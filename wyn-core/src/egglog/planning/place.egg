@@ -1,0 +1,9 @@
+; Execution domains and rematerialization precede physical dispatch recipes.
+(run-schedule
+  (saturate (run planning-import))
+  (saturate (run structure))
+  (saturate (run classify))
+  (saturate (run host-regions))
+  (saturate (run scalar-windows))
+  (run scalar-blockers)
+  (saturate (run scalar-groups)))

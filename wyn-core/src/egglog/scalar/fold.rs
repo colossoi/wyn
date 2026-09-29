@@ -1,25 +1,18 @@
 //! Typed scalar primitives. Egglog owns matching, propagation, and saturation.
-use super::select;
+use crate::builtins::catalog;
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
-use crate::builtins::{by_id, Purity};
 use crate::constant_eval::{self, Constant};
-use crate::egglog::data::{intern_type, ExprId, ExprKind, Ir};
 use crate::op::{BinaryOperator, UnaryOperator};
 use crate::scalar_eval::{binary, unary, wrap_int, Scalar};
-use crate::types::{function, Type, TypeName};
+use crate::types::{Type, TypeName};
 use egglog_engine::ast::Span;
 use egglog_engine::constraint::{SimpleTypeConstraint, TypeConstraint};
 use egglog_engine::prelude::BaseSort;
-use egglog_engine::sort::{I64Sort, StringSort, S};
-use egglog_engine::{Core, EGraph, Error, FullState, Primitive, PurePrim, PureState, Read, Value, Write};
+use egglog_engine::sort::{StringSort, S};
+use egglog_engine::{Core, EGraph, Primitive, PurePrim, PureState, Value};
 
 pub(super) fn register(graph: &mut EGraph) {
-    for primitive in [
-        ScalarPrimitive::Binary,
-        ScalarPrimitive::Unary,
-        ScalarPrimitive::Integer,
-        ScalarPrimitive::ChainExponent,
-    ] {
+    for primitive in [ScalarPrimitive::Binary, ScalarPrimitive::Unary] {
         graph.add_pure_primitive(primitive, None);
     }
 }
@@ -28,31 +21,21 @@ pub(super) fn register(graph: &mut EGraph) {
 enum ScalarPrimitive {
     Binary,
     Unary,
-    Integer,
-    ChainExponent,
 }
 impl Primitive for ScalarPrimitive {
     fn name(&self) -> &str {
         match self {
             Self::Binary => "wyn-binary",
             Self::Unary => "wyn-unary",
-            Self::Integer => "wyn-i64",
-            Self::ChainExponent => "wyn-chain-exponent",
         }
     }
     fn get_type_constraints(&self, span: &Span) -> Box<dyn TypeConstraint> {
         let arity = match self {
             Self::Binary => 5,
             Self::Unary => 4,
-            Self::Integer => 1,
-            Self::ChainExponent => 2,
         };
         let mut sorts = vec![StringSort.to_arcsort(); arity];
-        sorts.push(if matches!(self, Self::Integer | Self::ChainExponent) {
-            I64Sort.to_arcsort()
-        } else {
-            StringSort.to_arcsort()
-        });
+        sorts.push(StringSort.to_arcsort());
         SimpleTypeConstraint::new(self.name(), sorts, span.clone()).into_box()
     }
 }
@@ -62,19 +45,6 @@ impl PurePrim for ScalarPrimitive {
         // egglog base value, not an Option or Result.
         let string = |v| state.base_values().unwrap::<S>(v);
         let result = match (self, args) {
-            (Self::Integer, &[value]) => {
-                return string(value).as_str().parse::<i64>().ok().map(|v| state.base_values().get(v))
-            }
-            (Self::ChainExponent, &[ty, value]) => {
-                let ty = scalar_type(string(ty).as_str())?;
-                let exponent = match decode(&ty, string(value).as_str())? {
-                    Scalar::Int(n) if (2..=8).contains(&n) => n,
-                    Scalar::Float(n) if (2.0..=8.0).contains(&n) && n.fract() == 0.0 => n as i64,
-                    _ => return None,
-                };
-                // Fewer than the modeled eight operations for general power.
-                return Some(state.base_values().get(exponent));
-            }
             (Self::Binary, &[op, input, output, a, b]) => {
                 let input = scalar_type(string(input).as_str())?;
                 let output = scalar_type(string(output).as_str())?;
@@ -96,66 +66,6 @@ impl PurePrim for ScalarPrimitive {
         };
         Some(state.base_values().get(S::new(result)))
     }
-}
-
-pub(super) fn facts(data: &mut Ir, mut sink: FullState<'_, '_>) -> Result<(), Error> {
-    let scalars: Vec<_> = data
-        .types
-        .iter()
-        .filter_map(|(&id, t)| {
-            let tag = match t.ty {
-                Type::Constructed(TypeName::Int(bits), _) => format!("i{bits}"),
-                Type::Constructed(TypeName::UInt(bits), _) => format!("u{bits}"),
-                Type::Constructed(TypeName::Float(32), _) => "f32".into(),
-                Type::Constructed(TypeName::Bool, _) => "bool".into(),
-                _ => return None,
-            };
-            Some((id, tag))
-        })
-        .collect();
-    for (id, tag) in scalars {
-        let ty = sink.add("TypeId", (i64::from(id.as_u32()),))?;
-        sink.add("ScalarType", (ty, S::new(tag)))?;
-        if matches!(
-            data.types[id].ty,
-            Type::Constructed(TypeName::Int(_) | TypeName::UInt(_), _)
-        ) {
-            sink.add("IntegerType", (ty,))?;
-        }
-        if !matches!(data.types[id].ty, Type::Constructed(TypeName::Bool, _)) {
-            // A float power can have an integer exponent; its function type
-            // therefore cannot be reused for multiplication of two floats.
-            let scalar = data.types[id].ty.clone();
-            let ft = intern_type(data, function(scalar.clone(), function(scalar.clone(), scalar)));
-            let ft = sink.add("TypeId", (i64::from(ft.as_u32()),))?;
-            sink.add("MultiplicationType", (ty, ft))?;
-        }
-    }
-    for (&id, _) in &data.expressions {
-        let Some(BuiltinLowering::PrimOp(prim)) = lowering(data, id) else {
-            continue;
-        };
-        let op = match prim {
-            PrimOp::Bitcast => "bitcast",
-            PrimOp::GlslExt(8) => "floor",
-            PrimOp::GlslExt(9) => "ceil",
-            PrimOp::FPToSI => "fptosi",
-            PrimOp::FPToUI => "fptoui",
-            PrimOp::SIToFP => "sitofp",
-            PrimOp::UIToFP => "uitofp",
-            PrimOp::SConvert | PrimOp::UConvert => "int-convert",
-            PrimOp::FPConvert => "float-convert",
-            _ => continue,
-        };
-        let Some(value) = sink.lookup("SourceExpression", (i64::from(id.as_u32()),))? else {
-            continue;
-        };
-        sink.add("FoldUnary", (value, S::new(op.to_owned())))?;
-        if *prim == PrimOp::Bitcast {
-            sink.add("Bitcast", (value,))?;
-        }
-    }
-    select::facts(data, sink)
 }
 
 fn scalar_type(name: &str) -> Option<Type> {
@@ -216,6 +126,17 @@ fn evaluate_unary(op: &str, input: &str, output: &str, text: &str) -> Option<Str
     if let Ok(op) = UnaryOperator::try_from(op) {
         return encode(&output, unary(op, value, &input)?);
     }
+    if let Some(builtin) = op.strip_prefix("builtin:") {
+        let (name, overload) = builtin.rsplit_once(':')?;
+        let overload =
+            catalog().lookup_by_any_name(name)?.overloads().get(overload.parse::<usize>().ok()?)?;
+        let result = constant_eval::builtin(
+            &overload.lowering,
+            &[(Constant::from_scalar(value), input)],
+            &output,
+        )?;
+        return encode(&output, result.as_scalar()?);
+    }
     encode(&output, conversion(op, &input, &output, value)?)
 }
 fn conversion(op: &str, input: &Type, result: &Type, value: Scalar) -> Option<Scalar> {
@@ -236,14 +157,4 @@ fn conversion(op: &str, input: &Type, result: &Type, value: Scalar) -> Option<Sc
         result,
     )?
     .as_scalar()
-}
-
-pub(super) fn lowering(data: &Ir, f: ExprId) -> Option<&BuiltinLowering> {
-    let ExprKind::Builtin(b) = data.expressions[f].kind else {
-        return None;
-    };
-    let b = &data.builtins[b];
-    let def = by_id(b.builtin);
-    (def.raw.purity == Purity::Pure).then_some(())?;
-    Some(&def.overloads().get(b.overload_idx)?.lowering)
 }

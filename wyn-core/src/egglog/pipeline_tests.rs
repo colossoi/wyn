@@ -1,0 +1,260 @@
+//! Regression inputs exercise the public pipeline and backend-visible output.
+use crate::{compile_thru_ssa, lower_ssa_to_spirv, lower_ssa_to_wgsl};
+use naga::{BinaryOperator, Expression, Statement};
+
+fn shaders(source: &str) -> naga::Module {
+    let program = compile_thru_ssa(source).unwrap_or_else(|error| panic!("{error}\n{source}"));
+    let wgsl = lower_ssa_to_wgsl(program.clone()).unwrap_or_else(|error| panic!("{error}\n{source}"));
+    let module = naga::front::wgsl::parse_str(&wgsl)
+        .unwrap_or_else(|error| panic!("{}\n{wgsl}", error.emit_to_string(&wgsl)));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("{error:?}\n{wgsl}"));
+    let binary = lower_ssa_to_spirv(program).unwrap_or_else(|error| panic!("{error}\n{source}"));
+    wspirv::dr::load_words(&binary.spirv).expect("valid SPIR-V encoding");
+    module
+}
+
+#[test]
+fn scalar_entry_reaches_both_backends() {
+    let module = shaders("entry scalar(x:i32) i32=x+1");
+    assert_eq!(module.entry_points.len(), 1);
+    assert_eq!(module.entry_points[0].stage, naga::ShaderStage::Compute);
+}
+
+#[test]
+fn selections_reach_both_backends_without_rewriting_an_internal_ir() {
+    shaders("entry choose(c:bool,x:i32,y:i32) i32=if c then x+1 else y+2");
+}
+
+#[test]
+fn lexical_aliases_and_shadowing_preserve_values() {
+    shaders("entry aliases(a:i32) i32=let x=a in let y=x+7 in let x=y*2 in x+y");
+}
+
+#[test]
+fn helper_calls_in_different_functions_keep_their_parameters() {
+    shaders("def a(x:i32) i32=x+1 def b(x:i32) i32=x-1 entry result(x:i32,y:i32) i32=a(x)+b(y)");
+}
+
+#[test]
+fn selected_record_expansion_is_used_as_a_helper_argument() {
+    // The redundant differences survive early TLC simplification and keep
+    // repack above the early inlining threshold; egglog reduces them to zero.
+    let module = shaders(
+        "type camera = { target:vec3i32, az:i32, elev:i32, dist:i32, jitter:vec2i32 }
+         type orbit = { target:vec3i32, azimuth:i32, elevation:i32, distance:i32 }
+         def repack(o:camera) orbit = {
+             target=o.target, azimuth=o.az, elevation=o.elev,
+             distance=(o.dist-o.dist)+(o.dist-o.dist)+(o.dist-o.dist)+(o.dist-o.dist) +
+                      (o.dist-o.dist)+(o.dist-o.dist)+(o.dist-o.dist)+(o.dist-o.dist) }
+         def project(o:orbit) i32 =
+             (o.target.x+o.azimuth+o.elevation)*o.distance +
+             (o.target.y+o.azimuth+o.elevation)*o.distance +
+             (o.target.z+o.azimuth+o.elevation)*o.distance
+         entry main(o:camera) i32 = project(repack(o))",
+    );
+    assert!(
+        module
+            .functions
+            .iter()
+            .all(|(_, function)| { !function.name.as_deref().is_some_and(|name| name.contains("repack")) }),
+        "the expanded record must not leave a callable repacking helper"
+    );
+}
+
+#[test]
+fn inlining_cost_counts_shared_arithmetic_once() {
+    let module = shaders(
+        "def shared(x:u32,y:u32) u32 =
+             let a=x*y+x in
+             let b=a*a+a in
+             let c=b*b+b in
+             let d=c*c+c in
+             let e=d*d+d in
+             if y==0u32 then x else e
+         entry main(x:u32,y:u32) u32 = shared(x,y)",
+    );
+    assert!(
+        module.functions.is_empty(),
+        "a shared arithmetic DAG should inline"
+    );
+    let multiplies = module.entry_points[0]
+        .function
+        .expressions
+        .iter()
+        .filter(|(_, expression)| {
+            matches!(
+                expression,
+                Expression::Binary {
+                    op: BinaryOperator::Multiply,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(multiplies, 5, "inlining must preserve shared intermediate values");
+}
+
+#[test]
+fn guarded_partial_helpers_inline_at_their_call_sites() {
+    for (expression, operator) in [
+        ("x/y", BinaryOperator::Divide),
+        ("x<<y", BinaryOperator::ShiftLeft),
+    ] {
+        let module = shaders(&format!(
+            "def guarded(x:u32,y:u32) u32=if y==0u32 then x else {expression}
+             entry main(x:u32,y:u32) u32=guarded(x,y)"
+        ));
+        assert!(
+            module.functions.is_empty(),
+            "guarded arithmetic should inline: {expression}"
+        );
+        let function = &module.entry_points[0].function;
+        let emits_partial = |statement: &Statement| {
+            let Statement::Emit(range) = statement else {
+                return false;
+            };
+            range.clone().any(|value| {
+                matches!(function.expressions[value], Expression::Binary { op, .. } if op == operator)
+            })
+        };
+        assert!(
+            !function.body.iter().any(&emits_partial),
+            "partial arithmetic escaped its guard"
+        );
+        assert!(
+            function.body.iter().any(|statement| {
+                matches!(statement, Statement::If { accept, reject, .. }
+                if !accept.iter().any(&emits_partial) && reject.iter().any(&emits_partial))
+            }),
+            "partial arithmetic must remain in the nonzero branch"
+        );
+    }
+}
+
+#[test]
+fn partial_arithmetic_stays_conditional() {
+    let module = shaders("entry choose(c:bool,x:i32,y:i32) i32=if c then x/y else 0");
+    assert_eq!(module.entry_points.len(), 1);
+}
+
+#[test]
+fn loops_with_accumulators_reach_both_backends() {
+    shaders("entry sum(n:i32) i32=loop acc=0 for i<n do acc+i");
+}
+
+#[test]
+fn tuples_and_vectors_reach_both_backends() {
+    shaders("entry pair(x:i32) (i32,i32)=(x+1,x*2)");
+}
+
+#[test]
+fn storage_input_reads_preserve_the_public_interface() {
+    let module = shaders("entry first(xs:[]i32) i32=xs[0]");
+    assert!(module.global_variables.iter().any(|(_, value)| value.binding.is_some()));
+}
+
+#[test]
+fn pointwise_map_emits_a_parallel_dispatch() {
+    let module = shaders("entry doubled(xs:[]i32) []i32=map(|x:i32|x*2,xs)");
+    assert!(module.entry_points.iter().any(|entry| entry.workgroup_size == [64, 1, 1]));
+}
+
+#[test]
+fn fused_maps_preserve_captured_inputs() {
+    shaders("entry result(xs:[]i32,n:i32) []i32=map(|x:i32|x*2,map(|x:i32|x+n,xs))");
+}
+
+#[test]
+fn reductions_have_chunk_and_combine_dispatches() {
+    let module = shaders("entry sum(xs:[]i32) i32=reduce(|a:i32,b:i32|a+b,0,xs)");
+    assert!(module.entry_points.iter().any(|entry| entry.workgroup_size == [256, 1, 1]));
+}
+#[test]
+fn scans_have_prefix_and_offset_dispatches() {
+    shaders("entry sums(xs:[]i32) []i32=scan(|a:i32,b:i32|a+b,0,xs)");
+}
+
+#[test]
+fn filters_emit_stable_workgroup_compaction() {
+    shaders("entry positive(xs:[]i32) []i32=filter(|x:i32|x>0,xs)");
+}
+#[test]
+fn nested_reduction_stays_inside_the_map_invocation() {
+    shaders("entry sums(xs:[]i32) []i32=map(|x:i32|reduce(|a:i32,b:i32|a+b,0,map(|y:i32|y+x,iota(5))),xs)");
+}
+
+#[test]
+fn ranked_buckets_preserve_nested_storage_and_atomic_counters() {
+    shaders("entry bins(dest:*[2][2]i32) ([2][2]i32,[2]u32,u32)=bucket_scatter_2d(dest,[[(-1,9),(0,10),(0,11)],[(0,12),(1,20),(2,9)]])");
+}
+
+#[test]
+fn integer_histogram_uses_the_selected_atomic_update() {
+    let module=shaders("entry bins(dest:*[3]i32,xs:[5]i32) [3]i32=reduce_by_index(dest,|a:i32,b:i32|a+b,0,map(|x:i32|x-1,xs),map(|x:i32|x*3,xs))");
+    assert_eq!(module.entry_points.len(), 1);
+}
+
+#[test]
+fn float_histogram_retains_ordered_execution() {
+    let module = shaders(
+        "entry bins(dest:*[3]f32) [3]f32=reduce_by_index(dest,|a:f32,b:f32|a+b,0.0,[0,1,0],[1.0,2.0,3.0])",
+    );
+    assert!(module.entry_points.iter().all(|entry| entry.workgroup_size == [1, 1, 1]));
+}
+
+#[test]
+fn local_scatter_keeps_updates_inside_each_invocation() {
+    shaders(
+        "entry result(xs:[]i32) []i32=map(|x:i32|let a=scatter([1,2,3],[0,1],[x,x+1]) in a[0]+a[1],xs)",
+    );
+}
+
+#[test]
+fn local_filter_preserves_its_live_length() {
+    shaders("entry result(xs:[]i32) []i32=map(|x:i32|length(filter(|y:i32|y>x,[1,2,3])),xs)");
+}
+
+#[test]
+fn independent_scalar_results_do_not_share_a_host_resource() {
+    let source = include_str!("../../../testfiles/scalar_epilogues.wyn");
+    let output = crate::lower_ssa_to_wgsl_with_program(compile_thru_ssa(source).unwrap()).unwrap();
+    let mut resources = std::collections::BTreeMap::new();
+    for pipeline in &output.program.interface.pipelines {
+        let crate::host::Pipeline::Compute(pipeline) = pipeline else {
+            continue;
+        };
+        for binding in &pipeline.bindings {
+            if let crate::host::Binding::StorageBuffer {
+                set,
+                binding,
+                resource: Some(name),
+                ..
+            } = binding
+            {
+                assert!(!name.is_empty());
+                if let Some(previous) = resources.insert(name, (*set, *binding)) {
+                    assert_eq!(
+                        previous,
+                        (*set, *binding),
+                        "distinct buffers must not acquire one host identity"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn nested_loop_invariants_keep_outer_iteration_dependencies() {
+    shaders("entry nested(xs:[]i32) []i32 = map(|x:i32| loop a=0 for i<4 do a+(loop b=0 for j<3 do b+x*i+j), xs)");
+}
+
+#[test]
+fn guarded_partial_arithmetic_keeps_its_control_dependency_inside_loops() {
+    shaders("entry guarded(xs:[]i32) []i32 = map(|x:i32| loop a=0 for i<7 do a+(if x==0 then i else 120/x+i), xs)");
+}

@@ -2161,15 +2161,15 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         result_ty: Option<&polytype::Type<TypeName>>,
     ) -> Result<String> {
         let expr = self.get_value(v)?;
-        let (Some(result_ty), ValueRef::Ssa(id)) = (result_ty, v) else {
+        let Some(result_ty) = result_ty else {
             return Ok(expr);
         };
-        let operand_ty = self.body.get_value_type(id);
-        if operand_ty == result_ty {
+        let operand_ty = self.logical_value_type(v);
+        if &operand_ty == result_ty {
             return Ok(expr);
         }
         if self.ctx.int64_mode == WgslInt64Mode::EmulateU64
-            && (int64_emulation::is_u64(operand_ty) || int64_emulation::is_u64(result_ty))
+            && (int64_emulation::is_u64(&operand_ty) || int64_emulation::is_u64(result_ty))
         {
             return Err(err_wgsl_at!(
                 self.blame_span(),

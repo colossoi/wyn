@@ -681,11 +681,9 @@ fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileRe
         use wyn_core::egglog;
         let program = egglog::from_tlc(&program)?;
         let program = egglog::fuse(program)?;
-        let program = egglog::insert_expressions(program)?;
-        let program = egglog::simplify(program, false)?;
-        let program = egglog::place(program)?;
-        let program = egglog::schedule(program, topology)?;
-        Ok(egglog::to_ssa(&program, CodegenTarget::Wgsl)?)
+        let program = egglog::place(program, topology)?;
+        let program = egglog::schedule(program)?;
+        Ok(egglog::to_ssa(egglog::optimize(program)?, CodegenTarget::Wgsl)?)
     };
     let ssa = match lower() {
         Ok(s) => s,

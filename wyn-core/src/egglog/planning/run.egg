@@ -1,0 +1,13 @@
+; Structural scheduling only. Scalar instruction placement happens during SSA emission.
+(run-schedule (seq
+    (saturate (seq (run residency) (run schedule) (run allocation) (run dispatch)))
+    (saturate (run reuse)) (run reuse-blockers)
+    (run reuse-owned-input) (run reuse-input) (saturate (run reuse-output))
+    (run select-reuse) (run select-allocation)
+    (saturate (seq (run residency) (run allocation) (run dispatch)))
+    (run materialize-outputs) (run allocation) (run select-allocation)
+    (saturate (run allocation))
+    (saturate (run output-candidates)) (run output-blockers)
+    (run output-select) (run output-fallback)
+    (saturate (seq (run residency) (run allocation) (run dispatch)))
+    (run readout)))

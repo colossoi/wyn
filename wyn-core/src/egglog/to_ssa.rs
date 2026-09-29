@@ -1,204 +1,226 @@
-//! SSA handoff from scheduled blocks and the derived resource plan.
-use super::abi::{concrete, u32_type};
-use super::blocks::{Control, Exit, Instruction, Storage, Value};
-use super::host::{self, Host};
-use super::names;
-use super::scalar::placement_index;
-use super::timing::{span, time};
-use super::{OptimizeError, PlacementSite};
-use crate::ast::Span;
-use crate::egglog::data::{BlockId, BufferId, ExprId, ExternId, OperationId, OperationKind, ParameterId};
-use crate::egglog::{Program, Scheduled};
-use crate::flow::{ControlHeader, ExecutionModel};
-use crate::host::DispatchSize;
-use crate::interface::lowering::build_entry_outputs;
-use crate::interface::{EntryInput, EntryKind};
-use crate::op::{OpTag, PureViewSource};
-use crate::ssa::builder::{BuilderError, FuncBuilder};
+//! Emit selected egglog expressions and scheduled execution directly into SSA.
+use super::{timing, OptimizeError, Optimized, Program};
+use crate::ssa::builder::BuilderError;
 use crate::ssa::context::BackendGlobal;
-use crate::ssa::stage::{Elaborated, ElaboratedTag};
-use crate::ssa::types::{
-    AtomicOp, ConstantValue, EntryPoint, FuncBody, Function, InstKind, PlaceId, Terminator, ValueRef,
-};
-use crate::types::{bool_type, sized_array, unit, Type, TypeExt, TypeName};
-use crate::{ssa, types, BindingRef, CodegenTarget, EntryId, FunctionId};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use crate::ssa::stage::Elaborated;
+use crate::ssa::types::{Function, ValueRef};
+use crate::tlc::{extract_lambda_params_ref, DefMeta};
+use crate::types::Type;
+use crate::{CodegenTarget, FunctionId, LookupMap};
+use egglog_engine::Value;
 use wyn_base::IdSource;
 
-mod values;
+mod body;
+mod host;
+mod interface;
+mod kernels;
+mod plan;
+mod publication;
+mod read;
+mod sizes;
+use body::Body;
+use read::Facts;
 
-#[cfg(test)]
-mod capture_tests;
+use crate::host::DispatchLen;
+use crate::host::ScalarTask;
+use crate::interface::EntryInput;
+use crate::interface::EntryKind;
+use crate::ssa::builder::FuncBuilder;
+use crate::ssa::types::ConstantValue;
+use crate::ssa::types::Terminator;
+use crate::tlc::TermKind;
+use crate::types::TypeName;
+use crate::EntryId;
+use crate::SymbolId;
+pub(super) fn prepare(program: &mut Program<'_, Optimized>) -> Result<(), OptimizeError> {
+    program
+        .graph
+        .parse_and_run_program(Some("ssa-access.egg".into()), include_str!("to_ssa/access.egg"))?;
+    Ok(())
+}
 
-/// Lower scheduled kernels with their authored inputs and planned storage.
-/// Static compute pipelines publish the same resources and dispatch order.
-/// TODO: the runtime descriptor cannot yet execute host branches/repeated launches.
-pub fn to_ssa(data: &Program<Scheduled>, target: CodegenTarget) -> Result<Elaborated, OptimizeError> {
-    let _timing = span("egglog to SSA");
-    if let Some(root) = data.state.unsupported_host {
-        return Err(error(format!(
-            "TODO: runtime publication of conditional or repeated host dispatches ({root:?})"
-        )));
-    }
-    let _prepare = span("egglog to SSA / prepare");
-    let mut origins = BTreeMap::new();
-    for origin in data.origins.values().filter(|origin| origin.span.module().is_some()) {
-        origins.entry(origin.expression).or_insert(origin.span);
-    }
+pub(super) fn lower(
+    program: &Program<'_, Optimized>,
+    target: CodegenTarget,
+) -> Result<Elaborated, OptimizeError> {
+    let _timing = timing::span("egglog to SSA");
+    let facts = Facts { program };
     let mut compiler = Compiler {
-        host: time("egglog to SSA / prepare / host plan", || host::plan(data))?,
-        origins,
-        placements: placement_index(&data.ir, &data.state.placements),
-        inline: super::scalar::inline::run(data),
-        data,
-        functions: vec![],
-        externs: BTreeMap::new(),
-        specializations: HashMap::new(),
-        active: HashSet::new(),
-        used: BTreeSet::new(),
+        program,
+        facts,
+        plan: plan::Plan::read(program)?,
+        entry_origins: LookupMap::default(),
+        host_lengths: LookupMap::default(),
+        input_interfaces: LookupMap::default(),
+        host_tasks: Vec::new(),
+        entry_names: Default::default(),
+        functions: Vec::new(),
+        function_ids: IdSource::new(),
+        entry_ids: IdSource::new(),
+        specializations: LookupMap::default(),
     };
-    drop(_prepare);
-    let _lower = span("egglog to SSA / lower entries");
-    let roots = &data.state.abi.roots;
-    let mut entries = vec![];
-    for &(root, owner, size, finish) in roots {
-        compiler.used.clear();
-        let mut lower = Body::new(&mut compiler, root, &[], size[0])?;
-        lower.entry = Some(owner);
-        let declaration = &data.entries[owner].declaration;
-        let compute = !finish || declaration.entry_kind == EntryKind::Compute;
-        lower.finish_outputs = finish && compute;
-        lower.graphics_outputs = !compute;
-        for parameter in lower.compiler.host.inputs.get(&root).cloned().unwrap_or_default() {
-            lower.declare_input(parameter)?;
+    let mut lengths = Ok(());
+    program.graph.constructor_enodes("AbiStorage", |row| {
+        if lengths.is_err() {
+            return;
         }
-        // Root parameters are source ABI values. Kernel captures are resolved
-        // lazily, so a combine phase does not declare unused input arrays.
-        if finish {
-            for instruction in &data.state.bodies[data.state.blocks[root].body].instructions {
-                if let Instruction::BindParameter(p, Value::Local(name)) = instruction {
-                    lower.declare_input(*p)?;
-                    lower.input_locals.insert(name.clone(), *p);
-                }
+        lengths = (|| {
+            let Some(binding) = compiler.facts.enode("InputBinding", row.children[1]) else {
+                return Err(error("ABI storage has no input binding"));
+            };
+            let Some(expression) = compiler.facts.enode("AbiExpr", row.children[0]) else {
+                return Err(error("ABI storage has no source expression"));
+            };
+            let source = *program.identities.values.resolve(compiler.facts.integer(expression[0]));
+            compiler.host_lengths.insert(
+                source,
+                DispatchLen::InputBinding {
+                    set: compiler.facts.integer(binding[0]) as u32,
+                    binding: compiler.facts.integer(binding[1]) as u32,
+                    elem_bytes: compiler.facts.integer(row.children[2]) as u32,
+                },
+            );
+            Ok(())
+        })();
+    })?;
+    lengths?;
+    let mut entries = Vec::new();
+    for definition in &program.source.defs {
+        if let DefMeta::EntryPoint(entry) = &definition.meta {
+            let Some(scope) = compiler.facts.definition(definition.name) else {
+                return Err(error("entry scope is missing"));
+            };
+            let (source, parameters) = extract_lambda_params_ref(&definition.body);
+            for stage in compiler
+                .plan
+                .stages
+                .iter()
+                .filter(|stage| stage.owner == definition.name)
+                .cloned()
+                .collect::<Vec<_>>()
+            {
+                entries.push(interface::entry(
+                    &mut compiler,
+                    scope,
+                    source,
+                    &parameters,
+                    entry,
+                    definition.name,
+                    Some(&stage),
+                )?);
+            }
+            let needs_finish = entry.declaration.entry_kind != EntryKind::Compute
+                || !compiler.plan.stages.iter().any(|stage| stage.owner == definition.name)
+                || compiler.plan.outputs.iter().any(|output| {
+                    output.owner == definition.name && output.copy && output.writer.is_none()
+                });
+            if needs_finish {
+                entries.push(interface::entry(
+                    &mut compiler,
+                    scope,
+                    source,
+                    &parameters,
+                    entry,
+                    definition.name,
+                    None,
+                )?);
             }
         }
-        lower.visit(root, None).map_err(|e| error(format!("{} ({root:?}): {e}", declaration.name)))?;
-        let inputs = lower.inputs.clone();
-        let (body, return_types) = lower.finish()?;
-        let outputs = if compute {
-            vec![]
-        } else {
-            build_entry_outputs(
-                declaration,
-                &result_type(&return_types),
-                &[],
-                &inputs,
-                false,
-                &mut IdSource::new(),
-            )
-            .map_err(|e| error(e.to_string()))?
-        };
-        let storage_bindings = compiler
-            .used
-            .iter()
-            .filter_map(|id| compiler.data.state.abi.bindings.get(id).cloned())
-            .collect();
-        entries.push(EntryPoint {
-            id: EntryId::from(root.as_u32()),
-            name: data.state.abi.entry_names[&root].clone(),
-            body,
-            execution_model: if compute {
-                ExecutionModel::Compute {
-                    local_size: (size[0], size[1], size[2]),
-                }
-            } else {
-                match declaration.entry_kind {
-                    EntryKind::Vertex => ExecutionModel::Vertex,
-                    EntryKind::Fragment => ExecutionModel::Fragment,
-                    _ => return Err(error("unextracted graphics root")),
-                }
-            },
-            parameter_inputs: (0..inputs.len()).map(|i| vec![i]).collect(),
-            inputs,
-            outputs,
-            storage_bindings,
-            stage_descriptor_storage_accesses: Default::default(),
-            pipeline_storage_accesses: Default::default(),
-            span: Span::generated(),
-        });
     }
-    drop(_lower);
-    let mut pipeline = time("egglog to SSA / publish pipeline", || {
-        super::publish::publish(data, &mut entries)
-    })?;
-    time("egglog to SSA / publish host", || {
-        compiler.host.publish(&mut pipeline, &mut entries)
-    })?;
-    Ok(
-        ssa::Program::bare(compiler.functions, entries, vec![]).with_context::<ElaboratedTag, _>(
-            BackendGlobal {
-                pipeline,
-                physical_kernels: data.state.physical_kernels.clone(),
-                target,
-            },
-        ),
-    )
+    let (pipeline, physical_kernels) = publication::publish(&compiler, &mut entries)?;
+    Ok(Elaborated::from_parts(
+        compiler.functions,
+        entries,
+        Vec::new(),
+        BackendGlobal {
+            pipeline,
+            target,
+            physical_kernels,
+        },
+    ))
 }
 
-fn error(message: impl Into<String>) -> OptimizeError {
-    OptimizeError::Output(format!("egglog to SSA: {}", message.into()))
-}
-fn builder_error(e: BuilderError) -> OptimizeError {
-    error(e.to_string())
-}
-
-struct Compiler<'a> {
-    host: Host,
-    origins: BTreeMap<ExprId, Span>,
-    placements: BTreeMap<PlacementSite, Vec<ExprId>>,
-    inline: BTreeSet<BlockId>,
-    data: &'a Program<Scheduled>,
+struct Compiler<'a, 'source> {
+    program: &'a Program<'source, Optimized>,
+    facts: Facts<'a, 'source>,
+    plan: plan::Plan<'a, 'source>,
+    entry_origins: LookupMap<EntryId, (SymbolId, Option<plan::Stage>)>,
+    host_lengths: LookupMap<Value, DispatchLen>,
+    input_interfaces: LookupMap<Value, EntryInput>,
+    host_tasks: Vec<ScalarTask>,
+    entry_names: std::collections::BTreeSet<String>,
     functions: Vec<Function>,
-    externs: BTreeMap<ExternId, FunctionId>,
-    specializations: HashMap<(BlockId, Vec<Type>), (FunctionId, BTreeSet<BufferId>)>,
-    active: HashSet<BlockId>,
-    used: BTreeSet<BufferId>,
+    function_ids: IdSource<FunctionId>,
+    entry_ids: IdSource<EntryId>,
+    specializations: LookupMap<(Value, Vec<(Type, Option<ConstantValue>)>), FunctionId>,
 }
-impl Compiler<'_> {
-    // Emit each specialization once. Its signature comes from the actual SSA
-    // body, and cached resource uses belong to every shader that calls it.
-    fn function(&mut self, source: BlockId, parameters: Vec<Type>) -> Result<FunctionId, OptimizeError> {
-        let key = (source, parameters);
-        if let Some((id, buffers)) = self.specializations.get(&key) {
-            self.used.extend(buffers);
-            return Ok(*id);
+
+impl Compiler<'_, '_> {
+    fn function(&mut self, scope: Value, arguments: &[Typed]) -> Result<FunctionId, OptimizeError> {
+        let signature: Vec<_> = arguments.iter().map(|argument| argument.ty.clone()).collect();
+        let key = (
+            scope,
+            arguments.iter().map(|argument| (argument.ty.clone(), argument.value.as_const())).collect(),
+        );
+        if let Some(&id) = self.specializations.get(&key) {
+            return Ok(id);
         }
-        if !self.active.insert(source) {
-            return Err(error("recursive device helper"));
-        }
-        let caller_buffers = std::mem::take(&mut self.used);
-        let mut lower = Body::new(self, source, &key.1, 1)?;
-        lower.visit(source, None)?;
-        let (body, results) = lower.finish()?;
-        if self.data.state.blocks[source].interface.as_ref().is_none_or(|f| f.results != results.len()) {
-            return Err(error("helper result arity"));
-        }
-        let index = u32::try_from(self.functions.len()).map_err(|_| error("too many helpers"))?;
-        let id = FunctionId::from(index);
-        let Some(function) = &self.data.state.blocks[source].interface else {
-            return Err(error("device function has no interface"));
+        let Some(&(_, Some(source))) = self.program.identities.scopes.get(&scope) else {
+            return Err(error("callable has no source body"));
         };
+        let id = self.function_ids.next_id();
+        self.specializations.insert(key, id);
+        let name = self
+            .facts
+            .definition_name(scope)
+            .and_then(|symbol| self.program.source.symbols.get(symbol))
+            .cloned()
+            .unwrap_or_else(|| format!("helper_{}", self.functions.len()));
+        if let TermKind::Extern(linkage) = &source.kind {
+            let mut result = &source.ty;
+            for _ in &signature {
+                let Type::Constructed(TypeName::Arrow, parts) = result else {
+                    return Err(error("external signature is not callable"));
+                };
+                let Some(next) = parts.last() else {
+                    return Err(error("external return type missing"));
+                };
+                result = next;
+            }
+            let mut builder = FuncBuilder::new(
+                signature.into_iter().enumerate().map(|(i, ty)| (ty, format!("arg{i}"))).collect(),
+                result.clone(),
+            );
+            builder.terminate(Terminator::Unreachable).map_err(builder_error)?;
+            self.functions.push(Function {
+                id,
+                name,
+                body: builder.finish().map_err(builder_error)?,
+                span: source.span,
+                linkage_name: Some(linkage.clone()),
+            });
+            return Ok(id);
+        }
+        let mut lower = Body::new(self, scope, signature, source.ty.clone())?;
+        for (i, argument) in arguments.iter().enumerate() {
+            if argument.value.as_const().is_some() {
+                let Some(formal) = lower.compiler.facts.parameter(scope, i as i64) else {
+                    return Err(error("specialized parameter missing"));
+                };
+                lower.values.insert(formal, argument.clone());
+            }
+        }
+        let result = lower
+            .source(scope, source)
+            .map_err(|err| error(format!("function {name}, {} arguments: {err}", arguments.len())))?;
+        let body = lower.finish(result)?;
         self.functions.push(Function {
             id,
-            name: names::function(&self.data.ir, &function.name, index),
+            name,
             body,
-            span: Span::generated(),
+            span: source.span,
             linkage_name: None,
         });
-        let buffers = std::mem::replace(&mut self.used, caller_buffers);
-        self.used.extend(&buffers);
-        self.specializations.insert(key, (id, buffers));
-        self.active.remove(&source);
         Ok(id)
     }
 }
@@ -208,490 +230,12 @@ struct Typed {
     value: ValueRef,
     ty: Type,
 }
-#[derive(Clone, Default)]
-struct Environment {
-    locals: BTreeMap<String, Typed>,
-    parameters: BTreeMap<ParameterId, Typed>,
-    expressions: BTreeMap<ExprId, Typed>,
-    operations: BTreeMap<OperationId, Typed>,
-    buffers: BTreeMap<BufferId, (PlaceId, Type)>,
-}
-struct Body<'a, 'b> {
-    root: BlockId,
-    compiler: &'a mut Compiler<'b>,
-    builder: FuncBuilder,
-    environment: Environment,
-    blocks: BTreeMap<BlockId, crate::flow::BlockId>,
-    entered: BTreeSet<BlockId>,
-    parameter_types: BTreeMap<BlockId, Vec<Type>>,
-    return_types: Option<Vec<Type>>,
-    width: u32,
-    grid_yz: [u32; 2],
-    entry: Option<super::EntryId>,
-    finish_outputs: bool,
-    graphics_outputs: bool,
-    inputs: Vec<EntryInput>,
-    declared_inputs: BTreeMap<ParameterId, Vec<(EntryInput, Typed)>>,
-    input_locals: BTreeMap<String, ParameterId>,
-}
-impl<'a, 'b> Body<'a, 'b> {
-    fn new(
-        compiler: &'a mut Compiler<'b>,
-        entry: BlockId,
-        types: &[Type],
-        width: u32,
-    ) -> Result<Self, OptimizeError> {
-        let names = &compiler.data.state.blocks[entry].parameters;
-        if !types.is_empty() && names.len() != types.len() {
-            return Err(error("function parameter arity"));
-        }
-        let mut builder =
-            FuncBuilder::new(types.iter().cloned().zip(names.iter().cloned()).collect(), unit());
-        let mut environment = Environment::default();
-        for (i, (name, ty)) in names.iter().zip(types).enumerate() {
-            environment.locals.insert(
-                name.clone(),
-                Typed {
-                    value: builder.get_param(i).into(),
-                    ty: ty.clone(),
-                },
-            );
-        }
-        let mut blocks = BTreeMap::from([(entry, builder.entry())]);
-        let Some(function) = &compiler.data.state.blocks[entry].interface else {
-            return Err(error("helper has no function interface"));
-        };
-        for &id in &function.blocks {
-            if id != entry {
-                blocks.insert(id, builder.create_block());
-            }
-        }
-        let grid_yz = match compiler.data.state.abi.dispatch_sizes.get(&entry) {
-            Some(DispatchSize::Fixed { y, z, .. }) => [*y, *z],
-            _ => [1, 1],
-        };
-        Ok(Self {
-            root: entry,
-            compiler,
-            builder,
-            environment,
-            blocks,
-            entered: BTreeSet::new(),
-            parameter_types: BTreeMap::new(),
-            return_types: None,
-            width,
-            grid_yz,
-            entry: None,
-            finish_outputs: false,
-            graphics_outputs: false,
-            inputs: vec![],
-            declared_inputs: BTreeMap::new(),
-            input_locals: BTreeMap::new(),
-        })
-    }
-    fn finish(self) -> Result<(FuncBody, Vec<Type>), OptimizeError> {
-        let types = self.return_types.unwrap_or_default();
-        let mut body = self.builder.finish().map_err(builder_error)?;
-        crate::ssa::ir::schedule_floating(&mut body.inner).map_err(|e| error(e.to_string()))?;
-        body.return_ty = if self.graphics_outputs { unit() } else { result_type(&types) };
-        Ok((body, types))
-    }
-    fn visit(&mut self, id: BlockId, stop: Option<BlockId>) -> Result<(), OptimizeError> {
-        if Some(id) == stop || !self.entered.insert(id) {
-            return Ok(());
-        }
-        self.builder.switch_to_block_unchecked(self.blocks[&id]);
-        let data = self.compiler.data;
-        for (name, &value) in data.state.blocks[id]
-            .parameters
-            .iter()
-            .zip(&self.builder.func().blocks[self.blocks[&id]].params)
-        {
-            self.environment.locals.insert(
-                name.clone(),
-                Typed {
-                    value: value.into(),
-                    ty: self.builder.func().value_type(value).clone(),
-                },
-            );
-        }
-        if let Some(control @ Control::Loop { .. }) = data.state.blocks[id].control {
-            let control = match control {
-                Control::Selection { .. } => unreachable!(),
-                Control::Loop { merge, continuing } => ControlHeader::Loop {
-                    merge: self.blocks[&merge],
-                    continue_block: self.blocks[&continuing],
-                },
-            };
-            self.builder.set_control_header(self.blocks[&id], control);
-        }
-        for instruction in &data.state.bodies[data.state.blocks[id].body].instructions {
-            self.instruction(instruction)?;
-        }
-        match &data.state.blocks[id].exit {
-            Exit::Return(body) => {
-                let values = if self.finish_outputs {
-                    vec![]
-                } else {
-                    self.values(&data.state.bodies[*body].results)?
-                };
-                let types: Vec<_> = values.iter().map(|v| v.ty.clone()).collect();
-                if self.return_types.as_ref().is_some_and(|known| *known != types) {
-                    return Err(error("inconsistent function return types"));
-                }
-                self.return_types = Some(types);
-                let value = if values.is_empty() {
-                    None
-                } else if self.graphics_outputs {
-                    let packed = self.pack(values)?;
-                    let fields = match &packed.ty {
-                        Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) => (0..fields
-                            .len())
-                            .map(|i| self.field(packed.clone(), i))
-                            .collect::<Result<Vec<_>, _>>()?,
-                        _ => vec![packed],
-                    };
-                    for (index, field) in fields.into_iter().enumerate() {
-                        let result = self.builder.new_place(field.ty);
-                        self.builder
-                            .push_void_inst(InstKind::OutputSlot { index, result })
-                            .map_err(builder_error)?;
-                        self.builder
-                            .push_void_inst(InstKind::Store {
-                                place: result,
-                                value: field.value,
-                            })
-                            .map_err(builder_error)?;
-                    }
-                    None
-                } else {
-                    Some(self.pack(values)?.value)
-                };
-                self.builder.terminate(Terminator::Return(value)).map_err(builder_error)?;
-            }
-            Exit::Jump(edge) => {
-                let values = self.values(&data.state.bodies[edge.arguments].results)?;
-                let (target, args) = self.edge(edge.target, values)?;
-                self.builder.terminate(Terminator::Branch { target, args }).map_err(builder_error)?;
-                self.visit(edge.target, stop)?;
-            }
-            Exit::Branch { condition, yes, no } => {
-                let values = self.values(&data.state.bodies[*condition].results)?;
-                let [condition] = values.as_slice() else {
-                    return Err(error("branch condition arity"));
-                };
-                let y = self.values(&data.state.bodies[yes.arguments].results)?;
-                let n = self.values(&data.state.bodies[no.arguments].results)?;
-                let (then_target, then_args) = self.edge(yes.target, y)?;
-                let (else_target, else_args) = self.edge(no.target, n)?;
-                if let Some(Control::Selection { merge }) = data.state.blocks[id].control {
-                    let Some(header) = self.builder.current_block() else {
-                        return Err(error("missing selection header"));
-                    };
-                    self.builder.set_control_header(
-                        header,
-                        ControlHeader::Selection {
-                            merge: self.blocks[&merge],
-                        },
-                    );
-                }
-                self.builder
-                    .terminate(Terminator::CondBranch {
-                        cond: condition.value,
-                        then_target,
-                        then_args,
-                        else_target,
-                        else_args,
-                    })
-                    .map_err(builder_error)?;
-                let environment = self.environment.clone();
-                let merge = match data.state.blocks[id].control {
-                    Some(Control::Selection { merge }) => Some(merge),
-                    _ => None,
-                };
-                self.visit(yes.target, merge.or(stop))?;
-                self.environment = environment.clone();
-                self.visit(no.target, merge.or(stop))?;
-                if let Some(merge) = merge {
-                    // Neither arm's local bindings dominate the join. Only
-                    // its explicit block parameters carry values out of it.
-                    self.environment = environment;
-                    self.visit(merge, stop)?;
-                }
-            }
-        }
-        Ok(())
-    }
-    fn edge(
-        &mut self,
-        target: BlockId,
-        values: Vec<Typed>,
-    ) -> Result<(crate::flow::BlockId, Vec<ValueRef>), OptimizeError> {
-        if self.compiler.data.state.blocks[target].parameters.len() != values.len() {
-            return Err(error("block argument arity"));
-        }
-        let types: Vec<_> = values.iter().map(|v| v.ty.clone()).collect();
-        if let Some(known) = self.parameter_types.get(&target) {
-            if *known != types {
-                return Err(error(format!(
-                    "block {target:?} argument types differ: {known:?} vs {types:?}"
-                )));
-            }
-        } else {
-            for ty in &types {
-                self.builder.add_block_param(self.blocks[&target], ty.clone());
-            }
-            self.parameter_types.insert(target, types.clone());
-        }
-        Ok((
-            self.blocks[&target],
-            values.into_iter().map(|v| v.value).collect(),
-        ))
-    }
-    fn inline_call(
-        &mut self,
-        function: BlockId,
-        args: Vec<Typed>,
-    ) -> Result<Option<Vec<Typed>>, OptimizeError> {
-        if !self.compiler.inline.contains(&function) {
-            return Ok(None);
-        }
-        if !self.compiler.active.insert(function) {
-            return Err(error("recursive device helper"));
-        }
-        let data = self.compiler.data;
-        let block = &data.state.blocks[function];
-        let Exit::Return(result) = block.exit else {
-            unreachable!("selected single-block helper")
-        };
-        if block.parameters.len() != args.len() {
-            return Err(error("inlined call argument arity"));
-        }
-        // Each invocation gets its own bindings and expression cache. Only its
-        // returned values escape; the caller's scope and guards remain intact.
-        let caller = std::mem::replace(
-            &mut self.environment,
-            Environment {
-                locals: block.parameters.iter().cloned().zip(args).collect(),
-                ..Environment::default()
-            },
-        );
-        let finish_outputs = std::mem::replace(&mut self.finish_outputs, false);
-        for instruction in &data.state.bodies[block.body].instructions {
-            self.instruction(instruction)?;
-        }
-        let values = self.values(&data.state.bodies[result].results)?;
-        self.finish_outputs = finish_outputs;
-        self.environment = caller;
-        self.compiler.active.remove(&function);
-        Ok(Some(values))
-    }
 
-    fn instruction(&mut self, instruction: &Instruction) -> Result<(), OptimizeError> {
-        match instruction {
-            Instruction::BindParameter(id, value) => {
-                // Source ABI parameters are declarations. Resolve their values
-                // only when the live expression graph actually references them.
-                if matches!(value, Value::Local(name) if self.input_locals.get(name) == Some(id)) {
-                    return Ok(());
-                }
-                let v = self.value(value)?;
-                let ty = &self.compiler.data.types[self.compiler.data.parameters[*id].ty].ty;
-                let v = self.cast(v, ty)?;
-                self.environment.parameters.insert(*id, v);
-            }
-            Instruction::BindExpression(id, value) => {
-                if matches!(value, Value::Local(name) if !self.environment.locals.contains_key(name))
-                    && self.entry.is_some()
-                {
-                    return Ok(());
-                }
-                self.environment.expressions.remove(id);
-                let v = self.value(value)?;
-                self.environment.expressions.insert(*id, v);
-            }
-            Instruction::BindResult(id, value) => {
-                if self.finish_outputs && self.compiler.data.state.materialized.contains_key(id) {
-                    return Ok(());
-                }
-                let v = self.value(value)?;
-                self.environment.operations.insert(*id, v);
-            }
-            Instruction::Call {
-                function,
-                arguments,
-                results,
-            } => {
-                let args = self.values(arguments)?;
-                if let Some(values) = self.inline_call(*function, args.clone())? {
-                    if values.len() != results.len() {
-                        return Err(error("inlined call result arity"));
-                    }
-                    self.environment.locals.extend(results.iter().cloned().zip(values));
-                    return Ok(());
-                }
-                let id = self.compiler.function(*function, args.iter().map(|v| v.ty.clone()).collect())?;
-                let ty = self.compiler.functions[id.0 as usize].body.return_ty.clone();
-                if self.compiler.data.state.blocks[*function]
-                    .interface
-                    .as_ref()
-                    .is_none_or(|f| f.results != results.len())
-                {
-                    return Err(error("call result arity"));
-                }
-                let value = self.op(OpTag::Call(id), args, ty)?;
-                if results.len() == 1 {
-                    self.environment.locals.insert(results[0].clone(), value);
-                } else {
-                    for (i, name) in results.iter().enumerate() {
-                        let field = self.field(value.clone(), i)?;
-                        self.environment.locals.insert(name.clone(), field);
-                    }
-                }
-            }
-            Instruction::Evaluate(op) => {
-                let data = self.compiler.data;
-                let value = match &data.operations[*op].kind {
-                    OperationKind::Index { array, index } => {
-                        let a = self.expression(*array)?;
-                        let i = self.expression(*index)?;
-                        self.index(a, i)?
-                    }
-                    OperationKind::Call { function, args } => {
-                        let args = self.expressions(args)?;
-                        self.apply(*function, args, data.types[data.operations[*op].ty].ty.clone())?
-                    }
-                    other => return Err(error(format!("TODO: lower source execution {other:?}"))),
-                };
-                self.environment.operations.insert(*op, value);
-            }
-            Instruction::Load {
-                result,
-                buffer,
-                index,
-            } => {
-                let a = self.value(buffer)?;
-                let i = self.value(index)?;
-                let value = self.index(a, i)?;
-                self.environment.locals.insert(result.clone(), value);
-            }
-            Instruction::Store { buffer, index, value } => {
-                let i = self.value(index)?;
-                let v = self.value(value)?;
-                let (place, ty) = self.indexed_destination(buffer, i)?;
-                let v = self.cast(v, &ty)?;
-                self.builder
-                    .push_void_inst(InstKind::Store {
-                        place,
-                        value: v.value,
-                    })
-                    .map_err(builder_error)?;
-            }
-            Instruction::Allocate(id) => {
-                let buffer = &self.compiler.data.state.buffers[*id];
-                if buffer.storage == Storage::Function {
-                    let Some(&count) = self.compiler.data.state.abi.local_lengths.get(id) else {
-                        return Err(error("TODO: dynamic invocation-local allocation"));
-                    };
-                    let count = count.max(1) as usize;
-                    let ty = sized_array(count, concrete(&buffer.element)?);
-                    let place = self.builder.new_place(ty.clone());
-                    self.builder
-                        .push_void_inst(InstKind::Alloca {
-                            elem_ty: ty.clone(),
-                            result: place,
-                        })
-                        .map_err(builder_error)?;
-                    self.environment.buffers.insert(*id, (place, ty));
-                }
-            }
-            Instruction::Barrier => {
-                self.builder.push_void_inst(InstKind::ControlBarrier).map_err(builder_error)?;
-            }
-            Instruction::Atomic {
-                result,
-                buffer,
-                index,
-                op,
-                values,
-            } => {
-                let index = self.value(index)?;
-                let (place, ty) = self.indexed_destination(buffer, index)?;
-                let values = self
-                    .values(values)?
-                    .into_iter()
-                    .map(|v| self.cast(v, &ty).map(|v| v.value))
-                    .collect::<Result<_, _>>()?;
-                let ty = if *op == AtomicOp::CompareExchange {
-                    Type::Constructed(TypeName::Tuple(2), vec![ty, bool_type()])
-                } else {
-                    ty
-                };
-                let value = self
-                    .builder
-                    .push_inst(
-                        InstKind::Atomic {
-                            place,
-                            op: *op,
-                            values,
-                        },
-                        ty.clone(),
-                    )
-                    .map_err(builder_error)?;
-                self.environment.locals.insert(
-                    result.clone(),
-                    Typed {
-                        value: value.into(),
-                        ty,
-                    },
-                );
-            }
-            Instruction::Dispatch(_) if self.finish_outputs => {}
-            Instruction::Dispatch(_) => return Err(error("host dispatches do not belong in shader SSA")),
-        }
-        Ok(())
-    }
-    fn op(
-        &mut self,
-        tag: OpTag<BindingRef, FunctionId>,
-        args: Vec<Typed>,
-        ty: Type,
-    ) -> Result<Typed, OptimizeError> {
-        let instruction = InstKind::Op {
-            tag,
-            operands: args.into_iter().map(|v| v.value).collect(),
-        };
-        // Inlining can expose invariant arithmetic after source placement.
-        let value = if crate::ssa::is_speculatable(&instruction) {
-            self.builder.func_mut().append_floating_inst(instruction, ty.clone())
-        } else {
-            self.builder.push_inst(instruction, ty.clone()).map_err(builder_error)?
-        };
-        Ok(Typed {
-            value: value.into(),
-            ty,
-        })
-    }
-    fn pack(&mut self, values: Vec<Typed>) -> Result<Typed, OptimizeError> {
-        if values.len() == 1 {
-            return Ok(values[0].clone());
-        }
-        self.tuple(values)
-    }
-    fn tuple(&mut self, values: Vec<Typed>) -> Result<Typed, OptimizeError> {
-        let ty = types::tuple(values.iter().map(|v| v.ty.clone()).collect());
-        self.op(OpTag::Tuple(values.len()), values, ty)
-    }
+fn error(message: impl Into<String>) -> OptimizeError {
+    OptimizeError::Output(format!("SSA lowering: {}", message.into()))
 }
-fn result_type(types: &[Type]) -> Type {
-    match types {
-        [] => unit(),
-        [ty] => ty.clone(),
-        _ => types::tuple(types.to_vec()),
-    }
-}
-fn uint(n: u32) -> ValueRef {
-    ValueRef::Const(ConstantValue::U32(n))
+fn builder_error(error: BuilderError) -> OptimizeError {
+    OptimizeError::Output(error.to_string())
 }
 
 #[cfg(test)]

@@ -35,7 +35,6 @@ use crate::error;
 use crate::spirv;
 use crate::CodegenTarget;
 pub use addressable_constants::promote_addressable_constants;
-pub(crate) use optimize::is_speculatable;
 pub use optimize::optimize;
 pub use reachability::filter_reachable;
 pub use types::{context, stage, Program};

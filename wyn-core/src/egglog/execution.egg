@@ -11,7 +11,6 @@
 (relation ViewExtent (ExprKey Extent))
 (relation QueryLength (ExprKey))
 (relation PlannedViewLength (i64 Extent))
-(relation HostOperation (i64))
 ; Source order comes from the shared dependency scheduler. Scalar invocations
 ; may join across independent, effect-free work in the same source region.
 (relation SourcePosition (OperationKey RegionKey i64))
@@ -28,10 +27,6 @@
 (ruleset scalar-groups)
 (function GroupStart (OperationKey) i64 :merge (min old new))
 (relation ScalarGroup (OperationKey OperationKey))
-(relation PlannedScalar (i64 i64 i64))
-(rule ((ScalarValue (OperationId op)) (ScalarGroup (OperationId op) (OperationId leader))
-       (Phase (Stage (OperationId leader) "scalar") r) (SourcePosition (OperationId op) r i))
-      ((PlannedScalar leader op i)) :ruleset readout)
 (rule ((Site op r))
       ((set (IsScalarGroupCandidate op) false)
        (set (ScalarJoined op) false)) :ruleset structure)
@@ -67,12 +62,10 @@
 (rule ((Site op r)) ((set (Rematerialize op) false)) :ruleset structure)
 (rule ((Site op r)) ((set (ReadsLength op) false)) :ruleset structure)
 (rule ((LengthOperation op array)) ((set (ReadsLength op) true)) :ruleset structure)
-(rule ((ExecutionSummary (OperationId op) false legal cheap))
-      ((HostOperation op)) :ruleset classify)
 ; The source summary keeps mutable reads and speculation restrictions separate
 ; from work. Completed effect and collective proofs must also permit duplication.
 (rule ((ScalarCandidate (OperationId op)) (= (ParallelSafe (OperationId op)) true)
-       (ExecutionSummary (OperationId op) true true true)
+       (ExecutionSummary (OperationId op) device true true)
        (= (ContainsCollective (OperationId op)) false))
       ((set (Rematerialize (OperationId op)) true)) :ruleset classify)
 (rule ((ScalarResult e op) (= (Rematerialize op) false)) ((DirectResult e op 0)) :ruleset residency)
@@ -100,6 +93,8 @@
       ((ChildValue e start) (ChildValue e end)) :ruleset residency)
 (rule ((LengthReference e array) (ValueRef array value) (LiveLength value n))
       ((ReferencedExtent e n)) :ruleset residency)
+(rule ((LengthReference e array) (ViewExtent array n))
+      ((ReferencedExtent e n)) :ruleset residency)
 (rule ((LengthReference e array) (ValueRef array value) (SameBacking value source))
       ((LengthReference e source)) :ruleset residency)
 (rule ((ReferencedExtent e (Length array))) ((LengthReference e array)) :ruleset residency)
@@ -121,13 +116,4 @@
 (rule ((LengthDemand stage e)) ((QueryLength e)) :ruleset residency)
 (rule ((QueryLength e) (ViewExtent e (Length source))) ((QueryLength source)) :ruleset residency)
 (rule ((QueryLength (ExprId e)) (ViewExtent (ExprId e) n)) ((PlannedViewLength e n)) :ruleset readout)
-; ABI size proofs survive even when no scalar result buffer is allocated.
-(rule ((ScalarResult (ExprId e) op) (LengthOperation op (ExprId array)))
-      ((AbiAlias (AbiExpr e) (AbiLength (AbiExpr array)))) :ruleset residency)
 (rule ((= (Rematerialize op) true) (Enters op r)) ((DeviceRegion r)) :ruleset residency)
-; Identify rematerialized callees before joining the roots that use them.
-(relation RematerializedCall (i64 RegionKey))
-(rule ((ScalarResult (ExprId e) op) (= (Rematerialize op) true) (Enters op r))
-      ((RematerializedCall e r)) :ruleset abi)
-(rule ((AbiRootNeed root (AbiExpr e)) (RematerializedCall e r))
-      ((AbiInvokes root r)) :ruleset abi)

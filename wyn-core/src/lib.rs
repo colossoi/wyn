@@ -196,7 +196,7 @@ impl std::fmt::Display for BindingRef {
 pub struct ResourceId(u32);
 
 impl ResourceId {
-    /// A finalized egglog resource uses its sidecar buffer arena identity.
+    /// A finalized egglog resource uses its published frame-graph identity.
     pub(crate) const fn from_egglog_buffer(index: u32) -> Self {
         Self(index)
     }
@@ -741,11 +741,10 @@ fn compile_thru_ssa_for_target(
     let program = tlc::infer_input_slice_bounds(compile_thru_tlc(source)?);
     let program = egglog::from_tlc(&program)?;
     let program = egglog::fuse(program)?;
-    let program = egglog::insert_expressions(program)?;
-    let program = egglog::simplify(program, false)?;
-    let program = egglog::place(program)?;
-    let program = egglog::schedule(program, PipelineTopologyPolicy::AllowGenerated)?;
-    Ok(egglog::to_ssa(&program, target)?)
+    let program = egglog::place(program, PipelineTopologyPolicy::AllowGenerated)?;
+    let program = egglog::schedule(program)?;
+    let program = egglog::optimize(program)?;
+    Ok(egglog::to_ssa(program, target)?)
 }
 
 /// Run the full pipeline to a final SPIR-V binary.

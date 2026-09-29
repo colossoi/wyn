@@ -562,16 +562,6 @@ impl Program<stage::BareTag, ()> {
     pub fn bare(functions: Vec<Function>, entry_points: Vec<EntryPoint>, constants: Vec<Constant>) -> Self {
         Self::from_parts(functions, entry_points, constants, ())
     }
-
-    pub(crate) fn with_context<Tag, GlobalContext>(
-        self,
-        global_context: GlobalContext,
-    ) -> Program<Tag, GlobalContext> {
-        let mut result =
-            Program::from_parts(self.functions, self.entry_points, self.constants, global_context);
-        result.addressable_constants = self.addressable_constants;
-        result
-    }
 }
 
 /// A program-level constant definition.

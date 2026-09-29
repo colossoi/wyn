@@ -2,13 +2,12 @@
 ; Union redirects direct graph edges and use sets together.
 (datatype FusionGroup (Group OperationKey))
 ; Each planning round selects one contraction, giving its immutable plan an ID.
-(datatype FusionPlan (Source OperationKey) (Joined i64))
-(sort OperationSet (Set OperationKey))
+(datatype FusionPlan (FusionSource OperationKey) (Joined i64))
 ; Captures and neutrals are ordinary uses; indexed arguments and lengths carry
 ; additional proofs that fusion must distinguish from input streams.
-(datatype OperandRole (Input) (Other) (Argument) (Length))
+(datatype OperandRole (Input) (Other) (Argument) (LengthUse))
 (datatype GroupUse (To FusionGroup OperandRole) (Outside OperationKey OperandRole) (Returned))
-(datatype OriginalUse (At OperationKey OperandRole) (Observed))
+(datatype OriginalUse (UseAt OperationKey OperandRole) (Observed))
 (sort GroupUses (Set OriginalUse))
 (function SelfUses (FusionGroup) GroupUses :merge (set-union old new))
 (function InputUses (FusionGroup) GroupUses :merge (set-union old new))
@@ -22,7 +21,7 @@
 (relation Current (FusionGroup FusionPlan))
 (function Owner (FusionPlan) OperationKey :no-merge)
 (function Scope (FusionPlan) RegionKey :no-merge)
-; Eligibility depends on presence; result slots remain in the Rust sidecar.
+; Eligibility uses output presence and counts; composition records result slots.
 (function HasScans (FusionPlan) bool :no-merge)
 (function HasReductions (FusionPlan) bool :no-merge)
 (function HasArrayOutputs (FusionPlan) bool :no-merge)
@@ -37,25 +36,7 @@
 (relation ElementPlan (FusionPlan))
 (relation SafePlan (FusionPlan))
 (relation MovablePlan (FusionPlan))
-; Scalar helper purity is proved from local region/call edges. It authorizes
-; post-map attachment without changing the general motion/effect classification.
-(sort ScalarRegions (Set RegionKey))
-(function ScalarRegionMembers (RegionKey) OperationSet :no-merge)
-(function PureRegionMembers (RegionKey) OperationSet :merge (set-union old new))
-(function ScalarCallees (OperationKey) ScalarRegions :no-merge)
-(function PureCallees (OperationKey) ScalarRegions :merge (set-union old new))
-(relation ScalarMember (RegionKey OperationKey))
-(relation ScalarCall (OperationKey RegionKey))
-(relation PureScalarRegion (RegionKey))
-(relation PureScalarOperation (OperationKey))
 (relation PostMapPlan (FusionPlan))
-; Read-only callbacks may attach to compaction when no dependency/effect lies
-; between the filter and map. They do not acquire general purity/motion proofs.
-(relation ScalarRead (OperationKey))
-(function ReadOnlyRegionMembers (RegionKey) OperationSet :merge (set-union old new))
-(function ReadOnlyCallees (OperationKey) ScalarRegions :merge (set-union old new))
-(relation ReadOnlyScalarRegion (RegionKey))
-(relation ReadOnlyScalarOperation (OperationKey))
 (relation FilterPostMapPlan (FusionPlan))
 (relation ReadOnlyFilterPlan (FusionPlan))
 (relation FilterPostMapCompatible (i64 FusionGroup FusionGroup))
@@ -73,7 +54,6 @@
 (relation InputFact (FusionGroup InputSite))
 (function StreamBlocked (FusionGroup FusionGroup) bool :merge (or old new))
 (function StreamSlices (FusionGroup FusionGroup) SliceChains :merge (set-union old new))
-(function MemoryBlocked (FusionGroup FusionGroup) bool :merge (or old new))
 (function BarrierBlocked (FusionGroup FusionGroup) bool :merge (or old new))
 (relation ScanFeeds (OperationKey OperationKey))
 ; Recomputed on the current quotient graph before each planning round.
@@ -83,34 +63,6 @@
 (function IndexedUses (FusionGroup) GroupUses :merge (set-union old new))
 (function IndexAddressUses (FusionGroup) GroupUses :merge (set-union old new))
 (relation GroupUseFact (FusionGroup GroupUse))
-
-; Local source metadata is inserted once; joins derive compatibility.
-(sort DomainValues (Vec i64))
-(sort DomainList (Vec Domain))
 (constructor DomainValue (i64) Domain)
-(constructor DomainLiteral (DomainValues) Domain)
-(constructor DomainRange (i64 i64 i64) Domain)
-(constructor DomainZip (DomainList) Domain)
 (constructor FixedDomain (i64) Domain)
-(relation ReadResource (FusionGroup i64))
-(relation WriteResource (FusionGroup i64))
-(relation EffectMember (i64 FusionGroup))
-(relation EffectWait (FusionGroup i64))
 (relation RelevantPair (FusionGroup FusionGroup))
-
-; Field-sensitive dependency structure, without executable scalar expressions.
-(sort Dependency)
-(sort DependencyList)
-(constructor NoDependency () Dependency)
-(constructor ScanDependency (OperationKey) Dependency)
-(constructor OutputDependency (OperationKey i64) Dependency)
-(constructor TupleDependency (DependencyList) Dependency)
-(constructor AllDependencies (DependencyList) Dependency)
-(constructor FieldDependency (Dependency i64) Dependency)
-(constructor ChoiceDependency (Dependency Dependency Dependency) Dependency)
-(constructor DependencyAt (DependencyList i64) Dependency)
-(constructor NoDependencies () DependencyList)
-(constructor MoreDependencies (Dependency DependencyList) DependencyList)
-(relation DependencyScan (Dependency OperationKey))
-(relation DependencyListScan (DependencyList OperationKey))
-(relation CollectiveDependency (OperationKey Dependency))

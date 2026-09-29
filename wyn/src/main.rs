@@ -6,9 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 use thiserror::Error;
-use wyn_core::egglog::{
-    from_tlc, fuse, insert_expressions, place, schedule, simplify, to_ssa, with_timings,
-};
+use wyn_core::egglog::{from_tlc, fuse, optimize, place, schedule, to_ssa, with_timings};
 use wyn_core::host::{HostError, Program, ShaderFormat};
 use wyn_core::ssa::stage::Elaborated;
 use wyn_core::tlc::stage::InputSliceBoundsInferred;
@@ -212,9 +210,6 @@ enum DriverError {
 
     #[error(transparent)]
     Host(#[from] HostError),
-
-    #[error(transparent)]
-    EgglogConversionError(#[from] wyn_core::egglog::from_tlc::ConvertError),
 
     #[error(transparent)]
     EgglogOptimizationError(#[from] wyn_core::egglog::OptimizeError),
@@ -730,24 +725,23 @@ fn compile_tlc(modules: ParsedModules, options: &CompileOptions) -> Result<TlcCo
 fn compile_egglog(
     program: &InputSliceBoundsInferred,
     target: Target,
-    algebra: bool,
+    _algebra: bool,
     direct: bool,
     verbose: bool,
 ) -> Result<Elaborated, DriverError> {
     with_timings(verbose, || -> Result<_, DriverError> {
         let program = from_tlc(program)?;
         let program = fuse(program)?;
-        let program = insert_expressions(program)?;
-        let program = simplify(program, algebra)?;
-        let program = place(program)?;
         let topology = if direct {
             PipelineTopologyPolicy::AuthoredOnly
         } else {
             PipelineTopologyPolicy::AllowGenerated
         };
-        let program = schedule(program, topology)?;
+        let program = place(program, topology)?;
+        let program = schedule(program)?;
+        let program = optimize(program)?;
         let ssa = to_ssa(
-            &program,
+            program,
             match target {
                 Target::Spirv => CodegenTarget::Spirv,
                 Target::Wgsl => CodegenTarget::Wgsl,

@@ -1,72 +1,23 @@
 //! Compiler mid-end using [egglog](https://github.com/egraphs-good/egglog).
-//!
-//! [`from_tlc()`] accepts normalized TLC with inferred input bounds and
-//! returns [`Ir`]. [`fuse`] inserts native fusion facts, plans, and
-//! applies fusion decisions to the sidecar. [`insert_expressions`] adds a
-//! separate typed expression DAG with region uses and dependency facts.
-//! [`simplify`] uses equality saturation for scalar algebra. [`place`] records
-//! common-branch and loop-invariant placements, including SOAC captures.
-//! [`schedule`] derives logical stages, residency, backing, scratch requirements,
-//! and dispatch constraints in egglog before building functions and blocks.
-//! Resources, aliases, capacities, accesses and dispatch order are read from
-//! that plan. Generated scalar instructions remain opaque sidecar bodies.
-//! [`to_ssa`] preserves source inputs and publishes static compute pipelines
-//! through the shared shader/runtime ABI. Runtime capacity formulas, host
-//! control flow and graphics publication still have explicit limitations.
-//! Map, reduce, and scan are constructed as Scremas during import. Types and
-//! pure values are interned in the sidecar. Fusion exports only SOAC layouts,
-//! uses, dependencies and motion constraints. Each pass owns its egglog graph;
-//! extracted expressions and scheduled blocks remain in the IR.
-//!
-//! The schemas are defined in `fusion/schema.egg`, `expressions.egg`, and
-//! `planning.egg`. Identities are local to one conversion.
+//! Pass order is enforced by typestate:
+//! [`from_tlc`] → [`fuse`] → [`place`] → [`schedule`] → [`optimize`] → [`to_ssa`].
+use crate::ssa::stage::Elaborated;
+use crate::tlc::stage::InputSliceBoundsInferred;
+use crate::{CodegenTarget, PipelineTopologyPolicy};
 use egglog_engine::ast::{Command, Parser};
+use egglog_engine::EGraph;
 use egglog_engine::Error;
 
-mod abi;
-mod blocks;
-mod data;
-mod dependencies;
-mod execution;
-mod expressions;
-pub mod from_tlc;
+mod analysis;
+mod bindings;
 mod fusion;
-mod host;
-mod names;
 mod planning;
-mod publish;
-mod regions;
-mod rewrite;
 mod scalar;
-mod schedule;
-mod stage;
-pub use stage::{Expressions, Fused, Imported, Placed, Program, Scheduled, Simplified};
-#[cfg(test)]
-mod select_tests;
-mod term;
+mod source;
 mod timing;
 mod to_ssa;
-mod visit;
 
-pub use blocks::{
-    BlockData, BodyData, BufferData, DispatchData, Edge, Exit, Function, FunctionKind, GridData,
-    Instruction, Storage, Value,
-};
-pub use data::{
-    Array, BlockId, BodyId, BucketShapeData, BucketShapeId, BufferId, BuiltinData, BuiltinId,
-    DefinitionData, DefinitionId, DefinitionKind, DispatchId, EntryData, EntryId, EntryParamData,
-    EntryParamId, ExprData, ExprId, ExprKind, ExternData, ExternId, GridId, InputBoundData, InputBoundId,
-    Ir, LoopKind, OperationData, OperationId, OperationKind, OriginData, OriginId, OutputData, OutputId,
-    ParameterData, ParameterId, Place, PlacementData, PlacementId, PlacementSite, ProgramData, ProgramId,
-    Reduction, RegionData, RegionId, Scan, ScremaForm, SoacBody, SymbolData, SymbolId, TypeData, TypeId,
-};
-pub use expressions::insert_expressions;
-pub use from_tlc::{from_tlc, ConvertError};
-pub use fusion::fuse;
-pub use scalar::{place, simplify};
-pub use schedule::schedule;
 pub use timing::with_timings;
-pub use to_ssa::to_ssa;
 
 #[derive(Debug, thiserror::Error)]
 pub enum OptimizeError {
@@ -78,18 +29,93 @@ pub enum OptimizeError {
     Output(String),
 }
 
-/// Declarations loaded before native fusion fact insertion (egglog 3.0).
-pub const SCHEMA: &str = concat!(include_str!("ids.egg"), "\n", include_str!("fusion/schema.egg"));
-
-#[cfg(test)]
-mod from_tlc_tests;
-#[cfg(test)]
-mod graph_tests;
-
-#[cfg(test)]
-pub(super) fn simplify_and_place(program: Program<Expressions>) -> Result<Program<Placed>, OptimizeError> {
-    place(simplify(program, true)?)
+/// Summarize semantic values, operations, and execution scopes in one TLC walk.
+/// Resolve lexical bindings directly; scalar bodies remain source references.
+pub fn from_tlc(source: &InputSliceBoundsInferred) -> Result<Program<'_, Imported>, OptimizeError> {
+    let _timing = timing::span("egglog import");
+    let (graph, identities) = source::import(source)?;
+    Ok(Program {
+        source,
+        graph,
+        identities,
+        stage: Imported,
+    })
 }
+
+/// Apply the retained fusion rules and record callback composition in egglog.
+pub fn fuse(mut program: Program<'_, Imported>) -> Result<Program<'_, Fused>, OptimizeError> {
+    timing::time("egglog structural analysis", || analysis::run(&mut program.graph))?;
+    fusion::run(&mut program.graph)?;
+    Ok(program.advance(Fused))
+}
+
+/// Choose execution domains and rematerialization. This is execution placement;
+/// scalar loop-invariant and common-branch hoisting belongs to the local optimizer.
+pub fn place(
+    mut program: Program<'_, Fused>,
+    topology: PipelineTopologyPolicy,
+) -> Result<Program<'_, Placed>, OptimizeError> {
+    let _timing = timing::span("egglog placement");
+    planning::place(&mut program.graph, topology)?;
+    Ok(program.advance(Placed))
+}
+
+/// Select dispatch recipes, resource requirements, and ordering constraints.
+pub fn schedule(mut program: Program<'_, Placed>) -> Result<Program<'_, Scheduled>, OptimizeError> {
+    let _timing = timing::span("egglog scheduling");
+    planning::schedule(&mut program.graph)?;
+    Ok(program.advance(Scheduled))
+}
+
+/// Optimize demanded scalar regions after structural scheduling.
+pub fn optimize(mut program: Program<'_, Scheduled>) -> Result<Program<'_, Optimized>, OptimizeError> {
+    let selected = scalar::run(&mut program.graph, &program.identities)?;
+    Ok(program.advance(Optimized { selected }))
+}
+
+/// Emit the optimized scalar graph directly into SSA.
+pub fn to_ssa(
+    mut program: Program<'_, Optimized>,
+    target: CodegenTarget,
+) -> Result<Elaborated, OptimizeError> {
+    to_ssa::prepare(&mut program)?;
+    to_ssa::lower(&program, target)
+}
+
+/// Original TLC supplies untouched bodies and source metadata. The graph owns
+/// structural transformations and planning facts; Rust does not mirror its terms.
+pub struct Program<'source, Stage> {
+    source: &'source InputSliceBoundsInferred,
+    graph: EGraph,
+    identities: source::Identities<'source>,
+    stage: Stage,
+}
+
+impl<'source, Stage> Program<'source, Stage> {
+    fn advance<Next>(self, stage: Next) -> Program<'source, Next> {
+        Program {
+            source: self.source,
+            graph: self.graph,
+            identities: self.identities,
+            stage,
+        }
+    }
+}
+
+pub struct Imported;
+pub struct Fused;
+pub struct Placed;
+
+/// Logical dispatches, execution domains, and effect order are fixed. Concrete
+/// captures and ABI bindings are finalized after scalar bodies have been emitted.
+pub struct Scheduled;
+
+pub struct Optimized {
+    selected: scalar::Selected,
+}
+
+#[cfg(test)]
+mod pipeline_tests;
 
 fn parse_program(filename: &str, source: &str) -> Result<Vec<Command>, OptimizeError> {
     Parser::default()

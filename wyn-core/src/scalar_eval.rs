@@ -48,6 +48,22 @@ fn integer_binary(op: BinaryOperator, lhs: i64, rhs: i64, ty: &Type<TypeName>) -
         BinaryOperator::Add => arithmetic(lhs as i128 + rhs as i128),
         BinaryOperator::Subtract => arithmetic(lhs as i128 - rhs as i128),
         BinaryOperator::Multiply => arithmetic(lhs as i128 * rhs as i128),
+        BinaryOperator::Power => {
+            if signed && rhs < 0 {
+                return Some(Scalar::Int(1));
+            }
+            let mut exponent = unsigned(rhs, bits);
+            let mut base = lhs as u64;
+            let mut result = 1u64;
+            while exponent != 0 {
+                if exponent & 1 != 0 {
+                    result = result.wrapping_mul(base);
+                }
+                base = base.wrapping_mul(base);
+                exponent >>= 1;
+            }
+            arithmetic(result as i128)
+        }
         BinaryOperator::Divide | BinaryOperator::Remainder => {
             if signed {
                 if rhs == 0 {

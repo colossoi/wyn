@@ -709,14 +709,32 @@ fn filter_phase_layout_matches_the_selected_shader_storage_access() {
             ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
         };
         let rust = program.to_rust_wgpu("storage_access", format).unwrap();
+        let [Pipeline::Compute(pipeline)] = program.interface.pipelines.as_slice() else {
+            panic!("compute pipeline")
+        };
+        let (consumer, producers) = pipeline.stages.split_last().unwrap();
+        let shared = consumer
+            .reads
+            .iter()
+            .find(|binding| {
+                !consumer.writes.contains(binding)
+                    && producers.iter().any(|stage| stage.writes.contains(binding))
+            })
+            .unwrap();
+        let Binding::StorageBuffer {
+            set, binding: slot, ..
+        } = pipeline.bindings[*shared]
+        else {
+            panic!("shared storage buffer")
+        };
         let phase = rust
             .split("let compute_")
-            .find(|phase| phase.contains("entry_point: Some(\"reproduce_compute\")"))
+            .find(|phase| phase.contains(&format!("entry_point: Some({:?})", consumer.entry_point)))
             .unwrap();
         let layout = phase.split("let pipeline =").next().unwrap();
         let binding = layout
             .split("BindGroupLayoutEntry {")
-            .find(|entry| entry.trim_start().starts_with("binding: 1u32,"))
+            .find(|entry| entry.trim_start().starts_with(&format!("binding: {slot}u32,")))
             .unwrap();
         assert!(
             binding.contains(&format!("read_only: {read_only}")),
@@ -727,7 +745,7 @@ fn filter_phase_layout_matches_the_selected_shader_storage_access() {
         let phase = whl
             .kernels
             .values()
-            .find(|kernel| kernel.options.text(":entry").unwrap() == "reproduce_compute")
+            .find(|kernel| kernel.options.text(":entry").unwrap() == consumer.entry_point)
             .unwrap();
         let abi = phase.options.get(":abi").unwrap().list().unwrap();
         let binding = abi
@@ -735,8 +753,8 @@ fn filter_phase_layout_matches_the_selected_shader_storage_access() {
             .map(|value| value.list().unwrap())
             .find(|binding| {
                 binding[1].text().unwrap() == ":storage"
-                    && binding[2].u32().unwrap() == 0
-                    && binding[3].u32().unwrap() == 1
+                    && binding[2].u32().unwrap() == set
+                    && binding[3].u32().unwrap() == slot
             })
             .unwrap();
         let parameter =

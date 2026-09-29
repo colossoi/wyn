@@ -9,6 +9,23 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
 }
 
 #[test]
+fn generated_map_length_reuses_the_storage_view_length() {
+    let words = compile_to_spirv("entry repro(xs: []f32) []f32 = map(|x| x + 1.0, xs)").unwrap();
+    let module = wspirv::dr::load_words(&words).unwrap();
+    let lengths: Vec<_> =
+        module.all_inst_iter().filter(|i| i.class.opcode == spirv::Op::ArrayLength).collect();
+    assert_eq!(
+        lengths.len(),
+        1,
+        "the loop and output view share one input length query"
+    );
+    assert!(
+        module.all_inst_iter().any(|i| i.class.opcode == spirv::Op::Store),
+        "map writes its output"
+    );
+}
+
+#[test]
 fn trivial_loop_phis_are_removed_without_losing_loop_state_or_wgsl_scope() {
     for source in [
         "entry repro(xs: []f32) []f32 = map(|x| x + 1.0, xs)",

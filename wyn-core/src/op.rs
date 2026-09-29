@@ -63,6 +63,34 @@ pub enum BinaryOperator {
 }
 
 impl BinaryOperator {
+    /// Whether evaluating this operation outside its original control flow is safe.
+    pub const fn is_speculatable(self) -> bool {
+        match self {
+            Self::Divide
+            | Self::Remainder
+            | Self::FloorDivide
+            | Self::FloorRemainder
+            | Self::Power
+            | Self::ShiftLeft
+            | Self::ShiftRight
+            | Self::ShiftRightLogical => false,
+            Self::Add
+            | Self::Subtract
+            | Self::Multiply
+            | Self::Equal
+            | Self::NotEqual
+            | Self::Less
+            | Self::LessEqual
+            | Self::Greater
+            | Self::GreaterEqual
+            | Self::LogicalAnd
+            | Self::LogicalOr
+            | Self::BitwiseAnd
+            | Self::BitwiseOr
+            | Self::BitwiseXor => true,
+        }
+    }
+
     pub const fn symbol(self) -> &'static str {
         match self {
             Self::Add => "+",

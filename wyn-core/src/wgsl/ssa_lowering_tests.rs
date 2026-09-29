@@ -1144,12 +1144,17 @@ entry draw(fb: *[]vec4f32) *[]vec4f32 =
     .expect("map/scatter over a unique storage view must lower");
 
     validate_wgsl(&wgsl);
+    let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
     assert!(
-        wgsl.contains("@group(0) @binding(0) var<storage, read_write> _buf_0_0:")
-            && wgsl.contains("_buf_0_0[")
-            && wgsl.contains("] =")
-            && !wgsl.contains("@group(0) @binding(1)"),
-        "in-place view updates must target the backing storage buffer:\n{wgsl}"
+        stores_binding(&module, 0, 0),
+        "updates must store into the input binding: {wgsl}"
+    );
+    assert!(
+        !module
+            .global_variables
+            .iter()
+            .any(|(_, v)| v.binding.as_ref().is_some_and(|b| b.group == 0 && b.binding == 1)),
+        "no replacement allocation"
     );
 }
 
@@ -1249,20 +1254,17 @@ entry check(inputs: [1]([512]u32)) [1]u32 =
         .expect("compile 512-element distinctness check");
 
     validate_wgsl(&wgsl);
-    // Egglog retains the helper boundary; the row is passed by value once.
-    // Indexing inside that helper must reuse its parameter without local copies.
-    let helper = wgsl.split("fn ").nth(1).expect("distinctness helper").split("\n}").next().unwrap();
+    let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
+    let is_row = |ty| matches!(module.types[ty].inner,naga::TypeInner::Array {size:naga::ArraySize::Constant(n),..} if n.get()==512);
+    let (_, helper) = module
+        .functions
+        .iter()
+        .find(|(_, f)| f.arguments.iter().any(|arg| is_row(arg.ty)))
+        .expect("array-valued helper input");
+    assert!(helper.expressions.iter().filter(|(_,e)| matches!(e,naga::Expression::Access {base,..} if matches!(helper.expressions[*base],naga::Expression::FunctionArgument(_)))).count()>=2,"both distinctness indices must access the parameter");
     assert!(
-        helper.contains("array<u32, 512>"),
-        "missing array parameter: {helper}"
-    );
-    assert!(
-        helper.matches("w_p0[").count() >= 2,
-        "parameter indexing missing: {helper}"
-    );
-    assert!(
-        !helper.lines().any(|line| line.contains("array<u32, 512> =")),
-        "redundant helper-local array copy: {helper}"
+        !helper.local_variables.iter().any(|(_, local)| is_row(local.ty)),
+        "no full-array local copy"
     );
 }
 
@@ -1342,4 +1344,66 @@ fn duplicate_emitted_parameter_names_are_uniquified() {
     assert_eq!(uniquify_parameter_name("w_i".into(), &mut used), "w_i");
     assert_eq!(uniquify_parameter_name("w_i".into(), &mut used), "w_i__p1");
     assert_eq!(uniquify_parameter_name("w_i".into(), &mut used), "w_i__p2");
+}
+
+fn stores_binding(module: &naga::Module, group: u32, binding: u32) -> bool {
+    fn root(
+        function: &naga::Function,
+        mut expression: naga::Handle<naga::Expression>,
+    ) -> Option<naga::Handle<naga::GlobalVariable>> {
+        loop {
+            match function.expressions[expression] {
+                naga::Expression::GlobalVariable(global) => return Some(global),
+                naga::Expression::Access { base, .. } | naga::Expression::AccessIndex { base, .. } => {
+                    expression = base
+                }
+                _ => return None,
+            }
+        }
+    }
+    fn stores(
+        module: &naga::Module,
+        function: &naga::Function,
+        block: &naga::Block,
+        group: u32,
+        binding: u32,
+    ) -> bool {
+        block.iter().any(|statement| match statement {
+            naga::Statement::Store { pointer, .. } => root(function, *pointer).is_some_and(|global| {
+                module.global_variables[global]
+                    .binding
+                    .as_ref()
+                    .is_some_and(|b| b.group == group && b.binding == binding)
+            }),
+            naga::Statement::Block(block) => stores(module, function, block, group, binding),
+            naga::Statement::If { accept, reject, .. } => {
+                stores(module, function, accept, group, binding)
+                    || stores(module, function, reject, group, binding)
+            }
+            naga::Statement::Loop { body, continuing, .. } => {
+                stores(module, function, body, group, binding)
+                    || stores(module, function, continuing, group, binding)
+            }
+            naga::Statement::Switch { cases, .. } => {
+                cases.iter().any(|case| stores(module, function, &case.body, group, binding))
+            }
+            _ => false,
+        })
+    }
+    module
+        .functions
+        .iter()
+        .map(|(_, f)| f)
+        .chain(module.entry_points.iter().map(|entry| &entry.function))
+        .any(|f| stores(module, f, &f.body, group, binding))
+}
+
+#[test]
+fn float_powers_coerce_constant_and_dynamic_integer_exponents() {
+    let source = r#"
+entry powers(xs: []f32, exponent: i32) []f32 =
+    map(|x: f32| x ** 5 + x ** exponent, xs)
+"#;
+    let wgsl = compile_to_wgsl(source).expect("mixed float/integer powers must lower");
+    validate_wgsl(&wgsl);
 }

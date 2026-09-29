@@ -92,7 +92,7 @@ fn refresh(graph: &mut EGraph) -> Result<(), OptimizeError> {
 }
 
 pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
-    graph.parse_and_run_program(None, "(PlanningRound 0)")?;
+    graph.update(|mut sink| sink.add("PlanningRound", 0i64))?;
     let dependencies = parse_program(
         "fusion dependencies",
         "(run-schedule (saturate fusion-dependencies))",
@@ -166,8 +166,7 @@ mod tests {
 
     #[test]
     fn contraction_recomputes_order_and_keeps_effect_paths() {
-        let mut graph = EGraph::default();
-        graph.parse_and_run_program(None, crate::egglog::SCHEMA).unwrap();
+        let mut graph = super::super::new_graph().unwrap();
         graph.parse_and_run_program(None, include_str!("fusion.egg")).unwrap();
         graph
             .parse_and_run_program(
@@ -177,8 +176,7 @@ mod tests {
             (let b (Group (OperationId 1)))
             (let c (Group (OperationId 2)))
             (GroupEdge a b)
-            (EffectMember 0 b)
-            (EffectWait c 0)
+            (GroupBefore b c)
             (RelevantPair a c)
             (run-schedule (saturate fusion-dependencies))
         "#,

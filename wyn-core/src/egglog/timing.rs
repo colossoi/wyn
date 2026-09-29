@@ -40,3 +40,7 @@ pub(super) fn time<T>(name: &'static str, f: impl FnOnce() -> T) -> T {
     let _timing = span(name);
     f()
 }
+
+pub(super) fn enabled() -> bool {
+    ENABLED.get()
+}

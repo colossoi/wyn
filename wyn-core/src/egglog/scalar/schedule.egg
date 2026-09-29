@@ -1,0 +1,7 @@
+(run-schedule
+  (saturate
+    (seq
+      (saturate (run scalar-analysis))
+      (run scalar-inline)
+      (saturate (run scalar-analysis))
+      (run scalar-micro))))
