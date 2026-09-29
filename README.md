@@ -180,11 +180,11 @@ graphs; expression insertion hands its graph directly to scalar simplification.
 | --- | --- | --- |
 | `egglog::from_tlc` | `Imported` | Import normalized TLC, callable bodies, types, and source ABI into typed arenas; construct Scremas for map/reduce/scan and export structural fusion facts. |
 | `egglog::fuse` | `Fused` | Complete a deterministic greedy fusion plan on a persistent graph, then construct the selected bodies in the sidecar arenas. |
-| `egglog::insert_expressions` | `Expressions` | Form eligible selects, then insert typed expressions, region uses, structured control, and execution dependencies into egglog. |
+| `egglog::insert_expressions` | `Expressions` | Expand eligible scalar helpers into the expression DAG, form eligible selects, then insert typed expressions, region uses, structured control, and execution dependencies into egglog. |
 | `egglog::simplify` | `Simplified` | Fold constants and simplify scalar expressions in that graph; optionally explore algebraic rewrites with `-O`, then extract and apply replacements. |
 | `egglog::place` | `Placed` | Place safe shared and loop-invariant expressions in structured regions, including SOAC captures. Reuse expressions already evaluated by conditions, loop initializers, and call arguments without speculating partial operations, memory reads, or opaque calls. |
-| `egglog::schedule` | `Scheduled` | Derive execution recipes, host/device residency, storage allocation and reuse, output routes, scratch, dispatch domains, and dependencies; instantiate executable blocks. |
-| `egglog::to_ssa` | SSA `Elaborated` | Inline small scheduled helpers, including generated callbacks; reuse evaluated DAG nodes across conditionals and place newly exposed safe arithmetic with SSA's floating-instruction scheduler. Lower kernels for the selected target and publish the shader/runtime ABI. |
+| `egglog::schedule` | `Scheduled` | Derive execution recipes, host/device residency, storage allocation and reuse, output routes, scratch, dispatch domains, and dependencies; instantiate executable blocks and small pure callbacks in the expression DAG. |
+| `egglog::to_ssa` | SSA `Elaborated` | Reuse evaluated DAG nodes across conditionals and place generated safe arithmetic with SSA's floating-instruction scheduler. Lower kernels for the selected target and publish the shader/runtime ABI. |
 
 Dependency analysis works backward from results and required effects and orders
 only live operations. Operation identities keep effectful executions distinct,
@@ -285,10 +285,11 @@ Names are relative to `ssa::` unless otherwise qualified.
 | `prepare_*` | `backend_validation::verify_no_abstract_types` | Reject unresolved type representations. |
 | `prepare_spirv` | `spirv::verify_buffer_layouts` | Verify concrete buffer layouts. |
 
-Helper inlining runs after scheduling, during Egglog's SSA handoff. Expression
-interning and source placement run in Egglog; arithmetic exposed during the
-handoff uses the shared SSA placement routine. The later `place_floating` pass
-places storage materializations introduced by SSA preparation.
+Scalar helper expansion now runs before Egglog expression insertion, with small
+pure callbacks instantiated during scheduling. This port is work in progress;
+see [the checkpoint notes](docs/spirv-reuse-wip-20260926.md) for known failures.
+Generated arithmetic uses the shared SSA placement routine. The later
+`place_floating` pass places storage materializations introduced by SSA preparation.
 
 `--output-mir` dumps `Elaborated` SSA before these cleanup and backend passes.
 SSA expression reuse and early SSA constant folding are temporarily disabled
