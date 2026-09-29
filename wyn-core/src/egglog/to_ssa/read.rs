@@ -159,11 +159,17 @@ impl<'a, 'source> Facts<'a, 'source> {
     pub fn device_operation(&self, op: Value) -> bool {
         self.contains("SsaDeviceOperation", (op,))
     }
-    pub fn total(&self, context: Value, expression: Value) -> bool {
-        self.contains("ScalarTotal", (context, expression))
+    fn scalar_contains(&self, table: &str, keys: impl IntoValues) -> bool {
+        match self.program.stage.scalars.read(|r| r.contains(table, keys)) {
+            Ok(value) => value,
+            Err(error) => panic!("invalid native scalar predicate {table}: {error}"),
+        }
+    }
+    pub fn total(&self, expression: Value) -> bool {
+        self.scalar_contains("ScalarTotal", expression)
     }
     pub fn placement(&self, context: Value, expression: Value, scope: Value) -> bool {
-        self.contains("ScalarSelectedPlacement", (context, expression, scope))
+        self.scalar_contains("ScalarSelectedPlacement", (context, expression, scope))
     }
     pub fn dispatch_context(&self, operation: Value) -> Option<Value> {
         self.constructor("ScalarDispatch", (operation,))
@@ -202,6 +208,15 @@ impl Selected {
                 }
                 _ => return Err(error("unresolved scalar substitution")),
             }
+        }
+    }
+    pub fn operation_arguments(&self, term: TermId) -> Result<Vec<TermId>, OptimizeError> {
+        let (name, fields) = self.app(term)?;
+        match name {
+            "ScalarUnary" => Ok(vec![fields[3]]),
+            "ScalarBinary" => Ok(fields[3..5].to_vec()),
+            "ScalarOp" => self.arguments(fields[3]),
+            _ => Err(error("expected scalar operation")),
         }
     }
     pub fn operator(

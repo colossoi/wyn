@@ -41,6 +41,38 @@ fn helper_calls_in_different_functions_keep_their_parameters() {
 }
 
 #[test]
+fn batched_scalar_extraction_keeps_entry_contexts_distinct() {
+    let module = shaders(
+        "entry first(x:u32) u32=x+11u32
+         entry second(x:u32) u32=x+29u32",
+    );
+    for (name, expected, other) in [("first", 11, 29), ("second", 29, 11)] {
+        let entry = module
+            .entry_points
+            .iter()
+            .find(|entry| entry.name.contains(name))
+            .expect("each authored entry must reach the backend");
+        let literals: Vec<_> = entry
+            .function
+            .expressions
+            .iter()
+            .filter_map(|(_, expression)| match expression {
+                Expression::Literal(naga::Literal::U32(value)) => Some(*value),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            literals.contains(&expected),
+            "{name} lost its own arithmetic operand"
+        );
+        assert!(
+            !literals.contains(&other),
+            "{name} acquired another context's operand"
+        );
+    }
+}
+
+#[test]
 fn selected_record_expansion_is_used_as_a_helper_argument() {
     // The redundant differences survive early TLC simplification and keep
     // repack above the early inlining threshold; egglog reduces them to zero.
@@ -97,6 +129,42 @@ fn inlining_cost_counts_shared_arithmetic_once() {
         })
         .count();
     assert_eq!(multiplies, 5, "inlining must preserve shared intermediate values");
+}
+
+#[test]
+fn repeated_helper_substitution_keeps_independent_arguments_and_shared_work() {
+    let module = shaders(
+        "def shared(x:u32,y:u32) u32 =
+             let a=x*y+x in
+             let b=a*a+a in
+             let c=b*b+b in
+             let d=c*c+c in
+             let e=d*d+d in
+             if y==0u32 then x else e
+         entry main(x:u32,y:u32,u:u32,v:u32) (u32,u32) = (shared(x,y),shared(u,v))",
+    );
+    assert!(
+        module.functions.is_empty(),
+        "both helper invocations should inline"
+    );
+    let multiplies = module.entry_points[0]
+        .function
+        .expressions
+        .iter()
+        .filter(|(_, expression)| {
+            matches!(
+                expression,
+                Expression::Binary {
+                    op: BinaryOperator::Multiply,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        multiplies, 10,
+        "each call must retain its own five shared products"
+    );
 }
 
 #[test]

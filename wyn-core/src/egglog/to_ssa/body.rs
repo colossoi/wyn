@@ -358,8 +358,12 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                 let text = selected.text(fields[2])?;
                 self.literal(text, &ty)?
             }
-            "ScalarOp" => {
-                let arguments = self.arguments(scope, fields[3])?;
+            "ScalarUnary" | "ScalarBinary" | "ScalarOp" => {
+                let arguments = selected
+                    .operation_arguments(term)?
+                    .into_iter()
+                    .map(|arg| self.scalar(scope, arg))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let tag = selected.operator(fields[2], arguments.len())?;
                 self.op_at(self.scalar_target(expression)?, tag, arguments, ty)?
             }

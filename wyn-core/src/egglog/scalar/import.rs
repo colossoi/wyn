@@ -38,7 +38,24 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
         }
     }
 
-    pub(super) fn region(&mut self, context: Value, region: Value) -> Result<(), OptimizeError> {
+    pub(super) fn group(
+        &mut self,
+        context: Value,
+        members: &[Value],
+        roots: &[(Value, Value, bool)],
+    ) -> Result<usize, OptimizeError> {
+        self.sink.add("ScalarActive", context)?;
+        let before = self.cache.len();
+        for &region in members {
+            self.region(context, region)?;
+        }
+        for &(region, source, expand) in roots {
+            self.root(context, region, source, expand)?;
+        }
+        Ok(self.cache.len() - before)
+    }
+
+    fn region(&mut self, context: Value, region: Value) -> Result<(), OptimizeError> {
         if let Some(roots) = self.facts.roots.get(&region) {
             for &source in roots {
                 let value = self.value(context, source, !self.facts.dispatched.contains(&source))?;
@@ -48,7 +65,7 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
         Ok(())
     }
 
-    pub(super) fn root(
+    fn root(
         &mut self,
         context: Value,
         region: Value,
@@ -220,16 +237,23 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
                 for arg in args {
                     values.push(self.child(context, scope, arg)?);
                 }
-                let arguments = self.args(context, &values)?;
                 if let Some((op, safe)) = operator {
                     if safe {
                         self.sink.add("ScalarOperatorSafe", (ty, op.as_str()))?;
                     }
-                    return Ok(self.sink.add("ScalarOp", (context, ty, op.as_str(), arguments))?);
+                    return Ok(match values.as_slice() {
+                        &[x] => self.sink.add("ScalarUnary", (context, ty, op.as_str(), x))?,
+                        &[x, y] => self.sink.add("ScalarBinary", (context, ty, op.as_str(), x, y))?,
+                        _ => {
+                            let arguments = self.args(context, &values)?;
+                            self.sink.add("ScalarOp", (context, ty, op.as_str(), arguments))?
+                        }
+                    });
                 }
                 let Some(callee) = callee else {
                     return Err(OptimizeError::Output("missing admitted call target".into()));
                 };
+                let arguments = self.args(context, &values)?;
                 self.template(callee)?;
                 Ok(self.sink.add("ScalarInvoke", (context, ty, callee, arguments))?)
             }

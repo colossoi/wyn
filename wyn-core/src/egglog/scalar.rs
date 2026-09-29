@@ -215,7 +215,7 @@ fn inline_candidate(
 pub(super) fn run(
     graph: &mut EGraph,
     identities: &source::Identities<'_>,
-) -> Result<Selected, OptimizeError> {
+) -> Result<(Selected, EGraph), OptimizeError> {
     let _timing = timing::span("egglog scalar optimization");
     let facts = timing::time("egglog scalar / regions", || Facts::read(graph))?;
     fold::register(graph);
@@ -292,38 +292,64 @@ pub(super) fn run(
         }
         Ok(())
     })?;
-    let mut largest = 0;
-    let profile = std::env::var_os("WYN_SCALAR_PROFILE").is_some();
-    for (&id, (context, members, roots)) in &groups {
-        let start = Instant::now();
-        let before = cache.len();
-        graph.update(|mut sink| {
-            sink.add("ScalarActive", *context)?;
-            let mut importer = Importer::new(sink, identities, &facts, &mut cache, &mut templates);
-            Ok(
-                members.iter().try_for_each(|&region| importer.region(*context, region)).and_then(|()| {
-                    roots.iter().try_for_each(|&(region, source, expand)| {
-                        importer.root(*context, region, source, expand)
-                    })
-                }),
-            )
-        })??;
-        largest = largest.max(cache.len() - before);
-        // Each region admits only its demanded DAG and eligible helper bodies.
-        // Egglog's incremental rules retain sharing with earlier regions.
-        let imported = start.elapsed();
-        graph.run_program(schedule.clone())?;
-        graph.update(|mut sink| sink.remove("ScalarActive", *context))?;
-        if profile {
-            eprintln!(
-                "scalar region {id}: {} admitted, import {:.3} ms, optimize {:.3} ms",
-                cache.len() - before,
-                imported.as_secs_f64() * 1000.0,
-                (start.elapsed() - imported).as_secs_f64() * 1000.0
-            );
+    let structural = graph;
+    let mut scalars = timing::time("egglog scalar / graph projection", || {
+        // A native snapshot preserves the immutable identity handles shared with
+        // structural planning. Scalar rules need no structural analysis tables.
+        let mut scalars = structural.clone();
+        for name in scalars.get_function_names() {
+            if !name.starts_with("Scalar")
+                && !matches!(
+                    name.as_str(),
+                    "RegionId"
+                        | "OperationId"
+                        | "TypeId"
+                        | "SourceTerm"
+                        | "SourceFormal"
+                        | "SourceGlobal"
+                        | "SourceArrayAtom"
+                        | "SourceProjected"
+                        | "SourceLoop"
+                        | "FusionSource"
+                        | "Joined"
+                )
+            {
+                scalars.clear_function(&name)?;
+            }
         }
-    }
+        Ok::<_, OptimizeError>(scalars)
+    })?;
+    let graph = &mut scalars;
+    let profile = std::env::var_os("WYN_SCALAR_PROFILE").is_some();
+    let admission = timing::span("egglog scalar / admission");
+    let largest = graph.update(|sink| {
+        let mut importer = Importer::new(sink, identities, &facts, &mut cache, &mut templates);
+        Ok(
+            groups.iter().try_fold(0, |largest, (&id, (context, members, roots))| {
+                let start = Instant::now();
+                let admitted = importer.group(*context, members, roots)?;
+                if profile {
+                    eprintln!(
+                        "scalar region {id}: {admitted} admitted, import {:.3} ms",
+                        start.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+                Ok::<_, OptimizeError>(largest.max(admitted))
+            }),
+        )
+    })??;
+    drop(admission);
+    extract::prune_source_identities(graph)?;
+    // Context keys keep independent regions disjoint. Running them together
+    // shares egglog rebuild work without allowing rules to cross contexts.
+    timing::time("egglog scalar / fixed point", || graph.run_program(schedule))?;
     graph.update(|mut sink| {
+        for (context, _, _) in groups.values() {
+            sink.remove("ScalarActive", *context)?;
+        }
+        Ok(())
+    })?;
+    structural.update(|mut sink| {
         for &(plan, op, region) in &facts.invocations {
             if let Some(&source) = facts.results.get(&region) {
                 let Some(&context) = callback_contexts.get(&region) else {
@@ -331,8 +357,8 @@ pub(super) fn run(
                         "missing callback context".into(),
                     ));
                 };
-                if let Some(&root) = cache.get(&(context, source, true)) {
-                    sink.add("ScalarInvocation", (plan, op, region, root))?;
+                if cache.contains_key(&(context, source, true)) {
+                    sink.add("ScalarInvocation", (plan, op, region))?;
                 }
             }
         }
@@ -352,11 +378,12 @@ pub(super) fn run(
         );
     }
     if profile {
-        for output in graph.parse_and_run_program(None, "(print-stats)")? {
+        eprintln!("scalar graph tuples: {}", graph.num_tuples());
+        for output in graph.parse_and_run_program(None, "(print-stats) (print-size ScalarUnary) (print-size ScalarBinary) (print-size ScalarOp) (print-size ScalarCons) (print-size ScalarSub) (print-size ScalarSubArgs)")? {
             eprintln!("{output}");
         }
     }
-    Ok(selected)
+    Ok((selected, scalars))
 }
 
 fn home(mut region: Value, identities: &source::Identities<'_>, facts: &Facts) -> Value {

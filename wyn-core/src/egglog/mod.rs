@@ -69,8 +69,8 @@ pub fn schedule(mut program: Program<'_, Placed>) -> Result<Program<'_, Schedule
 
 /// Optimize demanded scalar regions after structural scheduling.
 pub fn optimize(mut program: Program<'_, Scheduled>) -> Result<Program<'_, Optimized>, OptimizeError> {
-    let selected = scalar::run(&mut program.graph, &program.identities)?;
-    Ok(program.advance(Optimized { selected }))
+    let (selected, scalars) = scalar::run(&mut program.graph, &program.identities)?;
+    Ok(program.advance(Optimized { selected, scalars }))
 }
 
 /// Emit the optimized scalar graph directly into SSA.
@@ -112,6 +112,9 @@ pub struct Scheduled;
 
 pub struct Optimized {
     selected: scalar::Selected,
+    // Shares immutable source/context identities with the structural graph.
+    // Rewrites and placement proofs belong to this scalar snapshot alone.
+    scalars: EGraph,
 }
 
 #[cfg(test)]

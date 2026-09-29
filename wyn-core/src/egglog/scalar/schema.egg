@@ -3,9 +3,13 @@
 (datatype ScalarContext (ScalarFunction RegionKey) (ScalarKernel FusionPlan) (ScalarDispatch OperationKey) (ScalarTemplate RegionKey))
 (sort ScalarExpr)
 (sort ScalarArgs)
+; A native vector groups roots for shared extraction after optimization.
+(sort ScalarOutputs (Vec ScalarExpr))
 (constructor ScalarLeaf (ScalarContext TypeKey SourceValue) ScalarExpr)
 (constructor ScalarParameter (ScalarContext TypeKey RegionKey i64) ScalarExpr)
 (constructor ScalarLiteral (ScalarContext TypeKey String) ScalarExpr)
+(constructor ScalarUnary (ScalarContext TypeKey String ScalarExpr) ScalarExpr)
+(constructor ScalarBinary (ScalarContext TypeKey String ScalarExpr ScalarExpr) ScalarExpr)
 (constructor ScalarOp (ScalarContext TypeKey String ScalarArgs) ScalarExpr)
 (constructor ScalarInvoke (ScalarContext TypeKey RegionKey ScalarArgs) ScalarExpr)
 (constructor ScalarChoice (ScalarContext TypeKey ScalarExpr ScalarExpr ScalarExpr) ScalarExpr)
@@ -24,13 +28,16 @@
 (relation ScalarOperatorSafe (TypeKey String))
 (relation ScalarInlineBody (RegionKey ScalarExpr))
 (relation ScalarRoot (ScalarContext RegionKey SourceValue ScalarExpr))
-(relation ScalarTotal (ScalarContext ScalarExpr))
-(relation ScalarArgsTotal (ScalarContext ScalarArgs))
-; Selected invocation descriptors preserve scans, accumulators, masks and routes.
-; They never match old candidate plans or substitute array values for elements.
-(relation ScalarInvocation (FusionPlan OperationKey RegionKey ScalarExpr))
+; Expression identities already carry their optimization context.
+(relation ScalarTotal (ScalarExpr))
+(relation ScalarArgsTotal (ScalarArgs))
+; Callback contexts refer to selected fusion plans; scalar expressions stay
+; in the scalar graph and are queried directly during SSA emission.
+(relation ScalarInvocation (FusionPlan OperationKey RegionKey))
 (ruleset scalar-analysis)
 (ruleset scalar-inline)
+(ruleset scalar-substitute)
+(ruleset scalar-arguments)
 (ruleset scalar-micro)
 
 (relation ScalarSelectedPlacement (ScalarContext ScalarExpr RegionKey))

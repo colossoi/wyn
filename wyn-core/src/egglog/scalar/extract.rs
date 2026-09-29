@@ -1,8 +1,9 @@
 //! Compare finite egglog extractions by the work in their shared DAGs.
-use crate::egglog::OptimizeError;
-use crate::LookupSet;
+use crate::egglog::{timing, OptimizeError};
+use crate::{LookupMap, LookupSet};
 use egglog_engine::extract::{Cost, CostModel, Extractor};
-use egglog_engine::{ArcSort, EGraph, Enode, Function, Term, TermDag, TermId, Value};
+use egglog_engine::sort::VecContainer;
+use egglog_engine::{ArcSort, EGraph, Enode, Function, RawValues, Term, TermDag, TermId, Value, Write};
 
 // Inlining trades one call for this much scalar work. Representation nodes,
 // already computed inputs, and constants require no additional instructions.
@@ -54,64 +55,131 @@ impl CostModel<Estimate> for Model {
 fn work(name: &str) -> u64 {
     match name {
         "ScalarInvoke" => CALL_WORK,
-        "ScalarOp" | "ScalarChoice" | "ScalarTuple" | "ScalarVector" | "ScalarProject" | "ScalarCoerce" => {
-            1
-        }
+        "ScalarUnary" | "ScalarBinary" | "ScalarOp" | "ScalarChoice" | "ScalarTuple" | "ScalarVector"
+        | "ScalarProject" | "ScalarCoerce" => 1,
         _ => 0,
     }
 }
 
-pub(super) struct Candidates {
-    compact: Extractor<Estimate>,
-    inlined: Extractor<Estimate>,
+/// Extract all demanded roots together so egglog reconstructs shared terms once.
+/// Candidate DAGs are temporary; only selected reachable terms enter the output.
+pub(super) fn select(graph: &mut EGraph, roots: &[Value]) -> Result<(TermDag, Vec<TermId>), OptimizeError> {
+    let Some(sort) = graph.get_sort_by_name("ScalarOutputs").cloned() else {
+        return Err(OptimizeError::Output("missing scalar outputs sort".into()));
+    };
+    let value = graph.container_to_value(VecContainer {
+        do_rebuild: true,
+        data: roots.to_vec(),
+    });
+    let extract = |prefer_inlining| {
+        let costs = timing::span(if prefer_inlining {
+            "egglog scalar / inlined costs"
+        } else {
+            "egglog scalar / compact costs"
+        });
+        let extractor = Extractor::compute_costs_from_rootsorts(
+            Some(vec![sort.clone()]),
+            graph,
+            Model { prefer_inlining },
+        );
+        drop(costs);
+        let mut dag = TermDag::default();
+        let Some((_, root)) = extractor.extract_best(graph, &mut dag, value) else {
+            return Err(OptimizeError::Extraction(
+                "scalar roots have no resolved finite extraction".into(),
+            ));
+        };
+        let Term::App(_, children) = dag.get(root) else {
+            return Err(OptimizeError::Extraction(
+                "expected extracted output vector".into(),
+            ));
+        };
+        let children = children.clone();
+        Ok((dag, children))
+    };
+    // Both seed models are additive, as egglog requires. Reranking their finite
+    // DAGs exposes sharing hidden behind calls without expanding alternatives.
+    let (compact, compact_roots) = extract(false)?;
+    let (inlined, inlined_roots) = extract(true)?;
+    let mut dag = TermDag::default();
+    let mut compact_copies = LookupMap::default();
+    let mut inlined_copies = LookupMap::default();
+    let roots = compact_roots
+        .into_iter()
+        .zip(inlined_roots)
+        .map(|(a, b)| {
+            if dag_work(&inlined, b) < dag_work(&compact, a) {
+                copy_term(&inlined, b, &mut dag, &mut inlined_copies)
+            } else {
+                copy_term(&compact, a, &mut dag, &mut compact_copies)
+            }
+        })
+        .collect();
+    Ok((dag, roots))
 }
 
-impl Candidates {
-    pub fn new(graph: &EGraph) -> Result<Self, OptimizeError> {
-        let Some(sort) = graph.get_sort_by_name("ScalarExpr") else {
-            return Err(OptimizeError::Output("missing scalar expression sort".into()));
-        };
-        let extract = |prefer_inlining| {
-            Extractor::compute_costs_from_rootsorts(
-                Some(vec![sort.clone()]),
-                graph,
-                Model { prefer_inlining },
-            )
-        };
-        Ok(Self {
-            compact: extract(false),
-            inlined: extract(true),
-        })
+// The scalar snapshot needs only source identities referenced by its leaves,
+// including template leaves that substitution may copy into active contexts.
+pub(super) fn prune_source_identities(graph: &mut EGraph) -> Result<(), OptimizeError> {
+    let _timing = timing::span("egglog scalar / source identities");
+    let mut needed = LookupSet::default();
+    graph.constructor_enodes("ScalarLeaf", |row| {
+        needed.insert(row.children[2]);
+    })?;
+    let mut rows = Vec::new();
+    let mut parents: LookupMap<Value, Vec<Value>> = LookupMap::default();
+    for name in [
+        "SourceTerm",
+        "SourceFormal",
+        "SourceGlobal",
+        "SourceArrayAtom",
+        "SourceProjected",
+    ] {
+        graph.constructor_enodes(name, |row| {
+            if matches!(name, "SourceArrayAtom" | "SourceProjected") {
+                parents.entry(row.eclass).or_default().push(row.children[0]);
+            }
+            rows.push((name, row.children.to_vec(), row.eclass));
+        })?;
     }
-
-    pub fn select(&self, graph: &EGraph, dag: &mut TermDag, value: Value) -> Result<TermId, OptimizeError> {
-        // Both seed models are additive, as egglog's extractor requires. The
-        // second exposes sharing hidden behind calls in the compact candidate.
-        // Reranking these finite DAGs is a heuristic, not globally optimal DAG
-        // extraction, and does not introduce expressions or cross contexts.
-        let mut best = None;
-        for extractor in [&self.compact, &self.inlined] {
-            let mut candidate = TermDag::default();
-            let Some((_, term)) = extractor.extract_best(graph, &mut candidate, value) else {
-                continue;
-            };
-            let cost = dag_work(&candidate, term);
-            if best.as_ref().is_none_or(|(old, _)| cost < *old) {
-                best = Some((cost, extractor));
+    let mut pending: Vec<_> = needed.iter().copied().collect();
+    while let Some(value) = pending.pop() {
+        for &parent in parents.get(&value).into_iter().flatten() {
+            if needed.insert(parent) {
+                pending.push(parent);
             }
         }
-        let Some((_, extractor)) = best else {
-            return Err(OptimizeError::Extraction(
-                "scalar root has no resolved finite extraction".into(),
-            ));
-        };
-        let Some((_, term)) = extractor.extract_best(graph, dag, value) else {
-            return Err(OptimizeError::Extraction(
-                "selected scalar extraction disappeared".into(),
-            ));
-        };
-        Ok(term)
     }
+    graph.update(|mut sink| {
+        for (name, fields, value) in rows {
+            if !needed.contains(&value) {
+                sink.remove(name, RawValues(fields))?;
+            }
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+fn copy_term(
+    source: &TermDag,
+    term: TermId,
+    target: &mut TermDag,
+    copied: &mut LookupMap<TermId, TermId>,
+) -> TermId {
+    if let Some(&id) = copied.get(&term) {
+        return id;
+    }
+    let id = match source.get(term) {
+        Term::Lit(literal) => target.lit(literal.clone()),
+        Term::Var(name) => target.var(name.clone()),
+        Term::App(name, children) => {
+            let children = children.iter().map(|&child| copy_term(source, child, target, copied)).collect();
+            target.app(name.clone(), children)
+        }
+    };
+    copied.insert(term, id);
+    id
 }
 
 fn dag_work(dag: &TermDag, root: TermId) -> u64 {
@@ -132,6 +200,8 @@ fn dag_work(dag: &TermDag, root: TermId) -> u64 {
 
 pub(super) fn operands(name: &str, fields: &[TermId]) -> Vec<TermId> {
     match name {
+        "ScalarUnary" => vec![fields[3]],
+        "ScalarBinary" => fields[3..5].to_vec(),
         "ScalarOp" | "ScalarInvoke" => vec![fields[3]],
         "ScalarTuple" | "ScalarVector" | "ScalarProject" | "ScalarCoerce" => vec![fields[2]],
         "ScalarChoice" => fields[2..5].to_vec(),

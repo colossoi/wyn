@@ -444,13 +444,16 @@ pub(super) fn capture_scalar(
         return Ok(None);
     };
     let selected = &body.compiler.program.stage.selected;
-    if !body.compiler.facts.total(body.context, selected.values[term]) {
+    if !body.compiler.facts.total(selected.values[term]) {
         return Ok(None);
     }
     let egglog_engine::Term::App(name, fields) = selected.dag.get(term) else {
         return Ok(None);
     };
-    if !matches!(name.as_str(), "ScalarOp" | "ScalarCoerce") {
+    if !matches!(
+        name.as_str(),
+        "ScalarUnary" | "ScalarBinary" | "ScalarOp" | "ScalarCoerce"
+    ) {
         return Ok(None);
     }
     let Some(ty) = body.compiler.facts.ty(selected.values[fields[1]]).cloned() else {
@@ -541,8 +544,8 @@ impl Lower<'_, '_, '_> {
                 ScalarType::F32 => ScalarExpr::F32(selected.text(f[2]).ok()?.parse().ok()?),
                 ScalarType::Bool => ScalarExpr::Bool(selected.text(f[2]).ok()? == "true"),
             }),
-            "ScalarOp" => {
-                let terms = selected.arguments(f[3]).ok()?;
+            "ScalarUnary" | "ScalarBinary" | "ScalarOp" => {
+                let terms = selected.operation_arguments(term).ok()?;
                 let (_, first) = selected.app(*terms.first()?).ok()?;
                 let argument_type = scalar_type(self.compiler.facts.ty(selected.values[first[1]])?)?;
                 let op = match selected.operator(f[2], terms.len()).ok()? {

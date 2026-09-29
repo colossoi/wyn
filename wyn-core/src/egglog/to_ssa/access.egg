@@ -48,7 +48,7 @@
 (rule ((SourceInput o i v)) ((set (SsaInputAt o i) v)) :ruleset ssa-access)
 (function SsaCaptureAt (RegionKey SourceValue) SourceValue :no-merge)
 (rule ((SourceCapture r p v)) ((set (SsaCaptureAt r p) v)) :ruleset ssa-access)
-(rule ((ScalarInvocation p o r e) (= c (ScalarKernel p))) ((set (SsaContext r) c)) :ruleset ssa-access)
+(rule ((ScalarInvocation p o r) (= c (ScalarKernel p))) ((set (SsaContext r) c)) :ruleset ssa-access)
 (sort SsaSources (Set SourceValue))
 (function SsaCaptures (RegionKey) SsaSources :merge (set-union old new))
 (rule ((SourceCapture r p v)) ((set (SsaCaptures r) (set-of p))) :ruleset ssa-access)

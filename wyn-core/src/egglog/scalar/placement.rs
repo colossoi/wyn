@@ -1,13 +1,13 @@
 //! Choose scopes once, over egglog's extracted DAG. Semantic safety is proved
 //! by scalar rules; no relation enumerates possible expression/scope pairs.
-use super::extract::{operands, Candidates};
+use super::extract::{self, operands};
 use super::scopes::{Forest, Scope, Scopes};
 use super::{Facts, Selected};
 use crate::egglog::{source, timing, OptimizeError};
 use crate::{LookupMap, LookupSet};
 use egglog_engine::ast::Literal;
 use egglog_engine::sort::{F, S};
-use egglog_engine::{Core, EGraph, RawValues, Read, Term, TermDag, Value, Write};
+use egglog_engine::{Core, EGraph, RawValues, Read, Term, Value, Write};
 
 pub(super) fn run(
     graph: &mut EGraph,
@@ -15,22 +15,23 @@ pub(super) fn run(
     facts: &Facts,
 ) -> Result<Selected, OptimizeError> {
     let _timing = timing::span("egglog scalar / exit placement");
-    let extractor = Candidates::new(graph)?;
+    let extraction = timing::span("egglog scalar / extraction");
     let mut roots = Vec::new();
     graph.constructor_enodes("ScalarRoot", |row| {
         roots.push((row.children[0], row.children[1], row.children[2], row.children[3]));
     })?;
-    let mut dag = TermDag::default();
+    let (dag, terms) = extract::select(graph, &roots.iter().map(|r| r.3).collect::<Vec<_>>())?;
     let mut uses: Vec<Vec<Value>> = Vec::new();
     let mut selected_roots = LookupMap::default();
-    for (context, scope, source, value) in roots {
-        let term = extractor.select(graph, &mut dag, value)?;
+    for ((context, scope, source, _), term) in roots.into_iter().zip(terms) {
         uses.resize_with(dag.size(), Vec::new);
         if !uses[term].contains(&scope) {
             uses[term].push(scope);
         }
         selected_roots.insert((context, source), term);
     }
+    drop(extraction);
+    let _placement = timing::span("egglog scalar / scope placement");
     // Recover opaque handles for the selected egglog terms without constructing
     // another expression representation or serializing source identities.
     let values = graph.update(|sink| {
@@ -76,7 +77,7 @@ pub(super) fn run(
             } else {
                 "ScalarTotal"
             };
-            graph.read(|r| r.contains(predicate, (values[fields[0]], values[id])))
+            graph.read(|r| r.contains(predicate, values[id]))
         })
         .collect::<Result<Vec<_>, egglog_engine::Error>>()?;
     let parent = |scope| {

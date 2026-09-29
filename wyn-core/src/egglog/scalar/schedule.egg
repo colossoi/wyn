@@ -1,7 +1,7 @@
+; Finish substitution before asking safety analyses about the expanded body.
 (run-schedule
   (saturate
     (seq
-      (saturate (run scalar-analysis))
-      (run scalar-inline)
+      (saturate (seq (run scalar-inline) (run scalar-substitute) (run scalar-arguments)))
       (saturate (run scalar-analysis))
       (run scalar-micro))))
