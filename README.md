@@ -151,44 +151,46 @@ and monomorphization. The TLC input to egglog is `InputSliceBoundsInferred`.
 ### Egglog passes
 
 Egglog combines Datalog's relational reasoning with equivalence graphs (e-graphs).
-This hybrid lends itself to both scheduling and arithmetic optimization: Datalog
-rules derive dependencies, execution order, and storage requirements, while
-e-graphs represent equivalent expressions and support exploring algebraic rewrites
-through equality saturation. Wyn uses these capabilities to plan array fusion,
-schedule work and storage, and simplify scalar arithmetic. Rust analyses and
-builders supply facts, construct transformed bodies, and perform expression
-placement.
+Wyn uses structural rules to plan array fusion, execution placement, and dispatches,
+then scalar rules to inline eligible helpers and simplify arithmetic. Rust provides
+source summaries, graph ordering, scope placement, and direct SSA emission.
 
-This stage uses several cooperating representations:
+A single traversal of TLC resolves lexical bindings and imports semantic identities,
+scopes, operation inputs, effects, and dependency summaries. Fusion, placement,
+and scheduling share this structural graph. They operate on array operations and
+execution regions rather than individual arithmetic expressions. Original TLC
+bodies and opaque identity mappings remain available for source metadata and
+computations outside scalar optimization.
 
-- An array-operation graph groups work into execution regions and records inputs,
-  captures, uses, and effects. A Screma combines scan, reduction, and map work
-  in one operation, potentially producing several outputs.
-- A typed expression DAG (directed acyclic graph) shares scalar syntax and
-  records dependencies.
-  Region parameters, results, and use sites distinguish invocations; sharing an
-  expression node does not by itself share a runtime value.
-- An execution and resource plan records host/device placement, kernel phases,
-  buffers, lifetimes, and dispatch dependencies. It becomes executable blocks
-  before the SSA handoff.
+After scheduling, the compiler creates a native scalar graph snapshot that retains
+shared identities but clears structural analysis tables. It imports only demanded
+scalar expressions and eligible helper templates. Context keys keep functions,
+fused callbacks, and scalar dispatch groups distinct: batching their rule execution
+does not let expressions in unrelated contexts optimize against one another.
 
-Types, bodies, and metadata live in typed arenas alongside the egglog graphs,
-called sidecars. Fusion, scalar simplification, and scheduling use separate
-graphs; expression insertion hands its graph directly to scalar simplification.
+Pass order is enforced by typestate:
 
 | Pass | Output checkpoint | Responsibility |
 | --- | --- | --- |
-| `egglog::from_tlc` | `Imported` | Import normalized TLC, callable bodies, types, and source ABI into typed arenas; construct Scremas for map/reduce/scan and export structural fusion facts. |
-| `egglog::fuse` | `Fused` | Complete a deterministic greedy fusion plan on a persistent graph, then construct the selected bodies in the sidecar arenas. |
-| `egglog::insert_expressions` | `Expressions` | Expand eligible scalar helpers into the expression DAG, form eligible selects, then insert typed expressions, region uses, structured control, and execution dependencies into egglog. |
-| `egglog::simplify` | `Simplified` | Fold constants and simplify scalar expressions in that graph; optionally explore algebraic rewrites with `-O`, then extract and apply replacements. |
-| `egglog::place` | `Placed` | Place safe shared and loop-invariant expressions in structured regions, including SOAC captures. Reuse expressions already evaluated by conditions, loop initializers, and call arguments without speculating partial operations, memory reads, or opaque calls. |
-| `egglog::schedule` | `Scheduled` | Derive execution recipes, host/device residency, storage allocation and reuse, output routes, scratch, dispatch domains, and dependencies; instantiate executable blocks and small pure callbacks in the expression DAG. |
-| `egglog::to_ssa` | SSA `Elaborated` | Reuse evaluated DAG nodes across conditionals and place generated safe arithmetic with SSA's floating-instruction scheduler. Lower kernels for the selected target and publish the shader/runtime ABI. |
+| `egglog::from_tlc` | `Imported` | Walk normalized TLC once, resolve bindings, and import structural summaries with source identities and scope relationships. |
+| `egglog::fuse` | `Fused` | Derive structural dependencies and select a deterministic greedy fusion plan, recording callback composition and argument routing in egglog. |
+| `egglog::place` | `Placed` | Choose execution domains, rematerialization, and scalar dispatch groups under the selected topology policy. |
+| `egglog::schedule` | `Scheduled` | Select dispatch recipes, resource requirements, storage allocation and reuse, output routes, and effect ordering. |
+| `egglog::optimize` | `Optimized` | Import demanded scalar regions, run the inlining and simplification fixed point, extract selected terms, and choose safe scopes for shared and loop-invariant computations. |
+| `egglog::to_ssa` | SSA `Elaborated` | Emit selected scalar terms and scheduled kernels directly into SSA; finalize captures, sizes, shader interfaces, and the companion host program. |
 
-Dependency analysis works backward from results and required effects and orders
-only live operations. Operation identities keep effectful executions distinct,
-while placement determines where shared expressions are evaluated.
+Scalar substitution finishes before safety analysis and reducing rewrites. Completed
+substitutions and replaced arithmetic forms are retired from matching. Unary and
+binary operations have direct operands; argument lists serve variable-arity forms.
+Native bulk extraction shares reconstruction across demanded roots and compares
+candidate DAGs by their shared operation cost. Only selected terms reach placement
+and SSA emission; there is no intervening Rust expression IR.
+
+Hoisting is an exit analysis over the selected DAG. Egglog proves whether evaluation
+is safe, while scope and dominator analyses determine where operands are available
+and where a result can serve its uses. Inlining at an existing call site does not
+require the stronger safety proof needed to speculate an expression outside a
+branch or loop. SSA emission queries scalar safety and placement facts directly.
 
 #### Fusion
 
@@ -203,8 +205,9 @@ into efficient executable work.
 iteration domains, SOAC layouts, producer/consumer links, uses, scalar dependency
 summaries, and memory/effect constraints. Scalar expression syntax and callback
 bodies remain opaque to the fusion rules. Source facts are analyzed once; the
-planner contracts groups on a persistent graph and records the complete plan
-before Rust constructs the composed bodies.
+planner contracts groups on a persistent graph and records selected composition,
+argument routing, and result signatures in egglog. Executable bodies are emitted
+later during SSA lowering.
 
 Supported cases include vertical producer/consumer fusion, horizontal fusion of
 compatible independent maps/scans/reductions, and retention of shared producer
@@ -217,10 +220,11 @@ scan's prefix values still requires a separate operation.
 
 #### Scheduling and publication
 
-Scheduling turns the fused graph into an execution plan: it chooses host or device
-execution, allocates or reuses storage, determines where outputs are written, and
-orders dispatches. Rust then builds the selected kernels and control flow.
-Scheduled executable blocks contain no SOAC operations.
+Execution placement chooses host or device execution and scalar dispatch groups.
+Structural scheduling then selects physical recipes, allocates or reuses storage,
+determines where outputs are written, and orders dispatches. Scalar optimization
+follows these decisions; SSA lowering builds the selected kernels and control flow,
+eliminating SOAC operations from the emitted program.
 
 The [execution recipes](wyn-core/src/egglog/schedule.egg) apply to surviving fused
 operations. Maps absorbed into a reduction share its traversal; a map after a scan
@@ -265,10 +269,8 @@ parameters carry values across branches and loops. With array scheduling already
 decided, this stage can clean up scalar code, place computations where they are
 needed, and establish the representation invariants required by code generation.
 
-The [shared SSA pipeline](wyn-core/src/ssa/mod.rs) runs these passes:
-
-The orchestration passes group the subpasses below, listed in execution order.
-Names are relative to `ssa::` unless otherwise qualified.
+The [shared SSA pipeline](wyn-core/src/ssa/mod.rs) groups the following subpasses,
+listed in execution order. Names are relative to `ssa::` unless otherwise qualified.
 
 | Orchestration pass | Subpass | Responsibility |
 | --- | --- | --- |
@@ -285,20 +287,16 @@ Names are relative to `ssa::` unless otherwise qualified.
 | `prepare_*` | `backend_validation::verify_no_abstract_types` | Reject unresolved type representations. |
 | `prepare_spirv` | `spirv::verify_buffer_layouts` | Verify concrete buffer layouts. |
 
-Scalar helper expansion now runs before Egglog expression insertion, with small
-pure callbacks instantiated during scheduling. This port is work in progress;
-see [the checkpoint notes](docs/spirv-reuse-wip-20260926.md) for known failures.
-Generated arithmetic uses the shared SSA placement routine. The later
-`place_floating` pass places storage materializations introduced by SSA preparation.
+Scalar helper expansion, expression sharing, and scope placement belong to the
+egglog stage. SSA preparation handles concrete storage and backend-specific cleanup;
+its `place_floating` pass places storage materializations introduced after lowering.
+Constant folding during backend preparation simplifies generated SSA operations.
 
 `--output-mir` dumps `Elaborated` SSA before these cleanup and backend passes.
-SSA expression reuse and early SSA constant folding are temporarily disabled
-for the Egglog port. Egglog scalar folding and the folding performed during
-backend preparation remain enabled.
-Constant folding and the normal pipeline run without `-O`; that flag enables
-additional egglog algebraic rewrites. Tests can use `compile_thru_frontend`,
-`compile_thru_tlc` (through TLC reachability), `compile_thru_ssa`, and
-`compile_thru_spirv` to stop at shared checkpoints.
+The scalar optimization fixed point runs by default. The CLI still accepts `-O`,
+but it currently does not select additional rewrites. Tests can use
+`compile_thru_frontend`, `compile_thru_tlc` (through TLC reachability),
+`compile_thru_ssa`, and `compile_thru_spirv` to stop at shared checkpoints.
 
 ### Backends and output modes
 
