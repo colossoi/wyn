@@ -75,7 +75,7 @@ pub(super) fn dispatch(compiler: &Compiler<'_, '_>, stage: &Stage) -> Result<Dis
     let value = self::extent(compiler, extent);
     match value {
         Ok(SizeExpr::Integer(count)) => Ok(DispatchSize::Fixed {
-            x: (count.max(0) as u32).div_ceil(divisor).max(1),
+            x: (count.max(0) as u32).div_ceil(divisor).clamp(1, 65_535),
             y: 1,
             z: 1,
             explicit: true,

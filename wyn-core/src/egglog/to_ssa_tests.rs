@@ -1139,3 +1139,23 @@ fn workgroup_storage_is_local_to_each_entry() {
     let module = spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
     Validator::new(ValidationFlags::all(), Capabilities::all()).validate(&module).unwrap();
 }
+
+#[test]
+fn large_fixed_domains_cap_generated_dispatches() {
+    let source = "entry main(xs:[25000000]i32) [25000000]i32 = map(|x:i32|x+1,xs)";
+    let output = pipeline(source);
+    let [Pipeline::Compute(p)] = output.program.interface.pipelines.as_slice() else {
+        panic!("one compute pipeline")
+    };
+    assert_eq!(p.stages.len(), 1);
+    assert_eq!(
+        p.stages[0].dispatch_size,
+        host::DispatchSize::Fixed {
+            x: 65_535,
+            y: 1,
+            z: 1,
+            explicit: true,
+        }
+    );
+    compile(source);
+}
