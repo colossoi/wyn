@@ -9,6 +9,39 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
 }
 
 #[test]
+fn integer_bool_scalar_and_capture_regressions_compile() {
+    for source in [
+        include_str!("../../../testfiles/regressions/integer_bool_scalar.wyn"),
+        include_str!("../../../testfiles/regressions/integer_bool_capture.wyn"),
+    ] {
+        compile_to_spirv(source).unwrap();
+        let program = crate::compile_thru_ssa(source).unwrap();
+        let wgsl = crate::lower_ssa_to_wgsl(program).unwrap();
+        let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+    }
+}
+
+#[test]
+fn integer_bool_conversions_support_every_integer_module() {
+    for ty in ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"] {
+        // Runtime predicates prevent constant folding from hiding an unbound
+        // scalar call, a captured callable, or passing the member as a value.
+        let source = format!(
+            "entry scalar(x: i32) {ty} = {ty}.bool(x > 0)
+             entry captured(xs: [4]i32) [4]{ty} = map(|x| {ty}.bool(x > 0), xs)
+             entry callable(xs: [4]i32) [4]{ty} = map({ty}.bool, map(|x| x > 0, xs))"
+        );
+        compile_to_spirv(&source).unwrap_or_else(|error| panic!("{ty}: {error}"));
+    }
+}
+
+#[test]
 fn generated_map_length_reuses_the_storage_view_length() {
     let words = compile_to_spirv("entry repro(xs: []f32) []f32 = map(|x| x + 1.0, xs)").unwrap();
     let module = wspirv::dr::load_words(&words).unwrap();

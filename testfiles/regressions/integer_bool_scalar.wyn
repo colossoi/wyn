@@ -1,0 +1,3 @@
+-- Previously failed with an unbound TLC symbol during source import.
+-- Expected: 1.
+entry main() i32 = i32.bool(true)

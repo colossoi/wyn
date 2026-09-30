@@ -322,6 +322,7 @@ module type carrier = { type t }
 -- (`i8`, `i32`, …) is just `integral_ops(<carrier>)`.
 functor integral_ops(B: carrier) = {
   type t = B.t
+  def bool(x: bool) t = if x then 1 else 0
   def (+)(a: t, b: t) t = a + b
   def (-)(a: t, b: t) t = a - b
   def (*)(a: t, b: t) t = a * b
