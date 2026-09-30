@@ -68,7 +68,6 @@ pub(super) fn indexed(
         let count = body.length(original.clone())?;
         body.copy_array(output.clone(), original, count)?;
     }
-    let inputs = body.compiler.facts.inputs(stage.operation);
     body.counted(start, n, step, vec![], |body, index, _| {
         if stage.phase == "initialize" {
             let original = body.value(scope, destination)?;
@@ -76,96 +75,115 @@ pub(super) fn indexed(
             store(body, output, index, value)?;
             return Ok(vec![]);
         }
-        let mut arguments = Vec::new();
-        let mut cache = LookupMap::default();
-        for &(_, input) in &inputs {
-            arguments.push(element(body, scope, plan, input, index.clone(), &mut cache)?);
+        update(body, scope, stage, plan, output, index, &mut LookupMap::default())?;
+        Ok(vec![])
+    })?;
+    Ok(())
+}
+
+pub(super) fn update(
+    body: &mut Body<'_, '_, '_>,
+    scope: Value,
+    stage: &Stage,
+    plan: Value,
+    output: Typed,
+    index: Typed,
+    cache: &mut LookupMap<Value, Typed>,
+) -> Result<(), OptimizeError> {
+    let Some(source) = body.compiler.plan.source(stage.operation) else {
+        return Err(error("indexed source missing"));
+    };
+    let Some(&(term, _)) = body.compiler.program.identities.origins.get(&source) else {
+        return Err(error("indexed source term missing"));
+    };
+    let inputs = body.compiler.facts.inputs(stage.operation);
+    let mut arguments = Vec::new();
+    for &(_, input) in &inputs {
+        arguments.push(element(body, scope, plan, input, index.clone(), cache)?);
+    }
+    let (key, value) = if matches!(term.kind, TermKind::Soac(SoacOp::Scatter { .. })) {
+        let pair = body.callback(scope, stage.operation, arguments)?;
+        (body.field(pair.clone(), 0)?, body.field(pair, 1)?)
+    } else {
+        if arguments.len() != 2 {
+            return Err(error("indexed reducer requires keys and values"));
         }
-        let (key, value) = if matches!(term.kind, TermKind::Soac(SoacOp::Scatter { .. })) {
-            let pair = body.callback(scope, stage.operation, arguments)?;
-            (body.field(pair.clone(), 0)?, body.field(pair, 1)?)
-        } else {
-            if arguments.len() != 2 {
-                return Err(error("indexed reducer requires keys and values"));
+        (arguments.remove(0), arguments.remove(0))
+    };
+    let zero = body.literal("0", &key.ty)?;
+    let length = body.length(output.clone())?;
+    let nonnegative = body.binary(BinaryOperator::GreaterEqual, key.clone(), zero)?;
+    let below = body.binary(BinaryOperator::Less, key.clone(), length)?;
+    let valid = body.binary(BinaryOperator::LogicalAnd, nonnegative, below)?;
+    body.when(valid, |body| {
+        if stage.phase == "atomic" {
+            let (place, ty) = body.index_place(output, key)?;
+            let value = body.cast(value, &ty)?;
+            let Some(update) = body.compiler.plan.atomic(stage.operation) else {
+                return Err(error("missing atomic"));
+            };
+            if update != AtomicOp::CompareExchange {
+                body.builder
+                    .push_inst(
+                        InstKind::Atomic {
+                            place,
+                            op: update,
+                            values: vec![value.value],
+                        },
+                        ty,
+                    )
+                    .map_err(builder_error)?;
+                return Ok(());
             }
-            (arguments.remove(0), arguments.remove(0))
-        };
-        let zero = body.literal("0", &key.ty)?;
-        let length = body.length(output.clone())?;
-        let nonnegative = body.binary(BinaryOperator::GreaterEqual, key.clone(), zero)?;
-        let below = body.binary(BinaryOperator::Less, key.clone(), length)?;
-        let valid = body.binary(BinaryOperator::LogicalAnd, nonnegative, below)?;
-        body.when(valid, |body| {
-            if stage.phase == "atomic" {
-                let (place, ty) = body.index_place(output, key)?;
-                let value = body.cast(value, &ty)?;
-                let Some(update) = body.compiler.plan.atomic(stage.operation) else {
-                    return Err(error("missing atomic"));
-                };
-                if update != AtomicOp::CompareExchange {
-                    body.builder
-                        .push_inst(
-                            InstKind::Atomic {
-                                place,
-                                op: update,
-                                values: vec![value.value],
-                            },
-                            ty,
-                        )
-                        .map_err(builder_error)?;
-                    return Ok(());
-                }
-                let old = body
+            let old = body
+                .builder
+                .push_inst(
+                    InstKind::Atomic {
+                        place,
+                        op: AtomicOp::Load,
+                        values: vec![],
+                    },
+                    ty.clone(),
+                )
+                .map_err(builder_error)?;
+            // A compare-exchange loop implements every associative i32/u32
+            // callback while preserving the chosen atomic execution domain.
+            let old = Typed {
+                value: old.into(),
+                ty: ty.clone(),
+            };
+            let state_ty = types::tuple(vec![ty.clone(), types::bool_type()]);
+            let done = body.op(OpTag::Bool(false), vec![], types::bool_type())?;
+            let initial = body.op(OpTag::Tuple(2), vec![old, done], state_ty.clone())?;
+            body.retry(initial, |body, state| {
+                let old = body.field(state, 0)?;
+                let next = body.callback(scope, stage.operation, vec![old.clone(), value.clone()])?;
+                let result = body
                     .builder
                     .push_inst(
                         InstKind::Atomic {
                             place,
-                            op: AtomicOp::Load,
-                            values: vec![],
+                            op: AtomicOp::CompareExchange,
+                            values: vec![old.value, next.value],
                         },
-                        ty.clone(),
+                        state_ty.clone(),
                     )
                     .map_err(builder_error)?;
-                // A compare-exchange loop implements every associative i32/u32
-                // callback while preserving the chosen atomic execution domain.
-                let old = Typed {
-                    value: old.into(),
-                    ty: ty.clone(),
-                };
-                let state_ty = types::tuple(vec![ty.clone(), types::bool_type()]);
-                let done = body.op(OpTag::Bool(false), vec![], types::bool_type())?;
-                let initial = body.op(OpTag::Tuple(2), vec![old, done], state_ty.clone())?;
-                body.retry(initial, |body, state| {
-                    let old = body.field(state, 0)?;
-                    let next = body.callback(scope, stage.operation, vec![old.clone(), value.clone()])?;
-                    let result = body
-                        .builder
-                        .push_inst(
-                            InstKind::Atomic {
-                                place,
-                                op: AtomicOp::CompareExchange,
-                                values: vec![old.value, next.value],
-                            },
-                            state_ty.clone(),
-                        )
-                        .map_err(builder_error)?;
-                    Ok(Typed {
-                        value: result.into(),
-                        ty: state_ty.clone(),
-                    })
-                })?;
+                Ok(Typed {
+                    value: result.into(),
+                    ty: state_ty.clone(),
+                })
+            })?;
+        } else {
+            let value = if matches!(term.kind, TermKind::Soac(SoacOp::ReduceByIndex { .. })) {
+                let previous = body.index(output.clone(), key.clone())?;
+                body.callback(scope, stage.operation, vec![previous, value])?
             } else {
-                let value = if matches!(term.kind, TermKind::Soac(SoacOp::ReduceByIndex { .. })) {
-                    let previous = body.index(output.clone(), key.clone())?;
-                    body.callback(scope, stage.operation, vec![previous, value])?
-                } else {
-                    value
-                };
-                store(body, output, key, value)?;
-            }
-            Ok(())
-        })?;
-        Ok(vec![])
+                value
+            };
+            store(body, output, key, value)?;
+        }
+        Ok(())
     })?;
     Ok(())
 }
