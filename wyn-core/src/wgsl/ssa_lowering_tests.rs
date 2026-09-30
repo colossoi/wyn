@@ -1056,8 +1056,7 @@ entry sum_array(#[size_hint(100000)] data: []f32) f32 =
 }
 
 #[test]
-fn size_hint_default_stays_workgroup_64() {
-    // No hint → workgroup remains the default 64 (current behaviour).
+fn reductions_default_to_a_cooperative_workgroup() {
     let wgsl = compile_to_wgsl(
         r#"
 entry sum_array(data: []f32) f32 =
@@ -1066,8 +1065,8 @@ entry sum_array(data: []f32) f32 =
     )
     .expect("compile");
     assert!(
-        wgsl.contains("@workgroup_size(64, 1, 1)"),
-        "no size_hint should keep workgroup_size=64, got:\n{}",
+        wgsl.contains("@workgroup_size(256, 1, 1)"),
+        "default reduction should use a cooperative workgroup, got:\n{}",
         wgsl
     );
 }

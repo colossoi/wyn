@@ -1,12 +1,10 @@
-use super::super::interface;
-use super::screma::write_arrays;
+use super::screma::{workgroup_scan, write_arrays};
 // Expand scheduled phases straight into SSA instructions and structured loops.
 use super::super::plan::Stage;
-use super::super::{builder_error, error, Body, OptimizeError};
+use super::super::{error, Body, OptimizeError};
 use super::{element, store};
 use crate::builtins::catalog;
-use crate::op::{BinaryOperator, OpTag, PureViewSource};
-use crate::ssa::types::InstKind;
+use crate::op::{BinaryOperator, OpTag};
 use crate::tlc::{SoacOp, TermKind};
 use crate::types::{self, Type, TypeName};
 use crate::LookupMap;
@@ -50,17 +48,6 @@ pub(super) fn compact(
         vec![],
         uint.clone(),
     )?;
-    let mut shared = Vec::new();
-    for id in 0..2 {
-        shared.push(body.op(
-            OpTag::StorageView(PureViewSource::Workgroup {
-                id,
-                count: stage.width,
-            }),
-            vec![zero.clone(), width.clone()],
-            interface::view_type(&uint, types::no_buffer()),
-        )?);
-    }
     let counts = body.counted(
         zero.clone(),
         chunks,
@@ -82,30 +69,17 @@ pub(super) fn compact(
                 |_| Ok(zero.clone()),
                 None,
             )?;
-            let mut prefix = flag.clone();
-            store(body, shared[0].clone(), lane.clone(), prefix.clone())?;
-            body.builder.push_void_inst(InstKind::ControlBarrier).map_err(builder_error)?;
-            let mut bank = 0;
-            for bit in 0..stage.width.trailing_zeros() {
-                let distance = body.literal(&(1u32 << bit).to_string(), &uint)?;
-                let valid = body.binary(BinaryOperator::GreaterEqual, lane.clone(), distance.clone())?;
-                prefix = body.branch(
-                    scope,
-                    valid,
-                    |body| {
-                        let index = body.binary(BinaryOperator::Subtract, lane.clone(), distance)?;
-                        let peer = body.index(shared[bank].clone(), index)?;
-                        body.binary(BinaryOperator::Add, prefix.clone(), peer)
-                    },
-                    |_| Ok(prefix.clone()),
-                    None,
-                )?;
-                bank = 1 - bank;
-                store(body, shared[bank].clone(), lane.clone(), prefix.clone())?;
-                body.builder.push_void_inst(InstKind::ControlBarrier).map_err(builder_error)?;
-            }
-            let total = body.index(shared[bank].clone(), last)?;
-            body.builder.push_void_inst(InstKind::ControlBarrier).map_err(builder_error)?;
+            let (prefixes, _, totals) = workgroup_scan(
+                body,
+                scope,
+                &[operation],
+                vec![flag.clone()],
+                &[zero.clone()],
+                lane.clone(),
+                stage.width,
+            )?;
+            let prefix = prefixes[0].clone();
+            let total = totals[0].clone();
             let selected = body.binary(BinaryOperator::NotEqual, flag, zero.clone())?;
             body.when(selected, |body| {
                 let mut cache = LookupMap::default();

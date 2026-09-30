@@ -12,7 +12,7 @@ use crate::tlc::{
 };
 use crate::types::{SoacOwnership, Type, TypeName};
 use crate::{LookupMap, LookupSet, SymbolId};
-use egglog_engine::{EGraph, FullState, Value, Write};
+use egglog_engine::{EGraph, FullState, RawValues, Value, Write};
 use wyn_base::{IdSource, Interner};
 
 mod facts;
@@ -118,6 +118,14 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 self.sink.add("SourceEntryPoint", (symbol, scope.key))?;
                 let compute = entry.declaration.entry_kind == EntryKind::Compute;
                 self.sink.add("SourceOriginalEntry", (symbol, scope.key, compute))?;
+                let grid = match entry.declaration.compute_dispatch {
+                    Some(grid) => self.sink.add(
+                        "FixedGrid",
+                        (i64::from(grid.x), i64::from(grid.y), i64::from(grid.z)),
+                    )?,
+                    None => self.sink.add("AutomaticGrid", RawValues(vec![]))?,
+                };
+                self.sink.set("EntryGrid", symbol, grid)?;
             }
             let checkpoint = self.bindings.checkpoint();
             self.parameters(&parameters, &scope)?;

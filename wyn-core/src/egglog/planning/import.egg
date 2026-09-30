@@ -53,7 +53,6 @@
       ((ScanComponent owner i ty) (Accumulator owner i ty)) :ruleset planning-import)
 (rule ((Current group plan) (= owner (Owner plan)) (PlanResult plan "total" i value ty) (= scans (PlanScans plan)) (= count (ResultCount scans)))
       ((Accumulator owner (+ count i) ty)) :ruleset planning-import)
-(rule ((Current group plan) (= owner (Owner plan)) (PlanResult plan "mapped" i value ty)) ((MappedComponent owner i ty)) :ruleset planning-import)
 (rule ((Current group plan) (= owner (Owner plan)) (FilterPlan plan) (PlanResult plan "array" i value ty) (= key (SourceExprKey value)))
       ((FilterShape owner) (FilterResult owner ty) (DirectResult key owner 0) (set (ContainsCollective owner) true)) :ruleset planning-import)
 ; A fused post-map replaces the elements, but the original filtered view still

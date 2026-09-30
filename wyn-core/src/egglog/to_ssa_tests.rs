@@ -1,6 +1,8 @@
 use crate::egglog::{from_tlc, fuse, optimize, place, schedule, to_ssa};
 use crate::host::Pipeline;
+use crate::interface::ComputeDispatchGrid;
 use crate::tlc::infer_input_slice_bounds;
+use crate::tlc::DefMeta;
 use crate::PipelineTopologyPolicy;
 use crate::{
     compile_thru_spirv, compile_thru_tlc, host, lower_ssa_to_spirv, lower_ssa_to_wgsl,
@@ -521,7 +523,16 @@ fn graphics_stages_preserve_shader_interfaces_and_draw_metadata() {
 }
 
 fn pipeline(source: &str) -> LoweredWgsl {
-    let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
+    pipeline_with_grid(source, None)
+}
+
+fn pipeline_with_grid(source: &str, grid: Option<(u32, u32, u32)>) -> LoweredWgsl {
+    let mut tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
+    for definition in &mut tlc.defs {
+        if let DefMeta::EntryPoint(entry) = &mut definition.meta {
+            entry.declaration.compute_dispatch = grid.map(|(x, y, z)| ComputeDispatchGrid { x, y, z });
+        }
+    }
     let program = optimize(
         schedule(
             place(
@@ -610,6 +621,10 @@ fn reduction_publication_has_scratch_writers_readers_and_a_source_result() {
         panic!("compute pipeline")
     };
     assert_eq!(p.stages.len(), 3, "chunks, combine, scalar result publication");
+    let host::DispatchSize::Fixed { x, y, z, .. } = p.stages[0].dispatch_size else {
+        panic!("collective chunk grid must be bounded");
+    };
+    let bytes = u64::from(x) * u64::from(y) * u64::from(z) * 4;
     let scratch = p
         .bindings
         .iter()
@@ -617,9 +632,9 @@ fn reduction_publication_has_scratch_writers_readers_and_a_source_result() {
             matches!(
                 b,
                 Binding::StorageBuffer {
-                    length: Some(BufferLen::Fixed { bytes: 12 }),
+                    length: Some(BufferLen::Fixed { bytes: capacity }),
                     ..
-                }
+                } if *capacity == bytes
             )
         })
         .unwrap();
@@ -877,19 +892,27 @@ fn unsigned_ranges_keep_their_extent_in_the_element_representation() {
 }
 
 #[test]
-fn runtime_collective_scratch_has_an_input_capacity_and_chunk_grid() {
-    use host::{Binding, BufferLen, DispatchLen, DispatchSize};
+fn runtime_collective_scratch_matches_its_bounded_chunk_grid() {
+    use host::{Binding, BufferLen, DispatchSize};
     let output = pipeline("entry main(xs: []i32) []i32 = scan(|a:i32,b:i32|a+b,0,xs)");
     let [Pipeline::Compute(p)] = output.program.interface.pipelines.as_slice() else {
         panic!("compute")
     };
-    assert!(matches!(
-        p.stages[0].dispatch_size,
-        DispatchSize::DerivedFrom {
-            len: DispatchLen::InputBinding { elem_bytes: 4, .. },
-            workgroup_size: 4096
-        }
-    ));
+    let DispatchSize::Fixed { x, y, z, .. } = p.stages[0].dispatch_size else {
+        panic!("collective chunk grid must be bounded");
+    };
+    let bytes = u64::from(x) * u64::from(y) * u64::from(z) * 4;
+    assert_eq!(
+        p.bindings
+            .iter()
+            .filter(|binding| matches!(binding,
+                Binding::StorageBuffer { length: Some(BufferLen::Fixed { bytes: capacity }), .. }
+                    if *capacity == bytes
+            ))
+            .count(),
+        2,
+        "one partial and one carry per chunk"
+    );
     assert!(p.bindings.iter().all(|b| !matches!(
         b,
         Binding::StorageBuffer {
@@ -914,28 +937,14 @@ fn bounded_filter_output_does_not_use_its_packed_backing_as_a_length() {
 
 #[test]
 fn explicit_grids_preserve_all_axes_in_the_shader_and_descriptor() {
-    use crate::interface::ComputeDispatchGrid;
     use host::DispatchSize;
     for source in [
         "entry main(xs:[4096]i32) [4096]i32 = map(|x:i32|x+1,xs)",
         "entry main(xs:[4096]i32) i32 = reduce(|a:i32,b:i32|a+b,0,xs)",
+        "entry main(xs:[4096]i32) [4096]i32 = scan(|a:i32,b:i32|a+b,0,xs)",
     ] {
-        for (x, y, z) in [(1, 1, 1), (2, 3, 4)] {
-            let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
-            let mut tlc = tlc;
-            for definition in &mut tlc.defs {
-                if let crate::tlc::DefMeta::EntryPoint(entry) = &mut definition.meta {
-                    entry.declaration.compute_dispatch = Some(ComputeDispatchGrid { x, y, z });
-                }
-            }
-            let imported = from_tlc(&tlc).unwrap();
-            let scheduled = optimize(
-                schedule(place(fuse(imported).unwrap(), PipelineTopologyPolicy::AllowGenerated).unwrap())
-                    .unwrap(),
-            )
-            .unwrap();
-            let output =
-                lower_ssa_to_wgsl_with_program(to_ssa(scheduled, CodegenTarget::Wgsl).unwrap()).unwrap();
+        for (x, y, z) in [(1, 1, 1), (2, 3, 4), (257, 1, 1), (3, 7, 17)] {
+            let output = pipeline_with_grid(source, Some((x, y, z)));
             let [Pipeline::Compute(p)] = output.program.interface.pipelines.as_slice() else {
                 panic!("compute")
             };
@@ -949,15 +958,26 @@ fn explicit_grids_preserve_all_axes_in_the_shader_and_descriptor() {
                 }
             );
             for stage in &p.stages[1..] {
+                let (x, y, z) = if stage.entry_point.ends_with("offsets") { (x, y, z) } else { (1, 1, 1) };
                 assert_eq!(
                     stage.dispatch_size,
                     DispatchSize::Fixed {
-                        x: 1,
-                        y: 1,
-                        z: 1,
+                        x,
+                        y,
+                        z,
                         explicit: true
                     }
                 );
+            }
+            if p.stages.len() > 1 {
+                let carries: Vec<_> =
+                    p.stages[0].writes.iter().filter(|slot| p.stages[1].reads.contains(slot)).collect();
+                assert!(!carries.is_empty());
+                for &slot in carries {
+                    assert!(matches!(&p.bindings[slot], host::Binding::StorageBuffer {
+                        length: Some(host::BufferLen::Fixed { bytes }), ..
+                    } if *bytes == u64::from(x) * u64::from(y) * u64::from(z) * 4));
+                }
             }
             let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
             naga::valid::Validator::new(
@@ -1158,4 +1178,27 @@ fn large_fixed_domains_cap_generated_dispatches() {
         }
     );
     compile(source);
+}
+
+#[test]
+fn explicit_grids_do_not_replicate_single_workgroup_compaction() {
+    let output = pipeline_with_grid(
+        "entry main(xs:[]i32) []i32 = filter(|x:i32|x>0,xs)",
+        Some((2, 3, 4)),
+    );
+    let [Pipeline::Compute(p)] = output.program.interface.pipelines.as_slice() else {
+        panic!("compute");
+    };
+    assert_eq!(p.stages.len(), 1);
+    assert_eq!(
+        p.stages[0].dispatch_size,
+        host::DispatchSize::Fixed {
+            x: 1,
+            y: 1,
+            z: 1,
+            explicit: true
+        }
+    );
+    let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
+    Validator::new(ValidationFlags::all(), Capabilities::all()).validate(&module).unwrap();
 }

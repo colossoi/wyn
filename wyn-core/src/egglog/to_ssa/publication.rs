@@ -59,7 +59,6 @@ pub(super) fn publish(
         };
         match entry.execution_model {
             ExecutionModel::Compute { local_size } => {
-                let grid = declaration.compute_dispatch.map_or((1, 1, 1), |grid| (grid.x, grid.y, grid.z));
                 let index = *compute.entry(*owner).or_insert_with(|| {
                     let index = module.pipelines.len();
                     module.pipelines.push(Pipeline::Compute(ComputePipeline {
@@ -70,22 +69,17 @@ pub(super) fn publish(
                     associations.push(vec![]);
                     index
                 });
-                let dispatch = if declaration.compute_dispatch.is_some() {
-                    let first = compiler.plan.stages.iter().find(|s| s.owner == *owner);
-                    let grid = if stage.as_ref().map(|s| s.key) == first.map(|s| s.key) {
-                        grid
-                    } else {
-                        (1, 1, 1)
-                    };
-                    DispatchSize::Fixed {
-                        x: grid.0,
-                        y: grid.1,
-                        z: grid.2,
-                        explicit: true,
-                    }
-                } else if let Some(stage) = stage {
+                let dispatch = if let Some(stage) = stage {
                     sizes::dispatch(compiler, stage)?
                 } else {
+                    let grid = compiler
+                        .plan
+                        .entry_grid(
+                            *owner,
+                            None,
+                            declaration.compute_dispatch.map(|grid| (grid.x, grid.y, grid.z)),
+                        )
+                        .unwrap_or((1, 1, 1));
                     DispatchSize::Fixed {
                         explicit: declaration.compute_dispatch.is_some(),
                         x: grid.0,
