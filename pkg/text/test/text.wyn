@@ -1,0 +1,40 @@
+import "../src/aileron"
+
+entry distances(samples: []vec4f32) []vec4f32 =
+  map(|s: vec4f32| @[text.sdf.distance(s.x), text.msdf.distance(s.xyz),
+                    text.fill(text.msdf.distance(s.xyz), s.w, 0.0f32),
+                    text.outline(text.sdf.distance(s.x), s.w, 2.0f32)], samples)
+
+entry ranges(samples: []vec4f32) []vec4f32 =
+  map(|s: vec4f32|
+    let unit = text.unit_range(8.0f32, @[512.0f32, 256.0f32]) in
+    @[text.screen_range(unit, s.xy, s.zw),
+      text.screen_range_2d(8.0f32, s.x, 48.0f32), unit.x, unit.y], samples)
+
+entry layout(steps: []vec2f32) []vec2f32 =
+  text.layout(map(|s: vec2f32| {advance = s.x, line_break = s.y != 0.0f32}, steps),
+              20.0f32, 1.2f32)
+
+entry font_layout(codepoints: []i32) []vec2f32 = aileron.layout(codepoints, 20.0f32)
+
+entry empty_layout() i32 =
+  let steps = map(|_: i32| {advance = 0.0f32, line_break = false}, iota(0)) in
+  length(text.layout(steps, 20.0f32, 1.2f32))
+
+entry metrics(codepoints: []i32) []vec4f32 =
+  map(|cp: i32|
+    let g = aileron.glyph(cp) in
+    @[g.advance, g.plane.y, g.plane.w, if aileron.has_glyph(cp) then 1.0f32 else 0.0f32], codepoints)
+
+entry quads(indices: []i32) []vec4f32 =
+  map(|i: i32|
+    let (position, uv) = text.quad_vertex(aileron.glyph(65), @[100.0f32, 80.0f32],
+                                        40.0f32, u32(i)) in
+    @[position.x, position.y, uv.x, uv.y], indices)
+
+entry colors(samples: []vec4f32) []vec4f32 =
+  map(|s: vec4f32| text.over(text.premultiply(s, 0.5f32),
+                            text.premultiply(@[0.1f32, 0.2f32, 0.3f32, 0.4f32], 1.0f32)), samples)
+
+entry sampling(atlas: texture2d, uvs: []vec2f32) []vec4f32 =
+  map(|uv: vec2f32| text.sample_bilinear(atlas, @[2, 2], uv), uvs)

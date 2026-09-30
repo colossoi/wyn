@@ -1,0 +1,55 @@
+import "../src/aileron"
+
+-- Real GPU text from the bundled MTSDF. tools/demo.mjs supplies positioned glyphs.
+-- instances = (baseline X, baseline Y, em size, Unicode codepoint).
+-- styles = (R, G, B, mode), mode 0=SDF, 1=MSDF, 2=MSDF fill + SDF outline.
+-- The specimen's display colors target viz's headless Rgba8Unorm output.
+def background(p: vec2f32) vec4f32 =
+  let panel = p.y > 256.0f32 && p.y < 724.0f32
+              && ((p.x > 48.0f32 && p.x < 664.0f32)
+                || (p.x > 696.0f32 && p.x < 1312.0f32)) in
+  let lower = p.y > 748.0f32 && p.y < 904.0f32 && p.x > 48.0f32 && p.x < 1312.0f32 in
+  let rule = f32.abs(p.y - 228.0f32) < 0.6f32 && p.x > 48.0f32 && p.x < 1312.0f32 in
+  if rule then @[0.17f32, 0.24f32, 0.29f32, 1.0f32]
+  else if panel || lower then @[0.063f32, 0.087f32, 0.109f32, 1.0f32]
+  else @[0.035f32, 0.047f32, 0.065f32, 1.0f32]
+
+entry demo(atlas: texture2d, resolution: vec3f32,
+           instances: []vec4f32, styles: []vec4f32,
+           screen: render_target<vec4f32>) render_target<vec4f32> =
+  let viewport = resolution.xy in
+  let scale = f32.min(viewport.x / 1360.0f32, viewport.y / 940.0f32) in
+  let backdrop = rasterize_triangles(direct_draw(3u32, 1u32),
+    |v: u32, _: u32, _: u32|
+      vertex_output(if v == 0u32 then @[-1.0f32, -1.0f32, 0.0f32, 1.0f32]
+                    else if v == 1u32 then @[3.0f32, -1.0f32, 0.0f32, 1.0f32]
+                    else @[-1.0f32, 3.0f32, 0.0f32, 1.0f32], 0.0f32)) in
+  let screen = shade_with({depth_test = #disabled, depth_write = false,
+                           blend = #replace, color_write = true},
+    screen, backdrop, |_, p, _, _, _| background(p.xy / scale)) in
+  -- The demo has 247 visible glyphs; the tool checks this fixed draw count.
+  let letters = rasterize_triangles(direct_draw(6u32, 247u32),
+    |v: u32, instance: u32, _: u32|
+      let i = i32(instance) in
+      let item = instances[i] in
+      let (p, uv) = text.quad_vertex(aileron.glyph(i32(item.w)), item.xy, item.z, v) in
+      vertex_output(text.pixel_to_clip(p * scale, viewport, 0.0f32), (uv, styles[i]))) in
+  shade_with({depth_test = #disabled, depth_write = false,
+              blend = #source_over, color_write = true}, screen, letters,
+    |varying, _, _, _, _|
+      let (uv, style) = varying in
+      let range = text.screen_range_fragment(
+        text.unit_range(aileron.px_range, aileron.atlas_size), uv) in
+      -- viz supplies nearest samplers by default; keep the demo portable by
+      -- using the package's explicit bilinear sampler. No runner modifications.
+      let sample = text.sample_bilinear(atlas,
+        @[i32(aileron.atlas_size.x), i32(aileron.atlas_size.y)], uv) in
+      let sd = text.sdf.distance(sample.w) in
+      let md = text.msdf.distance(sample.xyz) in
+      let fill = text.fill(if style.w < 0.5f32 then sd else md, range, 0.0f32) in
+      let outside = if style.w > 1.5f32 then text.outline(sd, range, 2.0f32 * scale)
+                    else 0.0f32 in
+      let alpha = f32.min(fill + outside, 1.0f32) in
+      let rgb = (style.xyz * fill + @[0.18f32, 0.56f32, 0.82f32] * outside)
+                 / f32.max(fill + outside, 1e-6f32) in
+      text.straight(@[rgb.x, rgb.y, rgb.z, 1.0f32], alpha))

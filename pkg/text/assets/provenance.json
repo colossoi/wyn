@@ -1,0 +1,47 @@
+{
+  "font": "Aileron Regular",
+  "version": "0.102",
+  "author": "Sora Sagano (dot colon)",
+  "license": "CC0-1.0",
+  "source": "https://dotcolon.net/fonts/aileron/",
+  "download": "https://dotcolon.net/files/fonts/aileron_0102.zip",
+  "generator": "msdf-atlas-gen 1.4.0 / MSDFgen 1.13.0",
+  "generatorSource": "https://github.com/Chlumsky/msdf-atlas-gen/releases/tag/v1.4",
+  "options": [
+    "-type mtsdf",
+    "-size 48",
+    "-pxrange 8",
+    "-square4",
+    "-yorigin top",
+    "-seed 0",
+    "-threads 1"
+  ],
+  "glyphCount": 196,
+  "missingLatin1": [
+    160,
+    170,
+    173,
+    178,
+    179,
+    181,
+    185,
+    186,
+    188,
+    189,
+    190
+  ],
+  "files": {
+    "Aileron-Regular.otf": {
+      "sha256": "2762f4fc2ebad8323264aea52ffa2260b86c9677493d3ce2dc4f34e5851d2aa2"
+    },
+    "charset.txt": {
+      "sha256": "cecf062d75efcafbe530b7e599a4b97c3fa3e9139369dab77ee14522535cd7cd"
+    },
+    "aileron-mtsdf.png": {
+      "sha256": "bacaabc5e41ed02cc6aa1ed336a309d33f85235e8c639bd6c373446b638f4d82"
+    },
+    "aileron-mtsdf.json": {
+      "sha256": "eed250e920523514281b05e0a0a40b7fd931082d4f71be70f9f5b6928a6a883d"
+    }
+  }
+}
