@@ -1840,6 +1840,16 @@ impl<'a> TypeChecker<'a> {
         // is keyed independently of the local-scope stack.
         self.forward_declare_ascribed_file_scope(declarations)?;
 
+        // Module bodies can use auto-imported prelude functions. Publish their
+        // declared contracts before checking modules; check the bodies below
+        // after the module functions they may themselves call are available.
+        let prelude = self.semantic_modules.get_prelude_function_declarations();
+        for declaration in prelude {
+            if let Some(scheme) = self.ascription_to_scheme(declaration)? {
+                self.globals.prelude_defs.insert(declaration.name.clone(), scheme);
+            }
+        }
+
         // Type-check module functions first to populate the module_schemes cache.
         // This must happen before prelude functions since they may reference module functions.
         self.check_module_functions()?;
@@ -2241,7 +2251,7 @@ impl<'a> TypeChecker<'a> {
             param_types.push(self.resolve_type_aliases_scoped(&ty, None)?);
         }
         let func_ty = param_types.into_iter().rev().fold(resolved_return, |acc, p| types::function(p, acc));
-        Ok(Some(self.generalize(&func_ty)))
+        Ok(Some(self.generalize_function(&func_ty)))
     }
 
     /// Type-check function bodies from modules (e.g., rand.init, rand.int, f32.pi)
