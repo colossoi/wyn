@@ -17,7 +17,7 @@ use crate::ssa::layout::block_layout;
 use crate::ssa::types::EntryPoint;
 use crate::tlc::{LoopKind, TermKind, VarRef};
 use crate::types::buffer_tag;
-use crate::types::{Type, TypeName};
+use crate::types::{Type, TypeExt, TypeName};
 use crate::BindingRef;
 use crate::LookupMap;
 use egglog_engine::Value;
@@ -208,6 +208,13 @@ impl<'source> Lower<'_, '_, 'source> {
                 })
             }
             TermKind::App { func, args } => {
+                if matches!(func.kind, TermKind::Var(VarRef::Builtin { id, .. }) if id == catalog().known().length)
+                {
+                    let Type::Constructed(TypeName::Size(n), _) = args.first()?.ty.array_size()? else {
+                        return None;
+                    };
+                    return Some(ScalarExpr::I32(i32::try_from(*n).ok()?));
+                }
                 let values =
                     args.iter().map(|term| self.source(scope, term)).collect::<Option<Vec<_>>>()?;
                 let op = match &func.kind {
