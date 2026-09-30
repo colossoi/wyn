@@ -18,7 +18,7 @@ type Soac = SoacOp<ExplicitClosurePayload, ExplicitCapturesPayload>;
 
 /// A local collective may produce a nested tuple of component arrays.
 /// Allocate the leaves separately and reconstruct that same representation.
-enum LocalOutput {
+pub(super) enum LocalOutput {
     Array {
         place: PlaceId,
         ty: Type,
@@ -335,7 +335,11 @@ impl<'source> Body<'_, '_, 'source> {
         }
     }
 
-    fn allocate_local_output(&mut self, ty: &Type, count: usize) -> Result<LocalOutput, OptimizeError> {
+    pub(super) fn allocate_local_output(
+        &mut self,
+        ty: &Type,
+        count: usize,
+    ) -> Result<LocalOutput, OptimizeError> {
         if let Some(fields) = as_soa_tuple(ty) {
             let mut outputs = Vec::with_capacity(fields.len());
             for field in fields {
@@ -357,7 +361,7 @@ impl<'source> Body<'_, '_, 'source> {
         Ok(LocalOutput::Array { place, ty, element })
     }
 
-    fn store_local_output(
+    pub(super) fn store_local_output(
         &mut self,
         output: &LocalOutput,
         index: Typed,
@@ -375,7 +379,7 @@ impl<'source> Body<'_, '_, 'source> {
         }
     }
 
-    fn load_local_output(&mut self, output: LocalOutput) -> Result<Typed, OptimizeError> {
+    pub(super) fn load_local_output(&mut self, output: LocalOutput) -> Result<Typed, OptimizeError> {
         match output {
             LocalOutput::Array { place, ty, .. } => {
                 let value =

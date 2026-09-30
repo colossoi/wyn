@@ -429,7 +429,13 @@ fn extract(
 
         let mut root_binding_ids = binding_ids.clone();
         if let Some(stages) = extract_root(
-            &definition, &builtins, &helpers, &constants, symbols, term_ids, &mut root_binding_ids,
+            &definition,
+            &builtins,
+            &helpers,
+            &constants,
+            symbols,
+            term_ids,
+            &mut root_binding_ids,
         ) {
             *binding_ids = root_binding_ids;
             extracted.extend(stages);
@@ -506,7 +512,12 @@ fn extract_root(
     }
     let root_entry = &root_entry;
     let shape = root_shape(
-        &root_lambda, root_entry, &root_name, builtins, computed_origins, binding_ids,
+        &root_lambda,
+        root_entry,
+        &root_name,
+        builtins,
+        computed_origins,
+        binding_ids,
     )?;
     let graphics_count =
         shape.operations.iter().filter(|operation| matches!(operation, RootOperation::Graphics(_))).count();

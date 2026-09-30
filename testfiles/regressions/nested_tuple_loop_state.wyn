@@ -1,0 +1,8 @@
+-- Nested component arrays must be published as arrays, including boolean fields.
+-- Expected: [(1, (2, true)), (3, (4, false))].
+entry main(k: i32) [2](i32, (i32, bool)) =
+  loop xs = [(1, (2, true)), (3, (4, false))] for _i < k do xs
+
+entry updated(k: i32) [2](i32, (i32, bool)) =
+  loop xs = [(1, (2, true)), (3, (4, false))] for _i < k do
+    map(|(a, (b, c))| (a + 1, (b + 2, !c)), xs)

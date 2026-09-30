@@ -9,6 +9,17 @@ use wyn_host::VertexFormat;
 #[path = "layout_tests.rs"]
 mod layout_tests;
 
+/// Logical booleans occupy u32 slots in storage, including inside aggregates.
+pub(crate) fn storage_value_type(ty: &Type) -> Type {
+    match ty {
+        Type::Constructed(TypeName::Bool, _) => Type::Constructed(TypeName::UInt(32), vec![]),
+        Type::Constructed(name, fields) => {
+            Type::Constructed(name.clone(), fields.iter().map(storage_value_type).collect())
+        }
+        _ => ty.clone(),
+    }
+}
+
 /// Map a Wyn type to its vertex-buffer attribute format, for
 /// `#[vertex_slot(n)]` vertex-shader input parameters. Only 32-bit
 /// float / signed / unsigned scalars and 2-4 wide vectors of them are
@@ -288,17 +299,23 @@ pub(crate) fn std430_type_layout(ty: &Type) -> Option<(u32, u32)> {
 
 /// Layout for an interface-block value: a 16/32-bit numeric scalar, a
 /// vec2/3/4 of them, or a FLAT record/tuple of those. Under
-/// Std430 (storage buffers) a member may also be a fixed-size array of
-/// supported scalars/vectors (the SOAC passes synthesize tuple
+/// Std430 (storage buffers) a member may also be a nested aggregate or a fixed-size array of
+/// supported members (the SOAC passes synthesize tuple
 /// elements like `(u32, [4]u32)`); std140's array rules (16-rounded
 /// strides) are not implemented, so arrays stay unsupported for
-/// uniforms. Returns `None` for anything else (bool, matrices, nested
-/// aggregates, runtime arrays, other scalar widths) — callers gate
+/// uniforms. Returns `None` for anything else (bool, matrices,
+/// runtime arrays, other scalar widths) — callers gate
 /// support on this.
 pub fn block_layout(ty: &Type, rules: StorageLayout) -> Option<BlockLayout> {
     // (size, alignment) of one supported member.
     fn member(ty: &Type, rules: StorageLayout) -> Option<(u32, u32)> {
         match ty {
+            Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), _)
+                if rules == StorageLayout::Std430 =>
+            {
+                let layout = block_layout(ty, rules)?;
+                Some((layout.size, layout.align))
+            }
             Type::Constructed(TypeName::Int(bits), _)
             | Type::Constructed(TypeName::UInt(bits), _)
             | Type::Constructed(TypeName::Float(bits), _)

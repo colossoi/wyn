@@ -172,12 +172,19 @@ fn source_size(
     source: Value,
     length: bool,
 ) -> Result<SizeExpr, OptimizeError> {
+    fn array_size(ty: &Type) -> Option<&Type> {
+        if let Some(fields) = crate::types::as_soa_tuple(ty) {
+            let size = array_size(fields.first()?)?;
+            return fields.iter().all(|field| array_size(field) == Some(size)).then_some(size);
+        }
+        ty.array_size()
+    }
     if let Some(actual) = compiler.facts.alias(source) {
         return source_size(compiler, actual, length);
     }
     if length {
         if let Some(Type::Constructed(TypeName::Size(n), _)) =
-            compiler.facts.source_type(source).and_then(TypeExt::array_size)
+            compiler.facts.source_type(source).and_then(array_size)
         {
             return Ok(SizeExpr::Integer(*n as i64));
         }
@@ -242,7 +249,7 @@ fn source_size(
             }
         }
         if let Some(Type::Constructed(TypeName::Size(n), _)) =
-            compiler.facts.source_type(source).and_then(TypeExt::array_size)
+            compiler.facts.source_type(source).and_then(array_size)
         {
             return Ok(SizeExpr::Integer(*n as i64));
         }

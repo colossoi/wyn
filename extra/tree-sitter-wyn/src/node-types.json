@@ -10438,6 +10438,10 @@
     "named": false
   },
   {
+    "type": "scratch",
+    "named": false
+  },
+  {
     "type": "sig",
     "named": false
   },

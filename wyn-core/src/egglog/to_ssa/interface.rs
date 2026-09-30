@@ -466,11 +466,7 @@ pub(super) fn concrete(ty: &Type) -> Result<Type, OptimizeError> {
     }
 }
 pub(super) fn storage_type(ty: &Type) -> Result<Type, OptimizeError> {
-    if *ty == bool_type() {
-        Ok(Type::Constructed(TypeName::UInt(32), vec![]))
-    } else {
-        concrete(ty)
-    }
+    concrete(&crate::ssa::layout::storage_value_type(ty))
 }
 
 pub(super) fn view_type(element: &Type, region: Type) -> Type {

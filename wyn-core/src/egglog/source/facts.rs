@@ -26,7 +26,10 @@ impl<'source> Import<'_, '_, '_, 'source> {
         if semantic.array_variant().is_some_and(is_array_variant_view) {
             self.sink.add("SourceViewType", key)?;
         }
-        if type_byte_size(ty).is_some_and(|size| size > 0) {
+        // Booleans are local scalar values even though their storage form is u32.
+        // Classify aggregates using that form so boolean loop state remains a
+        // device-local control boundary rather than exposing its inner SOACs.
+        if type_byte_size(&crate::ssa::layout::storage_value_type(ty)).is_some_and(|size| size > 0) {
             self.sink.add("SourceScalarLayout", key)?;
         }
         fn element(ty: &Type) -> Option<Type> {
@@ -233,7 +236,8 @@ impl<'source> Import<'_, '_, '_, 'source> {
             self.sink.add("AbiOutputBinding", (id, i64::from(*set), i64::from(*binding)))?;
         }
         let ty_key = self.ty(ty)?;
-        self.sink.add("SourceOutput", (id, entry, value, ty_key, ty.is_array()))?;
+        let array = ty.is_array() || crate::types::as_soa_tuple(ty).is_some();
+        self.sink.add("SourceOutput", (id, entry, value, ty_key, array))?;
         Ok(())
     }
 }

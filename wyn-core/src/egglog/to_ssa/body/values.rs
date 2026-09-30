@@ -23,7 +23,26 @@ impl Body<'_, '_, '_> {
         if value.ty == *ty {
             return Ok(value);
         }
-        if value.ty.is_array() && ty.is_array() {
+        if value.ty.is_array() && as_soa_tuple(ty).is_some() {
+            let mut component = ty;
+            while let Some(fields) = as_soa_tuple(component) {
+                component = &fields[0];
+            }
+            let Some(Type::Constructed(TypeName::Size(n), _)) = component.array_size() else {
+                return Err(error("stored array needs a fixed capacity"));
+            };
+            let output = self.allocate_local_output(ty, *n)?;
+            let zero = self.literal("0", &types::i32())?;
+            let length = self.literal(&n.to_string(), &types::i32())?;
+            let one = self.literal("1", &types::i32())?;
+            self.counted(zero, length, one, vec![], |body, index, _| {
+                let item = body.index(value.clone(), index.clone())?;
+                body.store_local_output(&output, index, item)?;
+                Ok(vec![])
+            })?;
+            return self.load_local_output(output);
+        }
+        if (value.ty.is_array() || as_soa_tuple(&value.ty).is_some()) && ty.is_array() {
             let place = self.builder.new_place(ty.clone());
             self.builder
                 .push_void_inst(InstKind::Alloca {

@@ -1166,9 +1166,11 @@ fn graphics_roots_share_a_descriptor_allocator() {
         let bytes = words.iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<_>>();
         let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
         naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all(),
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
         )
-        .validate(&module).unwrap();
+        .validate(&module)
+        .unwrap();
         assert_eq!(module.entry_points.len(), entry_count);
     }
 }
@@ -1176,18 +1178,25 @@ fn graphics_roots_share_a_descriptor_allocator() {
 #[test]
 fn push_constant_record_tail_padding_precedes_next_parameter() {
     for vector in ["vec3f32", "vec4f32"] {
-        let source = format!("type params = {{ direction: {vector} }}\n\
+        let source = format!(
+            "type params = {{ direction: {vector} }}\n\
             entry transform(values: []f32, frame: params, bias: f32) []f32 =\n\
-            map(|value| value * frame.direction.x + bias, values)");
+            map(|value| value * frame.direction.x + bias, values)"
+        );
         let words = compile_to_spirv(&source).unwrap();
         let bytes = words.iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<_>>();
         let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
         naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all(),
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
         )
-        .validate(&module).unwrap();
-        let (_, block) = module.global_variables.iter()
-            .find(|(_, global)| global.space == naga::AddressSpace::PushConstant).unwrap();
+        .validate(&module)
+        .unwrap();
+        let (_, block) = module
+            .global_variables
+            .iter()
+            .find(|(_, global)| global.space == naga::AddressSpace::PushConstant)
+            .unwrap();
         let naga::TypeInner::Struct { members, .. } = &module.types[block.ty].inner else {
             panic!("expected push constant struct");
         };

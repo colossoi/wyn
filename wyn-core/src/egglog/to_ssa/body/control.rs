@@ -183,7 +183,7 @@ impl<'source> Body<'_, '_, 'source> {
             self.values.insert(parameter, value);
         }
         let next = self.source(iteration_scope, body)?;
-        let next = self.cast(next, &initial.ty)?;
+        let next = self.stored(next, &initial.ty)?;
         self.terminate(Terminator::Branch {
             target: continuing,
             args: vec![],

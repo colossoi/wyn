@@ -180,6 +180,32 @@ fn parse_source(source: &str) -> tree_sitter::Tree {
 }
 
 #[test]
+fn scratch_expression_attribute_matches_compiler_precedence() {
+    for source in [
+        "def x = (#[scratch] replicate(4, 0))",
+        "def x = scatter((#[scratch] copy(xs)), indices, xs)",
+        "def x = #[scratch] #[scratch] copy(xs)",
+    ] {
+        parse_source(source);
+    }
+    let tree = parse_source("def x = #[scratch] copy(xs)[0] + 1");
+    let body = tree.root_node().named_child(0).unwrap().child_by_field_name("body").unwrap();
+    assert_eq!(body.kind(), "binary_expression");
+    let scratch = body.named_child(0).unwrap();
+    assert_eq!(scratch.kind(), "unary_expression");
+    assert_eq!(
+        scratch.child_by_field_name("operand").unwrap().kind(),
+        "index_expression"
+    );
+
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&LANGUAGE.into()).unwrap();
+    for source in ["def x = #[other] copy(xs)", "def x = #[scratch(4)] copy(xs)"] {
+        assert!(parser.parse(source, None).unwrap().root_node().has_error());
+    }
+}
+
+#[test]
 fn compiler_supported_forms_parse() {
     for source in [
         "def bits = 1 | 2 & 3 ^ 4",

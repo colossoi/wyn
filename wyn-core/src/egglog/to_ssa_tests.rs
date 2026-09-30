@@ -23,6 +23,49 @@ fn compile(source: &str) -> naga::Module {
 }
 
 #[test]
+fn nested_tuple_loop_state_preserves_component_arrays() {
+    use host::{Binding, BufferLen, ResultLayout, ResultScalar};
+    let source = include_str!("../../../testfiles/regressions/nested_tuple_loop_state.wyn");
+    compile(source);
+    for descriptor in [
+        pipeline(source).program.interface,
+        crate::compile_thru_spirv(source).unwrap().program.interface,
+    ] {
+        assert_eq!(descriptor.source_results.len(), 4);
+        for result in &descriptor.source_results {
+            let Pipeline::Compute(p) = &descriptor.pipelines[result.pipeline_index] else {
+                panic!("compute result");
+            };
+            let ResultLayout::Array {
+                element,
+                stride,
+                length: Some(2),
+            } = &result.layout
+            else {
+                panic!("fixed array result: {:?}", result.layout);
+            };
+            if result.result == 0 {
+                assert_eq!(*stride, 4);
+                assert_eq!(**element, ResultLayout::Scalar(ResultScalar::I32));
+            } else {
+                assert_eq!(*stride, 8);
+                let ResultLayout::Tuple { fields, size: 8 } = &**element else {
+                    panic!("tuple element: {element:?}");
+                };
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].offset, 0);
+                assert_eq!(fields[1].offset, 4);
+                assert_eq!(fields[1].layout, ResultLayout::Scalar(ResultScalar::Bool));
+            }
+            assert!(p.bindings.iter().any(|b| matches!(b,
+                Binding::StorageBuffer { set, binding, length: Some(BufferLen::Fixed { bytes }), .. }
+                    if (*set, *binding) == (result.set, result.binding) && *bytes == u64::from(*stride) * 2
+            )));
+        }
+    }
+}
+
+#[test]
 fn loop_local_tuple_collectives_preserve_component_arrays() {
     let source = include_str!("../../../testfiles/regressions/local_tuple_collectives.wyn");
     compile(source);

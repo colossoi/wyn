@@ -1,10 +1,40 @@
 //! Publish source result types using the shader's storage layout rules.
 use crate::host::{ResultField, ResultLayout, ResultScalar};
-use crate::ssa::layout::{std430_matrix_stride, std430_struct_layout, storage_elem_stride, type_byte_size};
+use crate::ssa::layout::{
+    std430_matrix_stride, std430_struct_layout, storage_elem_stride, storage_value_type, type_byte_size,
+};
 use crate::types::{strip_existentials, Type, TypeExt, TypeName};
 
 pub(crate) fn result_layout(ty: &Type) -> ResultLayout {
     let ty = strip_existentials(ty);
+    // A root SoA result is published as one array of logical tuple elements.
+    // Nested fields inside a scalar storage record retain their own arrays.
+    fn array_element(ty: &Type) -> Option<(Type, Type)> {
+        if let Some(fields) = crate::types::as_soa_tuple(ty) {
+            let fields = fields.iter().map(array_element).collect::<Option<Vec<_>>>()?;
+            let size = fields.first()?.1.clone();
+            if !fields.iter().all(|(_, n)| *n == size) {
+                return None;
+            }
+            Some((
+                crate::types::tuple(fields.into_iter().map(|(t, _)| t).collect()),
+                size,
+            ))
+        } else {
+            Some((ty.elem_type()?.clone(), ty.array_size()?.clone()))
+        }
+    }
+    if crate::types::as_soa_tuple(ty).is_some() {
+        if let Some((element, size)) = array_element(ty) {
+            let array = crate::types::make_array1(
+                element,
+                crate::types::array_variant_composite(),
+                size,
+                Type::Constructed(TypeName::NoBuffer, vec![]),
+            );
+            return layout(&array, true).unwrap_or_else(|| ResultLayout::Unsupported(ty.to_string()));
+        }
+    }
     layout(ty, true).unwrap_or_else(|| ResultLayout::Unsupported(ty.to_string()))
 }
 
@@ -48,7 +78,7 @@ fn layout(ty: &Type, root: bool) -> Option<ResultLayout> {
     }
     if ty.is_array() {
         let element = ty.elem_type()?;
-        let stride = storage_elem_stride(element)?;
+        let stride = storage_elem_stride(&storage_value_type(element))?;
         let length = match ty.array_size()? {
             Type::Constructed(TypeName::Size(n), _) => u32::try_from(*n).ok(),
             _ => None,
@@ -70,7 +100,8 @@ fn layout(ty: &Type, root: bool) -> Option<ResultLayout> {
     }
     match ty {
         Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), types) => {
-            let storage = std430_struct_layout(&types.iter().collect::<Vec<_>>())?;
+            let physical = types.iter().map(storage_value_type).collect::<Vec<_>>();
+            let storage = std430_struct_layout(&physical.iter().collect::<Vec<_>>())?;
             let mut fields = Vec::new();
             for (index, (ty, offset)) in types.iter().zip(storage.member_offsets).enumerate() {
                 let name = format!("result_{index}");

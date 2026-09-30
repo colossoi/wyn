@@ -254,6 +254,20 @@ fn block_layout_offsets_agree_across_rule_sets() {
 }
 
 #[test]
+fn std430_nested_aggregates_preserve_member_alignment_and_array_stride() {
+    let inner = record(&[("v", vecn(3)), ("n", f32t())]);
+    let outer = record(&[("tag", f32t()), ("inner", inner), ("tail", f32t())]);
+    let layout = block_layout(&outer, StorageLayout::Std430).unwrap();
+    assert_eq!(layout.member_offsets, vec![0, 16, 32]);
+    assert_eq!(layout.align, 16);
+    assert_eq!(layout.size, 48);
+    assert_eq!(
+        storage_elem_stride(&crate::types::sized_array(2, outer)),
+        Some(96)
+    );
+}
+
+#[test]
 fn block_layout_rejects_unsupported_members() {
     let matrix = Type::Constructed(
         TypeName::Mat,

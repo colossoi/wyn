@@ -790,6 +790,7 @@ module.exports = grammar({
     unary_expression: $ => prec(PREC.UNARY, choice(
       seq('-', field('operand', $._expression)),
       seq('!', field('operand', $._expression)),
+      seq('#[', 'scratch', ']', field('operand', $._expression)),
     )),
 
     field_expression: $ => prec.left(PREC.POSTFIX, seq(
