@@ -1407,3 +1407,23 @@ entry powers(xs: []f32, exponent: i32) []f32 =
     let wgsl = compile_to_wgsl(source).expect("mixed float/integer powers must lower");
     validate_wgsl(&wgsl);
 }
+
+#[test]
+fn minimum_i32_literals_validate_in_scalars_and_addressable_arrays() {
+    for source in [
+        "entry minimum() i32 = -2147483648",
+        "entry minimum() i32 = -2147483647 - 1",
+        "entry minimum() [2]i32 = [-2147483648, 2147483647]",
+        "def bounds: [2]i32 = [-2147483648, 2147483647] entry bound(i:i32) i32 = bounds[i]",
+    ] {
+        let wgsl = compile_to_wgsl(source).expect("minimum i32 must lower");
+        validate_wgsl(&wgsl);
+    }
+}
+
+#[test]
+fn signed_shift_counts_validate_in_wgsl() {
+    let source = "entry shifted(x:i32,n:i32) (i32,i32) = (x << n, x >> n)";
+    let wgsl = compile_to_wgsl(source).expect("integer shifts must lower");
+    validate_wgsl(&wgsl);
+}

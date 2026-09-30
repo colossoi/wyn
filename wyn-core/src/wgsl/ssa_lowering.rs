@@ -626,6 +626,16 @@ impl TypeEmitter {
 // Module-level lowering
 // -----------------------------------------------------------------------------
 
+// WGSL parses the minus separately: the positive magnitude of i32::MIN
+// cannot itself be an i32 literal. Both operands below are representable.
+fn i32_literal(value: &str) -> String {
+    if value == "-2147483648" {
+        "(-2147483647i - 1i)".into()
+    } else {
+        format!("{value}i")
+    }
+}
+
 fn wgsl_var(id: ValueId) -> String {
     use crate::ssa::ir::Key;
     let ffi = id.data().as_ffi();
@@ -821,7 +831,9 @@ impl<'a> LowerCtx<'a> {
     ) -> Result<String> {
         use ssa::types::{AddressableConstantKind, ConstantValue};
         match &value.kind {
-            AddressableConstantKind::Scalar(ConstantValue::I32(value)) => Ok(format!("{value}i")),
+            AddressableConstantKind::Scalar(ConstantValue::I32(value)) => {
+                Ok(i32_literal(&value.to_string()))
+            }
             AddressableConstantKind::Scalar(ConstantValue::U32(value)) => Ok(format!("{value}u")),
             AddressableConstantKind::Scalar(ConstantValue::F32(bits)) => {
                 let value = f32::from_bits(*bits);
@@ -843,7 +855,7 @@ impl<'a> LowerCtx<'a> {
                 if self.int64_mode == WgslInt64Mode::EmulateU64 && int64_emulation::is_u64(&value.ty) {
                     int64_emulation::lower_literal(literal).map_err(|message| err_wgsl!("{message}"))
                 } else {
-                    Ok(format!("{literal}i"))
+                    Ok(i32_literal(literal))
                 }
             }
             AddressableConstantKind::Unsigned(literal) => {
@@ -2199,7 +2211,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     fn format_constant(&self, c: &ssa::types::ConstantValue) -> Result<String> {
         use crate::ssa::types::ConstantValue;
         Ok(match c {
-            ConstantValue::I32(v) => format!("{}i", v),
+            ConstantValue::I32(v) => i32_literal(&v.to_string()),
             ConstantValue::U32(v) => format!("{}u", v),
             ConstantValue::F32(bits) => {
                 let v = f32::from_bits(*bits);
@@ -2783,7 +2795,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             .map_err(|message| err_wgsl_at!(self.blame_span(), "{message}"))
                     }
                     Some(PolyType::Constructed(TypeName::UInt(32), _)) => Ok(format!("{}u", s)),
-                    Some(PolyType::Constructed(TypeName::Int(32), _)) | _ => Ok(format!("{}i", s)),
+                    Some(PolyType::Constructed(TypeName::Int(32), _)) | _ => Ok(i32_literal(s)),
                 },
                 op::OpTag::Float(s) => {
                     let suffix = if matches!(
@@ -2844,6 +2856,13 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     let l = self.coerce_operand_to_result_ty(lhs, result_ty.as_ref())?;
                     let r = self.coerce_operand_to_result_ty(rhs, result_ty.as_ref())?;
                     match op {
+                        op::BinaryOperator::ShiftLeft | op::BinaryOperator::ShiftRight => {
+                            let count_ty = match lhs_ty.vec_size() {
+                                Some(size) => format!("vec{size}<u32>"),
+                                None => "u32".into(),
+                            };
+                            Ok(format!("({l} {} {count_ty}({r}))", op.symbol()))
+                        }
                         op::BinaryOperator::Power => match lhs_ty {
                             PolyType::Constructed(TypeName::Int(32), _) => {
                                 self.ctx.int_pow[0] = true;
