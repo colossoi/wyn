@@ -86,8 +86,10 @@ impl Body<'_, '_, '_> {
     ) -> Result<Typed, OptimizeError> {
         let backing = self.compiler.plan.backing(resource).unwrap_or(resource);
         *self.resource_uses.entry(backing).or_default() |= access;
-        if let Some(source) = self.compiler.plan.external(backing) {
-            return self.value(scope, source);
+        if !self.compiler.plan.buffers.contains_key(&backing) {
+            if let Some(source) = self.compiler.plan.external(backing) {
+                return self.value(scope, source);
+            }
         }
         let Some(buffer) = self.compiler.plan.buffers.get(&backing).cloned() else {
             return Err(error("selected resource has no allocation"));

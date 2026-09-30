@@ -9,6 +9,7 @@ use super::{
 fn frame_graph_aliases_storage_texture_views_and_orders_consumers() {
     let mut descriptor = ModuleInterface {
         scalar_tasks: vec![],
+        dispatch_loops: vec![],
         pipelines: vec![
             Pipeline::Compute(ComputePipeline {
                 bindings: vec![Binding::StorageTexture {
@@ -87,6 +88,7 @@ fn frame_graph_fragment_target_write_orders_downstream_reader() {
     // reader depends on the fragment that produced it.
     let mut descriptor = ModuleInterface {
         scalar_tasks: vec![],
+        dispatch_loops: vec![],
         pipelines: vec![
             Pipeline::Graphics(GraphicsPipeline {
                 source_operation: None,
@@ -192,6 +194,7 @@ fn producer_consumer_descriptor(producer_first: bool) -> ModuleInterface {
 
     let mut descriptor = ModuleInterface {
         scalar_tasks: vec![],
+        dispatch_loops: vec![],
         pipelines,
         source_results: Vec::new(),
         frame_graph: FrameGraph::default(),
@@ -264,6 +267,7 @@ fn frame_graph_reports_a_producer_consumer_cycle() {
     // `cull` after `reduce`.
     let mut descriptor = ModuleInterface {
         scalar_tasks: vec![],
+        dispatch_loops: vec![],
         pipelines: vec![
             Pipeline::Compute(ComputePipeline {
                 bindings: vec![inst(Access::ReadOnly, BufferUsage::Input), occ(Access::WriteOnly)],
@@ -299,6 +303,7 @@ fn frame_graph_target_write_merges_with_storage_read_view() {
     // on the fragment.
     let mut descriptor = ModuleInterface {
         scalar_tasks: vec![],
+        dispatch_loops: vec![],
         pipelines: vec![
             Pipeline::Graphics(GraphicsPipeline {
                 source_operation: None,

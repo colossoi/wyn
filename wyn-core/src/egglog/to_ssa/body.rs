@@ -162,8 +162,11 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         }
         if let Some(resource) = self.compiler.plan.value_ref(source) {
             if !self.compiler.facts.operation(source).is_some_and(|op| self.active_operations.contains(&op))
-                && self.compiler.plan.backing(resource).is_some()
-                && !self.compiler.plan.external(resource).is_some()
+                && self
+                    .compiler
+                    .plan
+                    .backing(resource)
+                    .is_some_and(|backing| self.compiler.plan.buffers.contains_key(&backing))
             {
                 let view = self.resource(scope, resource, 1)?;
                 if self.compiler.facts.source_type(source).is_some_and(|ty| {

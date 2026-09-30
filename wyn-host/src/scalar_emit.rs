@@ -4,7 +4,7 @@ use quote::{format_ident, quote};
 use syn::Index;
 
 impl Program {
-    fn whl_scalar(&self, pipeline: usize, value: &ScalarExpr) -> Result<String, HostError> {
+    pub(crate) fn whl_scalar(&self, pipeline: usize, value: &ScalarExpr) -> Result<String, HostError> {
         Ok(match value {
             ScalarExpr::I32(n) => format!("(i32 {n})"),
             ScalarExpr::U32(n) => format!("(u32 {n})"),
@@ -74,7 +74,11 @@ impl Program {
         ))
     }
 
-    fn rust_scalar(&self, pipeline: usize, value: &ScalarExpr) -> Result<TokenStream, HostError> {
+    pub(crate) fn rust_scalar(
+        &self,
+        pipeline: usize,
+        value: &ScalarExpr,
+    ) -> Result<TokenStream, HostError> {
         Ok(match value {
             ScalarExpr::I32(n) => quote!(#n),
             ScalarExpr::U32(n) => quote!(#n),

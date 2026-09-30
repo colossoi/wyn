@@ -288,6 +288,7 @@ pub(super) fn publish(
         }
     }
     host::publish(compiler, entries, &mut module);
+    super::loops::publish(compiler, entries, &mut module)?;
     for pipeline in &mut module.pipelines {
         let Pipeline::Compute(pipeline) = pipeline else {
             continue;

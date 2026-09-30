@@ -175,6 +175,11 @@ impl Allocation {
 
 #[derive(Clone, Debug)]
 pub enum Operation {
+    Loop {
+        pipeline: usize,
+        region: usize,
+        body: Vec<Operation>,
+    },
     Scalar {
         pipeline: usize,
         task: usize,
@@ -300,6 +305,55 @@ impl Program {
         }
         for (_, mut entry) in entries {
             program.prepare_entry(&mut entry)?;
+            for (region, repeated) in program.interface.dispatch_loops.iter().enumerate().rev() {
+                let find = |name: &str| {
+                    entry.operations.iter().position(|op| match op {
+                        Operation::Dispatch { pipeline, stage, .. } => {
+                            matches!(&program.interface.pipelines[*pipeline], Pipeline::Compute(p) if p.stages[*stage].entry_point == name)
+                        }
+                        _ => false,
+                    })
+                };
+                let Some(begin) = find(&repeated.begin) else {
+                    continue;
+                };
+                let Some(end) = find(&repeated.end) else {
+                    return Err(HostError::Invalid("loop exit missing".into()));
+                };
+                if end <= begin {
+                    return Err(HostError::Invalid("loop region is not ordered".into()));
+                }
+                let Operation::Dispatch { pipeline, .. } = entry.operations[begin] else {
+                    return Err(HostError::Invalid("loop entry must be a dispatch".into()));
+                };
+                for op in &entry.operations[begin + 1..end] {
+                    let name = match op {
+                        Operation::Dispatch { pipeline, stage, .. } => {
+                            let Pipeline::Compute(p) = &program.interface.pipelines[*pipeline] else {
+                                return Err(HostError::Invalid("loop contains a graphics pipeline".into()));
+                            };
+                            &p.stages[*stage].entry_point
+                        }
+                        Operation::Scalar { task, .. } => &program.interface.scalar_tasks[*task].stage,
+                        _ => {
+                            return Err(HostError::Invalid(
+                                "host loop sketch requires a flat compute region".into(),
+                            ))
+                        }
+                    };
+                    if !repeated.stages.contains(name) {
+                        return Err(HostError::Invalid(
+                            "host loop contains an interleaved outer stage".into(),
+                        ));
+                    }
+                }
+                let body = entry.operations.drain(begin + 1..end).collect();
+                entry.operations[begin + 1] = Operation::Loop {
+                    pipeline,
+                    region,
+                    body,
+                };
+            }
             program.entries.push(entry);
         }
         Ok(program)
@@ -496,7 +550,9 @@ impl Program {
                     }
                     *pipeline
                 }
-                Operation::Draw { pipeline } | Operation::Scalar { pipeline, .. } => *pipeline,
+                Operation::Draw { pipeline }
+                | Operation::Scalar { pipeline, .. }
+                | Operation::Loop { pipeline, .. } => *pipeline,
             };
             pipelines.insert(pipeline);
             for index in 0..self.bindings(pipeline).len() {

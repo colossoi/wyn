@@ -1,6 +1,6 @@
 //! Published shader interfaces, resource identities, and execution domains.
 
-use crate::{ResultKind, ResultLayout, ScalarTask};
+use crate::{ResultKind, ResultLayout, ScalarExpr, ScalarSource, ScalarTask};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Published shader declarations and physical resource interfaces for one module.
@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 pub struct ModuleInterface {
     /// Scalar evaluations ordered at their consuming or replaced dispatch sites.
     pub scalar_tasks: Vec<ScalarTask>,
+    pub dispatch_loops: Vec<DispatchLoop>,
     /// Individual pipelines in this program (one per top-level entry or multi-dispatch SOAC).
     pub pipelines: Vec<Pipeline>,
     /// Storage bindings that implement authored entry results. This preserves
@@ -34,6 +35,17 @@ pub struct SourceResultBinding {
     pub pipeline_index: usize,
     pub set: u32,
     pub binding: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct DispatchLoop {
+    pub begin: String,
+    pub end: String,
+    pub stages: Vec<String>,
+    pub count: ScalarExpr,
+    pub index: ScalarSource,
+    pub current: ScalarSource,
+    pub next: ScalarSource,
 }
 
 impl ModuleInterface {

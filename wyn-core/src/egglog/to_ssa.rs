@@ -14,6 +14,7 @@ mod body;
 mod host;
 mod interface;
 mod kernels;
+mod loops;
 mod plan;
 mod publication;
 mod read;
