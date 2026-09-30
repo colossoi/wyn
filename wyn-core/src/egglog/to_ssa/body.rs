@@ -166,12 +166,10 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                 && !self.compiler.plan.external(resource).is_some()
             {
                 let view = self.resource(scope, resource, 1)?;
-                if self
-                    .compiler
-                    .facts
-                    .source_type(source)
-                    .is_some_and(|ty| !TypeExt::is_array(types::strip_existentials(ty)))
-                {
+                if self.compiler.facts.source_type(source).is_some_and(|ty| {
+                    let ty = types::strip_existentials(ty);
+                    !ty.is_array() && types::as_soa_tuple(ty).is_none()
+                }) {
                     let zero = self.literal("0", &types::i32())?;
                     let value = self.index(view, zero)?;
                     let Some(ty) = self.compiler.facts.source_type(source).cloned() else {
