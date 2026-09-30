@@ -7,8 +7,8 @@ Compile and run one local playground example.
 .DESCRIPTION
 Builds Wyn and viz in release mode, compiles one source from
 testfiles/playground into tmp/playground, and opens it with viz. Bare image
-examples automatically receive scripts/playground_image_header.wyn; examples
-with an explicit entry declaration compile unchanged.
+examples automatically receive scripts/playground_image_header.wyn and compile
+in direct mode. Explicit pipelines allow compute passes to run in parallel.
 
 .PARAMETER Example
 The path to a .wyn playground source. Relative and absolute paths are accepted.
@@ -19,7 +19,7 @@ testfiles/playground/noise_demo.wyn.
 Reuse the existing release binaries instead of building Wyn and viz first.
 
 .PARAMETER OutputDirectory
-Directory for the generated .spv and .json files. Relative paths resolve from
+Directory for the generated .spv and .wynhost files. Relative paths resolve from
 the caller's current directory. The default is tmp/playground in the repository.
 
 .PARAMETER MaxFrames
@@ -101,7 +101,7 @@ if ([IO.Path]::GetExtension($sourcePath) -ine '.wyn') {
 
 $name = [IO.Path]::GetFileNameWithoutExtension($sourcePath)
 $spvPath = Join-Path $artifactDirectory "$name.spv"
-$descriptorPath = Join-Path $artifactDirectory "$name.json"
+$hostPath = Join-Path $artifactDirectory "$name.wynhost"
 $sourceDirectory = [IO.Path]::GetDirectoryName($sourcePath)
 $vizConfig = Join-Path $sourceDirectory "$name.viz.json"
 
@@ -138,7 +138,8 @@ try {
     $compileSource = $sourcePath
     $preparedSource = $null
     try {
-        $hasExplicitEntry = [IO.File]::ReadLines($sourcePath) |
+        # Close the file before Select-Object stops enumeration early.
+        $hasExplicitEntry = [IO.File]::ReadAllLines($sourcePath) |
             Where-Object { $_ -match '^entry ' } |
             Select-Object -First 1
         if (-not $hasExplicitEntry) {
@@ -150,16 +151,19 @@ try {
         }
 
         Write-Host "Compiling $sourcePath"
-        Invoke-NativeChecked $wynBinary @(
-            'build', $compileSource, '--graphics', '--direct', '-o', $spvPath
-        ) 'playground compilation'
+        $compileArguments = @('build', $compileSource, '--graphics')
+        if (-not $hasExplicitEntry) {
+            $compileArguments += '--direct'
+        }
+        $compileArguments += @('-o', $spvPath)
+        Invoke-NativeChecked $wynBinary $compileArguments 'playground compilation'
     } finally {
         if ($null -ne $preparedSource) {
             Remove-Item -LiteralPath $preparedSource -Force -ErrorAction SilentlyContinue
         }
     }
 
-    foreach ($artifact in @($spvPath, $descriptorPath)) {
+    foreach ($artifact in @($spvPath, $hostPath)) {
         if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
             throw "Compiler did not produce expected artifact: $artifact"
         }
@@ -173,8 +177,8 @@ try {
         $vizArguments += "--max-frames=$MaxFrames"
     }
 
-    Write-Host "SPIR-V:    $spvPath"
-    Write-Host "Descriptor: $descriptorPath"
+    Write-Host "SPIR-V:     $spvPath"
+    Write-Host "Host:       $hostPath"
     Write-Host "Running $name..."
     $vizCommand = (@($vizBinary) + $vizArguments | ForEach-Object {
         "'" + $_.Replace("'", "''") + "'"

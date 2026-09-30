@@ -43,7 +43,8 @@ def main [
 
         print $"=== ($name) ==="
 
-        let compile_args = ["build", $compile_source, "--graphics", "--direct", "-o", $spv]
+        let direct_args = if $has_explicit_entry { [] } else { ["--direct"] }
+        let compile_args = ["build", $compile_source, "--graphics", ...$direct_args, "-o", $spv]
         print $"$ ($wyn) ($compile_args | str join ' ')"
         let compile = (do { ^$wyn ...$compile_args } | complete)
         if $prepared_source != null { rm --force $prepared_source }

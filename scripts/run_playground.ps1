@@ -108,7 +108,8 @@ try {
 
         $compileSource = $file.FullName
         $preparedSource = $null
-        $hasExplicitEntry = [IO.File]::ReadLines($file.FullName) |
+        # Close the file before Select-Object stops enumeration early.
+        $hasExplicitEntry = [IO.File]::ReadAllLines($file.FullName) |
             Where-Object { $_ -match '^entry ' } |
             Select-Object -First 1
         if (-not $hasExplicitEntry) {
@@ -121,7 +122,11 @@ try {
 
         Write-Host ''
         Write-Host "=== $name ==="
-        $compileArguments = @('build', $compileSource, '--graphics', '--direct', '-o', $spv)
+        $compileArguments = @('build', $compileSource, '--graphics')
+        if (-not $hasExplicitEntry) {
+            $compileArguments += '--direct'
+        }
+        $compileArguments += @('-o', $spv)
 
         Write-Host "$wynBinary $($compileArguments -join ' ')"
         try {

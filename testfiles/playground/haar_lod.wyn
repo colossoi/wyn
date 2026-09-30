@@ -1,0 +1,282 @@
+-- Haar tree: one procedural material, progressively reconstructed mip levels.
+-- Inspired by Edward Kmett, "Wavelets in 3D Graphics":
+-- https://comonad.com/reader/1995/wavelets-in-3d-graphics/
+--
+-- The first board is ground truth: the original procedural 128x128 source,
+-- sampled directly without a Haar transform. Four identical boards show
+-- depths 2, 4, 6, 7 (4 through 128 texels per side); depth 7 should match
+-- the reference. The sixth fades between adjacent levels automatically.
+-- Hold the mouse and drag horizontally anywhere to scrub its depth 0..7.
+-- Release to resume animation. The eight ticks show reconstruction depth;
+-- here a larger depth means MORE detail (the reverse of a mip index).
+--
+-- This is the nonstandard 2D Haar decomposition: each quadtree node stores
+-- horizontal, vertical and diagonal differences of four child averages.
+-- Sampling starts at the root average and follows only one root-to-leaf
+-- path, adding signed detail coefficients. Stopping early gives an exact
+-- box-filtered mip, not a point sample of the procedural source.
+--
+-- Data flow: procedural_color -> source texels -> seven Haar passes -> draw.
+-- The source is an ordinary pointwise RGB function with no knowledge of Haar.
+-- Each pass transforms 2x2 blocks into an average and three detail values;
+-- the next pass transforms only the averages. The resulting coefficient
+-- pyramid is an implicit quadtree, stored in a GPU buffer. Rendering reads
+-- that buffer; it does not re-evaluate the source or compute coefficients.
+-- The original texel buffer is retained solely for the reference panel.
+--
+-- The explicit pipeline rebuilds these small buffers each frame so the demo
+-- needs no feedback config or external assets. A production asset would be
+-- encoded offline: retain the coefficients and cache reconstructed mip levels,
+-- without retaining the source texels or intermediate averaging buffers.
+-- No quantization or entropy coding is applied in this demo.
+-- All panels use nearest-texel sampling to expose Haar's block structure.
+--
+-- Run from the repository root:
+--   pwsh -File scripts/play.ps1 haar_lod
+-- This file owns its compute/draw pipeline; it is not a bare image shader.
+
+open f32
+
+def max_depth: i32 = 7
+def image_size: i32 = 128
+def tau: f32 = 6.28318530718
+
+-- The image definition. Replace this function with any RGB pattern; the
+-- encoder below operates on sampled texels and needs no analytic integrals.
+def procedural_color(uv: vec2f32) vec3f32 =
+  let broad = cos(tau * uv.x) * cos(tau * 2.0 * uv.y) in
+  let weave = cos(tau * 40.0 * uv.x) * cos(tau * 40.0 * uv.y) in
+  let outer = box_mask(uv, @[0.0625, 0.0625], @[0.9375, 0.9375]) in
+  let inner = box_mask(uv, @[0.078125, 0.078125], @[0.921875, 0.921875]) in
+  let horizontal = if uv.x >= 0.125 && uv.x < 0.875 && fract(uv.y * 16.0) < 0.125 then 1.0 else 0.0 in
+  let vertical = if uv.y >= 0.125 && uv.y < 0.875 && fract(uv.x * 16.0) < 0.125 then 1.0 else 0.0 in
+  let chip = box_mask(uv, @[0.3125, 0.3125], @[0.6875, 0.6875]) in
+  let chip_inner = box_mask(uv, @[0.328125, 0.328125], @[0.671875, 0.671875]) in
+  let mark_x = box_mask(uv, @[0.390625, 0.46875], @[0.609375, 0.53125]) in
+  let mark_y = box_mask(uv, @[0.46875, 0.390625], @[0.53125, 0.609375]) in
+  let mark_center = box_mask(uv, @[0.46875, 0.46875], @[0.53125, 0.53125]) in
+  let base = @[0.035, 0.20, 0.19] + @[0.015, 0.06, 0.055] * broad
+    + @[0.012, 0.025, 0.024] * weave in
+  base + @[0.63, 0.36, 0.10] * (outer - inner)
+    + @[0.25, 0.16, 0.045] * (horizontal + vertical)
+    + @[0.20, 0.14, 0.045] * chip - @[0.20, 0.21, 0.14] * chip_inner
+    + @[0.38, 0.56, 0.43] * (mark_x + mark_y - mark_center)
+
+-- Sample one source texel at its center, independently of the encoder.
+def source_texel(i: i32) vec4f32 =
+  let uv = @[f32(i % image_size) + 0.5, f32(i / image_size) + 0.5] / f32(image_size) in
+  @[procedural_color(uv)..., 1.0]
+
+-- One nonstandard 2D Haar pass over the active top-left square:
+--
+--   child block    ->  packed coefficient quadrants
+--       a b              average | horizontal
+--       c d              vertical| diagonal
+--
+-- Average = (a+b+c+d)/4; H = (a-b+c-d)/4; V = (a+b-c-d)/4;
+-- D = (a-b-c+d)/4. Finer coefficients outside this square are preserved.
+-- Each pass reads an old buffer and writes a new one, avoiding in-place races.
+def haar_pass(input: []vec4f32, active_size: i32) []vec4f32 =
+  map(|i: i32|
+    let x = i % image_size in
+    let y = i / image_size in
+    let half = active_size / 2 in
+    if x >= active_size || y >= active_size then input[i]
+    else
+      let child = 2 * (y % half) * image_size + 2 * (x % half) in
+      let a = input[child] in
+      let b = input[child + 1] in
+      let c = input[child + image_size] in
+      let d = input[child + image_size + 1] in
+      let sx = if x < half then 1.0 else -1.0 in
+      let sy = if y < half then 1.0 else -1.0 in
+      (a + sx * b + sy * c + sx * sy * d) * 0.25,
+    iota(16384))
+
+def source_sample(texels: []vec4f32, uv: vec2f32) vec3f32 =
+  let x = i32(clamp(floor(uv.x * f32(image_size)), 0.0, f32(image_size - 1))) in
+  let y = i32(clamp(floor(uv.y * f32(image_size)), 0.0, f32(image_size - 1))) in
+  texels[y * image_size + x].xyz
+
+-- Read one path through the encoded tree. The root average is tree[0].
+-- At depth j, a node (x,y) in a 2^j grid has its H, V, D at offsets
+-- (2^j,0), (0,2^j), (2^j,2^j) in the packed coefficient image.
+def haar_sample(tree: []vec4f32, uv: vec2f32, requested_depth: f32) vec3f32 =
+  let depth = clamp(requested_depth, 0.0, f32(max_depth)) in
+  let tx = u32(clamp(floor(uv.x * f32(image_size)), 0.0, f32(image_size - 1))) in
+  let ty = u32(clamp(floor(uv.y * f32(image_size)), 0.0, f32(image_size - 1))) in
+  let (color, _) =
+    loop (value, level) = (tree[0].xyz, 0i32)
+    while level < max_depth && f32(level) < depth do
+      let side = i32(1u32 << u32(level)) in
+      let shift = u32(max_depth - level) in
+      let x = i32(tx >> shift) in
+      let y = i32(ty >> shift) in
+      let h = tree[y * image_size + x + side].xyz in
+      let v = tree[(y + side) * image_size + x].xyz in
+      let d = tree[(y + side) * image_size + x + side].xyz in
+      let sx = if ((tx >> (shift - 1u32)) & 1u32) == 0u32 then 1.0 else -1.0 in
+      let sy = if ((ty >> (shift - 1u32)) & 1u32) == 0u32 then 1.0 else -1.0 in
+      -- Only the final visited level can have fractional weight. This is
+      -- exactly a blend of two adjacent reconstructed mips at the same UV.
+      let weight = clamp(depth - f32(level), 0.0, 1.0) in
+      (value + weight * (sx * h + sy * v + sx * sy * d), level + 1)
+  in color
+
+def box_mask(p: vec2f32, lo: vec2f32, hi: vec2f32) f32 =
+  if p.x >= lo.x && p.y >= lo.y && p.x < hi.x && p.y < hi.y then 1.0 else 0.0
+
+def depth_color(depth: f32) vec3f32 =
+  mix(@[0.88, 0.49, 0.20], @[0.25, 0.84, 0.73], depth / 7.0)
+
+-- Analytic ray/box intersection: identical geometry, camera and lighting in
+-- every panel; only the reconstructed surface material changes with depth.
+def board(texels: []vec4f32, tree: []vec4f32,
+          p: vec2f32, depth: f32, reference: bool, background: vec3f32) vec3f32 =
+  let ro = @[2.1, 3.8, 4.3] in
+  let forward = normalize(-ro) in
+  let right = normalize(cross(forward, @[0.0, 1.0, 0.0])) in
+  let up = cross(right, forward) in
+  let rd = normalize(3.8 * forward + p.x * right - p.y * up) in
+  let bounds = @[1.0, 0.07, 1.0] in
+  let t0 = (-bounds - ro) / rd in
+  let t1 = (bounds - ro) / rd in
+  let near = vec.min(t0, t1) in
+  let far = vec.max(t0, t1) in
+  let enter = max(near.x, max(near.y, near.z)) in
+  let leave = min(far.x, min(far.y, far.z)) in
+  if enter > leave || leave < 0.0 then
+    -- Soft contact shadow, drawn in panel space.
+    background * (1.0 - 0.40 * exp(-2.2 * dot(p - @[0.0, 0.15], p - @[0.0, 0.15])))
+  else
+    let hit = ro + rd * enter in
+    if near.y >= near.x && near.y >= near.z then
+      let uv = @[hit.x, hit.z] * 0.5 + 0.5 in
+      let albedo = if reference then source_sample(texels, uv) else haar_sample(tree, uv, depth) in
+      let lighting = 0.90 + 0.12 * (1.0 - uv.y) in
+      -- A narrow edge glint belongs to the board geometry, not the texture.
+      let edge = max(abs(hit.x), abs(hit.z)) in
+      albedo * lighting + @[0.11, 0.17, 0.16] * smoothstep(0.98, 1.0, edge)
+    else
+      @[0.025, 0.095, 0.09] * (if near.x > near.z then 0.75 else 1.0)
+
+def panel(texels: []vec4f32, tree: []vec4f32,
+          p: vec2f32, index: i32, live_depth: f32, held: bool) vec3f32 =
+  let depths = [7.0, 2.0, 4.0, 6.0, 7.0, live_depth] in
+  let depth = depths[index] in
+  let accent = depth_color(depth) in
+  let bg = @[0.033, 0.049, 0.060] in
+  let surface = board(texels, tree, (p - @[148.0, 140.0]) / 115.0, depth, index == 0, bg) in
+  let border = box_mask(p, @[0.0, 0.0], @[296.0, 252.0])
+    - box_mask(p, @[1.0, 1.0], @[295.0, 251.0]) in
+  let rule = box_mask(p, @[15.0, 42.0], @[281.0, 43.0]) in
+  let ticks = if index == 0 then 0.0 else
+    loop mask = 0.0 for i < 8 do
+      let amount = clamp(depth - f32(i) + 1.0, 0.0, 1.0) in
+      let start = 16.0 + f32(i) * 33.0 in
+      mask + box_mask(p, @[start, 232.0], @[start + 26.0, 235.0]) * (0.13 + amount * 0.87)
+  in
+  surface + @[0.10, 0.15, 0.17] * (border + rule)
+    + accent * ticks + panel_text(p, index, depth, held)
+
+def main_image(texels: []vec4f32, tree: []vec4f32,
+               resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32) vec4f32 =
+  -- Fit a 960x700 canvas into any window without stretching the boards.
+  let fit = min(resolution.x / 960.0, resolution.y / 700.0) in
+  let p = (frag_coord - (resolution.xy - @[960.0, 700.0] * fit) * 0.5) / fit in
+  let held = mouse.z > 0.0 in
+  let animated = 3.5 - 3.5 * cos(time * 0.42) in
+  let live_depth = if held then clamp(mouse.x / max(resolution.x, 1.0), 0.0, 1.0) * 7.0 else animated in
+  let grid = p - @[28.0, 100.0] in
+  let column = i32(floor(grid.x / 304.0)) in
+  let row = i32(floor(grid.y / 266.0)) in
+  let local = grid - @[f32(column) * 304.0, f32(row) * 266.0] in
+  let inside = column >= 0 && column < 3 && row >= 0 && row < 2
+    && local.x < 296.0 && local.y < 252.0 in
+  let bg = @[0.014, 0.024, 0.034] in
+  let color = if inside then panel(texels, tree, local, row * 3 + column, live_depth, held) else bg in
+  let result = color + page_text(p) in
+  -- Approximate linear-to-display conversion for the procedural material.
+  @[sqrt(max(result.x, 0.0)), sqrt(max(result.y, 0.0)), sqrt(max(result.z, 0.0)), 1.0]
+
+def vertex_main(index: u32, _instance: u32, _draw: u32) vertex<vec2f32> =
+  vertex_output(@[if index == 1u32 then 3.0 else -1.0,
+                   if index == 2u32 then 3.0 else -1.0, 0.0, 1.0], @[0.0, 0.0])
+
+entry haar_lod(resolution: vec3f32, time: f32, mouse: vec4f32,
+               screen: render_target<vec4f32>) render_target<vec4f32> =
+  -- Keep the pass sequence at the entry boundary so Wyn materializes each
+  -- array before its consumer. No source data is generated inside shade.
+  let texels = map(source_texel, iota(image_size * image_size)) in
+  let level6 = haar_pass(texels, 128) in
+  let level5 = haar_pass(level6, 64) in
+  let level4 = haar_pass(level5, 32) in
+  let level3 = haar_pass(level4, 16) in
+  let level2 = haar_pass(level3, 8) in
+  let level1 = haar_pass(level2, 4) in
+  let tree = haar_pass(level1, 2) in
+  let raster = rasterize_triangles(direct_draw(3u32, 1u32), vertex_main) in
+  shade(screen, raster, |_, position, _, _, _|
+    main_image(texels, tree, resolution, time, mouse, position.xy))
+
+-- Text rendering and labels ------------------------------------------------
+
+-- A tiny built-in 3x5 font: digits followed by A..Z, each row left-to-right.
+-- UI lettering is geometry/bit arithmetic, with no font image dependency.
+def glyphs: [36]u32 = [
+  31599u32, 11415u32, 29671u32, 29647u32, 23497u32,
+  31183u32, 31215u32, 29257u32, 31727u32, 31695u32,
+  15341u32, 27566u32, 31015u32, 27502u32, 31143u32,
+  31140u32, 31087u32, 23533u32, 29847u32, 4719u32,
+  23469u32, 18727u32, 24429u32, 24445u32, 31599u32,
+  31716u32, 31609u32, 31725u32, 31183u32, 29842u32,
+  23407u32, 23402u32, 23421u32, 23213u32, 23186u32, 29351u32]
+
+def text_mask(p: vec2f32, chars: []i32) f32 =
+  let index = i32(floor(p.x / 4.0)) in
+  let x = i32(floor(p.x)) % 4 in
+  let y = i32(floor(p.y)) in
+  if index < 0 || index >= length(chars) || x > 2 || y < 0 || y > 4 then 0.0
+  else
+    let code = chars[index] in
+    let g = if code >= 48 && code <= 57 then code - 48
+            else if code >= 65 && code <= 90 then code - 65 + 10 else -1 in
+    if g < 0 then 0.0
+    else f32((glyphs[g] >> u32(14 - y * 3 - x)) & 1u32)
+
+def panel_text(p: vec2f32, index: i32, depth: f32, held: bool) vec3f32 =
+  let title = if index == 0 then
+      text_mask((p - @[16.0, 16.0]) / 2.0, [82, 69, 70, 69, 82, 69, 78, 67, 69])
+    else if index == 5 then
+      text_mask((p - @[16.0, 16.0]) / 2.0,
+        if held then [77, 65, 78, 85, 65, 76] else [65, 85, 84, 79, 32, 32])
+    else text_mask((p - @[16.0, 16.0]) / 2.0, [68, 69, 80, 84, 72, 32, 48 + i32(depth)]) in
+  let scale = i32(2.0 ** floor(depth)) in
+  let resolution_label = text_mask((p - @[206.0, 19.0]) / 1.5,
+    [if scale >= 100 then 48 + scale / 100 else 32,
+     if scale >= 10 then 48 + (scale / 10) % 10 else 32,
+     48 + scale % 10, 32, 80, 88]) in
+  let reference_label = if index == 0 then
+    text_mask((p - @[16.0, 229.0]) / 1.5, [68, 73, 82, 69, 67, 84, 32, 83, 79, 85, 82, 67, 69])
+    else 0.0 in
+  depth_color(depth) * (title + reference_label) + @[0.43, 0.52, 0.55] * resolution_label
+
+def page_text(p: vec2f32) vec3f32 =
+  -- HAAR / LEVELS OF DETAIL
+  let title = text_mask((p - @[28.0, 28.0]) / 3.0,
+    [72, 65, 65, 82, 32, 32, 76, 69, 86, 69, 76, 83, 32, 79, 70, 32, 68, 69, 84, 65, 73, 76]) in
+  -- ONE ROOT AVERAGE + SEVEN LEVELS OF SIGNED DETAIL
+  let subtitle = text_mask((p - @[28.0, 62.0]) / 1.7,
+    [79, 78, 69, 32, 82, 79, 79, 84, 32, 65, 86, 69, 82, 65, 71, 69, 32,
+     32, 83, 69, 86, 69, 78, 32, 76, 69, 86, 69, 76, 83, 32, 79, 70, 32,
+     83, 73, 71, 78, 69, 68, 32, 68, 69, 84, 65, 73, 76]) in
+  -- HOLD MOUSE + DRAG X TO SCRUB THE LAST PANEL
+  let controls = text_mask((p - @[28.0, 645.0]) / 1.6,
+    [72, 79, 76, 68, 32, 77, 79, 85, 83, 69, 32, 32, 68, 82, 65, 71, 32,
+     88, 32, 84, 79, 32, 83, 67, 82, 85, 66, 32, 84, 72, 69, 32, 76, 65, 83, 84, 32, 80, 65, 78, 69, 76]) in
+  -- PROCEDURAL SOURCE / NO TEXTURES / 128 X 128 LEAVES
+  let note = text_mask((p - @[28.0, 674.0]) / 1.3,
+    [80, 82, 79, 67, 69, 68, 85, 82, 65, 76, 32, 83, 79, 85, 82, 67, 69, 32,
+     32, 78, 79, 32, 84, 69, 88, 84, 85, 82, 69, 83, 32, 32, 49, 50, 56, 32, 88, 32, 49, 50, 56, 32, 76, 69, 65, 86, 69, 83]) in
+  @[0.75, 0.86, 0.85] * title + @[0.31, 0.44, 0.48] * (subtitle + note)
+    + @[0.45, 0.64, 0.65] * controls

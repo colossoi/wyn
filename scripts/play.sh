@@ -7,7 +7,8 @@ Usage: scripts/play.sh EXAMPLE [--skip-build] [--output-directory DIR] [--max-fr
 
 Compile and run one local playground example. EXAMPLE may be a .wyn path or a
 bare name from testfiles/playground. Bare main_image examples automatically
-receive scripts/playground_image_header.wyn.
+receive scripts/playground_image_header.wyn and compile in direct mode.
+Explicit pipelines allow compute passes to run in parallel.
 EOF
 }
 
@@ -112,7 +113,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if ! grep -Eq '^entry ' "$source_path"; then
+has_explicit_entry=false
+if grep -Eq '^entry ' "$source_path"; then
+    has_explicit_entry=true
+fi
+if [[ $has_explicit_entry == false ]]; then
     prepared_source_base=$(mktemp "$source_directory/.run-$name.XXXXXX")
     prepared_source="$prepared_source_base.wyn"
     mv -- "$prepared_source_base" "$prepared_source"
@@ -126,7 +131,9 @@ if ! grep -Eq '^entry ' "$source_path"; then
 fi
 
 echo "Compiling $source_path"
-"$wyn_binary" build "$compile_source" --graphics --direct -o "$spv_path"
+compile_arguments=(build "$compile_source" --graphics)
+[[ $has_explicit_entry == false ]] && compile_arguments+=(--direct)
+"$wyn_binary" "${compile_arguments[@]}" -o "$spv_path"
 cleanup
 prepared_source=''
 
