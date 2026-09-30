@@ -23,6 +23,13 @@ fn compile(source: &str) -> naga::Module {
 }
 
 #[test]
+fn loop_local_tuple_collectives_preserve_component_arrays() {
+    let source = include_str!("../../../testfiles/regressions/local_tuple_collectives.wyn");
+    compile(source);
+    crate::compile_thru_spirv(source).unwrap();
+}
+
+#[test]
 fn length_only_filter_view_lowers_without_its_discarded_element_buffer() {
     let source = "entry main(xs:[]i32) i32=length(filter(|x:i32|x>0,xs))";
     compile(source);

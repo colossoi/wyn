@@ -11,10 +11,21 @@ use crate::ssa::types::{InstKind, PlaceId};
 use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
 use crate::tlc::SoacOp;
 use crate::tlc::TermKind;
-use crate::types::{self, sized_array, Type, TypeExt, TypeName};
+use crate::types::{self, as_soa_tuple, sized_array, Type, TypeExt, TypeName};
 use crate::LookupMap;
 
 type Soac = SoacOp<ExplicitClosurePayload, ExplicitCapturesPayload>;
+
+/// A local collective may produce a nested tuple of component arrays.
+/// Allocate the leaves separately and reconstruct that same representation.
+enum LocalOutput {
+    Array {
+        place: PlaceId,
+        ty: Type,
+        element: Type,
+    },
+    Tuple(Vec<LocalOutput>),
+}
 
 impl<'source> Body<'_, '_, 'source> {
     pub(in crate::egglog::to_ssa) fn callback(
@@ -169,18 +180,8 @@ impl<'source> Body<'_, '_, 'source> {
         match soac {
             SoacOp::Reduce { .. } => unreachable!("local reductions return before array materialization"),
             SoacOp::Map { .. } | SoacOp::Scan { .. } => {
-                let Some(element) = ty.elem_type() else {
-                    return Err(error("local collective output is not an array"));
-                };
                 let count = self.local_capacity(source, first)?;
-                let output_ty = sized_array(count.max(1), element.clone());
-                let place = self.builder.new_place(output_ty.clone());
-                self.builder
-                    .push_void_inst(InstKind::Alloca {
-                        elem_ty: output_ty.clone(),
-                        result: place,
-                    })
-                    .map_err(builder_error)?;
+                let output = self.allocate_local_output(ty, count)?;
                 let initial =
                     if let SoacOp::Scan { ne, .. } = soac { vec![self.source(scope, ne)?] } else { vec![] };
                 self.counted(zero, n, one, initial, |body, index, mut state| {
@@ -191,17 +192,10 @@ impl<'source> Body<'_, '_, 'source> {
                     let scan = !state.is_empty();
                     state.extend(arguments);
                     let value = body.callback(scope, operation, state)?;
-                    body.local_store(place, element, index, value.clone())?;
+                    body.store_local_output(&output, index, value.clone())?;
                     Ok(if scan { vec![value] } else { vec![] })
                 })?;
-                let value = self
-                    .builder
-                    .push_inst(InstKind::Load { place }, output_ty.clone())
-                    .map_err(builder_error)?;
-                Ok(Typed {
-                    value: value.into(),
-                    ty: output_ty,
-                })
+                self.load_local_output(output)
             }
             SoacOp::Filter { .. } => {
                 let Some(element) = first.ty.elem_type().cloned() else {
@@ -341,10 +335,80 @@ impl<'source> Body<'_, '_, 'source> {
         }
     }
 
+    fn allocate_local_output(&mut self, ty: &Type, count: usize) -> Result<LocalOutput, OptimizeError> {
+        if let Some(fields) = as_soa_tuple(ty) {
+            let mut outputs = Vec::with_capacity(fields.len());
+            for field in fields {
+                outputs.push(self.allocate_local_output(field, count)?);
+            }
+            return Ok(LocalOutput::Tuple(outputs));
+        }
+        let Some(element) = ty.elem_type().cloned() else {
+            return Err(error("local collective output is not an array"));
+        };
+        let ty = sized_array(count.max(1), element.clone());
+        let place = self.builder.new_place(ty.clone());
+        self.builder
+            .push_void_inst(InstKind::Alloca {
+                elem_ty: ty.clone(),
+                result: place,
+            })
+            .map_err(builder_error)?;
+        Ok(LocalOutput::Array { place, ty, element })
+    }
+
+    fn store_local_output(
+        &mut self,
+        output: &LocalOutput,
+        index: Typed,
+        value: Typed,
+    ) -> Result<(), OptimizeError> {
+        match output {
+            LocalOutput::Array { place, element, .. } => self.local_store(*place, element, index, value),
+            LocalOutput::Tuple(fields) => {
+                for (i, field) in fields.iter().enumerate() {
+                    let value = self.field(value.clone(), i)?;
+                    self.store_local_output(field, index.clone(), value)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn load_local_output(&mut self, output: LocalOutput) -> Result<Typed, OptimizeError> {
+        match output {
+            LocalOutput::Array { place, ty, .. } => {
+                let value =
+                    self.builder.push_inst(InstKind::Load { place }, ty.clone()).map_err(builder_error)?;
+                Ok(Typed {
+                    value: value.into(),
+                    ty,
+                })
+            }
+            LocalOutput::Tuple(fields) => {
+                let mut values = Vec::with_capacity(fields.len());
+                for field in fields {
+                    values.push(self.load_local_output(field)?);
+                }
+                self.tuple(values)
+            }
+        }
+    }
+
     fn local_capacity(&self, source: Value, input: &Typed) -> Result<usize, OptimizeError> {
+        fn capacity(ty: &Type) -> Option<usize> {
+            if let Some(fields) = as_soa_tuple(ty) {
+                let n = capacity(fields.first()?)?;
+                return fields.iter().all(|field| capacity(field) == Some(n)).then_some(n);
+            }
+            match ty.array_size() {
+                Some(Type::Constructed(TypeName::Size(n), _)) => Some(*n),
+                _ => None,
+            }
+        }
         for ty in self.compiler.facts.source_type(source).into_iter().chain(std::iter::once(&input.ty)) {
-            if let Some(Type::Constructed(TypeName::Size(n), _)) = ty.array_size() {
-                return Ok(*n);
+            if let Some(n) = capacity(ty) {
+                return Ok(n);
             }
         }
         if let Some(operation) = self.compiler.facts.operation(source) {

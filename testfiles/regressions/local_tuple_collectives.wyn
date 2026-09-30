@@ -1,0 +1,18 @@
+-- Loop-local map/scan outputs retain their structure-of-arrays representation.
+entry mapped(k: i32) [2](i32, i32) =
+  loop xs = [(1, 2), (3, 4)] for _i < k do
+    map(|(a, b)| (a + 1, b + 2), xs)
+
+entry scanned(k: i32) [2](i32, i32) =
+  loop xs = [(1, 2), (3, 4)] for _i < k do
+    scan(|(a, b), (c, d)| (a + c, b + d), (0, 0), xs)
+
+entry flags(k: i32) [2]i32 =
+  loop xs = [1, 2] for _i < k do
+    let bs = map(|x| (x > 0, x == 2), xs) in
+    map(|(a, b)| i32.bool(a) + i32.bool(b), bs)
+
+entry nested(k: i32) [2]i32 =
+  loop xs = [1, 2] for _i < k do
+    let ys = map(|x| (x, (x + 1, x > 0)), xs) in
+    map(|(a, (b, c))| a + b + i32.bool(c), ys)
