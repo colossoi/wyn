@@ -1514,25 +1514,34 @@ impl<'a> TypeChecker<'a> {
         quantify(TypeScheme::Monotype(body), &vars)
     }
 
-    /// Register zipN: ∀n a1..aN s. [a1,s,n] -> ... -> [aN,s,n] -> [(a1,...,aN),s,n]
+    /// Zip shares a length, but each input has its own representation and buffer.
+    /// Its composite result is normalized to a tuple of the input arrays.
     fn register_zip_n(&mut self, arity: usize) {
         let n = self.fresh_var();
-        let s = self.fresh_var();
         let elem_vars: Vec<polytype::Variable> = (0..arity).map(|_| self.fresh_var()).collect();
-
-        let params: Vec<Type> = elem_vars.iter().map(|&v| self.array_ty(Self::var(v), s, n)).collect();
+        let params: Vec<Type> = elem_vars
+            .iter()
+            .map(|&v| {
+                let variant = self.fresh_var();
+                self.array_ty(Self::var(v), variant, n)
+            })
+            .collect();
         let tuple_ty = Type::Constructed(
             TypeName::Tuple(arity),
             elem_vars.iter().map(|&v| Self::var(v)).collect(),
         );
-        let ret = self.array_ty(tuple_ty, s, n);
+        let ret = Type::Constructed(
+            TypeName::Array,
+            vec![
+                tuple_ty,
+                Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+                Self::var(n),
+                no_buffer(),
+            ],
+        );
         let body = Self::arrow_chain(&params, ret);
-
-        let name = format!("zip{}", arity);
-        let scheme = Self::generalize_closed(body);
-        // Register generated zip functions in the canonical builtin namespace
-        // used by SOAC-tagged identifier lookup.
-        self.define_builtin(&name, scheme);
+        let name = if arity == 2 { "zip".to_string() } else { format!("zip{arity}") };
+        self.define_builtin(&name, Self::generalize_closed(body));
     }
 
     /// Build a Vec type: Vec[elem, size]
@@ -1644,24 +1653,7 @@ impl<'a> TypeChecker<'a> {
         );
         self.define_builtin("map", Self::generalize_closed(body));
 
-        // zip: ∀n a b s. Array[a, s, n] -> Array[b, s, n] -> Array[(a, b), s, n]
-        let (n, a, b, s) = (
-            self.fresh_var(),
-            self.fresh_var(),
-            self.fresh_var(),
-            self.fresh_var(),
-        );
-        let body = Self::arrow_chain(
-            &[
-                self.array_ty(Self::var(a), s, n),
-                self.array_ty(Self::var(b), s, n),
-            ],
-            self.array_ty(tuple(vec![Self::var(a), Self::var(b)]), s, n),
-        );
-        self.define_builtin("zip", Self::generalize_closed(body));
-
-        // zip3..zip5: ∀n a1..aN s. [a1,s,n] -> ... -> [aN,s,n] -> [(a1,...,aN),s,n]
-        for arity in 3..=5 {
+        for arity in 2..=5 {
             self.register_zip_n(arity);
         }
 

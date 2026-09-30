@@ -236,6 +236,31 @@ fn test_zip_arrays() {
 }
 
 #[test]
+fn zip_accepts_independent_array_representations() {
+    typecheck_program(
+        r#"
+def pairs(xs: [4]i32) = zip(map(|x| x+1, xs), 0..<4)
+def reversed(xs: [4]i32) = zip(0..<4, map(|x| x+1, xs))
+def triples(xs: [4]i32) = zip3(xs, map(|x| x+1, xs), 0..<4)
+def quads(xs: [4]i32) = zip4(xs, map(|x| x+1, xs), 0..<4, xs)
+def quints(xs: [4]i32) = zip5(xs, map(|x| x+1, xs), 0..<4, xs, xs)
+def consume(xs: [4]i32) [4]i32 = map(|(x,i)| x+i, pairs(xs))
+"#,
+    );
+}
+
+#[test]
+fn zip_still_rejects_different_lengths() {
+    for arity in 2..=5 {
+        let name = if arity == 2 { "zip".to_string() } else { format!("zip{arity}") };
+        let mut inputs = vec!["[1,2]"; arity];
+        inputs[arity - 1] = "[3,4,5]";
+        let source = format!("def bad = {name}({})", inputs.join(", "));
+        assert!(try_typecheck_program(&source).is_err(), "{source}");
+    }
+}
+
+#[test]
 fn weakening_unique_return_into_non_unique_declared() {
     // step2 returns `*[4]i32`; main's declared return is `[4]i32`.
     // Uniqueness can be discarded at the return boundary, so this

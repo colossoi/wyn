@@ -1,5 +1,5 @@
 //! Finite structural summaries and native adapters for the retained planners.
-use super::{OptimizeError, parse_program, timing};
+use super::{parse_program, timing, OptimizeError};
 use egglog_engine::{EGraph, Value, Write};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
