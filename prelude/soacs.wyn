@@ -16,6 +16,10 @@
 -- Zipping and unzipping
 ------------------------------------------------------------
 
+-- | Apply a binary function to corresponding elements of equally sized arrays.
+def map2<[n], A, B, C>(f: A -> B -> C, xs: [n]A, ys: [n]B) [n]C =
+  map(|(x, y)| f(x, y), zip(xs, ys))
+
 -- | Split an array of pairs into the array of first components and
 -- the array of second components. Runs in two passes; for hot loops
 -- with multiple unzip outputs, consider unzipping inline with two
@@ -57,6 +61,9 @@ def tabulate<[n], A>(size: i32, f: i32 -> A) [n]A =
 ------------------------------------------------------------
 -- Array transformations
 ------------------------------------------------------------
+
+-- | Materialize a fresh array containing the same elements.
+def copy<[n], A>(xs: [n]A) [n]A = map(|x| x, xs)
 
 -- | Return the elements in reverse order. Materialises a fresh
 -- array (no in-place reversal); cheaper to fuse the reversal into a

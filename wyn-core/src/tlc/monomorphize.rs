@@ -391,6 +391,25 @@ impl TermRewriter<Empty, Empty> for Monomorphizer<'_, '_> {
     }
 
     fn rewrite_node_before_children(&mut self, term: &mut Term<Empty, Empty>) -> RewriteDecision {
+        if let TermKind::Let { name, rhs, body, .. } = &term.kind {
+            if matches!(rhs.kind, TermKind::Lambda(_)) && !rhs.ty.vars().is_empty() {
+                let body = super::subst::substitute_with(
+                    (**body).clone(),
+                    *name,
+                    &mut |occurrence, ids| {
+                        let mut subst = TypeSubstitution::new();
+                        extend_type_substitution(&rhs.ty, &occurrence.ty, &mut subst);
+                        let mut instance = super::clone_term_with_fresh_ids(rhs, ids);
+                        instance.rewrite_types(ids, &mut |ty| apply_type_substitution(ty, &subst));
+                        instance
+                    },
+                    self.term_ids,
+                );
+                *term = body;
+                self.rewrite_node_before_children(term);
+                return RewriteDecision::Changed;
+            }
+        }
         let TermKind::App { func, args } = &mut term.kind else {
             return RewriteDecision::Unchanged;
         };
