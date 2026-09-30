@@ -5,7 +5,7 @@
 ; Only the presence of scans and reductions determines the recipe.
 (relation CollectiveShape (OperationKey bool bool))
 (relation FilterShape (OperationKey))
-(relation IndexedWrite (OperationKey))
+(relation IndexedWrite (OperationKey bool))
 (relation ScatterReadConflict (OperationKey))
 (relation IndexedReducer (OperationKey bool AtomicUpdate))
 (relation BucketShape (OperationKey bool))
@@ -29,8 +29,8 @@
 (rule ((FilterShape op) (= (ParallelBodySafe op) false)) ((set (Plan op) (Serial))) :ruleset schedule)
 ; Scatter's caller must ensure colliding writes have identical values.
 ; Effectful callbacks still require serial execution.
-(rule ((IndexedWrite op) (= (ParallelBodySafe op) true)) ((set (Plan op) (Scatter))) :ruleset schedule)
-(rule ((IndexedWrite op) (= (ParallelBodySafe op) false)) ((set (Plan op) (Serial))) :ruleset schedule)
+(rule ((IndexedWrite op false) (= (ParallelBodySafe op) true)) ((set (Plan op) (Scatter))) :ruleset schedule)
+(rule ((IndexedWrite op false) (= (ParallelBodySafe op) false)) ((set (Plan op) (Serial))) :ruleset schedule)
 (rule ((IndexedReducer op false kind)) ((set (Plan op) (Serial))) :ruleset schedule)
 (rule ((IndexedReducer op true kind) (= (ParallelBodySafe op) false)) ((set (Plan op) (Serial))) :ruleset schedule)
 (rule ((IndexedReducer op true update) (= (ParallelBodySafe op) true)) ((set (Plan op) (Atomic update))) :ruleset schedule)
@@ -133,6 +133,9 @@
 (rule ((= (Plan op) (Compact)) (Phase (Stage op "compact") r))
       ((Produces (Stage op "compact") (Result op 0))
        (Produces (Stage op "compact") (Result op 1))) :ruleset schedule)
+
+(rule ((IndexedWrite op true) (Phase (Stage op "offsets") r))
+      ((Produces (Stage op "offsets") (Result op 0))) :ruleset schedule)
 
 ; Scratch is a recipe result with ordinary producers, consumers, and capacity.
 (relation Scratch (OperationKey String i64 Extent))
