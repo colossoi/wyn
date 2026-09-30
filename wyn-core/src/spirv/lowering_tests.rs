@@ -1109,3 +1109,55 @@ fn const_array_hoist_is_deduped() {
         "two indexings of one constant must share one Private global:\n{text}"
     );
 }
+
+#[test]
+fn graphics_roots_share_a_descriptor_allocator() {
+    let first = r#"entry first(value: f32, target: render_target<f32>) render_target<f32> =
+      let triangle = rasterize_triangles(direct_draw(3u32, 1u32),
+        |_: u32, _: u32, _: u32| vertex_output(@[0.0, 0.0, 0.0, 1.0], ())) in
+      shade(target, triangle, |_, _, _, _, _| value)"#;
+    let second = r#"entry second(values: []f32, target: render_target<f32>) render_target<f32> =
+      let triangle = rasterize_triangles(direct_draw(3u32, 1u32),
+        |_: u32, _: u32, _: u32| vertex_output(@[0.0, 0.0, 0.0, 1.0], ())) in
+      shade(target, triangle, |_, _, _, _, _| values[0])"#;
+    let compute = "entry compute(values: []f32) []f32 = map(|value| value + 1.0, values)";
+    for (source, entry_count) in [
+        (first.to_string(), 2),
+        (second.to_string(), 2),
+        (format!("{first}\n{second}"), 4),
+        (format!("{second}\n{first}"), 4),
+        (format!("{compute}\n{first}\n{second}"), 5),
+        (format!("{second}\n{first}\n{compute}"), 5),
+    ] {
+        let words = compile_to_spirv(&source).unwrap();
+        let bytes = words.iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<_>>();
+        let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all(),
+        )
+        .validate(&module).unwrap();
+        assert_eq!(module.entry_points.len(), entry_count);
+    }
+}
+
+#[test]
+fn push_constant_record_tail_padding_precedes_next_parameter() {
+    for vector in ["vec3f32", "vec4f32"] {
+        let source = format!("type params = {{ direction: {vector} }}\n\
+            entry transform(values: []f32, frame: params, bias: f32) []f32 =\n\
+            map(|value| value * frame.direction.x + bias, values)");
+        let words = compile_to_spirv(&source).unwrap();
+        let bytes = words.iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<_>>();
+        let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all(),
+        )
+        .validate(&module).unwrap();
+        let (_, block) = module.global_variables.iter()
+            .find(|(_, global)| global.space == naga::AddressSpace::PushConstant).unwrap();
+        let naga::TypeInner::Struct { members, .. } = &module.types[block.ty].inner else {
+            panic!("expected push constant struct");
+        };
+        assert_eq!(members[1].offset, 16, "bias follows the padded record");
+    }
+}

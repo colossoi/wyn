@@ -55,7 +55,7 @@ pub(super) fn entry<'source>(
     }
     let mut inputs = Vec::new();
     let mut parameter_inputs = Vec::new();
-    let mut offset = 0;
+    let mut offset = 0u32;
     for (index, (symbol, ty)) in parameters.iter().enumerate() {
         let Some(param) = decl.params.get(index) else {
             return Err(error("missing input declaration"));
@@ -114,9 +114,11 @@ pub(super) fn entry<'source>(
             {
                 EntryInputKind::Value { decoration }
             } else {
-                let Some(size) = type_byte_size(&storage_type(ty)?) else {
+                // Parameters are block members: aggregates include their tail padding.
+                let Some((size, align)) = crate::ssa::layout::std430_type_layout(&storage_type(ty)?) else {
                     return Err(error("input has no byte layout"));
                 };
+                offset = offset.div_ceil(align) * align;
                 let slot = PushConstantSlot { offset, size };
                 offset += size;
                 EntryInputKind::PushConstant { slot }

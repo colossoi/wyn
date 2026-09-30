@@ -256,7 +256,7 @@ pub(crate) fn std430_struct_layout(fields: &[&Type]) -> Option<BlockLayout> {
     })
 }
 
-fn std430_type_layout(ty: &Type) -> Option<(u32, u32)> {
+pub(crate) fn std430_type_layout(ty: &Type) -> Option<(u32, u32)> {
     match ty {
         Type::Constructed(TypeName::Int(_), _)
         | Type::Constructed(TypeName::UInt(_), _)

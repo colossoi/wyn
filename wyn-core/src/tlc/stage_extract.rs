@@ -390,11 +390,16 @@ pub fn extract_stages(program: PartialEvaled) -> error::Result<StagesExtracted> 
         defs,
         mut symbols,
         mut term_ids,
-        global_context,
+        mut global_context,
         state: _,
     } = program;
     let mut parts = ProgramParts { defs };
-    extract(&mut parts, &mut symbols, &mut term_ids)?;
+    extract(
+        &mut parts,
+        &mut symbols,
+        &mut term_ids,
+        &mut global_context.auto_storage_binding_ids,
+    )?;
     Ok(parts.with_symbols::<StagesExtractedTag, _>(symbols, term_ids, global_context))
 }
 
@@ -404,6 +409,7 @@ fn extract(
     parts: &mut ProgramParts<UnpinnedPolymorphic>,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
+    binding_ids: &mut wyn_base::IdSource<u32>,
 ) -> error::Result<()> {
     let builtins = InvocationBuiltins::get();
     let source_defs = std::mem::take(&mut parts.defs);
@@ -421,8 +427,11 @@ fn extract(
             continue;
         }
 
-        if let Some(stages) = extract_root(&definition, &builtins, &helpers, &constants, symbols, term_ids)
-        {
+        let mut root_binding_ids = binding_ids.clone();
+        if let Some(stages) = extract_root(
+            &definition, &builtins, &helpers, &constants, symbols, term_ids, &mut root_binding_ids,
+        ) {
+            *binding_ids = root_binding_ids;
             extracted.extend(stages);
             continue;
         }
@@ -461,6 +470,7 @@ fn extract_root(
     constants: &LookupMap<SymbolId, StageHelper>,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
+    binding_ids: &mut wyn_base::IdSource<u32>,
 ) -> Option<Vec<Def<UnpinnedPolymorphic>>> {
     let DefMeta::EntryPoint(root_entry) = &definition.meta else {
         return None;
@@ -485,7 +495,19 @@ fn extract_root(
         &mut computed_origins,
     ));
     let root_name = root_entry_name(definition)?;
-    let shape = root_shape(&root_lambda, root_entry, &root_name, builtins, computed_origins)?;
+    // Allocate one module-wide descriptor namespace, shared by all stages
+    // of this root and by the later compute buffer allocator.
+    let mut root_entry = root_entry.clone();
+    for param in &mut root_entry.declaration.params {
+        let binding = binding_ids.next_id();
+        if !is_render_target_type(&param.ty) && param.attributes.is_empty() {
+            param.attributes.extend(external_binding_attribute(&param.ty, binding));
+        }
+    }
+    let root_entry = &root_entry;
+    let shape = root_shape(
+        &root_lambda, root_entry, &root_name, builtins, computed_origins, binding_ids,
+    )?;
     let graphics_count =
         shape.operations.iter().filter(|operation| matches!(operation, RootOperation::Graphics(_))).count();
     if graphics_count == 0 {
@@ -723,6 +745,7 @@ fn root_shape<'a>(
     root_name: &str,
     builtins: &InvocationBuiltins,
     computed_origins: ProjectionOrigins,
+    binding_ids: &mut wyn_base::IdSource<u32>,
 ) -> Option<RootShape<'a>> {
     let mut targets = LookupMap::new();
     for ((symbol, ty), declaration) in root_lambda.params.iter().zip(&root_entry.declaration.params) {
@@ -804,7 +827,6 @@ fn root_shape<'a>(
     let compute_count =
         operations.iter().filter(|operation| matches!(operation, RootOperation::Compute(_))).count();
     let mut compute_index = 0usize;
-    let mut next_binding = root_lambda.params.len() as u32;
     let mut computed = Vec::with_capacity(compute_count);
     for operation in &mut operations {
         let RootOperation::Compute(operation) = operation else {
@@ -830,9 +852,8 @@ fn root_shape<'a>(
                     path,
                     ty,
                     output_name,
-                    binding: next_binding,
+                    binding: binding_ids.next_id(),
                 };
-                next_binding += 1;
                 leaf
             })
             .collect();
@@ -843,14 +864,15 @@ fn root_shape<'a>(
         compute_index += 1;
     }
 
-    let mut next_target_binding = next_binding;
     let mut target_bindings = LookupMap::new();
     for ((_, ty), declaration) in root_lambda.params.iter().zip(&root_entry.declaration.params) {
         let Some(color_ty) = ty.as_render_target().map(|target| target.color) else {
             continue;
         };
-        target_bindings.insert(declaration.name.clone(), next_target_binding);
-        next_target_binding += varying_leaf_types(color_ty).len() as u32;
+        target_bindings.insert(declaration.name.clone(), binding_ids.peek_id());
+        for _ in varying_leaf_types(color_ty) {
+            binding_ids.next_id();
+        }
     }
     for target in targets.values_mut() {
         target.binding = *target_bindings.get(&target.name)?;
@@ -1394,7 +1416,7 @@ fn draw_buffer_source(
         {
             return Some(host::DrawBufferRef {
                 set: AUTO_STORAGE_SET,
-                binding: index as u32,
+                binding: root_parameter_binding(&root_entry.declaration.params[index])?,
                 name: root_entry.declaration.params.get(index)?.name.clone(),
                 resource: None,
             });
@@ -1834,6 +1856,16 @@ fn referenced_symbols(term: &Term) -> LookupSet<SymbolId> {
     referenced
 }
 
+fn root_parameter_binding(param: &interface::EntryParamDecl) -> Option<u32> {
+    param.attributes.iter().find_map(|attribute| match attribute {
+        Attribute::Storage { binding, .. }
+        | Attribute::Uniform { binding, .. }
+        | Attribute::Texture { binding, .. }
+        | Attribute::Sampler { binding, .. } => Some(*binding),
+        _ => None,
+    })
+}
+
 fn append_root_captures(
     used: &LookupSet<SymbolId>,
     root_lambda: &Lambda,
@@ -1854,7 +1886,7 @@ fn append_root_captures(
         if is_render_target_type(ty) || (!used.contains(old_symbol) && is_u16_array(ty)) {
             continue;
         }
-        let binding = binding as u32;
+        let binding = root_parameter_binding(declaration).unwrap_or(binding as u32);
         let new_symbol = symbols.alloc(declaration.name.clone());
         let external_ty = external_parameter_type(ty, binding);
         substitutions.insert((*old_symbol, vec![]), (new_symbol, external_ty.clone()));
