@@ -1,6 +1,6 @@
 //! Demand-driven scalar admission followed by an egglog optimization fixed point.
 //! The structural graph remains authoritative for effects and dispatch placement.
-use super::{parse_program, source, timing, OptimizeError};
+use super::{parse_program, source, timing, OptimizeError, ScalarOptimization};
 use crate::{LookupMap, LookupSet};
 use egglog_engine::{EGraph, TermDag, TermId, Value, Write};
 use std::collections::BTreeMap;
@@ -215,12 +215,19 @@ fn inline_candidate(
 pub(super) fn run(
     graph: &mut EGraph,
     identities: &source::Identities<'_>,
+    policy: ScalarOptimization,
 ) -> Result<(Selected, EGraph), OptimizeError> {
     let _timing = timing::span("egglog scalar optimization");
     let facts = timing::time("egglog scalar / regions", || Facts::read(graph))?;
     fold::register(graph);
     graph.parse_and_run_program(Some("scalar rules".into()), RULES)?;
-    let schedule = parse_program("scalar fixed point", include_str!("scalar/schedule.egg"))?;
+    let schedule = parse_program(
+        "scalar fixed point",
+        match policy {
+            ScalarOptimization::Basic => include_str!("scalar/basic.egg"),
+            ScalarOptimization::Full => include_str!("scalar/schedule.egg"),
+        },
+    )?;
     let mut regions = Vec::new();
     graph.constructor_enodes("RegionId", |row| {
         if facts.roots.contains_key(&row.eclass) {
@@ -323,7 +330,7 @@ pub(super) fn run(
     let profile = std::env::var_os("WYN_SCALAR_PROFILE").is_some();
     let admission = timing::span("egglog scalar / admission");
     let largest = graph.update(|sink| {
-        let mut importer = Importer::new(sink, identities, &facts, &mut cache, &mut templates);
+        let mut importer = Importer::new(sink, identities, &facts, &mut cache, &mut templates, policy);
         Ok(
             groups.iter().try_fold(0, |largest, (&id, (context, members, roots))| {
                 let start = Instant::now();
@@ -364,7 +371,7 @@ pub(super) fn run(
         }
         Ok(())
     })?;
-    let selected = placement::run(graph, identities, &facts)?;
+    let selected = placement::run(graph, identities, &facts, policy)?;
     if timing::enabled() {
         let mut placements = 0;
         graph.constructor_enodes("ScalarSelectedPlacement", |_| placements += 1)?;

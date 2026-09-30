@@ -3,7 +3,7 @@
 use super::Facts;
 use crate::builtins::{by_id, Purity};
 use crate::egglog::source::{Identities, Term};
-use crate::egglog::OptimizeError;
+use crate::egglog::{OptimizeError, ScalarOptimization};
 use crate::tlc::{TermKind, VarRef};
 use crate::types::{Type, TypeName};
 use crate::{LookupMap, LookupSet};
@@ -18,6 +18,7 @@ pub(super) struct Importer<'graph, 'db, 'a, 'source> {
     cache: &'a mut Cache,
     templates: &'a mut LookupMap<Value, Value>,
     loading: LookupSet<(Value, Value, bool)>,
+    policy: ScalarOptimization,
 }
 
 impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
@@ -27,6 +28,7 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
         facts: &'a Facts,
         cache: &'a mut Cache,
         templates: &'a mut LookupMap<Value, Value>,
+        policy: ScalarOptimization,
     ) -> Self {
         Self {
             sink,
@@ -35,6 +37,7 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
             cache,
             templates,
             loading: LookupSet::default(),
+            policy,
         }
     }
 
@@ -175,6 +178,9 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
     }
 
     fn template(&mut self, region: Value) -> Result<(), OptimizeError> {
+        if self.policy == ScalarOptimization::Basic {
+            return Ok(());
+        }
         if !self.facts.eligible.contains(&region) || self.templates.contains_key(&region) {
             return Ok(());
         }

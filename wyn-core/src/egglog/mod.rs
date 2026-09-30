@@ -68,8 +68,23 @@ pub fn schedule(mut program: Program<'_, Placed>) -> Result<Program<'_, Schedule
 }
 
 /// Optimize demanded scalar regions after structural scheduling.
-pub fn optimize(mut program: Program<'_, Scheduled>) -> Result<Program<'_, Optimized>, OptimizeError> {
-    let (selected, scalars) = scalar::run(&mut program.graph, &program.identities)?;
+pub fn optimize(program: Program<'_, Scheduled>) -> Result<Program<'_, Optimized>, OptimizeError> {
+    optimize_with_policy(program, ScalarOptimization::Full)
+}
+
+/// Basic retains reducing rewrites and safety analysis; Full additionally searches
+/// helper expansions and compares compact and inlining-preferred extractions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScalarOptimization {
+    Basic,
+    Full,
+}
+
+pub fn optimize_with_policy(
+    mut program: Program<'_, Scheduled>,
+    policy: ScalarOptimization,
+) -> Result<Program<'_, Optimized>, OptimizeError> {
+    let (selected, scalars) = scalar::run(&mut program.graph, &program.identities, policy)?;
     Ok(program.advance(Optimized { selected, scalars }))
 }
 

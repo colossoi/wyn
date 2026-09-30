@@ -1,5 +1,5 @@
 //! Compare finite egglog extractions by the work in their shared DAGs.
-use crate::egglog::{timing, OptimizeError};
+use crate::egglog::{timing, OptimizeError, ScalarOptimization};
 use crate::{LookupMap, LookupSet};
 use egglog_engine::extract::{Cost, CostModel, Extractor};
 use egglog_engine::sort::VecContainer;
@@ -63,7 +63,11 @@ fn work(name: &str) -> u64 {
 
 /// Extract all demanded roots together so egglog reconstructs shared terms once.
 /// Candidate DAGs are temporary; only selected reachable terms enter the output.
-pub(super) fn select(graph: &mut EGraph, roots: &[Value]) -> Result<(TermDag, Vec<TermId>), OptimizeError> {
+pub(super) fn select(
+    graph: &mut EGraph,
+    roots: &[Value],
+    policy: ScalarOptimization,
+) -> Result<(TermDag, Vec<TermId>), OptimizeError> {
     let Some(sort) = graph.get_sort_by_name("ScalarOutputs").cloned() else {
         return Err(OptimizeError::Output("missing scalar outputs sort".into()));
     };
@@ -100,6 +104,17 @@ pub(super) fn select(graph: &mut EGraph, roots: &[Value]) -> Result<(TermDag, Ve
     // Both seed models are additive, as egglog requires. Reranking their finite
     // DAGs exposes sharing hidden behind calls without expanding alternatives.
     let (compact, compact_roots) = extract(false)?;
+    if policy == ScalarOptimization::Basic {
+        // Keep only reachable expression terms, excluding the synthetic output
+        // vector. Placement resolves every retained term as an engine enode.
+        let mut dag = TermDag::default();
+        let mut copied = LookupMap::default();
+        let roots = compact_roots
+            .into_iter()
+            .map(|root| copy_term(&compact, root, &mut dag, &mut copied))
+            .collect();
+        return Ok((dag, roots));
+    }
     let (inlined, inlined_roots) = extract(true)?;
     let mut dag = TermDag::default();
     let mut compact_copies = LookupMap::default();

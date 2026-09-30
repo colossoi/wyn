@@ -1,0 +1,8 @@
+; Keep argument indexing, safety proofs, and reducing rewrites without -O.
+; No helper expansion creates substitutions in this mode.
+(run-schedule
+  (saturate
+    (seq
+      (saturate (run scalar-arguments))
+      (saturate (run scalar-analysis))
+      (run scalar-micro))))

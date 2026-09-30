@@ -3,7 +3,7 @@
 use super::extract::{self, operands};
 use super::scopes::{Forest, Scope, Scopes};
 use super::{Facts, Selected};
-use crate::egglog::{source, timing, OptimizeError};
+use crate::egglog::{source, timing, OptimizeError, ScalarOptimization};
 use crate::{LookupMap, LookupSet};
 use egglog_engine::ast::Literal;
 use egglog_engine::sort::{F, S};
@@ -13,6 +13,7 @@ pub(super) fn run(
     graph: &mut EGraph,
     identities: &source::Identities<'_>,
     facts: &Facts,
+    policy: ScalarOptimization,
 ) -> Result<Selected, OptimizeError> {
     let _timing = timing::span("egglog scalar / exit placement");
     let extraction = timing::span("egglog scalar / extraction");
@@ -20,7 +21,7 @@ pub(super) fn run(
     graph.constructor_enodes("ScalarRoot", |row| {
         roots.push((row.children[0], row.children[1], row.children[2], row.children[3]));
     })?;
-    let (dag, terms) = extract::select(graph, &roots.iter().map(|r| r.3).collect::<Vec<_>>())?;
+    let (dag, terms) = extract::select(graph, &roots.iter().map(|r| r.3).collect::<Vec<_>>(), policy)?;
     let mut uses: Vec<Vec<Value>> = Vec::new();
     let mut selected_roots = LookupMap::default();
     for ((context, scope, source, _), term) in roots.into_iter().zip(terms) {

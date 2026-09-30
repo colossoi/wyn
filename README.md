@@ -293,8 +293,12 @@ its `place_floating` pass places storage materializations introduced after lower
 Constant folding during backend preparation simplifies generated SSA operations.
 
 `--output-mir` dumps `Elaborated` SSA before these cleanup and backend passes.
-The scalar optimization fixed point runs by default. The CLI still accepts `-O`,
-but it currently does not select additional rewrites. Tests can use
+Without `-O`, constant folding, reducing identities, safety analysis, and aggregate
+cleanup remain enabled, while optional scalar helper expansion and the second
+extraction search are skipped. `-O` enables both for more optimized generated code.
+Structural fusion and required lowering run in either mode.
+The library's `egglog::optimize` keeps the full policy;
+`optimize_with_policy` selects either policy explicitly. Tests can use
 `compile_thru_frontend`, `compile_thru_tlc` (through TLC reachability),
 `compile_thru_ssa`, and `compile_thru_spirv` to stop at shared checkpoints.
 

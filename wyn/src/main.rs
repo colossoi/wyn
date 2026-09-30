@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 use thiserror::Error;
-use wyn_core::egglog::{from_tlc, fuse, optimize, place, schedule, to_ssa, with_timings};
+use wyn_core::egglog::{
+    from_tlc, fuse, optimize_with_policy, place, schedule, to_ssa, with_timings, ScalarOptimization,
+};
 use wyn_core::host::{HostError, Program, ShaderFormat};
 use wyn_core::ssa::stage::Elaborated;
 use wyn_core::tlc::stage::InputSliceBoundsInferred;
@@ -134,7 +136,7 @@ enum Commands {
         #[arg(long)]
         egglog: bool,
 
-        /// Enable egglog algebraic rewrites (constant folding is always enabled).
+        /// Enable scalar helper expansion and extraction search (cheap cleanup is always enabled).
         #[arg(short = 'O')]
         algebra: bool,
 
@@ -725,7 +727,7 @@ fn compile_tlc(modules: ParsedModules, options: &CompileOptions) -> Result<TlcCo
 fn compile_egglog(
     program: &InputSliceBoundsInferred,
     target: Target,
-    _algebra: bool,
+    algebra: bool,
     direct: bool,
     verbose: bool,
 ) -> Result<Elaborated, DriverError> {
@@ -739,7 +741,8 @@ fn compile_egglog(
         };
         let program = place(program, topology)?;
         let program = schedule(program)?;
-        let program = optimize(program)?;
+        let policy = if algebra { ScalarOptimization::Full } else { ScalarOptimization::Basic };
+        let program = optimize_with_policy(program, policy)?;
         let ssa = to_ssa(
             program,
             match target {

@@ -2,6 +2,71 @@
 use crate::{compile_thru_ssa, lower_ssa_to_spirv, lower_ssa_to_wgsl};
 use naga::{BinaryOperator, Expression, Statement};
 
+#[test]
+fn basic_scalar_policy_retains_calls_and_validates_both_backends() {
+    use super::{from_tlc, fuse, optimize_with_policy, place, schedule, to_ssa, ScalarOptimization};
+    use crate::{CodegenTarget, PipelineTopologyPolicy};
+    let helper = "def helper(x:i32) i32 =
+        (x-x)+(x-x)+(x-x)+(x-x)+(x-x)+(x-x)+(x-x)+(x-x)
+        entry main(x:i32) i32 = helper(x)+1";
+    for source in [
+        helper,
+        include_str!("../../../testfiles/regressions/aggregate_forwarding.wyn"),
+        include_str!("../../../testfiles/select_lowering.wyn"),
+        include_str!("../../../testfiles/filter_then_map.wyn"),
+    ] {
+        let tlc = crate::tlc::infer_input_slice_bounds(crate::compile_thru_tlc(source).unwrap());
+        for policy in [ScalarOptimization::Basic, ScalarOptimization::Full] {
+            for target in [CodegenTarget::Spirv, CodegenTarget::Wgsl] {
+                let program = optimize_with_policy(
+                    schedule(
+                        place(
+                            fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                            PipelineTopologyPolicy::AllowGenerated,
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap(),
+                    policy,
+                )
+                .unwrap();
+                let mut templates = 0;
+                program.stage.scalars.constructor_enodes("ScalarInlineBody", |_| templates += 1).unwrap();
+                if policy == ScalarOptimization::Basic {
+                    assert_eq!(templates, 0, "basic mode must not import optional templates");
+                } else if source == helper {
+                    assert!(templates > 0, "fixture must exercise optional helper expansion");
+                }
+                let ssa = to_ssa(program, target).unwrap();
+                let module = match target {
+                    CodegenTarget::Portable => unreachable!("test uses concrete shader targets"),
+                    CodegenTarget::Spirv => {
+                        let binary = lower_ssa_to_spirv(ssa).unwrap();
+                        if source == helper {
+                            let module = wspirv::dr::load_words(&binary.spirv).unwrap();
+                            assert!(
+                                !module.all_inst_iter().any(|i| i.class.opcode == wspirv::spirv::Op::ISub),
+                                "cheap x-x cleanup must remain enabled"
+                            );
+                        }
+                        let bytes: Vec<_> = binary.spirv.iter().flat_map(|w| w.to_le_bytes()).collect();
+                        naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap()
+                    }
+                    CodegenTarget::Wgsl => {
+                        naga::front::wgsl::parse_str(&lower_ssa_to_wgsl(ssa).unwrap()).unwrap()
+                    }
+                };
+                naga::valid::Validator::new(
+                    naga::valid::ValidationFlags::all(),
+                    naga::valid::Capabilities::all(),
+                )
+                .validate(&module)
+                .unwrap();
+            }
+        }
+    }
+}
+
 fn shaders(source: &str) -> naga::Module {
     let program = compile_thru_ssa(source).unwrap_or_else(|error| panic!("{error}\n{source}"));
     let wgsl = lower_ssa_to_wgsl(program.clone()).unwrap_or_else(|error| panic!("{error}\n{source}"));
