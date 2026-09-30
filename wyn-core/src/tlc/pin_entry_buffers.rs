@@ -98,7 +98,7 @@ fn pin_definition(
     let meta = match meta {
         DefMeta::Function => DefMeta::Function,
         DefMeta::LiftedLambda => DefMeta::LiftedLambda,
-        DefMeta::EntryPoint(entry) => {
+        DefMeta::EntryPoint(mut entry) => {
             let span = body.span;
             let (_, params) = extract_lambda_params_ref(&body);
             let param_bindings = compute_entry_binding_layout(
@@ -108,6 +108,29 @@ fn pin_definition(
                 AUTO_STORAGE_SET,
                 binding_ids,
             );
+            // Opaque resources need descriptor bindings even in compute-only
+            // entries, which do not pass through graphics capture extraction.
+            // Share the buffer allocator so implicit resources cannot alias
+            // the entry's automatically allocated storage buffers.
+            for param in &mut entry.declaration.params {
+                if !param.attributes.is_empty() {
+                    continue;
+                }
+                let attribute = match &param.ty {
+                    Type::Constructed(TypeName::Texture2D, _) => interface::Attribute::Texture {
+                        set: AUTO_STORAGE_SET,
+                        binding: binding_ids.next_id(),
+                        backing: None,
+                        resource: None,
+                    },
+                    Type::Constructed(TypeName::Sampler, _) => interface::Attribute::Sampler {
+                        set: AUTO_STORAGE_SET,
+                        binding: binding_ids.next_id(),
+                    },
+                    _ => continue,
+                };
+                param.attributes.push(attribute);
+            }
             let mut subst = BufferSubst::new();
             let mut buffer_env = LookupMap::new();
             collect_buffer_subst(

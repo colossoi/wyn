@@ -1,0 +1,2 @@
+entry sample_pixels(image: texture2d, pixels: []vec2i32) []vec4f32 =
+  map(|pixel| texture_load(image, pixel, 0i32), pixels)

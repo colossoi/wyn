@@ -965,6 +965,37 @@ fn rust_context_keeps_pipeline_creation_out_of_entry_calls() {
 }
 
 #[test]
+fn compute_texture_parameters_validate_in_both_backends() {
+    let load = include_str!("../../testfiles/sample_pixels.wyn");
+    let sample = "entry sample_pixels(image: texture2d, samp: sampler, pixels: []vec2f32) []vec4f32 =
+        map(|pixel| texture_sample(image, samp, pixel, 0.0), pixels)";
+    let multiple = "entry sample_pixels(a: texture2d, pixels: []vec2i32, b: texture2d) []vec4f32 =
+        map(|pixel| texture_load(a, pixel, 0i32) + texture_load(b, pixel, 0i32), pixels)";
+    for source in [load, sample, multiple] {
+        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+            let ssa = compile_thru_ssa(source).unwrap();
+            let module = match format {
+                ShaderFormat::Spirv => {
+                    let binary = lower_ssa_to_spirv(ssa).unwrap();
+                    let bytes: Vec<_> = binary.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
+                    naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap()
+                }
+                ShaderFormat::Wgsl => {
+                    let compiled = lower_ssa_to_wgsl_with_program(ssa).unwrap();
+                    naga::front::wgsl::parse_str(&compiled.wgsl).unwrap()
+                }
+            };
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("{format:?}: {error:?}\n{source}"));
+        }
+    }
+}
+
+#[test]
 fn texture_load_bindings_do_not_require_filtering() {
     let source = include_str!("../../testfiles/rust_host_unfiltered_float_texture.wyn");
     let mixed = format!(
@@ -981,6 +1012,10 @@ fn texture_load_bindings_do_not_require_filtering() {
             )
     );
     for (source, expected) in [
+        (
+            include_str!("../../testfiles/sample_pixels.wyn"),
+            vec![("image", false)],
+        ),
         (source, vec![("source", false)]),
         (mixed.as_str(), vec![("sampled", true), ("source", false)]),
         (
