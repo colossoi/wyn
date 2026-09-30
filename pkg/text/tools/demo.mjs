@@ -19,21 +19,23 @@ function line(text, x, y, size, mode = 1, color = ink) {
   }
 }
 line('WYN / TEXT', 52, 51, 16, 1, mint);
-line('Distance, rendered.', 48, 143, 76);
+line('Same font. Three renderers.', 48, 143, 70);
 line('Aileron Regular  /  CC0  /  196 glyphs', 52, 195, 22, 1, muted);
-line('01  SDF', 76, 303, 20, 1, mint);
-line('02  MSDF', 724, 303, 20, 1, mint);
-line('True distance / alpha', 76, 340, 18, 1, muted);
-line('Sharp corners / RGB', 724, 340, 18, 1, muted);
-for (const [x, mode] of [[76, 0], [724, 1]]) {
-  line('AaW', x - 2, 522, 180, mode);
-  line('AVMW / 0123', x, 593, 42, mode);
-  line('Scales from one atlas.', x, 641, 24, mode);
+line('01  SDF', 72, 303, 20, 1, mint);
+line('02  MSDF', 504, 303, 20, 1, mint);
+line('03  SLUG', 936, 303, 20, 3, mint);
+line('True distance / alpha', 72, 340, 18, 1, muted);
+line('Median distance / RGB', 504, 340, 18, 1, muted);
+line('Direct curve coverage', 936, 340, 18, 3, muted);
+for (const [x, mode] of [[72, 0], [504, 1], [936, 3]]) {
+  line('AaW', x - 2, 515, 136, mode);
+  line('AVMW / 0123', x, 585, 36, mode);
+  line('The same font, scaled.', x, 637, 23, mode);
   line('Café • naïve • €48.00', x, 683, 18, mode, muted);
 }
-line('03  MTSDF / MSDF FILL + SDF OUTLINE', 76, 786, 16, 1, mint);
-line('One texture. Both distances.', 76, 865, 56, 2);
-if (instances.length / 4 !== 247) throw new Error('Update the fixed draw count in examples/demo.wyn.');
+line('SLUG / QUADRATIC OUTLINES + DYNAMIC HALF-PIXEL DILATION', 76, 786, 16, 3, mint);
+line('Curves, without a distance atlas.', 76, 865, 56, 3);
+if (instances.length / 4 !== 353) throw new Error(`Update the fixed draw count in examples/demo.wyn: ${instances.length/4}`);
 const binary = values => { const b = Buffer.alloc(values.length * 4); values.forEach((v,i)=>b.writeFloatLE(v,i*4)); return b; };
 writeFileSync(resolve(out, 'instances.bin'), binary(instances));
 writeFileSync(resolve(out, 'styles.bin'), binary(styles));
@@ -48,6 +50,9 @@ const args = ['pipeline', resolve(out, 'demo.wgsl'), '--size', '1360x940',
   '--image', `atlas:${resolve(root, 'assets/aileron-mtsdf.png')}`,
   '--input', `instances:${resolve(out, 'instances.bin')}`,
   '--input', `styles:${resolve(out, 'styles.bin')}`];
+args.push('--input', `curves:${resolve(root, 'assets/aileron-slug-curves.bin')}`,
+  '--input', `bands:${resolve(root, 'assets/aileron-slug-bands.bin')}`,
+  '--input', `indices:${resolve(root, 'assets/aileron-slug-indices.bin')}`);
 if (!process.argv.includes('--interactive')) args.push('--headless', '--output', `screen:${resolve(out, 'demo.png')}`);
 run(process.env.VIZ ?? 'viz', args);
 console.log(`Demo: ${out}`);

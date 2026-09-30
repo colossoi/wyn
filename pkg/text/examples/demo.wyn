@@ -1,13 +1,14 @@
 import "../src/aileron"
 
--- Real GPU text from the bundled MTSDF. tools/demo.mjs supplies positioned glyphs.
+-- GPU text from the bundled MTSDF and Slug curves. tools/demo.mjs positions glyphs.
 -- instances = (baseline X, baseline Y, em size, Unicode codepoint).
--- styles = (R, G, B, mode), mode 0=SDF, 1=MSDF, 2=MSDF fill + SDF outline.
+-- styles = (R, G, B, mode): 0=SDF, 1=MSDF, 2=MTSDF outline, 3=Slug.
 -- The specimen's display colors target viz's headless Rgba8Unorm output.
 def background(p: vec2f32) vec4f32 =
   let panel = p.y > 256.0f32 && p.y < 724.0f32
-              && ((p.x > 48.0f32 && p.x < 664.0f32)
-                || (p.x > 696.0f32 && p.x < 1312.0f32)) in
+              && ((p.x > 48.0f32 && p.x < 448.0f32)
+                || (p.x > 480.0f32 && p.x < 880.0f32)
+                || (p.x > 912.0f32 && p.x < 1312.0f32)) in
   let lower = p.y > 748.0f32 && p.y < 904.0f32 && p.x > 48.0f32 && p.x < 1312.0f32 in
   let rule = f32.abs(p.y - 228.0f32) < 0.6f32 && p.x > 48.0f32 && p.x < 1312.0f32 in
   if rule then @[0.17f32, 0.24f32, 0.29f32, 1.0f32]
@@ -16,6 +17,7 @@ def background(p: vec2f32) vec4f32 =
 
 entry demo(atlas: texture2d, resolution: vec3f32,
            instances: []vec4f32, styles: []vec4f32,
+           curves: []vec4f32, bands: []vec2i32, indices: []i32,
            screen: render_target<vec4f32>) render_target<vec4f32> =
   let viewport = resolution.xy in
   let scale = f32.min(viewport.x / 1360.0f32, viewport.y / 940.0f32) in
@@ -27,27 +29,45 @@ entry demo(atlas: texture2d, resolution: vec3f32,
   let screen = shade_with({depth_test = #disabled, depth_write = false,
                            blend = #replace, color_write = true},
     screen, backdrop, |_, p, _, _, _| background(p.xy / scale)) in
-  -- The demo has 247 visible glyphs; the tool checks this fixed draw count.
-  let letters = rasterize_triangles(direct_draw(6u32, 247u32),
+  -- tools/demo.mjs checks the fixed glyph count used by this authored draw.
+  let letters = rasterize_triangles(direct_draw(6u32, 353u32),
     |v: u32, instance: u32, _: u32|
       let i = i32(instance) in
       let item = instances[i] in
-      let (p, uv) = text.quad_vertex(aileron.glyph(i32(item.w)), item.xy, item.z, v) in
-      vertex_output(text.pixel_to_clip(p * scale, viewport, 0.0f32), (uv, styles[i]))) in
+      let codepoint = i32(item.w) in
+      let (clip, coordinate) = if styles[i].w > 2.5f32 then
+        let size = item.z * scale in
+        let origin = item.xy * scale in
+        let m0 = @[2.0f32 * size / viewport.x, 0.0f32, 0.0f32, 2.0f32 * origin.x / viewport.x - 1.0f32] in
+        let m1 = @[0.0f32, -2.0f32 * size / viewport.y, 0.0f32, 1.0f32 - 2.0f32 * origin.y / viewport.y] in
+        slug.quad_vertex(aileron.slug_glyph(codepoint), v, m0, m1,
+          @[0.0f32, 0.0f32, 0.0f32, 0.0f32], @[0.0f32, 0.0f32, 0.0f32, 1.0f32], viewport)
+      else
+        let (p, uv) = sdf.quad_vertex(aileron.sdf_glyph(codepoint), item.xy, item.z, v) in
+        (text.pixel_to_clip(p * scale, viewport, 0.0f32), uv) in
+      vertex_output(clip, (coordinate, styles[i], item.w))) in
   shade_with({depth_test = #disabled, depth_write = false,
               blend = #source_over, color_write = true}, screen, letters,
     |varying, _, _, _, _|
-      let (uv, style) = varying in
-      let range = text.screen_range_fragment(
-        text.unit_range(aileron.px_range, aileron.atlas_size), uv) in
+      let (uv, style, codepoint) = varying in
+      -- Derivatives precede the branch; Slug's curve loops use no derivatives.
+      let dx = @[f32.d_fdx(uv.x), f32.d_fdx(uv.y)] in
+      let dy = @[f32.d_fdy(uv.x), f32.d_fdy(uv.y)] in
+      if style.w > 2.5f32 then
+        let coverage = slug.coverage(curves, bands, indices,
+          aileron.slug_glyph(i32(f32.round(codepoint))), uv,
+          @[f32.abs(dx.x) + f32.abs(dy.x), f32.abs(dx.y) + f32.abs(dy.y)]) in
+        text.straight(@[style.x, style.y, style.z, 1.0f32], coverage)
+      else
+      let range = sdf.screen_range(sdf.unit_range(aileron.px_range, aileron.atlas_size), dx, dy) in
       -- viz supplies nearest samplers by default; keep the demo portable by
       -- using the package's explicit bilinear sampler. No runner modifications.
-      let sample = text.sample_bilinear(atlas,
+      let sample = sdf.sample_bilinear(atlas,
         @[i32(aileron.atlas_size.x), i32(aileron.atlas_size.y)], uv) in
-      let sd = text.sdf.distance(sample.w) in
-      let md = text.msdf.distance(sample.xyz) in
-      let fill = text.fill(if style.w < 0.5f32 then sd else md, range, 0.0f32) in
-      let outside = if style.w > 1.5f32 then text.outline(sd, range, 2.0f32 * scale)
+      let sd = sdf.distance(sample.w) in
+      let md = sdf.msdf_distance(sample.xyz) in
+      let fill = sdf.fill(if style.w < 0.5f32 then sd else md, range, 0.0f32) in
+      let outside = if style.w > 1.5f32 then sdf.outline(sd, range, 2.0f32 * scale)
                     else 0.0f32 in
       let alpha = f32.min(fill + outside, 1.0f32) in
       let rgb = (style.xyz * fill + @[0.18f32, 0.56f32, 0.82f32] * outside)

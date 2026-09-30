@@ -1,0 +1,21 @@
+import "../src/aileron"
+
+-- Draw A at a 96-pixel em size, with its baseline at (40,140).
+entry sdf_example(atlas: texture2d, resolution: vec3f32,
+                  screen: render_target<vec4f32>) render_target<vec4f32> =
+  let triangles = rasterize_triangles(direct_draw(6u32, 1u32),
+    |v: u32, _: u32, _: u32|
+      let (p, uv) = sdf.quad_vertex(aileron.sdf_glyph(65),
+        @[40.0f32, 140.0f32], 96.0f32, v) in
+      vertex_output(text.pixel_to_clip(p, resolution.xy, 0.0f32), uv)) in
+  shade_with({depth_test = #disabled, depth_write = false,
+              blend = #source_over, color_write = true}, screen, triangles,
+    |uv, _, _, _, _|
+      let range = sdf.screen_range_fragment(
+        sdf.unit_range(aileron.px_range, aileron.atlas_size), uv) in
+      let encoded = sdf.sample_bilinear(atlas,
+        @[i32(aileron.atlas_size.x), i32(aileron.atlas_size.y)], uv) in
+      let d = sdf.distance(encoded.w) in
+      -- For MSDF, use: sdf.msdf_distance(encoded.xyz)
+      text.straight(@[1.0f32, 1.0f32, 1.0f32, 1.0f32],
+                    sdf.fill(d, range, 0.0f32)))

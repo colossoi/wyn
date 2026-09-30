@@ -1,0 +1,102 @@
+-- | SDF, MSDF and MTSDF rendering. Public contract: API.md.
+import "lib"
+
+module sdf = {
+  -- | Top-down glyph metadata. advance is in em; plane is padded L,T,R,B
+  -- bounds in em relative to the baseline; uv is normalized atlas L,T,R,B.
+  type glyph = { advance: f32, plane: vec4f32, uv: vec4f32 }
+
+  -- | Invisible, degenerate geometry with the supplied advance in em units.
+  def empty_glyph(advance: f32) glyph = {
+    advance = advance,
+    plane = @[0.0f32, 0.0f32, 0.0f32, 0.0f32],
+    uv = @[0.0f32, 0.0f32, 0.0f32, 0.0f32],
+  }
+
+  -- | channel - 0.5: zero at the edge, positive inside, negative outside.
+  -- Returns encoded distance units, not pixels. Use alpha of the bundled MTSDF.
+  def distance(channel: f32) f32 = channel - 0.5f32
+
+  -- | Median of interpolated RGB minus 0.5; same units/sign as distance().
+  -- Interpolate channels before decoding. Use RGB of the bundled MTSDF.
+  def msdf_distance(rgb: vec3f32) f32 =
+    f32.max(f32.min(rgb.x, rgb.y), f32.min(f32.max(rgb.x, rgb.y), rgb.z)) - 0.5f32
+
+  -- | UV-unit range = full encoded range in texels / atlas dimensions in texels.
+  -- px_range and both atlas_size components must be positive.
+  def unit_range(px_range: f32, atlas_size: vec2f32) vec2f32 =
+    @[px_range / atlas_size.x, px_range / atlas_size.y]
+
+  -- | LOD-0 bilinear sampling with clamp-to-edge, independent of host sampler
+  -- defaults. Dimensions must match the texture. Prefer texture_sample with
+  -- a linear sampler when the host can provide one (one fetch versus four).
+  -- Interpolate all channels BEFORE MSDF median reconstruction.
+  -- Atlas is numeric data: non-sRGB, unpremultiplied, with alpha preserved.
+  def sample_bilinear(atlas: texture2d, dimensions: vec2i32, uv: vec2f32) vec4f32 =
+    let p = uv * @[f32(dimensions.x), f32(dimensions.y)] - 0.5f32 in
+    let x = i32(f32.floor(p.x)) in
+    let y = i32(f32.floor(p.y)) in
+    let x0 = i32.min(i32.max(x, 0), dimensions.x - 1) in
+    let x1 = i32.min(i32.max(x + 1, 0), dimensions.x - 1) in
+    let y0 = i32.min(i32.max(y, 0), dimensions.y - 1) in
+    let y1 = i32.min(i32.max(y + 1, 0), dimensions.y - 1) in
+    let a = texture_load(atlas, @[x0, y0], 0) in
+    let b = texture_load(atlas, @[x1, y0], 0) in
+    let c = texture_load(atlas, @[x0, y1], 0) in
+    let d = texture_load(atlas, @[x1, y1], 0) in
+    mix(mix(a, b, f32.fract(p.x)), mix(c, d, f32.fract(p.x)), f32.fract(p.y))
+
+  -- | Uniform axis-aligned scale: max(px_range * font_size / atlas_em_size, 1).
+  -- px_range is atlas texels; font_size is screen pixels/em; atlas_em_size
+  -- is atlas texels/em. All must be positive. Result is screen pixels.
+  def screen_range_2d(px_range: f32, font_size: f32, atlas_em_size: f32) f32 =
+    f32.max(px_range * font_size / atlas_em_size, 1.0f32)
+
+  -- | Pure derivative form; usable with analytic gradients in any stage.
+  -- All atlas sizes/ranges must be positive and inputs finite.
+  -- unit comes from unit_range(); uv_dx/uv_dy are UV change per screen pixel
+  -- along X/Y. Returns screen-pixel range, clamped to at least one pixel.
+  def screen_range(unit: vec2f32, uv_dx: vec2f32, uv_dy: vec2f32) f32 =
+    let footprint = @[f32.max(magnitude(@[uv_dx.x, uv_dy.x]), 1e-12f32),
+                      f32.max(magnitude(@[uv_dx.y, uv_dy.y]), 1e-12f32)] in
+    f32.max(0.5f32 * (unit.x / footprint.x + unit.y / footprint.y), 1.0f32)
+
+  -- | Fragment-only screen_range() wrapper; computes UV derivatives.
+  -- Evaluate in uniform control flow before per-pixel branches.
+  def screen_range_fragment(unit: vec2f32, uv: vec2f32) f32 =
+    screen_range(unit, @[f32.d_fdx(uv.x), f32.d_fdx(uv.y)],
+                      @[f32.d_fdy(uv.x), f32.d_fdy(uv.y)])
+
+  -- | Linear one-screen-pixel antialiasing ramp. Distance is in screen pixels.
+  def coverage(distance_px: f32) f32 =
+    f32.min(f32.max(distance_px + 0.5f32, 0.0f32), 1.0f32)
+
+  -- | Filled opacity [0,1]. signed_distance comes from distance/msdf_distance;
+  -- screen_px_range comes from a screen_range function. weight_px is screen
+  -- pixels: zero = ordinary fill, positive = expand, negative = thin.
+  -- Keep effects within the atlas padding, including the antialias fringe.
+  def fill(signed_distance: f32, screen_px_range: f32, weight_px: f32) f32 =
+    coverage(signed_distance * screen_px_range + weight_px)
+
+  -- | Exterior-only outline. Width must be nonnegative. Use MSDF for mitered
+  -- corners, true SDF for rounded distance effects. Stay within atlas padding.
+  -- signed_distance is decoded atlas distance; screen_px_range and width_px
+  -- are screen pixels. Returns expanded coverage minus normal fill in [0,1].
+  def outline(signed_distance: f32, screen_px_range: f32, width_px: f32) f32 =
+    let d = signed_distance * screen_px_range in
+    coverage(d + width_px) - coverage(d)
+
+  -- | Six vertices per glyph, in triangle-list order. vertex_index in [0,6).
+  -- Returned position is in top-down pixels and UV matches unflipped PNG rows.
+  -- baseline is screen pixels; font_size is positive screen pixels/em.
+  -- Convert the position with text.pixel_to_clip(). Empty glyphs degenerate.
+  def quad_vertex(g: glyph, baseline: vec2f32, font_size: f32,
+                  vertex_index: u32) (vec2f32, vec2f32) =
+    let right = vertex_index == 1u32 || vertex_index == 4u32 || vertex_index == 5u32 in
+    let bottom = vertex_index == 2u32 || vertex_index == 3u32 || vertex_index == 5u32 in
+    let plane = @[if right then g.plane.z else g.plane.x,
+                  if bottom then g.plane.w else g.plane.y] in
+    let uv = @[if right then g.uv.z else g.uv.x,
+               if bottom then g.uv.w else g.uv.y] in
+    (baseline + plane * font_size, uv)
+}

@@ -1,0 +1,141 @@
+-- | Slug outline rendering; public contract: API.md.
+-- Adapted from Eric Lengyel's reference shaders.
+-- Copyright (c) 2017 Eric Lengyel. MIT; see assets/LICENSE-slug.txt.
+-- Uses f32 storage buffers instead of the reference's curve/band textures.
+import "lib"
+
+module slug = {
+  -- | Glyph metadata in top-down em units; buffers are supplied separately.
+  type glyph = {
+    -- Layout advance in em units.
+    advance: f32,
+    -- Tight L,T,R,B outline bounds in em relative to the baseline; no padding.
+    bounds: vec4f32,
+    -- (scale_x, scale_y, offset_x, offset_y): coordinate * scale + offset.
+    band_transform: vec4f32,
+    -- Horizontal header offset/count, vertical header offset/count.
+    -- Offsets index the bands buffer; both counts must be positive.
+    bands: vec4i32,
+  }
+
+  def internal_saturate(x: f32) f32 = f32.min(f32.max(x, 0.0f32), 1.0f32)
+
+  -- Bits 0 and 8 select eligible roots. Sign bits intentionally distinguish -0.
+  def internal_root_code(y0: f32, y1: f32, y2: f32) u32 =
+    let shift = (f32.to_bits(y0) >> 31u32)
+                | ((f32.to_bits(y1) >> 30u32) & 2u32)
+                | ((f32.to_bits(y2) >> 29u32) & 4u32) in
+    (0x2e74u32 >> shift) & 0x0101u32
+
+  -- Crossing X coordinates for a sample-relative quadratic at Y=0. Called
+  -- only for eligible roots. Horizontal degenerates contribute nothing.
+  def internal_solve_horizontal(p01: vec4f32, p2: vec2f32) vec2f32 =
+    let a = p01.xy - p01.zw * 2.0f32 + p2 in
+    let b = p01.xy - p01.zw in
+    let roots =
+      if f32.abs(a.y) < 0.0000152587890625f32 && b.y != 0.0f32 then
+        let t = p01.y * (0.5f32 / b.y) in @[t, t]
+      else if a.y != 0.0f32 then
+        let d = f32.sqrt(f32.max(b.y * b.y - a.y * p01.y, 0.0f32)) in
+        @[(b.y - d) / a.y, (b.y + d) / a.y]
+      else @[0.0f32, 0.0f32] in
+    @[(a.x * roots.x - 2.0f32 * b.x) * roots.x + p01.x,
+      (a.x * roots.y - 2.0f32 * b.x) * roots.y + p01.x]
+
+  -- Signed ray contribution and confidence weight. Vertical rays swap X/Y;
+  -- coverage() reverses their winding sign after the shared calculation.
+  def internal_ray(curves: []vec4f32, indices: []i32, span: vec2i32,
+           coordinate: vec2f32, pixels_per_em: f32, vertical: bool) vec2f32 =
+    let (_, coverage, weight, _) =
+      loop (i, coverage, weight, active) = (0, 0.0f32, 0.0f32, true)
+        while i < span.y && active do
+        let index = indices[span.x + i] * 2 in
+        let first = curves[index] - @[coordinate.x, coordinate.y, coordinate.x, coordinate.y] in
+        let last = curves[index + 1].xy - coordinate in
+        let p01 = if vertical then @[first.y, first.x, first.w, first.z] else first in
+        let p2 = if vertical then last.yx else last in
+        let maximum = f32.max(f32.max(p01.x, p01.z), p2.x) * pixels_per_em in
+        if maximum < -0.5f32 then (i + 1, coverage, weight, false)
+        else
+          let code = internal_root_code(p01.y, p01.w, p2.y) in
+          if code == 0u32 then (i + 1, coverage, weight, true)
+          else
+            let roots = internal_solve_horizontal(p01, p2) * pixels_per_em in
+            let first = (code & 1u32) != 0u32 in
+            let second = code > 1u32 in
+            let add = if first then internal_saturate(roots.x + 0.5f32) else 0.0f32 in
+            let sub = if second then internal_saturate(roots.y + 0.5f32) else 0.0f32 in
+            let w0 = if first then internal_saturate(1.0f32 - f32.abs(roots.x) * 2.0f32) else 0.0f32 in
+            let w1 = if second then internal_saturate(1.0f32 - f32.abs(roots.y) * 2.0f32) else 0.0f32 in
+            (i + 1, coverage + add - sub, f32.max(weight, f32.max(w0, w1)), true) in
+    @[coverage, weight]
+
+  -- Nonzero winding fill; either contour orientation works. Hole contours
+  -- must have opposite winding to their enclosing contour.
+  def internal_combine(horizontal: vec2f32, vertical: vec2f32) f32 =
+    let weighted = f32.abs(horizontal.x * horizontal.y - vertical.x * vertical.y)
+                   / f32.max(horizontal.y + vertical.y, 0.0000152587890625f32) in
+    internal_saturate(f32.max(weighted, f32.min(f32.abs(horizontal.x), f32.abs(vertical.x))))
+
+  -- | Each curve occupies two vec4s: (p0.xy,p1.xy), (p2.xy,0,0).
+  -- Band headers are (index-list offset, count); indices identify curves.
+  -- Coordinate and pixel footprint use the same top-down em coordinate system.
+  -- Returns nonzero-winding coverage [0,1], using Slug's two-ray estimate.
+  -- ems_per_pixel must be positive, normally abs(dEm/dX) + abs(dEm/dY).
+  -- At 96 pixels/em with no rotation it is (1/96,1/96). No derivatives inside.
+  -- Contours must close; holes use opposite winding. Band ordering and buffer
+  -- bounds must follow SLUG.md. The bundled generator supplies valid buffers.
+  def coverage(curves: []vec4f32, bands: []vec2i32, indices: []i32,
+                g: glyph, coordinate: vec2f32, ems_per_pixel: vec2f32) f32 =
+    let band = coordinate * g.band_transform.xy + g.band_transform.zw in
+    let x = i32.min(i32.max(i32(f32.floor(band.x)), 0), g.bands.w - 1) in
+    let y = i32.min(i32.max(i32(f32.floor(band.y)), 0), g.bands.y - 1) in
+    let horizontal = internal_ray(curves, indices, bands[g.bands.x + y], coordinate,
+                         1.0f32 / f32.max(ems_per_pixel.x, 1e-12f32), false) in
+    let vertical = internal_ray(curves, indices, bands[g.bands.z + x], coordinate,
+                       1.0f32 / f32.max(ems_per_pixel.y, 1e-12f32), true) in
+    internal_combine(horizontal, vertical)
+
+  -- | Fragment-only coverage() wrapper using componentwise fwidth(coordinate).
+  -- Derivatives must execute in uniform control flow before divergent branches.
+  def coverage_fragment(curves: []vec4f32, bands: []vec2i32, indices: []i32,
+                         g: glyph, coordinate: vec2f32) f32 =
+    coverage(curves, bands, indices, g, coordinate,
+             @[f32.fwidth(coordinate.x), f32.fwidth(coordinate.y)])
+
+  -- | Half-pixel dynamic dilation in em space, including perspective. Rows are
+  -- from the matrix mapping (em.x,em.y,0,1) to clip space. `normal` is the
+  -- polygon miter normal, not a unit vector (rectangle corners use +/-1,+/-1).
+  -- Requires a nonsingular projection with the glyph in front of the near
+  -- plane and sqrt(u*u+v*v) > s*t. The caller must clip eye-plane crossings.
+  -- position is em; viewport is positive screen pixels; normal must be nonzero.
+  -- Returns expanded em position. quad_vertex calls this for each corner.
+  def dilate(position: vec2f32, normal: vec2f32,
+              m0: vec4f32, m1: vec4f32, m3: vec4f32, viewport: vec2f32) vec2f32 =
+    let n = normalize(normal) in
+    let s = dot(m3.xy, position) + m3.w in
+    let t = dot(m3.xy, n) in
+    let u = (s * dot(m0.xy, n) - t * (dot(m0.xy, position) + m0.w)) * viewport.x in
+    let v = (s * dot(m1.xy, n) - t * (dot(m1.xy, position) + m1.w)) * viewport.y in
+    -- Rationalized form of the reference expression avoids cancellation.
+    let distance = s * s / (f32.sqrt(u * u + v * v) - s * t) in
+    position + normal * distance
+
+  -- | Expanded triangle-list glyph quad. Return clip position plus the matching
+  -- expanded em coordinate, so dilation never changes the glyph's visual size.
+  -- vertex_index is [0,6); rows include glyph baseline, scale and projection.
+  -- viewport is positive screen pixels. Pass em unchanged to the fragment
+  -- stage with perspective-correct interpolation; do not clamp to g.bounds.
+  -- The projection/finite-input requirements of dilate() also apply here.
+  def quad_vertex(g: glyph, vertex_index: u32, m0: vec4f32, m1: vec4f32,
+                   m2: vec4f32, m3: vec4f32, viewport: vec2f32) (vec4f32, vec2f32) =
+    let right = vertex_index == 1u32 || vertex_index == 4u32 || vertex_index == 5u32 in
+    let bottom = vertex_index == 2u32 || vertex_index == 3u32 || vertex_index == 5u32 in
+    let p = @[if right then g.bounds.z else g.bounds.x,
+              if bottom then g.bounds.w else g.bounds.y] in
+    let n = @[if right then 1.0f32 else -1.0f32,
+              if bottom then 1.0f32 else -1.0f32] in
+    let em = dilate(p, n, m0, m1, m3, viewport) in
+    let point = @[em.x, em.y, 0.0f32, 1.0f32] in
+    (@[dot(m0, point), dot(m1, point), dot(m2, point), dot(m3, point)], em)
+}

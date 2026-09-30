@@ -130,6 +130,9 @@ for (const [target, ext] of [['wgsl','wgsl'],['spirv','spv']]) {
   close(gpu('metrics','codepoints',all,true),all.flatMap(cp=>{
     const g=lookup(cp);return [g.advance,g.planeBounds?.top??0,g.planeBounds?.bottom??0,glyphs.has(cp)?1:0];
   }),`${target} all glyphs and missing glyphs`);
+  close(gpu('font_contract','codepoints',all,true),all.flatMap(cp=>{
+    const g=lookup(cp); return [g.advance,g.advance,g.advance,[9,10,13,32,160].includes(cp)?1:0];
+  }),`${target} unified SDF/Slug advances, controls and fallback`);
   const a=glyphs.get(65), p=a.planeBounds, b=a.atlasBounds;
   close(gpu('quads','indices',[0,1,2,3,4,5],true),[[0,0],[1,0],[0,1],[0,1],[1,0],[1,1]].flatMap(([r,d])=>
     [100+40*(r?p.right:p.left),80+40*(d?p.bottom:p.top),

@@ -1,0 +1,24 @@
+Slug shader code Copyright 2017 by Eric Lengyel.
+Adapted under the MIT License; see LICENSE-slug.txt.
+
+Reference repository: https://github.com/EricLengyel/Slug
+Pinned commit: be3c13eb7d63f9e8aa5c583e42d92c374cb91d98
+Retrieved: 2026-09-30
+Reference files: SlugPixelShader.hlsl, SlugVertexShader.hlsl
+
+The reference is available under MIT or Apache-2.0; this adaptation selects MIT.
+It preserves the root eligibility table, signed-zero interpretation, quadratic
+crossings, two-ray nonzero winding filter, band ordering/early exits and dynamic
+dilation. Wyn storage arrays replace texture addressing. Control points use
+f32 rather than the reference's recommended f16 storage. Dilation is expressed
+in an algebraically equivalent rationalized form; a zero-slope degenerate guard
+prevents division by zero in the near-linear polynomial fallback.
+
+The bundled Aileron geometry is generated from the author's CC0 OTF with the
+same checksum and glyph subset as the SDF assets. Cubics are approximated by
+quadratics at 1/65536 em tolerance using FontTools 4.60.1. No proprietary Slug
+library files, font processing code, or commercial typography engine are used.
+
+Algorithm paper: https://jcgt.org/published/0006/02/02/
+Dynamic dilation and patent dedication:
+https://terathon.com/blog/decade-slug.html

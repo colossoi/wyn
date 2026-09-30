@@ -1,0 +1,24 @@
+import "../src/aileron"
+
+entry roots(samples: []vec4f32) []u32 =
+  map(|s: vec4f32| slug.internal_root_code(s.x, s.y, s.z), samples)
+
+entry shape(curves: []vec4f32, bands: []vec2i32, indices: []i32,
+             metadata: []vec4f32, samples: []vec4f32) []f32 =
+  let b = metadata[2] in
+  let g: slug.glyph = {advance = 0.0f32, bounds = metadata[0],
+    band_transform = metadata[1], bands = @[i32(b.x), i32(b.y), i32(b.z), i32(b.w)]} in
+  map(|s: vec4f32| slug.coverage(curves, bands, indices, g, s.xy, s.zw), samples)
+
+entry font(curves: []vec4f32, bands: []vec2i32, indices: []i32,
+            samples: []vec4f32) []f32 =
+  map(|s: vec4f32| slug.coverage(curves, bands, indices,
+    aileron.slug_glyph(i32(s.w)), s.xy, @[s.z, s.z]), samples)
+
+entry dilation(samples: []vec4f32, matrix: []vec4f32) []vec4f32 =
+  map(|s: vec4f32|
+    let p = slug.dilate(s.xy, s.zw, matrix[0], matrix[1], matrix[3], @[800.0f32, 600.0f32]) in
+    let clip_x = dot(matrix[0].xy, p) + matrix[0].w in
+    let clip_y = dot(matrix[1].xy, p) + matrix[1].w in
+    let clip_w = dot(matrix[3].xy, p) + matrix[3].w in
+    @[p.x, p.y, clip_x / clip_w, clip_y / clip_w], samples)
