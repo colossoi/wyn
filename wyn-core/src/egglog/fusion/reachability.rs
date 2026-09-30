@@ -167,6 +167,9 @@ mod tests {
     #[test]
     fn contraction_recomputes_order_and_keeps_effect_paths() {
         let mut graph = super::super::new_graph().unwrap();
+        crate::egglog::planning::load(&mut graph).unwrap();
+        graph.parse_and_run_program(None, include_str!("../source.egg")).unwrap();
+        graph.parse_and_run_program(None, include_str!("../analysis.egg")).unwrap();
         graph.parse_and_run_program(None, include_str!("fusion.egg")).unwrap();
         graph
             .parse_and_run_program(

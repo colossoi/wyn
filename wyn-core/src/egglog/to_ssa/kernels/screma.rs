@@ -2,7 +2,7 @@ use super::super::interface;
 // Expand scheduled phases straight into SSA instructions and structured loops.
 use super::super::plan::Stage;
 use super::super::{builder_error, error, Body, OptimizeError, Typed};
-use super::{element, invocation, store};
+use super::{element, indexed, invocation, store};
 use crate::builtins::catalog;
 use crate::op::{BinaryOperator, OpTag, PureViewSource};
 use crate::ssa::types::InstKind;
@@ -312,7 +312,14 @@ pub(super) fn screma(
                     let value = combine_accumulator(body, scope, operators[i], a, b)?;
                     cache.insert(source, value);
                 }
-                write_arrays(body, scope, stage.operation, plan, results, index, &mut cache)?;
+                if body.compiler.facts.destination(stage.operation).is_some() {
+                    let Some(output) = body.slot(scope, stage.operation, "output", 0, 2)? else {
+                        return Err(error("scan output action has no destination"));
+                    };
+                    indexed::update(body, scope, stage, plan, output, index, &mut cache)?;
+                } else {
+                    write_arrays(body, scope, stage.operation, plan, results, index, &mut cache)?;
+                }
                 Ok(vec![])
             })?;
         }

@@ -181,7 +181,18 @@ impl<'source> Import<'_, '_, '_, 'source> {
             (TermKind::Var(VarRef::Builtin { id, .. }), &[length])
                 if *id == catalog().known().scratch_alloc =>
             {
-                self.sink.add("SourceScratch", (value, length))?;
+                let key = self.expression_key(length)?;
+                let extent = self.sink.add("Scalar", key)?;
+                self.sink.add("SourceScratch", (value, extent))?;
+            }
+            (TermKind::Var(VarRef::Builtin { id, .. }), &[array])
+                if *id == catalog().known().scratch_annotation =>
+            {
+                self.sink.add("SourceLength", (value, array))?;
+                self.summaries.lengths.insert(value, array);
+                let key = self.expression_key(array)?;
+                let extent = self.sink.add("Length", key)?;
+                self.sink.add("SourceScratch", (value, extent))?;
             }
             _ => {}
         }

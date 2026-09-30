@@ -38,7 +38,7 @@
 (relation SourceField (SourceValue i64 SourceValue))
 (relation SourceLength (SourceValue SourceValue))
 (relation SourceSlice (SourceValue SourceValue SourceValue SourceValue))
-(relation SourceScratch (SourceValue SourceValue))
+(relation SourceScratch (SourceValue Extent))
 (function SourceDevice (SourceValue) bool :merge (or old new))
 (function SourcePure (SourceValue) bool :merge (and old new))
 (function SourceReadOnly (SourceValue) bool :merge (and old new))
