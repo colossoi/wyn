@@ -52,199 +52,253 @@ pub(super) fn screma(
         return Err(error("collective domain missing"));
     };
     let n = body.extent(scope, domain)?;
-    let extra = body.literal("63", &types::i32())?;
-    let chunks = body.binary(BinaryOperator::Add, n.clone(), extra)?;
-    let width = body.literal("64", &types::i32())?;
-    let chunks = body.binary(BinaryOperator::Divide, chunks, width.clone())?;
+    if stage.phase == "ordered" {
+        let zero = body.literal("0", &types::i32())?;
+        let one = body.literal("1", &types::i32())?;
+        let state = body.counted(zero.clone(), n, one, initial, |body, index, state| {
+            let mut cache = LookupMap::default();
+            let mut next = Vec::new();
+            for (i, &operator) in operators.iter().enumerate() {
+                let Some(input) = body.compiler.facts.input(operator, 0) else {
+                    return Err(error("operation input missing"));
+                };
+                let value = element(body, scope, plan, input, index.clone(), &mut cache)?;
+                let value = accumulate_element(body, scope, operator, state[i].clone(), value)?;
+                cache.insert(sources[i], value.clone());
+                next.push(value);
+            }
+            write_arrays(body, scope, stage.operation, plan, results, index, &mut cache)?;
+            Ok(next)
+        })?;
+        for (i, value) in state.into_iter().skip(scans.len()).enumerate() {
+            if let Some(output) = body.slot(scope, stage.operation, "total", i as i64, 2)? {
+                store(body, output, zero.clone(), value)?;
+            }
+        }
+        return Ok(());
+    }
+    let uint = Type::Constructed(TypeName::UInt(32), vec![]);
+    let n = body.cast(n, &uint)?;
+    let zero = body.literal("0", &uint)?;
+    let one = body.literal("1", &uint)?;
+    let Some(chunks) = body
+        .compiler
+        .plan
+        .stages
+        .iter()
+        .find(|candidate| candidate.operation == stage.operation && candidate.phase == "chunks")
+    else {
+        return Err(error("collective chunk schedule missing"));
+    };
+    let Some((x, y, z)) = chunks.grid else {
+        return Err(error("collective requires a fixed chunk grid"));
+    };
+    let groups = u64::from(x) * u64::from(y) * u64::from(z);
+    let threads = groups * u64::from(chunks.width);
+    if threads > i32::MAX as u64 {
+        return Err(error("collective grid exceeds the 32-bit index range"));
+    }
+    let width = body.literal(&chunks.width.to_string(), &uint)?;
+    let lane = body.op(
+        OpTag::Intrinsic {
+            id: catalog().known().local_id,
+            overload_idx: 0,
+        },
+        vec![],
+        uint.clone(),
+    )?;
+    // Workgroups own contiguous ranges of whole tiles, preserving operand order.
+    let extra = body.literal(&(threads - 1).to_string(), &uint)?;
+    let threads = body.literal(&threads.to_string(), &uint)?;
+    let tiles = body.binary(BinaryOperator::Add, n.clone(), extra)?;
+    let tiles = body.binary(BinaryOperator::Divide, tiles, threads)?;
+    let span = body.binary(BinaryOperator::Multiply, tiles.clone(), width.clone())?;
     match stage.phase.as_str() {
-        "ordered" => {
-            let zero = body.literal("0", &types::i32())?;
-            let one = body.literal("1", &types::i32())?;
-            let state = body.counted(zero.clone(), n, one, initial, |body, index, state| {
-                let mut cache = LookupMap::default();
-                let mut next = Vec::new();
-                for (i, &operator) in operators.iter().enumerate() {
-                    let Some(input) = body.compiler.facts.input(operator, 0) else {
-                        return Err(error("operation input missing"));
-                    };
-                    let value = element(body, scope, plan, input, index.clone(), &mut cache)?;
-                    let value = accumulate_element(body, scope, operator, state[i].clone(), value)?;
-                    cache.insert(sources[i], value.clone());
-                    next.push(value);
-                }
-                write_arrays(body, scope, stage.operation, plan, results, index, &mut cache)?;
-                Ok(next)
-            })?;
-            for (i, value) in state.into_iter().skip(scans.len()).enumerate() {
-                if let Some(output) = body.slot(scope, stage.operation, "total", i as i64, 2)? {
-                    store(body, output, zero.clone(), value)?;
-                }
-            }
-        }
         "chunks" => {
-            let (start, step) = invocation(body, stage.width)?;
-            body.counted(start, chunks, step, vec![], |body, chunk, _| {
-                let start = body.binary(BinaryOperator::Multiply, chunk.clone(), width.clone())?;
-                let bound = body.binary(BinaryOperator::Add, start.clone(), width.clone())?;
-                let cond = body.binary(BinaryOperator::Less, bound.clone(), n.clone())?;
-                let n = body.cast(n.clone(), &bound.ty)?;
-                let bound = body.select(cond, bound, n)?;
-                let one = body.literal("1", &start.ty)?;
-                let state = body.counted(start, bound, one, initial.clone(), |body, index, state| {
-                    let mut cache = LookupMap::default();
-                    let mut next = Vec::new();
-                    for (i, &operator) in operators.iter().enumerate() {
-                        let Some(input) = body.compiler.facts.input(operator, 0) else {
-                            return Err(error("accumulator input missing"));
-                        };
-                        let filtered = body
-                            .compiler
-                            .facts
-                            .operation(input)
-                            .filter(|filter| body.compiler.plan.member(plan, *filter))
-                            .filter(|_| {
-                                body.compiler.program.identities.origins.get(&input).is_some_and(
-                                    |(term, _)| matches!(term.kind, TermKind::Soac(SoacOp::Filter { .. })),
-                                )
-                            });
-                        let value = if let Some(filter) = filtered {
-                            let Some(source) = body.compiler.facts.input(filter, 0) else {
-                                return Err(error("filtered reduction input missing"));
+            let (thread, _) = invocation(body, stage.width)?;
+            let group = body.binary(BinaryOperator::Divide, thread, width.clone())?;
+            let base = body.binary(BinaryOperator::Multiply, group.clone(), span.clone())?;
+            let state = body.counted(zero.clone(), tiles, one, initial.clone(), |body, tile, carry| {
+                let offset = body.binary(BinaryOperator::Multiply, tile, width.clone())?;
+                let offset = body.binary(BinaryOperator::Add, base.clone(), offset)?;
+                let index = body.binary(BinaryOperator::Add, offset, lane.clone())?;
+                let valid = body.binary(BinaryOperator::Less, index.clone(), n.clone())?;
+                let mut values = Vec::new();
+                for (i, &operator) in operators.iter().enumerate() {
+                    values.push(body.branch(
+                        scope,
+                        valid.clone(),
+                        |body| {
+                            let Some(input) = body.compiler.facts.input(operator, 0) else {
+                                return Err(error("accumulator input missing"));
                             };
-                            let incoming = element(body, scope, plan, source, index.clone(), &mut cache)?;
-                            let keep = body.callback(scope, filter, vec![incoming.clone()])?;
-                            body.branch(
-                                scope,
-                                keep,
-                                |body| body.callback(scope, operator, vec![state[i].clone(), incoming]),
-                                |_| Ok(state[i].clone()),
-                                None,
-                            )?
-                        } else {
-                            let incoming = element(body, scope, plan, input, index.clone(), &mut cache)?;
-                            accumulate_element(body, scope, operator, state[i].clone(), incoming)?
-                        };
-                        if i < scans.len() {
-                            if let Some(output) =
-                                body.slot(scope, stage.operation, "prefix", i as i64, 2)?
-                            {
-                                store(body, output, index.clone(), value.clone())?;
+                            let mut cache = LookupMap::default();
+                            let filtered = body.compiler.facts.operation(input).filter(|filter| {
+                                body.compiler.plan.member(plan, *filter) && is_count(body, *filter)
+                            });
+                            let value = if let Some(filter) = filtered {
+                                let Some(source) = body.compiler.facts.input(filter, 0) else {
+                                    return Err(error("filter input missing"));
+                                };
+                                let incoming =
+                                    element(body, scope, plan, source, index.clone(), &mut cache)?;
+                                let keep = body.callback(scope, filter, vec![incoming.clone()])?;
+                                body.branch(
+                                    scope,
+                                    keep,
+                                    |body| {
+                                        accumulate_element(
+                                            body,
+                                            scope,
+                                            operator,
+                                            initial[i].clone(),
+                                            incoming,
+                                        )
+                                    },
+                                    |_| Ok(initial[i].clone()),
+                                    None,
+                                )?
+                            } else {
+                                let incoming =
+                                    element(body, scope, plan, input, index.clone(), &mut cache)?;
+                                accumulate_element(body, scope, operator, initial[i].clone(), incoming)?
+                            };
+                            if i == 0 && scans.is_empty() {
+                                write_arrays(
+                                    body,
+                                    scope,
+                                    stage.operation,
+                                    plan,
+                                    results,
+                                    index.clone(),
+                                    &mut cache,
+                                )?;
                             }
-                            cache.insert(sources[i], value.clone());
-                        }
-                        next.push(value);
-                    }
-                    if scans.is_empty() {
-                        write_arrays(body, scope, stage.operation, plan, results, index, &mut cache)?;
-                    } else {
-                        for (role, i, source) in results {
-                            if role != "mapped" {
-                                continue;
-                            }
-                            if let Some(output) = body.slot(scope, stage.operation, "mapped", *i, 2)? {
-                                let value = element(body, scope, plan, *source, index.clone(), &mut cache)?;
-                                store(body, output, index.clone(), value)?;
-                            }
-                        }
-                    }
-                    Ok(next)
-                })?;
-                for (i, value) in state.into_iter().enumerate() {
-                    if let Some(output) = body.slot(scope, stage.operation, "partial", i as i64, 2)? {
-                        store(body, output, chunk.clone(), value)?;
-                    }
+                            Ok(value)
+                        },
+                        |_| Ok(initial[i].clone()),
+                        None,
+                    )?);
                 }
-                Ok(vec![])
-            })?;
-        }
-        "combine" if scans.is_empty() => {
-            let lane = body.op(
-                OpTag::Intrinsic {
-                    id: catalog().known().local_id,
-                    overload_idx: 0,
-                },
-                vec![],
-                Type::Constructed(TypeName::UInt(32), vec![]),
-            )?;
-            let width = body.literal(&stage.width.to_string(), &chunks.ty)?;
-            let extra = body.literal(&(stage.width - 1).to_string(), &chunks.ty)?;
-            let count = body.binary(BinaryOperator::Add, chunks.clone(), extra)?;
-            let per_lane = body.binary(BinaryOperator::Divide, count, width)?;
-            let start = body.binary(BinaryOperator::Multiply, per_lane.clone(), lane.clone())?;
-            let bound = body.binary(BinaryOperator::Add, start.clone(), per_lane)?;
-            let cond = body.binary(BinaryOperator::Less, bound.clone(), chunks.clone())?;
-            let bound = body.select(cond, bound, chunks)?;
-            let one = body.literal("1", &start.ty)?;
-            let state = body.counted(start, bound, one, initial.clone(), |body, index, state| {
-                accumulate_slots(body, scope, stage.operation, &operators, &state, "partial", index)
-            })?;
-            let zero = body.literal("0", &types::i32())?;
-            let count = body.literal(&stage.width.to_string(), &types::i32())?;
-            let mut shared = Vec::new();
-            for (i, value) in state.into_iter().enumerate() {
-                let view = body.op(
-                    OpTag::StorageView(PureViewSource::Workgroup {
-                        id: i as u32,
-                        count: stage.width,
-                    }),
-                    vec![zero.clone(), count.clone()],
-                    interface::view_type(&value.ty, types::no_buffer()),
+                let (prefixes, _, totals) = workgroup_scan(
+                    body,
+                    scope,
+                    &operators,
+                    values,
+                    &initial,
+                    lane.clone(),
+                    stage.width,
                 )?;
-                store(body, view.clone(), lane.clone(), value)?;
-                shared.push(view);
-            }
-            body.builder.push_void_inst(InstKind::ControlBarrier).map_err(builder_error)?;
-            for bit in 0..stage.width.trailing_zeros() {
-                let stride = 1 << bit;
-                let active = body.literal(&(stage.width / (2 * stride)).to_string(), &lane.ty)?;
-                let condition = body.binary(BinaryOperator::Less, lane.clone(), active)?;
-                body.when(condition, |body| {
-                    let scale = body.literal(&(2 * stride).to_string(), &lane.ty)?;
-                    let first = body.binary(BinaryOperator::Multiply, lane.clone(), scale)?;
-                    let step = body.literal(&stride.to_string(), &lane.ty)?;
-                    let second = body.binary(BinaryOperator::Add, first.clone(), step)?;
-                    for (i, view) in shared.iter().enumerate() {
-                        let a = body.index(view.clone(), first.clone())?;
-                        let b = body.index(view.clone(), second.clone())?;
-                        let value = combine_accumulator(body, scope, operators[i], a, b)?;
-                        store(body, view.clone(), first.clone(), value)?;
+                body.when(valid, |body| {
+                    for (i, prefix) in prefixes.iter().take(scans.len()).enumerate() {
+                        if let Some(output) = body.slot(scope, stage.operation, "prefix", i as i64, 2)? {
+                            let value = combine_accumulator(
+                                body,
+                                scope,
+                                operators[i],
+                                carry[i].clone(),
+                                prefix.clone(),
+                            )?;
+                            store(body, output, index.clone(), value)?;
+                        }
                     }
                     Ok(())
                 })?;
-                body.builder.push_void_inst(InstKind::ControlBarrier).map_err(builder_error)?;
-            }
-            let condition = body.binary(BinaryOperator::Equal, lane, zero.clone())?;
-            body.when(condition, |body| {
-                for (i, view) in shared.iter().enumerate() {
-                    if let Some(output) = body.slot(scope, stage.operation, "total", i as i64, 2)? {
-                        let value = body.index(view.clone(), zero.clone())?;
-                        store(body, output, zero.clone(), value)?;
+                operators
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &operator)| {
+                        combine_accumulator(body, scope, operator, carry[i].clone(), totals[i].clone())
+                    })
+                    .collect()
+            })?;
+            let first = body.binary(BinaryOperator::Equal, lane, zero)?;
+            body.when(first, |body| {
+                for (i, value) in state.into_iter().enumerate() {
+                    if let Some(output) = body.slot(scope, stage.operation, "partial", i as i64, 2)? {
+                        store(body, output, group.clone(), value)?;
                     }
                 }
                 Ok(())
             })?;
         }
         "combine" => {
-            let zero = body.literal("0", &types::i32())?;
-            let one = body.literal("1", &types::i32())?;
-            let final_state = body.counted(zero.clone(), chunks, one, initial, |body, index, state| {
-                for (i, value) in state.iter().take(scans.len()).enumerate() {
-                    if let Some(output) = body.slot(scope, stage.operation, "offset", i as i64, 2)? {
-                        store(body, output, index.clone(), value.clone())?;
+            let groups = body.literal(&groups.to_string(), &uint)?;
+            let width = body.literal(&stage.width.to_string(), &uint)?;
+            let totals = body.counted(
+                zero.clone(),
+                groups.clone(),
+                width.clone(),
+                initial.clone(),
+                |body, base, carry| {
+                    let index = body.binary(BinaryOperator::Add, base, lane.clone())?;
+                    let valid = body.binary(BinaryOperator::Less, index.clone(), groups)?;
+                    let mut values = Vec::new();
+                    for (i, neutral) in initial.iter().enumerate() {
+                        values.push(body.branch(
+                            scope,
+                            valid.clone(),
+                            |body| {
+                                let Some(partial) =
+                                    body.slot(scope, stage.operation, "partial", i as i64, 1)?
+                                else {
+                                    return Err(error("collective partial is not materialized"));
+                                };
+                                body.index(partial, index.clone())
+                            },
+                            |_| Ok(neutral.clone()),
+                            None,
+                        )?);
+                    }
+                    let (_, offsets, totals) = workgroup_scan(
+                        body,
+                        scope,
+                        &operators,
+                        values,
+                        &initial,
+                        lane.clone(),
+                        stage.width,
+                    )?;
+                    body.when(valid, |body| {
+                        for (i, offset) in offsets.into_iter().take(scans.len()).enumerate() {
+                            if let Some(output) =
+                                body.slot(scope, stage.operation, "offset", i as i64, 2)?
+                            {
+                                let value = combine_accumulator(
+                                    body,
+                                    scope,
+                                    operators[i],
+                                    carry[i].clone(),
+                                    offset,
+                                )?;
+                                store(body, output, index.clone(), value)?;
+                            }
+                        }
+                        Ok(())
+                    })?;
+                    operators
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &operator)| {
+                            combine_accumulator(body, scope, operator, carry[i].clone(), totals[i].clone())
+                        })
+                        .collect()
+                },
+            )?;
+            let first = body.binary(BinaryOperator::Equal, lane, zero.clone())?;
+            body.when(first, |body| {
+                for (i, value) in totals.into_iter().skip(scans.len()).enumerate() {
+                    if let Some(output) = body.slot(scope, stage.operation, "total", i as i64, 2)? {
+                        store(body, output, zero.clone(), value)?;
                     }
                 }
-                accumulate_slots(body, scope, stage.operation, &operators, &state, "partial", index)
+                Ok(())
             })?;
-            for (i, value) in final_state.into_iter().skip(scans.len()).enumerate() {
-                if let Some(output) = body.slot(scope, stage.operation, "total", i as i64, 2)? {
-                    store(body, output, zero.clone(), value)?;
-                }
-            }
         }
         "offsets" => {
             let (start, step) = invocation(body, stage.width)?;
             body.counted(start, n, step, vec![], |body, index, _| {
-                let chunk = body.binary(BinaryOperator::Divide, index.clone(), width)?;
+                let chunk = body.binary(BinaryOperator::Divide, index.clone(), span)?;
                 let mut cache = LookupMap::default();
                 for (i, &source) in scans.iter().enumerate() {
                     let Some(prefix) = body.slot(scope, stage.operation, "prefix", i as i64, 1)? else {
@@ -258,13 +312,6 @@ pub(super) fn screma(
                     let value = combine_accumulator(body, scope, operators[i], a, b)?;
                     cache.insert(source, value);
                 }
-                for (role, i, source) in results {
-                    if role == "mapped" {
-                        if let Some(view) = body.slot(scope, stage.operation, "mapped", *i, 1)? {
-                            cache.insert(*source, body.index(view, index.clone())?);
-                        }
-                    }
-                }
                 write_arrays(body, scope, stage.operation, plan, results, index, &mut cache)?;
                 Ok(vec![])
             })?;
@@ -273,6 +320,83 @@ pub(super) fn screma(
     }
     Ok(())
 }
+
+pub(super) fn workgroup_scan(
+    body: &mut Body<'_, '_, '_>,
+    scope: Value,
+    operators: &[Value],
+    mut values: Vec<Typed>,
+    neutral: &[Typed],
+    lane: Typed,
+    width: u32,
+) -> Result<(Vec<Typed>, Vec<Typed>, Vec<Typed>), OptimizeError> {
+    assert!(
+        width.is_power_of_two(),
+        "workgroup scan width must be a power of two: {width}"
+    );
+    let zero = body.literal("0", &lane.ty)?;
+    let length = body.literal(&width.to_string(), &lane.ty)?;
+    let last = body.literal(&(width - 1).to_string(), &lane.ty)?;
+    let mut shared = Vec::new();
+    for (i, value) in values.iter().enumerate() {
+        let mut banks = Vec::new();
+        for bank in 0..2 {
+            banks.push(body.op(
+                OpTag::StorageView(PureViewSource::Workgroup {
+                    id: (i * 2 + bank) as u32,
+                    count: width,
+                }),
+                vec![zero.clone(), length.clone()],
+                interface::view_type(&value.ty, types::no_buffer()),
+            )?);
+        }
+        store(body, banks[0].clone(), lane.clone(), value.clone())?;
+        shared.push(banks);
+    }
+    body.builder.push_void_inst(InstKind::ControlBarrier).map_err(builder_error)?;
+    let mut bank = 0;
+    for bit in 0..width.trailing_zeros() {
+        let distance = body.literal(&(1u32 << bit).to_string(), &lane.ty)?;
+        let valid = body.binary(BinaryOperator::GreaterEqual, lane.clone(), distance.clone())?;
+        for (i, value) in values.iter_mut().enumerate() {
+            *value = body.branch(
+                scope,
+                valid.clone(),
+                |body| {
+                    let index = body.binary(BinaryOperator::Subtract, lane.clone(), distance.clone())?;
+                    let peer = body.index(shared[i][bank].clone(), index)?;
+                    combine_accumulator(body, scope, operators[i], peer, value.clone())
+                },
+                |_| Ok(value.clone()),
+                None,
+            )?;
+            store(body, shared[i][1 - bank].clone(), lane.clone(), value.clone())?;
+        }
+        bank = 1 - bank;
+        body.builder.push_void_inst(InstKind::ControlBarrier).map_err(builder_error)?;
+    }
+    let one = body.literal("1", &lane.ty)?;
+    let after_first = body.binary(BinaryOperator::Greater, lane.clone(), zero)?;
+    let mut exclusive = Vec::new();
+    let mut totals = Vec::new();
+    for (i, banks) in shared.iter().enumerate() {
+        exclusive.push(body.branch(
+            scope,
+            after_first.clone(),
+            |body| {
+                let previous = body.binary(BinaryOperator::Subtract, lane.clone(), one.clone())?;
+                body.index(banks[bank].clone(), previous)
+            },
+            |_| Ok(neutral[i].clone()),
+            None,
+        )?);
+        totals.push(body.index(banks[bank].clone(), last.clone())?);
+    }
+    // All lanes must finish reading before the next tile reuses shared storage.
+    body.builder.push_void_inst(InstKind::ControlBarrier).map_err(builder_error)?;
+    Ok((values, exclusive, totals))
+}
+
 fn is_count(body: &Body<'_, '_, '_>, operator: Value) -> bool {
     let Some(source) = body.compiler.plan.source(operator) else {
         return false;
@@ -310,31 +434,6 @@ fn combine_accumulator(
     } else {
         body.callback(scope, operator, vec![a, b])
     }
-}
-fn accumulate_slots(
-    body: &mut Body<'_, '_, '_>,
-    scope: Value,
-    operation: Value,
-    operators: &[Value],
-    state: &[Typed],
-    role: &str,
-    index: Typed,
-) -> Result<Vec<Typed>, OptimizeError> {
-    let mut next = Vec::new();
-    for (i, &operator) in operators.iter().enumerate() {
-        let Some(input) = body.slot(scope, operation, role, i as i64, 1)? else {
-            return Err(error("accumulator input is not materialized"));
-        };
-        let incoming = body.index(input, index.clone())?;
-        next.push(combine_accumulator(
-            body,
-            scope,
-            operator,
-            state[i].clone(),
-            incoming,
-        )?);
-    }
-    Ok(next)
 }
 pub(super) fn write_arrays(
     body: &mut Body<'_, '_, '_>,

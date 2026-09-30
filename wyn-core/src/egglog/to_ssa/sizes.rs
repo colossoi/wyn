@@ -63,6 +63,14 @@ pub(super) fn capacity(compiler: &Compiler<'_, '_>, buffer: &Buffer) -> Result<B
     })
 }
 pub(super) fn dispatch(compiler: &Compiler<'_, '_>, stage: &Stage) -> Result<DispatchSize, OptimizeError> {
+    if let Some((x, y, z)) = stage.grid {
+        return Ok(DispatchSize::Fixed {
+            x,
+            y,
+            z,
+            explicit: true,
+        });
+    }
     let mut extent = stage.extent;
     let mut divisor = stage.width;
     while let Some((name, children)) = compiler.plan.extent(extent) {

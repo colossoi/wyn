@@ -22,6 +22,7 @@ pub(super) struct Stage {
     pub phase: String,
     pub extent: Value,
     pub width: u32,
+    pub grid: Option<(u32, u32, u32)>,
 }
 #[derive(Clone)]
 pub(super) struct Buffer {
@@ -47,6 +48,20 @@ pub(super) struct Plan<'a, 'source> {
     query: Facts<'a, 'source>,
 }
 impl<'a, 'source> Plan<'a, 'source> {
+    pub fn entry_grid(
+        &self,
+        owner: SymbolId,
+        stage: Option<&Stage>,
+        authored: Option<(u32, u32, u32)>,
+    ) -> Option<(u32, u32, u32)> {
+        if let Some(stage) = stage {
+            return stage.grid;
+        }
+        if self.stages.iter().any(|stage| stage.owner == owner) {
+            return Some((1, 1, 1));
+        }
+        authored
+    }
     pub fn group(&self, value: Value) -> Option<Value> {
         self.query.lookup("SsaGroup", (value,))
     }
@@ -235,6 +250,18 @@ impl<'a, 'source> Plan<'a, 'source> {
             else {
                 return Err(error("missing stage operation"));
             };
+            let grid = if let Some(axes) = plan.query.enode("FixedGrid", r[6]) {
+                let axis = |i| {
+                    let n = graph.value_to_base::<i64>(axes[i]);
+                    if !(1..=65_535).contains(&n) {
+                        return Err(error("dispatch grid axis must be in 1..=65535"));
+                    }
+                    Ok(n as u32)
+                };
+                Some((axis(0)?, axis(1)?, axis(2)?))
+            } else {
+                None
+            };
             stages.push(Stage {
                 key: r[0],
                 operation,
@@ -242,6 +269,7 @@ impl<'a, 'source> Plan<'a, 'source> {
                 owner: *program.identities.symbols.resolve(graph.value_to_base::<i64>(r[3])),
                 extent: r[4],
                 width: graph.value_to_base::<i64>(r[5]) as u32,
+                grid,
             });
         }
         stages.sort_by_key(|s| s.key);

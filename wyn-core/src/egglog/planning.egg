@@ -2,6 +2,10 @@
 ; Stage identities name static launch sites. Site/Enters retain the
 ; invocation boundaries; a repeated launch is not a cycle in the dispatch DAG.
 (datatype StageKey (Stage OperationKey String))
+(datatype DispatchGrid (AutomaticGrid) (FixedGrid i64 i64 i64))
+(function EntryGrid (i64) DispatchGrid :no-merge)
+(function OperationGrid (OperationKey) DispatchGrid :no-merge)
+(function PhaseGrid (StageKey) DispatchGrid :no-merge)
 (datatype ValueKey
   (Output i64)
   (Source ExprKey)
@@ -39,7 +43,6 @@
 (relation TotalResult (OperationKey i64 TypeKey))
 (relation Accumulator (OperationKey i64 TypeKey))
 (relation ScanComponent (OperationKey i64 TypeKey))
-(relation MappedComponent (OperationKey i64 TypeKey))
 (relation UpdatedResult (OperationKey i64 ExprKey))
 (relation InitializedResult (OperationKey i64 TypeKey Extent))
 (relation FilterResult (OperationKey TypeKey))
@@ -115,7 +118,7 @@
 
 ; Final readout joins; Rust assigns arena IDs without reconstructing these joins.
 (relation PlannedBuffer (ValueKey i64 Extent))
-(relation PlannedStage (StageKey i64 String i64 Extent i64))
+(relation PlannedStage (StageKey i64 String i64 Extent i64 DispatchGrid))
 ; Logical roots and resources remain independent of backend numbering.
 (datatype RootKey (EntryRoot i64) (KernelRoot StageKey))
 (datatype BindingKey (InputBinding i64 i64))
@@ -128,8 +131,8 @@
 (ruleset readout)
 (rule ((Allocation value n) (ElementType value (TypeId ty)))
       ((PlannedBuffer value ty n)) :ruleset readout)
-(rule ((PhaseOwner stage entry) (= stage (Stage (OperationId op) name)) (PhaseDomain stage n width))
-      ((PlannedStage stage op name entry n width)) :ruleset readout)
+(rule ((PhaseOwner stage entry) (= stage (Stage (OperationId op) name)) (PhaseDomain stage n width) (= grid (PhaseGrid stage)))
+      ((PlannedStage stage op name entry n width grid)) :ruleset readout)
 
 (ruleset residency)
 (ruleset structure)

@@ -45,14 +45,11 @@ pub(super) fn entry<'source>(
 ) -> Result<EntryPoint, OptimizeError> {
     let decl = &entry.declaration;
     let mut lower = Body::new(compiler, scope, vec![], source.ty.clone())?;
-    if let Some(grid) = decl.compute_dispatch {
-        let first = lower.compiler.plan.stages.iter().find(|stage| stage.owner == symbol);
-        lower.grid = Some(if stage.map(|s| s.key) == first.map(|s| s.key) {
-            (grid.x, grid.y, grid.z)
-        } else {
-            (1, 1, 1)
-        });
-    }
+    lower.grid = lower.compiler.plan.entry_grid(
+        symbol,
+        stage,
+        decl.compute_dispatch.map(|grid| (grid.x, grid.y, grid.z)),
+    );
     let mut inputs = Vec::new();
     let mut parameter_inputs = Vec::new();
     let mut offset = 0u32;
