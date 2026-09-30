@@ -46,16 +46,37 @@ fn named_constant_branches_remove_only_unreachable_loops() {
 #[test]
 fn constant_shader_math_folds_after_inlining_and_preserves_dynamic_depth_order() {
     let program = crate::compile_thru_ssa(FIXTURE).unwrap();
+    let placed = ssa::place_floating(ssa::optimize(program.clone())).unwrap();
+    let prepared = ssa::prepare_spirv(ssa::filter_reachable(placed)).unwrap();
+    let entry = prepared.entry_points.iter().find(|e| e.name == "constant_math_compute").unwrap();
+    let function = &entry.body.inner;
+    let depth = ValueRef::Const(ConstantValue::from_f32(1.0 / (0.1f32 - 1000.0)));
+    let first = function
+        .insts
+        .values()
+        .find_map(|node| match &node.data {
+            InstKind::Op {
+                tag: OpTag::BinOp(BinaryOperator::Multiply),
+                operands,
+            } if operands.get(1) == Some(&ValueRef::Const(ConstantValue::from_f32(1000.0))) => node.result,
+            _ => None,
+        })
+        .expect("p.z * far must retain its own rounding step");
+    assert!(function.insts.values().any(|node| matches!(&node.data,
+        InstKind::Op { tag: OpTag::BinOp(BinaryOperator::Multiply), operands }
+        if operands == &[first.into(), depth])));
+
     let lowered = crate::lower_ssa_to_spirv(program.clone()).unwrap();
     let module = dr::load_words(&lowered.spirv).unwrap();
-    let count = |op| module.all_inst_iter().filter(|i| i.class.opcode == op).count();
+    let compute = entry_function(&module, "constant_math_compute");
+    let count = |op| instructions(compute).filter(|i| i.class.opcode == op).count();
     assert_eq!(
         count(spirv::Op::FDiv),
         2,
         "only dynamic aspect/projection divisions remain"
     );
     assert_eq!(count(spirv::Op::FSub), 0);
-    assert!(!module.all_inst_iter().any(|i| matches!(
+    assert!(!instructions(compute).any(|i| matches!(
         i.operands.get(1),
         Some(dr::Operand::LiteralExtInstInteger(11 | 15 | 46))
     )));

@@ -260,7 +260,6 @@ fn any_def_calls_candidate(
 
 /// Inline small user functions and constants at their call/reference sites.
 ///
-/// This is the TLC equivalent of `ssa::ssa_inline::inline_small_functions`.
 /// Inlines:
 /// - Small user functions (term size ≤ threshold, no control flow or SOACs)
 /// - Constants (arity-0 defs, substituted at Var reference sites)

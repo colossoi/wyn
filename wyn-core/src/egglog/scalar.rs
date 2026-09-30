@@ -79,6 +79,11 @@ impl Facts {
             facts.results.insert(row.children[0], row.children[1]);
             facts.roots.entry(row.children[0]).or_default().insert(row.children[1]);
         })?;
+        // While conditions are demanded in the header independently of the
+        // loop result. Admit them so their values can also serve dominated uses.
+        graph.constructor_enodes("SourceLoopCondition", |row| {
+            facts.roots.entry(row.children[0]).or_default().insert(row.children[1]);
+        })?;
         let mut operation_values = LookupMap::default();
         graph.constructor_enodes("SourceOperationValue", |row| {
             operation_values.insert(row.children[0], row.children[1]);

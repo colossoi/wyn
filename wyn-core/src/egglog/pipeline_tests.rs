@@ -391,3 +391,68 @@ fn nested_loop_invariants_keep_outer_iteration_dependencies() {
 fn guarded_partial_arithmetic_keeps_its_control_dependency_inside_loops() {
     shaders("entry guarded(xs:[]i32) []i32 = map(|x:i32| loop a=0 for i<7 do a+(if x==0 then i else 120/x+i), xs)");
 }
+
+#[test]
+fn guarded_division_is_shared_across_control_indexing_and_composed_callbacks() {
+    for source in [
+        "entry main(xs:[]i32) []i32 = map(|n|
+         if n==0 then 7 else if 100/n>2 then 100/n+1 else 100/n+2,xs)",
+        "entry main(xs:[]i32) []i32 = map(|n|
+         if n==0 then 7 else loop a=100/n for i<2 do a+100/n,xs)",
+        "entry main(xs:[]i32) []i32 = map(|x|
+         let values=[x,x+1]
+         let i=if x==0 then 0 else 10/x in values[i%2]+i,xs)",
+        "entry main(xs:[]i32) []i32 =
+         map(|p|p.0+p.1,map(|x|let q=if x==0 then 0 else 100/x in (q+1,q+2),xs))",
+    ] {
+        let module = shaders(source);
+        let divisions = module
+            .functions
+            .iter()
+            .map(|(_, f)| f)
+            .chain(module.entry_points.iter().map(|e| &e.function))
+            .flat_map(|f| f.expressions.iter())
+            .filter(|(_, expression)| {
+                matches!(
+                    expression,
+                    Expression::Binary {
+                        op: BinaryOperator::Divide,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(divisions, 1, "{source}");
+    }
+}
+
+#[test]
+fn camera_field_math_is_shared_across_indexing() {
+    for (ty, angle) in [("{angle:f32}", "camera.angle"), ("vec2f32", "camera.x")] {
+        // Keep the calculation per-element so host capture cannot remove it
+        // from the shader whose sharing this regression checks.
+        let source = format!(
+            "entry main(xs:[]i32,camera:{ty}) []f32 = map(|x|
+             let q=f32.sin({angle}+f32(x))
+             let values=[x,x+1] in f32(values[i32(f32.abs(q))%2])+q,xs)"
+        );
+        let module = shaders(&source);
+        let sines = module
+            .functions
+            .iter()
+            .map(|(_, f)| f)
+            .chain(module.entry_points.iter().map(|e| &e.function))
+            .flat_map(|f| f.expressions.iter())
+            .filter(|(_, expression)| {
+                matches!(
+                    expression,
+                    Expression::Math {
+                        fun: naga::MathFunction::Sin,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(sines, 1, "{source}");
+    }
+}
