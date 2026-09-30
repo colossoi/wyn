@@ -1197,11 +1197,8 @@ impl<'a> LowerCtx<'a> {
     }
 
     fn emit_remaining_declarations(&mut self, output: &mut String) -> Result<()> {
-        // Workgroup-shared arrays (phase2 tree reduce): one module-scope
-        // `var<workgroup> _wg_<id>: array<T, count>` per distinct id, found by
-        // pre-scanning every entry body for `StorageView(Workgroup{id,count})`.
-        // ids are globally unique (assigned by the phase2 synthesis).
-        let mut wg_arrays: std::collections::BTreeMap<u32, (String, u32)> =
+        // Workgroup IDs are local to an entry point; WGSL declarations are not.
+        let mut wg_arrays: std::collections::BTreeMap<(EntryId, u32), (String, u32)> =
             std::collections::BTreeMap::new();
         for entry in &self.program.entry_points {
             for (_, inst) in entry.body.inner.insts.iter() {
@@ -1223,15 +1220,15 @@ impl<'a> LowerCtx<'a> {
                         None => view_ty.clone(),
                     };
                     let elem_str = self.type_emitter.type_to_wgsl(&elem_ty)?;
-                    wg_arrays.entry(*id).or_insert((elem_str, *count));
+                    wg_arrays.entry((entry.id, *id)).or_insert((elem_str, *count));
                 }
             }
         }
-        for (id, (elem_str, count)) in wg_arrays {
+        for ((entry, id), (elem_str, count)) in wg_arrays {
             writeln!(
                 output,
-                "var<workgroup> _wg_{}: array<{}, {}>;",
-                id, elem_str, count
+                "var<workgroup> _wg_{}_{}: array<{}, {}>;",
+                entry.0, id, elem_str, count
             )?;
             writeln!(output)?;
         }
@@ -1889,9 +1886,9 @@ struct BodyLowerCtx<'a, 'b> {
     /// These must be introduced with `var`, even though SSA itself does
     /// not reassign the ValueId.
     needs_mutable_binding: LookupSet<ValueId>,
-    /// Workgroup view name (`_wg_<id>`) keyed by `StorageView` result ValueId.
+    /// Workgroup view name (`_wg_<entry>_<id>`) keyed by `StorageView` result ValueId.
     /// Storage views recover their buffer name from the type's region; only
-    /// workgroup views (whose `_wg_<id>` isn't in any type) need this.
+    /// workgroup views (whose name isn't in any type) need this.
     workgroup_view_name: LookupMap<ValueId, String>,
     /// WGSL place expression per `PlaceId` — output variable name,
     /// `_alloca_N` for function-local `Alloca`s, or `buf[offset+idx]`
@@ -3384,7 +3381,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 // len). The backing buffer is static — recovered from the value
                 // type's region at the consumer (`view_buffer_name`) — so it's
                 // NOT part of the value. Workgroup views are the one exception:
-                // their `_wg_<id>` name isn't in any type, so record it.
+                // their name isn't in any type, so record it.
                 op::OpTag::StorageView(src) => {
                     let offset = operands[0];
                     let len = operands[1];
@@ -3392,7 +3389,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         .result
                         .ok_or_else(|| err_wgsl_at!(self.blame_span(), "StorageView must have a result"))?;
                     if let op::PureViewSource::Workgroup { id, .. } = src {
-                        self.workgroup_view_name.insert(result_id, format!("_wg_{}", id));
+                        let Some(entry) = self.ctx.current_entry else {
+                            return Err(err_wgsl_at!(self.blame_span(), "workgroup view outside an entry"));
+                        };
+                        self.workgroup_view_name.insert(result_id, format!("_wg_{}_{}", entry.0, id));
                     }
                     let offset_expr = self.get_value(offset)?;
                     let len_expr = self.get_value(len)?;

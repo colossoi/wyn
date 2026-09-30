@@ -3,9 +3,12 @@ use crate::host::Pipeline;
 use crate::tlc::infer_input_slice_bounds;
 use crate::PipelineTopologyPolicy;
 use crate::{
-    compile_thru_tlc, host, lower_ssa_to_spirv, lower_ssa_to_wgsl, lower_ssa_to_wgsl_with_program,
-    CodegenTarget, LoweredWgsl,
+    compile_thru_spirv, compile_thru_tlc, host, lower_ssa_to_spirv, lower_ssa_to_wgsl,
+    lower_ssa_to_wgsl_with_program, CodegenTarget, LoweredWgsl,
 };
+
+use naga::front::spv;
+use naga::valid::{Capabilities, ValidationFlags, Validator};
 
 fn compile(source: &str) -> naga::Module {
     let ssa = crate::compile_thru_ssa_for_target(source, CodegenTarget::Wgsl)
@@ -1124,4 +1127,15 @@ fn runtime_index_into_shared_array_helper_reaches_wgsl() {
     compile(
         "def g(n: i32) []f32 = map(|i: i32| f32.i32(i),0i32..<n)\nentry e(j: i32) [1]f32 = [g(256)[j]]",
     );
+}
+
+#[test]
+fn workgroup_storage_is_local_to_each_entry() {
+    let source = "entry ints(xs:[]i32) i32 = reduce(|a:i32,b:i32|a+b,0,xs)
+                  entry floats(xs:[]f32) f32 = reduce(|a:f32,b:f32|a+b,0.0,xs)";
+    compile(source);
+    let output = compile_thru_spirv(source).unwrap();
+    let bytes: Vec<_> = output.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
+    let module = spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
+    Validator::new(ValidationFlags::all(), Capabilities::all()).validate(&module).unwrap();
 }

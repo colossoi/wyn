@@ -17,6 +17,7 @@ fn requires_flat_interpolation(ty: &PolyType<TypeName>) -> bool {
 
 /// Lower an SSA entry point to SPIR-V.
 pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &EntryPoint) -> Result<()> {
+    constructor.workgroup_vars.clear();
     let body = &entry.body;
     let uses = ssa::ValueUses::analyze(&body.inner);
     let used_places: LookupSet<_> =
