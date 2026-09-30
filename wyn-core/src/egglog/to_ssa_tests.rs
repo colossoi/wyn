@@ -972,6 +972,53 @@ fn materialized_tuple_projections_reach_both_backends() {
 }
 
 #[test]
+fn aggregate_forwarding_preserves_record_subsets_and_loop_state() {
+    let source = include_str!("../../../testfiles/regressions/aggregate_forwarding.wyn");
+    compile(source);
+    let output = crate::compile_thru_spirv(source).unwrap();
+    let bytes: Vec<_> = output.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
+    let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap();
+    let module = wspirv::dr::load_words(&output.spirv).unwrap();
+    let definitions: std::collections::HashMap<_, _> = module
+        .all_inst_iter()
+        .filter_map(|instruction| instruction.result_id.map(|id| (id, instruction)))
+        .collect();
+    for function in &module.functions {
+        for block in &function.blocks {
+            let mut seen = std::collections::HashSet::new();
+            for instruction in &block.instructions {
+                use wspirv::{dr::Operand, spirv::Op};
+                if matches!(
+                    instruction.class.opcode,
+                    Op::CompositeConstruct | Op::CompositeExtract
+                ) {
+                    assert!(
+                        seen.insert((
+                            instruction.class.opcode,
+                            instruction.result_type,
+                            &instruction.operands
+                        )),
+                        "duplicate aggregate operation"
+                    );
+                }
+                if instruction.class.opcode == Op::CompositeExtract {
+                    let Operand::IdRef(source) = instruction.operands[0] else {
+                        panic!("missing source")
+                    };
+                    assert_ne!(definitions[&source].class.opcode, Op::CompositeConstruct);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn materialized_boolean_reduction_reaches_both_backends() {
     for condition in ["xs[0] > 0 || any", "any || xs[0] > 0", "any", "!any"] {
         let source = format!(

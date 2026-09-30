@@ -13,6 +13,9 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::marker::PhantomData;
 
+mod aggregate_cleanup;
+mod aggregates;
+
 /// Phantom-typed wrapper around `spirv::Word` that prevents call-site
 /// confusion between distinct kinds of IDs (type vs. value vs.
 /// variable, etc.). `Deref<Target = spirv::Word>` lets `*id` extract
@@ -103,6 +106,7 @@ type ImageTypeKey = (
 
 pub struct SpirvBuilder {
     inner: Builder,
+    aggregates: aggregates::Definitions,
     // Well-known types eagerly created at construction so call sites
     // can look them up by name instead of asking rspirv each time.
     void_type: TypeId,
@@ -215,6 +219,7 @@ impl SpirvBuilder {
         let glsl_ext_inst_id = inner.ext_inst_import("GLSL.std.450");
         SpirvBuilder {
             inner,
+            aggregates: aggregates::Definitions::default(),
             void_type,
             bool_type,
             i32_type,
@@ -259,9 +264,12 @@ impl SpirvBuilder {
         }
     }
 
-    /// Consume the builder and produce the finished SPIR-V module.
+    /// Finish the module with block-local aggregate reuse and dead-aggregate
+    /// removal. Operand computations and control flow are preserved.
     pub fn into_module(self) -> rspirv::dr::Module {
-        self.inner.module()
+        let mut module = self.inner.module();
+        aggregate_cleanup::run(&mut module);
+        module
     }
 
     pub fn void_type(&self) -> TypeId {
@@ -678,8 +686,9 @@ impl SpirvBuilder {
 
     /// Emit `OpConstantComposite ty elems…` if all `elems` are
     /// constants minted through this builder, else
-    /// `OpCompositeConstruct ty elems…`. Both forms are cached so
-    /// repeated builds of the same shape collapse to one id.
+    /// `OpCompositeConstruct ty elems…`. Constants are cached; runtime
+    /// constructions use exact aggregate forwarding here. Block-local reuse
+    /// runs when the module is finished.
     pub fn composite_or_construct(
         &mut self,
         ty: TypeId,
@@ -704,7 +713,7 @@ impl SpirvBuilder {
             self.composite_const_cache.insert(key, id);
             Ok(*id)
         } else {
-            self.inner.composite_construct(*ty, None, elems)
+            self.composite_construct(*ty, None, elems)
         }
     }
 

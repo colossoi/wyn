@@ -22,6 +22,7 @@ use egglog_engine::{TermId, Value};
 use std::cell::RefCell;
 use wyn_graph::DominatorTree;
 
+mod aggregates;
 mod collective;
 mod control;
 mod resources;
@@ -542,6 +543,9 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
             _ => true,
         });
         let block = if available { block } else { self.current()? };
+        if let Some(value) = aggregates::forward(self.builder.func(), &tag, &args, &ty) {
+            return Ok(value);
+        }
         let instruction = InstKind::Op {
             tag,
             operands: args.into_iter().map(|arg| arg.value).collect(),

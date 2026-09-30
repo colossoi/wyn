@@ -1,0 +1,20 @@
+-- A camera-style field subset plus loop-carried aggregate state. Negative and
+-- zero inputs exercise the empty loop and guarded division paths.
+type full = { position: vec2i32, scale: i32, bias: i32, unused: i32 }
+type small = { position: vec2i32, scale: i32, bias: i32 }
+
+def subset(c: full) small = {
+  position = c.position,
+  scale = c.scale,
+  bias = c.bias,
+}
+
+entry aggregate_forwarding(xs: []i32) []i32 =
+  map(|x: i32|
+    let s = subset({ position = @[x, x + 1], scale = 3, bias = 2, unused = x - 7 })
+    let n = if x < 0 then 0 else x % 5
+    let state = loop state = (s.position.x, s.position.y) for i < n do
+      (state.1, state.0 + 1)
+    let quotient = if x != 0 then 120 / x else 7
+    in state.0 * s.scale + state.1 + s.bias + quotient,
+    xs)

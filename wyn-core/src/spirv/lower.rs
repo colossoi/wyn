@@ -151,7 +151,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             }
 
             for &param in &block.params {
-                let phi_id = self.constructor.builder.id();
+                let ty = self.constructor.polytype_to_spirv(self.body.inner.value_type(param))?;
+                let phi_id = *self.constructor.builder.reserve_value(super::builder::TypeId::new(ty));
                 self.value_map.insert(param, phi_id);
             }
         }
