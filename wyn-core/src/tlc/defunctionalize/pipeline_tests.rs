@@ -8,6 +8,39 @@ use crate::SymbolTable;
 use polytype::Type;
 use wyn_base::IdSource;
 
+#[test]
+fn unapplied_callback_remains_a_function_value_after_partial_evaluation() {
+    let source = "def bits(xs:[]i32,get_bit:i32 -> i32 -> i32,bit:i32) []i32 =
+        map(|x|get_bit(bit,x),xs)
+        entry main() []i32 = bits([-2147483648,0,2147483647],i32.get_bit,31)";
+    let program = crate::compile_thru_ssa(source).unwrap();
+    crate::lower_ssa_to_spirv(program.clone()).unwrap();
+    crate::lower_ssa_to_wgsl(program).unwrap();
+}
+
+#[test]
+fn integer_get_bit_can_be_passed_through_a_capturing_callback() {
+    let source = "def bits(xs:[]i32, get_bit:i32 -> i32 -> i32, bit:i32) []i32 =
+        map(|x|get_bit(bit,x),xs)
+        def signed_bits(xs:[]i32, get_bit:i32 -> i32 -> i32, bit:i32) []i32 =
+        bits(xs,|i,x|if i==31 then get_bit(i,x)^1 else get_bit(i,x),bit)
+        entry main(xs:[]i32,bit:i32) []i32 = signed_bits(xs,i32.get_bit,bit)";
+    let program = crate::compile_thru_ssa(source).unwrap();
+    crate::lower_ssa_to_spirv(program.clone()).unwrap();
+    crate::lower_ssa_to_wgsl(program).unwrap();
+}
+
+#[test]
+fn multiple_callable_arguments_are_fully_specialized() {
+    let source = "def combine(f:i32 -> i32,g:i32 -> i32,x:i32) i32 =
+        if x<0 then f(x) else g(x)
+        entry main(xs:[]i32,bias:i32) []i32 =
+        map(|x|combine(|y|y+bias,|y|y*bias,x),xs)";
+    let program = crate::compile_thru_ssa(source).unwrap();
+    crate::lower_ssa_to_spirv(program.clone()).unwrap();
+    crate::lower_ssa_to_wgsl(program).unwrap();
+}
+
 /// End-to-end runner for the three internal defunctionalization algorithms. Mirrors what
 /// `tlc::defunctionalize` does in production.
 fn defunctionalize(program: tlc::stage::RuntimeIndexProducersFloated) -> tlc::stage::Defunctionalized {

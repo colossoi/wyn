@@ -509,6 +509,14 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         mut args: Vec<Typed>,
         ty: Type,
     ) -> Result<Typed, OptimizeError> {
+        if matches!(tag,OpTag::Intrinsic{id,..} if id==catalog().known().scratch_annotation) {
+            let [array] = args.as_slice() else {
+                return Err(error("scratch annotation needs one array"));
+            };
+            // The planner has consumed this permission to omit initialization.
+            // Any initializer it retained has already been emitted above.
+            return Ok(array.clone());
+        }
         if matches!(tag,OpTag::Intrinsic{id,..} if id==catalog().known().array_with) {
             let Some(array) = args.first().cloned() else {
                 return Err(error("array update has no destination"));

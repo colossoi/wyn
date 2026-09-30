@@ -261,17 +261,23 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         let spirv_result = match &inst.data {
             InstKind::Op { tag, operands } => match tag {
                 op::OpTag::Int(s) | op::OpTag::Uint(s) => match ssa_result_ty.as_ref() {
-                    Some(PolyType::Constructed(TypeName::UInt(32), _)) => {
-                        let val: u32 = s
+                    Some(PolyType::Constructed(TypeName::UInt(width), _)) => {
+                        let val: u64 = s
                             .parse()
-                            .map_err(|_| err_spirv_at!(self.blame_span(), "Invalid u32: {}", s))?;
-                        self.constructor.const_u32(val)
+                            .map_err(|_| err_spirv_at!(self.blame_span(), "Invalid u{width}: {}", s))?;
+                        *self.constructor.builder.const_integer(*width as u32, false, val)
                     }
-                    _ => {
-                        let val: i32 = s
+                    Some(PolyType::Constructed(TypeName::Int(width), _)) => {
+                        let val: i64 = s
                             .parse()
-                            .map_err(|_| err_spirv_at!(self.blame_span(), "Invalid i32: {}", s))?;
-                        self.constructor.const_i32(val)
+                            .map_err(|_| err_spirv_at!(self.blame_span(), "Invalid i{width}: {}", s))?;
+                        *self.constructor.builder.const_integer(*width as u32, true, val as u64)
+                    }
+                    ty => {
+                        return Err(err_spirv_at!(
+                            self.blame_span(),
+                            "invalid integer literal type: {ty:?}"
+                        ))
                     }
                 },
 

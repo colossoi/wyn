@@ -192,28 +192,16 @@ fn array_of_tuple_parts(
 // SOAC normalization helpers (standalone, don't need self)
 // =============================================================================
 
-/// Count how many flat (non-tuple) types a type expands to.
-fn flat_type_count(ty: &Type<TypeName>) -> usize {
-    match ty {
-        Type::Constructed(TypeName::Tuple(_), children) if !children.is_empty() => {
-            children.iter().map(flat_type_count).sum()
-        }
-        _ => 1,
+/// A SoA input still supplies one logical tuple element to its callback.
+fn map_input_element_type(ty: &Type<TypeName>) -> Option<Type<TypeName>> {
+    if let Type::Constructed(TypeName::Tuple(n), fields) = ty {
+        Some(Type::Constructed(
+            TypeName::Tuple(*n),
+            fields.iter().map(map_input_element_type).collect::<Option<_>>()?,
+        ))
+    } else {
+        ty.elem_type().cloned()
     }
-}
-
-/// Recursively flatten nested tuple types: ((A, B), C) -> [A, B, C]
-fn flatten_tuple_types(types: &[Type<TypeName>]) -> Vec<Type<TypeName>> {
-    let mut flat = Vec::new();
-    for ty in types {
-        match ty {
-            Type::Constructed(TypeName::Tuple(_), children) if !children.is_empty() => {
-                flat.extend(flatten_tuple_types(children));
-            }
-            _ => flat.push(ty.clone()),
-        }
-    }
-    flat
 }
 
 fn has_type_variables(ty: &Type<TypeName>) -> bool {
@@ -667,25 +655,30 @@ impl MapNormalizer<'_, '_> {
         }
 
         let (old_param, param_ty) = (body.lam.params[0].0, body.lam.params[0].1.clone());
-        let flat_types = match &param_ty {
-            Type::Constructed(TypeName::Tuple(_), types) if !types.is_empty() => flatten_tuple_types(types),
-            _ => return None,
-        };
-        if flat_types.len() != inputs.len() || has_type_variables(&param_ty) {
+        if !matches!(&param_ty, Type::Constructed(TypeName::Tuple(_), _)) || has_type_variables(&param_ty) {
             return None;
         }
+        let input_types = inputs
+            .iter()
+            .map(|input| map_input_element_type(&input.array_type()))
+            .collect::<Option<Vec<_>>>()?;
 
         let SoacBody { lam, data } = body;
-        let new_params: Vec<(SymbolId, Type<TypeName>)> = flat_types
+        let new_params: Vec<(SymbolId, Type<TypeName>)> = input_types
             .into_iter()
             .enumerate()
             .map(|(index, ty)| (self.symbols.alloc(format!("_sn_{index}")), ty))
             .collect();
         let span = lam.body.span;
+        let mut remaining = new_params.as_slice();
+        let reconstruction = build_tuple_reconstruction(&mut remaining, &param_ty, span, self.term_ids)?;
+        if !remaining.is_empty() {
+            return None;
+        }
         let rewritten_body = super::subst::substitute_with(
             *lam.body,
             old_param,
-            &mut |_occurrence, term_ids| build_tuple_reconstruction(&new_params, &param_ty, span, term_ids),
+            &mut |_occurrence, term_ids| tlc::clone_term_with_fresh_ids(&reconstruction, term_ids),
             self.term_ids,
         );
 
@@ -726,37 +719,41 @@ impl TermRewriter<Empty, Empty> for MapNormalizer<'_, '_> {
     }
 }
 
-/// Build a tuple reconstruction from flattened map parameters. Each call is
-/// made for one substituted occurrence, so every inserted term receives IDs
-/// from the owning program.
+/// Reconstruct the tuple pattern from the actual input shapes. An input can
+/// supply an entire nested tuple; only tuples spread over inputs are rebuilt.
 fn build_tuple_reconstruction(
-    new_params: &[(SymbolId, Type<TypeName>)],
+    new_params: &mut &[(SymbolId, Type<TypeName>)],
     tuple_ty: &Type<TypeName>,
     span: Span,
     term_ids: &mut TermIdSource,
-) -> Term<Empty, Empty> {
+) -> Option<Term<Empty, Empty>> {
+    if let Some(((symbol, ty), rest)) = new_params.split_first() {
+        if ty == tuple_ty {
+            *new_params = rest;
+            return Some(Term::fresh(
+                term_ids,
+                ty.clone(),
+                span,
+                TermKind::Var(VarRef::Symbol(*symbol)),
+            ));
+        }
+    }
     let kind = match tuple_ty {
         Type::Constructed(TypeName::Tuple(_), component_types) if !component_types.is_empty() => {
-            let mut offset = 0;
             let mut elements = Vec::with_capacity(component_types.len());
             for component_type in component_types {
-                let count = flat_type_count(component_type);
                 elements.push(build_tuple_reconstruction(
-                    &new_params[offset..offset + count],
+                    new_params,
                     component_type,
                     span,
                     term_ids,
-                ));
-                offset += count;
+                )?);
             }
             TermKind::Tuple(elements)
         }
-        _ => {
-            assert_eq!(new_params.len(), 1);
-            TermKind::Var(VarRef::Symbol(new_params[0].0))
-        }
+        _ => return None,
     };
-    Term::fresh(term_ids, tuple_ty.clone(), span, kind)
+    Some(Term::fresh(term_ids, tuple_ty.clone(), span, kind))
 }
 
 // =============================================================================

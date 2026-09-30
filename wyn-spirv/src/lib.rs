@@ -322,6 +322,21 @@ impl SpirvBuilder {
         id
     }
 
+    /// Emit an integer constant at its declared width, with the supplied bit pattern.
+    pub fn const_integer(&mut self, width: u32, signed: bool, bits: u64) -> ConstId {
+        if width == 32 {
+            return if signed { self.const_i32(bits as i32) } else { self.const_u32(bits as u32) };
+        }
+        let ty = self.type_int(width, u32::from(signed));
+        let id = ConstId::new(if width == 64 {
+            self.inner.constant_bit64(*ty, bits)
+        } else {
+            self.inner.constant_bit32(*ty, bits as u32)
+        });
+        self.constant_ids.insert(id);
+        id
+    }
+
     /// Get or create an `OpConstant` for an `f32` value.
     pub fn const_f32(&mut self, value: f32) -> ConstId {
         let bits = value.to_bits();
@@ -602,6 +617,12 @@ impl SpirvBuilder {
         let key = (width, signedness);
         if let Some(&ty) = self.int_type_cache.get(&key) {
             return ty;
+        }
+        match width {
+            8 => self.enable_capability(Capability::Int8),
+            16 => self.enable_capability(Capability::Int16),
+            64 => self.enable_capability(Capability::Int64),
+            _ => {}
         }
         let ty = TypeId::new(self.inner.type_int(width, signedness));
         self.int_type_cache.insert(key, ty);

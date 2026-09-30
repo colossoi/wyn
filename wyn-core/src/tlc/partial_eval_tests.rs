@@ -439,6 +439,41 @@ fn partial_source_body(source: &str, name: &str) -> Term<Empty, Empty> {
 }
 
 #[test]
+fn get_bit_matches_integer_bit_patterns_at_every_width() {
+    for width in [8u32, 16, 32, 64] {
+        let high_bit = 1u128 << (width - 1);
+        let mask = (high_bit << 1) - 1;
+        for signed in [false, true] {
+            let ty = format!("{}{width}", if signed { "i" } else { "u" });
+            let mut checks = Vec::new();
+            for (bit, pattern) in [
+                (0, 0),
+                (0, mask),
+                (0, mask - 1),
+                (1, 2),
+                (width / 2, 1 << (width / 2)),
+                (width - 1, high_bit),
+                (width - 1, high_bit - 1),
+                (width - 1, mask),
+            ] {
+                let value = if signed && pattern == high_bit {
+                    format!("(-{}{ty} - 1{ty})", high_bit - 1)
+                } else if signed && pattern & high_bit != 0 {
+                    format!("-{}{ty}", (mask + 1) - pattern)
+                } else {
+                    format!("{pattern}{ty}")
+                };
+                let expected = (pattern >> bit) & 1;
+                checks.push(format!("{ty}.get_bit({bit}, {value}) == {expected}"));
+            }
+            let source = format!("entry main() bool = {}", checks.join(" && "));
+            let result = partial_source_body(&source, "main");
+            assert!(matches!(result.kind, TermKind::BoolLit(true)), "{ty}: {result:?}");
+        }
+    }
+}
+
+#[test]
 fn vector_arithmetic_exposes_palette_constants_with_f32_rounding() {
     let source = r#"
 def palette: vec3f32 =

@@ -28,6 +28,19 @@ fn integer_bool_scalar_and_capture_regressions_compile() {
 }
 
 #[test]
+fn get_bit_callbacks_support_every_integer_module() {
+    for ty in ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"] {
+        let source = format!(
+            "def bits(xs:[4]{ty}, f:i32 -> {ty} -> i32, bit:i32) [4]i32 =
+                map(|x|f(bit,x),xs)
+             entry main(xs:[4]i32,bit:i32) [4]i32 =
+                bits(map(|x|{ty}(x),xs),{ty}.get_bit,bit)"
+        );
+        compile_to_spirv(&source).unwrap_or_else(|error| panic!("{ty}: {error}"));
+    }
+}
+
+#[test]
 fn integer_bool_conversions_support_every_integer_module() {
     for ty in ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"] {
         // Runtime predicates prevent constant folding from hiding an unbound

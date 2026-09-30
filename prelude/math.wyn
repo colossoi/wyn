@@ -127,7 +127,9 @@ module type integral = {
   sig (>>)(a: t, b: t) t
   sig (>>>)(a: t, b: t) t
   sig num_bits: i32
-  sig get_bit(a: i32, b: t) i32
+  -- | Read bit `i` (0 is least significant), returning 0 or 1.
+  -- The index must be less than the integer width and non-negative.
+  sig get_bit(i: i32, x: t) i32
   sig set_bit(a: i32, b: t, c: i32) t
   sig popc(x: t) i32
 
@@ -309,11 +311,13 @@ module type float = {
 -- predicate into a numeric type.
 module bool : from_prim with t = bool
 
--- | A trivial module type carrying just a primitive `t`. Used as the
--- parameter signature for the per-type operator functors below — the
--- functors reach into `t` via `B.t`, and the primitive overload of
--- each operator resolves at instantiation against the concrete type.
-module type carrier = { type t }
+-- | Integer type and conversions used by the shared operator functor.
+-- Bit indices and extracted bits use i32 regardless of the integer width.
+module type carrier = {
+  type t
+  sig from_i32(x: i32) t
+  sig to_i32(x: t) i32
+}
 
 -- | Operator boilerplate for every integral type. Wyn's primitive
 -- operators are overloaded per primitive type; inside this functor
@@ -340,33 +344,66 @@ functor integral_ops(B: carrier) = {
   def (^)(a: t, b: t) t = a ^ b
   def (<<)(a: t, b: t) t = a << b
   def (>>)(a: t, b: t) t = a >> b
+  def get_bit(i: i32, x: t) i32 = B.to_i32((x >> B.from_i32(i)) & (1: t))
 }
 
 -- | Signed 8-bit integer. Most arithmetic widens internally on
 -- current GPU backends, so prefer `i32` unless you specifically
 -- need 8-bit storage.
-module i8_t  = { type t = i8  }
+module i8_t = {
+  type t = i8
+  def from_i32(x: i32) t = i8(x)
+  def to_i32(x: t) i32 = i32(x)
+}
 module i8 : (integral with t = i8) = integral_ops(i8_t)
-module i16_t = { type t = i16 }
+module i16_t = {
+  type t = i16
+  def from_i32(x: i32) t = i16(x)
+  def to_i32(x: t) i32 = i32(x)
+}
 module i16 : (integral with t = i16) = integral_ops(i16_t)
 
 -- | The default integer type. Pick this unless you need a specific
 -- width — `iota`, range syntax `a..<b`, and array indexing all use
 -- `i32`.
-module i32_t = { type t = i32 }
+module i32_t = {
+  type t = i32
+  def from_i32(x: i32) t = x
+  def to_i32(x: t) i32 = x
+}
 module i32 : (integral with t = i32) = integral_ops(i32_t)
-module i64_t = { type t = i64 }
+module i64_t = {
+  type t = i64
+  def from_i32(x: i32) t = i64(x)
+  def to_i32(x: t) i32 = i32(x)
+}
 module i64 : (integral with t = i64) = integral_ops(i64_t)
-module u8_t  = { type t = u8  }
+module u8_t = {
+  type t = u8
+  def from_i32(x: i32) t = u8(x)
+  def to_i32(x: t) i32 = i32(x)
+}
 module u8 : (integral with t = u8) = integral_ops(u8_t)
-module u16_t = { type t = u16 }
+module u16_t = {
+  type t = u16
+  def from_i32(x: i32) t = u16(x)
+  def to_i32(x: t) i32 = i32(x)
+}
 module u16 : (integral with t = u16) = integral_ops(u16_t)
 
 -- | Unsigned 32-bit integer. Used for bit-level work, hash state,
 -- and texture/buffer indices that cross the host boundary.
-module u32_t = { type t = u32 }
+module u32_t = {
+  type t = u32
+  def from_i32(x: i32) t = u32(x)
+  def to_i32(x: t) i32 = i32(x)
+}
 module u32 : (integral with t = u32) = integral_ops(u32_t)
-module u64_t = { type t = u64 }
+module u64_t = {
+  type t = u64
+  def from_i32(x: i32) t = u64(x)
+  def to_i32(x: t) i32 = i32(x)
+}
 module u64 : (integral with t = u64) = integral_ops(u64_t)
 
 -- | 64-bit float. **Not supported by every backend** — WGSL has

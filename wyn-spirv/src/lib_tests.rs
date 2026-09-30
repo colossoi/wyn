@@ -5,6 +5,50 @@
 use super::*;
 
 #[test]
+fn integer_constants_keep_their_width_and_required_capability() {
+    for (width, capability) in [
+        (8, spirv::Capability::Int8),
+        (16, spirv::Capability::Int16),
+        (64, spirv::Capability::Int64),
+    ] {
+        let mut builder = SpirvBuilder::new();
+        let signed = builder.const_integer(width, true, u64::MAX);
+        let unsigned = builder.const_integer(width, false, (1u64 << (width - 1)) - 1);
+        let module = builder.into_module();
+        assert_eq!(
+            module
+                .capabilities
+                .iter()
+                .filter(|instruction| {
+                    instruction.operands == [rspirv::dr::Operand::Capability(capability)]
+                })
+                .count(),
+            1
+        );
+        for (constant, signedness) in [(signed, 1), (unsigned, 0)] {
+            let declaration = module
+                .types_global_values
+                .iter()
+                .find(|instruction| instruction.result_id == Some(*constant))
+                .unwrap();
+            let ty = module
+                .types_global_values
+                .iter()
+                .find(|instruction| instruction.result_id == declaration.result_type)
+                .unwrap();
+            assert_eq!(ty.class.opcode, spirv::Op::TypeInt);
+            assert_eq!(
+                ty.operands,
+                [
+                    rspirv::dr::Operand::LiteralBit32(width),
+                    rspirv::dr::Operand::LiteralBit32(signedness),
+                ]
+            );
+        }
+    }
+}
+
+#[test]
 fn buffer_array_layout_is_distinct_and_decorated_once() {
     let mut builder = SpirvBuilder::new();
     let element = builder.u32_type();

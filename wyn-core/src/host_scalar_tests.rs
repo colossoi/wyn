@@ -127,6 +127,38 @@ fn host_calls_bind_each_invocation_separately() {
 }
 
 #[test]
+fn i32_get_bit_reads_low_high_and_sign_bits() {
+    for (bit, value, expected) in [
+        (0i32, 0i32, 0),
+        (0, 1, 1),
+        (0, -2, 0),
+        (7, 128, 1),
+        (30, i32::MAX, 1),
+        (31, i32::MIN, 1),
+        (31, -1, 1),
+        (31, i32::MAX, 0),
+    ] {
+        let bytes = scalar(
+            "entry main(bit:i32, value:i32) i32=i32.get_bit(bit, value)",
+            &[[bit, value].into_iter().flat_map(i32::to_le_bytes).collect()],
+        );
+        assert_eq!(i32::from_le_bytes(bytes.try_into().unwrap()), expected);
+    }
+}
+
+#[test]
+fn multiple_callable_arguments_keep_distinct_captured_values() {
+    let source = "def combine(f:i32 -> i32,g:i32 -> i32,x:i32) i32 =
+        if x<0 then f(x) else g(x)
+        entry main(x:i32,a:i32,b:i32) i32 = combine(|y|y+a,|y|y*b,x)";
+    for (x, expected) in [(-3i32, 4), (5, 55)] {
+        let arguments = [x, 7, 11].into_iter().flat_map(i32::to_le_bytes).collect();
+        let bytes = scalar(source, &[arguments]);
+        assert_eq!(i32::from_le_bytes(bytes.try_into().unwrap()), expected);
+    }
+}
+
+#[test]
 fn host_reads_packed_parameters_and_preserves_unsigned_comparisons() {
     let bytes = scalar(
         "entry main(a:u32,b:u32) u32=if a>b then a-b else b-a",

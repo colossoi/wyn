@@ -23,6 +23,29 @@ fn compile(source: &str) -> naga::Module {
 }
 
 #[test]
+fn loop_local_scratch_annotation_is_consumed_before_codegen() {
+    let source = "entry main(k:i32) [4]i32 =
+        loop xs=[1,2,3,4] for i<k do
+        scatter((#[scratch] map(|x|x,xs)),[3,2,1,0],xs)";
+    let program = crate::compile_thru_ssa(source).unwrap();
+    crate::lower_ssa_to_spirv(program.clone()).unwrap();
+    crate::lower_ssa_to_wgsl(program).unwrap();
+}
+
+#[test]
+fn loop_local_zip_preserves_nested_input_elements() {
+    let source = "entry main(xs:[5]i32) [5]i32 =
+        loop xs=xs for i<2 do
+        let bins=map(|x|x & 3,xs) in
+        let offsets=scan(|(a,b,c,d),(e,f,g,h)|(a+e,b+f,c+g,d+h),
+            (0,0,0,0),map(|x|(1,1,1,1),xs)) in
+        map(|(bin,(a,b,c,d))|i32(bin)+a+b+c+d,zip(bins,offsets))";
+    let program = crate::compile_thru_ssa(source).unwrap();
+    crate::lower_ssa_to_spirv(program.clone()).unwrap();
+    crate::lower_ssa_to_wgsl(program).unwrap();
+}
+
+#[test]
 fn nested_tuple_loop_state_preserves_component_arrays() {
     use host::{Binding, BufferLen, ResultLayout, ResultScalar};
     let source = include_str!("../../../testfiles/regressions/nested_tuple_loop_state.wyn");

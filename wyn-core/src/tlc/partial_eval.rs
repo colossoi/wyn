@@ -877,6 +877,9 @@ impl<'a> PartialEvaluator<'a> {
         span: Span,
     ) -> Term<Empty, Empty> {
         let func_term = self.mk_term(ty.clone(), span, TermKind::Var(VarRef::Symbol(sym)));
+        if args.is_empty() {
+            return func_term;
+        }
         let arg_terms: Vec<Term<Empty, Empty>> =
             args.into_iter().map(|(arg, arg_ty)| self.reify(arg, &arg_ty, span)).collect();
         self.mk_term(

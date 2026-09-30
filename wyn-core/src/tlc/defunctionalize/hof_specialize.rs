@@ -75,25 +75,18 @@ pub(super) fn extract_param_types(ty: &Type<TypeName>) -> Vec<Type<TypeName>> {
     params
 }
 
-fn detect_hofs(defs: &[Def<ClosureConverted>]) -> LookupMap<SymbolId, HofInfo> {
-    let mut result = LookupMap::new();
-    for def in defs {
+impl HofInfo {
+    fn new(def: &Def<ClosureConverted>) -> Option<Self> {
         let func_param_indices = extract_param_types(&def.ty)
             .iter()
             .enumerate()
             .filter_map(|(index, ty)| is_arrow_type(ty).then_some(index))
             .collect::<Vec<_>>();
-        if !func_param_indices.is_empty() {
-            result.insert(
-                def.name,
-                HofInfo {
-                    func_param_indices,
-                    def: def.clone(),
-                },
-            );
-        }
+        (!func_param_indices.is_empty()).then(|| Self {
+            func_param_indices,
+            def: def.clone(),
+        })
     }
-    result
 }
 
 // =============================================================================
@@ -404,7 +397,13 @@ impl TermRewriter<ExplicitClosurePayload, ExplicitCapturesPayload> for HofSpecia
         &mut self,
         term: &mut Term<ExplicitClosurePayload, ExplicitCapturesPayload>,
     ) -> RewriteDecision {
-        if self.maybe_specialize_hof_call(term) {
+        let mut changed = false;
+        // A specialization can retain other callable parameters or introduce
+        // callable captures. Continue until no concrete callable remains.
+        while self.maybe_specialize_hof_call(term) {
+            changed = true;
+        }
+        if changed {
             RewriteDecision::Changed
         } else {
             RewriteDecision::Unchanged
@@ -413,6 +412,14 @@ impl TermRewriter<ExplicitClosurePayload, ExplicitCapturesPayload> for HofSpecia
 }
 
 impl HofSpecializer<'_> {
+    fn register(&mut self, def: &Def<ClosureConverted>) {
+        self.top_level.insert(def.name);
+        if let Some(info) = HofInfo::new(def) {
+            self.hof_info.insert(def.name, info);
+        }
+        self.defs_by_sym.insert(def.name, def.clone());
+    }
+
     fn maybe_specialize_hof_call(
         &mut self,
         term: &mut Term<ExplicitClosurePayload, ExplicitCapturesPayload>,
@@ -534,7 +541,7 @@ impl HofSpecializer<'_> {
             .collect::<Vec<_>>();
         let body = tlc::rebuild_nested_lam(&new_params, body, hof_def.body.span, self.term_ids);
         let arity = new_params.len();
-        self.specialized_defs.push(Def {
+        let def = Def {
             data: (),
             name: specialized_symbol,
             package: hof_def.package,
@@ -544,8 +551,9 @@ impl HofSpecializer<'_> {
             arity,
             param_diets: vec![types::Diet::observing(); arity],
             return_diet: types::Diet::observing(),
-        });
-        self.top_level.insert(specialized_symbol);
+        };
+        self.register(&def);
+        self.specialized_defs.push(def);
 
         build_specialized_call(
             specialized_symbol,
@@ -569,6 +577,7 @@ impl HofSpecializer<'_> {
         if let TermKind::Soac(soac) = &mut term.kind {
             changed |= self.cascade_specialize_soac(soac);
         }
+        changed |= self.rewrite_node(term) == RewriteDecision::Changed;
         if changed {
             term.id = self.term_ids.next_id();
         }
@@ -727,7 +736,6 @@ impl HofSpecializer<'_> {
         let name = symbol_name_or_bug(self.symbols, lifted_symbol).to_string();
         let symbol = self.symbols.alloc(format!("{name}${}", self.specialization_counter));
         self.specialization_counter += 1;
-        self.top_level.insert(symbol);
         let arity = new_params.len();
         let def = Def {
             data: (),
@@ -740,7 +748,7 @@ impl HofSpecializer<'_> {
             param_diets: vec![types::Diet::observing(); arity],
             return_diet: types::Diet::observing(),
         };
-        self.defs_by_sym.insert(symbol, def.clone());
+        self.register(&def);
         self.specialized_defs.push(def);
 
         let specialization = ClosureSpecialization {
@@ -759,7 +767,8 @@ impl HofSpecializer<'_> {
 }
 
 pub(super) fn specialize_higher_order_functions(program: &mut Defunctionalized) {
-    let hof_info = detect_hofs(&program.defs);
+    let hof_info =
+        program.defs.iter().filter_map(|def| HofInfo::new(def).map(|info| (def.name, info))).collect();
     let top_level = program.defs.iter().map(|def| def.name).collect();
 
     let mut specializer = HofSpecializer {
