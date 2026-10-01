@@ -150,3 +150,7 @@
 
 ; Explicit output bindings cannot be satisfied by borrowing an input buffer.
 (function OutputPinned (i64) bool :merge (or old new))
+
+(function HostLoopCandidate (OperationKey) bool :merge (or old new))
+(relation CountedArrayLoop (OperationKey RegionKey ExprKey ExprKey ExprKey ExprKey))
+(relation HostLoop (OperationKey RegionKey ExprKey ExprKey ExprKey ExprKey))

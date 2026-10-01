@@ -91,7 +91,7 @@ fn uniform_sized_launches_scale_with_capacity_and_clamp_the_grid() {
         };
         let program = Program::parse(&program.to_whl("runtime_dispatch", format).unwrap()).unwrap();
         for (elements, groups) in [
-            (0, 1),
+            (0, 0),
             (64, 1),
             (65, 2),
             (320 * 200, 1_000),

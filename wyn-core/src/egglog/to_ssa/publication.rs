@@ -91,6 +91,7 @@ pub(super) fn publish(
                     return Err(error("compute pipeline identity mismatch"));
                 };
                 pipeline.stages.push(ComputeStage {
+                    dependencies: vec![],
                     entry_point: entry.name.clone(),
                     owner: declaration
                         .source_entry
@@ -379,7 +380,31 @@ pub(super) fn publish(
         }
     }
     module.source_results.sort_by(|a, b| (&a.entry, a.result).cmp(&(&b.entry, b.result)));
+    let mut stage_locations = LookupMap::default();
+    for (pipeline, ids) in associations.iter().enumerate() {
+        for (index, id) in ids.iter().enumerate() {
+            if let Some((_, Some(stage))) = compiler.entry_origins.get(id) {
+                stage_locations.insert(stage.key, (pipeline, index));
+            }
+        }
+    }
+    for (&key, &(pipeline, index)) in &stage_locations {
+        if let Pipeline::Compute(compute) = &mut module.pipelines[pipeline] {
+            compute.stages[index].dependencies = compiler
+                .plan
+                .dependencies(key)
+                .into_iter()
+                .map(|dependency| {
+                    stage_locations
+                        .get(&dependency)
+                        .copied()
+                        .ok_or_else(|| error("published stage dependency missing"))
+                })
+                .collect::<Result<_, _>>()?;
+        }
+    }
     module.rebuild_frame_graph();
+    super::loops::publish(compiler, entries, &associations, &mut module)?;
     let mut logical_entries = LookupMap::default();
     let mut stage_ids = LookupMap::default();
     for kernel in &kernels {

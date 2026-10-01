@@ -10,7 +10,7 @@ use crate::tlc::{
     self, extract_lambda_params_ref, ArrayExpr, DefMeta, Lambda, LoopKind, SoacBody, SoacOp, TermId,
     TermKind, VarRef,
 };
-use crate::types::{SoacOwnership, Type, TypeName};
+use crate::types::{SoacOwnership, Type, TypeExt, TypeName};
 use crate::{LookupMap, LookupSet, SymbolId};
 use egglog_engine::{EGraph, FullState, RawValues, Value, Write};
 use wyn_base::{IdSource, Interner};
@@ -465,6 +465,11 @@ impl<'source> Import<'_, '_, '_, 'source> {
         self.sink.add("SourceEnteredBy", (header.key, owner))?;
         self.sink.add("SourceEnteredBy", (iteration.key, owner))?;
         self.sink.add("SourceLoop", (owner, header.key, iteration.key))?;
+        if matches!(kind, LoopKind::ForRange { .. })
+            && (variable_ty.is_array() || crate::types::as_soa_tuple(variable_ty).is_some())
+        {
+            self.sink.add("SourceCountedArrayLoop", owner)?;
+        }
         let checkpoint = self.bindings.checkpoint();
         let accumulator = self.formal(variable, variable_ty, &header)?;
         self.sink.add("SourceLoopInitial", (header.key, accumulator, initial))?;

@@ -10,6 +10,28 @@ use crate::tlc::TermKind;
 use crate::types::{self, buffer_tag};
 
 impl Body<'_, '_, '_> {
+    /// Resolve a component array without materializing it separately from its parent.
+    pub(in crate::egglog::to_ssa) fn source_array(
+        &mut self,
+        scope: Value,
+        source: Value,
+    ) -> Result<(Typed, Vec<usize>), OptimizeError> {
+        if let Some(actual) = self.compiler.facts.alias(source) {
+            return self.source_array(scope, actual);
+        }
+        if let Some((parent, field)) = self.compiler.facts.projection(source) {
+            if self.compiler.facts.source_type(parent).is_some_and(|ty| types::as_soa_tuple(ty).is_some()) {
+                let (array, mut fields) = self.source_array(scope, parent)?;
+                if fields.is_empty() && types::as_soa_tuple(&array.ty).is_some() {
+                    return Ok((self.field(array, field)?, fields));
+                }
+                fields.push(field);
+                return Ok((array, fields));
+            }
+        }
+        Ok((self.value(scope, source)?, vec![]))
+    }
+
     pub(in crate::egglog::to_ssa) fn source_length(
         &mut self,
         scope: Value,
@@ -86,8 +108,10 @@ impl Body<'_, '_, '_> {
     ) -> Result<Typed, OptimizeError> {
         let backing = self.compiler.plan.backing(resource).unwrap_or(resource);
         *self.resource_uses.entry(backing).or_default() |= access;
-        if let Some(source) = self.compiler.plan.external(backing) {
-            return self.value(scope, source);
+        if !self.compiler.plan.buffers.contains_key(&backing) {
+            if let Some(source) = self.compiler.plan.external(backing) {
+                return self.value(scope, source);
+            }
         }
         let Some(buffer) = self.compiler.plan.buffers.get(&backing).cloned() else {
             return Err(error("selected resource has no allocation"));

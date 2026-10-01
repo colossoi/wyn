@@ -4,6 +4,12 @@ mod collectives_spv;
 #[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
 #[path = "collectives_wgsl.rs"]
 mod collectives_wgsl;
+#[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
+#[path = "sharing_spv.rs"]
+mod sharing_spv;
+#[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
+#[path = "sharing_wgsl.rs"]
+mod sharing_wgsl;
 // Copied beside compiler-generated modules by scripts/test_rust_host_gpu.ps1.
 #[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
 #[path = "capture_spv.rs"]
@@ -50,7 +56,7 @@ mod wgsl;
 
 #[cfg(test)]
 mod tests {
-    use super::{collectives_spv, collectives_wgsl,
+    use super::{collectives_spv, collectives_wgsl, sharing_spv, sharing_wgsl,
         capture_spv, capture_wgsl, epilogues_spv, epilogues_wgsl, filter_command_spv, filter_command_wgsl,
         filter_post_spv, filter_post_wgsl, filter_spv, filter_wgsl, setup_spv, setup_wgsl, spv, wgsl,
     };
@@ -109,6 +115,66 @@ mod tests {
         }))
         .unwrap();
         eprintln!("GPU: {:?}", adapter.get_info());
+        macro_rules! check_sharing {
+            ($module:ident) => {{
+                let mut context = $module::HostContext::new(&device).unwrap();
+                for n in [8, 65, 257] {
+                    for seed in [-9, 0, 13] {
+                        let values: Vec<i32> = (0..n).map(|i| i * 3 + seed).collect();
+                        let xs = input(&device, &values);
+                        let a: Vec<_> = values.iter().map(|x| x * x + 17).collect();
+                        let total: i32 = a.iter().sum();
+                        let output = $module::host_diamond(&mut context, &queue, &xs).unwrap();
+                        assert_eq!(
+                            read(&device, &queue, buffer!($module, output)),
+                            a.iter().map(|x| x * 4).collect::<Vec<_>>()
+                        );
+                        let output = $module::host_retained(&mut context, &queue, &xs).unwrap();
+                        assert_eq!(
+                            read(&device, &queue, buffer!($module, output)),
+                            a.iter().map(|x| x + total).collect::<Vec<_>>()
+                        );
+                        let output = $module::host_reductions(&mut context, &queue, &xs).unwrap();
+                        assert_eq!(read(&device, &queue, buffer!($module, output, 0)), vec![total]);
+                        assert_eq!(
+                            read(&device, &queue, buffer!($module, output, 1)),
+                            vec![*a.iter().max().unwrap()]
+                        );
+                        let output = $module::host_sliced(&mut context, &queue, &xs).unwrap();
+                        assert_eq!(
+                            &read(&device, &queue, buffer!($module, output))[..4],
+                            values[2..6].iter().map(|x| (x + 17) * 3).collect::<Vec<_>>()
+                        );
+                        let output = $module::host_nested(&mut context, &queue, &xs).unwrap();
+                        let mut expected = values.clone();
+                        for _ in 0..2 {
+                            expected.iter_mut().for_each(|x| *x += 17);
+                            let sum: i32 = expected.iter().sum();
+                            expected.iter_mut().for_each(|x| *x += sum);
+                        }
+                        assert_eq!(read(&device, &queue, buffer!($module, output)), expected);
+                        let expected: Vec<_> = values.iter().map(|x| x + 17).collect();
+                        let output = $module::host_action(&mut context, &queue, &xs).unwrap();
+                        assert_eq!(read(&device, &queue, buffer!($module, output)), expected);
+                        let output = $module::host_dead_output(&mut context, &queue, &xs).unwrap();
+                        assert_eq!(read(&device, &queue, buffer!($module, output)), expected);
+                        let output = $module::host_observed_action(&mut context, &queue, &xs).unwrap();
+                        assert_eq!(
+                            read(&device, &queue, buffer!($module, output, 0)),
+                            (1..=n).collect::<Vec<_>>()
+                        );
+                        assert_eq!(read(&device, &queue, buffer!($module, output, 1)), values);
+                        assert_eq!(
+                            read(&device, &queue, &xs),
+                            values,
+                            "borrowed input must survive sharing and scratch reuse"
+                        );
+                    }
+                }
+            }};
+        }
+        check_sharing!(sharing_spv);
+        check_sharing!(sharing_wgsl);
         macro_rules! check_collectives {
             ($module:ident) => {{
                 let mut context = $module::HostContext::new(&device).unwrap();
@@ -167,7 +233,7 @@ mod tests {
                 let spv_output =
                     setup_spv::host_setup(&mut setup_spv_context, &queue, &viewport_bytes, &xs).unwrap();
                 let wgsl_output =
-                    setup_wgsl::host_setup(&mut setup_wgsl_context, &queue, &xs, &viewport, &viewport).unwrap();
+                    setup_wgsl::host_setup(&mut setup_wgsl_context, &queue, &xs, &viewport).unwrap();
                 for (backend, actual) in [
                     ("SPIR-V", read(&device, &queue, buffer!(setup_spv, spv_output))),
                     ("WGSL", read(&device, &queue, buffer!(setup_wgsl, wgsl_output))),
@@ -212,7 +278,7 @@ mod tests {
         let index = input(&device, &[1]);
         let output = spv::host_dynamic_index(&mut spv, &queue, &xs, &1i32.to_le_bytes()).unwrap();
         assert_eq!(read(&device, &queue, buffer!(spv, output)), vec![10, 7, 14]);
-        let output = wgsl::host_dynamic_index(&mut wgsl, &queue, &xs, &index, &index).unwrap();
+        let output = wgsl::host_dynamic_index(&mut wgsl, &queue, &xs, &index).unwrap();
         assert_eq!(read(&device, &queue, buffer!(wgsl, output)), vec![10, 7, 14]);
         for n in [0i32, 4] {
             let scalar = input(&device, &[n]);
@@ -369,7 +435,7 @@ mod tests {
                     "SPIR-V n={n}, pattern={pattern}"
                 );
                 let output =
-                    filter_post_wgsl::host_post_mapped(&mut post_wgsl, &queue, &xs, &scalar, &scalar).unwrap();
+                    filter_post_wgsl::host_post_mapped(&mut post_wgsl, &queue, &xs, &scalar).unwrap();
                 assert_eq!(
                     read(&device, &queue, buffer!(filter_post_wgsl, output, 0)),
                     vec![expected.len() as i32]

@@ -64,6 +64,28 @@ fn dead_fused_outputs_do_not_evaluate_their_elements() {
 }
 
 #[test]
+fn shared_producer_matrix_reaches_both_backends() {
+    shaders(include_str!("../../../testfiles/rust_host_sharing.wyn"));
+}
+
+#[test]
+fn radix_scratch_initializer_has_no_array_allocation() {
+    let source = format!(
+        "{}\n entry main(xs: []i32) []i32 = radix_sort_step(xs, |i:i32,x:i32| (x >> i) & 1, 0)",
+        include_str!("../../../pkg/sort/src/radix_sort.wyn")
+    );
+    let compiled = crate::lower_ssa_to_wgsl_with_program(compile_thru_ssa(&source).unwrap()).unwrap();
+    let entry = &compiled.program.entries[0];
+    let arrays = entry.allocations.iter().filter(|allocation| matches!(allocation,
+        crate::host::Allocation::Buffer { bytes, .. } if !matches!(bytes, crate::host::Expr::Integer(_))
+    )).count();
+    assert_eq!(
+        arrays, 2,
+        "only scan prefixes and sorted output scale with input length"
+    );
+}
+
+#[test]
 fn basic_scalar_policy_retains_calls_and_validates_both_backends() {
     use super::{from_tlc, fuse, optimize_with_policy, place, schedule, to_ssa, ScalarOptimization};
     use crate::{CodegenTarget, PipelineTopologyPolicy};

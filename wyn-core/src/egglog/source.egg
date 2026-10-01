@@ -65,3 +65,5 @@
 (relation SourceBucketRank (OperationKey i64))
 (relation SourceBucketAxis (OperationKey i64 Extent))
 (relation SourceBucketInputAxis (OperationKey i64 i64))
+
+(relation SourceCountedArrayLoop (SourceValue))

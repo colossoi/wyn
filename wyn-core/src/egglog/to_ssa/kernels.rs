@@ -19,6 +19,9 @@ use indexed::{buckets, indexed};
 use screma::screma;
 
 pub(super) fn emit(body: &mut Body<'_, '_, '_>, scope: Value, stage: &Stage) -> Result<(), OptimizeError> {
+    if matches!(stage.phase.as_str(), "loop_enter" | "loop_exit") {
+        return super::loops::emit(body, scope, stage);
+    }
     if stage.phase == "scalar" {
         let operations = body.compiler.plan.scalar_group(stage.operation);
         if let Some(context) = body.compiler.facts.dispatch_context(stage.operation) {
@@ -89,7 +92,7 @@ pub(super) fn emit(body: &mut Body<'_, '_, '_>, scope: Value, stage: &Stage) -> 
     }
 }
 
-fn invocation(body: &mut Body<'_, '_, '_>, width: u32) -> Result<(Typed, Typed), OptimizeError> {
+pub(super) fn invocation(body: &mut Body<'_, '_, '_>, width: u32) -> Result<(Typed, Typed), OptimizeError> {
     let uint = Type::Constructed(TypeName::UInt(32), vec![]);
     let start = body.op(
         OpTag::Intrinsic {
@@ -178,7 +181,7 @@ pub(super) fn element(
     Ok(value)
 }
 
-fn store(
+pub(super) fn store(
     body: &mut Body<'_, '_, '_>,
     array: Typed,
     index: Typed,

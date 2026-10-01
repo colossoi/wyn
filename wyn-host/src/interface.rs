@@ -1,6 +1,6 @@
 //! Published shader interfaces, resource identities, and execution domains.
 
-use crate::{ResultKind, ResultLayout, ScalarTask};
+use crate::{ResultKind, ResultLayout, ScalarExpr, ScalarSource, ScalarTask};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Published shader declarations and physical resource interfaces for one module.
@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 pub struct ModuleInterface {
     /// Scalar evaluations ordered at their consuming or replaced dispatch sites.
     pub scalar_tasks: Vec<ScalarTask>,
+    pub dispatch_loops: Vec<DispatchLoop>,
     /// Individual pipelines in this program (one per top-level entry or multi-dispatch SOAC).
     pub pipelines: Vec<Pipeline>,
     /// Storage bindings that implement authored entry results. This preserves
@@ -34,6 +35,24 @@ pub struct SourceResultBinding {
     pub pipeline_index: usize,
     pub set: u32,
     pub binding: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct DispatchLoop {
+    /// Logical carry length; empty initialization performs no device work.
+    pub initial_length: ScalarExpr,
+    /// Compute pipeline containing this loop and its carried bindings.
+    pub pipeline: usize,
+    /// Initialization dispatch, executed once even for zero iterations.
+    pub setup: usize,
+    /// Ordered dispatch indices executed on every iteration.
+    pub body: Vec<usize>,
+    /// Stage exposing the carried result and performing any required output copies.
+    pub completion: usize,
+    pub count: ScalarExpr,
+    pub index: ScalarSource,
+    pub current: ScalarSource,
+    pub next: ScalarSource,
 }
 
 impl ModuleInterface {
@@ -185,6 +204,22 @@ impl FrameGraph {
         }
 
         builder.link_producers_to_consumers();
+        let passes: BTreeMap<_, _> = builder
+            .graph
+            .passes
+            .iter()
+            .enumerate()
+            .map(|(i, pass)| ((pass.pipeline_index, pass.stage_index), i))
+            .collect();
+        for pass in &mut builder.graph.passes {
+            if let Pipeline::Compute(pipeline) = &pipelines[pass.pipeline_index] {
+                for dependency in &pipeline.stages[pass.stage_index].dependencies {
+                    pass.depends_on.push(passes[dependency]);
+                }
+                pass.depends_on.sort_unstable();
+                pass.depends_on.dedup();
+            }
+        }
         builder.graph
     }
 }
@@ -342,6 +377,9 @@ impl StageBindingUses {
 /// A single dispatch stage within a `ComputePipeline`.
 #[derive(Debug, Clone)]
 pub struct ComputeStage {
+    /// Required predecessor stages, identified by (pipeline index, stage index).
+    /// Includes control dependencies that cannot be recovered from buffer access.
+    pub dependencies: Vec<(usize, usize)>,
     pub entry_point: String,
     /// Authored entry whose execution this stage implements. Generated stages
     /// retain their source owner instead of asking runtimes to infer it from

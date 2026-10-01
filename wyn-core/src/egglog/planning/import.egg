@@ -126,6 +126,16 @@
        (SourceResult wrapper value) (SourceCallable value actual))
       ((Callback owner actual) (DeviceRegion actual)) :ruleset planning-import)
 
+(rule ((SourceCountedArrayLoop value) (SourceOperationValue op value)
+       (SourceLoop value header iteration) (SourceLoopInitial header state initial)
+       (SourceLoopBackedge header state next) (SourceIterationValue iteration index)
+       (= a (SourceExprKey initial)) (= s (SourceExprKey state))
+       (= i (SourceExprKey index)) (= n (SourceExprKey next)))
+      ((set (HostLoopCandidate op) true) (CountedArrayLoop op iteration a s i n)) :ruleset planning-import)
+(rule ((HostLoop op r a s i n) (= s (SourceExprKey state)) (= ty (SourceType state))
+       (SourceArrayElement ty element) (= i (SourceExprKey index)) (= it (SourceType index)))
+      ((ElementType (Source s) element) (ElementType (Source i) it)) :ruleset residency)
+
 (rule ((PlannedOperation original owner plan region) (= original owner)
        (SourceOperationValue original value) (SourceScratch value extent))
       ((set (Rematerialize owner) true)) :ruleset classify)

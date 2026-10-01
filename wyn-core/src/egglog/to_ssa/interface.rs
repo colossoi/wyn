@@ -337,12 +337,23 @@ pub(super) fn entry<'source>(
             .collect::<Vec<_>>();
         let write = |lower: &mut Body<'_, '_, 'source>| -> Result<(), OptimizeError> {
             for output in planned {
-                let value = lower.value(scope, output.source)?;
-                let destination = lower.resource(scope, output.resource, 2)?;
-                if value.ty.is_array() {
-                    let length = lower.length(value.clone())?;
-                    lower.copy_array(destination, value, length)?;
+                if output.ty.is_array() || types::as_soa_tuple(&output.ty).is_some() {
+                    let (array, fields) = lower.source_array(scope, output.source)?;
+                    let length = lower.length(array.clone())?;
+                    let destination = lower.resource(scope, output.resource, 2)?;
+                    let zero = lower.literal("0", &types::i32())?;
+                    let one = lower.literal("1", &types::i32())?;
+                    lower.counted(zero, length, one, vec![], |lower, index, _| {
+                        let mut value = lower.index(array, index.clone())?;
+                        for field in fields {
+                            value = lower.field(value, field)?;
+                        }
+                        kernels::store(lower, destination, index, value)?;
+                        Ok(vec![])
+                    })?;
                 } else {
+                    let value = lower.value(scope, output.source)?;
+                    let destination = lower.resource(scope, output.resource, 2)?;
                     let zero = lower.literal("0", &types::i32())?;
                     let (place, ty) = lower.index_place(destination, zero)?;
                     let value = lower.stored(value, &ty)?;

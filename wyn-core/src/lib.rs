@@ -459,7 +459,7 @@ fn adapt_host_interface_for_wgsl(
         Access, Binding, BufferLen, BufferUsage, DispatchLen, DispatchSize, HostSizeInput, Pipeline,
     };
 
-    for pipeline in &mut descriptor.pipelines {
+    for (pipeline_index, pipeline) in descriptor.pipelines.iter_mut().enumerate() {
         let Pipeline::Compute(compute) = pipeline else {
             continue;
         };
@@ -568,12 +568,21 @@ fn adapt_host_interface_for_wgsl(
             }
         }
 
-        for task in &mut descriptor.scalar_tasks {
-            if !compute.stages.iter().any(|stage| stage.entry_point == task.stage) {
-                continue;
-            }
+        let values = descriptor
+            .scalar_tasks
+            .iter_mut()
+            .filter(|task| compute.stages.iter().any(|stage| stage.entry_point == task.stage))
+            .map(|task| &mut task.value)
+            .chain(
+                descriptor
+                    .dispatch_loops
+                    .iter_mut()
+                    .filter(|repeated| repeated.pipeline == pipeline_index)
+                    .flat_map(|repeated| [&mut repeated.count, &mut repeated.initial_length]),
+            );
+        for value in values {
             let mut missing = None;
-            task.value.reads_mut(&mut |source, offset| {
+            value.reads_mut(&mut |source, offset| {
                 let ScalarSource::PushConstant { name, offset: base } = source else {
                     return;
                 };

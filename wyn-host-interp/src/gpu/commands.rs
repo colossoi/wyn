@@ -449,6 +449,9 @@ impl WgpuBackend {
         if groups.iter().any(|n| *n > self.device.limits().max_compute_workgroups_per_dimension) {
             return Err(gpu_error("dispatch exceeds device limits"));
         }
+        if groups.contains(&0) {
+            return Ok(Value::Nil);
+        }
         if !self.computes.contains_key(name) {
             let (layouts, pushes) = self.layouts(kernel, ShaderStages::COMPUTE)?;
             let layout_refs = layouts.iter().collect::<Vec<_>>();
@@ -472,9 +475,6 @@ impl WgpuBackend {
         }
         let (pipeline, layouts) = &self.computes[name];
         let (bindings, pushes) = self.bind_groups(kernel, o.get(":args")?.list()?, layouts)?;
-        if groups.contains(&0) {
-            return Ok(Value::Nil);
-        }
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {

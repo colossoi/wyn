@@ -144,7 +144,8 @@ impl Program {
             .map(|operation| match operation {
                 Operation::Dispatch { pipeline, .. }
                 | Operation::Draw { pipeline }
-                | Operation::Scalar { pipeline, .. } => *pipeline,
+                | Operation::Scalar { pipeline, .. }
+                | Operation::Loop { pipeline, .. } => *pipeline,
             })
             .collect();
         let mut replacements = BTreeMap::new();
@@ -315,6 +316,17 @@ impl Program {
         let source_name = &entry.name;
         let mut params = vec![];
         let mut arguments = vec![];
+        let mut input_checks = vec![];
+        let pipelines: BTreeSet<_> = entry
+            .operations
+            .iter()
+            .map(|operation| match operation {
+                Operation::Dispatch { pipeline, .. }
+                | Operation::Draw { pipeline }
+                | Operation::Scalar { pipeline, .. }
+                | Operation::Loop { pipeline, .. } => *pipeline,
+            })
+            .collect();
         for &r in &entry.inputs {
             let id = resource(r);
             let ty = match self.interface.frame_graph.resources[r.0].kind {
@@ -325,13 +337,46 @@ impl Program {
             };
             params.push(quote!(#id:#ty));
             arguments.push(quote!(#id));
+            let resource = &self.interface.frame_graph.resources[r.0];
+            let mut expected = BTreeSet::new();
+            for binding in &resource.bindings {
+                if !pipelines.contains(&binding.pipeline_index) {
+                    continue;
+                }
+                if let Binding::StorageBuffer {
+                    usage: BufferUsage::Input,
+                    length: Some(crate::BufferLen::Fixed { bytes }),
+                    ..
+                } = &self.bindings(binding.pipeline_index)[binding.binding_index]
+                {
+                    expected.insert(*bytes);
+                }
+            }
+            if expected.len() > 1 {
+                return Err(HostError::Invalid(format!(
+                    "conflicting fixed sizes for input {}",
+                    resource.name
+                )));
+            }
+            if let Some(bytes) = expected.first() {
+                let label = &resource.name;
+                input_checks.push(quote! {
+                    if #id.size() != #bytes {
+                        return Err(HostError::Invalid(format!(
+                            "input {} requires exactly {} bytes, got {}", #label, #bytes, #id.size()
+                        )));
+                    }
+                });
+            }
         }
         for name in &entry.scalar_inputs {
             let name = scalar(name);
             params.push(quote!(#name:u32));
             arguments.push(quote!(#name));
         }
-        let mut code = vec![];
+        let mut carried = BTreeSet::new();
+        self.loop_resources(&entry.operations, &mut carried)?;
+        let mut code = input_checks;
         let mut scratch = vec![];
         for a in &entry.allocations {
             match a {
@@ -340,7 +385,9 @@ impl Program {
                     let bytes = self.rust_expr(bytes, entry);
                     let length = format_ident!("resource_{}_bytes", r.0);
                     let label = &self.interface.frame_graph.resources[r.0].name;
-                    let allocate = if entry.results.contains(r) {
+                    // Either carried buffer can become the result after a swap.
+                    // A cached handle must not let a later call overwrite it.
+                    let allocate = if entry.results.contains(r) || carried.contains(r) {
                         quote!(device.create_buffer(&descriptor))
                     } else {
                         context.scratch = true;
@@ -352,10 +399,11 @@ impl Program {
                         });
                         quote!(support::scratch_buffer(device, &mut context.scratch, #slot, &descriptor))
                     };
+                    let mutable = carried.contains(r).then(|| quote!(mut));
                     code.push(quote!{
                         let #length=size(#bytes)?;
                         if #length>device.limits().max_buffer_size {return Err(HostError::Invalid(format!("buffer {} exceeds device limit",#label)));}
-                        let #id={ let descriptor=BufferDescriptor{
+                        let #mutable #id={ let descriptor=BufferDescriptor{
                             label:Some(#label),size:#length.max(4),mapped_at_creation:false,
                             usage:BufferUsages::STORAGE|BufferUsages::COPY_SRC|BufferUsages::COPY_DST|BufferUsages::VERTEX|BufferUsages::INDEX|BufferUsages::INDIRECT,
                         }; #allocate };
@@ -393,27 +441,7 @@ impl Program {
                 },
             );
         }
-        for (ordinal, op) in entry.operations.iter().enumerate() {
-            code.push(match op {
-                Operation::Scalar { pipeline, task } => {
-                    self.rust_scalar_task(*pipeline, &self.interface.scalar_tasks[*task])?
-                }
-                Operation::Dispatch {
-                    pipeline,
-                    stage,
-                    groups,
-                } => {
-                    let (create, run) = self.rust_dispatch(*pipeline, *stage, groups, entry, format)?;
-                    context.compute.insert((*pipeline, *stage), create);
-                    run
-                }
-                Operation::Draw { pipeline } => {
-                    let (count, create, run) = self.rust_draw(*pipeline, ordinal, entry, format)?;
-                    context.graphics.insert(*pipeline, (count, create));
-                    run
-                }
-            });
-        }
+        code.push(self.rust_operations(&entry.operations, entry, format, context)?);
         let results = self.rust_results(entry)?;
         let entry_id = format_ident!("ENTRY_{}", index);
         let mut used = BTreeSet::new();
@@ -459,6 +487,77 @@ impl Program {
                 }
             })
         }
+    }
+
+    fn loop_resources(
+        &self,
+        operations: &[Operation],
+        resources: &mut BTreeSet<ResourceId>,
+    ) -> Result<(), HostError> {
+        for operation in operations {
+            if let Operation::Loop {
+                pipeline,
+                region,
+                body,
+                ..
+            } = operation
+            {
+                let repeated = &self.interface.dispatch_loops[*region];
+                resources.insert(self.scalar_resource(*pipeline, &repeated.current)?);
+                resources.insert(self.scalar_resource(*pipeline, &repeated.next)?);
+                self.loop_resources(body, resources)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn rust_operations(
+        &self,
+        operations: &[Operation],
+        entry: &Entry,
+        format: ShaderFormat,
+        context: &mut RustContext,
+    ) -> Result<TokenStream, HostError> {
+        let mut code = vec![];
+        for (ordinal, operation) in operations.iter().enumerate() {
+            code.push(match operation {
+                Operation::Loop { pipeline, region, setup, body } => {
+                    let repeated = &self.interface.dispatch_loops[*region];
+                    let current = resource(self.scalar_resource(*pipeline, &repeated.current)?);
+                    let next = resource(self.scalar_resource(*pipeline, &repeated.next)?);
+                    let index = resource(self.scalar_resource(*pipeline, &repeated.index)?);
+                    let count = self.rust_scalar(*pipeline, &repeated.count)?;
+                    let initial_length = self.rust_scalar(*pipeline, &repeated.initial_length)?;
+                    let setup = self.rust_operations(setup, entry, format, context)?;
+                    let body = self.rust_operations(body, entry, format, context)?;
+                    quote!({
+                        if #initial_length > 0 { #setup }
+                        let iterations = #count;
+                        for iteration in 0..iterations {
+                            // Record the index upload between dispatches, so each
+                            // iteration observes its own value in a batched submission.
+                            support::write_buffer(device, encoder, &#index, 0, &(iteration as i32).to_le_bytes());
+                            #body
+                            std::mem::swap(&mut #current, &mut #next);
+                        }
+                    })
+                }
+                Operation::Scalar { pipeline, task } => {
+                    self.rust_scalar_task(*pipeline, &self.interface.scalar_tasks[*task])?
+                }
+                Operation::Dispatch { pipeline, stage, groups } => {
+                    let (create, run) = self.rust_dispatch(*pipeline, *stage, groups, entry, format)?;
+                    context.compute.insert((*pipeline, *stage), create);
+                    run
+                }
+                Operation::Draw { pipeline } => {
+                    let (count, create, run) = self.rust_draw(*pipeline, ordinal, entry, format)?;
+                    context.graphics.insert(*pipeline, (count, create));
+                    run
+                }
+            });
+        }
+        Ok(quote!(#(#code)*))
     }
 
     fn rust_bindings(
@@ -551,9 +650,9 @@ impl Program {
         let run = quote! {{
             let groups=[#(#dims),*];
             if groups.iter().any(|&group_count|group_count>device.limits().max_compute_workgroups_per_dimension){return Err(HostError::Invalid("dispatch exceeds device limits".into()));}
-            let pipeline = &context.#cached;
-            #bindings
-            {
+            if groups.iter().all(|&group_count| group_count > 0) {
+                let pipeline = &context.#cached;
+                #bindings
                 let mut pass=encoder.begin_compute_pass(&ComputePassDescriptor{label:Some(#name),timestamp_writes:None});
                 pass.set_pipeline(&pipeline);#(#sets)*
                 pass.dispatch_workgroups(groups[0],groups[1],groups[2]);

@@ -38,3 +38,9 @@
 (rule ((Waits after (Gate gate)) (OrderEdge before (Gate gate))) ((Waits after before)) :ruleset dispatch)
 (rule ((Waits after (At before)) (Phase before r) (Phase after r) (!= before after))
       ((DispatchDependency before after)) :ruleset dispatch)
+
+(rule ((HostLoop op r a s i n) (Phase stage r))
+      ((DispatchDependency (Stage op "loop_enter") stage)
+       (DispatchDependency stage (Stage op "loop_exit"))) :ruleset dispatch)
+(rule ((HostLoop op r a s i n))
+      ((DispatchDependency (Stage op "loop_enter") (Stage op "loop_exit"))) :ruleset dispatch)

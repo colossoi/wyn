@@ -1,0 +1,99 @@
+-- Source translation of diku-dk/sorts v0.7.3, commit
+-- a473651d67d8ed0fafcea315f0226676721e2bdf. See ../FUTHARK-LICENSE.
+-- The byte-for-byte original is ../upstream/radix_sort.fut.
+--
+-- Array dimensions, indices, ranks, and bucket counts use Wyn-native i32
+-- instead of Futhark i64. Bucket labels use i32 instead of i8 for GPU portability.
+-- Key types and the algorithm are unchanged.
+-- Compiler support is incomplete. Do not replace copy with another producer,
+-- inline away higher-order helpers, unroll the loop,
+-- or replace the separate totals reduction with the last scan element.
+-- `map2`, `copy`, `reduce_comm`, and `iota` retain their prelude contracts;
+-- Wyn must provide those contracts.
+-- The step's local higher-order helpers retain their upstream scope.
+
+def radix_sort_step<[n], T>(
+    xs: [n]T, get_bit: i32 -> T -> i32, digit_n: i32
+  ) [n]T =
+  let num = |x| get_bit(digit_n + 1, x) * 2 + get_bit(digit_n, x) in
+  let pairwise = |op, (a1, b1, c1, d1), (a2, b2, c2, d2)|
+    (op(a1, a2), op(b1, b2), op(c1, c2), op(d1, d2)) in
+  let pairwise_prime = |op, (a1, b1, c1), (a2, b2, c2)|
+    (op(a1, a2), op(b1, b2), op(c1, c2)) in
+  let bins = map(num, xs) in
+  let flags = map(|x| (x == 0i32, x == 1i32, x == 2i32, x == 3i32), bins) in
+  let flags_prime = map(|x|
+    (i32.bool(x == 0i32), i32.bool(x == 1i32), i32.bool(x == 2i32)),
+    map(num, xs)) in
+  let offsets = scan(
+    |a, b| pairwise((+), a, b), (0i32, 0i32, 0i32, 0i32),
+    map(|(a, b, c, d)| (i32.bool(a), i32.bool(b), i32.bool(c), i32.bool(d)), flags)) in
+  let (na, nb, nc) = reduce_comm(
+    |a, b| pairwise_prime((+), a, b), (0i32, 0i32, 0i32), flags_prime) in
+  let f = |bin, (a, b, c, d)|
+    -1i32
+    + a * i32.bool(bin == 0i32)
+    + na * i32.bool(bin > 0i32)
+    + b * i32.bool(bin == 1i32)
+    + nb * i32.bool(bin > 1i32)
+    + c * i32.bool(bin == 2i32)
+    + nc * i32.bool(bin > 2i32)
+    + d * i32.bool(bin == 3i32) in
+  let is = map2(f, bins, offsets) in
+  scatter((#[scratch] copy(xs)), is, xs)
+
+-- Stable unsigned bit-pattern order. Supply the numeric module's num_bits
+-- and get_bit, or a smaller bit count when the key representation permits it.
+-- As upstream, an odd num_bits still requests both bits of the final digit.
+def radix_sort<[n], T>(
+    num_bits: i32, get_bit: i32 -> T -> i32, xs: [n]T
+  ) [n]T =
+  let iters = if length(xs) == 0 then 0 else (num_bits + 2 - 1) / 2 in
+  loop xs = xs for i < iters do radix_sort_step(xs, get_bit, i * 2)
+
+-- Use Wyn-native array indices, including the by-key permutation payload.
+def with_indices<[n], A>(xs: [n]A) [n](A, i32) =
+  zip(xs, iota(length(xs)))
+
+def by_key_wrapper<[n], T, K>(
+    sorter: i32 -> (i32 -> (K, i32) -> i32) -> [n](K, i32) -> [n](K, i32),
+    key: T -> K, num_bits: i32, get_bit: i32 -> K -> i32, xs: [n]T
+  ) [n]T =
+  let keys = with_indices(map(key, xs)) in
+  let order = sorter(num_bits, |i, (k, _)| get_bit(i, k), keys) in
+  map(|(_, i: i32)| xs[i], order)
+
+-- Stable sort by an unsigned bit-pattern key.
+def radix_sort_by_key<[n], T, K>(
+    key: T -> K, num_bits: i32, get_bit: i32 -> K -> i32, xs: [n]T
+  ) [n]T =
+  by_key_wrapper(radix_sort, key, num_bits, get_bit, xs)
+
+-- Flip the most significant bit, exactly as upstream.
+def radix_sort_int<[n], T>(
+    num_bits: i32, get_bit: i32 -> T -> i32, xs: [n]T
+  ) [n]T =
+  let get_bit_prime = |i, x|
+    let b = get_bit(i, x) in
+    if i == num_bits - 1 then b ^ 1 else b in
+  radix_sort(num_bits, get_bit_prime, xs)
+
+def radix_sort_int_by_key<[n], T, K>(
+    key: T -> K, num_bits: i32, get_bit: i32 -> K -> i32, xs: [n]T
+  ) [n]T =
+  by_key_wrapper(radix_sort_int, key, num_bits, get_bit, xs)
+
+-- Invert every bit of negative floats; invert the sign bit of positive floats.
+-- Preserve upstream's bit-pattern treatment of signed zero and NaNs.
+def radix_sort_float<[n], T>(
+    num_bits: i32, get_bit: i32 -> T -> i32, xs: [n]T
+  ) [n]T =
+  let get_bit_prime = |i, x|
+    let b = get_bit(i, x) in
+    if get_bit(num_bits - 1, x) == 1 || i == num_bits - 1 then b ^ 1 else b in
+  radix_sort(num_bits, get_bit_prime, xs)
+
+def radix_sort_float_by_key<[n], T, K>(
+    key: T -> K, num_bits: i32, get_bit: i32 -> K -> i32, xs: [n]T
+  ) [n]T =
+  by_key_wrapper(radix_sort_float, key, num_bits, get_bit, xs)

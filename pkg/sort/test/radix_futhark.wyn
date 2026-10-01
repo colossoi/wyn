@@ -1,0 +1,2 @@
+module R = import "../src/radix_sort"
+entry main() [5]i32 = R.radix_sort_int(32,i32.get_bit,[3,-1,0,-2147483648,2147483647])

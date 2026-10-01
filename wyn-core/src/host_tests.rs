@@ -14,6 +14,39 @@ fn compile(source: &str) -> Program {
 }
 
 #[test]
+fn tuple_loop_outputs_and_scalar_bounds_reach_host_backends() {
+    for source in [
+        include_str!("../../testfiles/regressions/local_tuple_collectives.wyn"),
+        include_str!("../../testfiles/regressions/nested_tuple_loop_state.wyn"),
+    ] {
+        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+            let ssa = compile_thru_ssa(source).unwrap();
+            let program = match format {
+                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+            };
+            program.to_rust_wgpu("tuple_loops", format).unwrap();
+            for entry in &program.entries {
+                for (position, operation) in entry.operations.iter().enumerate() {
+                    let Operation::Loop { region, pipeline, .. } = operation else {
+                        continue;
+                    };
+                    let completion = program.interface.dispatch_loops[*region].completion;
+                    let Pipeline::Compute(compute) = &program.interface.pipelines[*pipeline] else {
+                        panic!("compute loop");
+                    };
+                    if !compute.stages[completion].uses.writes.is_empty() {
+                        assert!(entry.operations[position + 1..].iter().any(|operation|
+                            matches!(operation, Operation::Dispatch { pipeline: p, stage, .. }
+                                if p == pipeline && *stage == completion)), "{} output copy", entry.name);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn unrelated_compute_entries_preserve_graphics_inputs_and_resources() {
     let source = include_str!("../../testfiles/graphics_compute_entry_bindings.wyn");
     let (draw, compute) = source.split_once("entry compute").unwrap();
@@ -790,7 +823,7 @@ fn uniform_sized_maps_launch_from_their_domain_capacity() {
         let expected = Expr::Min(
             Box::new(Expr::Max(
                 Box::new(Expr::BufferSize(pixels).floor(16).unwrap().ceiling(64).unwrap()),
-                Box::new(Expr::Integer(1)),
+                Box::new(Expr::Integer(0)),
             )),
             Box::new(Expr::Integer(65_535)),
         );

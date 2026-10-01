@@ -108,3 +108,11 @@
        (BufferSlot op "output" i (Result op i))) :ruleset allocation)
 (rule ((UninitializedResult op i t n) (Requires site (Result op i))) ((Materialize (Result op i))) :ruleset allocation)
 (rule ((UninitializedResult op i t n) (Produces stage (Result op i))) ((Materialize (Result op i))) :ruleset allocation)
+
+(rule ((HostLoop op r a s i n))
+      ((FreshValue (Source s)) (Materialize (Source s))
+       (CapacityExtent (Source s) (Length a)) (LiveLength (Source s) (Length a))
+       (FreshValue (Source i)) (Materialize (Source i))
+       (CapacityExtent (Source i) (Fixed 1))
+       (set (Backing (Source s)) (Source s)) (set (Backing (Source i)) (Source i))
+       (SameBacking (Result op 0) s)) :ruleset allocation)

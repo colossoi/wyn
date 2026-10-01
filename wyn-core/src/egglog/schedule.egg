@@ -164,3 +164,12 @@
 (rule ((= (Plan op) (Scatter)) (UninitializedResult op i t n)) ((PhaseEnds op "scatter" "scatter")) :ruleset schedule)
 
 (rule ((DeviceOperation op) (UninitializedResult op i t n)) ((LocalBuffer op "output" i t n)) :ruleset schedule)
+
+(rule ((HostLoop op r a s i n) (= grid (OperationGrid op)))
+      ((KernelPhase op "loop_enter" (Length a) 64 grid)
+       (KernelPhase op "loop_exit" (Fixed 1) 1 (FixedGrid 1 1 1))
+       (PhaseEnds op "loop_enter" "loop_exit")
+       (Produces (Stage op "loop_enter") (Source s))
+       (Produces (Stage op "loop_exit") (Result op 0))
+       (Demand (InStage (Stage op "loop_enter")) a)
+       (Demand (InStage (Stage op "loop_exit")) n)) :ruleset schedule)

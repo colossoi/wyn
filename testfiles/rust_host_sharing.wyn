@@ -1,0 +1,37 @@
+entry diamond(xs: []i32) []i32 =
+  let a = map(|x| x*x+17, xs) in
+  let b = map(|x| x*3, a) in
+  map2(|x,y| x+y, a, b)
+
+entry retained(xs: []i32) []i32 =
+  let a = map(|x| x*x+17, xs) in
+  let total = reduce((+), 0, a) in
+  map(|x| x+total, a)
+
+entry reductions(xs: []i32) (i32,i32) =
+  let a = map(|x| x*x+17, xs) in
+  (reduce((+), 0, a), reduce(|x,y| if x>y then x else y, 0, a))
+
+entry sliced(xs: []i32) [4]i32 =
+  let a = map(|x| x+17, xs) in
+  map(|x| x*3, a[2..6])
+
+entry nested(xs: []i32) []i32 =
+  loop state=xs for i<2 do
+    let a = map(|x| x+17, state) in
+    let total = reduce((+), 0, a) in
+    map(|x| x+total, a)
+
+entry action(xs: []i32) []i32 =
+  let a = map(|x| x+17, xs) in
+  let offsets = scan((+), 0, map(|x| 1, xs)) in
+  scatter((#[scratch] copy(xs)), map(|x| x-1, offsets), a)
+
+entry observed_action(xs: []i32) ([]i32,[]i32) =
+  let offsets = scan((+), 0, map(|x| 1, xs)) in
+  (offsets, scatter((#[scratch] copy(xs)), map(|x| x-1, offsets), xs))
+
+entry dead_output(xs: []i32) []i32 =
+  let dead = map(|x| x*x, xs) in
+  let live = map(|x| x+17, xs) in
+  scatter((#[scratch] dead), iota(length(xs)), live)
