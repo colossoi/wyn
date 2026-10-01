@@ -160,7 +160,13 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         if let Some(value) = self.values.get(&source) {
             return Ok(value.clone());
         }
-        if let Some(resource) = self.compiler.plan.value_ref(source) {
+        if let Some(actual) = self.compiler.facts.alias(source) {
+            return self.value(scope, actual);
+        }
+        // A resource identifies backing storage; a slice still needs its bounds.
+        if let Some(resource) =
+            self.compiler.plan.value_ref(source).filter(|_| self.compiler.facts.slice(source).is_none())
+        {
             if !self.compiler.facts.operation(source).is_some_and(|op| self.active_operations.contains(&op))
                 && self.compiler.plan.backing(resource).is_some()
                 && !self.compiler.plan.external(resource).is_some()
@@ -179,9 +185,6 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                 }
                 return Ok(view);
             }
-        }
-        if let Some(actual) = self.compiler.facts.alias(source) {
-            return self.value(scope, actual);
         }
         if let Some(symbol) = self.compiler.facts.global_symbol(source) {
             let Some(region) = self.compiler.facts.definition(symbol) else {

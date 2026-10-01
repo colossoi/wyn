@@ -123,16 +123,17 @@ pub(super) fn screma(
                 let offset = body.binary(BinaryOperator::Add, base.clone(), offset)?;
                 let index = body.binary(BinaryOperator::Add, offset, lane.clone())?;
                 let valid = body.binary(BinaryOperator::Less, index.clone(), n.clone())?;
-                let mut values = Vec::new();
-                for (i, &operator) in operators.iter().enumerate() {
-                    values.push(body.branch(
-                        scope,
-                        valid.clone(),
-                        |body| {
+                let tuple_ty = types::tuple(initial.iter().map(|value| value.ty.clone()).collect());
+                let incoming = body.branch(
+                    scope,
+                    valid.clone(),
+                    |body| {
+                        let mut cache = LookupMap::default();
+                        let mut values = Vec::new();
+                        for (i, &operator) in operators.iter().enumerate() {
                             let Some(input) = body.compiler.facts.input(operator, 0) else {
                                 return Err(error("accumulator input missing"));
                             };
-                            let mut cache = LookupMap::default();
                             let filtered = body.compiler.facts.operation(input).filter(|filter| {
                                 body.compiler.plan.member(plan, *filter) && is_count(body, *filter)
                             });
@@ -163,23 +164,27 @@ pub(super) fn screma(
                                     element(body, scope, plan, input, index.clone(), &mut cache)?;
                                 accumulate_element(body, scope, operator, initial[i].clone(), incoming)?
                             };
-                            if i == 0 && scans.is_empty() {
-                                write_arrays(
-                                    body,
-                                    scope,
-                                    stage.operation,
-                                    plan,
-                                    results,
-                                    index.clone(),
-                                    &mut cache,
-                                )?;
-                            }
-                            Ok(value)
-                        },
-                        |_| Ok(initial[i].clone()),
-                        None,
-                    )?);
-                }
+                            values.push(value);
+                        }
+                        if scans.is_empty() {
+                            write_arrays(
+                                body,
+                                scope,
+                                stage.operation,
+                                plan,
+                                results,
+                                index.clone(),
+                                &mut cache,
+                            )?;
+                        }
+                        body.op(OpTag::Tuple(values.len()), values, tuple_ty.clone())
+                    },
+                    |body| body.op(OpTag::Tuple(initial.len()), initial.clone(), tuple_ty.clone()),
+                    None,
+                )?;
+                let values = (0..operators.len())
+                    .map(|i| body.field(incoming.clone(), i))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let (prefixes, _, totals) = workgroup_scan(
                     body,
                     scope,

@@ -2,6 +2,67 @@
 use crate::{compile_thru_ssa, lower_ssa_to_spirv, lower_ssa_to_wgsl};
 use naga::{BinaryOperator, Expression, Statement};
 
+fn storage_loads(function: &naga::Function, global: naga::Handle<naga::GlobalVariable>) -> usize {
+    function
+        .expressions
+        .iter()
+        .filter(|(_, expression)| {
+            let Expression::Load { pointer } = expression else {
+                return false;
+            };
+            let mut pointer = *pointer;
+            loop {
+                match function.expressions[pointer] {
+                    Expression::Access { base, .. } | Expression::AccessIndex { base, .. } => {
+                        pointer = base
+                    }
+                    Expression::GlobalVariable(value) => return value == global,
+                    _ => return false,
+                }
+            }
+        })
+        .count()
+}
+
+#[test]
+fn fused_collectives_share_producer_elements() {
+    let module = shaders(
+        "entry main(xs:[]i32) (i32,i32) =
+        let a=map(|x|x*x+17,xs) in
+        (reduce((+),0,a),reduce(|x,y|if x>y then x else y,0,a))",
+    );
+    let input = module
+        .global_variables
+        .iter()
+        .find(|(_, v)| v.binding.as_ref().is_some_and(|b| b.group == 0 && b.binding == 0))
+        .unwrap()
+        .0;
+    let partials = module.entry_points.iter().find(|e| e.name.ends_with("_partials")).unwrap();
+    assert_eq!(
+        storage_loads(&partials.function, input),
+        1,
+        "one input load feeds both reductions"
+    );
+}
+
+#[test]
+fn dead_fused_outputs_do_not_evaluate_their_elements() {
+    let module = shaders(
+        "entry main(xs:[8]i32) [8]i32 =
+        let dead=map(|x|x*x,xs) in let live=map(|x|x+17,xs) in
+        scatter((#[scratch] dead),iota(8),live)",
+    );
+    for entry in &module.entry_points {
+        assert!(
+            !entry.function.expressions.iter().any(|(_, expression)| matches!(expression,
+                Expression::Binary { op: BinaryOperator::Multiply, left, right } if left == right
+            )),
+            "unused producer arithmetic in {}",
+            entry.name
+        );
+    }
+}
+
 #[test]
 fn basic_scalar_policy_retains_calls_and_validates_both_backends() {
     use super::{from_tlc, fuse, optimize_with_policy, place, schedule, to_ssa, ScalarOptimization};

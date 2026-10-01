@@ -52,8 +52,8 @@ pub(super) fn emit(body: &mut Body<'_, '_, '_>, scope: Value, stage: &Stage) -> 
                     if role != "array" {
                         continue;
                     }
-                    let value = element(body, scope, plan, *source, index.clone(), &mut cache)?;
                     if let Some(output) = body.slot(scope, stage.operation, "output", output_index, 2)? {
+                        let value = element(body, scope, plan, *source, index.clone(), &mut cache)?;
                         store(body, output, index.clone(), value)?;
                     }
                     output_index += 1;
@@ -146,6 +146,15 @@ pub(super) fn element(
         let value = element(body, scope, plan, parent, index, cache)?;
         return body.field(value, field);
     }
+    if let Some((array, start, _)) = body.compiler.facts.slice(source) {
+        let start = body.value(scope, start)?;
+        let start = body.cast(start, &index.ty)?;
+        let index = body.binary(BinaryOperator::Add, index, start)?;
+        // The base is evaluated at a different index from this stream's cache.
+        let value = element(body, scope, plan, array, index, &mut LookupMap::default())?;
+        cache.insert(source, value.clone());
+        return Ok(value);
+    }
     if let Some(operation) = body.compiler.facts.operation(source) {
         if body.compiler.plan.member(plan, operation) {
             let Some(&(term, owner)) = body.compiler.program.identities.origins.get(&source) else {
@@ -164,7 +173,9 @@ pub(super) fn element(
         }
     }
     let array = body.value(scope, source)?;
-    body.index(array, index)
+    let value = body.index(array, index)?;
+    cache.insert(source, value.clone());
+    Ok(value)
 }
 
 fn store(
