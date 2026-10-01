@@ -225,8 +225,11 @@ impl<'source> Import<'_, '_, '_, 'source> {
     }
 
     fn finish_body(&mut self, body: &'source Term, scope: &mut Scope) -> Result<Value, OptimizeError> {
-        let (result, _) = self.visit(body, scope)?;
+        let (result, summary) = self.visit(body, scope)?;
         self.sink.add("SourceResult", (scope.key, result))?;
+        for operation in summary.dependencies {
+            self.sink.add("SourceReturnDependency", (scope.key, operation))?;
+        }
         self.finish_region_summary(scope)?;
         Ok(result)
     }

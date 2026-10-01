@@ -231,11 +231,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
         ty: &Type,
         output: Option<&crate::interface::EntryOutputDecl<crate::interface::ResolvedAttribute>>,
     ) -> Result<(), OptimizeError> {
-        if let Some(summary) = self.summaries.values.get(&value) {
-            for &operation in &summary.dependencies {
-                self.sink.add("SourceObserved", operation)?;
-            }
-        }
         let id = self.outputs.next_id();
         let binding = output.and_then(|o| o.attribute.as_ref());
         self.sink.set(

@@ -14,6 +14,9 @@
 (relation SourceOrigin (SourceValue OperationKey))
 (relation SourceDepends (OperationKey OperationKey OperandRole))
 (relation SourceObserved (OperationKey))
+(relation SourceReturnDependency (RegionKey OperationKey))
+(rule ((SourceReturnDependency region op) (SourceOperation op region kind))
+      ((SourceObserved op)) :ruleset source-summary)
 (relation SourceOperationCheap (OperationKey bool))
 
 (rule ((SourceInput op i value) (= (SourceExprKey value) (ExprId token))) ((set (SourceIdentityToken (Identity value)) token)) :ruleset source-summary)
