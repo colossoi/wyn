@@ -316,6 +316,7 @@ impl Program {
         let source_name = &entry.name;
         let mut params = vec![];
         let mut arguments = vec![];
+        let mut input_checks = vec![];
         for &r in &entry.inputs {
             let id = resource(r);
             let ty = match self.interface.frame_graph.resources[r.0].kind {
@@ -326,6 +327,37 @@ impl Program {
             };
             params.push(quote!(#id:#ty));
             arguments.push(quote!(#id));
+            let resource = &self.interface.frame_graph.resources[r.0];
+            let mut expected = BTreeSet::new();
+            for binding in &resource.bindings {
+                if let Binding::StorageBuffer {
+                    usage: BufferUsage::Input,
+                    length: Some(crate::BufferLen::Fixed { bytes }),
+                    members,
+                    ..
+                } = &self.bindings(binding.pipeline_index)[binding.binding_index]
+                {
+                    if members.is_empty() {
+                        expected.insert(*bytes);
+                    }
+                }
+            }
+            if expected.len() > 1 {
+                return Err(HostError::Invalid(format!(
+                    "conflicting fixed sizes for input {}",
+                    resource.name
+                )));
+            }
+            if let Some(bytes) = expected.first() {
+                let label = &resource.name;
+                input_checks.push(quote! {
+                    if #id.size() != #bytes {
+                        return Err(HostError::Invalid(format!(
+                            "input {} requires exactly {} bytes, got {}", #label, #bytes, #id.size()
+                        )));
+                    }
+                });
+            }
         }
         for name in &entry.scalar_inputs {
             let name = scalar(name);
@@ -334,7 +366,7 @@ impl Program {
         }
         let mut carried = BTreeSet::new();
         self.loop_resources(&entry.operations, &mut carried)?;
-        let mut code = vec![];
+        let mut code = input_checks;
         let mut scratch = vec![];
         for a in &entry.allocations {
             match a {
@@ -457,6 +489,7 @@ impl Program {
                 pipeline,
                 region,
                 body,
+                ..
             } = operation
             {
                 let repeated = &self.interface.dispatch_loops[*region];
@@ -478,14 +511,17 @@ impl Program {
         let mut code = vec![];
         for (ordinal, operation) in operations.iter().enumerate() {
             code.push(match operation {
-                Operation::Loop { pipeline, region, body } => {
+                Operation::Loop { pipeline, region, setup, body } => {
                     let repeated = &self.interface.dispatch_loops[*region];
                     let current = resource(self.scalar_resource(*pipeline, &repeated.current)?);
                     let next = resource(self.scalar_resource(*pipeline, &repeated.next)?);
                     let index = resource(self.scalar_resource(*pipeline, &repeated.index)?);
                     let count = self.rust_scalar(*pipeline, &repeated.count)?;
+                    let initial_length = self.rust_scalar(*pipeline, &repeated.initial_length)?;
+                    let setup = self.rust_operations(setup, entry, format, context)?;
                     let body = self.rust_operations(body, entry, format, context)?;
                     quote!({
+                        if #initial_length > 0 { #setup }
                         let iterations = #count;
                         for iteration in 0..iterations {
                             // Record the index upload between dispatches, so each

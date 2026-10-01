@@ -42,6 +42,11 @@ pub enum ScalarExpr {
     F32(u32),
     Bool(bool),
     Local(String),
+    /// Element count of a whole input buffer, derived from its byte size.
+    BufferLength {
+        source: ScalarSource,
+        stride: u32,
+    },
     Read {
         source: ScalarSource,
         offset: u32,
@@ -90,6 +95,7 @@ impl ScalarExpr {
     pub fn reads_mut(&mut self, visit: &mut impl FnMut(&mut ScalarSource, &mut u32)) {
         match self {
             Self::Read { source, offset, .. } => visit(source, offset),
+            Self::BufferLength { source, .. } => visit(source, &mut 0),
             Self::Apply { args, .. } | Self::Tuple(args) => {
                 for arg in args {
                     arg.reads_mut(visit);

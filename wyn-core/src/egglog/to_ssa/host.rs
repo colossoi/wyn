@@ -17,7 +17,7 @@ use crate::ssa::layout::block_layout;
 use crate::ssa::types::EntryPoint;
 use crate::tlc::{LoopKind, TermKind, VarRef};
 use crate::types::buffer_tag;
-use crate::types::{Type, TypeExt, TypeName};
+use crate::types::{Type, TypeName};
 use crate::BindingRef;
 use crate::LookupMap;
 use egglog_engine::Value;
@@ -210,10 +210,9 @@ impl<'source> Lower<'_, '_, 'source> {
             TermKind::App { func, args } => {
                 if matches!(func.kind, TermKind::Var(VarRef::Builtin { id, .. }) if id == catalog().known().length)
                 {
-                    let Type::Constructed(TypeName::Size(n), _) = args.first()?.ty.array_size()? else {
-                        return None;
-                    };
-                    return Some(ScalarExpr::I32(i32::try_from(*n).ok()?));
+                    let array = args.first()?;
+                    let &source = self.compiler.program.identities.occurrences.get(&(scope, array.id))?;
+                    return array_length(self.compiler, source);
                 }
                 let values =
                     args.iter().map(|term| self.source(scope, term)).collect::<Option<Vec<_>>>()?;
@@ -579,5 +578,17 @@ impl Lower<'_, '_, '_> {
             "ScalarProject" => Some(field(self.selected(f[2])?, selected.integer(f[3]).ok()? as usize)),
             _ => None,
         }
+    }
+}
+
+/// Evaluate an array length without reading GPU contents.
+pub(super) fn array_length(compiler: &Compiler<'_, '_>, source: Value) -> Option<ScalarExpr> {
+    match super::sizes::source_size(compiler, source, true).ok()? {
+        crate::host::SizeExpr::Integer(n) => Some(ScalarExpr::I32(i32::try_from(n).ok()?)),
+        crate::host::SizeExpr::BufferLength { set, binding, stride } => Some(ScalarExpr::BufferLength {
+            source: ScalarSource::Binding { set, binding },
+            stride,
+        }),
+        _ => None,
     }
 }

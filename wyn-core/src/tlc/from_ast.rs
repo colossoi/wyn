@@ -1453,7 +1453,7 @@ impl<'a> Transformer<'a> {
             // No accumulator - use unit
             self.mk_term(Type::Constructed(TypeName::Unit, vec![]), span, TermKind::UnitLit)
         });
-        let acc_ty = init_term.ty.clone();
+        let acc_ty = ty.clone();
 
         // Build loop_var and init_bindings from the pattern
         let (loop_var, loop_var_ty, init_bindings) =

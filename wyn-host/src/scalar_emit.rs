@@ -11,6 +11,10 @@ impl Program {
             ScalarExpr::F32(bits) => format!("(wyn-f32-bits (u32 {bits}))"),
             ScalarExpr::Bool(b) => if *b { "t" } else { "nil" }.into(),
             ScalarExpr::Local(name) => name.clone(),
+            ScalarExpr::BufferLength { source, stride } => format!(
+                "(i32 (floor (gpu-buffer-size resource-{}) {stride}))",
+                self.scalar_resource(pipeline, source)?.0
+            ),
             ScalarExpr::Read { source, offset, ty } => format!(
                 "(gpu-read-scalar resource-{} {offset} '{})",
                 self.scalar_resource(pipeline, source)?.0,
@@ -87,6 +91,13 @@ impl Program {
             ScalarExpr::Local(name) => {
                 let name = format_ident!("{}", name.replace('-', "_"));
                 quote!(#name)
+            }
+            ScalarExpr::BufferLength { source, stride } => {
+                let resource = self.scalar_resource(pipeline, source)?;
+                let name = format_ident!("resource_{}", resource.0);
+                let stride = u64::from(*stride);
+                quote!(i32::try_from(#name.size() / #stride)
+                    .map_err(|_| HostError::Invalid("array length exceeds i32".into()))?)
             }
             ScalarExpr::Read { source, offset, ty } => {
                 let resource = self.scalar_resource(pipeline, source)?;

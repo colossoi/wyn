@@ -250,7 +250,7 @@ fn fv_type_generalizable(ty: &Type) -> BTreeSet<usize> {
 }
 
 /// Free type variables for a named function scheme. Function declarations are
-/// representation-polymorphic over fixed-size arrays: a helper taking `[4]T`
+/// representation-polymorphic over arrays: a helper taking `[n]T`
 /// can be specialized for a storage-backed View slice and for a local
 /// Composite literal at different call sites.
 ///
@@ -262,9 +262,10 @@ fn fv_type_generalizable(ty: &Type) -> BTreeSet<usize> {
 /// keys on the resulting substitution, so a call with `[4]T` and a call with
 /// a runtime-sized `[]T` get separate specializations.
 ///
-/// For size-polymorphic/unsized arrays the **variant** stays pinned, so
-/// producer-specialization can resolve filter outputs without defaulting a
-/// Skolem-sized value to Composite.
+/// Generalize free representation variables for runtime-sized arrays too.
+/// Otherwise a use with a materialized array can constrain every later call
+/// to a helper such as `copy`, rejecting storage-backed inputs. Concrete
+/// producer representations (including Abstract filter results) stay intact.
 fn fv_type_generalizable_for_function(ty: &Type) -> BTreeSet<usize> {
     let mut out = BTreeSet::new();
     fn go(t: &Type, acc: &mut BTreeSet<usize>) {
@@ -276,10 +277,8 @@ fn fv_type_generalizable_for_function(ty: &Type) -> BTreeSet<usize> {
                 if let Some(elem) = t.elem_type() {
                     go(elem, acc);
                 }
-                if matches!(t.array_size(), Some(Type::Constructed(TypeName::Size(_), _))) {
-                    if let Some(variant) = t.array_variant() {
-                        go(variant, acc);
-                    }
+                if let Some(variant) = t.array_variant() {
+                    go(variant, acc);
                 }
                 if let Some(size) = t.array_size() {
                     go(size, acc);
@@ -3224,7 +3223,17 @@ impl<'a> TypeChecker<'a> {
 
                 // Get or infer the type of the loop variable from init
                 let loop_var_type = if let Some(init) = &loop_expr.init {
-                    self.infer_expression(init)?
+                    let initial = self.infer_expression(init)?.apply(&self.context);
+                    // Loop storage is selected independently of the initializer.
+                    // Preserve element/shape constraints without forcing a view
+                    // initializer to use the representation of a materialized backedge.
+                    if let Type::Constructed(TypeName::Array, mut args) = initial {
+                        args[1] = self.context.new_variable();
+                        args[3] = self.context.new_variable();
+                        Type::Constructed(TypeName::Array, args)
+                    } else {
+                        initial
+                    }
                 } else {
                     // No init - create a fresh type variable
                     self.context.new_variable()

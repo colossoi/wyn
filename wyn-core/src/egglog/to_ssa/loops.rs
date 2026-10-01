@@ -54,8 +54,21 @@ pub(super) fn emit(body: &mut Body<'_, '_, '_>, scope: Value, stage: &Stage) -> 
 pub(super) fn publish(
     compiler: &Compiler<'_, '_>,
     entries: &[EntryPoint],
+    associations: &[Vec<crate::EntryId>],
     module: &mut ModuleInterface,
 ) -> Result<(), OptimizeError> {
+    let order = module
+        .frame_graph
+        .topological_order()
+        .map_err(|cycle| error(format!("cyclic loop dispatch dependencies: {cycle:?}")))?;
+    let positions: std::collections::BTreeMap<_, _> = order
+        .iter()
+        .enumerate()
+        .map(|(position, &index)| {
+            let pass = &module.frame_graph.passes[index];
+            ((pass.pipeline_index, pass.stage_index), position)
+        })
+        .collect();
     for entry in entries {
         let Some((_, Some(stage))) = compiler.entry_origins.get(&entry.id) else {
             continue;
@@ -71,6 +84,7 @@ pub(super) fn publish(
         };
         let TermKind::Loop {
             kind: LoopKind::ForRange { bound, .. },
+            init,
             ..
         } = &term.kind
         else {
@@ -111,23 +125,45 @@ pub(super) fn publish(
         }) else {
             return Err(error("loop entry missing"));
         };
-        module.dispatch_loops.push(DispatchLoop {
-            begin: begin.name.clone(),
-            end: entry.name.clone(),
-            stages: entries
+        let pipeline = associations
+            .iter()
+            .position(|ids| ids.contains(&entry.id))
+            .ok_or_else(|| error("loop pipeline missing"))?;
+        let stage_index = |id| {
+            associations[pipeline]
                 .iter()
-                .filter(|entry| {
-                    let Some((_, Some(stage))) = compiler.entry_origins.get(&entry.id) else {
-                        return false;
-                    };
-                    compiler
-                        .plan
-                        .source(stage.operation)
-                        .and_then(|source| compiler.program.identities.origins.get(&source))
-                        .is_some_and(|(_, scope)| *scope == iteration)
-                })
-                .map(|entry| entry.name.clone())
-                .collect(),
+                .position(|&candidate| candidate == id)
+                .ok_or_else(|| error("loop stage belongs to a different pipeline"))
+        };
+        let mut body = entries
+            .iter()
+            .filter(|entry| {
+                let Some((_, Some(stage))) = compiler.entry_origins.get(&entry.id) else {
+                    return false;
+                };
+                compiler
+                    .plan
+                    .source(stage.operation)
+                    .and_then(|source| compiler.program.identities.origins.get(&source))
+                    .is_some_and(|(_, scope)| *scope == iteration)
+            })
+            .map(|entry| stage_index(entry.id))
+            .collect::<Result<Vec<_>, _>>()?;
+        body.sort_by_key(|stage| positions[&(pipeline, *stage)]);
+        let initial = compiler
+            .program
+            .identities
+            .occurrences
+            .get(&(owner, init.id))
+            .ok_or_else(|| error("loop initializer missing"))?;
+        let initial_length = host::array_length(compiler, *initial)
+            .ok_or_else(|| error("loop initializer length cannot be evaluated on the host"))?;
+        module.dispatch_loops.push(DispatchLoop {
+            initial_length,
+            pipeline,
+            setup: stage_index(begin.id)?,
+            completion: stage_index(entry.id)?,
+            body,
             count,
             index: slot(compiler.facts.iteration(iteration))?,
             current,

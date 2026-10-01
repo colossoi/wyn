@@ -390,11 +390,14 @@ impl Program {
     fn write_operations(&self, out: &mut String, operations: &[Operation]) -> Result<(), HostError> {
         for op in operations {
             match op {
-                Operation::Loop { pipeline, region, body } => {
+                Operation::Loop { pipeline, region, setup, body } => {
                     let repeated = &self.interface.dispatch_loops[*region];
                     let current = resource(self.scalar_resource(*pipeline, &repeated.current)?);
                     let next = resource(self.scalar_resource(*pipeline, &repeated.next)?);
                     let index = resource(self.scalar_resource(*pipeline, &repeated.index)?);
+                    writeln!(out, "    (when (> {} 0)", self.whl_scalar(*pipeline, &repeated.initial_length)?)?;
+                    self.write_operations(out, setup)?;
+                    writeln!(out, "    )")?;
                     writeln!(out, "    (dotimes (iteration {})", self.whl_scalar(*pipeline, &repeated.count)?)?;
                     writeln!(out, "      (gpu-write-scalar {index} 0 'i32 (i32 iteration))")?;
                     self.write_operations(out, body)?;

@@ -175,7 +175,7 @@ pub(super) fn extent(compiler: &Compiler<'_, '_>, key: Value) -> Result<SizeExpr
         _ => Err(error("unsupported host extent")),
     }
 }
-fn source_size(
+pub(super) fn source_size(
     compiler: &Compiler<'_, '_>,
     source: Value,
     length: bool,

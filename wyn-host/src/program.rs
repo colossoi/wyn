@@ -176,6 +176,7 @@ impl Allocation {
 #[derive(Clone, Debug)]
 pub enum Operation {
     Loop {
+        setup: Vec<Operation>,
         pipeline: usize,
         region: usize,
         body: Vec<Operation>,
@@ -255,6 +256,8 @@ impl Program {
             .topological_order()
             .map_err(|cycle| HostError::Invalid(format!("cyclic pass dependencies: {cycle:?}")))?;
         let mut entries = BTreeMap::<String, Entry>::new();
+        let mut stage_operations = BTreeMap::new();
+        let mut entry_stages = BTreeMap::<String, Vec<(usize, usize)>>::new();
         for index in order {
             let pass = &program.interface.frame_graph.passes[index];
             let pipeline = pass.pipeline_index;
@@ -285,6 +288,9 @@ impl Program {
                 operations: vec![],
                 results: vec![],
             });
+            let start = entry.operations.len();
+            let key = (pipeline, pass.stage_index);
+            entry_stages.entry(entry.name.clone()).or_default().push(key);
             let mut replaced = false;
             if let Operation::Dispatch { stage, .. } = &operation {
                 let Pipeline::Compute(compute) = &program.interface.pipelines[pipeline] else {
@@ -302,58 +308,78 @@ impl Program {
             if !replaced {
                 entry.operations.push(operation);
             }
+            stage_operations.insert(key, entry.operations[start..].to_vec());
         }
         for (_, mut entry) in entries {
             program.prepare_entry(&mut entry)?;
-            for (region, repeated) in program.interface.dispatch_loops.iter().enumerate().rev() {
-                let find = |name: &str| {
-                    entry.operations.iter().position(|op| match op {
-                        Operation::Dispatch { pipeline, stage, .. } => {
-                            matches!(&program.interface.pipelines[*pipeline], Pipeline::Compute(p) if p.stages[*stage].entry_point == name)
-                        }
-                        _ => false,
-                    })
-                };
-                let Some(begin) = find(&repeated.begin) else {
+            let stages = &entry_stages[&entry.name];
+            let mut loops = BTreeMap::new();
+            let mut members = BTreeSet::new();
+            for (region, repeated) in program.interface.dispatch_loops.iter().enumerate() {
+                let setup = (repeated.pipeline, repeated.setup);
+                let Some(begin) = stages.iter().position(|key| *key == setup) else {
                     continue;
                 };
-                let Some(end) = find(&repeated.end) else {
-                    return Err(HostError::Invalid("loop exit missing".into()));
-                };
-                if end <= begin {
-                    return Err(HostError::Invalid("loop region is not ordered".into()));
+                let completion = (repeated.pipeline, repeated.completion);
+                let end = stages
+                    .iter()
+                    .position(|key| *key == completion)
+                    .ok_or_else(|| HostError::Invalid("loop completion is outside its entry".into()))?;
+                if end <= begin || loops.insert(setup, region).is_some() {
+                    return Err(HostError::Invalid("invalid or duplicate loop setup".into()));
                 }
-                let Operation::Dispatch { pipeline, .. } = entry.operations[begin] else {
-                    return Err(HostError::Invalid("loop entry must be a dispatch".into()));
-                };
-                for op in &entry.operations[begin + 1..end] {
-                    let name = match op {
-                        Operation::Dispatch { pipeline, stage, .. } => {
-                            let Pipeline::Compute(p) = &program.interface.pipelines[*pipeline] else {
-                                return Err(HostError::Invalid("loop contains a graphics pipeline".into()));
-                            };
-                            &p.stages[*stage].entry_point
-                        }
-                        Operation::Scalar { task, .. } => &program.interface.scalar_tasks[*task].stage,
-                        _ => {
-                            return Err(HostError::Invalid(
-                                "host loop sketch requires a flat compute region".into(),
-                            ))
-                        }
-                    };
-                    if !repeated.stages.contains(name) {
+                let mut previous = begin;
+                for &stage in &repeated.body {
+                    let key = (repeated.pipeline, stage);
+                    let position = stages
+                        .iter()
+                        .position(|candidate| *candidate == key)
+                        .ok_or_else(|| HostError::Invalid("loop body stage is outside its entry".into()))?;
+                    if position <= previous || position >= end || !members.insert(key) {
                         return Err(HostError::Invalid(
-                            "host loop contains an interleaved outer stage".into(),
+                            "loop body is unordered or overlaps another loop".into(),
                         ));
                     }
+                    previous = position;
                 }
-                let body = entry.operations.drain(begin + 1..end).collect();
-                entry.operations[begin + 1] = Operation::Loop {
-                    pipeline,
-                    region,
-                    body,
-                };
+                if !members.insert(completion)
+                    || stages[begin + 1..end]
+                        .iter()
+                        .any(|key| !repeated.body.contains(&key.1) || key.0 != repeated.pipeline)
+                {
+                    return Err(HostError::Invalid(
+                        "loop contains an interleaved outer stage".into(),
+                    ));
+                }
             }
+            if loops.keys().any(|key| members.contains(key)) {
+                return Err(HostError::Invalid(
+                    "nested dispatch loops are not supported".into(),
+                ));
+            }
+            let mut operations = Vec::new();
+            for key in stages {
+                if members.contains(key) {
+                    continue;
+                }
+                if let Some(&region) = loops.get(key) {
+                    let repeated = &program.interface.dispatch_loops[region];
+                    let body = repeated
+                        .body
+                        .iter()
+                        .flat_map(|stage| stage_operations[&(repeated.pipeline, *stage)].iter().cloned())
+                        .collect();
+                    operations.push(Operation::Loop {
+                        setup: stage_operations[key].clone(),
+                        pipeline: repeated.pipeline,
+                        region,
+                        body,
+                    });
+                } else {
+                    operations.extend(stage_operations[key].iter().cloned());
+                }
+            }
+            entry.operations = operations;
             program.entries.push(entry);
         }
         Ok(program)

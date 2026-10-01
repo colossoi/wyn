@@ -25,6 +25,7 @@ fn frame_graph_aliases_storage_texture_views_and_orders_consumers() {
                     resource: None,
                 }],
                 stages: vec![ComputeStage {
+                    dependencies: vec![],
                     entry_point: "paint".to_string(),
                     owner: "paint".to_string(),
                     workgroup_size: (8, 8, 1),
@@ -118,6 +119,7 @@ fn frame_graph_fragment_target_write_orders_downstream_reader() {
                     resource: None,
                 }],
                 stages: vec![ComputeStage {
+                    dependencies: vec![],
                     entry_point: "occ_reduce".to_string(),
                     owner: "occ_reduce".to_string(),
                     workgroup_size: (8, 8, 1),
@@ -170,6 +172,7 @@ fn producer_consumer_descriptor(producer_first: bool) -> ModuleInterface {
         members: Vec::new(),
     };
     let stage = |entry: &str| ComputeStage {
+        dependencies: vec![],
         entry_point: entry.to_string(),
         owner: entry.to_string(),
         workgroup_size: (64, 1, 1),
@@ -251,6 +254,7 @@ fn frame_graph_reports_a_producer_consumer_cycle() {
         resource: Some("occ".to_string()),
     };
     let stage = |entry: &str| ComputeStage {
+        dependencies: vec![],
         entry_point: entry.to_string(),
         owner: entry.to_string(),
         workgroup_size: (64, 1, 1),
@@ -332,6 +336,7 @@ fn frame_graph_target_write_merges_with_storage_read_view() {
                     resource: Some("gbuf".to_string()),
                 }],
                 stages: vec![ComputeStage {
+                    dependencies: vec![],
                     entry_point: "reduce".to_string(),
                     owner: "reduce".to_string(),
                     workgroup_size: (8, 8, 1),

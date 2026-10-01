@@ -1,5 +1,10 @@
 # Radix sort and fusion WIP
 
+**Current checkpoint:** see [port fidelity and validation gaps](radix-port-fidelity-wip.md).
+The latest compiler work has two failing tuple-loop tests and has not established
+end-to-end parity for all six sorts or fusion equal to Futhark. Historical
+measurements below do not validate that work.
+
 This branch contains the Futhark radix port, a cooperative scan/reduction
 implementation, and a remaining fusion/host-loop sketch. The sketch executes
 radix passes as repeated parallel GPU dispatches through WHL and Rust/WGPU.

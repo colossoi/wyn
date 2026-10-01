@@ -466,11 +466,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         self.sink.add("SourceEnteredBy", (iteration.key, owner))?;
         self.sink.add("SourceLoop", (owner, header.key, iteration.key))?;
         if matches!(kind, LoopKind::ForRange { .. })
-            && variable_ty.is_array()
-            && matches!(
-                variable_ty.array_size(),
-                Some(Type::Constructed(TypeName::Size(_), _))
-            )
+            && (variable_ty.is_array() || crate::types::as_soa_tuple(variable_ty).is_some())
         {
             self.sink.add("SourceCountedArrayLoop", owner)?;
         }
