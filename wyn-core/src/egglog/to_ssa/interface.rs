@@ -1,38 +1,18 @@
 //! Source ABI declarations and publication for directly emitted entry bodies.
 use super::kernels;
-use super::plan::Stage;
+
 use super::{builder_error, error, Body, Compiler, OptimizeError, Typed};
-use crate::binding_layout::{
-    extract_io_decoration, extract_sampler_binding, extract_storage_access, extract_storage_binding,
-    extract_storage_image_binding, extract_storage_image_resource, extract_texture_backing,
-    extract_texture_binding, extract_texture_resource, extract_uniform_binding,
-};
 use crate::builtins::catalog;
 use crate::egglog::source::Term;
-use crate::egglog::to_ssa::sizes;
-use crate::flow::ExecutionModel;
-use crate::host::BufferLen;
-use crate::host::DispatchLen;
-use crate::interface::lowering::{build_entry_outputs, extract_size_hint};
-use crate::interface::StorageBindingDecl;
-use crate::interface::StorageRole;
-use crate::interface::{
-    BindingExposure, EntryInput, EntryInputKind, EntryKind, EntryParamBindingKind, IoDecoration,
-    PushConstantSlot, StorageAccess, TextureSource,
-};
+use crate::interface::EntryKind;
 use crate::op::BinaryOperator;
 use crate::op::{OpTag, PureViewSource};
-use crate::ssa::layout::type_byte_size;
 use crate::ssa::types::{EntryPoint, InstKind};
 use crate::tlc::data::EntryInputBounds;
 use crate::tlc::EntryPoint as SourceEntry;
-use crate::types::{
-    self, bool_type, buffer_tag, canonical_storage_buffer_ty, sized_array, strip_existentials, Type,
-    TypeExt, TypeName,
-};
-use crate::{LookupMap, SymbolId};
+use crate::types::{self, buffer_tag, Type, TypeExt, TypeName};
+use crate::SymbolId;
 use egglog_engine::Value;
-use wyn_base::IdSource;
 
 pub(super) fn entry<'source>(
     compiler: &mut Compiler<'_, 'source>,
@@ -41,111 +21,31 @@ pub(super) fn entry<'source>(
     parameters: &[(SymbolId, Type)],
     entry: &SourceEntry<EntryInputBounds>,
     symbol: SymbolId,
-    stage: Option<&Stage>,
+    stage: Option<Value>,
+    metadata: &crate::interface::EntryPublication,
 ) -> Result<EntryPoint, OptimizeError> {
     let decl = &entry.declaration;
     let mut lower = Body::new(compiler, scope, vec![], source.ty.clone())?;
-    lower.grid = lower.compiler.plan.entry_grid(
-        symbol,
-        stage,
-        decl.compute_dispatch.map(|grid| (grid.x, grid.y, grid.z)),
-    );
+    lower.grid = stage.map(|key| lower.compiler.plan.grid(key)).transpose()?.flatten();
+    if stage.is_none() {
+        let Some(token) = lower.compiler.program.identities.symbols.get(&symbol) else {
+            return Err(error("entry symbol missing"));
+        };
+        let Some(grid) = lower.compiler.facts.lookup("OriginalEntryGrid", (token,)) else {
+            return Err(error("original entry has no launch grid"));
+        };
+        lower.grid = Some(lower.compiler.facts.grid(grid)?);
+    }
     let mut inputs = Vec::new();
     let mut parameter_inputs = Vec::new();
-    let mut offset = 0u32;
-    for (index, (symbol, ty)) in parameters.iter().enumerate() {
-        let Some(param) = decl.params.get(index) else {
-            return Err(error("missing input declaration"));
-        };
-        let binding = entry.data.param_bindings.get(index).and_then(Option::as_ref);
-        let mut declared = Vec::new();
-        if let Some(EntryParamBindingKind::TupleOfViews(fields)) = binding.map(|binding| &binding.kind) {
-            let Type::Constructed(TypeName::Tuple(_), types) = strip_existentials(ty) else {
-                return Err(error("tuple input has no tuple type"));
-            };
-            for (i, (field, ty)) in fields.iter().zip(types).enumerate() {
-                declared.push(EntryInput {
-                    name: format!("{}_{}", param.name, i),
-                    ty: canonical_storage_buffer_ty(ty),
-                    size_hint: extract_size_hint(param),
-                    kind: EntryInputKind::Storage {
-                        exposure: BindingExposure::Host(field.binding),
-                        access: StorageAccess::ReadOnly,
-                        length: None,
-                    },
-                });
-            }
-        } else {
-            let storage =
-                binding.map(|binding| binding.first_buffer().0).or_else(|| extract_storage_binding(param));
-            let decoration = extract_io_decoration(param);
-            let kind = if let Some(binding) = storage {
-                EntryInputKind::Storage {
-                    exposure: BindingExposure::Host(binding),
-                    access: extract_storage_access(param).unwrap_or(StorageAccess::ReadOnly),
-                    length: entry.data.by_symbol.get(symbol).cloned().or_else(|| {
-                        type_byte_size(ty).map(|bytes| BufferLen::Fixed { bytes: bytes.into() })
-                    }),
-                }
-            } else if let Some(binding) = extract_uniform_binding(param) {
-                EntryInputKind::Uniform { binding }
-            } else if let Some(binding) = extract_texture_binding(param) {
-                let source = match (extract_texture_backing(param), extract_texture_resource(param)) {
-                    (backing, Some(name)) => TextureSource::Resource { name, backing },
-                    (Some(binding), None) => TextureSource::Backing(binding),
-                    _ => TextureSource::External,
-                };
-                EntryInputKind::Texture { binding, source }
-            } else if let Some(binding) = extract_sampler_binding(param) {
-                EntryInputKind::Sampler { binding }
-            } else if let Some((binding, format, access, size)) = extract_storage_image_binding(param) {
-                EntryInputKind::StorageImage {
-                    binding,
-                    format,
-                    access,
-                    size,
-                    resource: extract_storage_image_resource(param),
-                }
-            } else if decl.entry_kind != EntryKind::Compute
-                || matches!(decoration, Some(IoDecoration::BuiltIn(_)))
-            {
-                EntryInputKind::Value { decoration }
-            } else {
-                // Parameters are block members: aggregates include their tail padding.
-                let Some((size, align)) = crate::ssa::layout::std430_type_layout(&storage_type(ty)?) else {
-                    return Err(error("input has no byte layout"));
-                };
-                offset = offset.div_ceil(align) * align;
-                let slot = PushConstantSlot { offset, size };
-                offset += size;
-                EntryInputKind::PushConstant { slot }
-            };
-            declared.push(EntryInput {
-                name: param.name.clone(),
-                ty: if *ty == bool_type() {
-                    Type::Constructed(TypeName::UInt(32), vec![])
-                } else {
-                    canonical_storage_buffer_ty(ty)
-                },
-                size_hint: extract_size_hint(param),
-                kind,
-            });
-        }
+    for (index, (_, ty)) in parameters.iter().enumerate() {
+        let declared = lower.compiler.facts.parameter_inputs(scope, index as i64)?;
         let first = inputs.len();
         let mut values = Vec::new();
-        for mut input in declared {
-            let scalar_storage = input.storage_binding().is_some() && !input.ty.is_array();
-            if scalar_storage {
-                input.ty = sized_array(1, input.ty.clone());
-            }
-            let physical = if let Some(binding) = input.storage_binding() {
-                let Some(element) = input.ty.elem_type() else {
-                    return Err(error("storage input has no element type"));
-                };
-                view_type(&storage_type(element)?, buffer_tag(binding))
-            } else {
-                concrete(&input.ty)?
-            };
+        for selected in declared {
+            let input = selected.declaration;
+            let physical = selected.parameter_type;
+            let scalar_storage = selected.scalar_storage;
             let parameter =
                 lower.builder.func_mut().add_function_param(physical.clone(), input.name.clone());
             let mut value = Typed {
@@ -201,91 +101,42 @@ pub(super) fn entry<'source>(
         let Some(formal) = lower.compiler.facts.parameter(scope, index as i64) else {
             return Err(error("missing entry parameter"));
         };
-        if let Some(input) = inputs.get(first) {
-            lower.compiler.input_interfaces.insert(formal, input.clone());
-            let host_length = match &input.kind {
-                EntryInputKind::Storage {
-                    exposure: BindingExposure::Host(binding),
-                    ..
-                } => {
-                    input.ty.elem_type().and_then(type_byte_size).map(|stride| DispatchLen::InputBinding {
-                        set: binding.set,
-                        binding: binding.binding,
-                        elem_bytes: stride,
-                    })
-                }
-                EntryInputKind::PushConstant { slot } => {
-                    Some(DispatchLen::PushConstant { offset: slot.offset })
-                }
-                _ => None,
-            };
-            if let Some(length) = host_length {
-                lower.compiler.host_lengths.insert(formal, length);
-            }
-        }
         lower.values.insert(formal, value);
         parameter_inputs.push((first..inputs.len()).collect());
     }
-    let owner = decl
-        .graphics_group
-        .as_ref()
-        .and_then(|group| lower.compiler.program.source.symbols.get(group.root))
-        .unwrap_or(&decl.name);
-    let phase = match stage.map(|stage| stage.phase.as_str()) {
-        Some("elements" | "scalar") => "compute",
-        Some("chunks") => "partials",
-        Some(phase) => phase,
-        None => match decl.entry_kind {
-            EntryKind::Vertex => "vertex",
-            EntryKind::Fragment => "fragment",
-            _ if lower.compiler.plan.stages.iter().any(|s| s.owner == symbol) => "finish",
-            _ => "compute",
-        },
-    };
-    let name = super::plan::unique(format!("{owner}_{phase}"), &mut lower.compiler.entry_names);
-    if stage.is_some_and(|s| s.phase != "scalar") && decl.compute_dispatch.is_none() {
-        lower.host_stage = Some(name.clone());
-    }
     let compute = decl.entry_kind == EntryKind::Compute;
+    let original = lower
+        .compiler
+        .program
+        .identities
+        .symbols
+        .get(&symbol)
+        .is_some_and(|token| lower.compiler.facts.contains("EmitOriginalEntry", (token,)));
     let result = if let Some(stage) = stage {
-        kernels::emit(&mut lower, scope, stage)?;
+        let recipe = lower.compiler.plan.recipe(stage)?;
+        kernels::emit(&mut lower, scope, &recipe)?;
         lower.op(OpTag::Unit, vec![], types::unit())?
-    } else if compute {
+    } else if compute && !original {
         lower.op(OpTag::Unit, vec![], types::unit())?
     } else {
-        lower.source(scope, source)?
+        let Some(result) = lower.compiler.facts.result(scope) else {
+            return Err(error("entry point has no selected result"));
+        };
+        lower.value(scope, result)?
     };
-    let mut bindings = IdSource::<u32>::new();
-    let maximum = inputs
-        .iter()
-        .filter_map(EntryInput::storage_binding)
-        .filter(|binding| binding.set == 0)
-        .map(|binding| binding.binding)
-        .max();
-    let maximum = Some(maximum.unwrap_or(0).max(lower.compiler.plan.next_binding.saturating_sub(1)));
-    if let Some(maximum) = maximum {
-        for _ in 0..=maximum {
-            bindings.next_id();
-        }
-    }
-    let outputs = if compute {
-        vec![]
-    } else {
-        build_entry_outputs(
-            decl,
-            &result.ty,
-            &[],
-            &inputs,
-            decl.entry_kind == EntryKind::Compute,
-            &mut bindings,
-        )
-        .map_err(|err| error(err.to_string()))?
-    };
+    let outputs = metadata.outputs.clone();
     for (index, output) in outputs.iter().enumerate() {
         let value = if outputs.len() == 1 { result.clone() } else { lower.field(result.clone(), index)? };
         if let Some(binding) = output.storage_binding() {
-            let element = value.ty.elem_type().filter(|_| value.ty.is_array()).unwrap_or(&value.ty);
-            let element = storage_type(element)?;
+            let element = if value.ty.is_array() {
+                let Some(element) = value.ty.elem_type() else {
+                    return Err(error("array output has no element type"));
+                };
+                element
+            } else {
+                &value.ty
+            };
+            let element = lower.compiler.facts.physical_type(element, true)?;
             let len = if value.ty.is_array() {
                 lower.length(value.clone())?
             } else {
@@ -327,20 +178,19 @@ pub(super) fn entry<'source>(
         }
     }
     if compute {
-        let planned = lower
-            .compiler
-            .plan
-            .outputs
-            .iter()
-            .filter(|output| output.owner == symbol && output.copy && output.writer == stage.map(|s| s.key))
-            .cloned()
-            .collect::<Vec<_>>();
+        let planned = lower.compiler.plan.outputs(symbol)?;
         let write = |lower: &mut Body<'_, '_, 'source>| -> Result<(), OptimizeError> {
-            for output in planned {
-                if output.ty.is_array() || types::as_soa_tuple(&output.ty).is_some() {
-                    let (array, fields) = lower.source_array(scope, output.source)?;
+            for id in planned {
+                if !lower.compiler.facts.contains("CopyOutput", (id,))
+                    || lower.compiler.facts.lookup("SsaOutputWriter", (id,)) != stage
+                {
+                    continue;
+                }
+                let (source, ty, resource) = lower.compiler.plan.output(id)?;
+                if ty.is_array() || types::as_soa_tuple(ty).is_some() {
+                    let (array, fields) = lower.source_array(scope, source)?;
                     let length = lower.length(array.clone())?;
-                    let destination = lower.resource(scope, output.resource, 2)?;
+                    let destination = lower.resource(scope, resource, 2)?;
                     let zero = lower.literal("0", &types::i32())?;
                     let one = lower.literal("1", &types::i32())?;
                     lower.counted(zero, length, one, vec![], |lower, index, _| {
@@ -352,11 +202,11 @@ pub(super) fn entry<'source>(
                         Ok(vec![])
                     })?;
                 } else {
-                    let value = lower.value(scope, output.source)?;
-                    let destination = lower.resource(scope, output.resource, 2)?;
+                    let value = lower.value(scope, source)?;
+                    let destination = lower.resource(scope, resource, 2)?;
                     let zero = lower.literal("0", &types::i32())?;
                     let (place, ty) = lower.index_place(destination, zero)?;
-                    let value = lower.stored(value, &ty)?;
+                    let value = lower.cast(value, &ty)?;
                     lower
                         .builder
                         .push_void_inst(InstKind::Store {
@@ -368,7 +218,11 @@ pub(super) fn entry<'source>(
             }
             Ok(())
         };
-        if stage.is_some_and(|stage| stage.width > 1) {
+        if stage
+            .map(|key| lower.compiler.plan.recipe(key).map(|recipe| recipe.width > 1))
+            .transpose()?
+            .unwrap_or(false)
+        {
             let uint = Type::Constructed(TypeName::UInt(32), vec![]);
             let lane = lower.op(
                 OpTag::Intrinsic {
@@ -386,95 +240,20 @@ pub(super) fn entry<'source>(
         }
     }
     let unit = lower.op(OpTag::Unit, vec![], types::unit())?;
-    let resource_uses = lower.resource_uses.clone();
-    let captures = std::mem::take(&mut lower.capture_bindings);
     let body = lower.finish(unit)?;
-    for (&resource, &access) in &resource_uses {
-        if let Some(source) = compiler.plan.external(resource) {
-            if let Some(DispatchLen::InputBinding { set, binding, .. }) = compiler.host_lengths.get(&source)
-            {
-                for input in &mut inputs {
-                    if let EntryInputKind::Storage {
-                        exposure: BindingExposure::Host(slot),
-                        access: mode,
-                        ..
-                    } = &mut input.kind
-                    {
-                        if slot.set == *set && slot.binding == *binding {
-                            *mode = match access {
-                                1 => StorageAccess::ReadOnly,
-                                2 => StorageAccess::ReadWrite,
-                                _ => StorageAccess::ReadWrite,
-                            };
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let mut storage_bindings = captures;
-    for (&resource, &access) in &resource_uses {
-        if let Some(buffer) = compiler.plan.buffers.get(&resource) {
-            storage_bindings.push(StorageBindingDecl {
-                binding: buffer.binding,
-                role: match access {
-                    1 => StorageRole::Input,
-                    2 => StorageRole::Output,
-                    _ => StorageRole::InputOutput,
-                },
-                logical_resource: Some(buffer.name.clone()),
-                elem_ty: storage_type(&buffer.element)?,
-                length: Some(sizes::capacity(compiler, buffer)?),
-            });
-        }
-    }
-    storage_bindings.sort_by_key(|buffer| buffer.binding.binding);
-    let id = compiler.entry_ids.next_id();
-    compiler.entry_origins.insert(id, (symbol, stage.cloned()));
-    let execution_model = match decl.entry_kind {
-        EntryKind::Vertex => ExecutionModel::Vertex,
-        EntryKind::Fragment => ExecutionModel::Fragment,
-        EntryKind::Compute => ExecutionModel::Compute {
-            local_size: (stage.map_or(1, |stage| stage.width), 1, 1),
-        },
-        EntryKind::Root => return Err(error("unextracted graphics entry")),
-    };
     Ok(EntryPoint {
-        id,
-        name,
+        id: metadata.id,
+        name: metadata.name.clone(),
         body,
-        execution_model,
-        inputs,
+        execution_model: metadata.execution_model.clone(),
+        inputs: metadata.inputs.clone(),
         parameter_inputs,
         outputs,
-        storage_bindings,
-        stage_descriptor_storage_accesses: LookupMap::default(),
-        pipeline_storage_accesses: LookupMap::default(),
+        storage_bindings: metadata.storage_bindings.clone(),
+        stage_descriptor_storage_accesses: crate::egglog::abi::entry_accesses(compiler, symbol, stage)?,
+        pipeline_storage_accesses: crate::egglog::abi::pipeline_accesses(compiler, symbol)?,
         span: source.span,
     })
-}
-
-pub(super) fn concrete(ty: &Type) -> Result<Type, OptimizeError> {
-    let ty = strip_existentials(ty);
-    if ty.array_variant().is_some_and(types::is_array_variant_view) {
-        return Ok(ty.clone());
-    }
-    if let Some(element) = ty.elem_type().filter(|_| ty.is_array()) {
-        let Some(Type::Constructed(TypeName::Size(count), _)) = ty.array_size() else {
-            return Err(error("runtime-sized array requires storage"));
-        };
-        return Ok(sized_array((*count).max(1), concrete(element)?));
-    }
-    match ty {
-        Type::Constructed(name, fields) => Ok(Type::Constructed(
-            name.clone(),
-            fields.iter().map(concrete).collect::<Result<_, _>>()?,
-        )),
-        Type::Variable(_) => Err(error("unresolved scalar type")),
-    }
-}
-pub(super) fn storage_type(ty: &Type) -> Result<Type, OptimizeError> {
-    concrete(&crate::ssa::layout::storage_value_type(ty))
 }
 
 pub(super) fn view_type(element: &Type, region: Type) -> Type {

@@ -37,10 +37,10 @@
 
 ; A whole input fits its own domain, or another input with the same live length.
 (rule ((InputDomain op (Length e))) ((FitsInput op e)) :ruleset reuse)
-(rule ((InputDomain op n) (Operand op "input" e) (WholeValue e old) (LiveLength old n))
+(rule ((InputDomain op n) (Operand op "input" e) (WholeValue e old) (= n (LiveLength old)))
       ((FitsInput op e)) :ruleset reuse)
-(rule ((InputDomain op (Length first)) (WholeValue first first-value) (LiveLength first-value n)
-       (Operand op "input" e) (WholeValue e old) (LiveLength old n))
+(rule ((InputDomain op (Length first)) (WholeValue first first-value) (= n (LiveLength first-value))
+       (Operand op "input" e) (WholeValue e old) (= n (LiveLength old)))
       ((FitsInput op e)) :ruleset reuse)
 
 ; Check each writer/input pair once, independently of the number of outputs.
@@ -69,9 +69,9 @@
 
 ; Follow authored aliases in both directions, scoped to actual candidates.
 ; Every alias and read inherits candidacy, so consumers need no candidate join.
-(rule ((ReuseAlias writer e old) (SameBacking alias source) (ValueRef source old))
+(rule ((ReuseAlias writer e old) (= source (SameBacking alias)) (ValueRef source old))
       ((ReuseAlias writer e alias)) :ruleset reuse)
-(rule ((ReuseAlias writer e alias) (SameBacking alias source) (ValueRef source old))
+(rule ((ReuseAlias writer e alias) (= source (SameBacking alias)) (ValueRef source old))
       ((ReuseAlias writer e old)) :ruleset reuse)
 
 ; Length-only demands do not observe contents. Scalar-stage needs include
@@ -110,7 +110,7 @@
 (rule ((ReuseAlias writer e alias) (Escapes alias))
       ((set (ReuseBlocked writer e) true)) :ruleset reuse)
 ; Authored updates may return slices even when the result is a whole value.
-(rule ((ReuseAlias writer e alias) (SameBacking alias source) (SliceView source base start end))
+(rule ((ReuseAlias writer e alias) (= source (SameBacking alias)) (SliceView source base start end))
       ((set (ReuseBlocked writer e) true)) :ruleset reuse)
 ; Captures and shifted input aliases may read elements already overwritten.
 (rule ((ReuseAlias (Stage op name) e alias)

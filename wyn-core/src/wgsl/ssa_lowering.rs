@@ -2108,9 +2108,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         }
         Err(err_wgsl_at!(
             self.blame_span(),
-            "no storage binding at (set={}, binding={})",
+            "no storage binding at (set={}, binding={}) in entry {:?}",
             set,
-            binding
+            binding,
+            self.ctx.current_entry
         ))
     }
 

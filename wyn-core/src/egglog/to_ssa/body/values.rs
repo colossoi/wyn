@@ -1,101 +1,14 @@
 use super::{builder_error, error, Body, OptimizeError, Typed};
 use crate::builtins::{catalog, select};
-use crate::egglog::to_ssa::interface;
-use crate::egglog::to_ssa::interface::storage_type;
 use crate::op::{BinaryOperator, OpTag};
 use crate::ssa::types::ConstantValue;
 use crate::ssa::types::ValueRef;
 use crate::ssa::types::{InstKind, PlaceId};
-use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
-use crate::tlc::{ArrayExpr, VarRef};
-use crate::types::tuple;
 use crate::types::{
-    self, as_soa_tuple, bool_type, is_array_variant_view, is_array_variant_virtual, strip_existentials,
-    Type, TypeExt, TypeName,
+    self, bool_type, is_array_variant_view, is_array_variant_virtual, strip_existentials, Type, TypeExt,
+    TypeName,
 };
-use egglog_engine::Value;
 impl Body<'_, '_, '_> {
-    pub(in crate::egglog::to_ssa) fn stored(
-        &mut self,
-        value: Typed,
-        ty: &Type,
-    ) -> Result<Typed, OptimizeError> {
-        if value.ty == *ty {
-            return Ok(value);
-        }
-        if value.ty.is_array() && as_soa_tuple(ty).is_some() {
-            let mut component = ty;
-            while let Some(fields) = as_soa_tuple(component) {
-                component = &fields[0];
-            }
-            let Some(Type::Constructed(TypeName::Size(n), _)) = component.array_size() else {
-                return Err(error("stored array needs a fixed capacity"));
-            };
-            let output = self.allocate_local_output(ty, *n)?;
-            let zero = self.literal("0", &types::i32())?;
-            let length = self.literal(&n.to_string(), &types::i32())?;
-            let one = self.literal("1", &types::i32())?;
-            self.counted(zero, length, one, vec![], |body, index, _| {
-                let item = body.index(value.clone(), index.clone())?;
-                body.store_local_output(&output, index, item)?;
-                Ok(vec![])
-            })?;
-            return self.load_local_output(output);
-        }
-        if (value.ty.is_array() || as_soa_tuple(&value.ty).is_some()) && ty.is_array() {
-            let place = self.builder.new_place(ty.clone());
-            self.builder
-                .push_void_inst(InstKind::Alloca {
-                    elem_ty: ty.clone(),
-                    result: place,
-                })
-                .map_err(builder_error)?;
-            let Some(Type::Constructed(TypeName::Size(n), _)) = ty.array_size() else {
-                return Err(error("stored array needs a fixed capacity"));
-            };
-            let Some(element) = ty.elem_type().cloned() else {
-                return Err(error("stored array element missing"));
-            };
-            let zero = self.literal("0", &types::i32())?;
-            let length = self.literal(&n.to_string(), &types::i32())?;
-            let one = self.literal("1", &types::i32())?;
-            self.counted(zero, length, one, vec![], |body, index, _| {
-                let item = body.index(value.clone(), index.clone())?;
-                let item = body.stored(item, &element)?;
-                let slot = body.builder.new_place(element.clone());
-                body.builder
-                    .push_void_inst(InstKind::PlaceIndex {
-                        place,
-                        index: index.value,
-                        result: slot,
-                    })
-                    .map_err(builder_error)?;
-                body.builder
-                    .push_void_inst(InstKind::Store {
-                        place: slot,
-                        value: item.value,
-                    })
-                    .map_err(builder_error)?;
-                Ok(vec![])
-            })?;
-            let result =
-                self.builder.push_inst(InstKind::Load { place }, ty.clone()).map_err(builder_error)?;
-            return Ok(Typed {
-                value: result.into(),
-                ty: ty.clone(),
-            });
-        }
-        if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = ty {
-            let mut args = Vec::new();
-            for (index, ty) in fields.iter().enumerate() {
-                let field = self.field(value.clone(), index)?;
-                args.push(self.stored(field, ty)?);
-            }
-            return self.op(OpTag::Tuple(args.len()), args, ty.clone());
-        }
-        self.cast(value, ty)
-    }
-
     pub(in crate::egglog::to_ssa) fn field(
         &mut self,
         value: Typed,
@@ -117,44 +30,20 @@ impl Body<'_, '_, '_> {
         array: Typed,
         index: Typed,
     ) -> Result<(PlaceId, Type), OptimizeError> {
-        if !array.ty.array_variant().is_some_and(is_array_variant_view) {
-            let ty = interface::concrete(&array.ty)?;
-            let Some(element) = ty.elem_type().cloned() else {
-                return Err(error("writable value is not an array"));
-            };
-            let place = if let Some(&place) = self.local_arrays.get(&array.value) {
-                place
-            } else {
-                let place = self.builder.new_place(ty.clone());
-                self.builder
-                    .push_void_inst(InstKind::Alloca {
-                        elem_ty: ty,
-                        result: place,
-                    })
-                    .map_err(builder_error)?;
-                self.builder
-                    .push_void_inst(InstKind::Store {
-                        place,
-                        value: array.value,
-                    })
-                    .map_err(builder_error)?;
-                self.local_arrays.insert(array.value, place);
-                place
-            };
-            let indexed = self.builder.new_place(element.clone());
-            self.builder
-                .push_void_inst(InstKind::PlaceIndex {
-                    place,
-                    index: index.value,
-                    result: indexed,
-                })
-                .map_err(builder_error)?;
-            return Ok((indexed, element));
-        }
         let Some(ty) = array.ty.elem_type().cloned() else {
             return Err(error("indexed value has no element type"));
         };
         let place = self.builder.new_place(ty.clone());
+        if let Some(&array) = self.local_arrays.get(&array.value) {
+            self.builder
+                .push_void_inst(InstKind::PlaceIndex {
+                    place: array,
+                    index: index.value,
+                    result: place,
+                })
+                .map_err(builder_error)?;
+            return Ok((place, ty));
+        }
         self.builder
             .push_void_inst(InstKind::ViewIndex {
                 view: array.value,
@@ -198,42 +87,19 @@ impl Body<'_, '_, '_> {
         };
         self.op(OpTag::Index, vec![array, index], ty)
     }
-    pub(in crate::egglog::to_ssa) fn updated(&mut self, array: Typed) -> Result<Typed, OptimizeError> {
-        let Some(&place) = self.local_arrays.get(&array.value) else {
-            return Ok(array);
-        };
-        let value =
-            self.builder.push_inst(InstKind::Load { place }, array.ty.clone()).map_err(builder_error)?;
-        Ok(Typed {
-            value: value.into(),
-            ty: array.ty,
-        })
-    }
     pub(in crate::egglog::to_ssa) fn cast(
         &mut self,
         value: Typed,
         ty: &Type,
     ) -> Result<Typed, OptimizeError> {
         let ty = strip_existentials(ty);
-        if value.ty == *ty || (value.ty.is_array() && ty.is_array()) {
+        if value.ty == *ty {
             return Ok(value);
         }
-        // A materialized logical tuple array can reside in one array-of-tuples
-        // buffer. Keep that physical view: indexing supplies the tuple element
-        // directly, without rebuilding every component array in each thread.
-        fn soa_element(ty: &Type) -> Option<Type> {
-            if let Some(fields) = as_soa_tuple(ty) {
-                Some(tuple(fields.iter().map(soa_element).collect::<Option<_>>()?))
-            } else {
-                ty.elem_type().cloned()
-            }
-        }
-        if as_soa_tuple(ty).is_some() {
-            if let (Some(actual), Some(expected)) = (value.ty.elem_type(), soa_element(ty)) {
-                if *actual == storage_type(&expected)? {
-                    return Ok(value);
-                }
-            }
+        // Source array qualifiers describe shape and ownership, not a physical
+        // conversion. Boundary layouts explicitly request any required copy.
+        if value.ty.is_array() && ty.is_array() {
+            return Ok(value);
         }
         if let (
             Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), a),
@@ -358,57 +224,5 @@ impl Body<'_, '_, '_> {
             vec![array],
             types::i32(),
         )
-    }
-}
-impl<'source> Body<'_, '_, 'source> {
-    pub(in crate::egglog::to_ssa) fn array(
-        &mut self,
-        scope: Value,
-        array: &'source ArrayExpr<ExplicitClosurePayload, ExplicitCapturesPayload>,
-        ty: &Type,
-    ) -> Result<Typed, OptimizeError> {
-        match array {
-            ArrayExpr::Literal(elements) => {
-                let mut args = Vec::new();
-                for element in elements {
-                    args.push(self.source(scope, element)?);
-                }
-                let Some(element) =
-                    args.first().map(|value| value.ty.clone()).or_else(|| ty.elem_type().cloned())
-                else {
-                    return Err(error("array literal has no element type"));
-                };
-                self.op(
-                    OpTag::ArrayLit(args.len()),
-                    args,
-                    types::sized_array(elements.len(), element),
-                )
-            }
-            ArrayExpr::Range { start, len, step } => {
-                let mut args = vec![self.source(scope, start)?, self.source(scope, len)?];
-                if let Some(step) = step {
-                    args.push(self.source(scope, step)?);
-                }
-                self.op(
-                    OpTag::ArrayRange {
-                        has_step: step.is_some(),
-                    },
-                    args,
-                    ty.clone(),
-                )
-            }
-            ArrayExpr::Var(VarRef::Symbol(symbol), _) => {
-                let source = self
-                    .values
-                    .keys()
-                    .copied()
-                    .find(|&source| self.compiler.facts.formal_name(source) == Some(*symbol));
-                let Some(source) = source else {
-                    return Err(error("array input has no bound source value"));
-                };
-                self.value(scope, source)
-            }
-            ArrayExpr::Var(_, _) | ArrayExpr::Zip(_) => Err(error("unresolved array input")),
-        }
     }
 }

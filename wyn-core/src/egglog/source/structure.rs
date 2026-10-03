@@ -38,17 +38,18 @@ impl Import<'_, '_, '_, '_> {
         Ok(())
     }
 
-    fn storage_binding(
+    pub(super) fn storage_binding(
         &mut self,
         value: Value,
         set: u32,
         binding: u32,
         stride: u32,
     ) -> Result<(), OptimizeError> {
-        let token = self.identities.values.intern(&value);
-        let source = self.sink.add("AbiExpr", token)?;
+        self.sink.add("SourceBinding", (value, i64::from(set), i64::from(binding)))?;
+        let source = self.expression_key(value)?;
         let binding = self.sink.add("InputBinding", (i64::from(set), i64::from(binding)))?;
-        self.sink.add("AbiStorage", (source, binding, i64::from(stride)))?;
+        let storage = self.sink.add("StorageInput", (binding, i64::from(stride)))?;
+        self.sink.set("AbiStorage", source, storage)?;
         Ok(())
     }
 
@@ -73,6 +74,20 @@ impl Import<'_, '_, '_, '_> {
                 ..
             } => {
                 let mut axes = vec![None; usize::from(*domain_rank)];
+                for (input, mapping) in input_dimensions.iter().enumerate() {
+                    self.sink.set(
+                        "SourceBucketInputRank",
+                        (operation, input as i64),
+                        mapping.len() as i64,
+                    )?;
+                    for (dimension, &axis) in mapping.iter().enumerate() {
+                        self.sink.set(
+                            "SourceBucketInputDimension",
+                            (operation, input as i64, dimension as i64),
+                            i64::from(axis),
+                        )?;
+                    }
+                }
                 for (input, mapping) in inputs.iter().zip(input_dimensions).enumerate() {
                     let (array, mapping) = mapping;
                     let ty = array.array_type();
@@ -91,12 +106,12 @@ impl Import<'_, '_, '_, '_> {
                     "SourceKnownBucketDomain",
                     (operation, axes.iter().all(Option::is_some)),
                 )?;
-                self.sink.add("SourceBucketRank", (operation, i64::from(*domain_rank)))?;
+                self.sink.set("SourceBucketRank", operation, i64::from(*domain_rank))?;
                 for (axis, dimension) in axes.into_iter().enumerate() {
                     if let Some((input, fixed)) = dimension {
                         if let Some(n) = fixed {
                             let extent = self.sink.add("Fixed", n as i64)?;
-                            self.sink.add("SourceBucketAxis", (operation, axis as i64, extent))?;
+                            self.sink.set("SourceBucketAxis", (operation, axis as i64), extent)?;
                         } else {
                             self.sink
                                 .add("SourceBucketInputAxis", (operation, axis as i64, input as i64))?;

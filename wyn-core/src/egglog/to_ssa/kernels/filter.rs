@@ -1,11 +1,10 @@
 use super::screma::{workgroup_scan, write_arrays};
 // Expand scheduled phases straight into SSA instructions and structured loops.
-use super::super::plan::Stage;
 use super::super::{error, Body, OptimizeError};
+use super::Recipe;
 use super::{element, store};
 use crate::builtins::catalog;
 use crate::op::{BinaryOperator, OpTag};
-use crate::tlc::{SoacOp, TermKind};
 use crate::types::{self, Type, TypeName};
 use crate::LookupMap;
 use egglog_engine::Value;
@@ -13,17 +12,13 @@ use egglog_engine::Value;
 pub(super) fn compact(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
-    stage: &Stage,
+    stage: &Recipe,
     plan: Value,
     results: &[(String, i64, Value)],
 ) -> Result<(), OptimizeError> {
-    let members = body.compiler.plan.members(plan);
-    let Some((operation, source)) = members.iter().find_map(|&operation| {
-        let source = body.compiler.plan.source(operation)?;
-        let (term, _) = body.compiler.program.identities.origins.get(&source)?;
-        matches!(&term.kind, TermKind::Soac(SoacOp::Filter { .. })).then_some((operation, source))
-    }) else {
-        return Err(error("filter callback missing"));
+    let operation = body.compiler.plan.filter(plan)?;
+    let Some(source) = body.compiler.plan.source(operation) else {
+        return Err(error("filter source missing"));
     };
     let Some(input) = body.compiler.facts.input(operation, 0) else {
         return Err(error("filter input missing"));
@@ -113,7 +108,7 @@ pub(super) fn compact(
 pub(super) fn serial_filter(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
-    stage: &Stage,
+    stage: &Recipe,
     plan: Value,
     results: &[(String, i64, Value)],
 ) -> Result<(), OptimizeError> {

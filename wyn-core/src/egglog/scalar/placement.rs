@@ -2,19 +2,15 @@
 //! by scalar rules; no relation enumerates possible expression/scope pairs.
 use super::extract::{self, operands};
 use super::scopes::{Forest, Scope, Scopes};
-use super::{Facts, Selected};
-use crate::egglog::{source, timing, OptimizeError, ScalarOptimization};
+use super::Selected;
+use crate::egglog::query::Query;
+use crate::egglog::{timing, OptimizeError, Optimized, Program, ScalarOptimization};
 use crate::{LookupMap, LookupSet};
 use egglog_engine::ast::Literal;
-use egglog_engine::sort::{F, S};
-use egglog_engine::{Core, EGraph, RawValues, Read, Term, Value, Write};
+use egglog_engine::sort::{VecContainer, F, S};
+use egglog_engine::{Core, EGraph, RawValues, Read, Term, Value};
 
-pub(super) fn run(
-    graph: &mut EGraph,
-    identities: &source::Identities<'_>,
-    facts: &Facts,
-    policy: ScalarOptimization,
-) -> Result<Selected, OptimizeError> {
+pub(super) fn select(graph: &mut EGraph, policy: ScalarOptimization) -> Result<Selected, OptimizeError> {
     let _timing = timing::span("egglog scalar / exit placement");
     let extraction = timing::span("egglog scalar / extraction");
     let mut roots = Vec::new();
@@ -22,20 +18,14 @@ pub(super) fn run(
         roots.push((row.children[0], row.children[1], row.children[2], row.children[3]));
     })?;
     let (dag, terms) = extract::select(graph, &roots.iter().map(|r| r.3).collect::<Vec<_>>(), policy)?;
-    let mut uses: Vec<Vec<Value>> = Vec::new();
     let mut selected_roots = LookupMap::default();
-    for ((context, scope, source, _), term) in roots.into_iter().zip(terms) {
-        uses.resize_with(dag.size(), Vec::new);
-        if !uses[term].contains(&scope) {
-            uses[term].push(scope);
-        }
+    for ((context, _, source, _), term) in roots.into_iter().zip(terms) {
         selected_roots.insert((context, source), term);
     }
     drop(extraction);
-    let _placement = timing::span("egglog scalar / scope placement");
     // Recover opaque handles for the selected egglog terms without constructing
     // another expression representation or serializing source identities.
-    let values = graph.update(|sink| {
+    let values = graph.update(|mut sink| {
         let mut values = Vec::with_capacity(dag.size());
         for id in 0..dag.size() {
             let value = match dag.get(id) {
@@ -46,6 +36,10 @@ pub(super) fn run(
                     Literal::Bool(x) => sink.base_to_value(*x),
                     Literal::Unit => sink.base_to_value(()),
                 },
+                Term::App(name, children) if name == "vec-of" => sink.container_to_value(VecContainer {
+                    data: children.iter().map(|&child| values[child]).collect(),
+                    do_rebuild: true,
+                }),
                 Term::App(name, children) => {
                     let args = RawValues(children.iter().map(|&child| values[child]).collect());
                     let Some(value) = sink.eclass_of(name, args)? else {
@@ -65,6 +59,28 @@ pub(super) fn run(
         }
         Ok(values)
     })?;
+    Ok(Selected {
+        dag,
+        values,
+        roots: selected_roots,
+    })
+}
+
+pub(in crate::egglog) fn run(program: &Program<'_, Optimized>) -> Result<Vec<Vec<Value>>, OptimizeError> {
+    let _placement = timing::span("egglog scalar / scope placement");
+    let graph = &program.stage.scalars;
+    let facts = Query(&program.graph);
+    let identities = &program.identities;
+    let selected = &program.stage.selected;
+    let dag = &selected.dag;
+    let values = &selected.values;
+    let mut uses = vec![Vec::new(); dag.size()];
+    graph.constructor_enodes("ScalarRoot", |row| {
+        let term = selected.roots[&(row.children[0], row.children[2])];
+        if !uses[term].contains(&row.children[1]) {
+            uses[term].push(row.children[1]);
+        }
+    })?;
     let total = (0..dag.size())
         .map(|id| {
             let Term::App(name, fields) = dag.get(id) else {
@@ -82,10 +98,10 @@ pub(super) fn run(
         })
         .collect::<Result<Vec<_>, egglog_engine::Error>>()?;
     let parent = |scope| {
-        if facts.boundaries.contains(&scope) {
-            None
+        if facts.flag("ScalarRegionBoundary", (scope,))? {
+            Ok(None)
         } else {
-            identities.scopes.get(&scope).and_then(|s| s.0)
+            Ok(identities.scopes.get(&scope).and_then(|s| s.0))
         }
     };
     let definitions = Forest::new(identities.scopes.keys().copied(), parent)?;
@@ -98,7 +114,7 @@ pub(super) fn run(
         .map(|(context, members)| Ok((context, Forest::new(members, parent)?)))
         .collect::<Result<_, OptimizeError>>()?;
     let mut loops = LookupSet::default();
-    graph.constructor_enodes("SourceLoop", |row| {
+    program.graph.constructor_enodes("SourceLoop", |row| {
         loops.insert(row.children[1]);
     })?;
     let scopes = Scopes::new(definitions, contexts, loops);
@@ -109,9 +125,10 @@ pub(super) fn run(
         let mut required = Vec::new();
         if let Term::App(name, fields) = dag.get(id) {
             match name.as_str() {
-                "ScalarLeaf" => {
-                    if let Some(owner) =
-                        facts.owners.get(&values[fields[2]]).and_then(|v| scopes.definition(*v))
+                "ScalarLeaf" | "ScalarExecute" | "ScalarInstruction" | "ScalarCall" => {
+                    if let Some(owner) = facts
+                        .lookup("ScalarOwner", (values[fields[2]],))?
+                        .and_then(|v| scopes.definition(v))
                     {
                         scopes.require(&mut required, owner);
                     }
@@ -131,7 +148,7 @@ pub(super) fn run(
         }
         requirements.push(required);
     }
-    let mut placements = Vec::new();
+    let mut placements = vec![Vec::new(); dag.size()];
     // Parents follow their children in TermDag. Visiting backwards collects all
     // use sites before choosing a node's location and propagating to operands.
     for id in (0..dag.size()).rev() {
@@ -171,7 +188,7 @@ pub(super) fn run(
             selected = shared;
         }
         if !matches!(name.as_str(), "ScalarCons" | "ScalarNil") {
-            placements.extend(selected.iter().map(|&scope| (context, values[id], scope)));
+            placements[id] = selected.clone();
         }
         for child in operands(name, fields) {
             // Non-total choice arms stay under their control dependency. Their
@@ -187,15 +204,5 @@ pub(super) fn run(
             }
         }
     }
-    graph.update(|mut sink| {
-        for (context, expression, scope) in placements {
-            sink.add("ScalarSelectedPlacement", (context, expression, scope))?;
-        }
-        Ok(())
-    })?;
-    Ok(Selected {
-        dag,
-        values,
-        roots: selected_roots,
-    })
+    Ok(placements)
 }

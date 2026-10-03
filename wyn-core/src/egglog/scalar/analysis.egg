@@ -11,3 +11,14 @@
 (rule ((ScalarActive ctx) (= e (ScalarChoice ctx t c a b)) (ScalarTotal c) (ScalarTotal a) (ScalarTotal b)) ((ScalarTotal e)) :ruleset scalar-analysis)
 (rule ((ScalarActive ctx) (= e (ScalarUnary ctx t op x)) (ScalarOperatorSafe t op) (ScalarTotal x)) ((ScalarTotal e)) :ruleset scalar-analysis)
 (rule ((ScalarActive ctx) (= e (ScalarBinary ctx t op x y)) (ScalarOperatorSafe t op) (ScalarTotal x) (ScalarTotal y)) ((ScalarTotal e)) :ruleset scalar-analysis)
+
+; A helper retaining an execution boundary from its own body is not a scalar
+; substitution template. Caller-supplied stored values remain ordinary inputs.
+(rule ((= v (ScalarLeaf (ScalarTemplate r) ty source)) (= owner (ScalarOwner source)) (= r (ScalarHome owner)))
+      ((set (ScalarTemplateSafe r) false)) :ruleset scalar-analysis)
+(rule ((= v (ScalarExecute (ScalarTemplate r) ty source)) (= owner (ScalarOwner source)) (= r (ScalarHome owner)))
+      ((set (ScalarTemplateSafe r) false)) :ruleset scalar-analysis)
+(rule ((= v (ScalarInstruction (ScalarTemplate r) ty source op args)) (= owner (ScalarOwner source)) (= r (ScalarHome owner)))
+      ((set (ScalarTemplateSafe r) false)) :ruleset scalar-analysis)
+(rule ((= v (ScalarCall (ScalarTemplate r) ty source callee args)) (= owner (ScalarOwner source)) (= r (ScalarHome owner)))
+      ((set (ScalarTemplateSafe r) false)) :ruleset scalar-analysis)

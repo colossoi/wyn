@@ -42,5 +42,7 @@
 (rule ((HostLoop op r a s i n) (Phase stage r))
       ((DispatchDependency (Stage op "loop_enter") stage)
        (DispatchDependency stage (Stage op "loop_exit"))) :ruleset dispatch)
+(relation LoopStage (OperationKey StageKey))
+(rule ((HostLoop op r a s i n) (Phase stage r)) ((LoopStage op stage)) :ruleset dispatch)
 (rule ((HostLoop op r a s i n))
       ((DispatchDependency (Stage op "loop_enter") (Stage op "loop_exit"))) :ruleset dispatch)

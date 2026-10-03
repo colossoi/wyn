@@ -14,6 +14,48 @@ fn compile(source: &str) -> Program {
 }
 
 #[test]
+fn rematerialized_helpers_and_dispatch_extents_publish_their_inputs() {
+    for source in [
+        include_str!("../../testfiles/scalar_setup.wyn"),
+        include_str!("../../testfiles/rust_host_filter.wyn"),
+    ] {
+        let ssa = compile_thru_ssa(source).unwrap();
+        let program = lower_ssa_to_spirv(ssa).unwrap().program;
+        let Pipeline::Compute(pipeline) = &program.interface.pipelines[0] else {
+            panic!("compute pipeline");
+        };
+        let push =
+            pipeline.bindings.iter().position(|b| matches!(b, Binding::PushConstant { .. })).unwrap();
+        assert!(pipeline.stages[0].uses.reads.contains(&push), "{source}");
+    }
+}
+
+#[test]
+fn finish_dispatch_waits_for_all_reduction_results() {
+    let program = compile(
+        "entry main(xs:[]i32) (i32,i32) =
+        let ys=map(|x|x*x+17,xs) in
+        (reduce((+),0,ys),reduce(|x,y|if x>y then x else y,0,ys))",
+    );
+    let dispatches: Vec<_> = program.entries[0]
+        .operations
+        .iter()
+        .filter_map(|operation| {
+            let Operation::Dispatch { pipeline, stage, .. } = operation else {
+                return None;
+            };
+            let Pipeline::Compute(compute) = &program.interface.pipelines[*pipeline] else {
+                panic!("compute pipeline");
+            };
+            Some(compute.stages[*stage].entry_point.as_str())
+        })
+        .collect();
+    let combine = dispatches.iter().position(|name| name.ends_with("_combine")).unwrap();
+    let finish = dispatches.iter().position(|name| name.ends_with("_finish")).unwrap();
+    assert!(combine < finish, "{dispatches:?}");
+}
+
+#[test]
 fn tuple_loop_outputs_and_scalar_bounds_reach_host_backends() {
     for source in [
         include_str!("../../testfiles/regressions/local_tuple_collectives.wyn"),
@@ -681,7 +723,7 @@ fn whl_paths_escape_lisp_strings() {
 #[test]
 fn rust_spirv_embeds_binary_and_binds_compute_push_constants() {
     let program = lower_ssa_to_spirv(
-        compile_thru_ssa("entry main(xs: []i32, bias: i32) []i32 = map(|x:i32|x+bias*bias,xs)").unwrap(),
+        compile_thru_ssa("entry main(xs: []i32, bias: i32) []i32 = map(|x:i32|x+bias,xs)").unwrap(),
     )
     .unwrap()
     .program;
@@ -1087,7 +1129,10 @@ fn texture_load_bindings_do_not_require_filtering() {
             let whl = program.to_whl("texture_load", format).unwrap();
             check_whl(&whl);
             for (_, value) in &expected {
-                assert!(rust.contains(&format!("filterable: {value}")));
+                assert!(
+                    rust.contains(&format!("filterable: {value}")),
+                    "{format:?}: {source}\n{rust}"
+                );
                 let sample_type = if *value { ":filterable-float" } else { ":float" };
                 assert!(whl.contains(&format!(":sample-type {sample_type}")));
             }

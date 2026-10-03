@@ -223,6 +223,9 @@ impl Import<'_, '_, '_, '_> {
             result.dependencies.clear();
             result.dependencies.insert(operation);
             self.sink.add("ImportedPosition", (operation, scope.position))?;
+            if let Some(previous) = scope.previous_operation.replace(operation) {
+                self.sink.add("SourceNextOperation", (previous, operation))?;
+            }
         }
         Ok(())
     }

@@ -12,6 +12,99 @@ use crate::{
 use naga::front::spv;
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 
+#[test]
+fn zipped_runtime_loop_retains_its_domain() {
+    let source = "entry main(xs:[]i32) []i32 =
+      let pairs=zip(xs,iota(length(xs))) in
+      let count=if length(xs)==0 then 0 else 3 in
+      let ys=loop ys=pairs for i<count do map(|(x,j)| (x+j,j),ys) in
+      map(|(x,j)| x,ys)";
+    compile(source);
+}
+
+#[test]
+fn missing_selected_abi_facts_are_errors() {
+    for (table, diagnostic) in [
+        ("SelectedLaunch", "missing selected SelectedLaunch"),
+        ("RootWorkgroup", "missing selected RootWorkgroup"),
+        ("PreferredExecutor", "missing selected PreferredExecutor"),
+        ("ParameterAbi", "missing selected ParameterAbi"),
+        ("AbiStorage", "has no binding"),
+    ] {
+        let tlc = infer_input_slice_bounds(
+            compile_thru_tlc("entry main(xs:[]i32,k:i32) []i32=map(|x|x+k,xs)").unwrap(),
+        );
+        let mut program = optimize(
+            schedule(
+                place(
+                    fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                    PipelineTopologyPolicy::AllowGenerated,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        program.graph.clear_function(table).unwrap();
+        let Err(error) = to_ssa(program, CodegenTarget::Wgsl) else {
+            panic!("missing {table} was silently accepted");
+        };
+        assert!(error.to_string().contains(diagnostic), "{table}: {error}");
+    }
+}
+
+#[test]
+fn invalid_selected_workgroup_is_an_error() {
+    use egglog_engine::Write;
+    let tlc =
+        infer_input_slice_bounds(compile_thru_tlc("entry main(xs:[4]i32) [4]i32=map(|x|x+1,xs)").unwrap());
+    let mut program = optimize(
+        schedule(
+            place(
+                fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                PipelineTopologyPolicy::AllowGenerated,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut roots = Vec::new();
+    program.graph.function_entries("RootWorkgroup", |row| roots.push(row.inputs[0])).unwrap();
+    program.graph.clear_function("RootWorkgroup").unwrap();
+    program
+        .graph
+        .update(|mut sink| {
+            let grid = sink.add("FixedGrid", (0i64, 1i64, 1i64))?;
+            for root in roots {
+                sink.set("RootWorkgroup", root, grid)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let Err(error) = to_ssa(program, CodegenTarget::Wgsl) else {
+        panic!("zero-width workgroup was silently accepted");
+    };
+    assert!(error.to_string().contains("grid x must be positive"), "{error}");
+}
+
+#[test]
+fn partial_maps_stream_only_over_the_whole_domain() {
+    for (source, count) in [
+        ("entry main(xs:[8]i32) [8]i32=map(|x|x+1,map(|x|12/x,xs))", 1),
+        (
+            "entry main(xs:[8]i32) []i32=let ys=map(|x|12/x,xs) in map(|x|x+1,ys[0..4])",
+            2,
+        ),
+    ] {
+        let output = pipeline(source);
+        let [Pipeline::Compute(pipeline)] = output.program.interface.pipelines.as_slice() else {
+            panic!("one compute pipeline");
+        };
+        assert_eq!(pipeline.stages.len(), count, "{source}");
+    }
+}
+
 fn compile(source: &str) -> naga::Module {
     let ssa = crate::compile_thru_ssa_for_target(source, CodegenTarget::Wgsl)
         .unwrap_or_else(|error| panic!("{error}\n{source}"));
@@ -1030,6 +1123,90 @@ fn direct_mode_keeps_collectives_in_the_authored_entry() {
 }
 
 #[test]
+fn authored_outputs_consume_selected_capacities() {
+    use host::{Binding, BufferLen};
+    for (source, expected) in [
+        (
+            "entry main(xs:[5]vec3f32) [5]vec3f32=xs",
+            BufferLen::Fixed { bytes: 80 },
+        ),
+        (
+            "entry main(xs:[]i32) []i32=xs",
+            BufferLen::LikeInput {
+                set: 0,
+                binding: 0,
+                elem_bytes: 4,
+                src_elem_bytes: 4,
+            },
+        ),
+        (
+            "entry main(xs:[]vec3f32,ys:[]i32) []i32=ys",
+            BufferLen::LikeInput {
+                set: 0,
+                binding: 1,
+                elem_bytes: 4,
+                src_elem_bytes: 4,
+            },
+        ),
+        (
+            "entry main(n:i32) []i32=iota(n)",
+            BufferLen::SameAsDispatch { elem_bytes: 4 },
+        ),
+    ] {
+        let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
+        let program = optimize(
+            schedule(
+                place(
+                    fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                    PipelineTopologyPolicy::AuthoredOnly,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let output = lower_ssa_to_wgsl_with_program(to_ssa(program, CodegenTarget::Wgsl).unwrap()).unwrap();
+        assert!(
+            output.program.interface.pipelines.iter().any(|pipeline| {
+                let Pipeline::Compute(pipeline) = pipeline else {
+                    return false;
+                };
+                pipeline.bindings.iter().any(|binding| {
+                    matches!(binding,
+                Binding::StorageBuffer { usage: host::BufferUsage::Output, length: Some(actual), .. }
+                if *actual == expected)
+                })
+            }),
+            "{source}: expected {expected:?}"
+        );
+    }
+}
+
+#[test]
+fn missing_authored_output_capacity_is_an_error() {
+    let tlc = infer_input_slice_bounds(compile_thru_tlc("entry main() i32=42").unwrap());
+    let mut program = optimize(
+        schedule(
+            place(
+                fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                PipelineTopologyPolicy::AuthoredOnly,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    program.graph.clear_function("SelectedOutputCapacity").unwrap();
+    let Err(error) = to_ssa(program, CodegenTarget::Wgsl) else {
+        panic!("missing selected capacity was silently accepted");
+    };
+    assert!(
+        error.to_string().contains("missing selected SelectedOutputCapacity"),
+        "{error}"
+    );
+}
+
+#[test]
 fn materialized_tuple_projections_reach_both_backends() {
     let source = include_str!("../../../testfiles/regressions/fusion_shared_tuple.wyn");
     compile(source);
@@ -1201,4 +1378,24 @@ fn explicit_grids_do_not_replicate_single_workgroup_compaction() {
     );
     let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
     Validator::new(ValidationFlags::all(), Capabilities::all()).validate(&module).unwrap();
+}
+
+#[test]
+fn collective_phase_accesses_exclude_unused_inputs_and_producer_captures() {
+    let output =
+        pipeline("entry main(xs:[]i32,unused:[]i32,bias:i32) i32=reduce((+),0,map(|x|x+bias*bias,xs))");
+    let [Pipeline::Compute(p)] = output.program.interface.pipelines.as_slice() else {
+        panic!("compute pipeline");
+    };
+    let unused = p
+        .bindings
+        .iter()
+        .position(
+            |binding| matches!(binding, host::Binding::StorageBuffer { name, .. } if name == "unused"),
+        )
+        .unwrap();
+    assert!(p.stages.iter().all(|stage| stage.uses.access(unused).is_none()));
+    let combine = p.stages.iter().find(|stage| stage.entry_point.ends_with("combine")).unwrap();
+    assert!(output.program.interface.scalar_tasks.iter().all(|task| task.stage != combine.entry_point));
+    assert!(!output.program.interface.scalar_tasks.is_empty());
 }

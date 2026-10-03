@@ -64,7 +64,7 @@ pub trait ModuleInterfacePublish {
     fn relabel_input_storage_names(&mut self, names: &LookupMap<(u32, u32), String>);
 }
 
-fn entry_stage_binding_uses(entry: &EntryPublication, bindings: &[Binding]) -> StageBindingUses {
+pub(crate) fn entry_stage_binding_uses(entry: &EntryPublication, bindings: &[Binding]) -> StageBindingUses {
     let indices = bindings
         .iter()
         .enumerate()
@@ -140,7 +140,7 @@ fn merge_non_storage_buffer_stage_binding_uses(
     }
 }
 
-fn reconcile_storage_binding_access<'a>(
+pub(crate) fn reconcile_storage_binding_access<'a>(
     bindings: &mut [Binding],
     stages: impl IntoIterator<Item = &'a StageBindingUses>,
 ) {

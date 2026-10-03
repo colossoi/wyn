@@ -1,17 +1,21 @@
 //! Compiler mid-end using [egglog](https://github.com/egraphs-good/egglog).
 //! Pass order is enforced by typestate:
 //! [`from_tlc`] → [`fuse`] → [`place`] → [`schedule`] → [`optimize`] → [`to_ssa`].
+use crate::host::ScalarExpr;
 use crate::ssa::stage::Elaborated;
 use crate::tlc::stage::InputSliceBoundsInferred;
-use crate::{CodegenTarget, PipelineTopologyPolicy};
+use crate::{CodegenTarget, LookupMap, PipelineTopologyPolicy};
 use egglog_engine::ast::{Command, Parser};
-use egglog_engine::EGraph;
 use egglog_engine::Error;
+use egglog_engine::{EGraph, Value};
 
+mod abi;
 mod analysis;
 mod bindings;
 mod fusion;
+mod host;
 mod planning;
+mod query;
 mod scalar;
 mod source;
 mod timing;
@@ -85,15 +89,19 @@ pub fn optimize_with_policy(
     policy: ScalarOptimization,
 ) -> Result<Program<'_, Optimized>, OptimizeError> {
     let (selected, scalars) = scalar::run(&mut program.graph, &program.identities, policy)?;
-    Ok(program.advance(Optimized { selected, scalars }))
+    let mut program = program.advance(Optimized {
+        selected,
+        scalars,
+        host: LookupMap::default(),
+        captures: LookupMap::default(),
+    });
+    to_ssa::prepare(&mut program)?;
+    host::prepare(&mut program)?;
+    Ok(program)
 }
 
 /// Emit the optimized scalar graph directly into SSA.
-pub fn to_ssa(
-    mut program: Program<'_, Optimized>,
-    target: CodegenTarget,
-) -> Result<Elaborated, OptimizeError> {
-    to_ssa::prepare(&mut program)?;
+pub fn to_ssa(program: Program<'_, Optimized>, target: CodegenTarget) -> Result<Elaborated, OptimizeError> {
     to_ssa::lower(&program, target)
 }
 
@@ -121,11 +129,13 @@ pub struct Imported;
 pub struct Fused;
 pub struct Placed;
 
-/// Logical dispatches, execution domains, and effect order are fixed. Concrete
-/// captures and ABI bindings are finalized after scalar bodies have been emitted.
+/// Dispatch recipes, execution domains, storage, and effect order are fixed.
+/// Scalar optimization finalizes host execution and the physical ABI.
 pub struct Scheduled;
 
 pub struct Optimized {
+    captures: LookupMap<egglog_engine::TermId, host::Capture>,
+    host: LookupMap<(Value, Value), ScalarExpr>,
     selected: scalar::Selected,
     // Shares immutable source/context identities with the structural graph.
     // Rewrites and placement proofs belong to this scalar snapshot alone.

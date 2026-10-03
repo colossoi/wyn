@@ -1,5 +1,6 @@
-; Finish substitution before asking safety analyses about the expanded body.
+; Settle template safety before substitution, then analyze each expanded body.
 (run-schedule
+  (saturate (run scalar-analysis))
   (saturate
     (seq
       (saturate (seq (run scalar-inline) (run scalar-substitute) (run scalar-arguments)))

@@ -1,10 +1,11 @@
 //! Admit source identities, never cloned TLC expressions. Lexical substitutions
 //! were resolved by the single source walk; helper substitution belongs to egglog.
-use super::Facts;
-use crate::builtins::{by_id, Purity};
+use crate::builtins::{by_id, catalog, Purity};
+use crate::egglog::query::Query;
 use crate::egglog::source::{Identities, Term};
 use crate::egglog::{OptimizeError, ScalarOptimization};
-use crate::tlc::{TermKind, VarRef};
+use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
+use crate::tlc::{ArrayExpr, TermKind, VarRef};
 use crate::types::{Type, TypeName};
 use crate::{LookupMap, LookupSet};
 use egglog_engine::{FullState, Value, Write};
@@ -14,7 +15,7 @@ type Cache = LookupMap<(Value, Value, bool), Value>;
 pub(super) struct Importer<'graph, 'db, 'a, 'source> {
     sink: FullState<'graph, 'db>,
     identities: &'a Identities<'source>,
-    facts: &'a Facts,
+    facts: Query<'a>,
     cache: &'a mut Cache,
     templates: &'a mut LookupMap<Value, Value>,
     loading: LookupSet<(Value, Value, bool)>,
@@ -25,7 +26,7 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
     pub(super) fn new(
         sink: FullState<'graph, 'db>,
         identities: &'a Identities<'source>,
-        facts: &'a Facts,
+        facts: Query<'a>,
         cache: &'a mut Cache,
         templates: &'a mut LookupMap<Value, Value>,
         policy: ScalarOptimization,
@@ -41,40 +42,14 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
         }
     }
 
-    pub(super) fn group(
-        &mut self,
-        context: Value,
-        members: &[Value],
-        roots: &[(Value, Value, bool)],
-    ) -> Result<usize, OptimizeError> {
-        self.sink.add("ScalarActive", context)?;
-        let before = self.cache.len();
-        for &region in members {
-            self.region(context, region)?;
-        }
-        for &(region, source, expand) in roots {
-            self.root(context, region, source, expand)?;
-        }
-        Ok(self.cache.len() - before)
-    }
-
-    fn region(&mut self, context: Value, region: Value) -> Result<(), OptimizeError> {
-        if let Some(roots) = self.facts.roots.get(&region) {
-            for &source in roots {
-                let value = self.value(context, source, !self.facts.dispatched.contains(&source))?;
-                self.sink.add("ScalarRoot", (context, region, source, value))?;
-            }
-        }
-        Ok(())
-    }
-
-    fn root(
+    pub(super) fn root(
         &mut self,
         context: Value,
         region: Value,
         source: Value,
         expand: bool,
     ) -> Result<(), OptimizeError> {
+        self.sink.add("ScalarActive", context)?;
         let value = self.value(context, source, expand)?;
         self.sink.add("ScalarRoot", (context, region, source, value))?;
         Ok(())
@@ -85,13 +60,14 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
     }
 
     fn ty(&mut self, source: Value) -> Result<Value, OptimizeError> {
-        let Some(&ty) = self.facts.types.get(&source) else {
+        let Some(ty) = self.facts.lookup("SourceType", (source,))? else {
             return Err(OptimizeError::Output("scalar source has no type".into()));
         };
         Ok(ty)
     }
 
     fn value(&mut self, context: Value, source: Value, expand: bool) -> Result<Value, OptimizeError> {
+        let expand = expand || self.facts.rematerialized(source)?;
         let key = (context, source, expand);
         if let Some(&value) = self.cache.get(&key) {
             return Ok(value);
@@ -102,32 +78,49 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
                 "cycle in admitted scalar source DAG".into(),
             ));
         }
-        let value = if let Some(&(owner, index)) = self.facts.parameters.get(&source) {
+        let value = if let Some((owner, index)) = self.facts.parameter(source)? {
             let value = self.sink.add("ScalarParameter", (context, ty, owner, index))?;
             value
-        } else if self.facts.operations.contains(&source) && !expand {
-            self.leaf(source, ty, context)?
+        } else if let Some(actual) = self.facts.alias(source)? {
+            self.value(
+                context,
+                actual,
+                expand && !self.facts.flag("ScalarSourceDispatched", (actual,))?,
+            )?
+        } else if let Some((callee, arguments)) = self.facts.call(source)? {
+            let arguments = arguments
+                .iter()
+                .map(|&argument| self.value(context, argument, false))
+                .collect::<Result<Vec<_>, _>>()?;
+            let arguments = self.args(context, &arguments)?;
+            self.template(callee)?;
+            self.sink.add("ScalarCall", (context, ty, source, callee, arguments))?
+        } else if self.facts.operation(source)?.is_some() && !expand {
+            self.opaque(source, ty, context, false)?
+        } else if let Some(&(array, scope)) =
+            self.identities.arrays.get(&source).filter(|(array, _)| !matches!(array, ArrayExpr::Var(_, _)))
+        {
+            self.array(context, source, scope, array, ty)?
         } else if let Some(&(term, scope)) = self.identities.origins.get(&source) {
             self.type_facts(ty, &term.ty)?;
             self.expression(context, source, scope, term, ty)?
         } else {
-            self.leaf(source, ty, context)?
+            self.opaque(source, ty, context, false)?
         };
         self.loading.remove(&key);
         self.cache.insert(key, value);
         Ok(value)
     }
 
-    fn leaf(&mut self, source: Value, ty: Value, context: Value) -> Result<Value, OptimizeError> {
-        let value = self.sink.add("ScalarLeaf", (context, ty, source))?;
-        let owner = self.facts.owners.get(&source).copied();
-        if let Some(owner) = owner {
-            if let Some(region) = self.template_region(context) {
-                if super::home(owner, self.identities, self.facts) == region {
-                    self.sink.set("ScalarTemplateSafe", region, false)?;
-                }
-            }
-        }
+    fn opaque(
+        &mut self,
+        source: Value,
+        ty: Value,
+        context: Value,
+        execute: bool,
+    ) -> Result<Value, OptimizeError> {
+        let name = if execute { "ScalarExecute" } else { "ScalarLeaf" };
+        let value = self.sink.add(name, (context, ty, source))?;
         Ok(value)
     }
 
@@ -142,12 +135,10 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
         let source = self.source(scope, term)?;
         // An admitted helper is a substitution template. Its own reproducible calls
         // may expand; stored results outside that helper remain opaque inputs.
-        let expand = self.template_region(context).is_some_and(|region| {
-            self.facts
-                .owners
-                .get(&source)
-                .is_some_and(|&owner| super::home(owner, self.identities, self.facts) == region)
-        }) && self.facts.duplicable.contains(&source);
+        let expand = match self.template_region(context) {
+            Some(region) => self.facts.contains("ScalarTemplateExpands", (region, source))?,
+            None => false,
+        };
         self.value(context, source, expand)
     }
 
@@ -181,10 +172,11 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
         if self.policy == ScalarOptimization::Basic {
             return Ok(());
         }
-        if !self.facts.eligible.contains(&region) || self.templates.contains_key(&region) {
+        if !self.facts.contains("SourceInlineEligible", (region,))? || self.templates.contains_key(&region)
+        {
             return Ok(());
         }
-        let Some(&source) = self.facts.results.get(&region) else {
+        let Some(source) = self.facts.lookup("SourceResult", (region,))? else {
             return Err(OptimizeError::Output("inline helper has no result".into()));
         };
         // Templates must not reuse cached stored results from the separately
@@ -215,7 +207,29 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
                 "ScalarLiteral",
                 (context, ty, if *value { "true" } else { "false" }),
             )?),
+            TermKind::UnitLit => {
+                let args = self.args(context, &[])?;
+                self.sink.add("ScalarOperatorSafe", (ty, "unit"))?;
+                Ok(self.sink.add("ScalarOp", (context, ty, "unit", args))?)
+            }
+            TermKind::ArrayExpr(_) => {
+                let Some(array) = self.facts.alias(source)? else {
+                    return Err(OptimizeError::Output("array expression has no atom".into()));
+                };
+                self.value(context, array, false)
+            }
+            TermKind::Index { array, index } => {
+                let array = self.child(context, scope, array)?;
+                let index = self.child(context, scope, index)?;
+                let args = self.args(context, &[array, index])?;
+                Ok(self.sink.add("ScalarInstruction", (context, ty, source, "index", args))?)
+            }
             TermKind::App { func, args } => {
+                if matches!(&func.kind, TermKind::Var(VarRef::Builtin { id, .. }) if *id == catalog().known().length || *id == catalog().known().slice)
+                {
+                    return self.opaque(source, ty, context, true);
+                }
+                let mut retained = false;
                 let operator = match &func.kind {
                     TermKind::BinOp(op) => Some((op.op.symbol().to_string(), op.op.is_speculatable())),
                     TermKind::UnOp(op) => Some((op.op.symbol().to_string(), true)),
@@ -225,7 +239,7 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
                             return Err(OptimizeError::Output("invalid scalar builtin overload".into()));
                         };
                         if builtin.raw.purity != Purity::Pure || !overload.lowering.is_reusable() {
-                            return self.leaf(source, ty, context);
+                            retained = true;
                         }
                         Some((
                             format!("builtin:{}:{overload_idx}", builtin.dispatch_name()),
@@ -235,15 +249,21 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
                     _ => None,
                 };
                 let function = self.source(scope, func)?;
-                let callee = self.facts.callable.get(&function).copied();
-                if operator.is_none() && (!self.facts.duplicable.contains(&source) || callee.is_none()) {
-                    return self.leaf(source, ty, context);
+                let callee = self.facts.callable(function)?;
+                if operator.is_none() && callee.is_none() {
+                    return self.opaque(source, ty, context, true);
                 }
                 let mut values = Vec::with_capacity(args.len());
                 for arg in args {
                     values.push(self.child(context, scope, arg)?);
                 }
                 if let Some((op, safe)) = operator {
+                    if retained {
+                        let arguments = self.args(context, &values)?;
+                        return Ok(self
+                            .sink
+                            .add("ScalarInstruction", (context, ty, source, op.as_str(), arguments))?);
+                    }
                     if safe {
                         self.sink.add("ScalarOperatorSafe", (ty, op.as_str()))?;
                     }
@@ -260,6 +280,9 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
                     return Err(OptimizeError::Output("missing admitted call target".into()));
                 };
                 let arguments = self.args(context, &values)?;
+                if !self.facts.duplicable(source)? {
+                    return Ok(self.sink.add("ScalarCall", (context, ty, source, callee, arguments))?);
+                }
                 self.template(callee)?;
                 Ok(self.sink.add("ScalarInvoke", (context, ty, callee, arguments))?)
             }
@@ -282,15 +305,15 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
                 Ok(self.sink.add("ScalarCoerce", (context, ty, inner))?)
             }
             TermKind::If { cond, .. }
-                if !self.facts.operations.contains(&source) || self.facts.duplicable.contains(&source) =>
+                if !self.facts.operation(source)?.is_some() || self.facts.duplicable(source)? =>
             {
-                let Some(&(yes, no)) = self.facts.branches.get(&source) else {
+                let Some(branch) = self.facts.row("SourceBranch", |r| r[0] == source)? else {
                     return Err(OptimizeError::Output("scalar conditional has no branches".into()));
                 };
-                let Some(&yes_result) = self.facts.results.get(&yes) else {
+                let Some(yes_result) = self.facts.lookup("SourceResult", (branch[2],))? else {
                     return Err(OptimizeError::Output("missing then result".into()));
                 };
-                let Some(&no_result) = self.facts.results.get(&no) else {
+                let Some(no_result) = self.facts.lookup("SourceResult", (branch[3],))? else {
                     return Err(OptimizeError::Output("missing else result".into()));
                 };
                 let c = self.child(context, scope, cond)?;
@@ -304,13 +327,57 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
             | TermKind::Lambda(_)
             | TermKind::Closure(_)
             | TermKind::Let { .. }
-            | TermKind::UnitLit
             | TermKind::Extern(_)
             | TermKind::If { .. }
             | TermKind::Loop { .. }
-            | TermKind::Soac(_)
-            | TermKind::ArrayExpr(_)
-            | TermKind::Index { .. } => self.leaf(source, ty, context),
+            | TermKind::Soac(_) => self.opaque(source, ty, context, true),
         }
+    }
+
+    fn array(
+        &mut self,
+        context: Value,
+        source: Value,
+        scope: Value,
+        array: &'source ArrayExpr<ExplicitClosurePayload, ExplicitCapturesPayload>,
+        ty: Value,
+    ) -> Result<Value, OptimizeError> {
+        let (operator, values) = match array {
+            ArrayExpr::Literal(elements) => (
+                "array",
+                elements.iter().map(|e| self.child(context, scope, e)).collect::<Result<Vec<_>, _>>()?,
+            ),
+            ArrayExpr::Range { start, len, step } => {
+                let mut values = vec![
+                    self.child(context, scope, start)?,
+                    self.child(context, scope, len)?,
+                ];
+                if let Some(step) = step {
+                    values.push(self.child(context, scope, step)?);
+                }
+                ("range", values)
+            }
+            ArrayExpr::Zip(parts) => {
+                let mut values = Vec::new();
+                for i in 0..parts.len() {
+                    let Some(part) = self
+                        .facts
+                        .row("SourceArrayPart", |r| {
+                            r[0] == source && self.facts.0.value_to_base::<i64>(r[1]) == i as i64
+                        })?
+                        .map(|r| r[2])
+                    else {
+                        return Err(OptimizeError::Output("zip component is missing".into()));
+                    };
+                    values.push(self.value(context, part, false)?);
+                }
+                let args = self.args(context, &values)?;
+                return Ok(self.sink.add("ScalarTuple", (context, ty, args))?);
+            }
+            ArrayExpr::Var(_, _) => return self.opaque(source, ty, context, false),
+        };
+        let args = self.args(context, &values)?;
+        self.sink.add("ScalarOperatorSafe", (ty, operator))?;
+        Ok(self.sink.add("ScalarOp", (context, ty, operator, args))?)
     }
 }

@@ -2,20 +2,25 @@
 //! Arithmetic stays in TLC; source uses and placement facts accompany later
 //! imports into local optimization graphs.
 use super::{fusion, planning, OptimizeError};
-use crate::binding_layout::{extract_storage_access, extract_storage_binding};
-use crate::interface::{EntryKind, StorageAccess};
+use crate::binding_layout::{
+    extract_io_decoration, extract_sampler_binding, extract_storage_access, extract_storage_binding,
+    extract_storage_image_binding, extract_texture_binding, extract_uniform_binding,
+};
+use crate::interface::{EntryKind, IoDecoration, StorageAccess};
 use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
 use crate::tlc::stage::InputSliceBoundsInferred;
 use crate::tlc::{
     self, extract_lambda_params_ref, ArrayExpr, DefMeta, Lambda, LoopKind, SoacBody, SoacOp, TermId,
     TermKind, VarRef,
 };
-use crate::types::{SoacOwnership, Type, TypeExt, TypeName};
+use crate::types::{as_soa_tuple, SoacOwnership, Type, TypeExt, TypeName};
 use crate::{LookupMap, LookupSet, SymbolId};
-use egglog_engine::{EGraph, FullState, RawValues, Value, Write};
+use egglog_engine::sort::VecContainer;
+use egglog_engine::{Core, EGraph, FullState, RawValues, Value, Write};
 use wyn_base::{IdSource, Interner};
 
 mod facts;
+mod interface;
 mod structure;
 mod summary;
 use super::bindings::Bindings;
@@ -29,6 +34,10 @@ pub(super) fn import(source: &InputSliceBoundsInferred) -> Result<(EGraph, Ident
     planning::load(&mut graph)?;
     graph.parse_and_run_program(Some("source.egg".into()), include_str!("source.egg"))?;
     graph.parse_and_run_program(Some("analysis.egg".into()), include_str!("analysis.egg"))?;
+    graph.parse_and_run_program(
+        Some("publication.egg".into()),
+        include_str!("publication-schema.egg"),
+    )?;
     let mut identities = Identities::default();
     graph.update(|sink| {
         let mut import = Import {
@@ -86,6 +95,7 @@ impl<'source> Identities<'source> {
 struct Scope {
     key: Value,
     position: i64,
+    previous_operation: Option<Value>,
     summary: Summary,
 }
 
@@ -106,7 +116,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
     fn definitions(&mut self, source: &'source InputSliceBoundsInferred) -> Result<(), OptimizeError> {
         let counter = self.ty(&Type::Constructed(TypeName::UInt(32), vec![]))?;
         self.sink.add("CounterType", counter)?;
-        for definition in &source.defs {
+        for (ordinal, definition) in source.defs.iter().enumerate() {
             let (body, parameters) = extract_lambda_params_ref(&definition.body);
             let mut scope = self.scope(Some(body), None)?;
             let symbol = self.identities.symbols.intern(&definition.name);
@@ -116,6 +126,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             self.flags(global, false, true, true, true, 0)?;
             if let DefMeta::EntryPoint(entry) = &definition.meta {
                 self.sink.add("SourceEntryPoint", (symbol, scope.key))?;
+                self.sink.add("SourceEntryOrder", (symbol, ordinal as i64))?;
                 let compute = entry.declaration.entry_kind == EntryKind::Compute;
                 self.sink.add("SourceOriginalEntry", (symbol, scope.key, compute))?;
                 let grid = match entry.declaration.compute_dispatch {
@@ -130,10 +141,42 @@ impl<'source> Import<'_, '_, '_, 'source> {
             let checkpoint = self.bindings.checkpoint();
             self.parameters(&parameters, &scope)?;
             if let DefMeta::EntryPoint(entry) = &definition.meta {
+                let family = if let Some(group) = &entry.declaration.graphics_group {
+                    let Some(name) = source.symbols.get(group.root) else {
+                        return Err(OptimizeError::Output("graphics source name missing".into()));
+                    };
+                    name
+                } else {
+                    entry
+                        .declaration
+                        .source_entry
+                        .as_ref()
+                        .map_or(&entry.declaration.name, |entry| &entry.name)
+                };
+                self.sink.add("SourceInterfaceFamily", (symbol, family.as_str()))?;
+                self.interface(entry, symbol, &parameters)?;
                 for binding in entry.data.param_bindings.iter().flatten() {
                     self.entry_binding(binding)?;
                 }
                 for (index, param) in entry.declaration.params.iter().enumerate() {
+                    let bound = entry.data.param_bindings.get(index).is_some_and(Option::is_some)
+                        || extract_storage_binding(param).is_some()
+                        || extract_uniform_binding(param).is_some()
+                        || extract_texture_binding(param).is_some()
+                        || extract_sampler_binding(param).is_some()
+                        || extract_storage_image_binding(param).is_some();
+                    let builtin = matches!(extract_io_decoration(param), Some(IoDecoration::BuiltIn(_)));
+                    self.sink.add("SourceEntryParameter", (scope.key, index as i64, bound, builtin))?;
+                    if let Some(access) = extract_storage_access(param) {
+                        let access: i64 = match access {
+                            StorageAccess::ReadOnly => 1,
+                            StorageAccess::WriteOnly => 2,
+                            StorageAccess::ReadWrite => 3,
+                        };
+                        self.sink.add("SourceParameterStorageAccess", (scope.key, index as i64, access))?;
+                    } else {
+                        self.sink.add("SourceImmutableParameter", (scope.key, index as i64))?;
+                    }
                     if matches!(
                         extract_storage_access(param),
                         Some(StorageAccess::ReadWrite | StorageAccess::WriteOnly)
@@ -172,10 +215,14 @@ impl<'source> Import<'_, '_, '_, 'source> {
         self.identities.scopes.insert(key, (parent, body));
         if let Some(parent) = parent {
             self.summaries.parents.insert(key, parent);
+            self.sink.add("SourceParent", (key, parent))?;
+        } else {
+            self.sink.add("SourceRootRegion", key)?;
         }
         Ok(Scope {
             key,
             position: 0,
+            previous_operation: None,
             summary: Summary::default(),
         })
     }
@@ -206,7 +253,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
     fn parameters(&mut self, parameters: &[(SymbolId, Type)], scope: &Scope) -> Result<(), OptimizeError> {
         for (index, (symbol, ty)) in parameters.iter().enumerate() {
             let value = self.formal(*symbol, ty, scope)?;
-            self.sink.add("SourceParameter", (scope.key, index as i64, value))?;
+            self.sink.set("SourceParameter", (scope.key, index as i64), value)?;
         }
         Ok(())
     }
@@ -226,7 +273,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
 
     fn finish_body(&mut self, body: &'source Term, scope: &mut Scope) -> Result<Value, OptimizeError> {
         let (result, summary) = self.visit(body, scope)?;
-        self.sink.add("SourceResult", (scope.key, result))?;
+        self.sink.set("SourceResult", scope.key, result)?;
         for operation in summary.dependencies {
             self.sink.add("SourceReturnDependency", (scope.key, operation))?;
         }
@@ -264,11 +311,11 @@ impl<'source> Import<'_, '_, '_, 'source> {
     fn operation(&mut self, value: Value, kind: &str, scope: &Scope) -> Result<Value, OptimizeError> {
         let operation = self.sink.add("OperationId", self.operations.next_id())?;
         self.sink.add("SourceOperation", (operation, scope.key, kind))?;
-        self.sink.add("SourceOperationValue", (operation, value))?;
+        self.sink.set("SourceOperationValue", operation, value)?;
         self.summaries.operations.insert(value, operation);
         self.summaries.regions_with_operations.insert(scope.key);
         if matches!(kind, "control" | "call" | "index" | "global") {
-            self.sink.add("SourceInputCount", (operation, 0i64))?;
+            self.sink.set("SourceInputCount", operation, 0i64)?;
         }
         Ok(operation)
     }
@@ -288,6 +335,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         match &term.kind {
             TermKind::Var(VarRef::Symbol(symbol)) => {
                 let target = self.resolve(*symbol)?;
+                self.sink.add("SourceRegionUse", (scope.key, target))?;
                 self.free_reference(target, scope.key)?;
                 let mut evaluation = Summary::default();
                 if let Some(summary) = self.summaries.values.get(&target) {
@@ -335,7 +383,17 @@ impl<'source> Import<'_, '_, '_, 'source> {
             | TermKind::BoolLit(_)
             | TermKind::UnitLit
             | TermKind::Extern(_) => {}
-            TermKind::IntLit(_) => {}
+            TermKind::IntLit(text) => {
+                if matches!(
+                    &term.ty,
+                    Type::Constructed(TypeName::Int(32) | TypeName::UInt(32), _)
+                ) {
+                    let integer = text
+                        .parse::<i64>()
+                        .map_err(|_| OptimizeError::Output("invalid 32-bit integer literal".into()))?;
+                    self.sink.set("SourceInteger32", value, integer)?;
+                }
+            }
             TermKind::Lambda(lambda) => {
                 let mut inner = self.scope(Some(&lambda.body), Some(scope.key))?;
                 self.sink.add("SourceCallable", (value, inner.key))?;
@@ -431,6 +489,9 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 for (index, field) in fields.iter().enumerate() {
                     let field = self.operand(field, value, scope)?;
                     self.sink.add("SourceField", (value, index as i64, field))?;
+                    if as_soa_tuple(&term.ty).is_some() {
+                        self.sink.add("SourceArrayPart", (value, index as i64, field))?;
+                    }
                     self.summaries.fields.insert((value, index as i64), field);
                 }
             }
@@ -456,10 +517,15 @@ impl<'source> Import<'_, '_, '_, 'source> {
             LoopKind::For { iter, .. } => {
                 let extent = self.operand(iter, owner, parent)?;
                 self.sink.add("SourceLoopExtent", (owner, extent))?;
+                let form = self.sink.add("ForEach", extent)?;
+                self.sink.set("SourceLoopForm", owner, form)?;
             }
-            LoopKind::ForRange { bound, .. } => {
+            LoopKind::ForRange { bound, var_ty, .. } => {
                 let extent = self.operand(bound, owner, parent)?;
                 self.sink.add("SourceLoopExtent", (owner, extent))?;
+                let ty = self.ty(var_ty)?;
+                let form = self.sink.add("ForCount", (extent, ty))?;
+                self.sink.set("SourceLoopForm", owner, form)?;
             }
             LoopKind::While { .. } => {}
         }
@@ -484,10 +550,12 @@ impl<'source> Import<'_, '_, '_, 'source> {
             LoopKind::While { cond } => {
                 let (condition, _) = self.visit(cond, &mut header)?;
                 self.sink.add("SourceLoopCondition", (header.key, condition))?;
+                let form = self.sink.add("WhileCondition", condition)?;
+                self.sink.set("SourceLoopForm", owner, form)?;
             }
             LoopKind::For { var, var_ty, .. } | LoopKind::ForRange { var, var_ty, .. } => {
                 let variable = self.formal(*var, var_ty, &iteration)?;
-                self.sink.add("SourceIterationValue", (iteration.key, variable))?;
+                self.sink.set("SourceIterationValue", iteration.key, variable)?;
             }
         }
         let result = self.finish_body(body, &mut iteration)?;
@@ -512,19 +580,37 @@ impl<'source> Import<'_, '_, '_, 'source> {
             .iter()
             .map(|(symbol, ty, term)| self.operand(term, owner, parent).map(|value| (*symbol, ty, value)))
             .collect::<Result<Vec<_>, _>>()?;
-        let Lambda { params, body, .. } = &body.lam;
+        let Lambda { params, body, ret_ty } = &body.lam;
         let mut scope = self.scope(Some(body), Some(parent.key))?;
-        self.sink.add("SourceOperatorBody", (operation, scope.key))?;
+        self.sink.set("SourceOperatorBody", operation, scope.key)?;
         self.sink.add("SourceEnteredBy", (scope.key, owner))?;
         let checkpoint = self.bindings.checkpoint();
+        let mut captured = Vec::new();
         for (symbol, ty, argument) in captures {
             let parameter = self.formal(symbol, ty, &scope)?;
+            captured.push(parameter);
             self.sink.add("SourceCapture", (scope.key, parameter, argument))?;
             self.summaries.captures.insert((operation, argument));
             self.summaries.reads.push((operation, argument));
         }
         self.parameters(params, &scope)?;
-        self.finish_body(body, &mut scope)?;
+        if matches!(&body.kind, TermKind::Var(VarRef::Symbol(symbol)) if self.globals.contains(symbol)) {
+            let (function, _) = self.visit(body, &mut scope)?;
+            let mut arguments =
+                params.iter().map(|(symbol, _)| self.resolve(*symbol)).collect::<Result<Vec<_>, _>>()?;
+            arguments.extend(captured);
+            let arguments = self.sink.container_to_value(VecContainer {
+                data: arguments,
+                do_rebuild: true,
+            });
+            let result = self.sink.add("SourceInvocation", (scope.key, function, arguments))?;
+            self.value_type(result, ret_ty)?;
+            self.sink.set("SourceResult", scope.key, result)?;
+            scope.summary.calls.insert(function);
+            self.finish_region_summary(&scope)?;
+        } else {
+            self.finish_body(body, &mut scope)?;
+        }
         self.bindings.restore(checkpoint);
         self.enter_summary(owner, scope.key, parent)?;
         Ok(())
@@ -599,7 +685,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             self.summaries.values.get(&owner).map(|s| s.dependencies.clone()).unwrap_or_default();
         let value = self.array(array, owner, scope)?;
         self.summaries.values.entry(owner).or_default().dependencies = dependencies;
-        self.sink.add("SourceInput", (operation, index, value))?;
+        self.sink.set("SourceInput", (operation, index), value)?;
         self.summaries.inputs.insert((operation, value));
         self.summaries.reads.push((operation, value));
         self.dependencies(operation, value, "Input")?;
@@ -631,7 +717,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             SoacOp::Reduce { .. } | SoacOp::Scan { .. } | SoacOp::Filter { .. } => 1,
             SoacOp::ReduceByIndex { .. } => 2,
         };
-        self.sink.add("SourceInputCount", (operation, count as i64))?;
+        self.sink.set("SourceInputCount", operation, count as i64)?;
         match soac {
             SoacOp::Map {
                 destination: SoacOwnership::UniqueInput,
@@ -657,14 +743,14 @@ impl<'source> Import<'_, '_, '_, 'source> {
             }
             SoacOp::Reduce { ne, input, .. } | SoacOp::Scan { ne, input, .. } => {
                 let neutral = self.operand(ne, value, scope)?;
-                self.sink.add("SourceNeutral", (operation, neutral))?;
+                self.sink.set("SourceNeutral", operation, neutral)?;
                 self.input(input, operation, 0, value, scope)?;
             }
             SoacOp::Filter { input, .. } => self.input(input, operation, 0, value, scope)?,
             SoacOp::Scatter { dest, inputs, .. } | SoacOp::BucketScatter { dest, inputs, .. } => {
                 let destination = self.resolve(dest.id)?;
                 self.use_value(value, destination);
-                self.sink.add("SourceDestination", (operation, destination))?;
+                self.sink.set("SourceDestination", operation, destination)?;
                 self.use_summary(value, destination, false);
                 for (index, input) in inputs.iter().enumerate() {
                     self.input(input, operation, index as i64, value, scope)?;
@@ -679,10 +765,10 @@ impl<'source> Import<'_, '_, '_, 'source> {
             } => {
                 let destination = self.resolve(dest.id)?;
                 self.use_value(value, destination);
-                self.sink.add("SourceDestination", (operation, destination))?;
+                self.sink.set("SourceDestination", operation, destination)?;
                 self.use_summary(value, destination, false);
                 let neutral = self.operand(ne, value, scope)?;
-                self.sink.add("SourceNeutral", (operation, neutral))?;
+                self.sink.set("SourceNeutral", operation, neutral)?;
                 self.input(indices, operation, 0, value, scope)?;
                 self.input(values, operation, 1, value, scope)?;
             }

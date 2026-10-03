@@ -17,6 +17,7 @@
   (Scalar ExprKey)
   (ChunkCount Extent i64)
   (Product Extent Extent)
+  (Difference Extent Extent)
   (Stored ValueKey))
 ; Empty collectives have no chunks; their combine phase writes the neutral.
 (relation Site (OperationKey RegionKey))
@@ -71,15 +72,23 @@
 (relation Produces (StageKey ValueKey))
 (relation Needs (StageKey ValueKey))
 (relation ElementType (ValueKey TypeKey))
-(relation CapacityExtent (ValueKey Extent))
-(relation LiveLength (ValueKey Extent))
+(function CapacityExtent (ValueKey) Extent :no-merge)
+(function LiveLength (ValueKey) Extent :no-merge)
+(function HostBound (Extent) Extent :no-merge)
+(function LocalCapacity (Extent) i64 :merge (max old new))
+(function LaunchGrid (StageKey) DispatchGrid :no-merge)
 (relation FreshValue (ValueKey))
 (datatype StorageChoice (Allocate) (Reuse ExprKey))
 (function StorageFor (ValueKey) StorageChoice :no-merge)
 (function ReuseSelected (ValueKey) bool :merge (or old new))
 (relation ReusePermission (OperationKey i64 ExprKey))
-(relation SameBacking (ValueKey ExprKey))
+(function SameBacking (ValueKey) ExprKey :no-merge)
 (relation ValueRef (ExprKey ValueKey))
+; A value crossing a storage boundary is either a descriptor or an element load.
+; Forwarded values preserve this choice; slices retain their own descriptor bounds.
+(datatype StorageRead (ReadView ValueKey) (ReadElement ValueKey))
+(function ResultRead (OperationKey i64) StorageRead :no-merge)
+(function ValueRead (ExprKey) StorageRead :no-merge)
 ; All dependencies share one expression propagation path. A descriptor use
 ; requires the input binding without observing its mutable element contents.
 (datatype ValueReference (Contents ValueKey) (Descriptor ExprKey))
@@ -140,9 +149,11 @@
 (ruleset allocation)
 (ruleset dispatch)
 ; Binding facts consumed by final interface publication.
-(datatype AbiValue (AbiExpr i64))
-(relation AbiStorage (AbiValue BindingKey i64))
+(datatype InputStorage (StorageInput BindingKey i64))
+(function AbiStorage (ExprKey) InputStorage :no-merge)
 (relation AbiOutputBinding (i64 i64 i64))
+(datatype UpdateDestination (DestinationBuffer ValueKey) (DestinationValue ExprKey))
+(function SelectedDestination (OperationKey) UpdateDestination :no-merge)
 
 (relation Callback (OperationKey RegionKey))
 

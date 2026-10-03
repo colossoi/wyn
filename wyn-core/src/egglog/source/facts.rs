@@ -3,13 +3,14 @@ use super::{Import, Summary, Term};
 use crate::builtins::lowering::PrimOp;
 use crate::builtins::{by_id, catalog, BuiltinLowering, Purity};
 use crate::egglog::OptimizeError;
-use crate::ssa::layout::type_byte_size;
+use crate::ssa::layout::{std430_type_layout, storage_elem_stride, storage_value_type, type_byte_size};
 use crate::tlc::{SoacOp, TermKind, VarRef};
 use crate::types::{
-    array_view_buffer, is_array_variant_composite, is_array_variant_view, is_copy, strip_existentials,
-    Type, TypeExt, TypeName,
+    array_view_buffer, as_soa_tuple, is_array_variant_composite, is_array_variant_view, is_copy,
+    strip_existentials, Type, TypeExt, TypeName,
 };
-use egglog_engine::{RawValues, Value, Write};
+use egglog_engine::sort::VecContainer;
+use egglog_engine::{Core, RawValues, Value, Write};
 
 impl<'source> Import<'_, '_, '_, 'source> {
     pub(super) fn expression_key(&mut self, value: Value) -> Result<Value, OptimizeError> {
@@ -23,6 +24,57 @@ impl<'source> Import<'_, '_, '_, 'source> {
         let token = self.identities.types.intern(ty);
         let key = self.sink.add("TypeId", token)?;
         let semantic = strip_existentials(ty);
+        if semantic.is_array() {
+            self.sink.add("SourceArrayType", key)?;
+            if !semantic.array_variant().is_some_and(is_array_variant_view) {
+                self.sink.add("SourceOwnedArrayType", key)?;
+            }
+        }
+        let mut array = semantic;
+        while let Some(fields) = as_soa_tuple(array) {
+            let Some(first) = fields.first() else {
+                break;
+            };
+            array = first;
+        }
+        if array.is_array() {
+            if let Some(dimension) = array.array_size() {
+                let dimension = self.ty(dimension)?;
+                self.sink.set("SourceArrayDimension", key, dimension)?;
+            }
+            let size = if let Some(Type::Constructed(TypeName::Size(n), _)) = array.array_size() {
+                self.sink.add("FixedSize", *n as i64)?
+            } else {
+                self.sink.add("DynamicSize", RawValues(vec![]))?
+            };
+            self.sink.set("SourceArraySize", key, size)?;
+        }
+        if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = semantic {
+            let Type::Constructed(name, _) = semantic else {
+                unreachable!()
+            };
+            let shape = Type::Constructed(name.clone(), vec![crate::types::unit(); fields.len()]);
+            let shape = self.identities.types.intern(&shape);
+            let shape = self.sink.add("TypeId", shape)?;
+            self.sink.set("SourceAggregateShape", key, shape)?;
+            let fields = fields.iter().map(|field| self.ty(field)).collect::<Result<Vec<_>, _>>()?;
+            let fields = self.sink.container_to_value(VecContainer {
+                data: fields,
+                do_rebuild: true,
+            });
+            self.sink.set("SourceTypeFields", key, fields)?;
+        } else if !semantic.is_array() && matches!(semantic, Type::Constructed(_, _)) {
+            self.sink.add("SourceAtomicType", key)?;
+        }
+        if let Some((size, align)) = std430_type_layout(&storage_value_type(ty)) {
+            self.sink.add("SourceBlockLayout", (key, i64::from(size), i64::from(align)))?;
+        }
+        if let Some(size) = type_byte_size(&storage_value_type(ty)) {
+            self.sink.set("SourceByteSize", key, i64::from(size))?;
+        }
+        if let Some(stride) = storage_elem_stride(&storage_value_type(ty)) {
+            self.sink.set("SourceStorageStride", key, i64::from(stride))?;
+        }
         if semantic.array_variant().is_some_and(is_array_variant_view) {
             self.sink.add("SourceViewType", key)?;
         }
@@ -50,10 +102,13 @@ impl<'source> Import<'_, '_, '_, 'source> {
     pub(super) fn value_type(&mut self, value: Value, ty: &Type) -> Result<(), OptimizeError> {
         self.expression_key(value)?;
         if let Some(binding) = array_view_buffer(ty) {
-            self.sink.add(
-                "SourceBinding",
-                (value, i64::from(binding.set), i64::from(binding.binding)),
-            )?;
+            let Some(element) = ty.elem_type() else {
+                return Err(OptimizeError::Output("bound array has no element".into()));
+            };
+            let Some(stride) = crate::ssa::layout::storage_elem_stride(&storage_value_type(element)) else {
+                return Err(OptimizeError::Output("bound array has no storage stride".into()));
+            };
+            self.storage_binding(value, binding.set, binding.binding, stride)?;
         }
         let ty = self.ty(ty)?;
         self.sink.set("SourceType", value, ty)?;
@@ -169,8 +224,14 @@ impl<'source> Import<'_, '_, '_, 'source> {
         args: &[Value],
     ) -> Result<(), OptimizeError> {
         match (&func.kind, args) {
+            (TermKind::Var(VarRef::Builtin { id, .. }), &[array, _, _])
+                if *id == catalog().known().array_with || *id == catalog().known().array_with_in_place =>
+            {
+                self.sink.add("SourceSameShape", (value, array))?;
+                self.sink.add("SourceResultOperand", (value, 0i64))?;
+            }
             (TermKind::Var(VarRef::Builtin { id, .. }), &[array]) if *id == catalog().known().length => {
-                self.sink.add("SourceLength", (value, array))?;
+                self.sink.set("SourceLength", value, array)?;
                 self.summaries.lengths.insert(value, array);
             }
             (TermKind::Var(VarRef::Builtin { id, .. }), &[array, start, end])
@@ -188,7 +249,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
             (TermKind::Var(VarRef::Builtin { id, .. }), &[array])
                 if *id == catalog().known().scratch_annotation =>
             {
-                self.sink.add("SourceLength", (value, array))?;
                 self.summaries.lengths.insert(value, array);
                 let key = self.expression_key(array)?;
                 let extent = self.sink.add("Length", key)?;

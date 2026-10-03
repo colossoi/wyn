@@ -11,23 +11,16 @@ use egglog_engine::Value;
 use wyn_base::IdSource;
 
 mod body;
-mod host;
+pub(super) mod host;
 mod interface;
 mod kernels;
 mod loops;
-mod plan;
-mod publication;
-mod read;
-mod sizes;
+pub(super) mod plan;
+pub(super) mod read;
 use body::Body;
 use read::Facts;
 
-use crate::host::DispatchLen;
-use crate::host::ScalarTask;
-use crate::interface::EntryInput;
-use crate::interface::EntryKind;
 use crate::ssa::builder::FuncBuilder;
-use crate::ssa::types::ConstantValue;
 use crate::ssa::types::Terminator;
 use crate::tlc::TermKind;
 use crate::types::TypeName;
@@ -49,86 +42,68 @@ pub(super) fn lower(
     let mut compiler = Compiler {
         program,
         facts,
-        plan: plan::Plan::read(program)?,
+        plan: plan::Plan::new(program)?,
+        placements: super::scalar::placement::run(program)?,
         entry_origins: LookupMap::default(),
-        host_lengths: LookupMap::default(),
-        input_interfaces: LookupMap::default(),
-        host_tasks: Vec::new(),
         entry_names: Default::default(),
         functions: Vec::new(),
+        callable_ids: LookupMap::default(),
         function_ids: IdSource::new(),
         entry_ids: IdSource::new(),
-        specializations: LookupMap::default(),
     };
-    let mut lengths = Ok(());
-    program.graph.constructor_enodes("AbiStorage", |row| {
-        if lengths.is_err() {
-            return;
-        }
-        lengths = (|| {
-            let Some(binding) = compiler.facts.enode("InputBinding", row.children[1]) else {
-                return Err(error("ABI storage has no input binding"));
-            };
-            let Some(expression) = compiler.facts.enode("AbiExpr", row.children[0]) else {
-                return Err(error("ABI storage has no source expression"));
-            };
-            let source = *program.identities.values.resolve(compiler.facts.integer(expression[0]));
-            compiler.host_lengths.insert(
-                source,
-                DispatchLen::InputBinding {
-                    set: compiler.facts.integer(binding[0]) as u32,
-                    binding: compiler.facts.integer(binding[1]) as u32,
-                    elem_bytes: compiler.facts.integer(row.children[2]) as u32,
-                },
-            );
-            Ok(())
-        })();
-    })?;
-    lengths?;
-    let mut entries = Vec::new();
+    let mut declarations = Vec::new();
     for definition in &program.source.defs {
-        if let DefMeta::EntryPoint(entry) = &definition.meta {
-            let Some(scope) = compiler.facts.definition(definition.name) else {
-                return Err(error("entry scope is missing"));
+        if let DefMeta::EntryPoint(_) = &definition.meta {
+            let Some(symbol) = program.identities.symbols.get(&definition.name) else {
+                return Err(error("entry symbol missing"));
             };
-            let (source, parameters) = extract_lambda_params_ref(&definition.body);
-            for stage in compiler
-                .plan
-                .stages
-                .iter()
-                .filter(|stage| stage.owner == definition.name)
-                .cloned()
-                .collect::<Vec<_>>()
-            {
-                entries.push(interface::entry(
-                    &mut compiler,
-                    scope,
-                    source,
-                    &parameters,
-                    entry,
-                    definition.name,
-                    Some(&stage),
-                )?);
+            for stage in compiler.plan.stages(definition.name)? {
+                let entry = super::abi::entry(&mut compiler, definition.name, Some(stage), &declarations)?;
+                declarations.push(entry);
             }
-            let needs_finish = entry.declaration.entry_kind != EntryKind::Compute
-                || !compiler.plan.stages.iter().any(|stage| stage.owner == definition.name)
-                || compiler.plan.outputs.iter().any(|output| {
-                    output.owner == definition.name && output.copy && output.writer.is_none()
-                });
-            if needs_finish {
-                entries.push(interface::entry(
-                    &mut compiler,
-                    scope,
-                    source,
-                    &parameters,
-                    entry,
-                    definition.name,
-                    None,
-                )?);
+            if compiler.facts.contains("EmitOriginalEntry", (symbol,))
+                || compiler.facts.contains("FinishEntry", (symbol,))
+                || compiler.facts.contains("InterfaceOnlyEntry", (symbol,))
+            {
+                let entry = super::abi::entry(&mut compiler, definition.name, None, &declarations)?;
+                declarations.push(entry);
             }
         }
     }
-    let (pipeline, physical_kernels) = publication::publish(&compiler, &mut entries)?;
+    let (pipeline, physical_kernels) = super::abi::publication::publish(&mut compiler, &mut declarations)?;
+    let mut entries = Vec::new();
+    for metadata in declarations {
+        let (owner, stage) = compiler.entry_origins[&metadata.id].clone();
+        let Some(definition) = program.source.defs.iter().find(|d| d.name == owner) else {
+            return Err(error("entry definition missing"));
+        };
+        let DefMeta::EntryPoint(entry) = &definition.meta else {
+            return Err(error("entry declaration missing"));
+        };
+        let Some(scope) = compiler.facts.definition(owner) else {
+            return Err(error("entry scope missing"));
+        };
+        let (source, parameters) = extract_lambda_params_ref(&definition.body);
+        entries.push(interface::entry(
+            &mut compiler,
+            scope,
+            source,
+            &parameters,
+            entry,
+            owner,
+            stage,
+            &metadata,
+        )?);
+    }
+    entries.retain(|entry| {
+        let (owner, _) = &compiler.entry_origins[&entry.id];
+        !compiler
+            .program
+            .identities
+            .symbols
+            .get(owner)
+            .is_some_and(|symbol| compiler.facts.contains("InterfaceOnlyEntry", (symbol,)))
+    });
     Ok(Elaborated::from_parts(
         compiler.functions,
         entries,
@@ -141,42 +116,38 @@ pub(super) fn lower(
     ))
 }
 
-struct Compiler<'a, 'source> {
-    program: &'a Program<'source, Optimized>,
-    facts: Facts<'a, 'source>,
-    plan: plan::Plan<'a, 'source>,
-    entry_origins: LookupMap<EntryId, (SymbolId, Option<plan::Stage>)>,
-    host_lengths: LookupMap<Value, DispatchLen>,
-    input_interfaces: LookupMap<Value, EntryInput>,
-    host_tasks: Vec<ScalarTask>,
-    entry_names: std::collections::BTreeSet<String>,
-    functions: Vec<Function>,
-    function_ids: IdSource<FunctionId>,
-    entry_ids: IdSource<EntryId>,
-    specializations: LookupMap<(Value, Vec<(Type, Option<ConstantValue>)>), FunctionId>,
+pub(super) struct Compiler<'a, 'source> {
+    placements: Vec<Vec<Value>>,
+    pub(super) program: &'a Program<'source, Optimized>,
+    pub(super) facts: Facts<'a, 'source>,
+    pub(super) plan: plan::Plan<'a, 'source>,
+    pub(super) entry_origins: LookupMap<EntryId, (SymbolId, Option<Value>)>,
+    pub(super) entry_names: std::collections::BTreeSet<String>,
+    pub(super) functions: Vec<Function>,
+    pub(super) function_ids: IdSource<FunctionId>,
+    callable_ids: LookupMap<(Value, Vec<Type>), FunctionId>,
+    pub(super) entry_ids: IdSource<EntryId>,
 }
 
 impl Compiler<'_, '_> {
     fn function(&mut self, scope: Value, arguments: &[Typed]) -> Result<FunctionId, OptimizeError> {
         let signature: Vec<_> = arguments.iter().map(|argument| argument.ty.clone()).collect();
-        let key = (
-            scope,
-            arguments.iter().map(|argument| (argument.ty.clone(), argument.value.as_const())).collect(),
-        );
-        if let Some(&id) = self.specializations.get(&key) {
+        if let Some(&id) = self.callable_ids.get(&(scope, signature.clone())) {
             return Ok(id);
         }
         let Some(&(_, Some(source))) = self.program.identities.scopes.get(&scope) else {
             return Err(error("callable has no source body"));
         };
         let id = self.function_ids.next_id();
-        self.specializations.insert(key, id);
-        let name = self
-            .facts
-            .definition_name(scope)
-            .and_then(|symbol| self.program.source.symbols.get(symbol))
-            .cloned()
-            .unwrap_or_else(|| format!("helper_{}", self.functions.len()));
+        self.callable_ids.insert((scope, signature.clone()), id);
+        let name = if let Some(symbol) = self.facts.definition_name(scope) {
+            let Some(name) = self.program.source.symbols.get(symbol) else {
+                return Err(error("callable definition name missing"));
+            };
+            name.clone()
+        } else {
+            format!("helper_{}", self.functions.len())
+        };
         if let TermKind::Extern(linkage) = &source.kind {
             let mut result = &source.ty;
             for _ in &signature {
@@ -202,17 +173,12 @@ impl Compiler<'_, '_> {
             });
             return Ok(id);
         }
+        let Some(result) = self.facts.result(scope) else {
+            return Err(error("callable has no result fact"));
+        };
         let mut lower = Body::new(self, scope, signature, source.ty.clone())?;
-        for (i, argument) in arguments.iter().enumerate() {
-            if argument.value.as_const().is_some() {
-                let Some(formal) = lower.compiler.facts.parameter(scope, i as i64) else {
-                    return Err(error("specialized parameter missing"));
-                };
-                lower.values.insert(formal, argument.clone());
-            }
-        }
         let result = lower
-            .source(scope, source)
+            .value(scope, result)
             .map_err(|err| error(format!("function {name}, {} arguments: {err}", arguments.len())))?;
         let body = lower.finish(result)?;
         self.functions.push(Function {
@@ -232,7 +198,7 @@ struct Typed {
     ty: Type,
 }
 
-fn error(message: impl Into<String>) -> OptimizeError {
+pub(super) fn error(message: impl Into<String>) -> OptimizeError {
     OptimizeError::Output(format!("SSA lowering: {}", message.into()))
 }
 fn builder_error(error: BuilderError) -> OptimizeError {

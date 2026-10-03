@@ -1083,7 +1083,12 @@ entry rasterize(positions: []vec4f32,
     let module = wspirv::dr::load_words(&spirv).unwrap();
     let stores: Vec<_> =
         module.all_inst_iter().filter(|inst| inst.class.opcode == spirv::Op::Store).collect();
-    assert_eq!(stores.len(), 1, "scatter emits one store in its runtime loop");
+    assert_eq!(
+        stores.len(),
+        1,
+        "scatter emits one store in its runtime loop\n{}",
+        disasm(&spirv)
+    );
     let wspirv::dr::Operand::IdRef(pointer) = stores[0].operands[0] else {
         panic!("store pointer")
     };

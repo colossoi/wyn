@@ -216,7 +216,19 @@ pub struct Program {
 impl Program {
     /// Build host functions from published shader interfaces and resource dependencies.
     pub fn new(mut interface: ModuleInterface) -> Result<Self, HostError> {
-        interface.rebuild_frame_graph();
+        let expected_passes: usize = interface
+            .pipelines
+            .iter()
+            .map(|pipeline| match pipeline {
+                Pipeline::Compute(pipeline) => pipeline.stages.len(),
+                Pipeline::Graphics(pipeline) => usize::from(!pipeline.stages.is_empty()),
+            })
+            .sum();
+        if interface.frame_graph.passes.len() != expected_passes {
+            return Err(HostError::Invalid(
+                "shader interface has no complete selected frame graph".into(),
+            ));
+        }
         let mut depth_targets = BTreeMap::new();
         for (p, pipeline) in interface.pipelines.iter().enumerate() {
             if let Pipeline::Graphics(g) = pipeline {
@@ -309,6 +321,17 @@ impl Program {
                 entry.operations.push(operation);
             }
             stage_operations.insert(key, entry.operations[start..].to_vec());
+        }
+        for result in &program.interface.source_results {
+            entry_stages.entry(result.entry.clone()).or_default();
+            entries.entry(result.entry.clone()).or_insert_with(|| Entry {
+                name: result.entry.clone(),
+                inputs: BTreeSet::new(),
+                scalar_inputs: BTreeSet::new(),
+                allocations: vec![],
+                operations: vec![],
+                results: vec![],
+            });
         }
         for (_, mut entry) in entries {
             program.prepare_entry(&mut entry)?;
@@ -661,6 +684,7 @@ impl Program {
             self.interface.source_results.iter().filter(|r| r.entry == entry.name).collect::<Vec<_>>();
         outputs.sort_by_key(|r| r.result);
         for output in outputs {
+            pipelines.insert(output.pipeline_index);
             entry.results.push(self.slot_resource(output.pipeline_index, output.set, output.binding)?);
         }
         for &pipeline in &pipelines {

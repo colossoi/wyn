@@ -1,11 +1,19 @@
 ; Scalar terms share the structural graph, but rules match only this vocabulary.
 ; Source leaves are existing values, not re-evaluations of their definitions.
 (datatype ScalarContext (ScalarFunction RegionKey) (ScalarKernel FusionPlan) (ScalarDispatch OperationKey) (ScalarTemplate RegionKey))
+(function ScalarScopeContext (RegionKey) ScalarContext :no-merge)
+(function ScalarSourceContext (SourceValue) ScalarContext :no-merge)
+(function ScalarOwner (SourceValue) RegionKey :no-merge)
+(function ScalarHome (RegionKey) RegionKey :no-merge)
 (sort ScalarExpr)
 (sort ScalarArgs)
 ; A native vector groups roots for shared extraction after optimization.
 (sort ScalarOutputs (Vec ScalarExpr))
 (constructor ScalarLeaf (ScalarContext TypeKey SourceValue) ScalarExpr)
+; Execute a selected local boundary; it must never read its own stored result.
+(constructor ScalarExecute (ScalarContext TypeKey SourceValue) ScalarExpr)
+(constructor ScalarInstruction (ScalarContext TypeKey SourceValue String ScalarArgs) ScalarExpr)
+(constructor ScalarCall (ScalarContext TypeKey SourceValue RegionKey ScalarArgs) ScalarExpr)
 (constructor ScalarParameter (ScalarContext TypeKey RegionKey i64) ScalarExpr)
 (constructor ScalarLiteral (ScalarContext TypeKey String) ScalarExpr)
 (constructor ScalarUnary (ScalarContext TypeKey String ScalarExpr) ScalarExpr)
@@ -40,7 +48,6 @@
 (ruleset scalar-arguments)
 (ruleset scalar-micro)
 
-(relation ScalarSelectedPlacement (ScalarContext ScalarExpr RegionKey))
 (function ScalarTemplateSafe (RegionKey) bool :merge (and old new))
 (relation ScalarActive (ScalarContext))
 (relation ScalarContextScope (ScalarContext RegionKey))

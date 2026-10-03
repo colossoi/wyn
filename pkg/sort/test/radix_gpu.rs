@@ -208,7 +208,7 @@ mod tests {
         for n in [0, 7, 8, 9] {
             let values: Vec<_> = (0..n).rev().map(|x| x as u32).collect();
             let xs = input(&device, &values);
-            let result = radix::host_fixed(&mut context, &queue, &xs, &xs, &xs, &xs, &xs, &xs, &xs);
+            let result = radix::host_fixed(&mut context, &queue, &xs, &xs, &xs, &xs, &xs, &xs, &xs, &xs);
             if n == 8 {
                 let result = result.unwrap();
                 let OutputResource::Buffer { buffer, .. } = &result.values[0].resource else {

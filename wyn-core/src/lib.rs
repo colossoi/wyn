@@ -676,7 +676,10 @@ fn adapt_host_interface_for_wgsl(
         ));
     }
 
-    descriptor.rebuild_frame_graph();
+    descriptor.frame_graph = descriptor
+        .frame_graph
+        .refresh_resources(&descriptor.pipelines)
+        .map_err(|error| err_wgsl!("{error}"))?;
     Ok(())
 }
 

@@ -106,6 +106,32 @@ fn compile(directory: &Path, source: &str, target: &str, optimize: bool) -> Resu
 }
 
 #[test]
+fn filtered_indirect_draw_keeps_generated_outputs_internal() {
+    let directory = std::env::temp_dir().join(format!("wyn_graphics_outputs_{}", std::process::id()));
+    fs::create_dir(&directory).expect("create test directory");
+    let program = "type command = {vertex_count:u32, instance_count:u32, first_vertex:u32, first_instance:u32}
+        def cull(values: []vec4f32) ([]vec4f32, command) =
+          let live = filter(|v|v.x>0.0, values) in
+          (live, {vertex_count=3u32, instance_count=u32(length(live)), first_vertex=0u32, first_instance=0u32})
+        entry reproduce(values: []vec4f32, target: render_target<vec4f32>) render_target<vec4f32> =
+          let (compacted, draw) = cull(values)
+          let fragments = rasterize_triangles(indirect_draw(draw),
+            |_,_,_| vertex_output(compacted[0], ())) in
+          shade(target, fragments, |_,_,_,_,_| compacted[0])";
+    for target in ["spirv", "wgsl"] {
+        for optimize in [false, true] {
+            let host = compile(&directory, program, target, optimize).expect("compile indirect draw");
+            let entry = host.split("(define-host-entry").nth(1).expect("source host entry");
+            let parameters = entry.split(":parameters '(").nth(1).expect("entry parameters");
+            let parameters = parameters.split(":results '(").next().unwrap();
+            assert_eq!(parameters.matches(":source-name ").count(), 2, "{host}");
+            assert_eq!(host.matches("(gpu-alloc ").count(), 3, "{host}");
+        }
+    }
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
 fn graphics_array_aliases_preserve_input_and_computed_buffer_identity() {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

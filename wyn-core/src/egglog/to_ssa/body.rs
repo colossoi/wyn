@@ -2,19 +2,12 @@
 use super::{builder_error, error, Compiler, OptimizeError, Typed};
 use crate::builtins::catalog;
 use crate::egglog::bindings::Bindings;
-use crate::egglog::source::Term;
-use crate::egglog::to_ssa::host;
-use crate::host::ScalarExpr;
-use crate::interface::StorageBindingDecl;
-use crate::op::OpTag;
+use crate::op::{OpTag, PureViewSource};
 use crate::ssa::builder::BuilderError;
 use crate::ssa::builder::FuncBuilder;
-use crate::ssa::types::PlaceId;
-use crate::ssa::types::ValueRef;
 use crate::ssa::types::{BlockId, FuncBody, InstKind, Terminator};
-use crate::tlc::ArrayExpr;
-use crate::tlc::{TermKind, VarRef};
-use crate::types::{self, Type, TypeExt, TypeName};
+use crate::ssa::types::{PlaceId, ValueRef};
+use crate::types::{self, Type, TypeName};
 use crate::BindingRef;
 use crate::FunctionId;
 use crate::{LookupMap, LookupSet};
@@ -22,9 +15,9 @@ use egglog_engine::{TermId, Value};
 use std::cell::RefCell;
 use wyn_graph::DominatorTree;
 
-mod aggregates;
 mod collective;
 mod control;
+mod materialize;
 mod resources;
 mod values;
 
@@ -39,14 +32,9 @@ pub(super) struct Body<'a, 'p, 'source> {
     pub scopes: Bindings<Value, BlockId>,
     loading: LookupSet<Value>,
     dominators: RefCell<Option<DominatorTree<BlockId>>>,
-    pub active_operations: LookupSet<Value>,
-    pub host_arguments: Bindings<Value, ScalarExpr>,
-    pub capture_bindings: Vec<StorageBindingDecl>,
     pub grid: Option<(u32, u32, u32)>,
-    pub host_stage: Option<String>,
-    pub host_scalar_bindings: LookupMap<TermId, BindingRef>,
-    pub resource_uses: LookupMap<Value, i64>,
-    pub local_arrays: LookupMap<ValueRef, PlaceId>,
+    local_resources: LookupMap<Value, Typed>,
+    local_arrays: LookupMap<ValueRef, PlaceId>,
 }
 
 impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
@@ -89,14 +77,9 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
             scalar_values: LookupMap::default(),
             loading: LookupSet::default(),
             dominators: RefCell::new(None),
-            resource_uses: LookupMap::default(),
-            local_arrays: LookupMap::default(),
-            host_arguments: Bindings::default(),
-            capture_bindings: Vec::new(),
-            host_stage: None,
             grid: None,
-            host_scalar_bindings: LookupMap::default(),
-            active_operations: LookupSet::default(),
+            local_resources: LookupMap::default(),
+            local_arrays: LookupMap::default(),
         })
     }
 
@@ -117,27 +100,6 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         Ok(block)
     }
 
-    pub fn identity(&self, scope: Value, term: &Term) -> Result<Value, OptimizeError> {
-        let Some(&value) = self.compiler.program.identities.occurrences.get(&(scope, term.id)) else {
-            return Err(error("source occurrence missing during SSA emission"));
-        };
-        Ok(value)
-    }
-
-    pub fn source(&mut self, scope: Value, term: &'source Term) -> Result<Typed, OptimizeError> {
-        // Let syntax has no graph node, but evaluating a binding preserves its
-        // effects even if the resulting value has no live scalar uses.
-        if let TermKind::Let { rhs: value, body, .. } = &term.kind {
-            let identity = self.identity(scope, value)?;
-            if !self.compiler.plan.pure(identity) {
-                self.source(scope, value)?;
-            }
-            return self.source(scope, body);
-        }
-        let source = self.identity(scope, term)?;
-        self.value(scope, source)
-    }
-
     pub fn value(&mut self, scope: Value, source: Value) -> Result<Typed, OptimizeError> {
         if let Some(value) = self.values.get(&source) {
             return Ok(value.clone());
@@ -149,171 +111,31 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
             if let Some(&term) = self.compiler.program.stage.selected.roots.get(&(self.context, source)) {
                 self.scalar(scope, term)?
             } else {
-                self.original(scope, source)?
+                self.boundary(scope, source)?
             };
         self.loading.remove(&source);
         self.values.insert(source, value.clone());
         Ok(value)
     }
 
-    fn original(&mut self, scope: Value, source: Value) -> Result<Typed, OptimizeError> {
-        if let Some(value) = self.values.get(&source) {
-            return Ok(value.clone());
-        }
-        if let Some(actual) = self.compiler.facts.alias(source) {
-            return self.value(scope, actual);
-        }
-        // A resource identifies backing storage; a slice still needs its bounds.
-        if let Some(resource) =
-            self.compiler.plan.value_ref(source).filter(|_| self.compiler.facts.slice(source).is_none())
-        {
-            if !self.compiler.facts.operation(source).is_some_and(|op| self.active_operations.contains(&op))
-                && self.compiler.plan.backing(resource).is_some_and(|backing| {
-                    self.compiler.plan.buffers.contains_key(&backing)
-                        || self.compiler.plan.external(resource).is_none()
-                })
-            {
-                let view = self.resource(scope, resource, 1)?;
-                if self.compiler.facts.source_type(source).is_some_and(|ty| {
-                    let ty = types::strip_existentials(ty);
-                    !ty.is_array() && types::as_soa_tuple(ty).is_none()
-                }) {
-                    let zero = self.literal("0", &types::i32())?;
-                    let value = self.index(view, zero)?;
-                    let Some(ty) = self.compiler.facts.source_type(source).cloned() else {
-                        return Err(error("missing source_type"));
-                    };
-                    return self.cast(value, &ty);
-                }
-                return Ok(view);
-            }
-        }
-        if let Some(symbol) = self.compiler.facts.global_symbol(source) {
-            let Some(region) = self.compiler.facts.definition(symbol) else {
-                return Err(error("global definition missing"));
-            };
-            return self.call(region, Vec::new());
-        }
-        if let Some((parent, index)) = self.compiler.facts.projection(source) {
-            let parent = self.value(scope, parent)?;
-            return self.field(parent, index);
-        }
-        if let Some(&(array, owner)) = self.compiler.program.identities.arrays.get(&source) {
-            if !matches!(array, ArrayExpr::Var(_, _)) {
-                return self.array(owner, array, &array.array_type());
-            }
-        }
-        let Some(&(term, owner)) = self.compiler.program.identities.origins.get(&source) else {
-            return Err(error(format!("unbound source value {source:?}")));
-        };
-        if let TermKind::App { func, args } = &term.kind {
-            if matches!(func.kind,TermKind::Var(VarRef::Builtin{id,..}) if id==catalog().known().length) {
-                if let [array] = args.as_slice() {
-                    let array = self.identity(owner, array)?;
-                    let value = self.source_length(scope, array)?;
-                    return self.cast(value, &term.ty);
-                }
-            }
-        }
-        self.term(owner, scope, source, term)
-    }
-
-    fn term(
-        &mut self,
-        owner: Value,
-        scope: Value,
-        source: Value,
-        term: &'source Term,
-    ) -> Result<Typed, OptimizeError> {
-        match &term.kind {
-            TermKind::IntLit(text) => self.literal(text, &term.ty),
-            TermKind::FloatLit(x) => self.literal(&x.to_bits().to_string(), &term.ty),
-            TermKind::BoolLit(x) => self.op(OpTag::Bool(*x), vec![], types::bool_type()),
-            TermKind::UnitLit => self.op(OpTag::Unit, vec![], types::unit()),
-            TermKind::App { func, args } => {
-                let mut arguments = Vec::new();
-                for argument in args {
-                    arguments.push(self.source(owner, argument)?);
-                }
-                let tag = match &func.kind {
-                    TermKind::BinOp(op) => OpTag::BinOp(op.op),
-                    TermKind::UnOp(op) => OpTag::UnaryOp(op.op),
-                    TermKind::Var(VarRef::Builtin { id, overload_idx }) => OpTag::Intrinsic {
-                        id: *id,
-                        overload_idx: *overload_idx,
-                    },
-                    _ => {
-                        let function = self.identity(owner, func)?;
-                        return self.call_value(owner, function, arguments);
-                    }
-                };
-                self.op(tag, arguments, term.ty.clone())
-            }
-            TermKind::Tuple(fields) | TermKind::VecLit(fields) => {
-                let mut values = Vec::new();
-                for field in fields {
-                    values.push(self.source(owner, field)?);
-                }
-                let tag = if matches!(term.kind, TermKind::Tuple(_)) {
-                    OpTag::Tuple(values.len())
-                } else {
-                    OpTag::Vector(values.len())
-                };
-                let ty = if let Type::Constructed(name @ (TypeName::Tuple(_) | TypeName::Record(_)), _) =
-                    types::strip_existentials(&term.ty)
-                {
-                    Type::Constructed(name.clone(), values.iter().map(|v| v.ty.clone()).collect())
-                } else {
-                    term.ty.clone()
-                };
-                self.op(tag, values, ty)
-            }
-            TermKind::TupleProj { tuple, idx } => {
-                let tuple = self.source(owner, tuple)?;
-                self.field(tuple, *idx)
-            }
-            TermKind::Coerce { inner, target_ty } => {
-                let value = self.source(owner, inner)?;
-                self.cast(value, target_ty)
-            }
-            TermKind::Index { array, index } => {
-                let array = self.source(owner, array)?;
-                let index = self.source(owner, index)?;
-                self.index(array, index)
-            }
-            TermKind::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => {
-                let condition = self.source(owner, cond)?;
-                let Some((yes, no)) = self.compiler.facts.branches(source) else {
-                    return Err(error("missing branch scopes"));
-                };
-                self.branch(
-                    scope,
-                    condition,
-                    |body| body.source(yes, then_branch),
-                    |body| body.source(no, else_branch),
-                    Some((yes, no)),
-                )
-            }
-            TermKind::Loop { .. } => self.loop_(owner, source, term),
-            TermKind::ArrayExpr(array) => self.array(owner, array, &term.ty),
-            TermKind::Let { .. } => self.source(owner, term),
-            TermKind::Soac(soac) => self.collective(owner, source, soac, &term.ty),
-            TermKind::Var(_)
-            | TermKind::Lambda(_)
-            | TermKind::Closure(_)
-            | TermKind::BinOp(_)
-            | TermKind::UnOp(_)
-            | TermKind::Extern(_) => Err(error("callable used as a runtime scalar")),
-        }
-    }
-
     fn scalar(&mut self, scope: Value, term: TermId) -> Result<Typed, OptimizeError> {
-        if let Some(value) = host::capture_scalar(self, term)? {
-            return Ok(value);
+        if let Some(&binding) = self.compiler.plan.captures.get(&term) {
+            let (_, fields) = self.compiler.program.stage.selected.app(term)?;
+            let Some(ty) =
+                self.compiler.facts.ty(self.compiler.program.stage.selected.values[fields[1]]).cloned()
+            else {
+                return Err(error("capture type missing"));
+            };
+            let element = crate::ssa::layout::storage_value_type(&ty);
+            let zero = self.literal("0", &types::i32())?;
+            let one = self.literal("1", &types::i32())?;
+            let view = self.op(
+                OpTag::StorageView(PureViewSource::Storage(binding)),
+                vec![zero.clone(), one],
+                super::interface::view_type(&element, types::buffer_tag(binding)),
+            )?;
+            let value = self.index(view, zero)?;
+            return self.cast(value, &ty);
         }
         let current = self.current()?;
         if let Some(values) = self.scalar_values.get(&term) {
@@ -324,108 +146,167 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         }
         let program = self.compiler.program;
         let selected = &program.stage.selected;
-        let expression = selected.values[term];
-        let target = self.scalar_target(expression)?;
+        let target = self.scalar_target(term)?;
         let (name, fields) = selected.app(term)?;
         let Some(ty) = self.compiler.facts.ty(selected.values[fields[1]]).cloned() else {
             return Err(error("selected scalar type missing"));
         };
         // Placement is applied to the resulting pure instruction. Operand
         // evaluation still occurs at the current control/effect position.
-        let value = match name {
-            "ScalarLeaf" => {
-                let source = selected.values[fields[2]];
-                // A source boundary can have its own optimized root in this
-                // context. Follow it unless it leads straight back to this leaf.
-                if selected.roots.get(&(self.context, source)).is_some_and(|&root| root != term) {
-                    self.value(scope, source)?
-                } else {
-                    self.original(scope, source)?
+        let value = {
+            match name {
+                "ScalarLeaf" => {
+                    let source = selected.values[fields[2]];
+                    // A source boundary can have its own optimized root in this
+                    // context. Follow it unless it leads straight back to this leaf.
+                    if let Some(value) = self.values.get(&source) {
+                        value.clone()
+                    } else if selected.roots.get(&(self.context, source)).is_some_and(|&root| root != term)
+                    {
+                        self.value(scope, source)?
+                    } else {
+                        self.boundary(scope, source)?
+                    }
                 }
+                "ScalarExecute" => self.local(scope, selected.values[fields[2]])?,
+                "ScalarInstruction" => {
+                    let arguments = self.arguments(scope, fields[4])?;
+                    let Some(representation) =
+                        self.compiler.facts.lookup("InstructionResult", (selected.values[fields[2]],))
+                    else {
+                        return Err(error("instruction result representation missing"));
+                    };
+                    let ty = if let Some(fields) =
+                        self.compiler.facts.enode("OperandResult", representation)
+                    {
+                        let index = usize::try_from(self.compiler.facts.integer(fields[0]))
+                            .map_err(|_| error("invalid result operand"))?;
+                        let Some(argument) = arguments.get(index) else {
+                            return Err(error("result operand missing"));
+                        };
+                        argument.ty.clone()
+                    } else if let Some(fields) = self.compiler.facts.enode("SemanticResult", representation)
+                    {
+                        let Some(ty) = self.compiler.facts.ty(fields[0]) else {
+                            return Err(error("instruction result type missing"));
+                        };
+                        ty.clone()
+                    } else {
+                        return Err(error("unknown instruction representation"));
+                    };
+                    let tag = selected.operator(fields[3], arguments.len())?;
+                    if matches!(tag, OpTag::Index) {
+                        let [array, index]: [Typed; 2] =
+                            arguments.try_into().map_err(|_| error("index needs two operands"))?;
+                        let value = self.index(array, index)?;
+                        self.cast(value, &ty)?
+                    } else {
+                        self.op(tag, arguments, ty)?
+                    }
+                }
+                "ScalarCall" => {
+                    let args = self.arguments(scope, fields[4])?;
+                    self.call(selected.values[fields[3]], args)?
+                }
+                "ScalarParameter" => {
+                    let region = selected.values[fields[2]];
+                    let index = selected.integer(fields[3])?;
+                    let Some(source) = self.compiler.facts.parameter(region, index) else {
+                        return Err(error("selected parameter missing"));
+                    };
+                    let Some(value) = self.values.get(&source).cloned() else {
+                        return Err(error(format!(
+                            "selected parameter {source:?} in {region:?} is unbound in {:?}, bound {:?}",
+                            self.context,
+                            self.values.keys().collect::<Vec<_>>()
+                        )));
+                    };
+                    value
+                }
+                "ScalarLiteral" => {
+                    let text = selected.text(fields[2])?;
+                    self.literal(text, &ty)?
+                }
+                "ScalarUnary" | "ScalarBinary" | "ScalarOp" => {
+                    let arguments = selected
+                        .operation_arguments(term)?
+                        .into_iter()
+                        .map(|arg| self.scalar(scope, arg))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let tag = selected.operator(fields[2], arguments.len())?;
+                    self.op_at(self.scalar_target(term)?, tag, arguments, ty)?
+                }
+                "ScalarInvoke" => {
+                    let callee = selected.values[fields[2]];
+                    let args = self.arguments(scope, fields[3])?;
+                    self.call(callee, args)?
+                }
+                "ScalarTuple" | "ScalarVector" => {
+                    let args = self.arguments(scope, fields[2])?;
+                    let tag = if name == "ScalarTuple" {
+                        OpTag::Tuple(args.len())
+                    } else {
+                        OpTag::Vector(args.len())
+                    };
+                    let ty =
+                        if let Type::Constructed(name @ (TypeName::Tuple(_) | TypeName::Record(_)), _) =
+                            types::strip_existentials(&ty)
+                        {
+                            Type::Constructed(name.clone(), args.iter().map(|v| v.ty.clone()).collect())
+                        } else if name == "ScalarTuple" {
+                            types::tuple(args.iter().map(|v| v.ty.clone()).collect())
+                        } else {
+                            ty
+                        };
+                    self.op_at(self.scalar_target(term)?, tag, args, ty)?
+                }
+                "ScalarProject" => {
+                    let index = selected.integer(fields[3])? as usize;
+                    let base = self.scalar(scope, fields[2])?;
+                    self.field(base, index)?
+                }
+                "ScalarCoerce" => {
+                    let value = self.scalar(scope, fields[2])?;
+                    self.cast(value, &ty)?
+                }
+                "ScalarChoice" => {
+                    let condition = self.scalar(scope, fields[2])?;
+                    let layout = self.compiler.facts.layout(selected.values[fields[1]])?;
+                    self.branch(
+                        scope,
+                        condition,
+                        |body| {
+                            let value = body.scalar(scope, fields[3])?;
+                            body.materialize(value, layout)
+                        },
+                        |body| {
+                            let value = body.scalar(scope, fields[4])?;
+                            body.materialize(value, layout)
+                        },
+                        None,
+                    )?
+                }
+                _ => return Err(error(format!("unresolved selected constructor {name}"))),
             }
-            "ScalarParameter" => {
-                let region = selected.values[fields[2]];
-                let index = selected.integer(fields[3])?;
-                let Some(source) = self.compiler.facts.parameter(region, index) else {
-                    return Err(error("selected parameter missing"));
-                };
-                let Some(value) = self.values.get(&source).cloned() else {
-                    return Err(error(format!(
-                        "selected parameter {source:?} in {region:?} is unbound in {:?}, bound {:?}",
-                        self.context,
-                        self.values.keys().collect::<Vec<_>>()
-                    )));
-                };
-                value
-            }
-            "ScalarLiteral" => {
-                let text = selected.text(fields[2])?;
-                self.literal(text, &ty)?
-            }
-            "ScalarUnary" | "ScalarBinary" | "ScalarOp" => {
-                let arguments = selected
-                    .operation_arguments(term)?
-                    .into_iter()
-                    .map(|arg| self.scalar(scope, arg))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let tag = selected.operator(fields[2], arguments.len())?;
-                self.op_at(self.scalar_target(expression)?, tag, arguments, ty)?
-            }
-            "ScalarInvoke" => {
-                let callee = selected.values[fields[2]];
-                let args = self.arguments(scope, fields[3])?;
-                self.call(callee, args)?
-            }
-            "ScalarTuple" | "ScalarVector" => {
-                let args = self.arguments(scope, fields[2])?;
-                let tag = if name == "ScalarTuple" {
-                    OpTag::Tuple(args.len())
-                } else {
-                    OpTag::Vector(args.len())
-                };
-                let ty = if let Type::Constructed(name @ (TypeName::Tuple(_) | TypeName::Record(_)), _) =
-                    types::strip_existentials(&ty)
-                {
-                    Type::Constructed(name.clone(), args.iter().map(|v| v.ty.clone()).collect())
-                } else {
-                    ty
-                };
-                self.op_at(self.scalar_target(expression)?, tag, args, ty)?
-            }
-            "ScalarProject" => {
-                let index = selected.integer(fields[3])? as usize;
-                let base = self.scalar(scope, fields[2])?;
-                self.field(base, index)?
-            }
-            "ScalarCoerce" => {
-                let value = self.scalar(scope, fields[2])?;
-                self.cast(value, &ty)?
-            }
-            "ScalarChoice" => {
-                let condition = self.scalar(scope, fields[2])?;
-                self.branch(
-                    scope,
-                    condition,
-                    |body| body.scalar(scope, fields[3]),
-                    |body| body.scalar(scope, fields[4]),
-                    None,
-                )?
-            }
-            _ => return Err(error(format!("unresolved selected constructor {name}"))),
         };
         let block = match value.value {
-            ValueRef::Ssa(id) => self.builder.func().block_of_value(id).unwrap_or(target),
+            ValueRef::Ssa(id) => {
+                let Some(block) = self.builder.func().block_of_value(id) else {
+                    return Err(error("selected expression produced an unplaced SSA value"));
+                };
+                block
+            }
             _ => target,
         };
         self.scalar_values.entry(term).or_default().push((block, value.clone()));
         Ok(value)
     }
 
-    fn scalar_target(&self, expression: Value) -> Result<BlockId, OptimizeError> {
+    fn scalar_target(&self, term: TermId) -> Result<BlockId, OptimizeError> {
         let current = self.current()?;
         let mut target = None;
         for (&scope, &block) in self.scopes.iter() {
-            if self.compiler.facts.placement(self.context, expression, scope)
+            if self.compiler.placements[term].contains(&scope)
                 && self.dominates(block, current)
                 && target.is_none_or(|old| self.dominates(old, block))
             {
@@ -465,27 +346,58 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
             .collect()
     }
 
-    pub fn call_value(
+    pub fn callback(
         &mut self,
-        scope: Value,
-        function: Value,
-        mut arguments: Vec<Typed>,
+        owner: Value,
+        operation: Value,
+        arguments: Vec<Typed>,
     ) -> Result<Typed, OptimizeError> {
-        let mut function = function;
-        while let Some(actual) = self.compiler.facts.lookup("SsaCaptured", (function,)) {
-            function = actual;
-        }
-        if let Some(&(term, owner)) = self.compiler.program.identities.origins.get(&function) {
-            if let TermKind::Closure(closure) = &term.kind {
-                for capture in &closure.captures {
-                    arguments.push(self.source(owner, capture)?);
-                }
-            }
-        }
-        let Some(callee) = self.compiler.facts.callable(function) else {
-            return Err(error(format!("unresolved call target in {scope:?}")));
+        let Some(scope) = self.compiler.facts.callback(operation) else {
+            return Err(error("collective callback is missing"));
         };
-        self.call(callee, arguments)
+        let Some(context) = self.compiler.facts.context(scope) else {
+            return Err(error("callback scalar context is missing"));
+        };
+        let Some(source) = self.compiler.facts.result(scope) else {
+            return Err(error("callback result is missing"));
+        };
+        let Some(&term) = self.compiler.program.stage.selected.roots.get(&(context, source)) else {
+            return Err(error("callback has no selected scalar body"));
+        };
+        let mut bindings = Vec::new();
+        for (formal, actual) in self.compiler.facts.captures(scope)? {
+            bindings.push((formal, self.value(owner, actual)?));
+        }
+        if self.compiler.facts.parameter(scope, arguments.len() as i64).is_some() {
+            return Err(error("callback has too few arguments"));
+        }
+        for (i, argument) in arguments.into_iter().enumerate() {
+            let Some(formal) = self.compiler.facts.parameter(scope, i as i64) else {
+                return Err(error("callback has too many arguments"));
+            };
+            let Some(ty) = self.compiler.facts.source_type(formal).cloned() else {
+                return Err(error("callback parameter type is missing"));
+            };
+            bindings.push((formal, self.cast(argument, &ty)?));
+        }
+        let block = self.current()?;
+        let old_context = std::mem::replace(&mut self.context, context);
+        let old_values = self.values.checkpoint();
+        let old_scopes = std::mem::take(&mut self.scopes);
+        // Parameters change between invocations, even in the same SSA block.
+        let old_scalar = std::mem::take(&mut self.scalar_values);
+        let old_resources = std::mem::take(&mut self.local_resources);
+        self.scopes.insert(scope, block);
+        for (formal, value) in bindings {
+            self.values.insert(formal, value);
+        }
+        let result = self.scalar(scope, term);
+        self.context = old_context;
+        self.values.restore(old_values);
+        self.scopes = old_scopes;
+        self.scalar_values = old_scalar;
+        self.local_resources = old_resources;
+        result
     }
 
     pub fn call(&mut self, scope: Value, args: Vec<Typed>) -> Result<Typed, OptimizeError> {
@@ -511,7 +423,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         &mut self,
         block: BlockId,
         tag: OpTag<BindingRef, FunctionId>,
-        mut args: Vec<Typed>,
+        args: Vec<Typed>,
         ty: Type,
     ) -> Result<Typed, OptimizeError> {
         if matches!(tag,OpTag::Intrinsic{id,..} if id==catalog().known().scratch_annotation) {
@@ -522,41 +434,18 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
             // Any initializer it retained has already been emitted above.
             return Ok(array.clone());
         }
-        if matches!(tag,OpTag::Intrinsic{id,..} if id==catalog().known().array_with) {
-            let Some(array) = args.first().cloned() else {
-                return Err(error("array update has no destination"));
-            };
-            if array.ty.array_variant().is_some_and(types::is_array_variant_view) {
-                let local = control::local_state_type(&array.ty);
-                if local == array.ty {
-                    return Err(error("functional storage update needs a bounded local value"));
-                }
-                args[0] = self.stored(array, &local)?;
-            }
-        }
-        let ty = if matches!(tag,OpTag::Intrinsic{id,..} if id==catalog().known().storage_store || id==catalog().known().array_with || id==catalog().known().array_with_in_place)
-        {
-            let Some(destination) = args.first() else {
-                return Err(error("array update has no destination"));
-            };
-            destination.ty.clone()
-        } else {
-            ty
-        };
         // A selected lexical scope may precede a merge introduced while
         // emitting an operand. Keep the instruction after that operand.
-        let available = args.iter().all(|arg| match arg.value {
-            ValueRef::Ssa(value) => self
-                .builder
-                .func()
-                .block_of_value(value)
-                .is_none_or(|definition| self.dominates(definition, block)),
-            _ => true,
-        });
-        let block = if available { block } else { self.current()? };
-        if let Some(value) = aggregates::forward(self.builder.func(), &tag, &args, &ty) {
-            return Ok(value);
+        let mut available = true;
+        for arg in &args {
+            if let ValueRef::Ssa(value) = arg.value {
+                let Some(definition) = self.builder.func().block_of_value(value) else {
+                    return Err(error("selected instruction has an unplaced operand"));
+                };
+                available &= self.dominates(definition, block);
+            }
         }
+        let block = if available { block } else { self.current()? };
         let instruction = InstKind::Op {
             tag,
             operands: args.into_iter().map(|arg| arg.value).collect(),

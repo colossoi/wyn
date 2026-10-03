@@ -16,10 +16,6 @@ impl<K: Copy + Eq + Hash, V> Bindings<K, V> {
         self.changes.push((symbol, self.values.insert(symbol, value)));
     }
 
-    pub(super) fn remove(&mut self, key: &K) {
-        self.changes.push((*key, self.values.remove(key)));
-    }
-
     pub(super) fn restore(&mut self, checkpoint: usize) {
         while self.changes.len() > checkpoint {
             let Some((symbol, previous)) = self.changes.pop() else {

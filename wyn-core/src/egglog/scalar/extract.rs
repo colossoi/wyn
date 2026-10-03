@@ -3,7 +3,7 @@ use crate::egglog::{timing, OptimizeError, ScalarOptimization};
 use crate::{LookupMap, LookupSet};
 use egglog_engine::extract::{Cost, CostModel, Extractor};
 use egglog_engine::sort::VecContainer;
-use egglog_engine::{ArcSort, EGraph, Enode, Function, RawValues, Term, TermDag, TermId, Value, Write};
+use egglog_engine::{ArcSort, EGraph, Enode, Function, Term, TermDag, TermId, Value};
 
 // Inlining trades one call for this much scalar work. Representation nodes,
 // already computed inputs, and constants require no additional instructions.
@@ -43,7 +43,9 @@ impl CostModel<Estimate> for Model {
     }
     fn enode_cost(&self, _graph: &EGraph, function: &Function, _enode: &Enode<'_>) -> Estimate {
         Estimate {
-            calls: u64::from(self.prefer_inlining && function.name() == "ScalarInvoke"),
+            calls: u64::from(
+                self.prefer_inlining && matches!(function.name(), "ScalarInvoke" | "ScalarCall"),
+            ),
             work: work(function.name()),
         }
     }
@@ -54,9 +56,9 @@ impl CostModel<Estimate> for Model {
 
 fn work(name: &str) -> u64 {
     match name {
-        "ScalarInvoke" => CALL_WORK,
+        "ScalarInvoke" | "ScalarCall" => CALL_WORK,
         "ScalarUnary" | "ScalarBinary" | "ScalarOp" | "ScalarChoice" | "ScalarTuple" | "ScalarVector"
-        | "ScalarProject" | "ScalarCoerce" => 1,
+        | "ScalarProject" | "ScalarCoerce" | "ScalarInstruction" => 1,
         _ => 0,
     }
 }
@@ -101,6 +103,8 @@ pub(super) fn select(
         let children = children.clone();
         Ok((dag, children))
     };
+    // TODO: Move the compact-versus-inlined optimization policy into Egglog;
+    // final extraction should consume that choice instead of reranking in Rust.
     // Both seed models are additive, as egglog requires. Reranking their finite
     // DAGs exposes sharing hidden behind calls without expanding alternatives.
     let (compact, compact_roots) = extract(false)?;
@@ -131,49 +135,6 @@ pub(super) fn select(
         })
         .collect();
     Ok((dag, roots))
-}
-
-// The scalar snapshot needs only source identities referenced by its leaves,
-// including template leaves that substitution may copy into active contexts.
-pub(super) fn prune_source_identities(graph: &mut EGraph) -> Result<(), OptimizeError> {
-    let _timing = timing::span("egglog scalar / source identities");
-    let mut needed = LookupSet::default();
-    graph.constructor_enodes("ScalarLeaf", |row| {
-        needed.insert(row.children[2]);
-    })?;
-    let mut rows = Vec::new();
-    let mut parents: LookupMap<Value, Vec<Value>> = LookupMap::default();
-    for name in [
-        "SourceTerm",
-        "SourceFormal",
-        "SourceGlobal",
-        "SourceArrayAtom",
-        "SourceProjected",
-    ] {
-        graph.constructor_enodes(name, |row| {
-            if matches!(name, "SourceArrayAtom" | "SourceProjected") {
-                parents.entry(row.eclass).or_default().push(row.children[0]);
-            }
-            rows.push((name, row.children.to_vec(), row.eclass));
-        })?;
-    }
-    let mut pending: Vec<_> = needed.iter().copied().collect();
-    while let Some(value) = pending.pop() {
-        for &parent in parents.get(&value).into_iter().flatten() {
-            if needed.insert(parent) {
-                pending.push(parent);
-            }
-        }
-    }
-    graph.update(|mut sink| {
-        for (name, fields, value) in rows {
-            if !needed.contains(&value) {
-                sink.remove(name, RawValues(fields))?;
-            }
-        }
-        Ok(())
-    })?;
-    Ok(())
 }
 
 fn copy_term(
@@ -213,11 +174,12 @@ fn dag_work(dag: &TermDag, root: TermId) -> u64 {
     cost
 }
 
-pub(super) fn operands(name: &str, fields: &[TermId]) -> Vec<TermId> {
+pub(in crate::egglog) fn operands(name: &str, fields: &[TermId]) -> Vec<TermId> {
     match name {
         "ScalarUnary" => vec![fields[3]],
         "ScalarBinary" => fields[3..5].to_vec(),
         "ScalarOp" | "ScalarInvoke" => vec![fields[3]],
+        "ScalarInstruction" | "ScalarCall" => vec![fields[4]],
         "ScalarTuple" | "ScalarVector" | "ScalarProject" | "ScalarCoerce" => vec![fields[2]],
         "ScalarChoice" => fields[2..5].to_vec(),
         "ScalarCons" => fields[1..3].to_vec(),

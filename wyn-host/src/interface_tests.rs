@@ -33,7 +33,10 @@ fn frame_graph_aliases_storage_texture_views_and_orders_consumers() {
                         len: DispatchLen::StorageImage { set: 1, binding: 0 },
                         workgroup_size: 8,
                     },
-                    uses: StageBindingUses::default(),
+                    uses: StageBindingUses {
+                        reads: vec![],
+                        writes: vec![0],
+                    },
                 }],
                 default_total_threads: None,
             }),
@@ -44,7 +47,10 @@ fn frame_graph_aliases_storage_texture_views_and_orders_consumers() {
                     entry_point: "shade".to_string(),
                     owner: "shade".to_string(),
                     stage: ShaderStage::Fragment,
-                    uses: StageBindingUses::default(),
+                    uses: StageBindingUses {
+                        reads: vec![0],
+                        writes: vec![],
+                    },
                 }],
                 bindings: vec![Binding::Texture {
                     set: 2,
@@ -64,7 +70,8 @@ fn frame_graph_aliases_storage_texture_views_and_orders_consumers() {
         frame_graph: FrameGraph::default(),
     };
 
-    descriptor.rebuild_frame_graph();
+    descriptor.frame_graph =
+        FrameGraph::from_selected_pipelines(&descriptor.pipelines, &[((0, 0), (1, 0))]).unwrap();
     let graph = &descriptor.frame_graph;
     assert_eq!(graph.resources.len(), 1);
     assert_eq!(graph.resources[0].kind, FrameResourceKind::StorageTexture);
@@ -129,7 +136,10 @@ fn frame_graph_fragment_target_write_orders_downstream_reader() {
                         z: 1,
                         explicit: false,
                     },
-                    uses: StageBindingUses::default(),
+                    uses: StageBindingUses {
+                        reads: vec![0],
+                        writes: vec![],
+                    },
                 }],
                 default_total_threads: None,
             }),
@@ -138,7 +148,8 @@ fn frame_graph_fragment_target_write_orders_downstream_reader() {
         frame_graph: FrameGraph::default(),
     };
 
-    descriptor.rebuild_frame_graph();
+    descriptor.frame_graph =
+        FrameGraph::from_selected_pipelines(&descriptor.pipelines, &[((0, 0), (1, 0))]).unwrap();
     let graph = &descriptor.frame_graph;
 
     // The render target and the sampled read are one resource.
@@ -158,8 +169,8 @@ fn frame_graph_fragment_target_write_orders_downstream_reader() {
 }
 
 /// Two compute passes sharing one storage buffer: `producer` writes it as an
-/// entry output, `consumer` reads it as an input. The edge follows the
-/// bindings, so it is the same whichever order the passes are declared in.
+/// entry output, `consumer` reads it as an input. The fixture selects the edge
+/// in either declaration order.
 fn producer_consumer_descriptor(producer_first: bool) -> ModuleInterface {
     let buffer = |name: &str, access: Access, usage: BufferUsage| Binding::StorageBuffer {
         set: 0,
@@ -182,7 +193,10 @@ fn producer_consumer_descriptor(producer_first: bool) -> ModuleInterface {
             z: 1,
             explicit: false,
         },
-        uses: StageBindingUses::default(),
+        uses: StageBindingUses {
+            reads: vec![0],
+            writes: vec![],
+        },
     };
     let pipeline = |entry: &str, access, usage| {
         Pipeline::Compute(ComputePipeline {
@@ -202,7 +216,11 @@ fn producer_consumer_descriptor(producer_first: bool) -> ModuleInterface {
         source_results: Vec::new(),
         frame_graph: FrameGraph::default(),
     };
-    descriptor.rebuild_frame_graph();
+    descriptor.frame_graph = FrameGraph::from_selected_pipelines(
+        &descriptor.pipelines,
+        &[if producer_first { ((0, 0), (1, 0)) } else { ((1, 0), (0, 0)) }],
+    )
+    .unwrap();
     descriptor
 }
 
@@ -229,74 +247,13 @@ fn frame_graph_orders_a_consumer_after_its_producer_in_either_declaration_order(
     }
 }
 
-/// A consumer that also overwrites, this frame, the state its producer reads
-/// has no valid single-frame order. The graph says so instead of emitting an
-/// order that runs one of them too early.
 #[test]
-fn frame_graph_reports_a_producer_consumer_cycle() {
-    let inst = |access, usage| Binding::StorageBuffer {
-        set: 0,
-        binding: 0,
-        access,
-        usage,
-        name: "inst".to_string(),
-        resource: None,
-        length: None,
-        members: Vec::new(),
-    };
-    let occ = |access| Binding::StorageTexture {
-        set: 1,
-        binding: 0,
-        name: "occ".to_string(),
-        format: StorageImageFormat::R32Float,
-        access,
-        size: StorageTextureSize::SameAsWindow,
-        resource: Some("occ".to_string()),
-    };
-    let stage = |entry: &str| ComputeStage {
-        dependencies: vec![],
-        entry_point: entry.to_string(),
-        owner: entry.to_string(),
-        workgroup_size: (64, 1, 1),
-        dispatch_size: DispatchSize::Fixed {
-            x: 1,
-            y: 1,
-            z: 1,
-            explicit: false,
-        },
-        uses: StageBindingUses::default(),
-    };
-    // `reduce` consumes `inst` and overwrites `occ`; `cull` produces `inst`
-    // and reads `occ`. Declared reduce-first, so the hazard sweep also wants
-    // `cull` after `reduce`.
-    let mut descriptor = ModuleInterface {
-        scalar_tasks: vec![],
-        dispatch_loops: vec![],
-        pipelines: vec![
-            Pipeline::Compute(ComputePipeline {
-                bindings: vec![inst(Access::ReadOnly, BufferUsage::Input), occ(Access::WriteOnly)],
-                stages: vec![stage("reduce")],
-                default_total_threads: None,
-            }),
-            Pipeline::Compute(ComputePipeline {
-                bindings: vec![
-                    inst(Access::WriteOnly, BufferUsage::Output),
-                    occ(Access::ReadOnly),
-                ],
-                stages: vec![stage("cull")],
-                default_total_threads: None,
-            }),
-        ],
-        source_results: Vec::new(),
-        frame_graph: FrameGraph::default(),
-    };
-    descriptor.rebuild_frame_graph();
-
-    let cycle = descriptor
-        .frame_graph
-        .topological_order()
-        .expect_err("reduce needs cull's `inst`, cull needs the `occ` reduce overwrites");
-    assert_eq!(cycle.len(), 2, "both passes lie on the cycle: {cycle:?}");
+fn frame_graph_reports_a_selected_cycle() {
+    let descriptor = producer_consumer_descriptor(true);
+    let graph =
+        FrameGraph::from_selected_pipelines(&descriptor.pipelines, &[((0, 0), (1, 0)), ((1, 0), (0, 0))])
+            .unwrap();
+    assert_eq!(graph.topological_order().unwrap_err().len(), 2);
 }
 
 #[test]
@@ -346,7 +303,10 @@ fn frame_graph_target_write_merges_with_storage_read_view() {
                         z: 1,
                         explicit: false,
                     },
-                    uses: StageBindingUses::default(),
+                    uses: StageBindingUses {
+                        reads: vec![0],
+                        writes: vec![],
+                    },
                 }],
                 default_total_threads: None,
             }),
@@ -355,7 +315,8 @@ fn frame_graph_target_write_merges_with_storage_read_view() {
         frame_graph: FrameGraph::default(),
     };
 
-    descriptor.rebuild_frame_graph();
+    descriptor.frame_graph =
+        FrameGraph::from_selected_pipelines(&descriptor.pipelines, &[((0, 0), (1, 0))]).unwrap();
     let graph = &descriptor.frame_graph;
 
     let gbuf: Vec<_> = graph.resources.iter().filter(|r| r.name == "gbuf").collect();
@@ -369,4 +330,24 @@ fn frame_graph_target_write_merges_with_storage_read_view() {
     assert!(graph.passes[0].writes.iter().any(|a| a.resource == idx));
     assert!(graph.passes[1].reads.iter().any(|a| a.resource == idx));
     assert_eq!(graph.passes[1].depends_on, vec![0]);
+}
+
+#[test]
+fn selected_frame_graph_does_not_infer_accesses_or_dependencies() {
+    let mut descriptor = producer_consumer_descriptor(false);
+    for pipeline in &mut descriptor.pipelines {
+        if let Pipeline::Compute(pipeline) = pipeline {
+            for stage in &mut pipeline.stages {
+                stage.uses = StageBindingUses::default();
+            }
+        }
+    }
+    let graph = FrameGraph::from_selected_pipelines(&descriptor.pipelines, &[]).unwrap();
+    assert!(graph.passes.iter().all(|pass| pass.depends_on.is_empty()));
+    assert!(graph.passes.iter().all(|pass| pass.reads.is_empty() && pass.writes.is_empty()));
+    let explicit = FrameGraph::from_selected_pipelines(&descriptor.pipelines, &[((1, 0), (0, 0))]).unwrap();
+    assert_eq!(explicit.passes[0].depends_on, vec![1]);
+    let refreshed = explicit.refresh_resources(&descriptor.pipelines).unwrap();
+    assert_eq!(refreshed.passes[0].depends_on, vec![1]);
+    assert!(refreshed.passes[1].depends_on.is_empty());
 }

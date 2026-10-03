@@ -1,33 +1,38 @@
 //! Expand scheduled phases straight into SSA instructions and structured loops.
 
-use super::plan::Stage;
 use super::{builder_error, error, Body, OptimizeError, Typed};
 use crate::builtins::catalog;
 use crate::op::{BinaryOperator, OpTag};
 use crate::ssa::types::InstKind;
-use crate::tlc::{SoacOp, TermKind};
 use crate::types::{self, Type, TypeName};
 use crate::LookupMap;
+use egglog_engine::sort::S;
 use egglog_engine::Value;
+
+pub(in crate::egglog) struct Recipe {
+    pub operation: Value,
+    pub phase: String,
+    pub extent: Value,
+    pub width: u32,
+}
 
 mod filter;
 mod indexed;
 mod screma;
 use filter::{compact, serial_filter};
-pub(super) use indexed::bucket_updates;
 use indexed::{buckets, indexed};
 use screma::screma;
 
-pub(super) fn emit(body: &mut Body<'_, '_, '_>, scope: Value, stage: &Stage) -> Result<(), OptimizeError> {
+pub(super) fn emit(body: &mut Body<'_, '_, '_>, scope: Value, stage: &Recipe) -> Result<(), OptimizeError> {
     if matches!(stage.phase.as_str(), "loop_enter" | "loop_exit") {
         return super::loops::emit(body, scope, stage);
     }
     if stage.phase == "scalar" {
         let operations = body.compiler.plan.scalar_group(stage.operation);
-        if let Some(context) = body.compiler.facts.dispatch_context(stage.operation) {
-            body.context = context;
-        }
-        body.active_operations.extend(operations.iter().copied());
+        let Some(context) = body.compiler.facts.dispatch_context(stage.operation) else {
+            return Err(error("scalar dispatch has no selected context"));
+        };
+        body.context = context;
         for operation in operations {
             let Some(source) = body.compiler.plan.source(operation) else {
                 return Err(error("scalar dispatch source missing"));
@@ -43,7 +48,7 @@ pub(super) fn emit(body: &mut Body<'_, '_, '_>, scope: Value, stage: &Stage) -> 
     let Some(plan) = body.compiler.plan.group(stage.operation) else {
         return Err(error("kernel has no fusion plan"));
     };
-    let results = body.compiler.plan.results(plan);
+    let results = body.compiler.plan.results(plan)?;
     match stage.phase.as_str() {
         "elements" => {
             let n = body.extent(scope, stage.extent)?;
@@ -68,19 +73,15 @@ pub(super) fn emit(body: &mut Body<'_, '_, '_>, scope: Value, stage: &Stage) -> 
         "scatter" | "initialize" | "atomic" => indexed(body, scope, stage, plan),
         "clear" | "buckets" => buckets(body, scope, stage, plan),
         "ordered" => {
-            let Some(source) = body.compiler.plan.source(stage.operation) else {
-                return Err(error("missing source"));
+            let Some(recipe) = body.compiler.facts.lookup("OrderedRecipe", (stage.operation,)) else {
+                return Err(error("ordered kernel has no selected algorithm"));
             };
-            let Some(&(term, _)) = body.compiler.program.identities.origins.get(&source) else {
-                return Err(error("ordered operation source missing"));
-            };
-            match term.kind {
-                TermKind::Soac(SoacOp::Scatter { .. } | SoacOp::ReduceByIndex { .. }) => {
-                    indexed(body, scope, stage, plan)
-                }
-                TermKind::Soac(SoacOp::BucketScatter { .. }) => buckets(body, scope, stage, plan),
-                TermKind::Soac(SoacOp::Filter { .. }) => serial_filter(body, scope, stage, plan, &results),
-                _ => screma(body, scope, stage, plan, &results),
+            match body.compiler.program.graph.value_to_base::<S>(recipe).as_ref() {
+                "screma" => screma(body, scope, stage, plan, &results),
+                "filter" => serial_filter(body, scope, stage, plan, &results),
+                "indexed" => indexed(body, scope, stage, plan),
+                "buckets" => buckets(body, scope, stage, plan),
+                _ => Err(error("unknown ordered algorithm")),
             }
         }
         "compact" => compact(body, scope, stage, plan, &results),
@@ -160,11 +161,9 @@ pub(super) fn element(
     }
     if let Some(operation) = body.compiler.facts.operation(source) {
         if body.compiler.plan.member(plan, operation) {
-            let Some(&(term, owner)) = body.compiler.program.identities.origins.get(&source) else {
-                return Err(error("fused source is missing"));
-            };
-            if let TermKind::Soac(SoacOp::Map { .. }) = &term.kind {
-                let inputs = body.compiler.facts.inputs(operation);
+            if body.compiler.facts.operation_kind(operation)? == "map" {
+                let owner = body.compiler.facts.operation_scope(operation)?;
+                let inputs = body.compiler.facts.inputs(operation)?;
                 let mut arguments = Vec::new();
                 for (_, input) in inputs {
                     arguments.push(element(body, scope, plan, input, index.clone(), cache)?);
@@ -188,7 +187,7 @@ pub(super) fn store(
     value: Typed,
 ) -> Result<(), OptimizeError> {
     let (place, ty) = body.index_place(array, index)?;
-    let value = body.stored(value, &ty)?;
+    let value = body.cast(value, &ty)?;
     body.builder
         .push_void_inst(InstKind::Store {
             place,

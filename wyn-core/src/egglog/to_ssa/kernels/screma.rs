@@ -1,12 +1,11 @@
 use super::super::interface;
 // Expand scheduled phases straight into SSA instructions and structured loops.
-use super::super::plan::Stage;
 use super::super::{builder_error, error, Body, OptimizeError, Typed};
+use super::Recipe;
 use super::{element, indexed, invocation, store};
 use crate::builtins::catalog;
 use crate::op::{BinaryOperator, OpTag, PureViewSource};
 use crate::ssa::types::InstKind;
-use crate::tlc::{SoacOp, TermKind};
 use crate::types::{self, Type, TypeName};
 use crate::LookupMap;
 use egglog_engine::Value;
@@ -14,7 +13,7 @@ use egglog_engine::Value;
 pub(super) fn screma(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
-    stage: &Stage,
+    stage: &Recipe,
     plan: Value,
     results: &[(String, i64, Value)],
 ) -> Result<(), OptimizeError> {
@@ -24,19 +23,14 @@ pub(super) fn screma(
     let mut initial = Vec::new();
     let mut operators = Vec::new();
     for &source in &sources {
-        let Some(&(term, owner)) = body.compiler.program.identities.origins.get(&source) else {
-            return Err(error("accumulator source missing"));
-        };
         let Some(operation) = body.compiler.facts.operation(source) else {
             return Err(error("accumulator operation missing"));
         };
-        let TermKind::Soac(SoacOp::Reduce { ne, .. } | SoacOp::Scan { ne, .. }) = &term.kind else {
-            return Err(error("invalid accumulator source"));
-        };
-        initial.push(body.source(owner, ne)?);
+        let neutral = body.compiler.facts.neutral(operation)?;
+        initial.push(body.value(scope, neutral)?);
         operators.push(operation);
     }
-    for (index, filter) in body.compiler.plan.counts(plan) {
+    for (index, filter) in body.compiler.plan.counts(plan)? {
         let index = scans.len() + usize::try_from(index).map_err(|_| error("negative count slot"))?;
         if index > operators.len() {
             return Err(error("noncontiguous count accumulator"));
@@ -81,16 +75,11 @@ pub(super) fn screma(
     let n = body.cast(n, &uint)?;
     let zero = body.literal("0", &uint)?;
     let one = body.literal("1", &uint)?;
-    let Some(chunks) = body
-        .compiler
-        .plan
-        .stages
-        .iter()
-        .find(|candidate| candidate.operation == stage.operation && candidate.phase == "chunks")
-    else {
+    let Some(key) = body.compiler.facts.constructor("Stage", (stage.operation, "chunks")) else {
         return Err(error("collective chunk schedule missing"));
     };
-    let Some((x, y, z)) = chunks.grid else {
+    let chunks = body.compiler.plan.recipe(key)?;
+    let Some((x, y, z)) = body.compiler.plan.grid(key)? else {
         return Err(error("collective requires a fixed chunk grid"));
     };
     let groups = u64::from(x) * u64::from(y) * u64::from(z);
@@ -134,9 +123,15 @@ pub(super) fn screma(
                             let Some(input) = body.compiler.facts.input(operator, 0) else {
                                 return Err(error("accumulator input missing"));
                             };
-                            let filtered = body.compiler.facts.operation(input).filter(|filter| {
-                                body.compiler.plan.member(plan, *filter) && is_count(body, *filter)
-                            });
+                            let filtered = match body.compiler.facts.operation(input) {
+                                Some(filter)
+                                    if body.compiler.plan.member(plan, filter)
+                                        && is_count(body, filter)? =>
+                                {
+                                    Some(filter)
+                                }
+                                _ => None,
+                            };
                             let value = if let Some(filter) = filtered {
                                 let Some(source) = body.compiler.facts.input(filter, 0) else {
                                     return Err(error("filter input missing"));
@@ -249,7 +244,8 @@ pub(super) fn screma(
                                 else {
                                     return Err(error("collective partial is not materialized"));
                                 };
-                                body.index(partial, index.clone())
+                                let value = body.index(partial, index.clone())?;
+                                body.cast(value, &neutral.ty)
                             },
                             |_| Ok(neutral.clone()),
                             None,
@@ -397,28 +393,22 @@ pub(super) fn workgroup_scan(
             after_first.clone(),
             |body| {
                 let previous = body.binary(BinaryOperator::Subtract, lane.clone(), one.clone())?;
-                body.index(banks[bank].clone(), previous)
+                let value = body.index(banks[bank].clone(), previous)?;
+                body.cast(value, &neutral[i].ty)
             },
             |_| Ok(neutral[i].clone()),
             None,
         )?);
-        totals.push(body.index(banks[bank].clone(), last.clone())?);
+        let value = body.index(banks[bank].clone(), last.clone())?;
+        totals.push(body.cast(value, &neutral[i].ty)?);
     }
     // All lanes must finish reading before the next tile reuses shared storage.
     body.builder.push_void_inst(InstKind::ControlBarrier).map_err(builder_error)?;
     Ok((values, exclusive, totals))
 }
 
-fn is_count(body: &Body<'_, '_, '_>, operator: Value) -> bool {
-    let Some(source) = body.compiler.plan.source(operator) else {
-        return false;
-    };
-    body.compiler
-        .program
-        .identities
-        .origins
-        .get(&source)
-        .is_some_and(|(term, _)| matches!(term.kind, TermKind::Soac(SoacOp::Filter { .. })))
+fn is_count(body: &Body<'_, '_, '_>, operator: Value) -> Result<bool, OptimizeError> {
+    Ok(body.compiler.facts.operation_kind(operator)? == "filter")
 }
 fn accumulate_element(
     body: &mut Body<'_, '_, '_>,
@@ -427,7 +417,7 @@ fn accumulate_element(
     state: Typed,
     incoming: Typed,
 ) -> Result<Typed, OptimizeError> {
-    if is_count(body, operator) {
+    if is_count(body, operator)? {
         let keep = body.callback(scope, operator, vec![incoming])?;
         let increment = body.cast(keep, &state.ty)?;
         return body.binary(BinaryOperator::Add, state, increment);
@@ -441,7 +431,7 @@ fn combine_accumulator(
     a: Typed,
     b: Typed,
 ) -> Result<Typed, OptimizeError> {
-    if is_count(body, operator) {
+    if is_count(body, operator)? {
         body.binary(BinaryOperator::Add, a, b)
     } else {
         body.callback(scope, operator, vec![a, b])

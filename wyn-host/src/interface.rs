@@ -1,7 +1,7 @@
 //! Published shader interfaces, resource identities, and execution domains.
 
 use crate::{ResultKind, ResultLayout, ScalarExpr, ScalarSource, ScalarTask};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 
 /// Published shader declarations and physical resource interfaces for one module.
 #[derive(Debug, Clone, Default)]
@@ -14,9 +14,8 @@ pub struct ModuleInterface {
     /// Storage bindings that implement authored entry results. This preserves
     /// source-level result identity independently of generated binding names.
     pub source_results: Vec<SourceResultBinding>,
-    /// Descriptor-derived pass/resource DAG. The compiler rebuilds this after
-    /// binding publication so host runtimes can drive scheduling and allocation
-    /// from data dependencies instead of hand-authored pass lists.
+    /// Selected pass dependencies and explicit resource accesses, translated to
+    /// published pipeline and binding indices for host execution.
     pub frame_graph: FrameGraph,
 }
 
@@ -55,15 +54,8 @@ pub struct DispatchLoop {
     pub next: ScalarSource,
 }
 
-impl ModuleInterface {
-    /// Rebuild the frame graph from the currently published pipelines.
-    pub fn rebuild_frame_graph(&mut self) {
-        self.frame_graph = FrameGraph::from_pipelines(&self.pipelines);
-    }
-}
-
 /// A descriptor-level frame graph: passes, logical resources, and the
-/// dependencies induced by same-frame reads/writes.
+/// selected dependencies and explicit resource accesses.
 #[derive(Debug, Clone, Default)]
 pub struct FrameGraph {
     pub passes: Vec<FramePass>,
@@ -113,7 +105,51 @@ impl FrameGraph {
         }
     }
 
-    pub fn from_pipelines(pipelines: &[Pipeline]) -> Self {
+    /// Translate published resources and explicit planning edges without hazard inference.
+    pub fn from_selected_pipelines(
+        pipelines: &[Pipeline],
+        edges: &[((usize, usize), (usize, usize))],
+    ) -> Result<Self, String> {
+        let mut graph = Self::build(pipelines)?;
+        let passes: BTreeMap<_, _> = graph
+            .passes
+            .iter()
+            .enumerate()
+            .map(|(i, pass)| ((pass.pipeline_index, pass.stage_index), i))
+            .collect();
+        for &(before, after) in edges {
+            let (Some(&before), Some(&after)) = (passes.get(&before), passes.get(&after)) else {
+                return Err("selected dependency has no published pass".into());
+            };
+            if before != after {
+                graph.passes[after].depends_on.push(before);
+            }
+        }
+        for pass in &mut graph.passes {
+            pass.depends_on.sort_unstable();
+            pass.depends_on.dedup();
+        }
+        Ok(graph)
+    }
+
+    /// Refresh resource indices after an ABI conversion, retaining every selected edge.
+    pub fn refresh_resources(&self, pipelines: &[Pipeline]) -> Result<Self, String> {
+        let mut edges = Vec::new();
+        for after in &self.passes {
+            for &before in &after.depends_on {
+                let Some(before) = self.passes.get(before) else {
+                    return Err("invalid selected pass dependency".into());
+                };
+                edges.push((
+                    (before.pipeline_index, before.stage_index),
+                    (after.pipeline_index, after.stage_index),
+                ));
+            }
+        }
+        Self::from_selected_pipelines(pipelines, &edges)
+    }
+
+    fn build(pipelines: &[Pipeline]) -> Result<Self, String> {
         let mut builder = FrameGraphBuilder::default();
 
         for (pipeline_index, pipeline) in pipelines.iter().enumerate() {
@@ -122,13 +158,12 @@ impl FrameGraph {
             }
         }
 
-        let mut last_writer = vec![None; builder.graph.resources.len()];
-        let mut last_readers = vec![BTreeSet::new(); builder.graph.resources.len()];
         for (pipeline_index, pipeline) in pipelines.iter().enumerate() {
             match pipeline {
                 Pipeline::Compute(compute) => {
                     for (stage_index, stage) in compute.stages.iter().enumerate() {
-                        let accesses = builder.compute_stage_accesses(pipeline_index, compute, stage);
+                        let accesses =
+                            builder.stage_accesses(pipeline_index, &compute.bindings, &stage.uses)?;
                         builder.push_pass(
                             FramePassKind::Compute,
                             stage.entry_point.clone(),
@@ -136,9 +171,6 @@ impl FrameGraph {
                             stage_index,
                             accesses.reads,
                             accesses.writes,
-                            accesses.produces,
-                            &mut last_writer,
-                            &mut last_readers,
                         );
                     }
                 }
@@ -156,17 +188,15 @@ impl FrameGraph {
                         })
                         .collect();
                     let mut reads = Vec::new();
-                    let mut produces = BTreeSet::new();
                     for stage in &graphics.stages {
                         let accesses =
-                            builder.stage_accesses(pipeline_index, &graphics.bindings, &stage.uses);
+                            builder.stage_accesses(pipeline_index, &graphics.bindings, &stage.uses)?;
                         for access in accesses.reads {
                             push_unique_access(&mut reads, access);
                         }
                         for access in accesses.writes {
                             push_unique_access(&mut writes, access);
                         }
-                        produces.extend(accesses.produces);
                     }
                     for attribute in &graphics.vertex_inputs {
                         let resource =
@@ -189,9 +219,6 @@ impl FrameGraph {
                         0,
                         reads,
                         writes,
-                        produces,
-                        &mut last_writer,
-                        &mut last_readers,
                     );
                     if let Some(buffer_resource) = indirect_resource {
                         builder.graph.indirect_draws.push(IndirectDrawDependency {
@@ -203,24 +230,7 @@ impl FrameGraph {
             }
         }
 
-        builder.link_producers_to_consumers();
-        let passes: BTreeMap<_, _> = builder
-            .graph
-            .passes
-            .iter()
-            .enumerate()
-            .map(|(i, pass)| ((pass.pipeline_index, pass.stage_index), i))
-            .collect();
-        for pass in &mut builder.graph.passes {
-            if let Pipeline::Compute(pipeline) = &pipelines[pass.pipeline_index] {
-                for dependency in &pipeline.stages[pass.stage_index].dependencies {
-                    pass.depends_on.push(passes[dependency]);
-                }
-                pass.depends_on.sort_unstable();
-                pass.depends_on.dedup();
-            }
-        }
-        builder.graph
+        Ok(builder.graph)
     }
 }
 
@@ -611,7 +621,7 @@ pub enum DrawCall {
 }
 
 impl DrawBufferRef {
-    pub(crate) fn frame_name(&self) -> &str {
+    pub fn frame_name(&self) -> &str {
         self.resource.as_deref().unwrap_or(&self.name)
     }
 }
@@ -926,26 +936,17 @@ enum ResourceKey {
     },
 }
 
-/// One stage's accesses: the frame resources it reads, the ones it writes, and
-/// the subset of those writes that produce a value for another pass.
+/// Explicit frame resource accesses of one selected stage.
 #[derive(Default)]
 struct StageAccesses {
     reads: Vec<FrameAccess>,
     writes: Vec<FrameAccess>,
-    produces: BTreeSet<usize>,
 }
 
 #[derive(Default)]
 struct FrameGraphBuilder {
     graph: FrameGraph,
     resources: BTreeMap<ResourceKey, usize>,
-    /// Passes that *produce* each resource — they write a storage buffer the
-    /// descriptor labels an entry output. Producer and consumer are a fact
-    /// about the bindings, so the edge between them does not depend on the
-    /// order the two passes happen to be declared in.
-    producers: BTreeMap<usize, BTreeSet<usize>>,
-    /// Passes that read each resource this frame.
-    readers: BTreeMap<usize, BTreeSet<usize>>,
 }
 
 impl FrameGraphBuilder {
@@ -1043,125 +1044,26 @@ impl FrameGraphBuilder {
         index
     }
 
-    fn compute_stage_accesses(
-        &mut self,
-        pipeline_index: usize,
-        compute: &ComputePipeline,
-        stage: &ComputeStage,
-    ) -> StageAccesses {
-        self.stage_accesses(pipeline_index, &compute.bindings, &stage.uses)
-    }
-
     fn stage_accesses(
         &mut self,
         pipeline_index: usize,
         bindings: &[Binding],
         uses: &StageBindingUses,
-    ) -> StageAccesses {
-        let explicit_reads = (!uses.reads.is_empty()).then_some(uses.reads.as_slice());
-        let explicit_writes = (!uses.writes.is_empty()).then_some(uses.writes.as_slice());
-        self.binding_table_accesses(pipeline_index, bindings, explicit_reads, explicit_writes)
-    }
-
-    fn binding_table_accesses(
-        &mut self,
-        pipeline_index: usize,
-        bindings: &[Binding],
-        explicit_reads: Option<&[usize]>,
-        explicit_writes: Option<&[usize]>,
-    ) -> StageAccesses {
-        let explicit = explicit_reads.is_some() || explicit_writes.is_some();
+    ) -> Result<StageAccesses, String> {
         let mut accesses = StageAccesses::default();
-
-        if explicit {
-            for index in explicit_reads.into_iter().flatten().copied() {
-                if let Some(binding) = bindings.get(index) {
-                    self.push_read(&mut accesses.reads, pipeline_index, index, binding);
-                }
-            }
-            for index in explicit_writes.into_iter().flatten().copied() {
-                if let Some(binding) = bindings.get(index) {
-                    let resource = self.push_write(&mut accesses.writes, pipeline_index, index, binding);
-                    if binding_is_produced(binding) {
-                        accesses.produces.insert(resource);
-                    }
-                }
+        for (indices, output) in [
+            (&uses.reads, &mut accesses.reads),
+            (&uses.writes, &mut accesses.writes),
+        ] {
+            for &index in indices {
+                let Some(binding) = bindings.get(index) else {
+                    return Err("selected access has no descriptor binding".into());
+                };
+                let resource = self.ensure_binding(pipeline_index, index, binding);
+                push_unique_access(output, FrameAccess { resource });
             }
         }
-
-        for (index, binding) in bindings.iter().enumerate() {
-            // In explicit mode the stage's read/write lists are the *complete*
-            // access spec for storage buffers — a storage buffer absent from
-            // them is not touched by this stage, so it must not auto-derive.
-            // Other binding kinds (textures, uniforms, samplers) are never in
-            // the lists and always auto-derive from their declared access. If a
-            // stage ever needs explicit read/write control over a non-buffer
-            // binding, the lists (populated upstream in egglog) must be extended
-            // to name it and this carve-out generalized to "skip if listed".
-            if explicit && matches!(binding, Binding::StorageBuffer { .. }) {
-                continue;
-            }
-            let (read, write) = binding_declared_access(binding);
-            if read {
-                self.push_read(&mut accesses.reads, pipeline_index, index, binding);
-            }
-            if write {
-                let resource = self.push_write(&mut accesses.writes, pipeline_index, index, binding);
-                if binding_is_produced(binding) {
-                    accesses.produces.insert(resource);
-                }
-            }
-        }
-
-        accesses
-    }
-
-    fn push_read(
-        &mut self,
-        reads: &mut Vec<FrameAccess>,
-        pipeline_index: usize,
-        binding_index: usize,
-        binding: &Binding,
-    ) {
-        let resource = self.ensure_binding(pipeline_index, binding_index, binding);
-        push_unique_access(reads, FrameAccess { resource });
-    }
-
-    fn push_write(
-        &mut self,
-        writes: &mut Vec<FrameAccess>,
-        pipeline_index: usize,
-        binding_index: usize,
-        binding: &Binding,
-    ) -> usize {
-        let resource = self.ensure_binding(pipeline_index, binding_index, binding);
-        push_unique_access(writes, FrameAccess { resource });
-        resource
-    }
-
-    /// Order every consumer of a produced resource after its producers.
-    ///
-    /// Producer and consumer are recorded in the bindings, so this edge holds
-    /// whichever order the two passes are declared in. The hazard sweep can only
-    /// see backwards, and would otherwise record a producer declared after its
-    /// consumer as a write-after-read — the same dependency, inverted.
-    fn link_producers_to_consumers(&mut self) {
-        for (resource, producers) in &self.producers {
-            let Some(readers) = self.readers.get(resource) else {
-                continue;
-            };
-            for &consumer in readers {
-                for &producer in producers {
-                    if producer != consumer {
-                        self.graph.passes[consumer].depends_on.push(producer);
-                    }
-                }
-            }
-        }
-        for pass in &mut self.graph.passes {
-            pass.depends_on.sort_unstable();
-            pass.depends_on.dedup();
-        }
+        Ok(accesses)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1173,58 +1075,13 @@ impl FrameGraphBuilder {
         stage_index: usize,
         reads: Vec<FrameAccess>,
         writes: Vec<FrameAccess>,
-        produces: BTreeSet<usize>,
-        last_writer: &mut Vec<Option<usize>>,
-        last_readers: &mut Vec<BTreeSet<usize>>,
     ) {
-        let needed = self.graph.resources.len();
-        if last_writer.len() < needed {
-            last_writer.resize(needed, None);
-            last_readers.resize_with(needed, BTreeSet::new);
-        }
-
-        let mut depends_on = BTreeSet::new();
-        for access in &reads {
-            if let Some(writer) = last_writer[access.resource] {
-                depends_on.insert(writer);
-            }
-        }
-        for access in &writes {
-            if let Some(writer) = last_writer[access.resource] {
-                depends_on.insert(writer);
-            }
-            // Writing a produced resource is the production. Its readers are
-            // consumers, ordered after it by `link_producers_to_consumers`, so
-            // an earlier reader is a consumer scheduled too early rather than
-            // one observing a prior value there is no reason to preserve.
-            if !produces.contains(&access.resource) {
-                depends_on.extend(last_readers[access.resource].iter().copied());
-            }
-        }
-
         let pass_index = self.graph.passes.len();
-        for resource in produces {
-            self.producers.entry(resource).or_default().insert(pass_index);
-        }
-        for access in &reads {
-            self.readers.entry(access.resource).or_default().insert(pass_index);
-        }
-        for access in reads.iter().chain(writes.iter()) {
+        for access in reads.iter().chain(&writes) {
             let resource = &mut self.graph.resources[access.resource];
             resource.first_pass.get_or_insert(pass_index);
             resource.last_pass = Some(pass_index);
         }
-
-        for access in &writes {
-            last_writer[access.resource] = Some(pass_index);
-            last_readers[access.resource].clear();
-        }
-        for access in &reads {
-            if !writes.iter().any(|write| write.resource == access.resource) {
-                last_readers[access.resource].insert(pass_index);
-            }
-        }
-
         self.graph.passes.push(FramePass {
             name,
             kind,
@@ -1232,7 +1089,7 @@ impl FrameGraphBuilder {
             stage_index,
             reads,
             writes,
-            depends_on: depends_on.into_iter().collect(),
+            depends_on: Vec::new(),
         });
     }
 }
@@ -1420,37 +1277,6 @@ fn merge_extent(target: &mut Option<FrameResourceExtent>, candidate: Option<Fram
             ),
         },
         None => {}
-    }
-}
-
-/// True when writing `binding` produces a value for another pass to read,
-/// rather than overwriting shared state. A storage buffer the descriptor labels
-/// an entry output (or a pipeline-internal intermediate) is a produced value;
-/// its readers bind it as an input. Image views carry no such label — a
-/// `storage_write` view of a `resource` is a write to state, and whether a
-/// reader wants this frame's value or the last one is not recoverable from the
-/// bindings.
-fn binding_is_produced(binding: &Binding) -> bool {
-    matches!(
-        binding,
-        Binding::StorageBuffer {
-            usage: BufferUsage::Output | BufferUsage::Intermediate,
-            ..
-        }
-    )
-}
-
-fn binding_declared_access(binding: &Binding) -> (bool, bool) {
-    match binding {
-        Binding::StorageBuffer { access, .. } | Binding::StorageTexture { access, .. } => match access {
-            Access::ReadOnly => (true, false),
-            Access::WriteOnly => (false, true),
-            Access::ReadWrite => (true, true),
-        },
-        Binding::Uniform { .. }
-        | Binding::PushConstant { .. }
-        | Binding::Texture { .. }
-        | Binding::Sampler { .. } => (true, false),
     }
 }
 

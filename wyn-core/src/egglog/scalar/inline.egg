@@ -1,6 +1,8 @@
 ; Calls retain the choice between invoking a helper and its expanded body.
 (rule ((ScalarActive ctx) (= call (ScalarInvoke ctx t region args)) (ScalarInlineBody region body) (= (ScalarTemplateSafe region) true))
       ((union call (ScalarSub ctx body region args))) :ruleset scalar-inline)
+(rule ((ScalarActive ctx) (= call (ScalarCall ctx t site region args)) (ScalarInlineBody region body) (= (ScalarTemplateSafe region) true))
+      ((union call (ScalarSub ctx body region args))) :ruleset scalar-inline)
 ; Administrative substitutions retire once their replacement is established.
 (rewrite (ScalarSub ctx (ScalarParameter original t region i) region args) argument
          :when ((ScalarActive ctx) (= argument (ScalarArgumentAt args i))) :subsume :ruleset scalar-substitute)

@@ -35,6 +35,7 @@
 (relation FilterPlan (FusionPlan))
 (relation ElementPlan (FusionPlan))
 (relation SafePlan (FusionPlan))
+(relation StreamPlan (FusionPlan))
 (relation MovablePlan (FusionPlan))
 (relation PostMapPlan (FusionPlan))
 (relation FilterPostMapPlan (FusionPlan))
@@ -56,10 +57,6 @@
 (function StreamSlices (FusionGroup FusionGroup) SliceChains :merge (set-union old new))
 (function BarrierBlocked (FusionGroup FusionGroup) bool :merge (or old new))
 (relation ScanFeeds (OperationKey OperationKey))
-; Recomputed on the current quotient graph before each planning round.
-(relation OrderClear (FusionGroup FusionGroup))
-(relation OrderBlocked (FusionGroup FusionGroup))
-(relation DataIndependent (FusionGroup FusionGroup))
 (function IndexedUses (FusionGroup) GroupUses :merge (set-union old new))
 (function IndexAddressUses (FusionGroup) GroupUses :merge (set-union old new))
 (relation GroupUseFact (FusionGroup GroupUse))

@@ -12,6 +12,7 @@ pub(super) fn new_graph() -> Result<EGraph, OptimizeError> {
         Some("fusion schema".into()),
         concat!(include_str!("../ids.egg"), "\n", include_str!("schema.egg")),
     )?;
+    reachability::register(&mut graph)?;
     Ok(graph)
 }
 

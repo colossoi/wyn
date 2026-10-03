@@ -1,47 +1,44 @@
 //! Expand scheduled phases straight into SSA instructions and structured loops.
 
-use super::super::plan::Stage;
 use super::super::{builder_error, error, Body, OptimizeError, Typed};
+use super::Recipe;
 use super::{element, invocation, store};
 use crate::op::{BinaryOperator, OpTag};
 use crate::ssa::types::{AtomicOp, InstKind};
-use crate::tlc::{SoacOp, TermKind};
 use crate::types::{self, Type, TypeExt, TypeName};
 use crate::LookupMap;
 use egglog_engine::Value;
 
+fn destination_value(
+    body: &mut Body<'_, '_, '_>,
+    scope: Value,
+    operation: Value,
+) -> Result<Typed, OptimizeError> {
+    let Some(destination) = body.compiler.facts.lookup("SelectedDestination", (operation,)) else {
+        return Err(error("update has no selected destination"));
+    };
+    if let Some(fields) = body.compiler.facts.enode("DestinationBuffer", destination) {
+        return body.resource(scope, fields[0], 3);
+    }
+    let Some(fields) = body.compiler.facts.enode("DestinationValue", destination) else {
+        return Err(error("unknown selected update destination"));
+    };
+    let Some(source) = body.compiler.plan.expr(fields[0]) else {
+        return Err(error("selected destination has no source value"));
+    };
+    body.value(scope, source)
+}
+
 pub(super) fn indexed(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
-    stage: &Stage,
+    stage: &Recipe,
     plan: Value,
 ) -> Result<(), OptimizeError> {
-    let Some(source) = body.compiler.plan.source(stage.operation) else {
-        return Err(error("indexed source missing"));
-    };
-    let Some(&(term, _)) = body.compiler.program.identities.origins.get(&source) else {
-        return Err(error("indexed source term missing"));
-    };
     let Some(destination) = body.compiler.facts.destination(stage.operation) else {
         return Err(error("indexed destination missing"));
     };
-    let output = if body.compiler.plan.slot(stage.operation, "output", 0).is_some() {
-        let Some(view) = body.slot(
-            scope,
-            stage.operation,
-            "output",
-            0,
-            if stage.phase == "initialize" { 2 } else { 3 },
-        )?
-        else {
-            return Err(error("indexed output is not materialized"));
-        };
-        view
-    } else if let Some(resource) = body.compiler.plan.value_ref(destination) {
-        body.resource(scope, resource, 3)?
-    } else {
-        body.value(scope, destination)?
-    };
+    let output = destination_value(body, scope, stage.operation)?;
     let serial = stage.phase == "ordered";
     let domain = if serial {
         let Some(domain) = body.compiler.plan.domain(stage.operation) else {
@@ -60,14 +57,6 @@ pub(super) fn indexed(
     } else {
         invocation(body, stage.width)?
     };
-    if serial
-        && matches!(term.kind, TermKind::Soac(SoacOp::Scatter { .. }))
-        && body.compiler.plan.slot(stage.operation, "output", 0).is_some()
-    {
-        let original = body.value(scope, destination)?;
-        let count = body.length(original.clone())?;
-        body.copy_array(output.clone(), original, count)?;
-    }
     body.counted(start, n, step, vec![], |body, index, _| {
         if stage.phase == "initialize" {
             let original = body.value(scope, destination)?;
@@ -84,24 +73,19 @@ pub(super) fn indexed(
 pub(super) fn update(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
-    stage: &Stage,
+    stage: &Recipe,
     plan: Value,
     output: Typed,
     index: Typed,
     cache: &mut LookupMap<Value, Typed>,
 ) -> Result<(), OptimizeError> {
-    let Some(source) = body.compiler.plan.source(stage.operation) else {
-        return Err(error("indexed source missing"));
-    };
-    let Some(&(term, _)) = body.compiler.program.identities.origins.get(&source) else {
-        return Err(error("indexed source term missing"));
-    };
-    let inputs = body.compiler.facts.inputs(stage.operation);
+    let kind = body.compiler.facts.operation_kind(stage.operation)?;
+    let inputs = body.compiler.facts.inputs(stage.operation)?;
     let mut arguments = Vec::new();
     for &(_, input) in &inputs {
         arguments.push(element(body, scope, plan, input, index.clone(), cache)?);
     }
-    let (key, value) = if matches!(term.kind, TermKind::Soac(SoacOp::Scatter { .. })) {
+    let (key, value) = if kind == "scatter" {
         let pair = body.callback(scope, stage.operation, arguments)?;
         (body.field(pair.clone(), 0)?, body.field(pair, 1)?)
     } else {
@@ -175,7 +159,7 @@ pub(super) fn update(
                 })
             })?;
         } else {
-            let value = if matches!(term.kind, TermKind::Soac(SoacOp::ReduceByIndex { .. })) {
+            let value = if kind == "reduce-by-index" {
                 let previous = body.index(output.clone(), key.clone())?;
                 body.callback(scope, stage.operation, vec![previous, value])?
             } else {
@@ -191,31 +175,11 @@ pub(super) fn update(
 pub(super) fn buckets(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
-    stage: &Stage,
+    stage: &Recipe,
     plan: Value,
 ) -> Result<(), OptimizeError> {
-    let Some(source) = body.compiler.plan.source(stage.operation) else {
-        return Err(error("missing source"));
-    };
-    let Some(&(term, _)) = body.compiler.program.identities.origins.get(&source) else {
-        return Err(error("bucket source missing"));
-    };
-    let TermKind::Soac(SoacOp::BucketScatter {
-        input_dimensions,
-        domain_rank,
-        ..
-    }) = &term.kind
-    else {
-        return Err(error("invalid bucket recipe"));
-    };
-    let Some(destination) = body.compiler.facts.destination(stage.operation) else {
-        return Err(error("missing destination"));
-    };
-    let output = if let Some(resource) = body.compiler.plan.value_ref(destination) {
-        body.resource(scope, resource, 3)?
-    } else {
-        body.value(scope, destination)?
-    };
+    let (domain_rank, input_dimensions) = body.compiler.facts.bucket_shape(stage.operation)?;
+    let output = destination_value(body, scope, stage.operation)?;
     let Some(counts) = body.slot(
         scope,
         stage.operation,
@@ -256,8 +220,8 @@ pub(super) fn buckets(
         output,
         counts,
         overflow,
-        input_dimensions,
-        *domain_rank,
+        &input_dimensions,
+        domain_rank,
         serial,
         stage.width,
     )
@@ -271,62 +235,26 @@ pub(in crate::egglog::to_ssa) fn bucket_updates(
     output: Typed,
     counts: Typed,
     overflow: Typed,
-    input_dimensions: &[Vec<u8>],
-    domain_rank: u8,
+    input_dimensions: &[Vec<usize>],
+    domain_rank: usize,
     serial: bool,
     width: u32,
 ) -> Result<(), OptimizeError> {
     let zero = body.literal("0", &types::i32())?;
     let one = body.literal("1", &types::i32())?;
-    let inputs = body.compiler.facts.inputs(operation);
-    let mut dimensions = vec![None; usize::from(domain_rank)];
-    for ((_, source), axes) in inputs.iter().zip(input_dimensions) {
-        let Some(ty) = body.compiler.facts.source_type(*source) else {
-            return Err(error("bucket input type missing"));
-        };
-        let mut ty = ty.clone();
-        if !body.compiler.facts.operation(*source).is_some() {
-            ty = body.value(scope, *source)?.ty;
-        }
-        for (i, &axis) in axes.iter().enumerate() {
-            while let Type::Constructed(TypeName::Tuple(_), fields) = &ty {
-                let Some(first) = fields.first() else {
-                    return Err(error("empty bucket input"));
-                };
-                ty = first.clone();
-            }
-            let n = if let Some(extent) = body.compiler.plan.bucket_axis(operation, i64::from(axis)) {
+    let inputs = body.compiler.facts.inputs(operation)?;
+    let mut dimensions = vec![None; domain_rank];
+    for axes in input_dimensions {
+        for &axis in axes {
+            let n = if let Some(extent) = body.compiler.plan.bucket_axis(operation, axis as i64) {
                 body.extent(scope, extent)?
-            } else if i == 0 {
-                if let Some(op) = body.compiler.facts.operation(*source) {
-                    if body.compiler.plan.member(plan, op) {
-                        let Some(domain) = body.compiler.plan.domain(operation) else {
-                            return Err(error("bucket operation domain missing"));
-                        };
-                        body.extent(scope, domain)?
-                    } else {
-                        let array = body.value(scope, *source)?;
-                        body.length(array)?
-                    }
-                } else {
-                    let array = body.value(scope, *source)?;
-                    body.length(array)?
-                }
-            } else if let Some(Type::Constructed(TypeName::Size(n), _)) = ty.array_size() {
-                body.literal(&n.to_string(), &types::i32())?
             } else {
-                return Err(error("bucket inner dimension has no capacity"));
+                return Err(error("bucket axis has no planned extent"));
             };
-            let Some(slot) = dimensions.get_mut(usize::from(axis)) else {
+            let Some(slot) = dimensions.get_mut(axis) else {
                 return Err(error("bucket axis out of range"));
             };
             *slot = Some(n);
-            if i + 1 < axes.len() {
-                let Some(element) = ty.elem_type() else {
-                    return Err(error("bucket input rank mismatch"));
-                };
-                ty = element.clone();
-            }
         }
     }
     let dimensions = dimensions
@@ -370,16 +298,9 @@ pub(in crate::egglog::to_ssa) fn bucket_updates(
                 args.push(body.value(scope, *source)?);
                 continue;
             };
-            let mut value = element(
-                body,
-                scope,
-                plan,
-                *source,
-                coordinates[usize::from(first)].clone(),
-                &mut cache,
-            )?;
+            let mut value = element(body, scope, plan, *source, coordinates[first].clone(), &mut cache)?;
             for &axis in rest {
-                value = body.index(value, coordinates[usize::from(axis)].clone())?;
+                value = body.index(value, coordinates[axis].clone())?;
             }
             args.push(value);
         }

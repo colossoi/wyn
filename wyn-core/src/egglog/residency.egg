@@ -43,6 +43,12 @@
 (rule ((ForwardValue e source) (ValueRef source value))
       ((ValueRef e value)) :ruleset residency)
 (rule ((SliceView e source start end) (ValueRef source value)) ((ValueRef e value)) :ruleset residency)
+(rule ((DirectResult e op i) (= access (ResultRead op i)))
+      ((set (ValueRead e) access)) :ruleset residency)
+(rule ((Projection e tuple i) (ResultTuple tuple op) (= access (ResultRead op i)))
+      ((set (ValueRead e) access)) :ruleset residency)
+(rule ((ForwardValue e source) (= access (ValueRead source)))
+      ((set (ValueRead e) access)) :ruleset residency)
 
 ; Request shared reference summaries only for scheduling, reuse, and output
 ; consumers. Propagate demand through scalar structure, stopping at results.
@@ -72,15 +78,17 @@
 ; Lengths follow view metadata; reading an allocation's size does not require
 ; waiting for its element writer. Compacted lengths do require the count writer.
 (rule ((PhaseDomain stage n width)) ((ExtentDemand stage n)) :ruleset residency)
-(rule ((Needs stage value) (CapacityExtent value n)) ((ExtentDemand stage n)) :ruleset residency)
+(rule ((Needs stage value) (= n (CapacityExtent value))) ((ExtentDemand stage n)) :ruleset residency)
 (rule ((ExtentDemand stage (Length e))) ((LengthDemand stage e)) :ruleset residency)
 (rule ((ExtentDemand stage (Scalar e))) ((Demand (InStage stage) e)) :ruleset residency)
 (rule ((ExtentDemand stage (ChunkCount n width))) ((ExtentDemand stage n)) :ruleset residency)
 (rule ((ExtentDemand stage (Product a b))) ((ExtentDemand stage a) (ExtentDemand stage b)) :ruleset residency)
+(rule ((ExtentDemand stage (Difference a b))) ((ExtentDemand stage a) (ExtentDemand stage b)) :ruleset residency)
 (rule ((ExtentDemand stage (Stored value))) ((Needs stage value)) :ruleset residency)
+(rule ((LengthDemand stage e) (= n (ViewExtent e))) ((ExtentDemand stage n)) :ruleset residency)
 (rule ((LengthDemand stage e) (ValueRef e (Source source))) ((Needs stage (Source source))) :ruleset residency)
-(rule ((LengthDemand stage e) (ValueRef e value) (LiveLength value n)) ((ExtentDemand stage n)) :ruleset residency)
-(rule ((LengthDemand stage e) (ValueRef e value) (SameBacking value source)) ((LengthDemand stage source)) :ruleset residency)
+(rule ((LengthDemand stage e) (ValueRef e value) (= n (LiveLength value))) ((ExtentDemand stage n)) :ruleset residency)
+(rule ((LengthDemand stage e) (ValueRef e value) (= source (SameBacking value))) ((LengthDemand stage source)) :ruleset residency)
 (rule ((LengthDemand stage e) (SliceView e source start end))
       ((Demand (InStage stage) start) (Demand (InStage stage) end)) :ruleset residency)
 (rule ((HostRegion r) (Site op r) (ScalarSite op) (= (ScalarBoundary op) false)

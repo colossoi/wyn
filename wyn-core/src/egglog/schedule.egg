@@ -76,6 +76,7 @@
 (rule ((= (Plan op) (Totals))) ((PhaseEnds op "chunks" "combine")) :ruleset schedule)
 (rule ((= (Plan op) (Prefixes)) (InputDomain op n) (= grid (OperationGrid op)))
       ((KernelPhase op "offsets" n 64 grid)
+       (PhaseInput (Stage op "offsets") op "input")
        (PhaseEnds op "chunks" "offsets")
        (PhaseLink op "combine" "offsets")) :ruleset schedule)
 ; Stable compaction runs in one workgroup, looping over the input in tiles.
@@ -105,8 +106,9 @@
        (Materialize (Result op 1)) (Materialize (Result op 2))) :ruleset schedule)
 (rule ((KernelPhase op name n width grid) (Site op r) (HostRegion r))
       ((Phase (Stage op name) r) (PhaseDomain (Stage op name) n width)
-       (set (PhaseGrid (Stage op name)) grid)
-       (PhaseInput (Stage op name) op "environment")) :ruleset schedule)
+       (set (PhaseGrid (Stage op name)) grid)) :ruleset schedule)
+(rule ((Phase (Stage op name) r) (!= name "combine"))
+      ((PhaseInput (Stage op name) op "environment")) :ruleset schedule)
 (rule ((PhaseEnds op first last) (Phase (Stage op first) r) (Phase (Stage op last) r))
       ((FirstPhase op (Stage op first)) (LastPhase op (Stage op last))) :ruleset schedule)
 (rule ((PhaseLink op a b) (Phase (Stage op a) r) (Phase (Stage op b) r))
@@ -152,13 +154,13 @@
        (Needs (Stage op "offsets") (Temporary op "prefix" i))
        (Needs (Stage op "offsets") (Temporary op "offset" i))) :ruleset schedule)
 (rule ((Scratch op name i n))
-      ((FreshValue (Temporary op name i)) (CapacityExtent (Temporary op name i) n)) :ruleset schedule)
+      ((FreshValue (Temporary op name i)) (set (CapacityExtent (Temporary op name i)) n)) :ruleset schedule)
 
 ; Invocation-local allocations are recipe outputs, without dispatches or shared storage.
 (rule ((Site op r) (DeviceRegion r)) ((DeviceOperation op)) :ruleset schedule)
 (rule ((DeviceOperation op) (Enters op r)) ((DeviceRegion r)) :ruleset schedule)
 (rule ((Phase (Stage op "scalar") r)) ((DeviceOperation op)) :ruleset schedule)
-(rule ((DeviceOperation op) (= recipe (Plan op)) (BufferSlot op name i value) (ElementType value t) (CapacityExtent value n))
+(rule ((DeviceOperation op) (= recipe (Plan op)) (BufferSlot op name i value) (ElementType value t) (= n (CapacityExtent value)))
       ((LocalBuffer op name i t n)) :ruleset schedule)
 
 (rule ((= (Plan op) (Scatter)) (UninitializedResult op i t n)) ((PhaseEnds op "scatter" "scatter")) :ruleset schedule)
@@ -171,5 +173,4 @@
        (PhaseEnds op "loop_enter" "loop_exit")
        (Produces (Stage op "loop_enter") (Source s))
        (Produces (Stage op "loop_exit") (Result op 0))
-       (Demand (InStage (Stage op "loop_enter")) a)
-       (Demand (InStage (Stage op "loop_exit")) n)) :ruleset schedule)
+       (Demand (InStage (Stage op "loop_enter")) a)) :ruleset schedule)

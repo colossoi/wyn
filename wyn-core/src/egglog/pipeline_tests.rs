@@ -81,7 +81,8 @@ fn radix_scratch_initializer_has_no_array_allocation() {
     )).count();
     assert_eq!(
         arrays, 2,
-        "only scan prefixes and sorted output scale with input length"
+        "only scan prefixes and sorted output scale with input length\n{}\n{:?}",
+        compiled.wgsl, entry.allocations
     );
 }
 

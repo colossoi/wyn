@@ -23,7 +23,7 @@ pub(super) struct Forest {
 impl Forest {
     pub fn new(
         values: impl IntoIterator<Item = Value>,
-        parent: impl Fn(Value) -> Option<Value>,
+        parent: impl Fn(Value) -> Result<Option<Value>, OptimizeError>,
     ) -> Result<Self, OptimizeError> {
         let mut values: Vec<_> = values.into_iter().collect();
         values.sort();
@@ -32,14 +32,16 @@ impl Forest {
         let mut nodes: Vec<_> = values
             .into_iter()
             .enumerate()
-            .map(|(i, value)| Node {
-                value,
-                parent: parent(value).and_then(|p| indices.get(&p).copied()),
-                depth: 0,
-                root: Scope(i),
-                interval: DfsInterval { start: 0, end: 0 },
+            .map(|(i, value)| {
+                Ok(Node {
+                    value,
+                    parent: parent(value)?.and_then(|p| indices.get(&p).copied()),
+                    depth: 0,
+                    root: Scope(i),
+                    interval: DfsInterval { start: 0, end: 0 },
+                })
             })
-            .collect();
+            .collect::<Result<_, OptimizeError>>()?;
         let mut children = vec![Vec::new(); nodes.len()];
         let mut roots = Vec::new();
         for (i, node) in nodes.iter().enumerate() {

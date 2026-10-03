@@ -3,11 +3,10 @@
 use crate::ast::TypeName;
 use crate::host::BufferLen;
 use crate::interface::{
-    Attribute, BindingExposure, EntryDecl, EntryInput, EntryInputKind, EntryOutput, EntryOutputDestination,
-    EntryOutputKind, EntryParamDecl, IoDecoration, ResolvedAttribute,
+    Attribute, BindingExposure, EntryDecl, EntryOutput, EntryOutputDestination, EntryOutputKind,
+    EntryParamDecl, IoDecoration, ResolvedAttribute,
 };
-use crate::ssa::layout::{storage_elem_stride, type_byte_size};
-use crate::types::{array_size, canonical_storage_buffer_ty, strip_existentials, TypeExt};
+use crate::types::{canonical_storage_buffer_ty, strip_existentials};
 use crate::BindingRef;
 use polytype::Type;
 use wyn_base::IdSource;
@@ -72,92 +71,23 @@ pub(crate) fn entry_output_arity(entry: &EntryDecl, ret_type: &Type<TypeName>) -
 pub(crate) fn build_entry_outputs(
     entry: &EntryDecl,
     ret_type: &Type<TypeName>,
-    slot_value_tys: &[Option<Type<TypeName>>],
-    inputs: &[EntryInput],
+    capacities: &[BufferLen],
     is_compute: bool,
     binding_ids: &mut IdSource<u32>,
 ) -> Result<Vec<EntryOutput>, InterfaceError> {
     let logical_ret_type = strip_existentials(ret_type);
     let output_arity = entry_output_arity(entry, ret_type);
-    // Pick a `BufferLen` policy for the output binding, in order:
-    //
-    //   1. Output type carries a compile-time-known `Size(n)` literal
-    //      → `Fixed { bytes: n * elem_bytes }`.
-    //   2. Output's size variable matches one of the entry's storage
-    //      inputs (the type checker has unified them) → `LikeInput`
-    //      tracking that input.
-    //   3. A runtime array output route is sized from the finalized semantic
-    //      dispatch domain → `SameAsDispatch { elem_bytes }`.
-    //   4. None — the host falls back to its default sizing or, if it
-    //      tried to allocate this buffer, surfaces a clean error.
-    //
-    // The size info is already in the (post-monomorphize) type — we
-    // just read it. No structural rewrites needed for `if/else`
-    // branches whose result types have already been unified.
-    let length_for =
-        |binding: Option<BindingRef>, ty: &Type<TypeName>| -> Result<Option<BufferLen>, InterfaceError> {
-            if binding.is_none() {
-                return Ok(None);
-            }
-            let Some(elem_ty) = ty.elem_type() else {
-                let Some(bytes) = type_byte_size(ty) else {
-                    return Err(InterfaceError(format!(
-                        "output has no static byte layout: {ty:?}"
-                    )));
-                };
-                return Ok(Some(BufferLen::Fixed {
-                    bytes: u64::from(bytes),
-                }));
-            };
-            let Some(elem_bytes) = storage_elem_stride(elem_ty) else {
-                return Err(InterfaceError(format!(
-                    "output element has no static byte layout: {elem_ty:?}"
-                )));
-            };
-            if let Some(out_size) = array_size(ty) {
-                // Rule 1: compile-time size literal.
-                if let Type::Constructed(TypeName::Size(n), _) = out_size {
-                    return Ok(Some(BufferLen::Fixed {
-                        bytes: (*n as u64) * elem_bytes as u64,
-                    }));
-                }
-                // Rule 2: size variable shared with an entry input.
-                for input in inputs {
-                    let EntryInputKind::Storage {
-                        exposure: BindingExposure::Host(in_binding),
-                        ..
-                    } = &input.kind
-                    else {
-                        continue;
-                    };
-                    let Some(in_size) = array_size(&input.ty) else {
-                        continue;
-                    };
-                    if in_size == out_size {
-                        let Some(in_elem_ty) = input.ty.elem_type() else {
-                            continue;
-                        };
-                        let Some(src_elem_bytes) = storage_elem_stride(in_elem_ty) else {
-                            return Err(InterfaceError(format!(
-                                "input element has no static byte layout: {in_elem_ty:?}"
-                            )));
-                        };
-                        return Ok(Some(BufferLen::LikeInput {
-                            set: in_binding.set,
-                            binding: in_binding.binding,
-                            elem_bytes,
-                            src_elem_bytes,
-                        }));
-                    }
-                }
-            }
-            // Rule 3: dynamic arrays without a fixed or matching-input size
-            // are sized from the finalized semantic dispatch domain.
-            if ty.is_array() {
-                return Ok(Some(BufferLen::SameAsDispatch { elem_bytes }));
-            }
-            Ok(None)
+    let length_for = |slot: usize, binding: Option<BindingRef>| {
+        if binding.is_none() {
+            return Ok(None);
+        }
+        let Some(capacity) = capacities.get(slot) else {
+            return Err(InterfaceError(format!("output {slot} has no selected capacity")));
         };
+        Ok(Some(capacity.clone()))
+    };
+    // TODO: Consider moving generated output binding assignment into Egglog
+    // alongside the selected output capacities and PhysicalBinding facts.
     let mut storage_binding_for = |ty: &Type<TypeName>,
                                    is_compute: bool,
                                    attribute: Option<&ResolvedAttribute>|
@@ -170,8 +100,8 @@ pub(crate) fn build_entry_outputs(
         }
     };
 
-    // Prefer the converted route value's representation-specialized type to
-    // the parse-time output declaration. A source entry with no return value
+    // Use the lowered return representation, not the parse-time declaration.
+    // A source entry with no return value
     // has no logical output slot. Returning a synthetic Unit-typed
     // `EntryOutput` here would surface to the SPIR-V backend as an
     // `Output<void>` variable in the entry's interface — malformed and
@@ -191,11 +121,10 @@ pub(crate) fn build_entry_outputs(
 
     if entry.outputs.iter().all(|o| o.attribute.is_none()) && output_arity == 1 {
         if !matches!(ret_type, Type::Constructed(TypeName::Unit, _)) {
-            let source_ty = slot_value_tys.first().and_then(Option::as_ref).unwrap_or(ret_type);
-            let ty = canonical_storage_buffer_ty(source_ty);
+            let ty = canonical_storage_buffer_ty(ret_type);
             let attribute = entry.outputs.first().and_then(|output| output.attribute.as_ref());
             let storage_binding = storage_binding_for(&ty, is_compute, attribute);
-            let length = length_for(storage_binding, &ty)?;
+            let length = length_for(0, storage_binding)?;
             Ok(vec![EntryOutput {
                 ty,
                 kind: entry_output_kind(storage_binding, length, None, None),
@@ -210,11 +139,10 @@ pub(crate) fn build_entry_outputs(
             .iter()
             .enumerate()
             .map(|(slot, ty)| {
-                let ty = slot_value_tys.get(slot).and_then(Option::as_ref).unwrap_or(ty);
                 let ty = canonical_storage_buffer_ty(ty);
                 let attribute = entry.outputs.get(slot).and_then(|output| output.attribute.as_ref());
                 let storage_binding = storage_binding_for(&ty, is_compute, attribute);
-                let length = length_for(storage_binding, &ty)?;
+                let length = length_for(slot, storage_binding)?;
                 Ok(EntryOutput {
                     ty,
                     kind: entry_output_kind(
@@ -227,11 +155,10 @@ pub(crate) fn build_entry_outputs(
             })
             .collect()
     } else {
-        let source_ty = slot_value_tys.first().and_then(Option::as_ref).unwrap_or(ret_type);
-        let ty = canonical_storage_buffer_ty(source_ty);
+        let ty = canonical_storage_buffer_ty(ret_type);
         let first_attr = entry.outputs.first().and_then(|o| o.attribute.as_ref());
         let storage_binding = storage_binding_for(&ty, is_compute, first_attr);
-        let length = length_for(storage_binding, &ty)?;
+        let length = length_for(0, storage_binding)?;
         Ok(vec![EntryOutput {
             ty,
             kind: entry_output_kind(
