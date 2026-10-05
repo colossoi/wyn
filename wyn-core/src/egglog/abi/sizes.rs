@@ -303,10 +303,10 @@ fn input_scalar(
             break;
         }
     }
-    let Some(region) = compiler.facts.lookup("SsaParameterRegion", (source,)) else {
+    let Some(region) = compiler.facts.lookup("SourceParameterRegion", (source,)) else {
         return Ok(None);
     };
-    let index = super::required(&compiler.program.graph, "SsaParameterIndex", (source,))?;
+    let index = super::required(&compiler.program.graph, "SourceParameterIndex", (source,))?;
     path.reverse();
     parameter_input(compiler, region, compiler.facts.integer(index), &path).map(|v| v.map(SizeExpr::Scalar))
 }

@@ -14,7 +14,7 @@
       ((RootValueUse root value)) :ruleset publication-uses)
 (rule ((RootValueUse root parameter) (SourceCapture region parameter actual))
       ((RootValueUse root actual)) :ruleset publication-uses)
-(rule ((RootValueUse root value) (SourceAlias value actual))
+(rule ((RootValueUse root value) (= actual (SourceAlias value)))
       ((RootValueUse root actual)) :ruleset publication-uses)
 (rule ((RootValueUse root value) (SourceInterfaceParameter value resource flags)
        (= (RootReadOnly root) true) (> (& flags 1) 0))

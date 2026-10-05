@@ -29,7 +29,7 @@
 (function ValueLayoutFields (SourceValue i64) LocalLayouts :no-merge)
 (rule ((= ty (SourceType value)) (= layout (BoundaryLayout ty)))
       ((set (ValueRepresentation value) layout)) :ruleset representations)
-(rule ((SourceAlias value original) (= ty (SourceType value)) (= (HasTypeLayout ty) false) (= layout (ValueRepresentation original)))
+(rule ((= original (SourceAlias value)) (= ty (SourceType value)) (= (HasTypeLayout ty) false) (= layout (ValueRepresentation original)))
       ((set (ValueRepresentation value) layout)) :ruleset representations)
 (rule ((SourceSameShape value original) (= ty (SourceType value)) (= (HasTypeLayout ty) false) (= layout (ValueRepresentation original)))
       ((set (ValueRepresentation value) layout)) :ruleset representations)

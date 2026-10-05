@@ -38,22 +38,6 @@ impl Query<'_> {
         Ok(self.0.read(|r| r.lookup(name, keys))?)
     }
 
-    pub fn inverse(&self, name: &str, value: Value) -> Result<Option<Vec<Value>>, OptimizeError> {
-        let mut keys = None;
-        self.for_function(name, |inputs, output| {
-            if output == value {
-                if keys.is_some() {
-                    return Err(OptimizeError::Output(format!(
-                        "ambiguous inverse {name} for {value:?}"
-                    )));
-                }
-                keys = Some(inputs.to_vec());
-            }
-            Ok(())
-        })?;
-        Ok(keys)
-    }
-
     pub fn required(&self, name: &str, keys: impl IntoValues) -> Result<Value, OptimizeError> {
         let Some(value) = self.lookup(name, keys)? else {
             return Err(OptimizeError::Output(format!("missing selected {name}")));

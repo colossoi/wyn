@@ -1,14 +1,8 @@
 ; Keyed read access to selected facts. This ruleset runs once after optimization.
 (ruleset ssa-access)
-(function SsaParameterRegion (SourceValue) RegionKey :no-merge)
-(function SsaParameterIndex (SourceValue) i64 :no-merge)
-(rule ((= value (SourceParameter region index)))
-      ((set (SsaParameterRegion value) region) (set (SsaParameterIndex value) index)) :ruleset ssa-access)
 ; SourceExprKey is a function; its inverse needs a keyed table.
 (function SsaExprSource (ExprKey) SourceValue :no-merge)
 (rule ((= e (SourceExprKey v))) ((set (SsaExprSource e) v)) :ruleset ssa-access)
-(function SsaAlias (SourceValue) SourceValue :no-merge)
-(rule ((SourceAlias x y)) ((set (SsaAlias x) y)) :ruleset ssa-access)
 (function SsaDefinition (i64) RegionKey :no-merge)
 (rule ((SourceDefinition x y)) ((set (SsaDefinition x) y)) :ruleset ssa-access)
 (function SsaBranchYes (SourceValue) RegionKey :no-merge)
@@ -23,8 +17,6 @@
 (rule ((SourceLoop x h i)) ((set (SsaLoopIteration x) i)) :ruleset ssa-access)
 (function SsaLoopState (RegionKey) SourceValue :no-merge)
 (rule ((SourceLoopInitial x y v)) ((set (SsaLoopState x) y)) :ruleset ssa-access)
-(function SsaOperation (SourceValue) OperationKey :no-merge)
-(rule ((= x (SourceOperationValue y))) ((set (SsaOperation x) y)) :ruleset ssa-access)
 (function SsaOperationKind (OperationKey) String :no-merge)
 (function SsaOperationScope (OperationKey) RegionKey :no-merge)
 (rule ((SourceOperation op region kind))

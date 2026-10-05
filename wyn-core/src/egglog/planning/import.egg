@@ -36,7 +36,7 @@
 (rule ((= value (SourceFormal region symbol)) (= key (SourceExprKey value))) ((ParameterValue key)) :ruleset planning-import)
 (rule ((SourceProjection value parent i) (= key (SourceExprKey value)) (= base (SourceExprKey parent))
        (ParameterValue base)) ((ParameterValue key)) :ruleset residency)
-(rule ((SourceAlias value source) (= key (SourceExprKey value)) (= child (SourceExprKey source))) ((ForwardValue key child)) :ruleset planning-import)
+(rule ((= source (SourceAlias value)) (= key (SourceExprKey value)) (= child (SourceExprKey source))) ((ForwardValue key child)) :ruleset planning-import)
 (rule ((SourceProjection value source i) (= key (SourceExprKey value)) (= child (SourceExprKey source))) ((Projection key child i)) :ruleset planning-import)
 (rule ((SourceField value i source) (= key (SourceExprKey value)) (= child (SourceExprKey source))) ((FieldValue key i child)) :ruleset planning-import)
 (rule ((SourceComputedUse value source) (= key (SourceExprKey value)) (= child (SourceExprKey source)))

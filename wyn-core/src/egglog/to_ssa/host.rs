@@ -199,8 +199,8 @@ impl<'a, 'source> Lower<'a, 'source> {
                 return self.source(context, actual);
             }
         }
-        if let Some(region) = self.facts.lookup("SsaParameterRegion", (source,)) {
-            let Some(index) = self.facts.lookup("SsaParameterIndex", (source,)) else {
+        if let Some(region) = self.facts.lookup("SourceParameterRegion", (source,)) {
+            let Some(index) = self.facts.lookup("SourceParameterIndex", (source,)) else {
                 return Err(error("host parameter index missing").into());
             };
             let index = self.facts.integer(index);

@@ -86,7 +86,7 @@ impl<'a, 'source> Facts<'a, 'source> {
         set.data.iter().copied().collect()
     }
     pub fn alias(&self, value: Value) -> Option<Value> {
-        self.lookup("SsaAlias", (value,))
+        self.lookup("SourceAlias", (value,))
     }
     pub fn context(&self, value: Value) -> Option<Value> {
         self.lookup("ScalarScopeContext", (value,))
@@ -104,7 +104,7 @@ impl<'a, 'source> Facts<'a, 'source> {
         self.lookup("SourceDestination", (value,))
     }
     pub fn operation(&self, value: Value) -> Option<Value> {
-        self.lookup("SsaOperation", (value,))
+        self.lookup("SourceValueOperation", (value,))
     }
     pub fn operation_kind(&self, operation: Value) -> Result<String, OptimizeError> {
         let Some(kind) = self.lookup("SsaOperationKind", (operation,)) else {

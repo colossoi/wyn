@@ -149,7 +149,7 @@ impl Import<'_, '_, '_, '_> {
     pub(super) fn alias_summary(&mut self, value: Value, target: Value) -> Result<(), OptimizeError> {
         let target = self.summaries.canonical.get(&target).copied().unwrap_or(target);
         self.summaries.canonical.insert(value, target);
-        self.sink.add("SourceAlias", (value, target))?;
+        self.sink.set("SourceAlias", value, target)?;
         Ok(())
     }
 

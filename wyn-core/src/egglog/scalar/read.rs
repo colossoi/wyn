@@ -9,16 +9,15 @@ impl Query<'_> {
         Ok(self.lookup("SourceDuplicable", (source,))?.is_some_and(|v| self.0.value_to_base::<bool>(v)))
     }
     pub(super) fn parameter(&self, source: Value) -> Result<Option<(Value, i64)>, OptimizeError> {
-        if self.enode("SourceFormal", source)?.is_none() {
+        let Some(region) = self.lookup("SourceParameterRegion", (source,))? else {
             return Ok(None);
-        }
-        Ok(self
-            .inverse("SourceParameter", source)?
-            .map(|row| (row[0], self.0.value_to_base::<i64>(row[1]))))
+        };
+        let index = self.required("SourceParameterIndex", (source,))?;
+        Ok(Some((region, self.0.value_to_base::<i64>(index))))
     }
 
     pub(super) fn alias(&self, source: Value) -> Result<Option<Value>, OptimizeError> {
-        Ok(self.row("SourceAlias", |r| r[0] == source)?.map(|r| r[1]))
+        self.lookup("SourceAlias", (source,))
     }
 
     pub(super) fn callable(&self, source: Value) -> Result<Option<Value>, OptimizeError> {
@@ -41,7 +40,7 @@ impl Query<'_> {
     }
 
     pub(super) fn operation(&self, source: Value) -> Result<Option<Value>, OptimizeError> {
-        Ok(self.inverse("SourceOperationValue", source)?.map(|row| row[0]))
+        self.lookup("SourceValueOperation", (source,))
     }
 
     pub(super) fn rematerialized(&self, source: Value) -> Result<bool, OptimizeError> {

@@ -1,6 +1,11 @@
 ; Source summaries settle before boundary-sensitive dependency queries run.
 (ruleset source-summary)
 (ruleset source-dependencies)
+; Source identities are queried in either direction during scalar admission and
+; final readout. Populate the shared inverse indexes with the source summaries.
+(rule ((= value (SourceParameter region index)))
+      ((set (SourceParameterRegion value) region) (set (SourceParameterIndex value) index)) :ruleset source-summary)
+(rule ((= value (SourceOperationValue op))) ((set (SourceValueOperation value) op)) :ruleset source-summary)
 (function SourceRegionPure (RegionKey) bool :merge (and old new))
 (function SourceRegionReadOnly (RegionKey) bool :merge (and old new))
 (function SourceRegionDevice (RegionKey) bool :merge (or old new))
@@ -21,12 +26,12 @@
 
 (rule ((= value (SourceInput op i)) (= (SourceExprKey value) (ExprId token))) ((set (SourceIdentityToken (Identity value)) token)) :ruleset source-summary)
 (rule ((= value (SourceOperationValue op))) ((SourceOrigin value op) (Identity value)) :ruleset source-summary)
-(rule ((SourceAlias value target)) ((union (Identity value) (Identity target))) :ruleset source-summary)
-(rule ((SourceAlias value target) (SourceOrigin target op)) ((SourceOrigin value op)) :ruleset source-summary)
+(rule ((= target (SourceAlias value))) ((union (Identity value) (Identity target))) :ruleset source-summary)
+(rule ((= target (SourceAlias value)) (SourceOrigin target op)) ((SourceOrigin value op)) :ruleset source-summary)
 (rule ((SourceProjection value tuple i) (SourceOrigin tuple op)) ((SourceOrigin value op)) :ruleset source-summary)
 (rule ((SourceOrigin value op)) ((set (SourceHasOrigin value) true)) :ruleset source-summary)
 (rule ((SourceDefinition symbol region)) ((SourceCallable (SourceGlobal symbol) region)) :ruleset source-summary)
-(rule ((SourceAlias value target) (SourceCallable target region)) ((SourceCallable value region)) :ruleset source-summary)
+(rule ((= target (SourceAlias value)) (SourceCallable target region)) ((SourceCallable value region)) :ruleset source-summary)
 (rule ((SourceClosureCode value code) (SourceCallable code region)) ((SourceCallable value region)) :ruleset source-summary)
 (rule ((SourceApply value function) (SourceCallable function region)) ((SourceEnters value region)) :ruleset source-summary)
 (rule ((SourceEnteredBy region value)) ((SourceEnters value region)) :ruleset source-summary)
@@ -37,7 +42,7 @@
 
 (rule ((= value (SourceDestination op))) ((set (SourceStorage value) false)) :ruleset source-summary)
 (rule ((= ty (SourceType value)) (SourceViewType ty)) ((set (SourceStorage value) true)) :ruleset source-summary)
-(rule ((SourceAlias value target) (= storage (SourceStorage target))) ((set (SourceStorage value) storage)) :ruleset source-summary)
+(rule ((= target (SourceAlias value)) (= storage (SourceStorage target))) ((set (SourceStorage value) storage)) :ruleset source-summary)
 (rule ((SourceProjection value target i) (= storage (SourceStorage target))) ((set (SourceStorage value) storage)) :ruleset source-summary)
 (rule ((= value (SourceOperationValue op)) (= destination (SourceDestination op)) (= storage (SourceStorage destination)))
       ((set (SourceStorage value) storage)) :ruleset source-summary)
@@ -55,7 +60,7 @@
 (relation SourceReadCandidate (OperationKey SourceValue))
 (rule ((SourceReadCandidate op value)) ((BackingIdentity value)) :ruleset source-summary)
 (rule ((= value (SourceDestination op))) ((BackingIdentity value)) :ruleset source-summary)
-(rule ((SourceAlias value target)) ((union (BackingIdentity value) (BackingIdentity target))) :ruleset source-summary)
+(rule ((= target (SourceAlias value))) ((union (BackingIdentity value) (BackingIdentity target))) :ruleset source-summary)
 (rule ((SourceProjection value target i)) ((union (BackingIdentity value) (BackingIdentity target))) :ruleset source-summary)
 (rule ((SourceSlice value target start end)) ((union (BackingIdentity value) (BackingIdentity target))) :ruleset source-summary)
 (rule ((= value (SourceOperationValue op)) (= destination (SourceDestination op)))
@@ -65,7 +70,7 @@
 (function SourceScratchValue (SourceValue) bool :merge (or old new))
 (rule ((= value (SourceDestination op))) ((set (SourceScratchValue value) false)) :ruleset source-summary)
 (rule ((SourceScratch value n)) ((set (SourceScratchValue value) true)) :ruleset source-summary)
-(rule ((SourceAlias value target) (= scratch (SourceScratchValue target))) ((set (SourceScratchValue value) scratch)) :ruleset source-summary)
+(rule ((= target (SourceAlias value)) (= scratch (SourceScratchValue target))) ((set (SourceScratchValue value) scratch)) :ruleset source-summary)
 
 
 (function SourceRegionWork (RegionKey) i64 :no-merge)
@@ -85,7 +90,7 @@
 (relation SourceRegionReadsBinding (RegionKey i64 i64))
 (relation SourceMutableBinding (i64 i64))
 (relation SourceUnknownWrite ())
-(rule ((SourceAlias value source) (SourceBinding source set binding))
+(rule ((= source (SourceAlias value)) (SourceBinding source set binding))
       ((SourceBinding value set binding)) :ruleset source-summary)
 (rule ((SourceProjection value source i) (SourceBinding source set binding))
       ((SourceBinding value set binding)) :ruleset source-summary)
