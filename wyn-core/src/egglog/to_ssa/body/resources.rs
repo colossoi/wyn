@@ -51,6 +51,14 @@ impl Body<'_, '_, '_> {
             };
             let layout = self.compiler.facts.value_layout(source)?;
             let condition = self.value(scope, condition)?;
+            let selected = &self.compiler.program.stage.selected;
+            let (Some(&a_root), Some(&b_root)) = (
+                selected.roots.get(&(self.context, a)),
+                selected.roots.get(&(self.context, b)),
+            ) else {
+                return Err(error("branch has no selected result roots"));
+            };
+            self.share_branch_values(scope, a_root, b_root)?;
             return self.branch(
                 scope,
                 condition,

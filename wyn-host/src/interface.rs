@@ -77,16 +77,72 @@ impl FrameGraph {
     /// frame. Declaration order is one solution whenever the graph is acyclic,
     /// but not the only one; passes with no path between them may overlap.
     pub fn topological_order(&self) -> Result<Vec<usize>, Vec<usize>> {
-        let mut remaining: Vec<usize> = self.passes.iter().map(|pass| pass.depends_on.len()).collect();
+        self.order_units(&(0..self.passes.len()).collect::<Vec<_>>())
+    }
+
+    /// Read out selected loop bodies contiguously, keeping all dependencies.
+    /// A cycle between a loop and an outer pass makes that grouping invalid.
+    pub(crate) fn execution_order(&self, loops: &[DispatchLoop]) -> Result<Vec<usize>, String> {
+        let mut order =
+            self.topological_order().map_err(|cycle| format!("cyclic pass dependencies: {cycle:?}"))?;
+        if loops.is_empty() {
+            return Ok(order);
+        }
+        let indices: BTreeMap<_, _> = self
+            .passes
+            .iter()
+            .enumerate()
+            .map(|(index, pass)| ((pass.pipeline_index, pass.stage_index), index))
+            .collect();
+        let mut units: Vec<_> = (0..self.passes.len()).collect();
+        let mut owners = vec![None; self.passes.len()];
+        for (region, repeated) in loops.iter().enumerate() {
+            let Some(&setup) = indices.get(&(repeated.pipeline, repeated.setup)) else {
+                return Err("loop setup has no published pass".into());
+            };
+            for stage in std::iter::once(repeated.setup)
+                .chain(repeated.body.iter().copied())
+                .chain(std::iter::once(repeated.completion))
+            {
+                let Some(&index) = indices.get(&(repeated.pipeline, stage)) else {
+                    return Err("loop stage has no published pass".into());
+                };
+                if let Some(previous) = owners[index].replace(region) {
+                    return Err(format!(
+                        "dispatch loop {region} reuses pass {index} already in loop {previous}"
+                    ));
+                }
+                units[index] = setup;
+            }
+        }
+        let grouped = self
+            .order_units(&units)
+            .map_err(|cycle| format!("cyclic dependencies across dispatch loop boundaries: {cycle:?}"))?;
+        let mut position = vec![0; self.passes.len()];
+        for (rank, unit) in grouped.into_iter().enumerate() {
+            position[unit] = rank;
+        }
+        // Stable sorting retains the dependency order within each loop.
+        order.sort_by_key(|&index| position[units[index]]);
+        Ok(order)
+    }
+
+    fn order_units(&self, units: &[usize]) -> Result<Vec<usize>, Vec<usize>> {
+        let mut remaining = vec![0; self.passes.len()];
         let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); self.passes.len()];
         for (index, pass) in self.passes.iter().enumerate() {
             for &dependency in &pass.depends_on {
-                dependents[dependency].push(index);
+                if index == dependency || units[index] != units[dependency] {
+                    remaining[units[index]] += 1;
+                    dependents[units[dependency]].push(units[index]);
+                }
             }
         }
 
+        let representatives: Vec<_> =
+            (0..self.passes.len()).filter(|&index| units[index] == index).collect();
         let mut ready: VecDeque<usize> =
-            (0..self.passes.len()).filter(|&index| remaining[index] == 0).collect();
+            representatives.iter().copied().filter(|&index| remaining[index] == 0).collect();
         let mut order = Vec::with_capacity(self.passes.len());
         while let Some(index) = ready.pop_front() {
             order.push(index);
@@ -98,10 +154,10 @@ impl FrameGraph {
             }
         }
 
-        if order.len() == self.passes.len() {
+        if order.len() == representatives.len() {
             Ok(order)
         } else {
-            Err((0..self.passes.len()).filter(|&index| remaining[index] > 0).collect())
+            Err(representatives.into_iter().filter(|&index| remaining[index] > 0).collect())
         }
     }
 

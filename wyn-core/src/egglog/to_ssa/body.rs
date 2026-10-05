@@ -19,6 +19,7 @@ mod collective;
 mod control;
 mod materialize;
 mod resources;
+mod sharing;
 mod values;
 
 pub(super) struct Body<'a, 'p, 'source> {
@@ -271,6 +272,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                 }
                 "ScalarChoice" => {
                     let condition = self.scalar(scope, fields[2])?;
+                    self.share_branch_values(scope, fields[3], fields[4])?;
                     let layout = self.compiler.facts.layout(selected.values[fields[1]])?;
                     self.branch(
                         scope,

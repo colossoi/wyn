@@ -360,6 +360,49 @@ fn partial_arithmetic_stays_conditional() {
 }
 
 #[test]
+fn shared_branch_producers_keep_one_guarded_loop() {
+    let source = include_str!("../../../testfiles/regressions/shared_branch_producer.wyn");
+    for (consumer, loops) in [
+        ("if y > 1.0 then color else color * 0.8", 1),
+        (
+            "if y > 1.0 then (if y > 2.0 then color else @[0.0,0.0,0.0,0.0])
+             else (if y < 0.0 then color * 0.8 else @[0.0,0.0,0.0,0.0])",
+            2,
+        ),
+    ] {
+        let source = source.replace("if y > 1.0 then color else color * 0.8", consumer);
+        let module = shaders(&source);
+        let fragment =
+            &module.entry_points.iter().find(|e| e.stage == naga::ShaderStage::Fragment).unwrap().function;
+        fn guarded_loops(block: &naga::Block, depth: usize) -> Vec<usize> {
+            block
+                .iter()
+                .flat_map(|statement| match statement {
+                    Statement::If { accept, reject, .. } => {
+                        let mut loops = guarded_loops(accept, depth + 1);
+                        loops.extend(guarded_loops(reject, depth + 1));
+                        loops
+                    }
+                    Statement::Loop { body, .. } => {
+                        let mut loops = vec![depth];
+                        loops.extend(guarded_loops(body, depth));
+                        loops
+                    }
+                    Statement::Block(block) => guarded_loops(block, depth),
+                    _ => Vec::new(),
+                })
+                .collect()
+        }
+        let depths = guarded_loops(&fragment.body, 0);
+        assert_eq!(depths.len(), loops, "{source}");
+        assert!(
+            depths.iter().all(|&depth| depth > 0),
+            "producer escaped its x guard: {source}"
+        );
+    }
+}
+
+#[test]
 fn loops_with_accumulators_reach_both_backends() {
     shaders("entry sum(n:i32) i32=loop acc=0 for i<n do acc+i");
 }

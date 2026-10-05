@@ -265,8 +265,8 @@ impl Program {
         let order = program
             .interface
             .frame_graph
-            .topological_order()
-            .map_err(|cycle| HostError::Invalid(format!("cyclic pass dependencies: {cycle:?}")))?;
+            .execution_order(&program.interface.dispatch_loops)
+            .map_err(HostError::Invalid)?;
         let mut entries = BTreeMap::<String, Entry>::new();
         let mut stage_operations = BTreeMap::new();
         let mut entry_stages = BTreeMap::<String, Vec<(usize, usize)>>::new();
@@ -348,9 +348,10 @@ impl Program {
                     .iter()
                     .position(|key| *key == completion)
                     .ok_or_else(|| HostError::Invalid("loop completion is outside its entry".into()))?;
-                if end <= begin || loops.insert(setup, region).is_some() {
-                    return Err(HostError::Invalid("invalid or duplicate loop setup".into()));
+                if end <= begin {
+                    return Err(HostError::Invalid("loop completion precedes its setup".into()));
                 }
+                loops.insert(setup, region);
                 let mut previous = begin;
                 for &stage in &repeated.body {
                     let key = (repeated.pipeline, stage);
@@ -358,27 +359,13 @@ impl Program {
                         .iter()
                         .position(|candidate| *candidate == key)
                         .ok_or_else(|| HostError::Invalid("loop body stage is outside its entry".into()))?;
-                    if position <= previous || position >= end || !members.insert(key) {
-                        return Err(HostError::Invalid(
-                            "loop body is unordered or overlaps another loop".into(),
-                        ));
+                    if position <= previous || position >= end {
+                        return Err(HostError::Invalid("loop body is unordered".into()));
                     }
+                    members.insert(key);
                     previous = position;
                 }
-                if !members.insert(completion)
-                    || stages[begin + 1..end]
-                        .iter()
-                        .any(|key| !repeated.body.contains(&key.1) || key.0 != repeated.pipeline)
-                {
-                    return Err(HostError::Invalid(
-                        "loop contains an interleaved outer stage".into(),
-                    ));
-                }
-            }
-            if loops.keys().any(|key| members.contains(key)) {
-                return Err(HostError::Invalid(
-                    "nested dispatch loops are not supported".into(),
-                ));
+                members.insert(completion);
             }
             let mut operations = Vec::new();
             for key in stages {

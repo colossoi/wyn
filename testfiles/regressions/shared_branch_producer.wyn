@@ -1,0 +1,16 @@
+def vertex(vi: u32, _instance: u32, _draw: u32) vertex<()> =
+  vertex_output(@[if vi == 1u32 then 3.0 else -1.0,
+                  if vi == 2u32 then 3.0 else -1.0, 0.0, 1.0], ())
+
+def wet(color: vec4f32, y: f32) vec4f32 =
+  if y > 1.0 then color else color * 0.8
+
+entry repro(xs: []f32, target: render_target<vec4f32>) render_target<vec4f32> =
+  let triangles = rasterize_triangles(direct_draw(3u32, 1u32), vertex) in
+  shade(target, triangles, |_, position, _, _, _|
+    let x = position.x
+    let color = if x < 0.0 then @[0.0, 0.0, 0.0, 0.0]
+                else
+                  let s = loop s = x for i < 8 do f32.sin(s) + xs[i] in
+                  @[s, s + 1.0, s + 2.0, 1.0]
+    in wet(color, position.y))

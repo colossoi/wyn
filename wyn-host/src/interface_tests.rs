@@ -1,9 +1,60 @@
 use super::{
-    Access, BackingRef, Binding, BufferUsage, ComputePipeline, ComputeStage, DispatchLen, DispatchSize,
-    FragmentOutput, FrameGraph, FrameResourceExtent, FrameResourceKind, GraphicsInvocation,
-    GraphicsPipeline, GraphicsStage, ModuleInterface, Pipeline, ShaderStage, StageBindingUses,
-    StorageImageFormat, StorageTextureSize, TextureSampleType, TextureViewDimension,
+    Access, BackingRef, Binding, BufferUsage, ComputePipeline, ComputeStage, DispatchLen, DispatchLoop,
+    DispatchSize, FragmentOutput, FrameGraph, FramePass, FramePassKind, FrameResourceExtent,
+    FrameResourceKind, GraphicsInvocation, GraphicsPipeline, GraphicsStage, ModuleInterface, Pipeline,
+    ShaderStage, StageBindingUses, StorageImageFormat, StorageTextureSize, TextureSampleType,
+    TextureViewDimension,
 };
+use crate::{ScalarExpr, ScalarSource};
+
+#[test]
+fn selected_loops_stay_contiguous_and_wait_for_outer_dependencies() {
+    let dependencies = [vec![], vec![0, 4], vec![1], vec![], vec![3], vec![2]];
+    let mut graph = FrameGraph {
+        passes: dependencies
+            .into_iter()
+            .enumerate()
+            .map(|(index, depends_on)| FramePass {
+                name: format!("stage{index}"),
+                kind: FramePassKind::Compute,
+                pipeline_index: 0,
+                stage_index: index,
+                reads: vec![],
+                writes: vec![],
+                depends_on,
+            })
+            .collect(),
+        ..FrameGraph::default()
+    };
+    let repeated = DispatchLoop {
+        initial_length: ScalarExpr::I32(8),
+        pipeline: 0,
+        setup: 0,
+        body: vec![1],
+        completion: 2,
+        count: ScalarExpr::I32(8),
+        index: ScalarSource::Binding { set: 0, binding: 0 },
+        current: ScalarSource::Binding { set: 0, binding: 1 },
+        next: ScalarSource::Binding { set: 0, binding: 2 },
+    };
+    assert_eq!(graph.topological_order().unwrap(), [0, 3, 4, 1, 2, 5]);
+    assert_eq!(
+        graph.execution_order(&[]).unwrap(),
+        graph.topological_order().unwrap()
+    );
+    assert_eq!(
+        graph.execution_order(&[repeated.clone()]).unwrap(),
+        [3, 4, 0, 1, 2, 5]
+    );
+    assert!(graph.execution_order(&[repeated.clone(), repeated.clone()]).is_err());
+    let mut missing = repeated.clone();
+    missing.body.push(6);
+    assert!(graph.execution_order(&[missing]).is_err());
+    // The flat graph is acyclic, but this outer pass would have to run inside the loop.
+    graph.passes[4].depends_on.push(0);
+    assert!(graph.topological_order().is_ok());
+    assert!(graph.execution_order(&[repeated]).unwrap_err().contains("across dispatch loop boundaries"));
+}
 
 #[test]
 fn frame_graph_aliases_storage_texture_views_and_orders_consumers() {

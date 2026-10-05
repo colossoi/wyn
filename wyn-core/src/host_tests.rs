@@ -14,6 +14,28 @@ fn compile(source: &str) -> Program {
 }
 
 #[test]
+fn independent_work_and_successive_loops_reach_host_backends() {
+    let source = "entry main(xs:[8]i32, ys:[8]i32, k:i32) ([8]i32,i32) =
+        let first=loop values=xs for i<k do map(|x|x+i,values) in
+        let other=reduce((+),0,map(|x|x*x,ys)) in
+        let second=loop values=first for i<k do map(|x|x*2+i,values) in
+        (second,other)";
+    for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+        let ssa = compile_thru_ssa(source).unwrap();
+        let program = match format {
+            ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+            ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+        };
+        assert_eq!(
+            program.entries[0].operations.iter().filter(|op| matches!(op, Operation::Loop { .. })).count(),
+            2
+        );
+        program.to_rust_wgpu("loops", format).unwrap();
+        program.to_whl("loops", format).unwrap();
+    }
+}
+
+#[test]
 fn rematerialized_helpers_and_dispatch_extents_publish_their_inputs() {
     for source in [
         include_str!("../../testfiles/scalar_setup.wyn"),
