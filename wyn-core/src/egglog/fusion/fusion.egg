@@ -228,16 +228,18 @@
 
 ; Indexed expansion is terminal: plan all contractions before making helpers.
 (relation IndexedCandidate (FusionGroup))
+(relation IndexedEligible (FusionGroup))
 (function IndexedBlocked (FusionGroup) bool :merge (or old new))
 (ruleset fusion-indexed-analysis)
-(rule ((Current p a))
+(rule ((IndexedEligible p))
       ((set (IndexedBlocked p) false)) :ruleset fusion-indexed-analysis)
-(rule ((GroupUseFact p (To c role))
+(rule ((IndexedEligible p)
+       (GroupUseFact p (To c role))
        (!= p c)
-       (Member c original)
        (PlanningRound n) (= (wyn-order-intermediate n p c) true))
       ((set (IndexedBlocked p) true)) :ruleset fusion-indexed-analysis :naive)
-(ruleset fusion-indexed)
+; Establish applicability before querying paths through the quotient graph.
+(ruleset fusion-indexed-eligibility)
 (rule ((Current p a)
        (ScremaPlan a)
        (MovablePlan a)
@@ -246,8 +248,10 @@
        (= uses (set-diff (GroupUsesOf p) (SelfUses p)))
        (> (set-length uses) 0)
        (<= (set-length uses) (DemandLimit a))
-       (= (IndexedBlocked p) false)
        (= uses (set-diff (IndexedUses p) (set-union (SelfUses p) (IndexAddressUses p)))))
+      ((IndexedEligible p)) :ruleset fusion-indexed-eligibility)
+(ruleset fusion-indexed)
+(rule ((IndexedEligible p) (= (IndexedBlocked p) false))
       ((IndexedCandidate p)) :ruleset fusion-indexed)
 ; Snapshot uses before union; materialization will replay these decisions once.
 

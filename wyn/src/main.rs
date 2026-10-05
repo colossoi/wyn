@@ -616,7 +616,9 @@ fn build(
     };
     let output_path = output_path(&normalized_input, output, target)?;
     let compilation = compile(parsed_modules, options)?;
-    write_artifacts(&output_path, compilation, target_double, verbose)?;
+    time("write_artifacts", verbose, || {
+        write_artifacts(&output_path, compilation, target_double, verbose)
+    })?;
 
     // Always-on wall-clock summary (per-pass breakdown is available via
     // `-v`). Printed to stderr so it doesn't pollute any piped output.
@@ -867,10 +869,10 @@ fn write_artifacts(
             "shader output needs a UTF-8 file name".into(),
         ));
     };
-    let source = match target_double {
-        TargetDouble::WhlUnknown => program.to_whl(module_name, shader_format)?,
-        TargetDouble::RustWgpu => program.to_rust_wgpu(module_name, shader_format)?,
-    };
+    let source = time("host_emit", verbose, || match target_double {
+        TargetDouble::WhlUnknown => program.to_whl(module_name, shader_format),
+        TargetDouble::RustWgpu => program.to_rust_wgpu(module_name, shader_format),
+    })?;
     fs::write(&host_path, source)?;
     if verbose {
         info!("Wrote host program to {}", host_path.display());

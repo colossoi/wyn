@@ -1,5 +1,6 @@
 ; Indexed expansion uses the final quotient graph snapshot.
 (run-schedule
+  (saturate fusion-indexed-eligibility)
   (saturate fusion-indexed-analysis)
   (saturate fusion-indexed)
   (saturate
