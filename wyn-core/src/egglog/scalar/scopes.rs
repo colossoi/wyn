@@ -10,8 +10,6 @@ pub(super) struct Scope(usize);
 struct Node {
     value: Value,
     parent: Option<Scope>,
-    depth: usize,
-    root: Scope,
     interval: DfsInterval,
 }
 
@@ -31,13 +29,10 @@ impl Forest {
         let indices: LookupMap<_, _> = values.iter().enumerate().map(|(i, &v)| (v, Scope(i))).collect();
         let mut nodes: Vec<_> = values
             .into_iter()
-            .enumerate()
-            .map(|(i, value)| {
+            .map(|value| {
                 Ok(Node {
                     value,
                     parent: parent(value)?.and_then(|p| indices.get(&p).copied()),
-                    depth: 0,
-                    root: Scope(i),
                     interval: DfsInterval { start: 0, end: 0 },
                 })
             })
@@ -57,14 +52,8 @@ impl Forest {
         if intervals.len() != nodes.len() {
             return Err(OptimizeError::Output("cyclic lexical scope forest".into()));
         }
-        let mut preorder: Vec<_> = intervals.into_iter().collect();
-        preorder.sort_by_key(|(_, interval)| interval.start);
-        for (scope, interval) in preorder {
+        for (scope, interval) in intervals {
             nodes[scope.0].interval = interval;
-            if let Some(parent) = nodes[scope.0].parent {
-                nodes[scope.0].depth = nodes[parent.0].depth + 1;
-                nodes[scope.0].root = nodes[parent.0].root;
-            }
         }
         Ok(Self { nodes, indices })
     }
@@ -78,25 +67,9 @@ impl Forest {
     pub fn parent(&self, scope: Scope) -> Option<Scope> {
         self.nodes[scope.0].parent
     }
-    pub fn root(&self, scope: Scope) -> Scope {
-        self.nodes[scope.0].root
-    }
     pub fn ancestor(&self, a: Scope, b: Scope) -> bool {
         let (a, b) = (&self.nodes[a.0], &self.nodes[b.0]);
         a.interval.contains(b.interval.start)
-    }
-    pub fn common(&self, mut a: Scope, mut b: Scope) -> Option<Scope> {
-        if self.root(a) != self.root(b) {
-            return None;
-        }
-        while a != b {
-            if self.nodes[a.0].depth >= self.nodes[b.0].depth {
-                a = self.parent(a)?;
-            } else {
-                b = self.parent(b)?;
-            }
-        }
-        Some(a)
     }
     /// Ancestor requirements are implied by a requirement in a deeper scope.
     pub fn require(&self, requirements: &mut Vec<Scope>, scope: Scope) {
@@ -132,13 +105,6 @@ impl Scopes {
         self.definitions
             .find(scope)
             .is_some_and(|scope| required.iter().all(|&d| self.definitions.ancestor(d, scope)))
-    }
-    pub fn common(&self, context: Value, a: Value, b: Value) -> Option<Value> {
-        let tree = self.contexts.get(&context)?;
-        Some(tree.value(tree.common(tree.find(a)?, tree.find(b)?)?))
-    }
-    pub fn root(&self, context: Value, value: Value) -> Value {
-        self.contexts.get(&context).and_then(|t| t.find(value).map(|s| t.value(t.root(s)))).unwrap_or(value)
     }
     pub fn outside_loops(&self, context: Value, scope: Value, required: &[Scope]) -> Value {
         let Some(tree) = self.contexts.get(&context) else {

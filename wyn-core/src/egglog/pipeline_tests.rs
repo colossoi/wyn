@@ -359,6 +359,110 @@ fn partial_arithmetic_stays_conditional() {
     assert_eq!(module.entry_points.len(), 1);
 }
 
+fn guarded_loops(block: &naga::Block, depth: usize) -> Vec<usize> {
+    block
+        .iter()
+        .flat_map(|statement| match statement {
+            Statement::If { accept, reject, .. } => {
+                let mut loops = guarded_loops(accept, depth + 1);
+                loops.extend(guarded_loops(reject, depth + 1));
+                loops
+            }
+            Statement::Loop { body, .. } => {
+                let mut loops = vec![depth];
+                loops.extend(guarded_loops(body, depth));
+                loops
+            }
+            Statement::Block(block) => guarded_loops(block, depth),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+#[test]
+fn sibling_branches_share_producers_only_under_matching_guards() {
+    let source = include_str!("../../../testfiles/regressions/sibling_branch_producer.wyn");
+    for (direct, specular, loops, unguarded) in [
+        (
+            "if skip then 0.0 else s",
+            "if skip then 0.0 else s*position.z",
+            1,
+            0,
+        ),
+        (
+            "if skip then s else 0.0",
+            "if skip then s*position.z else 0.0",
+            1,
+            0,
+        ),
+        // One consumer demands s on each path, so evaluating it before the
+        // common split is safe even though the individual uses are guarded.
+        (
+            "if skip then 0.0 else s",
+            "if skip then s*position.z else 0.0",
+            1,
+            1,
+        ),
+        (
+            "if skip then 0.0 else s",
+            "if position.y>2.0 then 0.0 else s*position.z",
+            2,
+            0,
+        ),
+        (
+            "if skip then 0.0 else (if position.z>0.0 then s else 0.0)",
+            "if skip then 0.0 else s*position.z",
+            1,
+            0,
+        ),
+    ] {
+        let source = source
+            .replace(
+                "let direct=if skip then 0.0 else s",
+                &format!("let direct={direct}"),
+            )
+            .replace(
+                "let specular=if skip then 0.0 else s*position.z",
+                &format!("let specular={specular}"),
+            );
+        let module = shaders(&source);
+        let fragment =
+            &module.entry_points.iter().find(|e| e.stage == naga::ShaderStage::Fragment).unwrap().function;
+        let depths = guarded_loops(&fragment.body, 0);
+        assert_eq!(depths.len(), loops, "{source}");
+        assert_eq!(
+            depths.iter().filter(|&&depth| depth == 0).count(),
+            unguarded,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn grouped_materializations_keep_guarded_availability() {
+    let source = include_str!("../../../testfiles/regressions/sibling_branch_producer.wyn");
+    for (last, loops, unguarded) in [
+        ("if skip then 0.0 else s*3.0", 1, 0),
+        ("if skip then 0.0 else direct+specular", 1, 0),
+        ("s", 1, 1),
+    ] {
+        let source = source.replace(
+            "@[direct,specular,0.0,1.0]",
+            &format!("@[direct,specular,{last},1.0]"),
+        );
+        let module = shaders(&source);
+        let fragment =
+            &module.entry_points.iter().find(|e| e.stage == naga::ShaderStage::Fragment).unwrap().function;
+        let depths = guarded_loops(&fragment.body, 0);
+        assert_eq!(depths.len(), loops, "{source}");
+        assert_eq!(
+            depths.iter().filter(|&&depth| depth == 0).count(),
+            unguarded,
+            "{source}"
+        );
+    }
+}
+
 #[test]
 fn shared_branch_producers_keep_one_guarded_loop() {
     let source = include_str!("../../../testfiles/regressions/shared_branch_producer.wyn");
@@ -374,25 +478,6 @@ fn shared_branch_producers_keep_one_guarded_loop() {
         let module = shaders(&source);
         let fragment =
             &module.entry_points.iter().find(|e| e.stage == naga::ShaderStage::Fragment).unwrap().function;
-        fn guarded_loops(block: &naga::Block, depth: usize) -> Vec<usize> {
-            block
-                .iter()
-                .flat_map(|statement| match statement {
-                    Statement::If { accept, reject, .. } => {
-                        let mut loops = guarded_loops(accept, depth + 1);
-                        loops.extend(guarded_loops(reject, depth + 1));
-                        loops
-                    }
-                    Statement::Loop { body, .. } => {
-                        let mut loops = vec![depth];
-                        loops.extend(guarded_loops(body, depth));
-                        loops
-                    }
-                    Statement::Block(block) => guarded_loops(block, depth),
-                    _ => Vec::new(),
-                })
-                .collect()
-        }
         let depths = guarded_loops(&fragment.body, 0);
         assert_eq!(depths.len(), loops, "{source}");
         assert!(

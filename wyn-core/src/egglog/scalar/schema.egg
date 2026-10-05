@@ -39,10 +39,15 @@
 ; Expression identities already carry their optimization context.
 (relation ScalarTotal (ScalarExpr))
 (relation ScalarArgsTotal (ScalarArgs))
+; Effects of materialization, including definitions reached through leaves.
+; An effectful alternative must not acquire a proof through e-class merging.
+(function ScalarReadOnly (ScalarExpr) bool :merge (and old new))
+(function ScalarArgsReadOnly (ScalarArgs) bool :merge (and old new))
 ; Callback contexts refer to selected fusion plans; scalar expressions stay
 ; in the scalar graph and are queried directly during SSA emission.
 (relation ScalarInvocation (FusionPlan OperationKey RegionKey))
 (ruleset scalar-analysis)
+(ruleset scalar-effects)
 (ruleset scalar-inline)
 (ruleset scalar-substitute)
 (ruleset scalar-arguments)

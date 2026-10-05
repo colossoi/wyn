@@ -13,6 +13,10 @@ mod read;
 mod scopes;
 use import::Importer;
 
+#[cfg(test)]
+#[path = "scalar/analysis_tests.rs"]
+mod analysis_tests;
+
 /// Egglog's own extracted DAG, retained unchanged for direct SSA emission.
 pub(super) struct Selected {
     pub dag: TermDag,
@@ -77,6 +81,8 @@ pub(super) fn run(
                         | "SourceProjected"
                         | "SourceInvocation"
                         | "SourceLoop"
+                        | "SourceReadOnly"
+                        | "SourceRegionReadOnly"
                         | "FusionSource"
                         | "Joined"
                 )
@@ -97,6 +103,9 @@ pub(super) fn run(
         })?
     })?;
     timing::time("egglog scalar / fixed point", || scalars.run_program(schedule))?;
+    timing::time("egglog scalar / effect summaries", || {
+        scalars.parse_and_run_program(None, "(run-schedule (saturate scalar-effects))")
+    })?;
     scalars.parse_and_run_program(
         Some("scalar host preferences".into()),
         include_str!("scalar/host.egg"),

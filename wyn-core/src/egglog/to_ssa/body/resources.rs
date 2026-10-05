@@ -58,7 +58,13 @@ impl Body<'_, '_, '_> {
             ) else {
                 return Err(error("branch has no selected result roots"));
             };
-            self.share_branch_values(scope, a_root, b_root)?;
+            let shared = self.compiler.placements.shared(
+                self.compiler.program,
+                scope,
+                [&[a_root], &[b_root]],
+                |source| self.values.contains_key(&source),
+            )?;
+            self.materializations(scope, &shared)?;
             return self.branch(
                 scope,
                 condition,

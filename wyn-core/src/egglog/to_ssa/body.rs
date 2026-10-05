@@ -18,8 +18,8 @@ use wyn_graph::DominatorTree;
 mod collective;
 mod control;
 mod materialize;
+mod readout;
 mod resources;
-mod sharing;
 mod values;
 
 pub(super) struct Body<'a, 'p, 'source> {
@@ -110,7 +110,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         }
         let value =
             if let Some(&term) = self.compiler.program.stage.selected.roots.get(&(self.context, source)) {
-                self.scalar(scope, term)?
+                self.scalar_body(scope, term)?
             } else {
                 self.boundary(scope, source)?
             };
@@ -120,6 +120,10 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
     }
 
     fn scalar(&mut self, scope: Value, term: TermId) -> Result<Typed, OptimizeError> {
+        self.scalar_at(scope, term, self.current()?)
+    }
+
+    fn scalar_at(&mut self, scope: Value, term: TermId, target: BlockId) -> Result<Typed, OptimizeError> {
         if let Some(&binding) = self.compiler.plan.captures.get(&term) {
             let (_, fields) = self.compiler.program.stage.selected.app(term)?;
             let Some(ty) =
@@ -138,16 +142,11 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
             let value = self.index(view, zero)?;
             return self.cast(value, &ty);
         }
-        let current = self.current()?;
-        if let Some(values) = self.scalar_values.get(&term) {
-            if let Some((_, value)) = values.iter().rev().find(|(block, _)| self.dominates(*block, current))
-            {
-                return Ok(value.clone());
-            }
+        if let Some(value) = self.available_scalar(term)? {
+            return Ok(value);
         }
         let program = self.compiler.program;
         let selected = &program.stage.selected;
-        let target = self.scalar_target(term)?;
         let (name, fields) = selected.app(term)?;
         let Some(ty) = self.compiler.facts.ty(selected.values[fields[1]]).cloned() else {
             return Err(error("selected scalar type missing"));
@@ -235,7 +234,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                         .map(|arg| self.scalar(scope, arg))
                         .collect::<Result<Vec<_>, _>>()?;
                     let tag = selected.operator(fields[2], arguments.len())?;
-                    self.op_at(self.scalar_target(term)?, tag, arguments, ty)?
+                    self.op_at(target, tag, arguments, ty)?
                 }
                 "ScalarInvoke" => {
                     let callee = selected.values[fields[2]];
@@ -259,7 +258,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                         } else {
                             ty
                         };
-                    self.op_at(self.scalar_target(term)?, tag, args, ty)?
+                    self.op_at(target, tag, args, ty)?
                 }
                 "ScalarProject" => {
                     let index = selected.integer(fields[3])? as usize;
@@ -270,24 +269,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                     let value = self.scalar(scope, fields[2])?;
                     self.cast(value, &ty)?
                 }
-                "ScalarChoice" => {
-                    let condition = self.scalar(scope, fields[2])?;
-                    self.share_branch_values(scope, fields[3], fields[4])?;
-                    let layout = self.compiler.facts.layout(selected.values[fields[1]])?;
-                    self.branch(
-                        scope,
-                        condition,
-                        |body| {
-                            let value = body.scalar(scope, fields[3])?;
-                            body.materialize(value, layout)
-                        },
-                        |body| {
-                            let value = body.scalar(scope, fields[4])?;
-                            body.materialize(value, layout)
-                        },
-                        None,
-                    )?
-                }
+                "ScalarChoice" => self.scalar_body(scope, term)?,
                 _ => return Err(error(format!("unresolved selected constructor {name}"))),
             }
         };
@@ -304,18 +286,15 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         Ok(value)
     }
 
-    fn scalar_target(&self, term: TermId) -> Result<BlockId, OptimizeError> {
+    fn available_scalar(&self, term: TermId) -> Result<Option<Typed>, OptimizeError> {
         let current = self.current()?;
-        let mut target = None;
-        for (&scope, &block) in self.scopes.iter() {
-            if self.compiler.placements[term].contains(&scope)
-                && self.dominates(block, current)
-                && target.is_none_or(|old| self.dominates(old, block))
-            {
-                target = Some(block);
-            }
-        }
-        Ok(target.unwrap_or(current))
+        Ok(self.scalar_values.get(&term).and_then(|values| {
+            values
+                .iter()
+                .rev()
+                .find(|(block, _)| self.dominates(*block, current))
+                .map(|(_, value)| value.clone())
+        }))
     }
 
     fn dominates(&self, definition: BlockId, use_block: BlockId) -> bool {
@@ -393,7 +372,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         for (formal, value) in bindings {
             self.values.insert(formal, value);
         }
-        let result = self.scalar(scope, term);
+        let result = self.scalar_body(scope, term);
         self.context = old_context;
         self.values.restore(old_values);
         self.scopes = old_scopes;

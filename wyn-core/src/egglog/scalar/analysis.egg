@@ -12,6 +12,32 @@
 (rule ((ScalarActive ctx) (= e (ScalarUnary ctx t op x)) (ScalarOperatorSafe t op) (ScalarTotal x)) ((ScalarTotal e)) :ruleset scalar-analysis)
 (rule ((ScalarActive ctx) (= e (ScalarBinary ctx t op x y)) (ScalarOperatorSafe t op) (ScalarTotal x) (ScalarTotal y)) ((ScalarTotal e)) :ruleset scalar-analysis)
 
+; A read-only proof does not authorize speculation: guarded reads and loops
+; can be read-only without being total.
+(rule ((ScalarActive ctx) (= e (ScalarLiteral ctx t value))) ((set (ScalarReadOnly e) true)) :ruleset scalar-effects)
+(rule ((ScalarActive ctx) (= e (ScalarParameter ctx t region i))) ((set (ScalarReadOnly e) true)) :ruleset scalar-effects)
+; Loop state, iteration values, and captures are bound by their invocation.
+(rule ((ScalarActive ctx) (= e (ScalarLeaf ctx t (SourceFormal region i)))) ((set (ScalarReadOnly e) true)) :ruleset scalar-effects)
+(rule ((ScalarActive ctx) (= e (ScalarLeaf ctx t source)) (= readonly (SourceReadOnly source))) ((set (ScalarReadOnly e) readonly)) :ruleset scalar-effects)
+(rule ((ScalarActive ctx) (= e (ScalarExecute ctx t source)) (= readonly (SourceReadOnly source))) ((set (ScalarReadOnly e) readonly)) :ruleset scalar-effects)
+; A source summary treats earlier bindings as available; readout may have to
+; materialize their selected definitions. Propagate those effects as well.
+(rule ((ScalarActive ctx) (= e (ScalarLeaf ctx t source)) (ScalarRoot ctx region source root) (= (ScalarReadOnly root) false))
+      ((set (ScalarReadOnly e) false)) :ruleset scalar-effects)
+(rule ((ScalarActive ctx) (= xs (ScalarNil ctx))) ((set (ScalarArgsReadOnly xs) true)) :ruleset scalar-effects)
+(rule ((ScalarActive ctx) (= xs (ScalarCons ctx x tail)) (= a (ScalarReadOnly x)) (= b (ScalarArgsReadOnly tail))) ((set (ScalarArgsReadOnly xs) (and a b))) :ruleset scalar-effects)
+(rule ((ScalarActive ctx) (= e (ScalarInstruction ctx t source op args)) (= a (SourceReadOnly source)) (= b (ScalarArgsReadOnly args))) ((set (ScalarReadOnly e) (and a b))) :ruleset scalar-effects)
+(rule ((ScalarActive ctx) (= e (ScalarCall ctx t source region args)) (= a (SourceReadOnly source)) (= b (ScalarArgsReadOnly args))) ((set (ScalarReadOnly e) (and a b))) :ruleset scalar-effects)
+(rule ((ScalarActive ctx) (= e (ScalarInvoke ctx t region args)) (= a (SourceRegionReadOnly region)) (= b (ScalarArgsReadOnly args))) ((set (ScalarReadOnly e) (and a b))) :ruleset scalar-effects)
+(rule ((ScalarActive ctx) (= e (ScalarUnary ctx t op x)) (= readonly (ScalarReadOnly x))) ((set (ScalarReadOnly e) readonly)) :ruleset scalar-effects)
+(rule ((ScalarActive ctx) (= e (ScalarBinary ctx t op x y)) (= a (ScalarReadOnly x)) (= b (ScalarReadOnly y))) ((set (ScalarReadOnly e) (and a b))) :ruleset scalar-effects)
+(rule ((ScalarActive ctx) (= e (ScalarOp ctx t op xs)) (= readonly (ScalarArgsReadOnly xs))) ((set (ScalarReadOnly e) readonly)) :ruleset scalar-effects)
+(rule ((ScalarActive ctx) (= e (ScalarTuple ctx t xs)) (= readonly (ScalarArgsReadOnly xs))) ((set (ScalarReadOnly e) readonly)) :ruleset scalar-effects)
+(rule ((ScalarActive ctx) (= e (ScalarVector ctx t xs)) (= readonly (ScalarArgsReadOnly xs))) ((set (ScalarReadOnly e) readonly)) :ruleset scalar-effects)
+(rule ((ScalarActive ctx) (= e (ScalarProject ctx t x i)) (= readonly (ScalarReadOnly x))) ((set (ScalarReadOnly e) readonly)) :ruleset scalar-effects)
+(rule ((ScalarActive ctx) (= e (ScalarCoerce ctx t x)) (= readonly (ScalarReadOnly x))) ((set (ScalarReadOnly e) readonly)) :ruleset scalar-effects)
+(rule ((ScalarActive ctx) (= e (ScalarChoice ctx t c a b)) (= cr (ScalarReadOnly c)) (= ar (ScalarReadOnly a)) (= br (ScalarReadOnly b))) ((set (ScalarReadOnly e) (and cr (and ar br)))) :ruleset scalar-effects)
+
 ; A helper retaining an execution boundary from its own body is not a scalar
 ; substitution template. Caller-supplied stored values remain ordinary inputs.
 (rule ((= v (ScalarLeaf (ScalarTemplate r) ty source)) (= owner (ScalarOwner source)) (= r (ScalarHome owner)))

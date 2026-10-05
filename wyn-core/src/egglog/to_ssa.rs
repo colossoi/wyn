@@ -43,7 +43,7 @@ pub(super) fn lower(
         program,
         facts,
         plan: plan::Plan::new(program)?,
-        placements: super::scalar::placement::run(program)?,
+        placements: super::scalar::placement::Placement::new(program)?,
         entry_origins: LookupMap::default(),
         entry_names: Default::default(),
         functions: Vec::new(),
@@ -117,7 +117,7 @@ pub(super) fn lower(
 }
 
 pub(super) struct Compiler<'a, 'source> {
-    placements: Vec<Vec<Value>>,
+    placements: super::scalar::placement::Placement,
     pub(super) program: &'a Program<'source, Optimized>,
     pub(super) facts: Facts<'a, 'source>,
     pub(super) plan: plan::Plan<'a, 'source>,

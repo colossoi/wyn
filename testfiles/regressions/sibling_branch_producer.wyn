@@ -1,0 +1,12 @@
+def vertex(vi:u32,_instance:u32,_draw:u32) vertex<()> =
+  vertex_output(@[if vi==1u32 then 3.0 else -1.0,
+                  if vi==2u32 then 3.0 else -1.0,0.0,1.0],())
+
+entry repro(xs:[]f32,target:render_target<vec4f32>) render_target<vec4f32> =
+  let triangles=rasterize_triangles(direct_draw(3u32,1u32),vertex) in
+  shade(target,triangles,|_,position,_,_,_|
+    let s=loop s=position.x for i<8 do f32.sin(s)+xs[i]
+    let skip=position.y>1.0
+    let direct=if skip then 0.0 else s
+    let specular=if skip then 0.0 else s*position.z
+    in @[direct,specular,0.0,1.0])
