@@ -471,7 +471,7 @@ fn shared_branch_producers_keep_one_guarded_loop() {
         (
             "if y > 1.0 then (if y > 2.0 then color else @[0.0,0.0,0.0,0.0])
              else (if y < 0.0 then color * 0.8 else @[0.0,0.0,0.0,0.0])",
-            2,
+            1,
         ),
     ] {
         let source = source.replace("if y > 1.0 then color else color * 0.8", consumer);
@@ -485,6 +485,20 @@ fn shared_branch_producers_keep_one_guarded_loop() {
             "producer escaped its x guard: {source}"
         );
     }
+}
+
+#[test]
+fn enclosing_producer_is_shared_across_nested_consumer_guards() {
+    let source = include_str!("../../../testfiles/regressions/shared_branch_producer.wyn").replace(
+        "if y > 1.0 then color else color * 0.8",
+        "if y > 1.0 then color else if y < 0.0 then @[0.0,0.0,0.0,0.0] else color * 0.8",
+    );
+    let module = shaders(&source);
+    let fragment =
+        &module.entry_points.iter().find(|e| e.stage == naga::ShaderStage::Fragment).unwrap().function;
+    let depths = guarded_loops(&fragment.body, 0);
+    assert_eq!(depths.len(), 1);
+    assert!(depths[0] > 0, "producer must retain its own guard");
 }
 
 #[test]

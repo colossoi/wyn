@@ -171,7 +171,7 @@ impl Placement {
             program,
             bound,
         };
-        readout.body(scope, &readout.common(arms)?, &mut LookupSet::default())
+        readout.body(scope, &readout.common(scope, arms)?, &mut LookupSet::default())
     }
 }
 
@@ -233,12 +233,59 @@ impl<B: Fn(Value) -> bool> Readout<'_, '_, B> {
         Ok(true)
     }
 
-    fn common(&self, arms: [&[TermId]; 2]) -> Result<Vec<TermId>, OptimizeError> {
+    fn enclosing_bindings(
+        &self,
+        scope: Value,
+        roots: &[TermId],
+    ) -> Result<LookupSet<TermId>, OptimizeError> {
+        let selected = &self.program.stage.selected;
+        let terms = wyn_graph::dag_postorder(
+            roots.iter().copied(),
+            |_| false,
+            |term, out| {
+                out.extend(self.dependencies(term));
+                if let Term::App(name, fields) = selected.dag.get(term) {
+                    if name == "ScalarChoice" {
+                        out.extend_from_slice(&fields[3..5]);
+                    }
+                }
+            },
+        );
+        let mut bindings = LookupSet::default();
+        for term in terms {
+            let (name, fields) = selected.app(term)?;
+            if name != "ScalarLeaf" {
+                continue;
+            }
+            // A value defined in an enclosing source scope was evaluated before
+            // these consumers. Restore that materialization, including its own
+            // guards, without speculating expressions defined inside an arm.
+            let source = selected.values[fields[2]];
+            if let Some(owner) = Query(&self.program.graph)
+                .lookup("ScalarOwner", (source,))?
+                .and_then(|owner| self.placement.scopes.definition(owner))
+            {
+                if self.placement.scopes.available(&[owner], scope)
+                    && self.placement.scopes.available(&self.placement.requirements[term], scope)
+                {
+                    bindings.insert(term);
+                }
+            }
+        }
+        Ok(bindings)
+    }
+
+    fn common(&self, scope: Value, arms: [&[TermId]; 2]) -> Result<Vec<TermId>, OptimizeError> {
         if !self.readonly(arms[0])? || !self.readonly(arms[1])? {
             return Ok(Vec::new());
         }
         let yes: LookupSet<_> = self.demands(arms[0]).into_iter().collect();
-        Ok(self.demands(arms[1]).into_iter().filter(|term| yes.contains(term)).collect())
+        let mut common: LookupSet<_> =
+            self.demands(arms[1]).into_iter().filter(|term| yes.contains(term)).collect();
+        let yes = self.enclosing_bindings(scope, arms[0])?;
+        common
+            .extend(self.enclosing_bindings(scope, arms[1])?.into_iter().filter(|term| yes.contains(term)));
+        Ok(common.into_iter().collect())
     }
 
     fn body(
@@ -285,7 +332,7 @@ impl<B: Fn(Value) -> bool> Readout<'_, '_, B> {
                 });
                 let [yes, no] = arms;
                 let (yes, no) = (yes?, no?);
-                let shared = self.body(scope, &self.common([&yes, &no])?, available)?;
+                let shared = self.body(scope, &self.common(scope, [&yes, &no])?, available)?;
                 let arms = [
                     self.body(scope, &yes, &mut available.clone())?,
                     self.body(scope, &no, &mut available.clone())?,
