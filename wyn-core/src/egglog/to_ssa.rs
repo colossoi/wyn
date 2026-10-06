@@ -11,14 +11,10 @@ use egglog_engine::Value;
 use wyn_base::IdSource;
 
 mod body;
-pub(super) mod host;
-mod interface;
+mod entry;
 mod kernels;
-mod loops;
-pub(super) mod plan;
-pub(super) mod read;
+use super::facts::Facts;
 use body::Body;
-use read::Facts;
 
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::types::Terminator;
@@ -26,13 +22,6 @@ use crate::tlc::TermKind;
 use crate::types::TypeName;
 use crate::EntryId;
 use crate::SymbolId;
-pub(super) fn prepare(program: &mut Program<'_, Optimized>) -> Result<(), OptimizeError> {
-    program
-        .graph
-        .parse_and_run_program(Some("ssa-access.egg".into()), include_str!("to_ssa/access.egg"))?;
-    Ok(())
-}
-
 pub(super) fn lower(
     program: &Program<'_, Optimized>,
     target: CodegenTarget,
@@ -42,7 +31,7 @@ pub(super) fn lower(
     let mut compiler = Compiler {
         program,
         facts,
-        plan: plan::Plan::new(program)?,
+        bindings: super::abi::bindings::Bindings::new(program)?,
         placements: super::scalar::placement::Placement::new(program)?,
         entry_origins: LookupMap::default(),
         entry_names: Default::default(),
@@ -58,15 +47,15 @@ pub(super) fn lower(
             let Some(symbol) = program.identities.symbols.get(&definition.name) else {
                 return Err(error("entry symbol missing"));
             };
-            for stage in compiler.plan.stages(definition.name)? {
-                let entry = interface::entry(&mut compiler, definition.name, Some(stage), &entries)?;
+            for stage in compiler.facts.stages(definition.name)? {
+                let entry = entry::entry(&mut compiler, definition.name, Some(stage), &entries)?;
                 entries.push(entry);
             }
             if compiler.facts.contains("EmitOriginalEntry", (symbol,))
                 || compiler.facts.contains("FinishEntry", (symbol,))
                 || compiler.facts.contains("InterfaceOnlyEntry", (symbol,))
             {
-                let entry = interface::entry(&mut compiler, definition.name, None, &entries)?;
+                let entry = entry::entry(&mut compiler, definition.name, None, &entries)?;
                 entries.push(entry);
             }
             // Each stage's accesses were lowered with its interface. Form this
@@ -104,7 +93,7 @@ pub(super) struct Compiler<'a, 'source> {
     placements: super::scalar::placement::Placement,
     pub(super) program: &'a Program<'source, Optimized>,
     pub(super) facts: Facts<'a, 'source>,
-    pub(super) plan: plan::Plan<'a, 'source>,
+    pub(super) bindings: super::abi::bindings::Bindings<'a, 'source>,
     pub(super) entry_origins: LookupMap<EntryId, (SymbolId, Option<Value>)>,
     pub(super) entry_names: std::collections::BTreeSet<String>,
     pub(super) functions: Vec<Function>,

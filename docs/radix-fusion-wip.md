@@ -289,9 +289,9 @@ Implementation locations:
 
 - [schedule.egg](../wyn-core/src/egglog/schedule.egg): collective launch policy,
   stage grids, and scratch extents.
-- [plan.rs](../wyn-core/src/egglog/to_ssa/plan.rs),
-  [sizes.rs](../wyn-core/src/egglog/to_ssa/sizes.rs), and
-  [publication.rs](../wyn-core/src/egglog/to_ssa/publication.rs): decode and
+- [plan.rs](../wyn-core/src/egglog/facts/plan.rs),
+  [sizes.rs](../wyn-core/src/egglog/abi/sizes.rs), and
+  [publication.rs](../wyn-core/src/egglog/abi/publication.rs): decode and
   publish the selected launches without replacing their grids afterward.
 - [screma.rs](../wyn-core/src/egglog/to_ssa/kernels/screma.rs): cooperative tile
   scan, reduction, and carry propagation.
@@ -361,8 +361,9 @@ for the multiple-consumer, slice, loop, and output-action cases and remaining ga
 The sketch recognizes counted loops carrying fixed-size or runtime-sized arrays,
 including tuple elements. Egglog
 placement exposes the body's parallel region, and allocation assigns distinct
-current/next buffers. [loops.rs](../wyn-core/src/egglog/to_ssa/loops.rs) publishes
-explicit setup, body, and completion stage identities. The host program follows
+current/next buffers. [loops.rs](../wyn-core/src/egglog/to_ssa/kernels/loops.rs)
+emits the scheduled loop phases; [publication.rs](../wyn-core/src/egglog/abi/publication.rs)
+publishes explicit setup, body, and completion stage identities. The host program follows
 those dependencies, and [whl.rs](../wyn-host/src/whl.rs) emits the repeated
 dispatches and buffer swap. Completion stages with output copies execute after
 the loop; publication-only completions require no dispatch.

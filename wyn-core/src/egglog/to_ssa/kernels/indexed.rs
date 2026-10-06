@@ -1,7 +1,7 @@
 //! Expand scheduled phases straight into SSA instructions and structured loops.
 
 use super::super::{builder_error, error, Body, OptimizeError, Typed};
-use super::{element, invocation, store};
+use super::{element, invocation};
 use crate::op::{BinaryOperator, OpTag};
 use crate::ssa::types::{AtomicOp, InstKind};
 use crate::types::{self, Type, TypeExt, TypeName};
@@ -22,7 +22,7 @@ fn destination_value(
     let Some(fields) = body.compiler.facts.enode("DestinationValue", destination) else {
         return Err(error("unknown selected update destination"));
     };
-    let Some(source) = body.compiler.plan.expr(fields[0]) else {
+    let Some(source) = body.compiler.facts.expr(fields[0]) else {
         return Err(error("selected destination has no source value"));
     };
     body.value(scope, source)
@@ -43,7 +43,7 @@ pub(super) fn indexed(
     let output = destination_value(body, scope, phase_owner)?;
     let serial = phase == "ordered";
     let domain = if serial {
-        let Some(domain) = body.compiler.plan.domain(phase_owner) else {
+        let Some(domain) = body.compiler.facts.domain(phase_owner) else {
             return Err(error("ordered operation domain missing"));
         };
         domain
@@ -63,7 +63,7 @@ pub(super) fn indexed(
         if phase == "initialize" {
             let original = body.value(scope, destination)?;
             let value = body.index(original, index.clone())?;
-            store(body, output, index, value)?;
+            body.store(output, index, value)?;
             return Ok(vec![]);
         }
         update(
@@ -115,7 +115,7 @@ pub(super) fn update(
         if phase == "atomic" {
             let (place, ty) = body.index_place(output, key)?;
             let value = body.cast(value, &ty)?;
-            let Some(update) = body.compiler.plan.atomic(phase_owner) else {
+            let Some(update) = body.compiler.facts.atomic(phase_owner) else {
                 return Err(error("missing atomic"));
             };
             if update != AtomicOp::CompareExchange {
@@ -177,7 +177,7 @@ pub(super) fn update(
             } else {
                 value
             };
-            store(body, output, key, value)?;
+            body.store(output, key, value)?;
         }
         Ok(())
     })?;
@@ -216,10 +216,10 @@ pub(super) fn buckets(
             if serial { (zero.clone(), one.clone()) } else { invocation(body, phase_width)? };
         let first = body.binary(BinaryOperator::Equal, start.clone(), zero.clone())?;
         body.when(first, |body| {
-            store(body, overflow.clone(), zero.clone(), zero.clone())
+            body.store(overflow.clone(), zero.clone(), zero.clone())
         })?;
         body.counted(start, count, step, vec![], |body, index, _| {
-            store(body, counts.clone(), index, zero.clone())?;
+            body.store(counts.clone(), index, zero.clone())?;
             Ok(vec![])
         })?;
         if !serial {
@@ -260,7 +260,7 @@ pub(in crate::egglog::to_ssa) fn bucket_updates(
     let mut dimensions = vec![None; domain_rank];
     for axes in input_dimensions {
         for &axis in axes {
-            let n = if let Some(extent) = body.compiler.plan.bucket_axis(operation, axis as i64) {
+            let n = if let Some(extent) = body.compiler.facts.bucket_axis(operation, axis as i64) {
                 body.extent(scope, extent)?
             } else {
                 return Err(error("bucket axis has no planned extent"));
@@ -332,7 +332,7 @@ pub(in crate::egglog::to_ssa) fn bucket_updates(
                     let slot = if serial {
                         let slot = body.index(counts.clone(), key.clone())?;
                         let next = body.binary(BinaryOperator::Add, slot.clone(), one.clone())?;
-                        store(body, counts.clone(), key.clone(), next)?;
+                        body.store(counts.clone(), key.clone(), next)?;
                         slot
                     } else {
                         let (place, ty) = body.index_place(counts.clone(), key.clone())?;
@@ -386,7 +386,7 @@ pub(in crate::egglog::to_ssa) fn bucket_updates(
             let failed = body.binary(BinaryOperator::Equal, succeeded, no)?;
             body.when(failed, |body| {
                 if serial {
-                    store(body, overflow.clone(), zero.clone(), one.clone())?;
+                    body.store(overflow.clone(), zero.clone(), one.clone())?;
                 } else {
                     let (place, ty) = body.index_place(overflow.clone(), zero.clone())?;
                     let one = body.cast(one.clone(), &ty)?;

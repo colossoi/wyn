@@ -1,13 +1,12 @@
 //! Final storage views and launch extents decoded from the selected plan.
 use super::{error, Body, OptimizeError, Typed, Value};
 use crate::builtins::catalog;
-use crate::egglog::to_ssa::interface::view_type;
 use crate::op::{BinaryOperator, OpTag, PureViewSource};
 use crate::types::{self, buffer_tag, Type, TypeExt, TypeName};
 
 impl Body<'_, '_, '_> {
     pub(super) fn boundary(&mut self, scope: Value, source: Value) -> Result<Typed, OptimizeError> {
-        if let Some(access) = self.compiler.plan.access(source) {
+        if let Some(access) = self.compiler.facts.access(source) {
             if let Some(fields) = self.compiler.facts.enode("RunCollective", access) {
                 return self.collective(scope, source, fields[0], fields[1]);
             }
@@ -33,7 +32,7 @@ impl Body<'_, '_, '_> {
     }
 
     pub(super) fn local(&mut self, scope: Value, source: Value) -> Result<Typed, OptimizeError> {
-        if let Some(access) = self.compiler.plan.access(source) {
+        if let Some(access) = self.compiler.facts.access(source) {
             if let Some(fields) = self.compiler.facts.enode("RunCollective", access) {
                 return self.collective(scope, source, fields[0], fields[1]);
             }
@@ -133,7 +132,7 @@ impl Body<'_, '_, '_> {
     }
 
     fn source_length(&mut self, scope: Value, source: Value) -> Result<Typed, OptimizeError> {
-        let Some(extent) = self.compiler.plan.view_extent(source) else {
+        let Some(extent) = self.compiler.facts.view_extent(source) else {
             return Err(error(format!(
                 "array {source:?} has no planned view extent, projection {:?}, type {:?}",
                 self.compiler.facts.projection(source),
@@ -142,8 +141,8 @@ impl Body<'_, '_, '_> {
         };
         // A parameter's Length(self) queries its bound descriptor. Other lengths
         // follow the plan, including compacted counts and slice bounds.
-        if let Some(("Length", fields)) = self.compiler.plan.extent(extent) {
-            if self.compiler.plan.expr(fields[0]) == Some(source) {
+        if let Some(("Length", fields)) = self.compiler.facts.extent(extent) {
+            if self.compiler.facts.expr(fields[0]) == Some(source) {
                 let value = self.value(scope, source)?;
                 return self.length(value);
             }
@@ -183,9 +182,10 @@ impl Body<'_, '_, '_> {
             return Ok(value.clone());
         }
         if let Some(owner) = self.compiler.facts.lookup("LocalStorageOwner", (resource,)) {
-            let (Some(source), Some(plan)) =
-                (self.compiler.plan.source(owner), self.compiler.plan.group(owner))
-            else {
+            let (Some(source), Some(plan)) = (
+                self.compiler.facts.source(owner),
+                self.compiler.facts.group(owner),
+            ) else {
                 return Err(error("local resource owner missing"));
             };
             self.collective(scope, source, owner, plan)?;
@@ -194,17 +194,17 @@ impl Body<'_, '_, '_> {
             };
             return Ok(value.clone());
         }
-        let Some(backing) = self.compiler.plan.backing(resource) else {
+        let Some(backing) = self.compiler.facts.backing(resource) else {
             return Err(error(format!(
                 "selected resource {resource:?} has no backing, source {:?}",
                 self.compiler.facts.enode("Result", resource)
             )));
         };
-        let reused = self.compiler.plan.reuse_source(resource);
+        let reused = self.compiler.facts.reuse_source(resource);
         let extent = if access == 2 {
-            self.compiler.plan.capacity(resource)
+            self.compiler.facts.capacity(resource)
         } else {
-            self.compiler.plan.live_length(resource)
+            self.compiler.facts.live_length(resource)
         };
         if let Some(source) = reused {
             let Some(extent) = extent else {
@@ -223,12 +223,12 @@ impl Body<'_, '_, '_> {
                 Type::Constructed(TypeName::SizePlaceholder, vec![]),
             );
         }
-        if self.compiler.plan.buffer(backing)?.is_none() {
-            if let Some(source) = self.compiler.plan.external(backing) {
+        if self.compiler.bindings.buffer(backing)?.is_none() {
+            if let Some(source) = self.compiler.facts.external(backing) {
                 return self.value(scope, source);
             }
         }
-        let Some((binding, element, _)) = self.compiler.plan.buffer(backing)? else {
+        let Some((binding, element, _)) = self.compiler.bindings.buffer(backing)? else {
             return Err(error("selected resource has no allocation"));
         };
         let Some(extent) = extent else {
@@ -237,7 +237,7 @@ impl Body<'_, '_, '_> {
         let length = self.extent(scope, extent)?;
         let zero = self.literal("0", &types::i32())?;
         let element = self.compiler.facts.physical_type(element, true)?;
-        let ty = view_type(&element, buffer_tag(binding));
+        let ty = Body::view_type(&element, buffer_tag(binding));
         self.op(
             OpTag::StorageView(PureViewSource::Storage(binding)),
             vec![zero, length],
@@ -253,10 +253,11 @@ impl Body<'_, '_, '_> {
         index: i64,
         access: i64,
     ) -> Result<Option<Typed>, OptimizeError> {
-        let Some(resource) = self.compiler.plan.slot(operation, role, index) else {
+        let Some(resource) = self.compiler.facts.slot(operation, role, index) else {
             return Err(error(format!("missing {role} slot {index}")));
         };
-        if !self.local_resources.contains_key(&resource) && self.compiler.plan.backing(resource).is_none() {
+        if !self.local_resources.contains_key(&resource) && self.compiler.facts.backing(resource).is_none()
+        {
             return Ok(None);
         }
         self.resource(scope, resource, access).map(Some)
@@ -267,7 +268,7 @@ impl Body<'_, '_, '_> {
         scope: Value,
         extent: Value,
     ) -> Result<Typed, OptimizeError> {
-        let Some((name, children)) = self.compiler.plan.extent(extent) else {
+        let Some((name, children)) = self.compiler.facts.extent(extent) else {
             return Err(error("unknown extent"));
         };
         match name {
@@ -276,7 +277,7 @@ impl Body<'_, '_, '_> {
                 self.literal(&n.to_string(), &types::i32())
             }
             "Length" | "Scalar" => {
-                let Some(source) = self.compiler.plan.expr(children[0]) else {
+                let Some(source) = self.compiler.facts.expr(children[0]) else {
                     return Err(error("extent source is missing"));
                 };
                 if name == "Length" {

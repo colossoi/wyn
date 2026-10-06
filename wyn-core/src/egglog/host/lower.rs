@@ -1,12 +1,14 @@
 //! Translate selected scalar terms and explicit control facts to the host IR.
-use super::{error, read::Facts};
+use crate::binding_layout::{extract_storage_binding, extract_uniform_binding};
 use crate::builtins::lowering::PrimOp;
 use crate::builtins::{catalog, BuiltinLowering};
+use crate::egglog::query::Query;
 use crate::egglog::{bindings::Bindings, OptimizeError, Optimized, Program};
+use crate::egglog::{facts::Facts, output_error as error};
 use crate::host::{ScalarExpr, ScalarSource, ScalarType};
-use crate::interface::{EntryInputKind, StorageLayout};
+use crate::interface::StorageLayout;
 use crate::op::OpTag;
-use crate::ssa::layout::{block_layout, type_byte_size};
+use crate::ssa::layout::{block_layout, storage_value_type, type_byte_size};
 use crate::types::{Type, TypeExt, TypeName};
 use crate::{BindingRef, FunctionId};
 use egglog_engine::{TermId, Value};
@@ -233,31 +235,7 @@ impl<'a, 'source> Lower<'a, 'source> {
                 // A callback element or unbound function argument is device-local.
                 return Err(Error::Unsupported);
             }
-            let inputs = self.facts.parameter_inputs(region, index)?;
-            let [input] = inputs.as_slice() else {
-                return Err(Error::Unsupported);
-            };
-            return match &input.kind {
-                EntryInputKind::PushConstant { slot } => read(
-                    ScalarSource::PushConstant {
-                        name: input.name.clone(),
-                        offset: slot.offset,
-                    },
-                    0,
-                    &input.ty,
-                    StorageLayout::Std430,
-                ),
-                EntryInputKind::Uniform { binding } => read(
-                    ScalarSource::Binding {
-                        set: binding.set,
-                        binding: binding.binding,
-                    },
-                    0,
-                    &input.ty,
-                    StorageLayout::Std140,
-                ),
-                _ => Err(Error::Unsupported),
-            };
+            return self.parameter(region, index, source);
         }
         if let Some((yes, no)) = self.facts.branches(source) {
             let Some(condition) = self.facts.lookup("SsaBranchCondition", (source,)) else {
@@ -347,6 +325,61 @@ impl<'a, 'source> Lower<'a, 'source> {
         ))
         .into())
     }
+    /// Emit a host read directly from the selected ABI and source declaration.
+    fn parameter(&self, region: Value, index: i64, source: Value) -> Result<ScalarExpr> {
+        let owner =
+            self.facts.definition_name(region).ok_or_else(|| error("host parameter owner missing"))?;
+        let definition = self
+            .facts
+            .program
+            .source
+            .defs
+            .iter()
+            .find(|d| d.name == owner)
+            .ok_or_else(|| error("host parameter definition missing"))?;
+        let crate::tlc::DefMeta::EntryPoint(entry) = &definition.meta else {
+            return Err(error("host parameter is not an entry input").into());
+        };
+        let index_usize = usize::try_from(index).map_err(|_| error("invalid host parameter index"))?;
+        let parameter = entry
+            .declaration
+            .params
+            .get(index_usize)
+            .ok_or_else(|| error("host parameter declaration missing"))?;
+        let ty = self.facts.source_type(source).ok_or_else(|| error("host parameter type missing"))?;
+        let ty = storage_value_type(&crate::types::canonical_storage_buffer_ty(ty));
+        let abi = Query(&self.facts.program.graph).required("ParameterAbi", (region, index))?;
+        if entry.data.param_bindings.get(index_usize).and_then(Option::as_ref).is_some()
+            || extract_storage_binding(parameter).is_some()
+        {
+            return Err(Error::Unsupported);
+        }
+        if let Some(binding) = extract_uniform_binding(parameter) {
+            return read(
+                ScalarSource::Binding {
+                    set: binding.set,
+                    binding: binding.binding,
+                },
+                0,
+                &ty,
+                StorageLayout::Std140,
+            );
+        }
+        if let Some(fields) = self.facts.enode("PushInput", abi) {
+            let offset = self.facts.unsigned(fields[0], "push constant offset")?;
+            return read(
+                ScalarSource::PushConstant {
+                    name: parameter.name.clone(),
+                    offset,
+                },
+                0,
+                &ty,
+                StorageLayout::Std430,
+            );
+        }
+        Err(Error::Unsupported)
+    }
+
     fn stored(&self, source: Value) -> bool {
         self.facts
             .lookup("SourceExprKey", (source,))

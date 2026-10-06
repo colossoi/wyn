@@ -1,7 +1,6 @@
 use super::{builder_error, error, Body, OptimizeError, Typed, Value};
 use crate::flow::ControlHeader;
 use crate::op::BinaryOperator;
-use crate::ssa::types::InstKind;
 use crate::ssa::types::Terminator;
 use crate::types;
 
@@ -198,73 +197,6 @@ impl Body<'_, '_, '_> {
             return Err(error("loop result is missing"));
         };
         Ok(result)
-    }
-}
-
-impl Body<'_, '_, '_> {
-    pub(in crate::egglog::to_ssa) fn copy_array(
-        &mut self,
-        destination: Typed,
-        source: Typed,
-        length: Typed,
-    ) -> Result<(), OptimizeError> {
-        let index_ty = length.ty.clone();
-        let zero = self.literal("0", &index_ty)?;
-        let (header, indices) = self.builder.create_block_with_params(vec![index_ty.clone()]);
-        let body = self.builder.create_block();
-        let continuing = self.builder.create_block();
-        let done = self.builder.create_block();
-        self.terminate(Terminator::Branch {
-            target: header,
-            args: vec![zero.value],
-        })
-        .map_err(builder_error)?;
-        self.builder.switch_to_block_unchecked(header);
-        self.builder.set_control_header(
-            header,
-            ControlHeader::Loop {
-                merge: done,
-                continue_block: continuing,
-            },
-        );
-        let index = Typed {
-            value: indices[0].into(),
-            ty: index_ty.clone(),
-        };
-        let condition = self.binary(BinaryOperator::Less, index.clone(), length)?;
-        self.terminate(Terminator::CondBranch {
-            cond: condition.value,
-            then_target: body,
-            then_args: vec![],
-            else_target: done,
-            else_args: vec![],
-        })
-        .map_err(builder_error)?;
-        self.builder.switch_to_block_unchecked(body);
-        let value = self.index(source, index.clone())?;
-        let (place, ty) = self.index_place(destination, index.clone())?;
-        let value = self.cast(value, &ty)?;
-        self.builder
-            .push_void_inst(InstKind::Store {
-                place,
-                value: value.value,
-            })
-            .map_err(builder_error)?;
-        self.terminate(Terminator::Branch {
-            target: continuing,
-            args: vec![],
-        })
-        .map_err(builder_error)?;
-        self.builder.switch_to_block_unchecked(continuing);
-        let one = self.literal("1", &index_ty)?;
-        let next = self.binary(BinaryOperator::Add, index, one)?;
-        self.terminate(Terminator::Branch {
-            target: header,
-            args: vec![next.value],
-        })
-        .map_err(builder_error)?;
-        self.builder.switch_to_block_unchecked(done);
-        Ok(())
     }
 }
 

@@ -226,3 +226,48 @@ impl Body<'_, '_, '_> {
         )
     }
 }
+
+impl Body<'_, '_, '_> {
+    pub(in crate::egglog::to_ssa) fn store(
+        &mut self,
+        array: Typed,
+        index: Typed,
+        value: Typed,
+    ) -> Result<(), OptimizeError> {
+        let (place, ty) = self.index_place(array, index)?;
+        let value = self.cast(value, &ty)?;
+        self.builder
+            .push_void_inst(InstKind::Store {
+                place,
+                value: value.value,
+            })
+            .map_err(builder_error)?;
+        Ok(())
+    }
+
+    pub(in crate::egglog::to_ssa) fn view_type(element: &Type, region: Type) -> Type {
+        types::view_array_with_size(
+            element,
+            Type::Constructed(TypeName::SizePlaceholder, vec![]),
+            region,
+        )
+    }
+}
+
+impl Body<'_, '_, '_> {
+    pub(in crate::egglog::to_ssa) fn copy_array(
+        &mut self,
+        destination: Typed,
+        source: Typed,
+        length: Typed,
+    ) -> Result<(), OptimizeError> {
+        let zero = self.literal("0", &length.ty)?;
+        let one = self.literal("1", &length.ty)?;
+        self.counted(zero, length, one, vec![], |body, index, _| {
+            let value = body.index(source, index.clone())?;
+            body.store(destination, index, value)?;
+            Ok(vec![])
+        })?;
+        Ok(())
+    }
+}

@@ -3,7 +3,7 @@
 use super::query::Query;
 use super::{parse_program, source, timing, OptimizeError, ScalarOptimization};
 use crate::LookupMap;
-use egglog_engine::{EGraph, TermDag, TermId, Value};
+use egglog_engine::EGraph;
 
 pub(super) mod extract;
 mod fold;
@@ -17,12 +17,8 @@ use import::Importer;
 #[path = "scalar/analysis_tests.rs"]
 mod analysis_tests;
 
-/// Egglog's own extracted DAG, retained unchanged for direct SSA emission.
-pub(super) struct Selected {
-    pub dag: TermDag,
-    pub values: Vec<Value>,
-    pub roots: LookupMap<(Value, Value), TermId>,
-}
+mod selected;
+pub(super) use selected::Selected;
 
 const RULES: &str = concat!(
     include_str!("scalar/schema.egg"),

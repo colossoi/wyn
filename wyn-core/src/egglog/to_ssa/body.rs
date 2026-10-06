@@ -124,7 +124,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
     }
 
     fn scalar_at(&mut self, scope: Value, term: TermId, target: BlockId) -> Result<Typed, OptimizeError> {
-        if let Some(&binding) = self.compiler.plan.captures.get(&term) {
+        if let Some(&binding) = self.compiler.bindings.captures.get(&term) {
             let (_, fields) = self.compiler.program.stage.selected.app(term)?;
             let Some(ty) =
                 self.compiler.facts.ty(self.compiler.program.stage.selected.values[fields[1]]).cloned()
@@ -137,7 +137,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
             let view = self.op(
                 OpTag::StorageView(PureViewSource::Storage(binding)),
                 vec![zero.clone(), one],
-                super::interface::view_type(&element, types::buffer_tag(binding)),
+                Body::view_type(&element, types::buffer_tag(binding)),
             )?;
             let value = self.index(view, zero)?;
             return self.cast(value, &ty);

@@ -17,7 +17,7 @@ impl Body<'_, '_, '_> {
             return Err(error("local collective has no selected recipe"));
         };
         let phase = self.compiler.program.graph.value_to_base::<S>(recipe).to_string();
-        let Some(domain) = self.compiler.plan.domain(owner) else {
+        let Some(domain) = self.compiler.facts.domain(owner) else {
             return Err(error("local domain missing"));
         };
         let mut allocations = Vec::new();
@@ -29,7 +29,7 @@ impl Body<'_, '_, '_> {
         for fields in allocations {
             let role = self.compiler.program.graph.value_to_base::<S>(fields[1]).to_string();
             let index = self.compiler.facts.integer(fields[2]);
-            let Some(resource) = self.compiler.plan.slot(owner, &role, index) else {
+            let Some(resource) = self.compiler.facts.slot(owner, &role, index) else {
                 return Err(error("local slot missing"));
             };
             let Some(n) = self.compiler.facts.lookup("PhysicalLocalCapacity", (fields[4],)) else {
@@ -69,7 +69,7 @@ impl Body<'_, '_, '_> {
         }
         kernels::emit(self, scope, owner, &phase, domain, 1)?;
         let mut output_index = 0;
-        for (role, index, result) in self.compiler.plan.results(plan)? {
+        for (role, index, result) in self.compiler.facts.results(plan)? {
             if role == "scan" {
                 continue;
             }
@@ -107,7 +107,7 @@ impl Body<'_, '_, '_> {
         if let Some(value) = self.values.get(&source) {
             return Ok(value.clone());
         }
-        if let Some(access) = self.compiler.plan.value_read(source) {
+        if let Some(access) = self.compiler.facts.value_read(source) {
             if let Some(fields) = self.compiler.facts.enode("ReadElement", access) {
                 let array = self.resource(scope, fields[0], 1)?;
                 let zero = self.literal("0", &types::i32())?;

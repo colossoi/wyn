@@ -38,6 +38,10 @@ impl Query<'_> {
         Ok(self.0.read(|r| r.lookup(name, keys))?)
     }
 
+    pub fn constructor(&self, name: &str, keys: impl IntoValues) -> Result<Option<Value>, OptimizeError> {
+        Ok(self.0.read(|r| r.eclass_of(name, keys))?)
+    }
+
     pub fn required(&self, name: &str, keys: impl IntoValues) -> Result<Value, OptimizeError> {
         let Some(value) = self.lookup(name, keys)? else {
             return Err(OptimizeError::Output(format!("missing selected {name}")));

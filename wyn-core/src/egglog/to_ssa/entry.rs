@@ -1,4 +1,4 @@
-//! Source ABI declarations and publication for directly emitted entry bodies.
+//! Emit entry parameters, bodies, and output writes directly into final SSA.
 use super::kernels;
 
 use super::{builder_error, error, Body, Compiler, OptimizeError, Typed};
@@ -35,7 +35,7 @@ pub(super) fn entry<'source>(
     let (source, parameters) = crate::tlc::extract_lambda_params_ref(&definition.body);
     let original = compiler.facts.contains("EmitOriginalEntry", (token,));
     let outputs = if stage.is_none() && original {
-        let Some(outputs) = compiler.plan.entry_outputs.remove(&owner) else {
+        let Some(outputs) = compiler.bindings.entry_outputs.remove(&owner) else {
             return Err(OptimizeError::Output("entry output ABI missing".into()));
         };
         outputs
@@ -51,7 +51,7 @@ pub(super) fn entry<'source>(
     } else {
         &declaration.name
     };
-    let selected_phase = stage.map(|key| compiler.plan.phase_name(key)).transpose()?;
+    let selected_phase = stage.map(|key| compiler.facts.phase_name(key)).transpose()?;
     let phase = match selected_phase.as_deref() {
         Some("elements" | "scalar") => "compute",
         Some("chunks") => "partials",
@@ -63,7 +63,7 @@ pub(super) fn entry<'source>(
             _ => "compute",
         },
     };
-    let name = super::plan::unique(format!("{name}_{phase}"), &mut compiler.entry_names);
+    let name = crate::egglog::abi::unique_name(format!("{name}_{phase}"), &mut compiler.entry_names);
     let execution_model = match declaration.entry_kind {
         EntryKind::Vertex => ExecutionModel::Vertex,
         EntryKind::Fragment => ExecutionModel::Fragment,
@@ -82,7 +82,7 @@ pub(super) fn entry<'source>(
     let decl = &entry.declaration;
     let symbol = owner;
     let mut lower = Body::new(compiler, scope, vec![], source.ty.clone())?;
-    lower.grid = stage.map(|key| lower.compiler.plan.grid(key)).transpose()?.flatten();
+    lower.grid = stage.map(|key| lower.compiler.facts.dispatch_grid(key)).transpose()?.flatten();
     if stage.is_none() {
         let Some(token) = lower.compiler.program.identities.symbols.get(&symbol) else {
             return Err(error("entry symbol missing"));
@@ -94,8 +94,48 @@ pub(super) fn entry<'source>(
     }
     let mut inputs = Vec::new();
     let mut parameter_inputs = Vec::new();
+    bind_parameters(&mut lower, scope, &parameters, &mut inputs, &mut parameter_inputs)?;
+    let mut accesses = crate::egglog::abi::entry_accesses(lower.compiler, root)?;
+    let storage_bindings = crate::egglog::abi::storage_bindings(
+        lower.compiler,
+        root,
+        stage,
+        published,
+        &mut inputs,
+        &mut accesses,
+    )?;
+    let compute = decl.entry_kind == EntryKind::Compute;
+    let result = emit_body(&mut lower, scope, stage, compute, original)?;
+    write_outputs(&mut lower, result, &outputs)?;
+    if compute {
+        copy_results(&mut lower, scope, symbol, stage)?;
+    }
+    let unit = lower.op(OpTag::Unit, vec![], types::unit())?;
+    let body = lower.finish(unit)?;
+    Ok(EntryPoint {
+        id,
+        name,
+        body,
+        execution_model,
+        inputs,
+        parameter_inputs,
+        outputs,
+        storage_bindings,
+        stage_descriptor_storage_accesses: accesses,
+        pipeline_storage_accesses: Default::default(),
+        span: source.span,
+    })
+}
+
+fn bind_parameters(
+    lower: &mut Body<'_, '_, '_>,
+    scope: Value,
+    parameters: &[(SymbolId, Type)],
+    inputs: &mut Vec<crate::interface::EntryInput>,
+    parameter_inputs: &mut Vec<Vec<usize>>,
+) -> Result<(), OptimizeError> {
     for (index, (_, ty)) in parameters.iter().enumerate() {
-        let declared = lower.compiler.facts.parameter_inputs(scope, index as i64)?;
+        let declared = crate::egglog::abi::parameter_inputs(lower.compiler.program, scope, index as i64)?;
         let first = inputs.len();
         let mut values = Vec::new();
         for selected in declared {
@@ -106,7 +146,7 @@ pub(super) fn entry<'source>(
             }
             let physical = if let Some(binding) = input.storage_binding() {
                 let element = input.ty.elem_type().ok_or_else(|| error("storage input has no element"))?;
-                view_type(
+                Body::view_type(
                     &lower.compiler.facts.physical_type(element, true)?,
                     buffer_tag(binding),
                 )
@@ -171,29 +211,22 @@ pub(super) fn entry<'source>(
         lower.values.insert(formal, value);
         parameter_inputs.push((first..inputs.len()).collect());
     }
-    let mut accesses = crate::egglog::abi::entry_accesses(lower.compiler, root)?;
-    let storage_bindings = crate::egglog::abi::storage_bindings(
-        lower.compiler,
-        root,
-        stage,
-        published,
-        &mut inputs,
-        &mut accesses,
-    )?;
-    let compute = decl.entry_kind == EntryKind::Compute;
-    let original = lower
-        .compiler
-        .program
-        .identities
-        .symbols
-        .get(&symbol)
-        .is_some_and(|token| lower.compiler.facts.contains("EmitOriginalEntry", (token,)));
+    Ok(())
+}
+
+fn emit_body(
+    lower: &mut Body<'_, '_, '_>,
+    scope: Value,
+    stage: Option<Value>,
+    compute: bool,
+    original: bool,
+) -> Result<Typed, OptimizeError> {
     let result = if let Some(stage) = stage {
-        let operation = lower.compiler.plan.phase_operation(stage)?;
-        let phase = lower.compiler.plan.phase_name(stage)?;
-        let extent = lower.compiler.plan.phase_extent(stage)?;
-        let width = lower.compiler.plan.phase_width(stage)?;
-        kernels::emit(&mut lower, scope, operation, &phase, extent, width)?;
+        let operation = lower.compiler.facts.phase_operation(stage)?;
+        let phase = lower.compiler.facts.phase_name(stage)?;
+        let extent = lower.compiler.facts.phase_extent(stage)?;
+        let width = lower.compiler.facts.phase_width(stage)?;
+        kernels::emit(lower, scope, operation, &phase, extent, width)?;
         lower.op(OpTag::Unit, vec![], types::unit())?
     } else if compute && !original {
         lower.op(OpTag::Unit, vec![], types::unit())?
@@ -203,6 +236,14 @@ pub(super) fn entry<'source>(
         };
         lower.value(scope, result)?
     };
+    Ok(result)
+}
+
+fn write_outputs(
+    lower: &mut Body<'_, '_, '_>,
+    result: Typed,
+    outputs: &[crate::interface::EntryOutput],
+) -> Result<(), OptimizeError> {
     for (index, output) in outputs.iter().enumerate() {
         let value = if outputs.len() == 1 { result.clone() } else { lower.field(result.clone(), index)? };
         if let Some(binding) = output.storage_binding() {
@@ -224,7 +265,7 @@ pub(super) fn entry<'source>(
             let view = lower.op(
                 OpTag::StorageView(PureViewSource::Storage(binding)),
                 vec![zero.clone(), len.clone()],
-                view_type(&element, buffer_tag(binding)),
+                Body::view_type(&element, buffer_tag(binding)),
             )?;
             if value.ty.is_array() {
                 lower.copy_array(view, value, len)?;
@@ -255,89 +296,74 @@ pub(super) fn entry<'source>(
                 .map_err(builder_error)?;
         }
     }
-    if compute {
-        let planned = lower.compiler.plan.outputs(symbol)?;
-        let write = |lower: &mut Body<'_, '_, 'source>| -> Result<(), OptimizeError> {
-            for id in planned {
-                if !lower.compiler.facts.contains("CopyOutput", (id,))
-                    || lower.compiler.facts.lookup("SsaOutputWriter", (id,)) != stage
-                {
-                    continue;
-                }
-                let (source, ty, resource) = lower.compiler.plan.output(id)?;
-                if ty.is_array() || types::as_soa_tuple(ty).is_some() {
-                    let (array, fields) = lower.source_array(scope, source)?;
-                    let length = lower.length(array.clone())?;
-                    let destination = lower.resource(scope, resource, 2)?;
-                    let zero = lower.literal("0", &types::i32())?;
-                    let one = lower.literal("1", &types::i32())?;
-                    lower.counted(zero, length, one, vec![], |lower, index, _| {
-                        let mut value = lower.index(array, index.clone())?;
-                        for field in fields {
-                            value = lower.field(value, field)?;
-                        }
-                        kernels::store(lower, destination, index, value)?;
-                        Ok(vec![])
-                    })?;
-                } else {
-                    let value = lower.value(scope, source)?;
-                    let destination = lower.resource(scope, resource, 2)?;
-                    let zero = lower.literal("0", &types::i32())?;
-                    let (place, ty) = lower.index_place(destination, zero)?;
-                    let value = lower.cast(value, &ty)?;
-                    lower
-                        .builder
-                        .push_void_inst(InstKind::Store {
-                            place,
-                            value: value.value,
-                        })
-                        .map_err(builder_error)?;
-                }
-            }
-            Ok(())
-        };
-        if stage
-            .map(|key| lower.compiler.plan.phase_width(key).map(|width| width > 1))
-            .transpose()?
-            .unwrap_or(false)
-        {
-            let uint = Type::Constructed(TypeName::UInt(32), vec![]);
-            let lane = lower.op(
-                OpTag::Intrinsic {
-                    id: catalog().known().local_id,
-                    overload_idx: 0,
-                },
-                vec![],
-                uint.clone(),
-            )?;
-            let zero = lower.literal("0", &uint)?;
-            let first = lower.binary(BinaryOperator::Equal, lane, zero)?;
-            lower.when(first, write)?;
-        } else {
-            write(&mut lower)?;
-        }
-    }
-    let unit = lower.op(OpTag::Unit, vec![], types::unit())?;
-    let body = lower.finish(unit)?;
-    Ok(EntryPoint {
-        id,
-        name,
-        body,
-        execution_model,
-        inputs,
-        parameter_inputs,
-        outputs,
-        storage_bindings,
-        stage_descriptor_storage_accesses: accesses,
-        pipeline_storage_accesses: Default::default(),
-        span: source.span,
-    })
+    Ok(())
 }
 
-pub(super) fn view_type(element: &Type, region: Type) -> Type {
-    types::view_array_with_size(
-        element,
-        Type::Constructed(TypeName::SizePlaceholder, vec![]),
-        region,
-    )
+fn copy_results<'source>(
+    lower: &mut Body<'_, '_, 'source>,
+    scope: Value,
+    symbol: SymbolId,
+    stage: Option<Value>,
+) -> Result<(), OptimizeError> {
+    let planned = lower.compiler.facts.outputs(symbol)?;
+    let write = |lower: &mut Body<'_, '_, 'source>| -> Result<(), OptimizeError> {
+        for id in planned {
+            if !lower.compiler.facts.contains("CopyOutput", (id,))
+                || lower.compiler.facts.lookup("SsaOutputWriter", (id,)) != stage
+            {
+                continue;
+            }
+            let (source, ty, resource) = lower.compiler.facts.output(id)?;
+            if ty.is_array() || types::as_soa_tuple(ty).is_some() {
+                let (array, fields) = lower.source_array(scope, source)?;
+                let length = lower.length(array.clone())?;
+                let destination = lower.resource(scope, resource, 2)?;
+                let zero = lower.literal("0", &types::i32())?;
+                let one = lower.literal("1", &types::i32())?;
+                lower.counted(zero, length, one, vec![], |lower, index, _| {
+                    let mut value = lower.index(array, index.clone())?;
+                    for field in fields {
+                        value = lower.field(value, field)?;
+                    }
+                    lower.store(destination, index, value)?;
+                    Ok(vec![])
+                })?;
+            } else {
+                let value = lower.value(scope, source)?;
+                let destination = lower.resource(scope, resource, 2)?;
+                let zero = lower.literal("0", &types::i32())?;
+                let (place, ty) = lower.index_place(destination, zero)?;
+                let value = lower.cast(value, &ty)?;
+                lower
+                    .builder
+                    .push_void_inst(InstKind::Store {
+                        place,
+                        value: value.value,
+                    })
+                    .map_err(builder_error)?;
+            }
+        }
+        Ok(())
+    };
+    if stage
+        .map(|key| lower.compiler.facts.phase_width(key).map(|width| width > 1))
+        .transpose()?
+        .unwrap_or(false)
+    {
+        let uint = Type::Constructed(TypeName::UInt(32), vec![]);
+        let lane = lower.op(
+            OpTag::Intrinsic {
+                id: catalog().known().local_id,
+                overload_idx: 0,
+            },
+            vec![],
+            uint.clone(),
+        )?;
+        let zero = lower.literal("0", &uint)?;
+        let first = lower.binary(BinaryOperator::Equal, lane, zero)?;
+        lower.when(first, write)?;
+    } else {
+        write(lower)?;
+    }
+    Ok(())
 }

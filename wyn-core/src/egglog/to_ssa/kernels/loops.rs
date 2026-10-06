@@ -1,5 +1,6 @@
-use super::kernels::{invocation, store};
-use super::{error, Body, OptimizeError};
+//! Emit scheduled loop entry and exit phases.
+use super::super::{error, Body, OptimizeError};
+use super::invocation;
 use egglog_engine::Value;
 
 pub(super) fn emit(
@@ -9,7 +10,7 @@ pub(super) fn emit(
     phase: &str,
     phase_width: u32,
 ) -> Result<(), OptimizeError> {
-    let Some(source) = body.compiler.plan.source(phase_owner) else {
+    let Some(source) = body.compiler.facts.source(phase_owner) else {
         return Err(error("loop source missing"));
     };
     let Some((header, _)) = body.compiler.facts.loops(source) else {
@@ -18,7 +19,7 @@ pub(super) fn emit(
     let Some(state) = body.compiler.facts.loop_state(header) else {
         return Err(error("loop state missing"));
     };
-    let Some(resource) = body.compiler.plan.value_ref(state) else {
+    let Some(resource) = body.compiler.facts.value_ref(state) else {
         return Err(error("loop carry storage missing"));
     };
     if phase == "loop_enter" {
@@ -29,7 +30,7 @@ pub(super) fn emit(
         let (start, step) = invocation(body, phase_width)?;
         body.counted(start, n, step, vec![], |body, index, _| {
             let value = body.index(initial, index.clone())?;
-            store(body, output, index, value)?;
+            body.store(output, index, value)?;
             Ok(vec![])
         })?;
     }

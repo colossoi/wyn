@@ -1,9 +1,8 @@
 //! Expand scheduled phases straight into SSA instructions and structured loops.
 
-use super::{builder_error, error, Body, OptimizeError, Typed};
+use super::{error, Body, OptimizeError, Typed};
 use crate::builtins::catalog;
 use crate::op::{BinaryOperator, OpTag};
-use crate::ssa::types::InstKind;
 use crate::types::{self, Type, TypeName};
 use crate::LookupMap;
 use egglog_engine::sort::S;
@@ -11,6 +10,7 @@ use egglog_engine::Value;
 
 mod filter;
 mod indexed;
+mod loops;
 mod screma;
 use filter::{compact, serial_filter};
 use indexed::{buckets, indexed};
@@ -25,47 +25,37 @@ pub(super) fn emit(
     phase_width: u32,
 ) -> Result<(), OptimizeError> {
     if matches!(phase, "loop_enter" | "loop_exit") {
-        return super::loops::emit(body, scope, phase_owner, phase, phase_width);
+        return loops::emit(body, scope, phase_owner, phase, phase_width);
     }
     if phase == "scalar" {
-        let operations = body.compiler.plan.scalar_group(phase_owner);
+        let operations = body.compiler.facts.scalar_group(phase_owner);
         let Some(context) = body.compiler.facts.dispatch_context(phase_owner) else {
             return Err(error("scalar dispatch has no selected context"));
         };
         body.context = context;
         for operation in operations {
-            let Some(source) = body.compiler.plan.source(operation) else {
+            let Some(source) = body.compiler.facts.source(operation) else {
                 return Err(error("scalar dispatch source missing"));
             };
             let value = body.value(scope, source)?;
             if let Some(output) = body.slot(scope, operation, "scalar", 0, 2)? {
                 let zero = body.literal("0", &types::i32())?;
-                store(body, output, zero, value)?;
+                body.store(output, zero, value)?;
             }
         }
         return Ok(());
     }
-    let Some(plan) = body.compiler.plan.group(phase_owner) else {
+    let Some(plan) = body.compiler.facts.group(phase_owner) else {
         return Err(error("kernel has no fusion plan"));
     };
-    let results = body.compiler.plan.results(plan)?;
+    let results = body.compiler.facts.results(plan)?;
     match phase {
         "elements" => {
             let n = body.extent(scope, phase_extent)?;
             let (start, step) = invocation(body, phase_width)?;
             body.counted(start, n, step, vec![], |body, index, _| {
                 let mut cache = LookupMap::default();
-                let mut output_index = 0;
-                for (role, _, source) in &results {
-                    if role != "array" {
-                        continue;
-                    }
-                    if let Some(output) = body.slot(scope, phase_owner, "output", output_index, 2)? {
-                        let value = element(body, scope, plan, *source, index.clone(), &mut cache)?;
-                        store(body, output, index.clone(), value)?;
-                    }
-                    output_index += 1;
-                }
+                write_arrays(body, scope, phase_owner, plan, &results, index, &mut cache)?;
                 Ok(vec![])
             })?;
             Ok(())
@@ -161,7 +151,7 @@ pub(super) fn element(
         return Ok(value);
     }
     if let Some(operation) = body.compiler.facts.operation(source) {
-        if body.compiler.plan.member(plan, operation) {
+        if body.compiler.facts.member(plan, operation) {
             if body.compiler.facts.operation_kind(operation)? == "map" {
                 let owner = body.compiler.facts.operation_scope(operation)?;
                 let inputs = body.compiler.facts.inputs(operation)?;
@@ -181,19 +171,25 @@ pub(super) fn element(
     Ok(value)
 }
 
-pub(super) fn store(
+pub(super) fn write_arrays(
     body: &mut Body<'_, '_, '_>,
-    array: Typed,
+    scope: Value,
+    operation: Value,
+    plan: Value,
+    results: &[(String, i64, Value)],
     index: Typed,
-    value: Typed,
+    cache: &mut LookupMap<Value, Typed>,
 ) -> Result<(), OptimizeError> {
-    let (place, ty) = body.index_place(array, index)?;
-    let value = body.cast(value, &ty)?;
-    body.builder
-        .push_void_inst(InstKind::Store {
-            place,
-            value: value.value,
-        })
-        .map_err(builder_error)?;
+    let mut position = 0;
+    for (role, _, source) in results {
+        if role != "array" {
+            continue;
+        }
+        if let Some(output) = body.slot(scope, operation, "output", position, 2)? {
+            let value = element(body, scope, plan, *source, index.clone(), cache)?;
+            body.store(output, index.clone(), value)?;
+        }
+        position += 1;
+    }
     Ok(())
 }

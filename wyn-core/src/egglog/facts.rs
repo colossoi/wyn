@@ -1,55 +1,41 @@
 //! Borrowed queries into egglog; this view owns no source or planning facts.
-use super::{error, OptimizeError, Optimized, Program};
-use crate::builtins::catalog;
-use crate::egglog::scalar::Selected;
-use crate::op::{BinaryOperator, OpTag, UnaryOperator};
+use super::{output_error as error, query::Query, OptimizeError, Optimized, Program};
 use crate::types::{self, Type};
+use crate::BindingRef;
 use crate::SymbolId;
-use crate::{BindingRef, FunctionId};
 use egglog_engine::sort::{SetContainer, VecContainer, S};
-use egglog_engine::{ast::Literal, Term, TermId};
-use egglog_engine::{IntoValues, Read, Value};
+use egglog_engine::{IntoValues, Value};
 
-pub(in crate::egglog) struct Facts<'a, 'source> {
+mod plan;
+
+pub(super) struct Facts<'a, 'source> {
     pub program: &'a Program<'source, Optimized>,
 }
 impl<'a, 'source> Facts<'a, 'source> {
     // Access declarations are loaded with this compiler module. Wrong names or
     // arities here are compiler programming errors, never missing user facts.
     pub fn lookup(&self, table: &str, keys: impl IntoValues) -> Option<Value> {
-        match self.program.graph.read(|r| r.lookup(table, keys)) {
+        match Query(&self.program.graph).lookup(table, keys) {
             Ok(value) => value,
             Err(error) => panic!("invalid native fact accessor {table}: {error}"),
         }
     }
     pub fn contains(&self, table: &str, keys: impl IntoValues) -> bool {
-        match self.program.graph.read(|r| r.contains(table, keys)) {
+        match Query(&self.program.graph).contains(table, keys) {
             Ok(value) => value,
             Err(error) => panic!("invalid native fact predicate {table}: {error}"),
         }
     }
     pub fn constructor(&self, table: &str, keys: impl IntoValues) -> Option<Value> {
-        match self.program.graph.read(|r| r.eclass_of(table, keys)) {
+        match Query(&self.program.graph).constructor(table, keys) {
             Ok(value) => value,
             Err(error) => panic!("invalid native constructor accessor {table}: {error}"),
         }
     }
     pub fn enode(&self, name: &str, value: Value) -> Option<Vec<Value>> {
-        let mut fields = Vec::new();
-        match self
-            .program
-            .graph
-            .read(|r| r.enodes_for_eclass(name, value, |row| fields.push(row.children.to_vec())))
-        {
-            Ok(()) => {
-                assert!(
-                    fields.len() <= 1,
-                    "ambiguous native fact {name} for {value:?}: {fields:?}"
-                );
-                fields.pop()
-            }
-            Err(error) => panic!("invalid native enode accessor {name}: {error}"),
-        }
+        Query(&self.program.graph)
+            .enode(name, value)
+            .unwrap_or_else(|error| panic!("invalid native enode accessor {name}: {error}"))
     }
     pub fn integer(&self, value: Value) -> i64 {
         self.program.graph.value_to_base::<i64>(value)
@@ -265,13 +251,6 @@ impl<'a, 'source> Facts<'a, 'source> {
         Err(error("unknown boundary layout"))
     }
 
-    pub fn parameter_inputs(
-        &self,
-        scope: Value,
-        index: i64,
-    ) -> Result<Vec<crate::interface::EntryInput>, OptimizeError> {
-        crate::egglog::abi::parameter_inputs(self.program, scope, index)
-    }
     pub fn vector(&self, value: Value) -> Result<Vec<Value>, OptimizeError> {
         let Some(values) = self.program.graph.value_to_container::<VecContainer>(value) else {
             return Err(error("expected a native fact vector"));
@@ -360,81 +339,10 @@ impl<'a, 'source> Facts<'a, 'source> {
     }
 }
 
-// Borrowed decoding of egglog's extracted DAG, shared by host and SSA emission.
-impl Selected {
-    pub fn app(&self, term: TermId) -> Result<(&str, &[TermId]), OptimizeError> {
-        let Term::App(name, fields) = self.dag.get(term) else {
-            return Err(error("selected scalar is not a constructor"));
-        };
-        Ok((name, fields))
-    }
-    pub fn text(&self, term: TermId) -> Result<&str, OptimizeError> {
-        let Term::Lit(Literal::String(text)) = self.dag.get(term) else {
-            return Err(error("expected selected scalar text"));
-        };
-        Ok(text)
-    }
-    pub fn integer(&self, term: TermId) -> Result<i64, OptimizeError> {
-        let Term::Lit(Literal::Int(value)) = self.dag.get(term) else {
-            return Err(error("expected selected scalar integer"));
-        };
-        Ok(*value)
-    }
-    pub fn arguments(&self, mut term: TermId) -> Result<Vec<TermId>, OptimizeError> {
-        let mut args = Vec::new();
-        loop {
-            let (name, fields) = self.app(term)?;
-            match name {
-                "ScalarNil" => return Ok(args),
-                "ScalarCons" => {
-                    args.push(fields[1]);
-                    term = fields[2];
-                }
-                _ => return Err(error("unresolved scalar substitution")),
-            }
-        }
-    }
-    pub fn operation_arguments(&self, term: TermId) -> Result<Vec<TermId>, OptimizeError> {
-        let (name, fields) = self.app(term)?;
-        match name {
-            "ScalarUnary" => Ok(vec![fields[3]]),
-            "ScalarBinary" => Ok(fields[3..5].to_vec()),
-            "ScalarOp" => self.arguments(fields[3]),
-            _ => Err(error("expected scalar operation")),
-        }
-    }
-    pub fn operator(
-        &self,
-        term: TermId,
-        arity: usize,
-    ) -> Result<OpTag<BindingRef, FunctionId>, OptimizeError> {
-        let name = self.text(term)?;
-        match name {
-            "unit" => return Ok(OpTag::Unit),
-            "array" => return Ok(OpTag::ArrayLit(arity)),
-            "range" => return Ok(OpTag::ArrayRange { has_step: arity == 3 }),
-            "index" => return Ok(OpTag::Index),
-            _ => {}
-        }
-        if let Some(name) = name.strip_prefix("builtin:") {
-            let Some((name, index)) = name.rsplit_once(':') else {
-                return Err(error("invalid builtin identity"));
-            };
-            let Some(builtin) = catalog().lookup_by_any_name(name) else {
-                return Err(error("missing selected builtin"));
-            };
-            Ok(OpTag::Intrinsic {
-                id: builtin.id,
-                overload_idx: index.parse().map_err(|_| error("invalid builtin overload"))?,
-            })
-        } else if arity == 1 {
-            Ok(OpTag::UnaryOp(
-                UnaryOperator::try_from(name).map_err(|_| error("invalid unary operator"))?,
-            ))
-        } else {
-            Ok(OpTag::BinOp(
-                BinaryOperator::try_from(name).map_err(|_| error("invalid binary operator"))?,
-            ))
-        }
-    }
+pub(super) fn prepare(program: &mut Program<'_, Optimized>) -> Result<(), OptimizeError> {
+    program.graph.parse_and_run_program(
+        Some("lowering-access.egg".into()),
+        include_str!("facts/access.egg"),
+    )?;
+    Ok(())
 }

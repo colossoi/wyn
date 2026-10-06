@@ -12,6 +12,7 @@ use egglog_engine::{EGraph, Value};
 mod abi;
 mod analysis;
 mod bindings;
+mod facts;
 mod fusion;
 mod host;
 mod planning;
@@ -95,7 +96,7 @@ pub fn optimize_with_policy(
         host: LookupMap::default(),
         captures: LookupMap::default(),
     });
-    to_ssa::prepare(&mut program)?;
+    facts::prepare(&mut program)?;
     host::prepare(&mut program)?;
     Ok(program)
 }
@@ -149,4 +150,8 @@ fn parse_program(filename: &str, source: &str) -> Result<Vec<Command>, OptimizeE
     Parser::default()
         .get_program_from_string(Some(filename.into()), source)
         .map_err(|error| OptimizeError::Output(error.to_string()))
+}
+
+pub(super) fn output_error(message: impl Into<String>) -> OptimizeError {
+    OptimizeError::Output(message.into())
 }

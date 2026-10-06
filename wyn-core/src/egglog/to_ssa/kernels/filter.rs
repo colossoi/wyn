@@ -1,7 +1,7 @@
-use super::screma::{workgroup_scan, write_arrays};
+use super::screma::workgroup_scan;
 // Expand scheduled phases straight into SSA instructions and structured loops.
 use super::super::{error, Body, OptimizeError};
-use super::{element, store};
+use super::{element, write_arrays};
 use crate::builtins::catalog;
 use crate::op::{BinaryOperator, OpTag};
 use crate::types::{self, Type, TypeName};
@@ -16,14 +16,14 @@ pub(super) fn compact(
     plan: Value,
     results: &[(String, i64, Value)],
 ) -> Result<(), OptimizeError> {
-    let operation = body.compiler.plan.filter(plan)?;
-    let Some(source) = body.compiler.plan.source(operation) else {
+    let operation = body.compiler.facts.filter(plan)?;
+    let Some(source) = body.compiler.facts.source(operation) else {
         return Err(error("filter source missing"));
     };
     let Some(input) = body.compiler.facts.input(operation, 0) else {
         return Err(error("filter input missing"));
     };
-    let Some(domain) = body.compiler.plan.domain(phase_owner) else {
+    let Some(domain) = body.compiler.facts.domain(phase_owner) else {
         return Err(error("filter domain missing"));
     };
     let n = body.extent(scope, domain)?;
@@ -88,7 +88,7 @@ pub(super) fn compact(
                     }
                     if let Some(output) = body.slot(scope, phase_owner, "output", 0, 2)? {
                         let value = element(body, scope, plan, *output_source, index.clone(), &mut cache)?;
-                        store(body, output, output_index.clone(), value)?;
+                        body.store(output, output_index.clone(), value)?;
                     }
                 }
                 Ok(())
@@ -99,7 +99,7 @@ pub(super) fn compact(
     let first = body.binary(BinaryOperator::Equal, lane, zero.clone())?;
     body.when(first, |body| {
         if let Some(output) = body.slot(scope, phase_owner, "length", 0, 2)? {
-            store(body, output, zero, counts[0].clone())?;
+            body.store(output, zero, counts[0].clone())?;
         }
         Ok(())
     })
@@ -112,13 +112,13 @@ pub(super) fn serial_filter(
     plan: Value,
     results: &[(String, i64, Value)],
 ) -> Result<(), OptimizeError> {
-    let Some(source) = body.compiler.plan.source(phase_owner) else {
+    let Some(source) = body.compiler.facts.source(phase_owner) else {
         return Err(error("missing source"));
     };
     let Some(input) = body.compiler.facts.input(phase_owner, 0) else {
         return Err(error("operation input missing"));
     };
-    let Some(domain) = body.compiler.plan.domain(phase_owner) else {
+    let Some(domain) = body.compiler.facts.domain(phase_owner) else {
         return Err(error("filter domain missing"));
     };
     let n = body.extent(scope, domain)?;
@@ -156,7 +156,7 @@ pub(super) fn serial_filter(
         },
     )?;
     if let Some(output) = body.slot(scope, phase_owner, "length", 0, 2)? {
-        store(body, output, zero, count[0].clone())?;
+        body.store(output, zero, count[0].clone())?;
     }
     Ok(())
 }

@@ -1,7 +1,6 @@
-use super::super::interface;
 // Expand scheduled phases straight into SSA instructions and structured loops.
 use super::super::{builder_error, error, Body, OptimizeError, Typed};
-use super::{element, indexed, invocation, store};
+use super::{element, indexed, invocation, write_arrays};
 use crate::builtins::catalog;
 use crate::op::{BinaryOperator, OpTag, PureViewSource};
 use crate::ssa::types::InstKind;
@@ -31,19 +30,19 @@ pub(super) fn screma(
         initial.push(body.value(scope, neutral)?);
         operators.push(operation);
     }
-    for (index, filter) in body.compiler.plan.counts(plan)? {
+    for (index, filter) in body.compiler.facts.counts(plan)? {
         let index = scans.len() + usize::try_from(index).map_err(|_| error("negative count slot"))?;
         if index > operators.len() {
             return Err(error("noncontiguous count accumulator"));
         }
-        let Some(source) = body.compiler.plan.source(filter) else {
+        let Some(source) = body.compiler.facts.source(filter) else {
             return Err(error("filter accumulator source missing"));
         };
         sources.insert(index, source);
         operators.insert(index, filter);
         initial.insert(index, body.literal("0", &types::i32())?);
     }
-    let Some(domain) = body.compiler.plan.domain(phase_owner) else {
+    let Some(domain) = body.compiler.facts.domain(phase_owner) else {
         return Err(error("collective domain missing"));
     };
     let n = body.extent(scope, domain)?;
@@ -71,7 +70,7 @@ pub(super) fn screma(
         })?;
         for (i, value) in state.into_iter().skip(scans.len()).enumerate() {
             if let Some(output) = body.slot(scope, phase_owner, "total", i as i64, 2)? {
-                store(body, output, zero.clone(), value)?;
+                body.store(output, zero.clone(), value)?;
             }
         }
         return Ok(());
@@ -83,8 +82,8 @@ pub(super) fn screma(
     let Some(key) = body.compiler.facts.constructor("Stage", (phase_owner, "chunks")) else {
         return Err(error("collective chunk schedule missing"));
     };
-    let chunks_width = body.compiler.plan.phase_width(key)?;
-    let Some((x, y, z)) = body.compiler.plan.grid(key)? else {
+    let chunks_width = body.compiler.facts.phase_width(key)?;
+    let Some((x, y, z)) = body.compiler.facts.dispatch_grid(key)? else {
         return Err(error("collective requires a fixed chunk grid"));
     };
     let groups = u64::from(x) * u64::from(y) * u64::from(z);
@@ -174,7 +173,7 @@ pub(super) fn screma(
                                 carry[i].clone(),
                                 prefix.clone(),
                             )?;
-                            store(body, output, index.clone(), value)?;
+                            body.store(output, index.clone(), value)?;
                         }
                     }
                     Ok(())
@@ -191,7 +190,7 @@ pub(super) fn screma(
             body.when(first, |body| {
                 for (i, value) in state.into_iter().enumerate() {
                     if let Some(output) = body.slot(scope, phase_owner, "partial", i as i64, 2)? {
-                        store(body, output, group.clone(), value)?;
+                        body.store(output, group.clone(), value)?;
                     }
                 }
                 Ok(())
@@ -245,7 +244,7 @@ pub(super) fn screma(
                                     carry[i].clone(),
                                     offset,
                                 )?;
-                                store(body, output, index.clone(), value)?;
+                                body.store(output, index.clone(), value)?;
                             }
                         }
                         Ok(())
@@ -263,7 +262,7 @@ pub(super) fn screma(
             body.when(first, |body| {
                 for (i, value) in totals.into_iter().skip(scans.len()).enumerate() {
                     if let Some(output) = body.slot(scope, phase_owner, "total", i as i64, 2)? {
-                        store(body, output, zero.clone(), value)?;
+                        body.store(output, zero.clone(), value)?;
                     }
                 }
                 Ok(())
@@ -328,10 +327,10 @@ pub(super) fn workgroup_scan(
                     count: width,
                 }),
                 vec![zero.clone(), length.clone()],
-                interface::view_type(&value.ty, types::no_buffer()),
+                Body::view_type(&value.ty, types::no_buffer()),
             )?);
         }
-        store(body, banks[0].clone(), lane.clone(), value.clone())?;
+        body.store(banks[0].clone(), lane.clone(), value.clone())?;
         shared.push(banks);
     }
     body.builder.push_void_inst(InstKind::ControlBarrier).map_err(builder_error)?;
@@ -351,7 +350,7 @@ pub(super) fn workgroup_scan(
                 |_| Ok(value.clone()),
                 None,
             )?;
-            store(body, shared[i][1 - bank].clone(), lane.clone(), value.clone())?;
+            body.store(shared[i][1 - bank].clone(), lane.clone(), value.clone())?;
         }
         bank = 1 - bank;
         body.builder.push_void_inst(InstKind::ControlBarrier).map_err(builder_error)?;
@@ -395,7 +394,7 @@ fn accumulate_at(
         return Err(error("accumulator input missing"));
     };
     let filtered = match body.compiler.facts.operation(input) {
-        Some(filter) if body.compiler.plan.member(plan, filter) && is_count(body, filter)? => Some(filter),
+        Some(filter) if body.compiler.facts.member(plan, filter) && is_count(body, filter)? => Some(filter),
         _ => None,
     };
     if let Some(filter) = filtered {
@@ -446,26 +445,4 @@ fn combine_accumulator(
     } else {
         body.callback(scope, operator, vec![a, b])
     }
-}
-pub(super) fn write_arrays(
-    body: &mut Body<'_, '_, '_>,
-    scope: Value,
-    operation: Value,
-    plan: Value,
-    results: &[(String, i64, Value)],
-    index: Typed,
-    cache: &mut LookupMap<Value, Typed>,
-) -> Result<(), OptimizeError> {
-    let mut position = 0;
-    for (role, _, source) in results {
-        if role != "array" {
-            continue;
-        }
-        if let Some(output) = body.slot(scope, operation, "output", position, 2)? {
-            let value = element(body, scope, plan, *source, index.clone(), cache)?;
-            store(body, output, index.clone(), value)?;
-        }
-        position += 1;
-    }
-    Ok(())
 }

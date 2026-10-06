@@ -1,6 +1,6 @@
 //! Source ABI declarations and publication for directly emitted entry bodies.
 use super::sizes;
-use crate::egglog::to_ssa::host::{self, scalar_type};
+use crate::egglog::host::lower::{self as host, scalar_type};
 use crate::egglog::to_ssa::{error, Compiler};
 use crate::egglog::OptimizeError;
 use crate::flow::ExecutionModel;
@@ -243,15 +243,15 @@ fn publish_results(
         let declaration = &entry.declaration;
         let (body, _) = extract_lambda_params_ref(&definition.body);
         let result_type = strip_existentials(&body.ty);
-        for (index, id) in compiler.plan.outputs(owner)?.into_iter().enumerate() {
-            let (_, ty, resource) = compiler.plan.output(id)?;
-            let Some(backing) = compiler.plan.backing(resource) else {
+        for (index, id) in compiler.facts.outputs(owner)?.into_iter().enumerate() {
+            let (_, ty, resource) = compiler.facts.output(id)?;
+            let Some(backing) = compiler.facts.backing(resource) else {
                 return Err(error("output backing missing"));
             };
-            let binding = if let Some((binding, _, _)) = compiler.plan.buffer(backing)? {
+            let binding = if let Some((binding, _, _)) = compiler.bindings.buffer(backing)? {
                 binding
             } else {
-                let Some(source) = compiler.plan.external(backing) else {
+                let Some(source) = compiler.facts.external(backing) else {
                     return Err(error("output backing missing"));
                 };
                 let Some((binding, _)) = compiler.facts.input_storage(source)? else {
@@ -370,7 +370,7 @@ fn publish_scalars(
                 if !capture.stages.contains(stage) {
                     continue;
                 }
-                let binding = compiler.plan.captures[&term];
+                let binding = compiler.bindings.captures[&term];
                 module.scalar_tasks.push(ScalarTask {
                     stage: entry.name.clone(),
                     destination: ScalarSource::Binding {
@@ -400,7 +400,7 @@ fn publish_scalars(
             let Some(value) = compiler.program.stage.host.get(&(root, target[1])) else {
                 return Err(error("selected host computation missing"));
             };
-            let Some((binding, _, _)) = compiler.plan.buffer(target[3])? else {
+            let Some((binding, _, _)) = compiler.bindings.buffer(target[3])? else {
                 return Err(error("host destination allocation missing"));
             };
             let Some(ty) = compiler.facts.source_type(target[1]).and_then(scalar_type) else {
@@ -432,12 +432,12 @@ fn publish_loops(
         let Some((_, Some(stage))) = compiler.entry_origins.get(&entry.id) else {
             continue;
         };
-        let operation = compiler.plan.phase_operation(*stage)?;
-        let phase = compiler.plan.phase_name(*stage)?;
+        let operation = compiler.facts.phase_operation(*stage)?;
+        let phase = compiler.facts.phase_name(*stage)?;
         if phase != "loop_exit" {
             continue;
         }
-        let Some(source) = compiler.plan.source(operation) else {
+        let Some(source) = compiler.facts.source(operation) else {
             return Err(error("loop source missing"));
         };
         let Some((header, iteration)) = compiler.facts.loops(source) else {
@@ -459,11 +459,11 @@ fn publish_loops(
             .map_err(|error| error.required("loop initial length"))?;
         let slot = |value: Option<Value>| -> Result<ScalarSource, OptimizeError> {
             let Some(backing) =
-                value.and_then(|v| compiler.plan.value_ref(v)).and_then(|v| compiler.plan.backing(v))
+                value.and_then(|v| compiler.facts.value_ref(v)).and_then(|v| compiler.facts.backing(v))
             else {
                 return Err(error("loop state has no selected backing"));
             };
-            let Some((binding, _, _)) = compiler.plan.buffer(backing)? else {
+            let Some((binding, _, _)) = compiler.bindings.buffer(backing)? else {
                 return Err(error("loop state has no selected allocation"));
             };
             Ok(ScalarSource::Binding {
@@ -481,8 +481,8 @@ fn publish_loops(
             let Some((_, Some(candidate))) = compiler.entry_origins.get(id) else {
                 continue;
             };
-            let candidate_operation = compiler.plan.phase_operation(*candidate)?;
-            let candidate_phase = compiler.plan.phase_name(*candidate)?;
+            let candidate_operation = compiler.facts.phase_operation(*candidate)?;
+            let candidate_phase = compiler.facts.phase_name(*candidate)?;
             if candidate_operation == operation {
                 if candidate_phase == "loop_enter" {
                     setup = Some(index);

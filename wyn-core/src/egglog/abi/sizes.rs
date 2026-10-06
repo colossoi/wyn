@@ -1,7 +1,8 @@
 //! Lower selected allocation extents directly into the final host expressions.
 
-use crate::egglog::to_ssa::{error, host, read::Facts, Compiler};
+use crate::egglog::to_ssa::{error, Compiler};
 use crate::egglog::OptimizeError;
+use crate::egglog::{facts::Facts, host::lower as host};
 use crate::host::{BufferLen, DispatchLen, DispatchSize, Expr, ScalarExpr, ScalarSource};
 use crate::ssa::layout::storage_elem_stride;
 use egglog_engine::{RawValues, Value};
@@ -47,7 +48,7 @@ pub(in crate::egglog) fn dispatch(
         });
     }
     if let Some(fields) = compiler.facts.enode("BufferLaunch", selected) {
-        let Some((binding, element, _)) = compiler.plan.buffer(fields[0])? else {
+        let Some((binding, element, _)) = compiler.bindings.buffer(fields[0])? else {
             return Err(error("launch buffer missing"));
         };
         let Some(elem_bytes) = storage_elem_stride(&compiler.facts.physical_type(element, true)?) else {
@@ -101,7 +102,7 @@ pub(in crate::egglog) fn capacity(
     compiler: &Compiler<'_, '_>,
     buffer: Value,
 ) -> Result<BufferLen, OptimizeError> {
-    let Some((_, element, extent_value)) = compiler.plan.buffer(buffer)? else {
+    let Some((_, element, extent_value)) = compiler.bindings.buffer(buffer)? else {
         return Err(error("allocation missing"));
     };
     let Some(stride) = storage_elem_stride(&compiler.facts.physical_type(element, true)?) else {
@@ -137,7 +138,7 @@ pub(in crate::egglog) fn extent(compiler: &Compiler<'_, '_>, key: Value) -> Resu
     if let Some(bound) = compiler.facts.lookup("HostBound", (key,)) {
         return extent(compiler, bound);
     }
-    let Some((name, children)) = compiler.plan.extent(key) else {
+    let Some((name, children)) = compiler.facts.extent(key) else {
         return Err(error("host extent missing"));
     };
     match name {
@@ -145,7 +146,7 @@ pub(in crate::egglog) fn extent(compiler: &Compiler<'_, '_>, key: Value) -> Resu
             compiler.program.graph.value_to_base::<i64>(children[0]),
         )),
         "Length" | "Scalar" => {
-            let Some(source) = compiler.plan.expr(children[0]) else {
+            let Some(source) = compiler.facts.expr(children[0]) else {
                 return Err(error("host extent identity missing"));
             };
             source_size(compiler, source, name == "Length")
@@ -167,11 +168,11 @@ pub(in crate::egglog) fn source_size(
     length: bool,
 ) -> Result<Expr, OptimizeError> {
     if length {
-        let Some(bound) = compiler.plan.view_extent(source) else {
+        let Some(bound) = compiler.facts.view_extent(source) else {
             return Err(error(format!("array {source:?} has no host extent")));
         };
-        if let Some(("Length", fields)) = compiler.plan.extent(bound) {
-            if compiler.plan.expr(fields[0]) == Some(source) {
+        if let Some(("Length", fields)) = compiler.facts.extent(bound) {
+            if compiler.facts.expr(fields[0]) == Some(source) {
                 let Some((binding, stride)) = compiler.facts.input_storage(source)? else {
                     return Err(error(format!("array {source:?} has no host length input")));
                 };

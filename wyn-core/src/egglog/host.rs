@@ -1,8 +1,7 @@
 //! Resolve target support once while constructing the final host program.
-use super::{
-    to_ssa::{host, read::Facts},
-    OptimizeError, Optimized, Program,
-};
+use super::{facts::Facts, OptimizeError, Optimized, Program};
+
+pub(super) mod lower;
 
 pub(super) struct Capture {
     pub value: crate::host::ScalarExpr,
@@ -34,9 +33,9 @@ pub(super) fn prepare(program: &mut Program<'_, Optimized>) -> Result<(), Optimi
                 .contains("ScalarPreferHost", (selected.values[term],))?
             {
                 if let Some(ty) =
-                    (Facts { program }).ty(selected.values[fields[1]]).and_then(host::scalar_type)
+                    (Facts { program }).ty(selected.values[fields[1]]).and_then(lower::scalar_type)
                 {
-                    match host::selected(program, term) {
+                    match lower::selected(program, term) {
                         Ok(value) => {
                             captures.insert(
                                 term,
@@ -48,8 +47,8 @@ pub(super) fn prepare(program: &mut Program<'_, Optimized>) -> Result<(), Optimi
                             );
                             continue;
                         }
-                        Err(host::Error::Unsupported) => {}
-                        Err(host::Error::Invalid(error)) => return Err(error),
+                        Err(lower::Error::Unsupported) => {}
+                        Err(lower::Error::Invalid(error)) => return Err(error),
                     }
                 }
             }
@@ -79,17 +78,17 @@ pub(super) fn prepare(program: &mut Program<'_, Optimized>) -> Result<(), Optimi
         })?;
         let mut lowered = Vec::new();
         for (source, context) in targets {
-            if (Facts { program }).source_type(source).and_then(host::scalar_type).is_none() {
+            if (Facts { program }).source_type(source).and_then(lower::scalar_type).is_none() {
                 lowered.clear();
                 break;
             }
-            match host::expression(program, context, source) {
+            match lower::expression(program, context, source) {
                 Ok(value) => lowered.push((source, value)),
-                Err(host::Error::Unsupported) => {
+                Err(lower::Error::Unsupported) => {
                     lowered.clear();
                     break;
                 }
-                Err(host::Error::Invalid(error)) => return Err(error),
+                Err(lower::Error::Invalid(error)) => return Err(error),
             }
         }
         for (source, value) in lowered {

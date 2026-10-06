@@ -6,7 +6,7 @@ use crate::binding_layout::{
     extract_storage_image_resource, extract_texture_backing, extract_texture_binding,
     extract_texture_resource, extract_uniform_binding,
 };
-use crate::egglog::to_ssa::{plan::unique, Compiler};
+use crate::egglog::to_ssa::Compiler;
 use crate::host::BufferLen;
 use crate::interface::lowering::{build_entry_outputs, extract_size_hint};
 use crate::interface::{
@@ -23,6 +23,7 @@ use egglog_engine::Value;
 use std::collections::BTreeSet;
 use wyn_base::IdSource;
 
+pub(super) mod bindings;
 pub(super) mod publication;
 mod sizes;
 
@@ -75,7 +76,7 @@ pub(super) fn storage_bindings(
     for value in compiler.facts.set("RootResourceSet", (root,)) {
         let flags = Query(&compiler.program.graph).required("RootResource", (root, value))?;
         let access = compiler.facts.storage_access(flags)?;
-        if let Some((binding, element, _)) = compiler.plan.buffer(value)? {
+        if let Some((binding, element, _)) = compiler.bindings.buffer(value)? {
             if let Some(access) = access.map(ResourceAccess::from) {
                 accesses.entry(binding).and_modify(|old| *old = old.merge(access)).or_insert(access);
             }
@@ -87,12 +88,12 @@ pub(super) fn storage_bindings(
             {
                 name
             } else {
-                let name = compiler.plan.buffer_name(value)?;
+                let name = compiler.bindings.buffer_name(value)?;
                 if compiler.facts.lookup("PhysicalBinding", (value,)).is_some() {
                     resource_names.insert(name.clone());
                     name
                 } else {
-                    unique(name, &mut resource_names)
+                    unique_name(name, &mut resource_names)
                 }
             };
             storage_bindings.push(StorageBindingDecl {
@@ -112,7 +113,7 @@ pub(super) fn storage_bindings(
                     "runtime loop storage has no allocation".into(),
                 ));
             };
-            let Some(source) = compiler.plan.external(value) else {
+            let Some(source) = compiler.facts.external(value) else {
                 return Err(OptimizeError::Output("external planned storage missing".into()));
             };
             let Some((binding, _)) = compiler.facts.input_storage(source)? else {
@@ -135,7 +136,7 @@ pub(super) fn storage_bindings(
             if !capture.stages.contains(&stage) {
                 continue;
             }
-            let binding = compiler.plan.captures[&term];
+            let binding = compiler.bindings.captures[&term];
             accesses.insert(binding, ResourceAccess::Read);
             let (_, fields) = compiler.program.stage.selected.app(term)?;
             let Some(ty) = compiler.facts.ty(compiler.program.stage.selected.values[fields[1]]) else {
@@ -158,7 +159,7 @@ pub(super) fn parameter_inputs(
     scope: Value,
     index: i64,
 ) -> Result<Vec<EntryInput>, OptimizeError> {
-    let facts = super::to_ssa::read::Facts { program };
+    let facts = super::facts::Facts { program };
     let Some(symbol) = facts.definition_name(scope) else {
         return Err(OptimizeError::Output("parameter region is not an entry".into()));
     };
@@ -271,7 +272,7 @@ pub(super) fn outputs(
     symbol: SymbolId,
     bindings: &mut IdSource<u32>,
 ) -> Result<Vec<crate::interface::EntryOutput>, OptimizeError> {
-    let facts = super::to_ssa::read::Facts { program };
+    let facts = super::facts::Facts { program };
     let Some(token) = program.identities.symbols.get(&symbol) else {
         return Err(OptimizeError::Output("entry identity missing".into()));
     };
@@ -308,4 +309,17 @@ pub(super) fn outputs(
         bindings,
     )
     .map_err(|error| OptimizeError::Output(error.to_string()))
+}
+
+pub(in crate::egglog) fn unique_name(
+    base: String,
+    used: &mut std::collections::BTreeSet<String>,
+) -> String {
+    let mut name = base.clone();
+    let mut index = 2;
+    while !used.insert(name.clone()) {
+        name = format!("{base}_{index}");
+        index += 1;
+    }
+    name
 }
