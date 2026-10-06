@@ -1,5 +1,4 @@
 //! Native plan identities mapped to final dispatch and storage metadata.
-use super::kernels::Recipe;
 use super::read::Facts;
 use super::{error, OptimizeError, Optimized, Program};
 use crate::egglog::query::Query;
@@ -32,7 +31,7 @@ impl<'a, 'source> Plan<'a, 'source> {
             };
             for index in 0..entry.declaration.params.len() {
                 for input in query.parameter_inputs(scope, index as i64)? {
-                    if let Some(binding) = input.declaration.descriptor_binding() {
+                    if let Some(binding) = input.descriptor_binding() {
                         reserved.insert(binding);
                     }
                 }
@@ -109,20 +108,28 @@ impl<'a, 'source> Plan<'a, 'source> {
             .map_err(|_| error("dispatch plan contains a cycle"))
     }
 
-    pub fn recipe(&self, key: Value) -> Result<Recipe, OptimizeError> {
-        let query = Query(&self.query.program.graph);
-        let Some(stage) = query.enode("Stage", key)? else {
-            return Err(error("stage identity missing"));
-        };
-        let Some(domain) = query.row("PhaseDomain", |r| r[0] == key)? else {
-            return Err(error("stage domain missing"));
-        };
-        Ok(Recipe {
-            operation: stage[0],
-            phase: query.0.value_to_base::<S>(stage[1]).to_string(),
-            extent: domain[1],
-            width: self.query.positive(domain[2], "stage width")?,
-        })
+    pub fn phase_operation(&self, stage: Value) -> Result<Value, OptimizeError> {
+        let fields = self.query.enode("Stage", stage).ok_or_else(|| error("stage identity missing"))?;
+        Ok(fields[0])
+    }
+
+    pub fn phase_name(&self, stage: Value) -> Result<String, OptimizeError> {
+        let fields = self.query.enode("Stage", stage).ok_or_else(|| error("stage identity missing"))?;
+        Ok(self.query.program.graph.value_to_base::<S>(fields[1]).to_string())
+    }
+
+    pub fn phase_extent(&self, stage: Value) -> Result<Value, OptimizeError> {
+        let row = Query(&self.query.program.graph)
+            .row("PhaseDomain", |r| r[0] == stage)?
+            .ok_or_else(|| error("stage domain missing"))?;
+        Ok(row[1])
+    }
+
+    pub fn phase_width(&self, stage: Value) -> Result<u32, OptimizeError> {
+        let row = Query(&self.query.program.graph)
+            .row("PhaseDomain", |r| r[0] == stage)?
+            .ok_or_else(|| error("stage domain missing"))?;
+        self.query.positive(row[2], "stage width")
     }
 
     pub fn grid(&self, key: Value) -> Result<Option<(u32, u32, u32)>, OptimizeError> {

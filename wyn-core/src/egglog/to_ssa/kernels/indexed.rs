@@ -1,7 +1,6 @@
 //! Expand scheduled phases straight into SSA instructions and structured loops.
 
 use super::super::{builder_error, error, Body, OptimizeError, Typed};
-use super::Recipe;
 use super::{element, invocation, store};
 use crate::op::{BinaryOperator, OpTag};
 use crate::ssa::types::{AtomicOp, InstKind};
@@ -32,21 +31,24 @@ fn destination_value(
 pub(super) fn indexed(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
-    stage: &Recipe,
+    phase_owner: Value,
+    phase: &str,
+    phase_extent: Value,
+    phase_width: u32,
     plan: Value,
 ) -> Result<(), OptimizeError> {
-    let Some(destination) = body.compiler.facts.destination(stage.operation) else {
+    let Some(destination) = body.compiler.facts.destination(phase_owner) else {
         return Err(error("indexed destination missing"));
     };
-    let output = destination_value(body, scope, stage.operation)?;
-    let serial = stage.phase == "ordered";
+    let output = destination_value(body, scope, phase_owner)?;
+    let serial = phase == "ordered";
     let domain = if serial {
-        let Some(domain) = body.compiler.plan.domain(stage.operation) else {
+        let Some(domain) = body.compiler.plan.domain(phase_owner) else {
             return Err(error("ordered operation domain missing"));
         };
         domain
     } else {
-        stage.extent
+        phase_extent
     };
     let n = body.extent(scope, domain)?;
     let (start, step) = if serial {
@@ -55,16 +57,25 @@ pub(super) fn indexed(
             body.literal("1", &types::i32())?,
         )
     } else {
-        invocation(body, stage.width)?
+        invocation(body, phase_width)?
     };
     body.counted(start, n, step, vec![], |body, index, _| {
-        if stage.phase == "initialize" {
+        if phase == "initialize" {
             let original = body.value(scope, destination)?;
             let value = body.index(original, index.clone())?;
             store(body, output, index, value)?;
             return Ok(vec![]);
         }
-        update(body, scope, stage, plan, output, index, &mut LookupMap::default())?;
+        update(
+            body,
+            scope,
+            phase_owner,
+            phase,
+            plan,
+            output,
+            index,
+            &mut LookupMap::default(),
+        )?;
         Ok(vec![])
     })?;
     Ok(())
@@ -73,20 +84,21 @@ pub(super) fn indexed(
 pub(super) fn update(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
-    stage: &Recipe,
+    phase_owner: Value,
+    phase: &str,
     plan: Value,
     output: Typed,
     index: Typed,
     cache: &mut LookupMap<Value, Typed>,
 ) -> Result<(), OptimizeError> {
-    let kind = body.compiler.facts.operation_kind(stage.operation)?;
-    let inputs = body.compiler.facts.inputs(stage.operation)?;
+    let kind = body.compiler.facts.operation_kind(phase_owner)?;
+    let inputs = body.compiler.facts.inputs(phase_owner)?;
     let mut arguments = Vec::new();
     for &(_, input) in &inputs {
         arguments.push(element(body, scope, plan, input, index.clone(), cache)?);
     }
     let (key, value) = if kind == "scatter" {
-        let pair = body.callback(scope, stage.operation, arguments)?;
+        let pair = body.callback(scope, phase_owner, arguments)?;
         (body.field(pair.clone(), 0)?, body.field(pair, 1)?)
     } else {
         if arguments.len() != 2 {
@@ -100,10 +112,10 @@ pub(super) fn update(
     let below = body.binary(BinaryOperator::Less, key.clone(), length)?;
     let valid = body.binary(BinaryOperator::LogicalAnd, nonnegative, below)?;
     body.when(valid, |body| {
-        if stage.phase == "atomic" {
+        if phase == "atomic" {
             let (place, ty) = body.index_place(output, key)?;
             let value = body.cast(value, &ty)?;
-            let Some(update) = body.compiler.plan.atomic(stage.operation) else {
+            let Some(update) = body.compiler.plan.atomic(phase_owner) else {
                 return Err(error("missing atomic"));
             };
             if update != AtomicOp::CompareExchange {
@@ -141,7 +153,7 @@ pub(super) fn update(
             let initial = body.op(OpTag::Tuple(2), vec![old, done], state_ty.clone())?;
             body.retry(initial, |body, state| {
                 let old = body.field(state, 0)?;
-                let next = body.callback(scope, stage.operation, vec![old.clone(), value.clone()])?;
+                let next = body.callback(scope, phase_owner, vec![old.clone(), value.clone()])?;
                 let result = body
                     .builder
                     .push_inst(
@@ -161,7 +173,7 @@ pub(super) fn update(
         } else {
             let value = if kind == "reduce-by-index" {
                 let previous = body.index(output.clone(), key.clone())?;
-                body.callback(scope, stage.operation, vec![previous, value])?
+                body.callback(scope, phase_owner, vec![previous, value])?
             } else {
                 value
             };
@@ -175,31 +187,33 @@ pub(super) fn update(
 pub(super) fn buckets(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
-    stage: &Recipe,
+    phase_owner: Value,
+    phase: &str,
+    phase_width: u32,
     plan: Value,
 ) -> Result<(), OptimizeError> {
-    let (domain_rank, input_dimensions) = body.compiler.facts.bucket_shape(stage.operation)?;
-    let output = destination_value(body, scope, stage.operation)?;
+    let (domain_rank, input_dimensions) = body.compiler.facts.bucket_shape(phase_owner)?;
+    let output = destination_value(body, scope, phase_owner)?;
     let Some(counts) = body.slot(
         scope,
-        stage.operation,
+        phase_owner,
         "counts",
         0,
-        if stage.phase == "clear" { 2 } else { 3 },
+        if phase == "clear" { 2 } else { 3 },
     )?
     else {
         return Err(error("bucket counts missing"));
     };
-    let Some(overflow) = body.slot(scope, stage.operation, "overflow", 0, 2)? else {
+    let Some(overflow) = body.slot(scope, phase_owner, "overflow", 0, 2)? else {
         return Err(error("bucket overflow missing"));
     };
     let zero = body.literal("0", &types::i32())?;
     let one = body.literal("1", &types::i32())?;
-    let serial = stage.phase == "ordered";
-    if serial || stage.phase == "clear" {
+    let serial = phase == "ordered";
+    if serial || phase == "clear" {
         let count = body.length(output.clone())?;
         let (start, step) =
-            if serial { (zero.clone(), one.clone()) } else { invocation(body, stage.width)? };
+            if serial { (zero.clone(), one.clone()) } else { invocation(body, phase_width)? };
         let first = body.binary(BinaryOperator::Equal, start.clone(), zero.clone())?;
         body.when(first, |body| {
             store(body, overflow.clone(), zero.clone(), zero.clone())
@@ -215,7 +229,7 @@ pub(super) fn buckets(
     bucket_updates(
         body,
         scope,
-        stage.operation,
+        phase_owner,
         plan,
         output,
         counts,
@@ -223,7 +237,7 @@ pub(super) fn buckets(
         &input_dimensions,
         domain_rank,
         serial,
-        stage.width,
+        phase_width,
     )
 }
 

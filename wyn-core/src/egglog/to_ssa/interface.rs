@@ -3,28 +3,87 @@ use super::kernels;
 
 use super::{builder_error, error, Body, Compiler, OptimizeError, Typed};
 use crate::builtins::catalog;
-use crate::egglog::source::Term;
+use crate::flow::ExecutionModel;
 use crate::interface::EntryKind;
 use crate::op::BinaryOperator;
 use crate::op::{OpTag, PureViewSource};
 use crate::ssa::types::{EntryPoint, InstKind};
-use crate::tlc::data::EntryInputBounds;
-use crate::tlc::EntryPoint as SourceEntry;
 use crate::types::{self, buffer_tag, Type, TypeExt, TypeName};
 use crate::SymbolId;
 use egglog_engine::Value;
 
 pub(super) fn entry<'source>(
     compiler: &mut Compiler<'_, 'source>,
-    scope: Value,
-    source: &'source Term,
-    parameters: &[(SymbolId, Type)],
-    entry: &SourceEntry<EntryInputBounds>,
-    symbol: SymbolId,
+    owner: SymbolId,
     stage: Option<Value>,
-    metadata: &crate::interface::EntryPublication,
+    published: &[EntryPoint],
 ) -> Result<EntryPoint, OptimizeError> {
+    let definition = compiler
+        .program
+        .source
+        .defs
+        .iter()
+        .find(|d| d.name == owner)
+        .ok_or_else(|| error("entry definition missing"))?;
+    let crate::tlc::DefMeta::EntryPoint(entry) = &definition.meta else {
+        return Err(error("entry declaration missing"));
+    };
+    let scope = compiler.facts.definition(owner).ok_or_else(|| error("entry region missing"))?;
+    let token =
+        compiler.program.identities.symbols.get(&owner).ok_or_else(|| error("entry identity missing"))?;
+    let root = match stage {
+        Some(stage) => compiler.facts.constructor("KernelRoot", (stage,)),
+        None => compiler.facts.constructor("EntryRoot", (token,)),
+    }
+    .ok_or_else(|| error("entry root missing"))?;
+    let (source, parameters) = crate::tlc::extract_lambda_params_ref(&definition.body);
+    let original = compiler.facts.contains("EmitOriginalEntry", (token,));
+    let outputs = if stage.is_none() && original {
+        let Some(outputs) = compiler.plan.entry_outputs.remove(&owner) else {
+            return Err(OptimizeError::Output("entry output ABI missing".into()));
+        };
+        outputs
+    } else {
+        Vec::new()
+    };
+    let declaration = &entry.declaration;
+    let name = if let Some(group) = &declaration.graphics_group {
+        let Some(name) = compiler.program.source.symbols.get(group.root) else {
+            return Err(OptimizeError::Output("graphics owner name missing".into()));
+        };
+        name
+    } else {
+        &declaration.name
+    };
+    let selected_phase = stage.map(|key| compiler.plan.phase_name(key)).transpose()?;
+    let phase = match selected_phase.as_deref() {
+        Some("elements" | "scalar") => "compute",
+        Some("chunks") => "partials",
+        Some(phase) => phase,
+        None => match declaration.entry_kind {
+            EntryKind::Vertex => "vertex",
+            EntryKind::Fragment => "fragment",
+            _ if compiler.facts.contains("FinishEntry", (token,)) => "finish",
+            _ => "compute",
+        },
+    };
+    let name = super::plan::unique(format!("{name}_{phase}"), &mut compiler.entry_names);
+    let execution_model = match declaration.entry_kind {
+        EntryKind::Vertex => ExecutionModel::Vertex,
+        EntryKind::Fragment => ExecutionModel::Fragment,
+        EntryKind::Compute => {
+            let grid = crate::egglog::abi::required(&compiler.program.graph, "RootWorkgroup", (root,))?;
+            ExecutionModel::Compute {
+                local_size: compiler.facts.grid(grid)?,
+            }
+        }
+        EntryKind::Root => return Err(OptimizeError::Output("unextracted graphics entry".into())),
+    };
+    let id = compiler.entry_ids.next_id();
+    compiler.entry_origins.insert(id, (owner, stage));
+
     let decl = &entry.declaration;
+    let symbol = owner;
     let mut lower = Body::new(compiler, scope, vec![], source.ty.clone())?;
     lower.grid = stage.map(|key| lower.compiler.plan.grid(key)).transpose()?.flatten();
     if stage.is_none() {
@@ -43,9 +102,20 @@ pub(super) fn entry<'source>(
         let first = inputs.len();
         let mut values = Vec::new();
         for selected in declared {
-            let input = selected.declaration;
-            let physical = selected.parameter_type;
-            let scalar_storage = selected.scalar_storage;
+            let mut input = selected;
+            let scalar_storage = input.storage_binding().is_some() && !input.ty.is_array();
+            if scalar_storage {
+                input.ty = types::sized_array(1, input.ty.clone());
+            }
+            let physical = if let Some(binding) = input.storage_binding() {
+                let element = input.ty.elem_type().ok_or_else(|| error("storage input has no element"))?;
+                view_type(
+                    &lower.compiler.facts.physical_type(element, true)?,
+                    buffer_tag(binding),
+                )
+            } else {
+                lower.compiler.facts.physical_type(&input.ty, false)?
+            };
             let parameter =
                 lower.builder.func_mut().add_function_param(physical.clone(), input.name.clone());
             let mut value = Typed {
@@ -104,6 +174,8 @@ pub(super) fn entry<'source>(
         lower.values.insert(formal, value);
         parameter_inputs.push((first..inputs.len()).collect());
     }
+    let storage_bindings =
+        crate::egglog::abi::storage_bindings(lower.compiler, owner, stage, published, &mut inputs)?;
     let compute = decl.entry_kind == EntryKind::Compute;
     let original = lower
         .compiler
@@ -113,8 +185,11 @@ pub(super) fn entry<'source>(
         .get(&symbol)
         .is_some_and(|token| lower.compiler.facts.contains("EmitOriginalEntry", (token,)));
     let result = if let Some(stage) = stage {
-        let recipe = lower.compiler.plan.recipe(stage)?;
-        kernels::emit(&mut lower, scope, &recipe)?;
+        let operation = lower.compiler.plan.phase_operation(stage)?;
+        let phase = lower.compiler.plan.phase_name(stage)?;
+        let extent = lower.compiler.plan.phase_extent(stage)?;
+        let width = lower.compiler.plan.phase_width(stage)?;
+        kernels::emit(&mut lower, scope, operation, &phase, extent, width)?;
         lower.op(OpTag::Unit, vec![], types::unit())?
     } else if compute && !original {
         lower.op(OpTag::Unit, vec![], types::unit())?
@@ -124,7 +199,6 @@ pub(super) fn entry<'source>(
         };
         lower.value(scope, result)?
     };
-    let outputs = metadata.outputs.clone();
     for (index, output) in outputs.iter().enumerate() {
         let value = if outputs.len() == 1 { result.clone() } else { lower.field(result.clone(), index)? };
         if let Some(binding) = output.storage_binding() {
@@ -219,7 +293,7 @@ pub(super) fn entry<'source>(
             Ok(())
         };
         if stage
-            .map(|key| lower.compiler.plan.recipe(key).map(|recipe| recipe.width > 1))
+            .map(|key| lower.compiler.plan.phase_width(key).map(|width| width > 1))
             .transpose()?
             .unwrap_or(false)
         {
@@ -242,14 +316,14 @@ pub(super) fn entry<'source>(
     let unit = lower.op(OpTag::Unit, vec![], types::unit())?;
     let body = lower.finish(unit)?;
     Ok(EntryPoint {
-        id: metadata.id,
-        name: metadata.name.clone(),
+        id,
+        name,
         body,
-        execution_model: metadata.execution_model.clone(),
-        inputs: metadata.inputs.clone(),
+        execution_model,
+        inputs,
         parameter_inputs,
         outputs,
-        storage_bindings: metadata.storage_bindings.clone(),
+        storage_bindings,
         stage_descriptor_storage_accesses: crate::egglog::abi::entry_accesses(compiler, symbol, stage)?,
         pipeline_storage_accesses: crate::egglog::abi::pipeline_accesses(compiler, symbol)?,
         span: source.span,

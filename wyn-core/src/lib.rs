@@ -11,7 +11,6 @@ pub mod error;
 pub mod flow;
 mod frontend;
 pub mod interface;
-pub mod kernel_graph;
 pub mod lexer;
 mod name_resolution;
 pub mod op;
@@ -51,7 +50,6 @@ use wyn_base::IdArena;
 
 use ast::NodeCounter;
 use host::ScalarSource;
-use std::collections::BTreeMap;
 // =============================================================================
 // Collection aliases
 // =============================================================================
@@ -166,7 +164,7 @@ pub type SymbolTable = IdArena<SymbolId, String>;
 
 /// A `(descriptor set, binding)` pair naming a host-runtime storage /
 /// uniform / texture / sampler resource. Source interfaces keep
-/// this binding identity; scheduled resources also carry `ResourceId` values.
+/// this binding identity.
 /// Deliberately no
 /// `Default` impl —
 /// `BindingRef { set: 0, binding: 0 }` is a meaningful binding, and a
@@ -186,44 +184,6 @@ impl BindingRef {
 impl std::fmt::Display for BindingRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "set={},binding={}", self.set, self.binding)
-    }
-}
-
-/// Target-independent identity of a semantic storage resource. Identities are
-/// assigned by the selected compiler route. Callers can observe its dense
-/// index but cannot manufacture one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ResourceId(u32);
-
-impl ResourceId {
-    /// A finalized egglog resource uses its published frame-graph identity.
-    pub(crate) const fn from_egglog_buffer(index: u32) -> Self {
-        Self(index)
-    }
-
-    pub const fn index(self) -> usize {
-        self.0 as usize
-    }
-}
-
-/// Access to one resource in a compiler route's resource namespace.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ResourceUse<R> {
-    pub resource: R,
-    pub access: ResourceAccess,
-}
-
-impl<R: Copy + Ord> ResourceUse<R> {
-    /// Combine accesses to the same resource in ascending resource order.
-    pub fn merge(a: &[Self], b: &[Self]) -> Vec<Self> {
-        let mut merged: BTreeMap<R, ResourceAccess> = BTreeMap::new();
-        for resource in a.iter().chain(b) {
-            merged
-                .entry(resource.resource)
-                .and_modify(|access| *access = access.merge(resource.access))
-                .or_insert(resource.access);
-        }
-        merged.into_iter().map(|(resource, access)| Self { resource, access }).collect()
     }
 }
 
@@ -455,9 +415,7 @@ fn adapt_host_interface_for_wgsl(
     descriptor: &mut host::ModuleInterface,
     parameter_blocks: &[wgsl::ssa_lowering::ParameterBlock],
 ) -> error::Result<()> {
-    use host::{
-        Access, Binding, BufferLen, BufferUsage, DispatchLen, DispatchSize, HostSizeInput, Pipeline,
-    };
+    use host::{Access, Binding, BufferLen, BufferUsage, DispatchLen, DispatchSize, Pipeline};
 
     for (pipeline_index, pipeline) in descriptor.pipelines.iter_mut().enumerate() {
         let Pipeline::Compute(compute) = pipeline else {
@@ -533,41 +491,6 @@ fn adapt_host_interface_for_wgsl(
             block_binding_indices.push(binding_index);
         }
 
-        for binding in &mut compute.bindings {
-            let Binding::StorageBuffer {
-                length: Some(length), ..
-            } = binding
-            else {
-                continue;
-            };
-            for input in length.inputs_mut() {
-                let HostSizeInput::PushConstant {
-                    name,
-                    push_constant_offset,
-                    scalar,
-                } = input
-                else {
-                    continue;
-                };
-                let Some((block, member)) = blocks.iter().find_map(|block| {
-                    block
-                        .members
-                        .iter()
-                        .find(|m| m.name == *name && m.push_constant_offset == *push_constant_offset)
-                        .map(|m| (*block, m))
-                }) else {
-                    return Err(err_wgsl!("host size input '{}' has no WGSL parameter", name));
-                };
-                *input = HostSizeInput::Uniform {
-                    name: name.clone(),
-                    set: block.set,
-                    binding: block.binding,
-                    offset: member.offset,
-                    scalar: *scalar,
-                };
-            }
-        }
-
         let values = descriptor
             .scalar_tasks
             .iter_mut()
@@ -580,32 +503,41 @@ fn adapt_host_interface_for_wgsl(
                     .filter(|repeated| repeated.pipeline == pipeline_index)
                     .flat_map(|repeated| [&mut repeated.count, &mut repeated.initial_length]),
             );
-        for value in values {
-            let mut missing = None;
-            value.reads_mut(&mut |source, offset| {
-                let ScalarSource::PushConstant { name, offset: base } = source else {
-                    return;
-                };
-                let found = blocks.iter().find_map(|block| {
-                    block
-                        .members
-                        .iter()
-                        .find(|member| member.name == *name && member.push_constant_offset == *base)
-                        .map(|member| (*block, member))
-                });
-                if let Some((block, member)) = found {
-                    *offset += member.offset;
-                    *source = ScalarSource::Binding {
-                        set: block.set,
-                        binding: block.binding,
-                    };
-                } else {
-                    missing = Some(name.clone());
-                }
+        let mut missing = None;
+        let mut legalize = |source: &mut ScalarSource, offset: &mut u32| {
+            let ScalarSource::PushConstant { name, offset: base } = source else {
+                return;
+            };
+            let found = blocks.iter().find_map(|block| {
+                block
+                    .members
+                    .iter()
+                    .find(|member| member.name == *name && member.push_constant_offset == *base)
+                    .map(|member| (*block, member))
             });
-            if let Some(name) = missing {
-                return Err(err_wgsl!("host scalar '{}' has no WGSL parameter", name));
+            if let Some((block, member)) = found {
+                *offset += member.offset;
+                *source = ScalarSource::Binding {
+                    set: block.set,
+                    binding: block.binding,
+                };
+            } else {
+                missing = Some(name.clone());
             }
+        };
+        for value in values {
+            value.reads_mut(&mut legalize);
+        }
+        for binding in &mut compute.bindings {
+            if let Binding::StorageBuffer {
+                length: Some(length), ..
+            } = binding
+            {
+                length.reads_mut(&mut legalize);
+            }
+        }
+        if let Some(name) = missing {
+            return Err(err_wgsl!("host scalar '{}' has no WGSL parameter", name));
         }
 
         for stage in &mut compute.stages {

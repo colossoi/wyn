@@ -4,7 +4,7 @@ use crate::ssa::builder::BuilderError;
 use crate::ssa::context::BackendGlobal;
 use crate::ssa::stage::Elaborated;
 use crate::ssa::types::{Function, ValueRef};
-use crate::tlc::{extract_lambda_params_ref, DefMeta};
+use crate::tlc::DefMeta;
 use crate::types::Type;
 use crate::{CodegenTarget, FunctionId, LookupMap};
 use egglog_engine::Value;
@@ -51,50 +51,26 @@ pub(super) fn lower(
         function_ids: IdSource::new(),
         entry_ids: IdSource::new(),
     };
-    let mut declarations = Vec::new();
+    let mut entries = Vec::new();
     for definition in &program.source.defs {
         if let DefMeta::EntryPoint(_) = &definition.meta {
             let Some(symbol) = program.identities.symbols.get(&definition.name) else {
                 return Err(error("entry symbol missing"));
             };
             for stage in compiler.plan.stages(definition.name)? {
-                let entry = super::abi::entry(&mut compiler, definition.name, Some(stage), &declarations)?;
-                declarations.push(entry);
+                let entry = interface::entry(&mut compiler, definition.name, Some(stage), &entries)?;
+                entries.push(entry);
             }
             if compiler.facts.contains("EmitOriginalEntry", (symbol,))
                 || compiler.facts.contains("FinishEntry", (symbol,))
                 || compiler.facts.contains("InterfaceOnlyEntry", (symbol,))
             {
-                let entry = super::abi::entry(&mut compiler, definition.name, None, &declarations)?;
-                declarations.push(entry);
+                let entry = interface::entry(&mut compiler, definition.name, None, &entries)?;
+                entries.push(entry);
             }
         }
     }
-    let (pipeline, physical_kernels) = super::abi::publication::publish(&mut compiler, &mut declarations)?;
-    let mut entries = Vec::new();
-    for metadata in declarations {
-        let (owner, stage) = compiler.entry_origins[&metadata.id].clone();
-        let Some(definition) = program.source.defs.iter().find(|d| d.name == owner) else {
-            return Err(error("entry definition missing"));
-        };
-        let DefMeta::EntryPoint(entry) = &definition.meta else {
-            return Err(error("entry declaration missing"));
-        };
-        let Some(scope) = compiler.facts.definition(owner) else {
-            return Err(error("entry scope missing"));
-        };
-        let (source, parameters) = extract_lambda_params_ref(&definition.body);
-        entries.push(interface::entry(
-            &mut compiler,
-            scope,
-            source,
-            &parameters,
-            entry,
-            owner,
-            stage,
-            &metadata,
-        )?);
-    }
+    let pipeline = super::abi::publication::publish(&mut compiler, &entries)?;
     entries.retain(|entry| {
         let (owner, _) = &compiler.entry_origins[&entry.id];
         !compiler
@@ -108,11 +84,7 @@ pub(super) fn lower(
         compiler.functions,
         entries,
         Vec::new(),
-        BackendGlobal {
-            pipeline,
-            target,
-            physical_kernels,
-        },
+        BackendGlobal { pipeline, target },
     ))
 }
 

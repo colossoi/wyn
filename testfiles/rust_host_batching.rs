@@ -197,6 +197,24 @@ mod tests {
                     assert_eq!(read(&device, &queue, buffer!($module, survivors, 0))[0], positives.len() as i32, "count at {n}");
                     assert_eq!(read(&device, &queue, buffer!($module, survivors, 1))[0], positives.iter().sum::<i32>(), "filtered sum at {n}");
                 }
+                for values in [[3, -2, 7, 3], [-4, -3, -2, -1], [5; 4], [0; 4]] {
+                    let xs = input(&device, &values);
+                    let output = $module::host_local_filtered(&mut context, &queue, &xs).unwrap();
+                    let expected: Vec<i32> = values.iter().map(|p| {
+                        let kept: Vec<i32> = values.iter().copied().filter(|x| x < p).collect();
+                        10 * kept.iter().sum::<i32>() + kept.len() as i32
+                    }).collect();
+                    assert_eq!(read(&device, &queue, buffer!($module, output)), expected,
+                        "local filtered reduction and count: {values:?}");
+                    let output = $module::host_local_mixed(&mut context, &queue, &xs).unwrap();
+                    let expected: Vec<i32> = values.iter().map(|p| {
+                        let ys: Vec<_> = values.iter().map(|x| x + p).collect();
+                        let zs: Vec<_> = values.iter().map(|x| x - p).collect();
+                        ys.iter().sum::<i32>() + 2 * zs.iter().sum::<i32>() + ys[0] + 2 * zs[3]
+                    }).collect();
+                    assert_eq!(read(&device, &queue, buffer!($module, output)), expected,
+                        "local mixed scalar/array outputs: {values:?}");
+                }
             }};
         }
         check_collectives!(collectives_spv);

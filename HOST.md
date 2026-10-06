@@ -1005,9 +1005,11 @@ scalar interface reads, arithmetic, and logical input lengths. Expressions lifte
 from typed 32-bit Wyn arithmetic use explicit wrapping operations. Generated
 capacity expressions use checked `i64` intermediates and convert to `u64` byte sizes
 or `u32` launch dimensions at the API boundary. Standalone count and dimension
-parameters are `u32`. Capacities requiring unsupported scalar conversions
-or device-only values remain explicit caller-supplied resources. The source
-program still determines logical lengths independently of allocation capacity.
+parameters are `u32`. Allocation expressions use the same typed host scalar
+emitter as sequential host computations, including float-to-integer conversions
+and conditionals. Device-dependent capacities require a selected host bound;
+missing host representations are compilation errors. The source program still
+determines logical lengths independently of allocation capacity.
 
 For parallel grid-stride kernels with a host-sized domain, the compiler can use
 an input or output buffer whose allocation covers that domain as a launch bound.

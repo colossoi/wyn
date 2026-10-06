@@ -457,7 +457,6 @@ impl FuncBody {
 
 pub mod context {
     use crate::host::ModuleInterface;
-    use crate::kernel_graph::PhysicalKernelGraph;
     use crate::CodegenTarget;
 
     /// Pipeline and planning data carried alongside a backend-bound SSA tree.
@@ -465,7 +464,6 @@ pub mod context {
     pub struct BackendGlobal {
         pub pipeline: ModuleInterface,
         pub target: CodegenTarget,
-        pub physical_kernels: PhysicalKernelGraph,
     }
 }
 

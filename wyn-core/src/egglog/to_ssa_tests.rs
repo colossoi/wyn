@@ -333,19 +333,9 @@ fn scalar_domain_collectives_publish_scratch_and_capacity_dependencies() {
     ] {
         compile(source);
         let output = pipeline(source);
-        for p in &output.program.interface.pipelines {
-            let Pipeline::Compute(p) = p else { continue };
-            for binding in &p.bindings {
-                if let host::Binding::StorageBuffer {
-                    length: Some(host::BufferLen::HostProvided { inputs, .. }),
-                    ..
-                } = binding
-                {
-                    assert!(!inputs.is_empty());
-                    assert!(inputs.iter().all(|i| matches!(i, host::HostSizeInput::Uniform { .. })));
-                }
-            }
-        }
+        let whl = output.program.to_whl("collectives.wgsl", host::ShaderFormat::Wgsl).unwrap();
+        wyn_host_interp::Program::parse(&whl).unwrap();
+        assert!(output.program.entries.iter().any(|entry| !entry.allocations.is_empty()));
     }
 }
 
@@ -381,6 +371,16 @@ fn filtered_reduction_and_shared_count_reach_wgsl() {
         let kept=filter(|x:i32|x>0,xs) in
         (length(kept),reduce(|a:i32,b:i32|a+b,0,kept))",
     );
+}
+
+#[test]
+fn invocation_local_filtered_and_mixed_collectives_reach_both_backends() {
+    let source = include_str!("../../../testfiles/rust_host_collectives.wyn");
+    compile(source);
+    let spirv = compile_thru_spirv(source).unwrap();
+    let bytes: Vec<_> = spirv.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
+    let module = spv::parse_u8_slice(&bytes, &spv::Options::default()).unwrap();
+    Validator::new(ValidationFlags::all(), Capabilities::all()).validate(&module).unwrap();
 }
 
 #[test]
@@ -881,7 +881,7 @@ fn computed_graphics_captures_share_the_producer_binding() {
 
 #[test]
 fn host_sized_outputs_publish_uniform_dependencies_and_storage_stride() {
-    use host::{Binding, BufferLen, HostSizeScalar};
+    use host::{Binding, BufferLen, Expr, ScalarSource};
     let source = include_str!("../../../testfiles/regressions/uniform_output_size.wyn")
         .replace("{ resolution: vec3f32 }", "{ padding: f32, resolution: vec3f32 }")
         .replace("([]f32,", "([]vec3f32,")
@@ -890,43 +890,37 @@ fn host_sized_outputs_publish_uniform_dependencies_and_storage_stride() {
             "@[f32(i), 0.0, 0.0]",
         );
     let output = pipeline(&source);
-    let lengths: Vec<_> = output
-        .program
-        .interface
-        .pipelines
+    let result = &output.program.interface.source_results[0];
+    let Pipeline::Compute(pipeline) = &output.program.interface.pipelines[result.pipeline_index] else {
+        panic!("compute")
+    };
+    let bytes = pipeline
+        .bindings
         .iter()
-        .filter_map(|p| {
-            let Pipeline::Compute(p) = p else { return None };
-            p.bindings.iter().find_map(|b| match b {
-                Binding::StorageBuffer {
-                    length: Some(BufferLen::HostProvided { inputs, elem_bytes }),
-                    ..
-                } => Some((inputs, *elem_bytes)),
-                _ => None,
-            })
+        .find_map(|binding| match binding {
+            Binding::StorageBuffer {
+                set,
+                binding,
+                length: Some(BufferLen::Computed { bytes }),
+                ..
+            } if (*set, *binding) == (result.set, result.binding) => Some(bytes),
+            _ => None,
         })
-        .collect();
-    assert_eq!(lengths.len(), 1);
-    let (inputs, stride) = lengths[0];
-    assert_eq!(stride, 16);
-    assert_eq!(
-        inputs
-            .iter()
-            .map(|i| {
-                let crate::host::HostSizeInput::Uniform {
-                    name, offset, scalar, ..
-                } = i
-                else {
-                    panic!("uniform input");
-                };
-                (name.as_str(), *offset, *scalar)
-            })
-            .collect::<Vec<_>>(),
-        [
-            ("frame_resolution_x", 16, HostSizeScalar::F32),
-            ("frame_resolution_y", 20, HostSizeScalar::F32)
-        ]
-    );
+        .expect("generated output allocation");
+    let Expr::Multiply(_, stride) = bytes else {
+        panic!("physical stride")
+    };
+    assert_eq!(**stride, Expr::Integer(16));
+    let mut reads = Vec::new();
+    bytes.clone().reads_mut(&mut |source, offset| {
+        assert!(matches!(source, ScalarSource::Binding { .. }));
+        reads.push(*offset);
+    });
+    // Reading an aggregate may also read its other fields; both used vector
+    // components must have the std140 offsets, not packed scalar offsets.
+    assert!(reads.contains(&16) && reads.contains(&20), "{reads:?}");
+    let whl = output.program.to_whl("uniform.wgsl", host::ShaderFormat::Wgsl).unwrap();
+    assert!(whl.contains("wyn-f32-to-i32"));
 }
 
 #[test]
@@ -1006,13 +1000,6 @@ fn runtime_collective_scratch_matches_its_bounded_chunk_grid() {
         2,
         "one partial and one carry per chunk"
     );
-    assert!(p.bindings.iter().all(|b| !matches!(
-        b,
-        Binding::StorageBuffer {
-            length: Some(BufferLen::HostProvided { .. }),
-            ..
-        }
-    )));
 }
 
 #[test]

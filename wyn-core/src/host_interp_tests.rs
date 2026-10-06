@@ -64,17 +64,25 @@ fn uses_input_buffer_capacity_and_preserves_returned_aliases() {
 }
 
 #[test]
-fn uniform_sized_launches_scale_with_capacity_and_clamp_the_grid() {
+fn uniform_sized_launches_allocate_capacity_and_clamp_the_grid() {
+    #[derive(Default)]
     struct LaunchTrace {
         trace: Trace,
-        bytes: u64,
+        allocation: Option<(u64, u64)>,
     }
     impl Backend for LaunchTrace {
         fn call(&mut self, program: &Program, name: &str, args: &[Value]) -> Result<Value> {
             match name {
+                "gpu-alloc" => {
+                    let buffer = self.trace.input(vec![]);
+                    assert!(self.allocation.is_none(), "one map output allocation");
+                    self.allocation = Some((buffer.handle()?, args[0].u64()?));
+                    Ok(buffer)
+                }
                 "gpu-buffer-size" => {
-                    assert_eq!(args[0], Value::Resource(2), "map output capacity");
-                    Ok(Value::Number(Number::U64(self.bytes)))
+                    let (buffer, bytes) = self.allocation.unwrap();
+                    assert_eq!(args[0].handle()?, buffer);
+                    Ok(Value::Number(Number::U64(bytes)))
                 }
                 "gpu-texture-view" => Ok(args[0].clone()),
                 "gpu-draw" => Ok(Value::Nil),
@@ -91,30 +99,88 @@ fn uniform_sized_launches_scale_with_capacity_and_clamp_the_grid() {
         };
         let program = Program::parse(&program.to_whl("runtime_dispatch", format).unwrap()).unwrap();
         for (elements, groups) in [
-            (0, 0),
+            (0, 1),
             (64, 1),
             (65, 2),
-            (320 * 200, 1_000),
-            (1280 * 800, 16_000),
+            (64_000, 1_000),
+            (1_024_000, 16_000),
             (65_535 * 64 + 1, 65_535),
         ] {
-            let mut backend = LaunchTrace {
-                trace: Trace::default(),
-                bytes: elements * 16,
-            };
-            // Uniform contents are deliberately unavailable: launching from
-            // capacity must not require scalar readback or extra host inputs.
-            program
-                .run(
-                    "reproduce",
-                    &[Value::Resource(1), Value::Resource(2), Value::Resource(3)],
-                    &mut backend,
-                )
-                .unwrap();
+            let mut backend = LaunchTrace::default();
+            let arguments: Vec<_> = program
+                .entry("reproduce")
+                .unwrap()
+                .parameters
+                .iter()
+                .map(|parameter| {
+                    if parameter.source_name() == "frame" {
+                        backend.trace.input(
+                            [elements as f32, 1.0, 0.0, 0.0]
+                                .into_iter()
+                                .flat_map(f32::to_le_bytes)
+                                .collect(),
+                        )
+                    } else {
+                        backend.trace.input(vec![])
+                    }
+                })
+                .collect();
+            assert_eq!(arguments.len(), 2, "only source inputs are caller-supplied");
+            program.run("reproduce", &arguments, &mut backend).unwrap();
+            assert_eq!(backend.allocation.unwrap().1, elements.max(1) * 16);
             let [(_, actual)] = backend.trace.dispatches.as_slice() else {
                 panic!("one parallel map");
             };
-            assert_eq!(actual, &[groups, 1, 1], "{format:?}, capacity={elements}");
+            assert_eq!(actual, &[groups, 1, 1], "{format:?}, elements={elements}");
+        }
+    }
+}
+
+#[test]
+fn allocation_expressions_preserve_casts_branches_and_wrapping() {
+    for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+        for (source, input, bytes) in [
+            (
+                "entry main(n:f32) []i32 = iota(i32(n))",
+                7.75f32.to_le_bytes(),
+                28,
+            ),
+            (
+                "entry main(n:f32) []i32 = iota(i32(n))",
+                (-2.0f32).to_le_bytes(),
+                4,
+            ),
+            (
+                "entry main(n:i32) []i32 = iota(if n>0 then n*2 else 3)",
+                7i32.to_le_bytes(),
+                56,
+            ),
+            (
+                "entry main(n:i32) []i32 = iota(if n>0 then n*2 else 3)",
+                (-1i32).to_le_bytes(),
+                12,
+            ),
+            ("entry main(n:i32) []i32 = iota(n*2+3)", i32::MAX.to_le_bytes(), 4),
+            (
+                "entry main(n:u32) []i32 = iota(i32(n+2u32))",
+                u32::MAX.to_le_bytes(),
+                4,
+            ),
+        ] {
+            let ssa = compile_thru_ssa(source).unwrap();
+            let host = match format {
+                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+            };
+            let program = Program::parse(&host.to_whl("capacities", format).unwrap()).unwrap();
+            let mut backend = Trace::default();
+            let input = backend.input(input.to_vec());
+            let result = program.run("main", &[input], &mut backend).unwrap();
+            assert_eq!(
+                backend.buffers[&result.handle().unwrap()].len(),
+                bytes,
+                "{format:?}: {source}"
+            );
         }
     }
 }

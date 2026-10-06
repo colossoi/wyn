@@ -17,10 +17,10 @@ pub use interface::{
     CullMode, DepthTest, DispatchLen, DispatchLoop, DispatchSize, DrawBufferRef, DrawCall, DrawCount,
     FillMode, FragmentOutput, FragmentState, FrameAccess, FrameBindingRef, FrameGraph, FramePass,
     FramePassKind, FrameResource, FrameResourceExtent, FrameResourceKind, FrontFace, GraphicsInvocation,
-    GraphicsPipeline, GraphicsStage, HostSizeInput, HostSizeScalar, IndexFormat, IntegerOp,
-    ModuleInterface, Pipeline, PrimitiveTopology, RasterState, SamplerBindingType, Scissor, ShaderStage,
-    SizeExpr, SizeOp, SourceResultBinding, StageBindingUses, StorageImageFormat, StorageTextureSize,
-    TextureSampleType, TextureViewDimension, UniformMember, VertexAttribute, VertexFormat, Viewport,
+    GraphicsPipeline, GraphicsStage, IndexFormat, ModuleInterface, Pipeline, PrimitiveTopology,
+    RasterState, SamplerBindingType, Scissor, ShaderStage, SourceResultBinding, StageBindingUses,
+    StorageImageFormat, StorageTextureSize, TextureSampleType, TextureViewDimension, UniformMember,
+    VertexAttribute, VertexFormat, Viewport,
 };
 pub use program::{Allocation, Entry, Expr, HostError, Operation, Program, ResourceId, ShaderFormat};
 pub use results::{ResultField, ResultKind, ResultLayout, ResultScalar};

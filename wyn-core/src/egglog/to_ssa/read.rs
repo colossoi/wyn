@@ -239,7 +239,7 @@ impl<'a, 'source> Facts<'a, 'source> {
         &self,
         scope: Value,
         index: i64,
-    ) -> Result<Vec<crate::egglog::abi::Input>, OptimizeError> {
+    ) -> Result<Vec<crate::interface::EntryInput>, OptimizeError> {
         crate::egglog::abi::parameter_inputs(self.program, scope, index)
     }
     pub fn vector(&self, value: Value) -> Result<Vec<Value>, OptimizeError> {

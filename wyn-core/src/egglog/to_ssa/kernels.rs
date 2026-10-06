@@ -9,13 +9,6 @@ use crate::LookupMap;
 use egglog_engine::sort::S;
 use egglog_engine::Value;
 
-pub(in crate::egglog) struct Recipe {
-    pub operation: Value,
-    pub phase: String,
-    pub extent: Value,
-    pub width: u32,
-}
-
 mod filter;
 mod indexed;
 mod screma;
@@ -23,13 +16,20 @@ use filter::{compact, serial_filter};
 use indexed::{buckets, indexed};
 use screma::screma;
 
-pub(super) fn emit(body: &mut Body<'_, '_, '_>, scope: Value, stage: &Recipe) -> Result<(), OptimizeError> {
-    if matches!(stage.phase.as_str(), "loop_enter" | "loop_exit") {
-        return super::loops::emit(body, scope, stage);
+pub(super) fn emit(
+    body: &mut Body<'_, '_, '_>,
+    scope: Value,
+    phase_owner: Value,
+    phase: &str,
+    phase_extent: Value,
+    phase_width: u32,
+) -> Result<(), OptimizeError> {
+    if matches!(phase, "loop_enter" | "loop_exit") {
+        return super::loops::emit(body, scope, phase_owner, phase, phase_width);
     }
-    if stage.phase == "scalar" {
-        let operations = body.compiler.plan.scalar_group(stage.operation);
-        let Some(context) = body.compiler.facts.dispatch_context(stage.operation) else {
+    if phase == "scalar" {
+        let operations = body.compiler.plan.scalar_group(phase_owner);
+        let Some(context) = body.compiler.facts.dispatch_context(phase_owner) else {
             return Err(error("scalar dispatch has no selected context"));
         };
         body.context = context;
@@ -45,14 +45,14 @@ pub(super) fn emit(body: &mut Body<'_, '_, '_>, scope: Value, stage: &Recipe) ->
         }
         return Ok(());
     }
-    let Some(plan) = body.compiler.plan.group(stage.operation) else {
+    let Some(plan) = body.compiler.plan.group(phase_owner) else {
         return Err(error("kernel has no fusion plan"));
     };
     let results = body.compiler.plan.results(plan)?;
-    match stage.phase.as_str() {
+    match phase {
         "elements" => {
-            let n = body.extent(scope, stage.extent)?;
-            let (start, step) = invocation(body, stage.width)?;
+            let n = body.extent(scope, phase_extent)?;
+            let (start, step) = invocation(body, phase_width)?;
             body.counted(start, n, step, vec![], |body, index, _| {
                 let mut cache = LookupMap::default();
                 let mut output_index = 0;
@@ -60,7 +60,7 @@ pub(super) fn emit(body: &mut Body<'_, '_, '_>, scope: Value, stage: &Recipe) ->
                     if role != "array" {
                         continue;
                     }
-                    if let Some(output) = body.slot(scope, stage.operation, "output", output_index, 2)? {
+                    if let Some(output) = body.slot(scope, phase_owner, "output", output_index, 2)? {
                         let value = element(body, scope, plan, *source, index.clone(), &mut cache)?;
                         store(body, output, index.clone(), value)?;
                     }
@@ -70,26 +70,27 @@ pub(super) fn emit(body: &mut Body<'_, '_, '_>, scope: Value, stage: &Recipe) ->
             })?;
             Ok(())
         }
-        "scatter" | "initialize" | "atomic" => indexed(body, scope, stage, plan),
-        "clear" | "buckets" => buckets(body, scope, stage, plan),
+        "scatter" | "initialize" | "atomic" => {
+            indexed(body, scope, phase_owner, phase, phase_extent, phase_width, plan)
+        }
+        "clear" | "buckets" => buckets(body, scope, phase_owner, phase, phase_width, plan),
         "ordered" => {
-            let Some(recipe) = body.compiler.facts.lookup("OrderedRecipe", (stage.operation,)) else {
+            let Some(recipe) = body.compiler.facts.lookup("OrderedRecipe", (phase_owner,)) else {
                 return Err(error("ordered kernel has no selected algorithm"));
             };
             match body.compiler.program.graph.value_to_base::<S>(recipe).as_ref() {
-                "screma" => screma(body, scope, stage, plan, &results),
-                "filter" => serial_filter(body, scope, stage, plan, &results),
-                "indexed" => indexed(body, scope, stage, plan),
-                "buckets" => buckets(body, scope, stage, plan),
+                "screma" => screma(body, scope, phase_owner, phase, phase_width, plan, &results),
+                "filter" => serial_filter(body, scope, phase_owner, plan, &results),
+                "indexed" => indexed(body, scope, phase_owner, phase, phase_extent, phase_width, plan),
+                "buckets" => buckets(body, scope, phase_owner, phase, phase_width, plan),
                 _ => Err(error("unknown ordered algorithm")),
             }
         }
-        "compact" => compact(body, scope, stage, plan, &results),
-        "chunks" | "combine" | "offsets" => screma(body, scope, stage, plan, &results),
-        _ => Err(error(format!(
-            "scheduled {} kernel is not implemented",
-            stage.phase
-        ))),
+        "compact" => compact(body, scope, phase_owner, phase_width, plan, &results),
+        "chunks" | "combine" | "offsets" => {
+            screma(body, scope, phase_owner, phase, phase_width, plan, &results)
+        }
+        _ => Err(error(format!("scheduled {} kernel is not implemented", phase))),
     }
 }
 

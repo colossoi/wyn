@@ -49,6 +49,17 @@ pub(in crate::egglog) fn expression(
     let value = lower.source(context, source)?;
     Ok(lower.finish(value))
 }
+/// Allocation capacities may use proven bounds for device-produced logical lengths.
+pub(in crate::egglog) fn allocation(
+    program: &Program<'_, Optimized>,
+    context: Value,
+    source: Value,
+) -> Result<ScalarExpr> {
+    let mut lower = Lower::new(program);
+    lower.capacity_bounds = true;
+    let value = lower.source(context, source)?;
+    Ok(lower.finish(value))
+}
 pub(in crate::egglog) fn selected(program: &Program<'_, Optimized>, term: TermId) -> Result<ScalarExpr> {
     let mut lower = Lower::new(program);
     let value = lower.term(term)?;
@@ -65,6 +76,7 @@ struct Lower<'a, 'source> {
     terms: Bindings<TermId, ScalarExpr>,
     bindings: Vec<(String, ScalarExpr)>,
     next: usize,
+    capacity_bounds: bool,
 }
 impl<'a, 'source> Lower<'a, 'source> {
     fn new(program: &'a Program<'source, Optimized>) -> Self {
@@ -74,6 +86,7 @@ impl<'a, 'source> Lower<'a, 'source> {
             terms: Bindings::default(),
             bindings: vec![],
             next: 0,
+            capacity_bounds: false,
         }
     }
     fn length(&mut self, source: Value) -> Result<ScalarExpr> {
@@ -83,6 +96,11 @@ impl<'a, 'source> Lower<'a, 'source> {
         self.extent(extent)
     }
     fn extent(&mut self, extent: Value) -> Result<ScalarExpr> {
+        if self.capacity_bounds {
+            if let Some(bound) = self.facts.lookup("HostBound", (extent,)) {
+                return self.extent(bound);
+            }
+        }
         if let Some(fields) = self.facts.enode("Fixed", extent) {
             return Ok(ScalarExpr::I32(
                 i32::try_from(self.facts.integer(fields[0]))
@@ -137,7 +155,14 @@ impl<'a, 'source> Lower<'a, 'source> {
         self.next += 1;
         name
     }
-    fn finish(&mut self, value: ScalarExpr) -> ScalarExpr {
+    fn finish(&mut self, mut value: ScalarExpr) -> ScalarExpr {
+        // The final binding has no later uses: return its expression directly.
+        while let ScalarExpr::Local(name) = &value {
+            if !self.bindings.last().is_some_and(|(last, _)| last == name) {
+                break;
+            }
+            value = self.bindings.pop().unwrap().1;
+        }
         if self.bindings.is_empty() {
             return value;
         }
@@ -183,7 +208,7 @@ impl<'a, 'source> Lower<'a, 'source> {
         }
         if let Some(array) = self.facts.lookup("SourceLength", (source,)) {
             // Fusion may replace the query with a count-reduction result.
-            if self.stored(source) {
+            if !self.capacity_bounds && self.stored(source) {
                 return Err(Error::Unsupported);
             }
             return self.length(array);
@@ -212,7 +237,6 @@ impl<'a, 'source> Lower<'a, 'source> {
             let [input] = inputs.as_slice() else {
                 return Err(Error::Unsupported);
             };
-            let input = &input.declaration;
             return match &input.kind {
                 EntryInputKind::PushConstant { slot } => read(
                     ScalarSource::PushConstant {
@@ -371,7 +395,7 @@ impl<'a, 'source> Lower<'a, 'source> {
                 let (Some(argument), Some(result)) = (scalar_type(argument), scalar_type(ty)) else {
                     return Err(Error::Unsupported);
                 };
-                let op = operation(selected.operator(f[2], terms.len())?, result)?;
+                let op = operation(selected.operator(f[2], terms.len())?, argument, result)?;
                 apply(
                     op,
                     argument,
@@ -466,7 +490,11 @@ fn apply(op: &str, ty: ScalarType, args: Vec<ScalarExpr>) -> ScalarExpr {
         args,
     }
 }
-fn operation(tag: OpTag<BindingRef, FunctionId>, result: ScalarType) -> Result<&'static str> {
+fn operation(
+    tag: OpTag<BindingRef, FunctionId>,
+    argument: ScalarType,
+    result: ScalarType,
+) -> Result<&'static str> {
     let op = match tag {
         OpTag::UnaryOp(op) => operator(op.symbol(), 1),
         OpTag::BinOp(op) => operator(op.symbol(), 2),
@@ -474,7 +502,7 @@ fn operation(tag: OpTag<BindingRef, FunctionId>, result: ScalarType) -> Result<&
             let Some(overload) = catalog().get(id).overloads().get(overload_idx) else {
                 return Err(error("host builtin overload missing").into());
             };
-            builtin_op(&overload.lowering, result)
+            builtin_op(&overload.lowering, argument, result)
         }
         _ => None,
     };
@@ -506,8 +534,23 @@ fn operator(op: &str, arity: usize) -> Option<&'static str> {
         _ => return None,
     })
 }
-fn builtin_op(lowering: &BuiltinLowering, result: ScalarType) -> Option<&'static str> {
+fn builtin_op(
+    lowering: &BuiltinLowering,
+    argument: ScalarType,
+    result: ScalarType,
+) -> Option<&'static str> {
     Some(match lowering {
+        // Same-width signed/unsigned conversions preserve the 32 source bits.
+        BuiltinLowering::PrimOp(PrimOp::Bitcast)
+            if matches!(argument, ScalarType::I32 | ScalarType::U32)
+                && matches!(result, ScalarType::I32 | ScalarType::U32) =>
+        {
+            if result == ScalarType::I32 {
+                "to-i32"
+            } else {
+                "to-u32"
+            }
+        }
         BuiltinLowering::PrimOp(PrimOp::Select) => "select",
         BuiltinLowering::PrimOp(PrimOp::GlslExt(ext)) => match ext {
             1 => "round",

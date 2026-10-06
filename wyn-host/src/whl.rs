@@ -2,7 +2,7 @@ use std::fmt::Write;
 
 use crate::{
     Access, Allocation, Binding, BlendMode, BufferLen, CullMode, DepthTest, DrawCall, DrawCount, Entry,
-    Expr, FillMode, FrameResourceKind, FrontFace, HostError, IndexFormat, IntegerOp, Operation, Pipeline,
+    Expr, FillMode, FrameResourceKind, FrontFace, HostError, IndexFormat, Operation, Pipeline,
     PrimitiveTopology, Program, ResourceId, ResultLayout, ResultScalar, SamplerBindingType, Scissor,
     ShaderFormat, ShaderStage, StorageImageFormat, TextureSampleType, TextureViewDimension, UniformMember,
     VertexFormat, Viewport,
@@ -93,21 +93,16 @@ fn vertex_type(v: &VertexFormat) -> String {
 }
 
 impl Expr {
-    pub fn to_whl(&self) -> String {
-        match self {
-            Self::I32 { op, left, right } | Self::U32 { op, left, right } => {
-                let ty = if matches!(self, Self::I32 { .. }) { "i32" } else { "u32" };
-                let op = match op {
-                    IntegerOp::Add => "add",
-                    IntegerOp::Subtract => "sub",
-                    IntegerOp::Multiply => "mul",
-                };
-                format!(
-                    "(i64 ({ty}-{op} ({ty} {}) ({ty} {})))",
-                    left.to_whl(),
-                    right.to_whl()
-                )
-            }
+    pub fn to_whl(&self) -> Result<String, HostError> {
+        Ok(match self {
+            Self::Scalar(value) => format!(
+                "(i64 {})",
+                crate::scalar_emit::whl_scalar(value, &crate::ScalarSource::resource)?
+            ),
+            Self::BufferLength { source, stride } => format!(
+                "(floor (i64 (gpu-buffer-size {})) {stride})",
+                resource(source.resource()?)
+            ),
             Self::Integer(n) => format!("(i64 {n})"),
             Self::Input(n) => format!("(i64 {n})"),
             Self::BufferSize(r) => format!("(i64 (gpu-buffer-size {}))", resource(*r)),
@@ -129,15 +124,13 @@ impl Expr {
                     _ => "depth-or-layers",
                 }
             ),
-            Self::Add(a, b) => format!("(+ {} {})", a.to_whl(), b.to_whl()),
-            Self::Subtract(a, b) => format!("(- {} {})", a.to_whl(), b.to_whl()),
-            Self::Multiply(a, b) => format!("(* {} {})", a.to_whl(), b.to_whl()),
-            Self::Floor(a, b) => format!("(floor {} {})", a.to_whl(), b.to_whl()),
-            Self::Ceiling(a, b) => format!("(ceiling {} {})", a.to_whl(), b.to_whl()),
-            Self::Mod(a, b) => format!("(mod {} {})", a.to_whl(), b.to_whl()),
-            Self::Min(a, b) => format!("(min {} {})", a.to_whl(), b.to_whl()),
-            Self::Max(a, b) => format!("(max {} {})", a.to_whl(), b.to_whl()),
-        }
+            Self::Subtract(a, b) => format!("(- {} {})", a.to_whl()?, b.to_whl()?),
+            Self::Multiply(a, b) => format!("(* {} {})", a.to_whl()?, b.to_whl()?),
+            Self::Floor(a, b) => format!("(floor {} {})", a.to_whl()?, b.to_whl()?),
+            Self::Ceiling(a, b) => format!("(ceiling {} {})", a.to_whl()?, b.to_whl()?),
+            Self::Min(a, b) => format!("(min {} {})", a.to_whl()?, b.to_whl()?),
+            Self::Max(a, b) => format!("(max {} {})", a.to_whl()?, b.to_whl()?),
+        })
     }
 }
 
@@ -404,7 +397,7 @@ impl Program {
                     writeln!(out, "      (let ((previous {current})) (setq {current} {next} {next} previous)))")?;
                 }
                 Operation::Scalar { pipeline, task } => writeln!(out, "    {}", self.whl_scalar_task(*pipeline, &self.interface.scalar_tasks[*task])?)?,
-                Operation::Dispatch { pipeline: p, stage: s, groups } => writeln!(out, "    (gpu-dispatch 'kernel-{p}-{s}\n      :groups (list {} {} {})\n      :args (list {}))", groups[0].to_whl(), groups[1].to_whl(), groups[2].to_whl(), self.arguments(*p, Some(*s))?)?,
+                Operation::Dispatch { pipeline: p, stage: s, groups } => writeln!(out, "    (gpu-dispatch 'kernel-{p}-{s}\n      :groups (list {} {} {})\n      :args (list {}))", groups[0].to_whl()?, groups[1].to_whl()?, groups[2].to_whl()?, self.arguments(*p, Some(*s))?)?,
                 Operation::Draw { pipeline } => self.write_draw(out, *pipeline)?,
             }
         }
@@ -470,7 +463,7 @@ impl Program {
         for allocation in &entry.allocations {
             match allocation {
                 Allocation::Buffer { resource: r, bytes } => {
-                    writeln!(out, "    ({} (gpu-alloc {}))", resource(*r), bytes.to_whl())?
+                    writeln!(out, "    ({} (gpu-alloc {}))", resource(*r), bytes.to_whl()?)?
                 }
                 Allocation::Texture {
                     resource: r,
@@ -480,7 +473,7 @@ impl Program {
                     let Some(Binding::StorageTexture { format, .. }) = self.texture_binding(*r) else {
                         return Err(HostError::Invalid("allocated texture has no format".into()));
                     };
-                    writeln!(out,"    ({} (gpu-alloc-texture :dimension :d2 :size (list {} {} 1) :format :{} :mip-levels 1 :samples 1 :usage '(:storage :sampled :render-target :copy)))",resource(*r),width.to_whl(),height.to_whl(),format_name(*format))?;
+                    writeln!(out,"    ({} (gpu-alloc-texture :dimension :d2 :size (list {} {} 1) :format :{} :mip-levels 1 :samples 1 :usage '(:storage :sampled :render-target :copy)))",resource(*r),width.to_whl()?,height.to_whl()?,format_name(*format))?;
                 }
             }
         }

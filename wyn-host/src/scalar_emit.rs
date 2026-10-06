@@ -1,71 +1,13 @@
-use crate::{FrameResourceKind, HostError, Program, ScalarExpr, ScalarTask, ScalarType};
+use crate::{
+    FrameResourceKind, HostError, Program, ResourceId, ScalarExpr, ScalarSource, ScalarTask, ScalarType,
+};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::Index;
 
 impl Program {
     pub(crate) fn whl_scalar(&self, pipeline: usize, value: &ScalarExpr) -> Result<String, HostError> {
-        Ok(match value {
-            ScalarExpr::I32(n) => format!("(i32 {n})"),
-            ScalarExpr::U32(n) => format!("(u32 {n})"),
-            ScalarExpr::F32(bits) => format!("(wyn-f32-bits (u32 {bits}))"),
-            ScalarExpr::Bool(b) => if *b { "t" } else { "nil" }.into(),
-            ScalarExpr::Local(name) => name.clone(),
-            ScalarExpr::BufferLength { source, stride } => format!(
-                "(i32 (floor (gpu-buffer-size resource-{}) {stride}))",
-                self.scalar_resource(pipeline, source)?.0
-            ),
-            ScalarExpr::Read { source, offset, ty } => format!(
-                "(gpu-read-scalar resource-{} {offset} '{})",
-                self.scalar_resource(pipeline, source)?.0,
-                ty.name()
-            ),
-            ScalarExpr::Apply { op, ty, args } => {
-                let args =
-                    args.iter().map(|a| self.whl_scalar(pipeline, a)).collect::<Result<Vec<_>, _>>()?;
-                let function = format!("wyn-{}-{op}", ty.name());
-                format!("({function} {})", args.join(" "))
-            }
-            ScalarExpr::If { condition, yes, no } => format!(
-                "(if {} {} {})",
-                self.whl_scalar(pipeline, condition)?,
-                self.whl_scalar(pipeline, yes)?,
-                self.whl_scalar(pipeline, no)?
-            ),
-            ScalarExpr::Let { bindings, result } => {
-                let bindings = bindings
-                    .iter()
-                    .map(|(name, value)| Ok(format!("({name} {})", self.whl_scalar(pipeline, value)?)))
-                    .collect::<Result<Vec<_>, HostError>>()?;
-                format!(
-                    "(let* ({}) {})",
-                    bindings.join(" "),
-                    self.whl_scalar(pipeline, result)?
-                )
-            }
-            ScalarExpr::Loop {
-                name,
-                initial,
-                condition,
-                step,
-            } => format!(
-                "(do (({name} {} {})) ((not {}) {name}))",
-                self.whl_scalar(pipeline, initial)?,
-                self.whl_scalar(pipeline, step)?,
-                self.whl_scalar(pipeline, condition)?
-            ),
-            ScalarExpr::Tuple(fields) => format!(
-                "(list {})",
-                fields
-                    .iter()
-                    .map(|a| self.whl_scalar(pipeline, a))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .join(" ")
-            ),
-            ScalarExpr::Field { tuple, index } => {
-                format!("(nth {index} {})", self.whl_scalar(pipeline, tuple)?)
-            }
-        })
+        whl_scalar(value, &|source| self.scalar_resource(pipeline, source))
     }
 
     pub(crate) fn whl_scalar_task(&self, pipeline: usize, task: &ScalarTask) -> Result<String, HostError> {
@@ -83,86 +25,12 @@ impl Program {
         pipeline: usize,
         value: &ScalarExpr,
     ) -> Result<TokenStream, HostError> {
-        Ok(match value {
-            ScalarExpr::I32(n) => quote!(#n),
-            ScalarExpr::U32(n) => quote!(#n),
-            ScalarExpr::F32(bits) => quote!(f32::from_bits(#bits)),
-            ScalarExpr::Bool(b) => quote!(#b),
-            ScalarExpr::Local(name) => {
-                let name = format_ident!("{}", name.replace('-', "_"));
-                quote!(#name)
-            }
-            ScalarExpr::BufferLength { source, stride } => {
-                let resource = self.scalar_resource(pipeline, source)?;
-                let name = format_ident!("resource_{}", resource.0);
-                let stride = u64::from(*stride);
-                quote!(i32::try_from(#name.size() / #stride)
-                    .map_err(|_| HostError::Invalid("array length exceeds i32".into()))?)
-            }
-            ScalarExpr::Read { source, offset, ty } => {
-                let resource = self.scalar_resource(pipeline, source)?;
-                let name = format_ident!("resource_{}", resource.0);
-                let primitive =
-                    format_ident!("{}", if *ty == ScalarType::Bool { "u32" } else { ty.name() });
-                let read = if self.interface.frame_graph.resources[resource.0].kind
-                    == FrameResourceKind::PushConstant
-                {
-                    quote!(#primitive::from_le_bytes(support::scalar_bytes(#name, #offset)?))
-                } else {
-                    let reader = format_ident!("read_{}", primitive);
-                    quote!(support::#reader(device, queue, encoder, &#name, #offset)?)
-                };
-                if *ty == ScalarType::Bool {
-                    quote!(#read != 0)
-                } else {
-                    read
-                }
-            }
-            ScalarExpr::Apply { op, ty, args } => {
-                let args =
-                    args.iter().map(|a| self.rust_scalar(pipeline, a)).collect::<Result<Vec<_>, _>>()?;
-                rust_operation(op, *ty, &args)?
-            }
-            ScalarExpr::If { condition, yes, no } => {
-                let condition = self.rust_scalar(pipeline, condition)?;
-                let yes = self.rust_scalar(pipeline, yes)?;
-                let no = self.rust_scalar(pipeline, no)?;
-                quote!(if #condition { #yes } else { #no })
-            }
-            ScalarExpr::Let { bindings, result } => {
-                let bindings = bindings
-                    .iter()
-                    .map(|(name, value)| {
-                        let name = format_ident!("{}", name.replace('-', "_"));
-                        let value = self.rust_scalar(pipeline, value)?;
-                        Ok(quote!(let #name = #value;))
-                    })
-                    .collect::<Result<Vec<_>, HostError>>()?;
-                let result = self.rust_scalar(pipeline, result)?;
-                quote!({ #(#bindings)* #result })
-            }
-            ScalarExpr::Loop {
-                name,
-                initial,
-                condition,
-                step,
-            } => {
-                let name = format_ident!("{}", name.replace('-', "_"));
-                let initial = self.rust_scalar(pipeline, initial)?;
-                let condition = self.rust_scalar(pipeline, condition)?;
-                let step = self.rust_scalar(pipeline, step)?;
-                quote!({let mut #name = #initial; while #condition { #name = #step; } #name})
-            }
-            ScalarExpr::Tuple(fields) => {
-                let fields =
-                    fields.iter().map(|a| self.rust_scalar(pipeline, a)).collect::<Result<Vec<_>, _>>()?;
-                quote!((#(#fields,)*))
-            }
-            ScalarExpr::Field { tuple, index } => {
-                let tuple = self.rust_scalar(pipeline, tuple)?;
-                let index = Index::from(*index);
-                quote!((#tuple).#index)
-            }
+        rust_scalar(value, &|source| {
+            let resource = self.scalar_resource(pipeline, source)?;
+            Ok((
+                resource,
+                self.interface.frame_graph.resources[resource.0].kind == FrameResourceKind::PushConstant,
+            ))
         })
     }
 
@@ -260,5 +128,145 @@ fn rust_operation(op: &str, ty: ScalarType, args: &[TokenStream]) -> Result<Toke
             quote!((#a).#method(#b))
         }
         _ => return Err(HostError::Invalid(format!("unsupported scalar operation {op}"))),
+    })
+}
+
+pub(crate) fn whl_scalar(
+    value: &ScalarExpr,
+    resolve: &impl Fn(&ScalarSource) -> Result<ResourceId, HostError>,
+) -> Result<String, HostError> {
+    Ok(match value {
+        ScalarExpr::I32(n) => format!("(i32 {n})"),
+        ScalarExpr::U32(n) => format!("(u32 {n})"),
+        ScalarExpr::F32(bits) => format!("(wyn-f32-bits (u32 {bits}))"),
+        ScalarExpr::Bool(b) => if *b { "t" } else { "nil" }.into(),
+        ScalarExpr::Local(name) => name.clone(),
+        ScalarExpr::BufferLength { source, stride } => format!(
+            "(i32 (floor (gpu-buffer-size resource-{}) {stride}))",
+            resolve(source)?.0
+        ),
+        ScalarExpr::Read { source, offset, ty } => format!(
+            "(gpu-read-scalar resource-{} {offset} '{})",
+            resolve(source)?.0,
+            ty.name()
+        ),
+        ScalarExpr::Apply { op, ty, args } => {
+            let args = args.iter().map(|a| whl_scalar(a, resolve)).collect::<Result<Vec<_>, _>>()?;
+            let function = format!("wyn-{}-{op}", ty.name());
+            format!("({function} {})", args.join(" "))
+        }
+        ScalarExpr::If { condition, yes, no } => format!(
+            "(if {} {} {})",
+            whl_scalar(condition, resolve)?,
+            whl_scalar(yes, resolve)?,
+            whl_scalar(no, resolve)?
+        ),
+        ScalarExpr::Let { bindings, result } => {
+            let bindings = bindings
+                .iter()
+                .map(|(name, value)| Ok(format!("({name} {})", whl_scalar(value, resolve)?)))
+                .collect::<Result<Vec<_>, HostError>>()?;
+            format!("(let* ({}) {})", bindings.join(" "), whl_scalar(result, resolve)?)
+        }
+        ScalarExpr::Loop {
+            name,
+            initial,
+            condition,
+            step,
+        } => format!(
+            "(do (({name} {} {})) ((not {}) {name}))",
+            whl_scalar(initial, resolve)?,
+            whl_scalar(step, resolve)?,
+            whl_scalar(condition, resolve)?
+        ),
+        ScalarExpr::Tuple(fields) => format!(
+            "(list {})",
+            fields.iter().map(|a| whl_scalar(a, resolve)).collect::<Result<Vec<_>, _>>()?.join(" ")
+        ),
+        ScalarExpr::Field { tuple, index } => {
+            format!("(nth {index} {})", whl_scalar(tuple, resolve)?)
+        }
+    })
+}
+
+pub(crate) fn rust_scalar(
+    value: &ScalarExpr,
+    resolve: &impl Fn(&ScalarSource) -> Result<(ResourceId, bool), HostError>,
+) -> Result<TokenStream, HostError> {
+    Ok(match value {
+        ScalarExpr::I32(n) => quote!(#n),
+        ScalarExpr::U32(n) => quote!(#n),
+        ScalarExpr::F32(bits) => quote!(f32::from_bits(#bits)),
+        ScalarExpr::Bool(b) => quote!(#b),
+        ScalarExpr::Local(name) => {
+            let name = format_ident!("{}", name.replace('-', "_"));
+            quote!(#name)
+        }
+        ScalarExpr::BufferLength { source, stride } => {
+            let (resource, _) = resolve(source)?;
+            let name = format_ident!("resource_{}", resource.0);
+            let stride = u64::from(*stride);
+            quote!(i32::try_from(#name.size() / #stride)
+                    .map_err(|_| HostError::Invalid("array length exceeds i32".into()))?)
+        }
+        ScalarExpr::Read { source, offset, ty } => {
+            let (resource, push_constant) = resolve(source)?;
+            let name = format_ident!("resource_{}", resource.0);
+            let primitive = format_ident!("{}", if *ty == ScalarType::Bool { "u32" } else { ty.name() });
+            let read = if push_constant {
+                quote!(#primitive::from_le_bytes(support::scalar_bytes(#name, #offset)?))
+            } else {
+                let reader = format_ident!("read_{}", primitive);
+                quote!(support::#reader(device, queue, encoder, &#name, #offset)?)
+            };
+            if *ty == ScalarType::Bool {
+                quote!(#read != 0)
+            } else {
+                read
+            }
+        }
+        ScalarExpr::Apply { op, ty, args } => {
+            let args = args.iter().map(|a| rust_scalar(a, resolve)).collect::<Result<Vec<_>, _>>()?;
+            rust_operation(op, *ty, &args)?
+        }
+        ScalarExpr::If { condition, yes, no } => {
+            let condition = rust_scalar(condition, resolve)?;
+            let yes = rust_scalar(yes, resolve)?;
+            let no = rust_scalar(no, resolve)?;
+            quote!(if #condition { #yes } else { #no })
+        }
+        ScalarExpr::Let { bindings, result } => {
+            let bindings = bindings
+                .iter()
+                .map(|(name, value)| {
+                    let name = format_ident!("{}", name.replace('-', "_"));
+                    let value = rust_scalar(value, resolve)?;
+                    Ok(quote!(let #name = #value;))
+                })
+                .collect::<Result<Vec<_>, HostError>>()?;
+            let result = rust_scalar(result, resolve)?;
+            quote!({ #(#bindings)* #result })
+        }
+        ScalarExpr::Loop {
+            name,
+            initial,
+            condition,
+            step,
+        } => {
+            let name = format_ident!("{}", name.replace('-', "_"));
+            let initial = rust_scalar(initial, resolve)?;
+            let condition = rust_scalar(condition, resolve)?;
+            let step = rust_scalar(step, resolve)?;
+            quote!({let mut #name = #initial; while #condition { #name = #step; } #name})
+        }
+        ScalarExpr::Tuple(fields) => {
+            let fields = fields.iter().map(|a| rust_scalar(a, resolve)).collect::<Result<Vec<_>, _>>()?;
+            quote!((#(#fields,)*))
+        }
+        ScalarExpr::Field { tuple, index } => {
+            let tuple = rust_scalar(tuple, resolve)?;
+            let index = Index::from(*index);
+            quote!((#tuple).#index)
+        }
     })
 }

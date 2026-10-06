@@ -1,7 +1,6 @@
 use super::screma::{workgroup_scan, write_arrays};
 // Expand scheduled phases straight into SSA instructions and structured loops.
 use super::super::{error, Body, OptimizeError};
-use super::Recipe;
 use super::{element, store};
 use crate::builtins::catalog;
 use crate::op::{BinaryOperator, OpTag};
@@ -12,7 +11,8 @@ use egglog_engine::Value;
 pub(super) fn compact(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
-    stage: &Recipe,
+    phase_owner: Value,
+    phase_width: u32,
     plan: Value,
     results: &[(String, i64, Value)],
 ) -> Result<(), OptimizeError> {
@@ -23,7 +23,7 @@ pub(super) fn compact(
     let Some(input) = body.compiler.facts.input(operation, 0) else {
         return Err(error("filter input missing"));
     };
-    let Some(domain) = body.compiler.plan.domain(stage.operation) else {
+    let Some(domain) = body.compiler.plan.domain(phase_owner) else {
         return Err(error("filter domain missing"));
     };
     let n = body.extent(scope, domain)?;
@@ -31,8 +31,8 @@ pub(super) fn compact(
     let n = body.cast(n, &uint)?;
     let zero = body.literal("0", &uint)?;
     let one = body.literal("1", &uint)?;
-    let width = body.literal(&stage.width.to_string(), &uint)?;
-    let last = body.literal(&(stage.width - 1).to_string(), &uint)?;
+    let width = body.literal(&phase_width.to_string(), &uint)?;
+    let last = body.literal(&(phase_width - 1).to_string(), &uint)?;
     let sum = body.binary(BinaryOperator::Add, n.clone(), last.clone())?;
     let chunks = body.binary(BinaryOperator::Divide, sum, width.clone())?;
     let lane = body.op(
@@ -71,7 +71,7 @@ pub(super) fn compact(
                 vec![flag.clone()],
                 &[zero.clone()],
                 lane.clone(),
-                stage.width,
+                phase_width,
             )?;
             let prefix = prefixes[0].clone();
             let total = totals[0].clone();
@@ -86,7 +86,7 @@ pub(super) fn compact(
                     if role != "array" {
                         continue;
                     }
-                    if let Some(output) = body.slot(scope, stage.operation, "output", 0, 2)? {
+                    if let Some(output) = body.slot(scope, phase_owner, "output", 0, 2)? {
                         let value = element(body, scope, plan, *output_source, index.clone(), &mut cache)?;
                         store(body, output, output_index.clone(), value)?;
                     }
@@ -98,7 +98,7 @@ pub(super) fn compact(
     )?;
     let first = body.binary(BinaryOperator::Equal, lane, zero.clone())?;
     body.when(first, |body| {
-        if let Some(output) = body.slot(scope, stage.operation, "length", 0, 2)? {
+        if let Some(output) = body.slot(scope, phase_owner, "length", 0, 2)? {
             store(body, output, zero, counts[0].clone())?;
         }
         Ok(())
@@ -108,17 +108,17 @@ pub(super) fn compact(
 pub(super) fn serial_filter(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
-    stage: &Recipe,
+    phase_owner: Value,
     plan: Value,
     results: &[(String, i64, Value)],
 ) -> Result<(), OptimizeError> {
-    let Some(source) = body.compiler.plan.source(stage.operation) else {
+    let Some(source) = body.compiler.plan.source(phase_owner) else {
         return Err(error("missing source"));
     };
-    let Some(input) = body.compiler.facts.input(stage.operation, 0) else {
+    let Some(input) = body.compiler.facts.input(phase_owner, 0) else {
         return Err(error("operation input missing"));
     };
-    let Some(domain) = body.compiler.plan.domain(stage.operation) else {
+    let Some(domain) = body.compiler.plan.domain(phase_owner) else {
         return Err(error("filter domain missing"));
     };
     let n = body.extent(scope, domain)?;
@@ -132,7 +132,7 @@ pub(super) fn serial_filter(
         |body, index, state| {
             let mut cache = LookupMap::default();
             let value = element(body, scope, plan, input, index.clone(), &mut cache)?;
-            let keep = body.callback(scope, stage.operation, vec![value.clone()])?;
+            let keep = body.callback(scope, phase_owner, vec![value.clone()])?;
             let next = body.branch(
                 scope,
                 keep,
@@ -141,7 +141,7 @@ pub(super) fn serial_filter(
                     write_arrays(
                         body,
                         scope,
-                        stage.operation,
+                        phase_owner,
                         plan,
                         results,
                         state[0].clone(),
@@ -155,7 +155,7 @@ pub(super) fn serial_filter(
             Ok(vec![next])
         },
     )?;
-    if let Some(output) = body.slot(scope, stage.operation, "length", 0, 2)? {
+    if let Some(output) = body.slot(scope, phase_owner, "length", 0, 2)? {
         store(body, output, zero, count[0].clone())?;
     }
     Ok(())

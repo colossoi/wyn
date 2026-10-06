@@ -14,23 +14,20 @@ use crate::host::{
 use crate::host::{DispatchLoop, ScalarSource, ScalarTask};
 use crate::interface::publish::{reconcile_storage_binding_access, ModuleInterfacePublish};
 use crate::interface::results::result_layout;
-use crate::interface::EntryPublication;
 use crate::interface::SourceResult;
-use crate::kernel_graph::{KernelDomain, PhysicalKernel, PhysicalKernelGraph};
+use crate::ssa::types::EntryPoint;
 use crate::tlc::extract_lambda_params_ref;
 use crate::tlc::DefMeta;
 use crate::types::{strip_existentials, Type, TypeName};
 use crate::BindingRef;
-use crate::LookupSet;
+use crate::ResourceAccess;
 use crate::{EntryId, LookupMap};
-use crate::{ResourceAccess, ResourceId, ResourceUse};
 use egglog_engine::Value;
-use wyn_base::IdSource;
 
 pub(in crate::egglog) fn publish(
     compiler: &mut Compiler<'_, '_>,
-    entries: &mut [EntryPublication],
-) -> Result<(ModuleInterface, PhysicalKernelGraph), OptimizeError> {
+    entries: &[EntryPoint],
+) -> Result<ModuleInterface, OptimizeError> {
     let source = compiler.program.source;
     let declarations: LookupMap<_, _> = source
         .defs
@@ -44,8 +41,6 @@ pub(in crate::egglog) fn publish(
     let mut associations: Vec<Vec<EntryId>> = Vec::new();
     let mut compute = LookupMap::default();
     let mut graphics = LookupMap::default();
-    let mut kernels = Vec::new();
-    let mut ids = IdSource::new();
     for entry in entries.iter() {
         let Some((owner, stage)) = compiler.entry_origins.get(&entry.id) else {
             return Err(error("entry provenance missing"));
@@ -117,34 +112,11 @@ pub(in crate::egglog) fn publish(
                     uses: Default::default(),
                 });
                 associations[index].push(entry.id);
-                kernels.push(PhysicalKernel {
-                    id: ids.next_id(),
-                    entry: entry.id,
-                    entry_point: entry.name.clone(),
-                    label: entry.name.clone(),
-                    source_entry: Some(entry.id),
-                    output_routes: vec![],
-                    workgroup_size: local_size,
-                    domain: match dispatch {
-                        DispatchSize::Fixed { x, y, z, .. } => KernelDomain::Fixed { x, y, z },
-                        DispatchSize::DerivedFrom { len, workgroup_size }
-                            if workgroup_size == local_size.0 =>
-                        {
-                            KernelDomain::Elements(len)
-                        }
-                        DispatchSize::DerivedFrom { len, workgroup_size }
-                            if workgroup_size % local_size.0 == 0 =>
-                        {
-                            KernelDomain::ChunkedElements {
-                                len,
-                                chunk_size: workgroup_size / local_size.0,
-                            }
-                        }
-                        _ => return Err(error("launch divisor must cover whole workgroups")),
-                    },
-                    resources: vec![],
-                    dependencies: vec![],
-                });
+                if let DispatchSize::DerivedFrom { workgroup_size, .. } = dispatch {
+                    if workgroup_size % local_size.0 != 0 {
+                        return Err(error("launch divisor must cover whole workgroups"));
+                    }
+                }
             }
             ExecutionModel::Vertex | ExecutionModel::Fragment => {
                 let Some(group) = &declaration.graphics_group else {
@@ -374,7 +346,6 @@ pub(in crate::egglog) fn publish(
         }
     }
     let mut locations = LookupMap::default();
-    let mut entry_locations = LookupMap::default();
     for (pipeline, entries) in associations.iter().enumerate() {
         for (index, entry) in entries.iter().enumerate() {
             let (owner, stage) = compiler.entry_origins[entry];
@@ -394,7 +365,6 @@ pub(in crate::egglog) fn publish(
             };
             let index = if matches!(module.pipelines[pipeline], Pipeline::Graphics(_)) { 0 } else { index };
             locations.insert(root, (pipeline, index));
-            entry_locations.insert(*entry, (pipeline, index));
         }
     }
     let mut edges = Vec::new();
@@ -417,70 +387,12 @@ pub(in crate::egglog) fn publish(
     module.frame_graph = FrameGraph::from_selected_pipelines(&module.pipelines, &edges).map_err(error)?;
     publish_scalars(compiler, entries, &mut module)?;
     publish_loops(compiler, entries, &associations, &mut module)?;
-    let mut logical_entries = LookupMap::default();
-    let kernel_ids: LookupMap<_, _> =
-        kernels.iter().map(|kernel| (entry_locations[&kernel.entry], kernel.id)).collect();
-    for kernel in &kernels {
-        logical_entries.entry(compiler.entry_origins[&kernel.entry].0).or_insert(kernel.entry);
-    }
-    for kernel in &mut kernels {
-        let owner = compiler.entry_origins[&kernel.entry].0;
-        kernel.source_entry = Some(logical_entries[&owner]);
-        let location = entry_locations[&kernel.entry];
-        for &(before, after) in &edges {
-            if after == location {
-                if let Some(&id) = kernel_ids.get(&before) {
-                    kernel.dependencies.push(id);
-                }
-            }
-        }
-        let Some(pass) = module
-            .frame_graph
-            .passes
-            .iter()
-            .find(|pass| (pass.pipeline_index, pass.stage_index) == location)
-        else {
-            return Err(error("published kernel pass missing"));
-        };
-        let resources = |accesses: &[crate::host::FrameAccess], access| -> Result<Vec<_>, OptimizeError> {
-            accesses
-                .iter()
-                .map(|item| {
-                    let id =
-                        u32::try_from(item.resource).map_err(|_| error("too many published resources"))?;
-                    Ok(ResourceUse {
-                        resource: ResourceId::from_egglog_buffer(id),
-                        access,
-                    })
-                })
-                .collect()
-        };
-        kernel.resources = ResourceUse::merge(
-            &resources(&pass.reads, ResourceAccess::Read)?,
-            &resources(&pass.writes, ResourceAccess::Write)?,
-        );
-    }
-    let mut ordered = Vec::new();
-    let mut ready = LookupSet::default();
-    while !kernels.is_empty() {
-        let Some(index) = kernels.iter().position(|k| k.dependencies.iter().all(|id| ready.contains(id)))
-        else {
-            return Err(error(format!(
-                "cyclic physical kernel dependencies {:?}; passes {:?}",
-                kernels.iter().map(|k| (&k.entry_point, k.id, &k.dependencies)).collect::<Vec<_>>(),
-                module.frame_graph.passes.iter().map(|p| (&p.name, &p.depends_on)).collect::<Vec<_>>()
-            )));
-        };
-        let kernel = kernels.remove(index);
-        ready.insert(kernel.id);
-        ordered.push(kernel);
-    }
-    Ok((module, PhysicalKernelGraph::from_ordered(ordered).map_err(error)?))
+    Ok(module)
 }
 
 fn publish_scalars(
     compiler: &Compiler<'_, '_>,
-    entries: &[EntryPublication],
+    entries: &[EntryPoint],
     module: &mut ModuleInterface,
 ) -> Result<(), OptimizeError> {
     let mut targets = Vec::new();
@@ -555,7 +467,7 @@ fn publish_scalars(
 
 fn publish_loops(
     compiler: &mut Compiler<'_, '_>,
-    entries: &[EntryPublication],
+    entries: &[EntryPoint],
     associations: &[Vec<EntryId>],
     module: &mut ModuleInterface,
 ) -> Result<(), OptimizeError> {
@@ -563,11 +475,12 @@ fn publish_loops(
         let Some((_, Some(stage))) = compiler.entry_origins.get(&entry.id) else {
             continue;
         };
-        let recipe = compiler.plan.recipe(*stage)?;
-        if recipe.phase != "loop_exit" {
+        let operation = compiler.plan.phase_operation(*stage)?;
+        let phase = compiler.plan.phase_name(*stage)?;
+        if phase != "loop_exit" {
             continue;
         }
-        let Some(source) = compiler.plan.source(recipe.operation) else {
+        let Some(source) = compiler.plan.source(operation) else {
             return Err(error("loop source missing"));
         };
         let Some((header, iteration)) = compiler.facts.loops(source) else {
@@ -610,16 +523,17 @@ fn publish_loops(
             let Some((_, Some(candidate))) = compiler.entry_origins.get(id) else {
                 continue;
             };
-            let candidate_recipe = compiler.plan.recipe(*candidate)?;
-            if candidate_recipe.operation == recipe.operation {
-                if candidate_recipe.phase == "loop_enter" {
+            let candidate_operation = compiler.plan.phase_operation(*candidate)?;
+            let candidate_phase = compiler.plan.phase_name(*candidate)?;
+            if candidate_operation == operation {
+                if candidate_phase == "loop_enter" {
                     setup = Some(index);
                 }
-                if candidate_recipe.phase == "loop_exit" {
+                if candidate_phase == "loop_exit" {
                     completion = Some(index);
                 }
             }
-            if compiler.facts.contains("LoopStage", (recipe.operation, *candidate)) {
+            if compiler.facts.contains("LoopStage", (operation, *candidate)) {
                 body.push(index);
             }
         }

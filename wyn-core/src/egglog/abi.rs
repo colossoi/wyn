@@ -7,17 +7,16 @@ use crate::binding_layout::{
     extract_texture_resource, extract_uniform_binding,
 };
 use crate::egglog::to_ssa::{plan::unique, Compiler};
-use crate::flow::ExecutionModel;
 use crate::host::BufferLen;
 use crate::interface::lowering::{build_entry_outputs, extract_size_hint};
 use crate::interface::{
     BindingExposure, EntryInput, EntryInputKind, EntryParamBindingKind, PushConstantSlot, StorageAccess,
     TextureSource,
 };
-use crate::interface::{EntryKind, EntryPublication, StorageBindingDecl, StorageRole};
+use crate::interface::{EntryKind, StorageBindingDecl, StorageRole};
 use crate::ssa::layout::{storage_value_type, type_byte_size};
 use crate::tlc::{extract_lambda_params_ref, DefMeta};
-use crate::types::{self, canonical_storage_buffer_ty, strip_existentials, Type, TypeExt, TypeName};
+use crate::types::{canonical_storage_buffer_ty, strip_existentials, Type, TypeName};
 use crate::SymbolId;
 use crate::{BindingRef, LookupMap, ResourceAccess};
 use egglog_engine::{EGraph, IntoValues, Read, Value};
@@ -133,24 +132,19 @@ fn binding_accesses(
     Ok(result)
 }
 
-pub(super) fn entry(
+pub(super) fn storage_bindings(
     compiler: &mut Compiler<'_, '_>,
     owner: SymbolId,
     stage: Option<Value>,
-    published: &[EntryPublication],
-) -> Result<EntryPublication, OptimizeError> {
-    let Some(definition) = compiler.program.source.defs.iter().find(|d| d.name == owner) else {
-        return Err(OptimizeError::Output("entry definition missing".into()));
-    };
-    let DefMeta::EntryPoint(entry) = &definition.meta else {
-        return Err(OptimizeError::Output("entry declaration missing".into()));
-    };
-    let Some(scope) = compiler.facts.definition(owner) else {
-        return Err(OptimizeError::Output("entry region missing".into()));
-    };
-    let Some(token) = compiler.program.identities.symbols.get(&owner) else {
-        return Err(OptimizeError::Output("entry identity missing".into()));
-    };
+    published: &[crate::ssa::types::EntryPoint],
+    inputs: &mut [EntryInput],
+) -> Result<Vec<StorageBindingDecl>, OptimizeError> {
+    let token = compiler
+        .program
+        .identities
+        .symbols
+        .get(&owner)
+        .ok_or_else(|| OptimizeError::Output("entry identity missing".into()))?;
     let root = match stage {
         Some(stage) => compiler.facts.constructor("KernelRoot", (stage,)),
         None => compiler.facts.constructor("EntryRoot", (token,)),
@@ -158,12 +152,6 @@ pub(super) fn entry(
     let Some(root) = root else {
         return Err(OptimizeError::Output("entry root missing".into()));
     };
-    let mut inputs = Vec::new();
-    for i in 0..entry.declaration.params.len() {
-        inputs.extend(
-            compiler.facts.parameter_inputs(scope, i as i64)?.into_iter().map(|input| input.declaration),
-        );
-    }
     let mut storage_bindings = Vec::new();
     let mut resource_names: BTreeSet<_> = compiler
         .program
@@ -236,7 +224,7 @@ pub(super) fn entry(
                     compiler.facts.source_type(source)
                 )));
             };
-            for input in &mut inputs {
+            for input in inputs.iter_mut() {
                 if input.storage_binding() == Some(binding) {
                     if let EntryInputKind::Storage { access: selected, .. } = &mut input.kind {
                         *selected = selected.merge(access);
@@ -264,66 +252,7 @@ pub(super) fn entry(
             });
         }
     }
-    let original = compiler.facts.contains("EmitOriginalEntry", (token,));
-    let outputs = if stage.is_none() && original {
-        let Some(outputs) = compiler.plan.entry_outputs.get(&owner) else {
-            return Err(OptimizeError::Output("entry output ABI missing".into()));
-        };
-        outputs.clone()
-    } else {
-        Vec::new()
-    };
-    let declaration = &entry.declaration;
-    let name = if let Some(group) = &declaration.graphics_group {
-        let Some(name) = compiler.program.source.symbols.get(group.root) else {
-            return Err(OptimizeError::Output("graphics owner name missing".into()));
-        };
-        name
-    } else {
-        &declaration.name
-    };
-    let recipe = stage.map(|key| compiler.plan.recipe(key)).transpose()?;
-    let phase = match recipe.as_ref().map(|stage| stage.phase.as_str()) {
-        Some("elements" | "scalar") => "compute",
-        Some("chunks") => "partials",
-        Some(phase) => phase,
-        None => match declaration.entry_kind {
-            EntryKind::Vertex => "vertex",
-            EntryKind::Fragment => "fragment",
-            _ if compiler.facts.contains("FinishEntry", (token,)) => "finish",
-            _ => "compute",
-        },
-    };
-    let name = unique(format!("{name}_{phase}"), &mut compiler.entry_names);
-    let execution_model = match declaration.entry_kind {
-        EntryKind::Vertex => ExecutionModel::Vertex,
-        EntryKind::Fragment => ExecutionModel::Fragment,
-        EntryKind::Compute => {
-            let grid = required(&compiler.program.graph, "RootWorkgroup", (root,))?;
-            ExecutionModel::Compute {
-                local_size: compiler.facts.grid(grid)?,
-            }
-        }
-        EntryKind::Root => return Err(OptimizeError::Output("unextracted graphics entry".into())),
-    };
-    let id = compiler.entry_ids.next_id();
-    compiler.entry_origins.insert(id, (owner, stage));
-
-    Ok(EntryPublication {
-        id,
-        name,
-        execution_model,
-        inputs,
-        outputs,
-        storage_bindings,
-    })
-}
-
-#[derive(Clone)]
-pub(super) struct Input {
-    pub declaration: EntryInput,
-    pub parameter_type: Type,
-    pub scalar_storage: bool,
+    Ok(storage_bindings)
 }
 
 pub(super) fn required(graph: &EGraph, table: &str, keys: impl IntoValues) -> Result<Value, OptimizeError> {
@@ -350,7 +279,7 @@ pub(super) fn parameter_inputs(
     program: &Program<'_, super::Optimized>,
     scope: Value,
     index: i64,
-) -> Result<Vec<Input>, OptimizeError> {
+) -> Result<Vec<EntryInput>, OptimizeError> {
     let facts = super::to_ssa::read::Facts { program };
     let Some(symbol) = facts.definition_name(scope) else {
         return Err(OptimizeError::Output("parameter region is not an entry".into()));
@@ -459,35 +388,7 @@ pub(super) fn parameter_inputs(
             kind,
         });
     }
-    inputs
-        .into_iter()
-        .map(|mut declaration| {
-            let scalar_storage = declaration.storage_binding().is_some() && !declaration.ty.is_array();
-            if scalar_storage {
-                declaration.ty = types::sized_array(1, declaration.ty.clone());
-            }
-            let physical = if let Some(binding) = declaration.storage_binding() {
-                let Some(element) = declaration.ty.elem_type() else {
-                    return Err(OptimizeError::Output("storage input has no element".into()));
-                };
-                facts.physical_type(element, true).map(|element| {
-                    types::view_array_with_size(
-                        &element,
-                        Type::Constructed(TypeName::SizePlaceholder, vec![]),
-                        types::buffer_tag(binding),
-                    )
-                })
-            } else {
-                facts.physical_type(&declaration.ty, false)
-            };
-            let parameter_type = physical?;
-            Ok(Input {
-                declaration,
-                parameter_type,
-                scalar_storage,
-            })
-        })
-        .collect()
+    Ok(inputs)
 }
 
 pub(super) fn outputs(
@@ -514,7 +415,7 @@ pub(super) fn outputs(
     let mut bindings = IdSource::new();
     for index in 0..parameters.len() {
         for input in parameter_inputs(program, scope, index as i64)? {
-            if let Some(binding) = input.declaration.descriptor_binding().filter(|b| b.set == 0) {
+            if let Some(binding) = input.descriptor_binding().filter(|b| b.set == 0) {
                 while bindings.peek_id() <= binding.binding {
                     bindings.next_id();
                 }

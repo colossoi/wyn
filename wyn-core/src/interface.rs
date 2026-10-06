@@ -17,11 +17,9 @@ pub(crate) mod results;
 
 use crate::ast;
 use crate::ast::Span;
-use crate::flow::ExecutionModel;
 use crate::host;
 use crate::types;
 use crate::types::Type;
-use crate::EntryId;
 use crate::{host::Access as DescriptorAccess, BindingRef, ResourceAccess, SymbolId};
 
 // ---------------------------------------------------------------------------
@@ -873,19 +871,4 @@ pub struct StorageBindingDecl {
     /// host-supplied input (e.g. a gather intermediate). `None` for ordinary
     /// inputs/outputs, which the runtime sizes from host data or dispatch.
     pub length: Option<host::BufferLen>,
-}
-
-/// Stable identity of a declared entry-output position.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct OutputSlotId(pub usize);
-
-#[derive(Clone, Debug)]
-pub struct EntryPublication {
-    /// Compiler identity. The name below remains emitted host ABI metadata.
-    pub id: EntryId,
-    pub name: String,
-    pub execution_model: ExecutionModel,
-    pub inputs: Vec<EntryInput>,
-    pub outputs: Vec<EntryOutput>,
-    pub storage_bindings: Vec<StorageBindingDecl>,
 }

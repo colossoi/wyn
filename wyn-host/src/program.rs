@@ -4,8 +4,8 @@ use thiserror::Error;
 
 use crate::{
     Binding, BufferLen, BufferUsage, DepthTest, DispatchLen, DispatchSize, DrawBufferRef, DrawCall,
-    DrawCount, FrameResource, FrameResourceKind, HostSizeInput, HostSizeScalar, IntegerOp, ModuleInterface,
-    Pipeline, SizeExpr, SizeOp, StorageTextureSize,
+    DrawCount, FrameResource, FrameResourceKind, ModuleInterface, Pipeline, ScalarExpr, ScalarSource,
+    StorageTextureSize,
 };
 
 #[derive(Debug, Error)]
@@ -30,15 +30,12 @@ pub struct ResourceId(pub usize);
 /// Checked i64 capacity arithmetic, with explicit wrapping i32/u32 source operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Expr {
-    I32 {
-        op: IntegerOp,
-        left: Box<Expr>,
-        right: Box<Expr>,
-    },
-    U32 {
-        op: IntegerOp,
-        left: Box<Expr>,
-        right: Box<Expr>,
+    /// Source arithmetic retains its typed host operations through code generation.
+    Scalar(ScalarExpr),
+    /// Capacity from a physical buffer, without reading or narrowing its contents.
+    BufferLength {
+        source: ScalarSource,
+        stride: u32,
     },
     Integer(i64),
     Input(String),
@@ -52,12 +49,10 @@ pub enum Expr {
         resource: ResourceId,
         axis: usize,
     },
-    Add(Box<Expr>, Box<Expr>),
     Subtract(Box<Expr>, Box<Expr>),
     Multiply(Box<Expr>, Box<Expr>),
     Floor(Box<Expr>, Box<Expr>),
     Ceiling(Box<Expr>, Box<Expr>),
-    Mod(Box<Expr>, Box<Expr>),
     Min(Box<Expr>, Box<Expr>),
     Max(Box<Expr>, Box<Expr>),
 }
@@ -87,32 +82,52 @@ impl Expr {
         ))
     }
 
-    pub(crate) fn resources(&self, result: &mut BTreeSet<ResourceId>) {
+    pub fn reads_mut(&mut self, visit: &mut impl FnMut(&mut ScalarSource, &mut u32)) {
         match self {
+            Self::Scalar(value) => value.reads_mut(visit),
+            Self::BufferLength { source, .. } => visit(source, &mut 0),
+            Self::Subtract(left, right)
+            | Self::Multiply(left, right)
+            | Self::Floor(left, right)
+            | Self::Ceiling(left, right)
+            | Self::Min(left, right)
+            | Self::Max(left, right) => {
+                left.reads_mut(visit);
+                right.reads_mut(visit);
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn resources(&self, result: &mut BTreeSet<ResourceId>) -> Result<(), HostError> {
+        match self {
+            Self::Scalar(value) => {
+                let mut sources = Vec::new();
+                value.sources(&mut sources);
+                for source in sources {
+                    result.insert(source.resource()?);
+                }
+            }
+            Self::BufferLength { source, .. } => {
+                result.insert(source.resource()?);
+            }
             Self::BufferSize(id)
             | Self::ReadScalar { resource: id, .. }
             | Self::TextureDimension { resource: id, .. } => {
                 result.insert(*id);
             }
-            Self::I32 {
-                left: a, right: b, ..
-            }
-            | Self::U32 {
-                left: a, right: b, ..
-            }
-            | Self::Add(a, b)
-            | Self::Subtract(a, b)
+            Self::Subtract(a, b)
             | Self::Multiply(a, b)
-            | Self::Mod(a, b)
             | Self::Floor(a, b)
             | Self::Ceiling(a, b)
             | Self::Min(a, b)
             | Self::Max(a, b) => {
-                a.resources(result);
-                b.resources(result);
+                a.resources(result)?;
+                b.resources(result)?;
             }
             Self::Integer(_) | Self::Input(_) => {}
         }
+        Ok(())
     }
 
     pub(crate) fn inputs(&self, result: &mut BTreeSet<String>) {
@@ -120,16 +135,8 @@ impl Expr {
             Self::Input(name) => {
                 result.insert(name.clone());
             }
-            Self::I32 {
-                left: a, right: b, ..
-            }
-            | Self::U32 {
-                left: a, right: b, ..
-            }
-            | Self::Add(a, b)
-            | Self::Subtract(a, b)
+            Self::Subtract(a, b)
             | Self::Multiply(a, b)
-            | Self::Mod(a, b)
             | Self::Floor(a, b)
             | Self::Ceiling(a, b)
             | Self::Min(a, b)
@@ -137,7 +144,9 @@ impl Expr {
                 a.inputs(result);
                 b.inputs(result);
             }
-            Self::Integer(_)
+            Self::Scalar(_)
+            | Self::BufferLength { .. }
+            | Self::Integer(_)
             | Self::BufferSize(_)
             | Self::ReadScalar { .. }
             | Self::TextureDimension { .. } => {}
@@ -591,7 +600,7 @@ impl Program {
             let pipeline = match op {
                 Operation::Dispatch { pipeline, groups, .. } => {
                     for e in groups {
-                        e.resources(&mut used);
+                        e.resources(&mut used)?;
                         e.inputs(&mut entry.scalar_inputs);
                     }
                     *pipeline
@@ -697,7 +706,7 @@ impl Program {
         for id in used.clone() {
             if let Some(allocation) = self.allocation(id, &pipelines)? {
                 for expr in allocation.expressions() {
-                    expr.resources(&mut used);
+                    expr.resources(&mut used)?;
                     expr.inputs(&mut entry.scalar_inputs);
                 }
                 pending.insert(id, allocation);
@@ -706,13 +715,17 @@ impl Program {
         entry.inputs = used.difference(&pending.keys().copied().collect()).copied().collect();
         let mut available = entry.inputs.clone();
         while !pending.is_empty() {
-            let next = pending.iter().find_map(|(&id, a)| {
+            let mut next = None;
+            for (&id, allocation) in &pending {
                 let mut refs = BTreeSet::new();
-                for e in a.expressions() {
-                    e.resources(&mut refs);
+                for expression in allocation.expressions() {
+                    expression.resources(&mut refs)?;
                 }
-                refs.is_subset(&available).then_some(id)
-            });
+                if refs.is_subset(&available) {
+                    next = Some(id);
+                    break;
+                }
+            }
             let Some(id) = next else {
                 return Err(HostError::Invalid("cyclic resource allocation sizes".into()));
             };
@@ -725,82 +738,13 @@ impl Program {
         Ok(())
     }
 
-    pub fn size_expression(&self, pipeline: usize, expr: &SizeExpr) -> Result<Expr, HostError> {
-        Ok(match expr {
-            SizeExpr::Integer(n) => Expr::Integer(*n),
-            SizeExpr::BufferLength { set, binding, stride } => {
-                Expr::BufferSize(self.slot_resource(pipeline, *set, *binding)?).floor(*stride)?
-            }
-            SizeExpr::Scalar(input) => {
-                let (mut expression, scalar) = match input {
-                    HostSizeInput::Uniform {
-                        set,
-                        binding,
-                        offset,
-                        scalar,
-                        ..
-                    } => (
-                        Expr::ReadScalar {
-                            resource: self.slot_resource(pipeline, *set, *binding)?,
-                            offset: *offset,
-                            signed: false,
-                        },
-                        scalar,
-                    ),
-                    HostSizeInput::PushConstant {
-                        push_constant_offset,
-                        scalar,
-                        ..
-                    } => (
-                        self.logical_count(
-                            pipeline,
-                            &DispatchLen::PushConstant {
-                                offset: *push_constant_offset,
-                            },
-                        )?,
-                        scalar,
-                    ),
-                };
-                match scalar {
-                    HostSizeScalar::I32 => {
-                        if let Expr::ReadScalar { signed, .. } = &mut expression {
-                            *signed = true;
-                        }
-                    }
-                    HostSizeScalar::U32 => {}
-                    HostSizeScalar::F32 => {
-                        return Err(HostError::Invalid(
-                            "floating-point capacity needs an explicit conversion".into(),
-                        ))
-                    }
-                }
-                expression
-            }
-            SizeExpr::Binary { op, left, right } => {
-                let a = Box::new(self.size_expression(pipeline, left)?);
-                let b = Box::new(self.size_expression(pipeline, right)?);
-                match op {
-                    SizeOp::I32(op) => Expr::I32 {
-                        op: *op,
-                        left: a,
-                        right: b,
-                    },
-                    SizeOp::U32(op) => Expr::U32 {
-                        op: *op,
-                        left: a,
-                        right: b,
-                    },
-                    SizeOp::Add => Expr::Add(a, b),
-                    SizeOp::Subtract => Expr::Subtract(a, b),
-                    SizeOp::Multiply => Expr::Multiply(a, b),
-                    SizeOp::Floor => Expr::Floor(a, b),
-                    SizeOp::Ceiling => Expr::Ceiling(a, b),
-                    SizeOp::Mod => Expr::Mod(a, b),
-                    SizeOp::Min => Expr::Min(a, b),
-                    SizeOp::Max => Expr::Max(a, b),
-                }
-            }
-        })
+    fn resolve_size_sources(&self, pipeline: usize, expr: &mut Expr) -> Result<(), HostError> {
+        let mut failure = None;
+        expr.reads_mut(&mut |source, _| match self.scalar_resource(pipeline, source) {
+            Ok(id) => *source = ScalarSource::Resource(id),
+            Err(error) => failure = Some(error),
+        });
+        failure.map_or(Ok(()), Err)
     }
 
     fn allocation(
@@ -849,8 +793,11 @@ impl Program {
                             self.logical_count(r.pipeline_index, domain)?
                                 .multiply(Expr::Integer((*elem_bytes).into()))
                         }
-                        BufferLen::HostProvided { .. } => return Ok(None),
-                        BufferLen::Computed { bytes } => self.size_expression(r.pipeline_index, bytes)?,
+                        BufferLen::Computed { bytes } => {
+                            let mut bytes = bytes.clone();
+                            self.resolve_size_sources(r.pipeline_index, &mut bytes)?;
+                            bytes
+                        }
                     };
                     return Ok(Some(Allocation::Buffer { resource: id, bytes }));
                 }

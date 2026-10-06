@@ -1,5 +1,5 @@
 //! Plan lexical and guarded materializations over the selected native DAG.
-//! SSA emission consumes these locations without rediscovering shared producers.
+//! SSA emission queries dependency requirements while constructing control flow.
 use super::extract::{self, operands};
 use super::scopes::{Forest, Scope, Scopes};
 use super::Selected;
@@ -71,16 +71,6 @@ pub(in crate::egglog) struct Placement {
     requirements: Vec<Vec<Scope>>,
 }
 
-/// Locations for materialization, including selections sharing a predicate.
-pub(in crate::egglog) enum Materialization {
-    Value(TermId, Option<Value>),
-    Choice {
-        terms: Vec<TermId>,
-        shared: Vec<Materialization>,
-        arms: [Vec<Materialization>; 2],
-    },
-}
-
 impl Placement {
     pub fn new(program: &Program<'_, Optimized>) -> Result<Self, OptimizeError> {
         let _placement = timing::span("egglog scalar / scope placement");
@@ -144,214 +134,13 @@ impl Placement {
         Ok(Self { scopes, requirements })
     }
 
-    pub fn readout(
-        &self,
-        program: &Program<'_, Optimized>,
-        scope: Value,
-        roots: &[TermId],
-        bound: impl Fn(Value) -> bool,
-    ) -> Result<Vec<Materialization>, OptimizeError> {
-        Readout {
-            placement: self,
-            program,
-            bound,
-        }
-        .body(scope, roots, &mut LookupSet::default())
+    pub fn available(&self, term: TermId, owner: Value, scope: Value) -> bool {
+        self.scopes.definition(owner).is_some_and(|owner| {
+            self.scopes.available(&[owner], scope) && self.scopes.available(&self.requirements[term], scope)
+        })
     }
 
-    pub fn shared(
-        &self,
-        program: &Program<'_, Optimized>,
-        scope: Value,
-        arms: [&[TermId]; 2],
-        bound: impl Fn(Value) -> bool,
-    ) -> Result<Vec<Materialization>, OptimizeError> {
-        let readout = Readout {
-            placement: self,
-            program,
-            bound,
-        };
-        readout.body(scope, &readout.common(scope, arms)?, &mut LookupSet::default())
-    }
-}
-
-struct Readout<'a, 'source, B> {
-    placement: &'a Placement,
-    program: &'a Program<'source, Optimized>,
-    bound: B,
-}
-
-impl<B: Fn(Value) -> bool> Readout<'_, '_, B> {
-    fn dependencies(&self, term: TermId) -> Vec<TermId> {
-        let selected = &self.program.stage.selected;
-        let Term::App(name, fields) = selected.dag.get(term) else {
-            return Vec::new();
-        };
-        if name == "ScalarLeaf" {
-            let source = selected.values[fields[2]];
-            if !(self.bound)(source) {
-                if let Some(&root) = selected.roots.get(&(selected.values[fields[0]], source)) {
-                    if root != term {
-                        return vec![root];
-                    }
-                }
-            }
-        }
-        if name == "ScalarChoice" {
-            return vec![fields[2]];
-        }
-        operands(name, fields)
-    }
-
-    fn demands(&self, roots: &[TermId]) -> Vec<TermId> {
-        wyn_graph::dag_postorder(
-            roots.iter().copied(),
-            |_| false,
-            |term, out| {
-                out.extend(self.dependencies(term));
-            },
-        )
-    }
-
-    fn readonly(&self, roots: &[TermId]) -> Result<bool, OptimizeError> {
-        let scalars = &self.program.stage.scalars;
-        for &term in roots {
-            let (name, _) = self.program.stage.selected.app(term)?;
-            let table = if matches!(name, "ScalarCons" | "ScalarNil") {
-                "ScalarArgsReadOnly"
-            } else {
-                "ScalarReadOnly"
-            };
-            let value = self.program.stage.selected.values[term];
-            if !scalars
-                .read(|r| r.lookup(table, value))?
-                .is_some_and(|value| scalars.value_to_base::<bool>(value))
-            {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
-    fn enclosing_bindings(
-        &self,
-        scope: Value,
-        roots: &[TermId],
-    ) -> Result<LookupSet<TermId>, OptimizeError> {
-        let selected = &self.program.stage.selected;
-        let terms = wyn_graph::dag_postorder(
-            roots.iter().copied(),
-            |_| false,
-            |term, out| {
-                out.extend(self.dependencies(term));
-                if let Term::App(name, fields) = selected.dag.get(term) {
-                    if name == "ScalarChoice" {
-                        out.extend_from_slice(&fields[3..5]);
-                    }
-                }
-            },
-        );
-        let mut bindings = LookupSet::default();
-        for term in terms {
-            let (name, fields) = selected.app(term)?;
-            if name != "ScalarLeaf" {
-                continue;
-            }
-            // A value defined in an enclosing source scope was evaluated before
-            // these consumers. Restore that materialization, including its own
-            // guards, without speculating expressions defined inside an arm.
-            let source = selected.values[fields[2]];
-            if let Some(owner) = Query(&self.program.graph)
-                .lookup("ScalarOwner", (source,))?
-                .and_then(|owner| self.placement.scopes.definition(owner))
-            {
-                if self.placement.scopes.available(&[owner], scope)
-                    && self.placement.scopes.available(&self.placement.requirements[term], scope)
-                {
-                    bindings.insert(term);
-                }
-            }
-        }
-        Ok(bindings)
-    }
-
-    fn common(&self, scope: Value, arms: [&[TermId]; 2]) -> Result<Vec<TermId>, OptimizeError> {
-        if !self.readonly(arms[0])? || !self.readonly(arms[1])? {
-            return Ok(Vec::new());
-        }
-        let yes: LookupSet<_> = self.demands(arms[0]).into_iter().collect();
-        let mut common: LookupSet<_> =
-            self.demands(arms[1]).into_iter().filter(|term| yes.contains(term)).collect();
-        let yes = self.enclosing_bindings(scope, arms[0])?;
-        common
-            .extend(self.enclosing_bindings(scope, arms[1])?.into_iter().filter(|term| yes.contains(term)));
-        Ok(common.into_iter().collect())
-    }
-
-    fn body(
-        &self,
-        scope: Value,
-        roots: &[TermId],
-        available: &mut LookupSet<TermId>,
-    ) -> Result<Vec<Materialization>, OptimizeError> {
-        let selected = &self.program.stage.selected;
-        let mut order = self.demands(roots);
-        let readonly = self.readonly(roots)?;
-        let mut groups = LookupMap::<TermId, Vec<TermId>>::default();
-        if readonly {
-            // Strict dependencies precede their consumers. Delaying selections
-            // behind other mandatory work prevents an earlier guarded use from
-            // materializing a producer also needed unconditionally in this block.
-            let mut levels = LookupMap::default();
-            for &term in &order {
-                let (name, fields) = selected.app(term)?;
-                let level = self.dependencies(term).iter().map(|child| levels[child]).max().unwrap_or(0);
-                levels.insert(term, level + usize::from(name == "ScalarChoice"));
-                if name == "ScalarChoice" {
-                    groups.entry(fields[2]).or_default().push(term);
-                }
-            }
-            order.sort_by_key(|term| levels[term]);
-        }
-        let mut result = Vec::new();
-        for term in order {
-            if !available.insert(term) {
-                continue;
-            }
-            let (name, fields) = selected.app(term)?;
-            if matches!(name, "ScalarCons" | "ScalarNil") {
-                continue;
-            }
-            if name == "ScalarChoice" {
-                let terms = groups.remove(&fields[2]).unwrap_or_else(|| vec![term]);
-                let arms = [3, 4].map(|arm| {
-                    terms
-                        .iter()
-                        .map(|&term| selected.app(term).map(|(_, f)| f[arm]))
-                        .collect::<Result<Vec<_>, _>>()
-                });
-                let [yes, no] = arms;
-                let (yes, no) = (yes?, no?);
-                let shared = self.body(scope, &self.common(scope, [&yes, &no])?, available)?;
-                let arms = [
-                    self.body(scope, &yes, &mut available.clone())?,
-                    self.body(scope, &no, &mut available.clone())?,
-                ];
-                available.extend(terms.iter().copied());
-                result.push(Materialization::Choice { terms, shared, arms });
-            } else {
-                let context = selected.values[fields[0]];
-                let total = self
-                    .program
-                    .stage
-                    .scalars
-                    .read(|r| r.contains("ScalarTotal", selected.values[term]))?;
-                let target = total.then(|| {
-                    self.placement.scopes.outside_loops(context, scope, &self.placement.requirements[term])
-                });
-                result.push(Materialization::Value(term, target));
-            }
-        }
-        Ok(result)
+    pub fn outside_loops(&self, context: Value, scope: Value, term: TermId) -> Value {
+        self.scopes.outside_loops(context, scope, &self.requirements[term])
     }
 }

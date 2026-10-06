@@ -1,6 +1,4 @@
-use crate::host::arithmetic::{
-    add, ceiling, dimension, floor, modulo, multiply, signed_size, size, subtract,
-};
+use crate::host::arithmetic::{add, ceiling, dimension, floor, multiply, signed_size, size, subtract};
 use crate::host::{
     Allocation, Binding, Expr, Operation, Pipeline, Program, ResultKind, ResultLayout, ResultScalar,
     ShaderFormat, TextureSampleType,
@@ -296,14 +294,13 @@ fn integer_capacity_expressions_reach_both_hosts() {
     let [entry] = program.entries.as_slice() else {
         panic!("one host entry");
     };
-    assert!(entry
-        .allocations
-        .iter()
-        .any(|a| matches!(a,Allocation::Buffer{bytes,..} if bytes.to_whl().contains("gpu-read-scalar"))));
+    assert!(entry.allocations.iter().any(
+        |a| matches!(a,Allocation::Buffer{bytes,..} if bytes.to_whl().unwrap().contains("gpu-read-scalar"))
+    ));
     let whl = program.to_whl("sizes.wgsl", ShaderFormat::Wgsl).unwrap();
     check_whl(&whl);
-    assert!(whl.contains("(i32-add "), "{whl}");
-    assert!(whl.contains("(i32-mul "), "{whl}");
+    assert!(whl.contains("(wyn-i32-add "), "{whl}");
+    assert!(whl.contains("(wyn-i32-mul "), "{whl}");
     assert!(!whl.contains("4294967296"));
     let rust = program.to_rust_wgpu("sizes.wgsl", ShaderFormat::Wgsl).unwrap();
     assert!(rust.contains(".wrapping_add("));
@@ -457,10 +454,6 @@ fn published_shader_names_identify_source_phases_and_stay_consistent() {
     assert!(names.iter().all(|n| n.starts_with("totals_")), "{names:?}");
     assert!(names.contains("totals_partials"));
     assert!(names.contains("totals_combine"));
-    for kernel in ssa.global_context.physical_kernels.kernels() {
-        let entry = ssa.entry_points.iter().find(|e| e.id == kernel.entry).unwrap();
-        assert_eq!(kernel.entry_point, entry.name);
-    }
     let compiled = lower_ssa_to_wgsl_with_program(ssa).unwrap();
     let module = naga::front::wgsl::parse_str(&compiled.wgsl).unwrap();
     let shader_names: BTreeSet<_> = module.entry_points.iter().map(|e| e.name.as_str()).collect();
@@ -510,58 +503,47 @@ fn rust_buffer_arguments_keep_source_names_in_bindings_sizes_and_results() {
 }
 
 #[test]
-fn rust_caller_provided_results_use_source_fields() {
-    for (ty, value, parameters) in [
-        ("[]i32", "xs", &["result"][..]),
-        (
-            "([]i32, []i32)",
-            "(xs, ys)",
-            &["result_field_0", "result_field_1"][..],
-        ),
+fn rust_generated_results_use_source_fields() {
+    for (ty, value, fields) in [
+        ("[]i32", "xs", &["generated"][..]),
+        ("([]i32, []i32)", "(xs, ys)", &["result_0", "result_1"][..]),
         (
             "{ao:[]i32, coarse:[]i32}",
             "{ao=xs, coarse=ys}",
-            &["result_ao", "result_coarse"][..],
+            &["ao", "coarse"][..],
         ),
     ] {
         let program = compile(&format!(
             "entry generated(count:f32) {ty} = let xs = iota(i32(count)) let ys = iota(i32(count+1.0)) in {value}"
         ));
         let entry = &program.entries[0];
-        assert!(
-            entry.results.iter().all(|id| entry.inputs.contains(id)),
-            "output requires caller storage"
-        );
+        assert!(entry.results.iter().all(|id| !entry.inputs.contains(id)));
+        assert!(entry.results.iter().all(|id| entry.allocations.iter().any(|a| a.resource() == *id)));
         let rust = program.to_rust_wgpu("results.wgsl", ShaderFormat::Wgsl).unwrap();
-        for parameter in parameters {
-            assert_eq!(
-                rust.matches(&format!("{parameter}: &Buffer")).count(),
-                1 + usize::from(rust.contains("pub fn encode_generated(")),
-                "{rust}"
-            );
-            assert!(
-                rust.contains(&format!("resource: {parameter}.as_entire_binding()")),
-                "{rust}"
-            );
-            assert!(rust.contains(&format!("Buffer::clone(&{parameter})")), "{rust}");
+        assert!(rust.contains("count: &Buffer"));
+        assert!(rust.contains("support::read_f32("));
+        for field in fields {
+            assert!(rust.contains(&format!("name: \"{field}\"")), "{rust}");
         }
     }
 }
 
 #[test]
-fn rust_caller_provided_result_names_avoid_source_input_collisions() {
+fn rust_generated_result_preserves_an_aliased_source_input() {
     let program = compile(
         "entry generated(result_field_1:[]i32, count:f32) ([]i32, []i32) = (result_field_1, iota(i32(count)))"
     );
+    let entry = &program.entries[0];
+    assert!(entry.inputs.contains(&entry.results[0]));
+    assert!(!entry.inputs.contains(&entry.results[1]));
     let rust = program.to_rust_wgpu("collision.wgsl", ShaderFormat::Wgsl).unwrap();
-    for parameter in ["result_field_1", "result_field_1_2"] {
-        assert!(rust.contains(&format!("{parameter}: &Buffer")), "{rust}");
-        assert!(rust.contains(&format!("Buffer::clone(&{parameter})")), "{rust}");
-    }
+    assert!(rust.contains("result_field_1: &Buffer"));
+    assert!(rust.contains("Buffer::clone(&result_field_1)"));
+    assert!(!rust.contains("result_field_1_2: &Buffer"));
 }
 
 #[test]
-fn rust_caller_provided_graphics_intermediates_use_resource_ids() {
+fn rust_allocates_graphics_intermediates_from_host_scalar_expressions() {
     let program = compile(
         r#"
 entry scene(count:f32, target:render_target<vec4f32>) render_target<vec4f32> =
@@ -574,29 +556,21 @@ entry scene(count:f32, target:render_target<vec4f32>) render_target<vec4f32> =
     );
     let entry = &program.entries[0];
     assert!(program.interface.source_results.is_empty());
-    let scratch = entry
-        .inputs
-        .iter()
-        .find(|id| {
-            let resource = &program.interface.frame_graph.resources[id.0];
-            resource.bindings.iter().any(|binding| {
-                matches!(
-                    program.bindings(binding.pipeline_index)[binding.binding_index],
-                    Binding::StorageBuffer {
-                        usage: crate::host::BufferUsage::Output | crate::host::BufferUsage::Intermediate,
-                        ..
-                    }
-                )
-            })
-        })
-        .expect("graphics capture requires caller storage");
+    assert!(entry.allocations.iter().any(|a| matches!(a, Allocation::Buffer { .. })));
     let rust = program.to_rust_wgpu("scratch.wgsl", ShaderFormat::Wgsl).unwrap();
-    let name = format!("scratch_{}", scratch.0);
-    assert!(rust.contains(&format!("{name}: &Buffer")), "{rust}");
-    assert!(
-        rust.matches(&format!("resource: {name}.as_entire_binding()")).count() >= 2,
-        "{rust}"
-    );
+    assert!(rust.contains("count: &Buffer"));
+    assert!(entry.inputs.iter().all(|id| {
+        program.interface.frame_graph.resources[id.0].bindings.iter().all(|binding| {
+            !matches!(
+                program.bindings(binding.pipeline_index)[binding.binding_index],
+                Binding::StorageBuffer {
+                    usage: crate::host::BufferUsage::Output | crate::host::BufferUsage::Intermediate,
+                    ..
+                }
+            )
+        })
+    }));
+    assert!(rust.contains("support::read_f32("));
 }
 
 #[test]
@@ -663,22 +637,14 @@ fn fixed_width_host_arithmetic_checks_overflow_and_keeps_large_byte_sizes() {
 
 #[test]
 fn fixed_width_division_rounds_without_overflowing_intermediates() {
-    for (a, b, down, up, remainder) in [
-        (5, 2, 2, 3, 1),
-        (-5, 2, -3, -2, 1),
-        (5, -2, -3, -2, -1),
-        (-5, -2, 2, 3, -1),
-    ] {
+    for (a, b, down, up) in [(5, 2, 2, 3), (-5, 2, -3, -2), (5, -2, -3, -2), (-5, -2, 2, 3)] {
         assert_eq!(floor(a, b).unwrap(), down);
         assert_eq!(ceiling(a, b).unwrap(), up);
-        assert_eq!(modulo(a, b).unwrap(), remainder);
     }
     assert_eq!(ceiling(i64::MAX, 2).unwrap(), (i64::MAX / 2) + 1);
-    assert_eq!(modulo(i64::MIN, i64::MAX).unwrap(), i64::MAX - 1);
     for (a, b) in [(1, 0), (i64::MIN, -1)] {
         assert!(floor(a, b).is_err());
         assert!(ceiling(a, b).is_err());
-        assert!(modulo(a, b).is_err());
     }
 }
 
@@ -877,8 +843,8 @@ fn uniform_sized_maps_launch_from_their_domain_capacity() {
         };
         let pixels = entry.results[0];
         assert!(
-            entry.inputs.contains(&pixels),
-            "caller provides the output capacity"
+            entry.allocations.iter().any(|a| a.resource() == pixels),
+            "host computes and allocates the output capacity"
         );
         let [Operation::Dispatch { groups, .. }, Operation::Draw { .. }] = entry.operations.as_slice()
         else {
@@ -894,10 +860,10 @@ fn uniform_sized_maps_launch_from_their_domain_capacity() {
         assert_eq!(groups, &[expected, Expr::Integer(1), Expr::Integer(1)]);
         let rust = program.to_rust_wgpu("runtime_dispatch", format).unwrap();
         let call = rust.split_once("pub fn host_reproduce(").unwrap().1;
-        assert!(call.contains(".size()"), "{call}");
+        assert!(call.contains("_bytes"), "{call}");
         assert!(call.contains("ceiling("), "{call}");
         let whl = program.to_whl("runtime_dispatch", format).unwrap();
-        assert!(whl.contains(&groups[0].to_whl()), "{whl}");
+        assert!(whl.contains(&groups[0].to_whl().unwrap()), "{whl}");
     }
 }
 

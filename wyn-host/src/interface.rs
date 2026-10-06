@@ -1342,101 +1342,12 @@ fn push_unique_access(accesses: &mut Vec<FrameAccess>, access: FrameAccess) {
     }
 }
 
-/// Scalar type of a host-visible value that may influence a host-provided
-/// buffer capacity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum HostSizeScalar {
-    I32,
-    U32,
-    F32,
-}
-
-/// One host-visible scalar value that may influence a host-provided buffer
-/// capacity. This is dependency metadata, not a formula: the host application
-/// remains responsible for choosing the allocation size.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum HostSizeInput {
-    Uniform {
-        name: String,
-        set: u32,
-        binding: u32,
-        offset: u32,
-        scalar: HostSizeScalar,
-    },
-    PushConstant {
-        name: String,
-        push_constant_offset: u32,
-        scalar: HostSizeScalar,
-    },
-}
-
-/// A host-computable byte-count expression with physical interface leaves.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SizeExpr {
-    Integer(i64),
-    Scalar(HostSizeInput),
-    BufferLength {
-        set: u32,
-        binding: u32,
-        stride: u32,
-    },
-    Binary {
-        op: SizeOp,
-        left: Box<SizeExpr>,
-        right: Box<SizeExpr>,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IntegerOp {
-    Add,
-    Subtract,
-    Multiply,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SizeOp {
-    I32(IntegerOp),
-    U32(IntegerOp),
-    Add,
-    Subtract,
-    Multiply,
-    Floor,
-    Ceiling,
-    Mod,
-    Min,
-    Max,
-}
-
-impl SizeExpr {
-    pub fn inputs_mut(&mut self) -> Vec<&mut HostSizeInput> {
-        match self {
-            Self::Scalar(input) => vec![input],
-            Self::Binary { left, right, .. } => {
-                let mut inputs = left.inputs_mut();
-                inputs.extend(right.inputs_mut());
-                inputs
-            }
-            Self::Integer(_) | Self::BufferLength { .. } => vec![],
-        }
-    }
-}
-
-/// Allocation policy for a storage buffer. Some policies are resolved from
-/// descriptor metadata; `HostProvided` is an explicit request for the host
-/// application to supply a byte capacity.
+/// Allocation policy for a storage buffer, including its final host expression.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BufferLen {
     /// Compute an allocation capacity from the published host expression.
     Computed {
-        bytes: SizeExpr,
-    },
-    /// The host application must provide the allocation capacity. `inputs`
-    /// identifies host-visible scalar values that may influence the logical
-    /// length, but deliberately does not encode the size calculation.
-    HostProvided {
-        inputs: Vec<HostSizeInput>,
-        elem_bytes: u32,
+        bytes: crate::Expr,
     },
     /// Minimum bytes the host must allocate. For an *output* binding this
     /// is the bytes the shader will write (so it's also the maximum
@@ -1468,18 +1379,15 @@ pub enum BufferLen {
 }
 
 impl BufferLen {
-    pub fn inputs_mut(&mut self) -> Vec<&mut HostSizeInput> {
-        match self {
-            Self::HostProvided { inputs, .. } => inputs.iter_mut().collect(),
-            Self::Computed { bytes } => bytes.inputs_mut(),
-            Self::Fixed { .. } | Self::LikeInput { .. } | Self::SameAsDispatch { .. } => vec![],
+    pub fn reads_mut(&mut self, visit: &mut impl FnMut(&mut ScalarSource, &mut u32)) {
+        if let Self::Computed { bytes } = self {
+            bytes.reads_mut(visit);
         }
     }
     /// Resolve to a byte size given a lookup of already-allocated buffers'
     /// byte sizes by (set, binding). Returns `None` if a referenced source
     /// buffer hasn't been sized yet, or when a separate context is needed:
-    /// `SameAsDispatch` uses `dispatch_elem_bytes`; `HostProvided` requires an
-    /// explicit capacity from the host application.
+    /// `SameAsDispatch` uses `dispatch_elem_bytes`; `Computed` needs scalar evaluation.
     pub fn resolve_bytes(&self, src_bytes: impl Fn(u32, u32) -> Option<u64>) -> Option<u64> {
         match self {
             BufferLen::Fixed { bytes } => Some(*bytes),
@@ -1492,9 +1400,7 @@ impl BufferLen {
                 let bytes = src_bytes(*set, *binding)?;
                 Some(bytes / *src_elem_bytes as u64 * *elem_bytes as u64)
             }
-            BufferLen::Computed { .. }
-            | BufferLen::SameAsDispatch { .. }
-            | BufferLen::HostProvided { .. } => None,
+            BufferLen::Computed { .. } | BufferLen::SameAsDispatch { .. } => None,
         }
     }
 

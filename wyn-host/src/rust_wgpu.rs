@@ -10,9 +10,9 @@ use syn::{
 
 use crate::{
     Allocation, Binding, BlendMode, BufferUsage, CullMode, DepthTest, DrawCall, DrawCount, Entry, Expr,
-    FillMode, FrameResourceKind, FrontFace, HostError, IndexFormat, IntegerOp, Operation, Pipeline,
-    PrimitiveTopology, Program, ResourceId, ResultKind, Scissor, ShaderFormat, ShaderStage,
-    StorageImageFormat, TextureViewDimension, VertexFormat, Viewport,
+    FillMode, FrameResourceKind, FrontFace, HostError, IndexFormat, Operation, Pipeline, PrimitiveTopology,
+    Program, ResourceId, ResultKind, Scissor, ShaderFormat, ShaderStage, StorageImageFormat,
+    TextureViewDimension, VertexFormat, Viewport,
 };
 
 pub(crate) fn resource(id: ResourceId) -> Ident {
@@ -211,19 +211,22 @@ impl Program {
         Ok(rename_identifiers(tokens, &replacements))
     }
 
-    fn rust_expr(&self, expr: &Expr, entry: &Entry) -> TokenStream {
-        match expr {
-            Expr::I32 { op, left, right } | Expr::U32 { op, left, right } => {
-                let left = self.rust_expr(left, entry);
-                let right = self.rust_expr(right, entry);
-                let convert =
-                    if matches!(expr, Expr::I32 { .. }) { quote!(i32_value) } else { quote!(u32_value) };
-                let method = match op {
-                    IntegerOp::Add => quote!(wrapping_add),
-                    IntegerOp::Subtract => quote!(wrapping_sub),
-                    IntegerOp::Multiply => quote!(wrapping_mul),
-                };
-                quote!(i64::from(support::arithmetic::#convert(#left)?.#method(support::arithmetic::#convert(#right)?)))
+    fn rust_expr(&self, expr: &Expr, entry: &Entry) -> Result<TokenStream, HostError> {
+        Ok(match expr {
+            Expr::Scalar(value) => {
+                let value = crate::scalar_emit::rust_scalar(value, &|source| {
+                    let id = source.resource()?;
+                    Ok((
+                        id,
+                        matches!(self.resource_binding(id), Some(Binding::PushConstant { .. })),
+                    ))
+                })?;
+                quote!(i64::from(#value))
+            }
+            Expr::BufferLength { source, stride } => {
+                let bytes = self.rust_expr(&Expr::BufferSize(source.resource()?), entry)?;
+                let stride = i64::from(*stride);
+                quote!(floor(#bytes, #stride)?)
             }
             Expr::Integer(n) => quote!(#n),
             Expr::Input(name) => {
@@ -261,47 +264,37 @@ impl Program {
                     _ => quote!(i64::from(#id.depth_or_array_layers())),
                 }
             }
-            Expr::Add(a, b) => {
-                let a = self.rust_expr(a, entry);
-                let b = self.rust_expr(b, entry);
-                quote!(support::arithmetic::add(#a,#b)?)
-            }
             Expr::Subtract(a, b) => {
-                let a = self.rust_expr(a, entry);
-                let b = self.rust_expr(b, entry);
+                let a = self.rust_expr(a, entry)?;
+                let b = self.rust_expr(b, entry)?;
                 quote!(support::arithmetic::subtract(#a,#b)?)
             }
             Expr::Multiply(a, b) => {
-                let a = self.rust_expr(a, entry);
-                let b = self.rust_expr(b, entry);
+                let a = self.rust_expr(a, entry)?;
+                let b = self.rust_expr(b, entry)?;
                 quote!(support::arithmetic::multiply(#a,#b)?)
             }
             Expr::Floor(a, b) => {
-                let a = self.rust_expr(a, entry);
-                let b = self.rust_expr(b, entry);
+                let a = self.rust_expr(a, entry)?;
+                let b = self.rust_expr(b, entry)?;
                 quote!(floor(#a,#b)?)
             }
             Expr::Ceiling(a, b) => {
-                let a = self.rust_expr(a, entry);
-                let b = self.rust_expr(b, entry);
+                let a = self.rust_expr(a, entry)?;
+                let b = self.rust_expr(b, entry)?;
                 quote!(ceiling(#a,#b)?)
             }
-            Expr::Mod(a, b) => {
-                let a = self.rust_expr(a, entry);
-                let b = self.rust_expr(b, entry);
-                quote!(support::arithmetic::modulo(#a,#b)?)
-            }
             Expr::Min(a, b) => {
-                let a = self.rust_expr(a, entry);
-                let b = self.rust_expr(b, entry);
+                let a = self.rust_expr(a, entry)?;
+                let b = self.rust_expr(b, entry)?;
                 quote!((#a).min(#b))
             }
             Expr::Max(a, b) => {
-                let a = self.rust_expr(a, entry);
-                let b = self.rust_expr(b, entry);
+                let a = self.rust_expr(a, entry)?;
+                let b = self.rust_expr(b, entry)?;
                 quote!((#a).max(#b))
             }
-        }
+        })
     }
 
     fn rust_entry(
@@ -382,7 +375,7 @@ impl Program {
             match a {
                 Allocation::Buffer { resource: r, bytes } => {
                     let id = resource(*r);
-                    let bytes = self.rust_expr(bytes, entry);
+                    let bytes = self.rust_expr(bytes, entry)?;
                     let length = format_ident!("resource_{}_bytes", r.0);
                     let label = &self.interface.frame_graph.resources[r.0].name;
                     // Either carried buffer can become the result after a swap.
@@ -415,8 +408,8 @@ impl Program {
                     height,
                 } => {
                     let id = resource(*r);
-                    let width = self.rust_expr(width, entry);
-                    let height = self.rust_expr(height, entry);
+                    let width = self.rust_expr(width, entry)?;
+                    let height = self.rust_expr(height, entry)?;
                     let Some(Binding::StorageTexture { format, .. }) = self.texture_binding(*r) else {
                         return Err(HostError::Invalid("texture allocation without format".into()));
                     };
@@ -637,10 +630,10 @@ impl Program {
         let dims = groups
             .iter()
             .map(|e| {
-                let e = self.rust_expr(e, entry);
-                quote!(dimension(#e)?)
+                let e = self.rust_expr(e, entry)?;
+                Ok(quote!(dimension(#e)?))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, HostError>>()?;
         let create = quote! {
             #layout
             let pipeline=device.create_compute_pipeline(&ComputePipelineDescriptor{
@@ -953,13 +946,13 @@ impl Program {
     }
 
     fn rust_draw_call(&self, p: usize, draw: &DrawCall, entry: &Entry) -> Result<TokenStream, HostError> {
-        let count = |c: &DrawCount, r: ResourceId| {
+        let count = |c: &DrawCount, r: ResourceId| -> Result<TokenStream, HostError> {
             let expr = match c {
                 DrawCount::Fixed(n) => Expr::Integer((*n).into()),
                 DrawCount::BufferLength => Expr::Input(format!("count-resource-{}", r.0)),
             };
-            let expr = self.rust_expr(&expr, entry);
-            quote!(dimension(#expr)?)
+            let expr = self.rust_expr(&expr, entry)?;
+            Ok(quote!(dimension(#expr)?))
         };
         let index = |f: &IndexFormat| match f {
             IndexFormat::Uint16 => quote!(IndexFormat::Uint16),
@@ -984,7 +977,7 @@ impl Program {
                 first_instance,
             } => {
                 let r = self.draw_resource(p, indices)?;
-                let n = count(index_count, r);
+                let n = count(index_count, r)?;
                 let id = resource(r);
                 let format = index(index_format);
                 quote! {pass.set_index_buffer(#id.slice(..),#format);pass.draw_indexed(#first_index..support::draw_end(#first_index,#n)?,#vertex_offset,#first_instance..support::draw_end(#first_instance,#instance_count)?);}
@@ -995,7 +988,7 @@ impl Program {
                 draw_count,
             } => {
                 let r = self.draw_resource(p, commands)?;
-                let n = count(draw_count, r);
+                let n = count(draw_count, r)?;
                 let id = resource(r);
                 quote!(pass.multi_draw_indirect(&#id,#offset,#n);)
             }
@@ -1007,7 +1000,7 @@ impl Program {
                 draw_count,
             } => {
                 let r = self.draw_resource(p, commands)?;
-                let n = count(draw_count, r);
+                let n = count(draw_count, r)?;
                 let id = resource(r);
                 let indices = resource(self.draw_resource(p, indices)?);
                 let format = index(index_format);

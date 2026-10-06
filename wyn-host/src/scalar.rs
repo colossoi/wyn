@@ -20,9 +20,11 @@ impl ScalarType {
     }
 }
 
-/// A physical input before target-specific push-constant legalization.
+/// A physical input, resolved to its resource identity during host assembly.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScalarSource {
+    /// Final resource identity, resolved when a host entry is assembled.
+    Resource(ResourceId),
     Binding {
         set: u32,
         binding: u32,
@@ -33,9 +35,18 @@ pub enum ScalarSource {
     },
 }
 
+impl ScalarSource {
+    pub(crate) fn resource(&self) -> Result<ResourceId, HostError> {
+        match self {
+            Self::Resource(id) => Ok(*id),
+            _ => Err(HostError::Invalid("unresolved host scalar source".into())),
+        }
+    }
+}
+
 /// Expressions retain lexical binding and conditional evaluation boundaries.
 /// `Loop` tests before each iteration and evaluates its step in the old scope.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScalarExpr {
     I32(i32),
     U32(u32),
@@ -92,6 +103,40 @@ pub struct ScalarTask {
 }
 
 impl ScalarExpr {
+    pub fn sources<'a>(&'a self, out: &mut Vec<&'a ScalarSource>) {
+        match self {
+            Self::Read { source, .. } | Self::BufferLength { source, .. } => out.push(source),
+            Self::Apply { args, .. } | Self::Tuple(args) => {
+                for arg in args {
+                    arg.sources(out);
+                }
+            }
+            Self::If { condition, yes, no } => {
+                condition.sources(out);
+                yes.sources(out);
+                no.sources(out);
+            }
+            Self::Let { bindings, result } => {
+                for (_, value) in bindings {
+                    value.sources(out);
+                }
+                result.sources(out);
+            }
+            Self::Loop {
+                initial,
+                condition,
+                step,
+                ..
+            } => {
+                initial.sources(out);
+                condition.sources(out);
+                step.sources(out);
+            }
+            Self::Field { tuple, .. } => tuple.sources(out),
+            Self::I32(_) | Self::U32(_) | Self::F32(_) | Self::Bool(_) | Self::Local(_) => {}
+        }
+    }
+
     pub fn reads_mut(&mut self, visit: &mut impl FnMut(&mut ScalarSource, &mut u32)) {
         match self {
             Self::Read { source, offset, .. } => visit(source, offset),
@@ -135,6 +180,7 @@ impl Program {
         source: &ScalarSource,
     ) -> Result<ResourceId, HostError> {
         match source {
+            ScalarSource::Resource(id) => Ok(*id),
             ScalarSource::Binding { set, binding } => self.slot_resource(pipeline, *set, *binding),
             ScalarSource::PushConstant { name, offset } => {
                 let Some(index) = self.bindings(pipeline).iter().position(|b| {

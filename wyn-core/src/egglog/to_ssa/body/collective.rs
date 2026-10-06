@@ -67,18 +67,22 @@ impl Body<'_, '_, '_> {
                 self.copy_array(output, initial, n)?;
             }
         }
-        let stage = kernels::Recipe {
-            operation: owner,
-            phase,
-            extent: domain,
-            width: 1,
-        };
-        kernels::emit(self, scope, &stage)?;
+        kernels::emit(self, scope, owner, &phase, domain, 1)?;
+        let mut output_index = 0;
         for (role, index, result) in self.compiler.plan.results(plan)? {
             if role == "scan" {
                 continue;
             }
             let slot = if role == "total" { "total" } else { "output" };
+            // Plan result indices include totals and counts; output buffers
+            // number only the array results, matching the array writes.
+            let index = if role == "array" {
+                let index = output_index;
+                output_index += 1;
+                index
+            } else {
+                index
+            };
             let Some(array) = self.slot(scope, owner, slot, index, 1)? else {
                 continue;
             };

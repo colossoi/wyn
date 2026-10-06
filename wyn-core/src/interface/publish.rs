@@ -16,8 +16,8 @@ use crate::host::{
     SamplerBindingType, SourceResultBinding, StageBindingUses, TextureSampleType, TextureViewDimension,
     VertexAttribute,
 };
-use crate::interface::EntryPublication;
 use crate::interface::{EntryInputKind, IoDecoration, StorageAccess, TextureSource};
+use crate::ssa::types::EntryPoint;
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -27,7 +27,7 @@ pub struct DescriptorError(String);
 /// descriptor pipeline index and each inner index is a stage index.
 pub(crate) type StageEntryAssociations = Vec<Vec<EntryId>>;
 
-fn entries_by_id<'a>(entries: &[&'a EntryPublication]) -> LookupMap<EntryId, &'a EntryPublication> {
+fn entries_by_id<'a>(entries: &[&'a EntryPoint]) -> LookupMap<EntryId, &'a EntryPoint> {
     entries.iter().map(|entry| (entry.id, *entry)).collect()
 }
 
@@ -40,7 +40,7 @@ pub trait ModuleInterfacePublish {
     /// `MultiCompute` parallelization path pre-populated) are skipped.
     fn publish_implicit_bindings(
         &mut self,
-        entries: &[&EntryPublication],
+        entries: &[&EntryPoint],
         associations: &StageEntryAssociations,
     ) -> Result<(), DescriptorError>;
 
@@ -48,14 +48,14 @@ pub trait ModuleInterfacePublish {
     /// reconcile each pipeline's storage-buffer access from its own stages.
     fn publish_stage_binding_uses(
         &mut self,
-        entries: &[&EntryPublication],
+        entries: &[&EntryPoint],
         associations: &StageEntryAssociations,
     );
 
     /// Populate `vertex_inputs` and `fragment_outputs` on graphics
     /// pipelines from a vertex entry's `#[vertex_slot(n)]` inputs and a
     /// fragment entry's `#[target(name)]` outputs.
-    fn publish_graphics_io(&mut self, entries: &[&EntryPublication], associations: &StageEntryAssociations);
+    fn publish_graphics_io(&mut self, entries: &[&EntryPoint], associations: &StageEntryAssociations);
 
     /// Workgroup size the parallelizer chose for the compute entry
     /// `entry_name`, or `(64, 1, 1)` when the entry isn't in the
@@ -64,7 +64,7 @@ pub trait ModuleInterfacePublish {
     fn relabel_input_storage_names(&mut self, names: &LookupMap<(u32, u32), String>);
 }
 
-pub(crate) fn entry_stage_binding_uses(entry: &EntryPublication, bindings: &[Binding]) -> StageBindingUses {
+pub(crate) fn entry_stage_binding_uses(entry: &EntryPoint, bindings: &[Binding]) -> StageBindingUses {
     let indices = bindings
         .iter()
         .enumerate()
@@ -162,11 +162,7 @@ pub(crate) fn reconcile_storage_binding_access<'a>(
     }
 }
 
-fn publish_pipeline_stage_uses(
-    pipeline: &mut Pipeline,
-    entries: &[&EntryPublication],
-    stage_ids: &[EntryId],
-) {
+fn publish_pipeline_stage_uses(pipeline: &mut Pipeline, entries: &[&EntryPoint], stage_ids: &[EntryId]) {
     let entries = entries_by_id(entries);
     match pipeline {
         Pipeline::Compute(compute) => {
@@ -219,7 +215,7 @@ fn publish_pipeline_stage_uses(
 impl ModuleInterfacePublish for ModuleInterface {
     fn publish_implicit_bindings(
         &mut self,
-        entries: &[&EntryPublication],
+        entries: &[&EntryPoint],
         associations: &StageEntryAssociations,
     ) -> Result<(), DescriptorError> {
         let mut layout = DescriptorLayout::from_pipeline(self)?;
@@ -461,7 +457,7 @@ impl ModuleInterfacePublish for ModuleInterface {
 
     fn publish_stage_binding_uses(
         &mut self,
-        entries: &[&EntryPublication],
+        entries: &[&EntryPoint],
         associations: &StageEntryAssociations,
     ) {
         for (index, pipeline) in self.pipelines.iter_mut().enumerate() {
@@ -473,11 +469,7 @@ impl ModuleInterfacePublish for ModuleInterface {
         }
     }
 
-    fn publish_graphics_io(
-        &mut self,
-        entries: &[&EntryPublication],
-        associations: &StageEntryAssociations,
-    ) {
+    fn publish_graphics_io(&mut self, entries: &[&EntryPoint], associations: &StageEntryAssociations) {
         let entries = entries_by_id(entries);
         for (pipeline_index, stage_ids) in associations.iter().enumerate() {
             let Some(Pipeline::Graphics(graphics)) = self.pipelines.get_mut(pipeline_index) else {
@@ -631,7 +623,7 @@ fn binding_shape(binding: &Binding) -> Option<DescriptorShape> {
 /// the input's type. The type checker guarantees every such input has a
 /// valid vertex format, so `vertex_format` returning `None` here is a
 /// compiler bug.
-fn append_vertex_inputs(vertex_inputs: &mut Vec<VertexAttribute>, entry: &EntryPublication) {
+fn append_vertex_inputs(vertex_inputs: &mut Vec<VertexAttribute>, entry: &EntryPoint) {
     for input in &entry.inputs {
         let Some(IoDecoration::Location(slot)) = input.decoration() else {
             continue;
@@ -650,7 +642,7 @@ fn append_vertex_inputs(vertex_inputs: &mut Vec<VertexAttribute>, entry: &EntryP
     }
 }
 
-fn append_fragment_outputs(fragment_outputs: &mut Vec<FragmentOutput>, entry: &EntryPublication) {
+fn append_fragment_outputs(fragment_outputs: &mut Vec<FragmentOutput>, entry: &EntryPoint) {
     for (i, output) in entry.outputs.iter().enumerate() {
         if let Some(name) = output.target().map(str::to_owned) {
             fragment_outputs.push(FragmentOutput {

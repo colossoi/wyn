@@ -58,13 +58,8 @@ impl Body<'_, '_, '_> {
             ) else {
                 return Err(error("branch has no selected result roots"));
             };
-            let shared = self.compiler.placements.shared(
-                self.compiler.program,
-                scope,
-                [&[a_root], &[b_root]],
-                |source| self.values.contains_key(&source),
-            )?;
-            self.materializations(scope, &shared)?;
+            let shared = self.scalar_common(scope, [&[a_root], &[b_root]])?;
+            self.scalar_roots(scope, &shared, &mut crate::LookupSet::default())?;
             return self.branch(
                 scope,
                 condition,

@@ -300,7 +300,6 @@ fn lower_empty_program_succeeds() {
         ssa::context::BackendGlobal {
             pipeline: Default::default(),
             target: CodegenTarget::Wgsl,
-            physical_kernels: Default::default(),
         },
     );
     let out = super::lower(&program).expect("empty program should lower");
@@ -481,7 +480,6 @@ fn wgsl_scope_tree_owns_loop_exports_and_preserves_state_swaps() {
         ssa::context::BackendGlobal {
             pipeline: Default::default(),
             target: CodegenTarget::Wgsl,
-            physical_kernels: Default::default(),
         },
     );
     let mut ctx = super::LowerCtx::new(&program, Default::default());
