@@ -154,15 +154,31 @@ pub(super) fn screma(
                 let values = (0..operators.len())
                     .map(|i| body.field(incoming.clone(), i))
                     .collect::<Result<Vec<_>, _>>()?;
-                let (prefixes, _, totals) = workgroup_scan(
-                    body,
-                    scope,
-                    &operators,
-                    values,
-                    &initial,
-                    lane.clone(),
-                    phase_width,
-                )?;
+                let (prefixes, totals) = if scans.is_empty() {
+                    (
+                        Vec::new(),
+                        workgroup_reduce(
+                            body,
+                            scope,
+                            &operators,
+                            values,
+                            &initial,
+                            lane.clone(),
+                            phase_width,
+                        )?,
+                    )
+                } else {
+                    let (prefixes, _, totals) = workgroup_scan(
+                        body,
+                        scope,
+                        &operators,
+                        values,
+                        &initial,
+                        lane.clone(),
+                        phase_width,
+                    )?;
+                    (prefixes, totals)
+                };
                 body.when(valid, |body| {
                     for (i, prefix) in prefixes.iter().take(scans.len()).enumerate() {
                         if let Some(output) = body.slot(scope, phase_owner, "prefix", i as i64, 2)? {
@@ -225,15 +241,31 @@ pub(super) fn screma(
                             None,
                         )?);
                     }
-                    let (_, offsets, totals) = workgroup_scan(
-                        body,
-                        scope,
-                        &operators,
-                        values,
-                        &initial,
-                        lane.clone(),
-                        phase_width,
-                    )?;
+                    let (offsets, totals) = if scans.is_empty() {
+                        (
+                            Vec::new(),
+                            workgroup_reduce(
+                                body,
+                                scope,
+                                &operators,
+                                values,
+                                &initial,
+                                lane.clone(),
+                                phase_width,
+                            )?,
+                        )
+                    } else {
+                        let (_, offsets, totals) = workgroup_scan(
+                            body,
+                            scope,
+                            &operators,
+                            values,
+                            &initial,
+                            lane.clone(),
+                            phase_width,
+                        )?;
+                        (offsets, totals)
+                    };
                     body.when(valid, |body| {
                         for (i, offset) in offsets.into_iter().take(scans.len()).enumerate() {
                             if let Some(output) = body.slot(scope, phase_owner, "offset", i as i64, 2)? {
@@ -299,6 +331,67 @@ pub(super) fn screma(
         _ => return Err(error("invalid collective phase")),
     }
     Ok(())
+}
+
+/// Reduce adjacent contiguous ranges in source order. A single shared bank is
+/// sufficient: a round's right-hand ranges never write during that round.
+fn workgroup_reduce(
+    body: &mut Body<'_, '_, '_>,
+    scope: Value,
+    operators: &[Value],
+    values: Vec<Typed>,
+    neutral: &[Typed],
+    lane: Typed,
+    width: u32,
+) -> Result<Vec<Typed>, OptimizeError> {
+    assert!(
+        width.is_power_of_two(),
+        "workgroup reduction width must be a power of two: {width}"
+    );
+    let zero = body.literal("0", &lane.ty)?;
+    let length = body.literal(&width.to_string(), &lane.ty)?;
+    let mut shared = Vec::new();
+    for (i, value) in values.into_iter().enumerate() {
+        let buffer = body.op(
+            OpTag::StorageView(PureViewSource::Workgroup {
+                id: i as u32,
+                count: width,
+            }),
+            vec![zero.clone(), length.clone()],
+            Body::view_type(&value.ty, types::no_buffer()),
+        )?;
+        body.store(buffer.clone(), lane.clone(), value)?;
+        shared.push(buffer);
+    }
+    body.builder.push_void_inst(InstKind::ControlBarrier).map_err(builder_error)?;
+    for bit in 0..width.trailing_zeros() {
+        let distance = body.literal(&(1u32 << bit).to_string(), &lane.ty)?;
+        let span = body.literal(&(2u32 << bit).to_string(), &lane.ty)?;
+        let remainder = body.binary(BinaryOperator::Remainder, lane.clone(), span)?;
+        let active = body.binary(BinaryOperator::Equal, remainder, zero.clone())?;
+        body.when(active, |body| {
+            let right = body.binary(BinaryOperator::Add, lane.clone(), distance)?;
+            for (i, buffer) in shared.iter().enumerate() {
+                let a = body.index(buffer.clone(), lane.clone())?;
+                let b = body.index(buffer.clone(), right.clone())?;
+                let value = combine_accumulator(body, scope, operators[i], a, b)?;
+                body.store(buffer.clone(), lane.clone(), value)?;
+            }
+            Ok(())
+        })?;
+        body.builder.push_void_inst(InstKind::ControlBarrier).map_err(builder_error)?;
+    }
+    let totals = shared
+        .into_iter()
+        .zip(neutral)
+        .map(|(buffer, neutral)| {
+            let total = body.index(buffer, zero.clone())?;
+            body.cast(total, &neutral.ty)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // Every lane reads the total before the next tile overwrites shared storage.
+    body.builder.push_void_inst(InstKind::ControlBarrier).map_err(builder_error)?;
+    Ok(totals)
 }
 
 pub(super) fn workgroup_scan(

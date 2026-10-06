@@ -1,4 +1,11 @@
 entry total(xs: []i32) i32 = reduce(|a:i32,b:i32|a+b, 0, xs)
+-- Affine composition is associative but not commutative: reassociation may
+-- change the tree, but must retain the order of inputs and neutral padding.
+def compose(p:(i32,i32),q:(i32,i32)) (i32,i32) =
+  let (a,b)=p in let (c,d)=q in
+  ((a*c)%251,(b*c+d)%251)
+entry ordered(xs: []i32, n: i32) (i32,i32) =
+  reduce(compose,(1,0),map(|i| let x=xs[i] in ((x+8)%7+1,(x+8)%251),iota(n)))
 entry prefixes(xs: []i32) []i32 = scan(|a:i32,b:i32|a+b, 0, xs)
 entry survivors(xs: []i32) (i32, i32) =
   let ys = filter(|x:i32|x>0, xs) in

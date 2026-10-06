@@ -10,7 +10,6 @@ fn graph() -> EGraph {
                 r#"
                 (datatype TypeKey (TypeId i64))
                 (datatype FusionPlan (FusionSource OperationKey))
-                (datatype SourceValue (SourceGlobal i64) (SourceFormal RegionKey i64))
                 (function SourceReadOnly (SourceValue) bool :merge (and old new))
                 (function SourceRegionReadOnly (RegionKey) bool :merge (and old new))
                 "#,

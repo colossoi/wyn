@@ -542,6 +542,49 @@ fn scans_have_prefix_and_offset_dispatches() {
 fn filters_emit_stable_workgroup_compaction() {
     shaders("entry positive(xs:[]i32) []i32=filter(|x:i32|x>0,xs)");
 }
+
+#[test]
+#[ignore = "tuple-with-boolean filters fail host-extent lowering"]
+fn filters_of_tuples_with_boolean_fields() {
+    shaders("entry kept(xs:[]i32) [](i32,bool)=filter(|(x,b)|b,map(|x|(x,x>0),xs))");
+}
+
+#[test]
+fn compaction_retains_producer_elements_across_the_scan() {
+    for source in [
+        "entry kept(xs:[]i32) []i32=filter(|x|x>0,map(|x|x*x+17,xs))",
+        "entry kept(xs:[]i32) []{x:i32,y:i32}=filter(|p|p.x>0,map(|x|{x=x,y=x*3+1},xs))",
+        "entry kept(xs:[]i32) []{x:i32,keep:bool}=filter(|p|p.keep,map(|x|{x=x,keep=x>0},xs))",
+    ] {
+        let module = shaders(source);
+        let input = module
+            .global_variables
+            .iter()
+            .find(|(_, v)| v.binding.as_ref().is_some_and(|b| b.group == 0 && b.binding == 0))
+            .unwrap()
+            .0;
+        assert_eq!(module.entry_points.len(), 1);
+        assert_eq!(
+            storage_loads(&module.entry_points[0].function, input),
+            1,
+            "the predicate and output must share one input load: {source}"
+        );
+    }
+}
+
+#[test]
+fn reductions_use_less_shared_storage_than_scans() {
+    let reduce = shaders("entry total(xs:[]i32) i32=reduce((+),0,xs)");
+    let scan = shaders("entry prefixes(xs:[]i32) []i32=scan((+),0,xs)");
+    let shared = |module: &naga::Module| {
+        module.global_variables.iter().filter(|(_, v)| v.space == naga::AddressSpace::WorkGroup).count()
+    };
+    assert!(shared(&reduce) > 0);
+    assert!(
+        shared(&reduce) < shared(&scan),
+        "reductions need no prefix ping-pong bank"
+    );
+}
 #[test]
 fn nested_reduction_stays_inside_the_map_invocation() {
     shaders("entry sums(xs:[]i32) []i32=map(|x:i32|reduce(|a:i32,b:i32|a+b,0,map(|y:i32|y+x,iota(5))),xs)");

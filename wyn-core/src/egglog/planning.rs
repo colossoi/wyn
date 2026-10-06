@@ -21,7 +21,7 @@ pub(super) const RULES: &str = concat!(
     include_str!("epilogues.egg"),
     "\n",
 );
-pub(super) const KEYS: &str = "(datatype ExprKey (ExprId i64))\n(datatype TypeKey (TypeId i64))\n";
+pub(super) const KEYS: &str = "(datatype TypeKey (TypeId i64))\n";
 
 pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
     graph.parse_and_run_program(Some("planning keys".into()), KEYS)?;

@@ -52,18 +52,35 @@ pub(super) fn compact(
             let base = body.binary(BinaryOperator::Multiply, tile, width)?;
             let index = body.binary(BinaryOperator::Add, base, lane.clone())?;
             let valid = body.binary(BinaryOperator::Less, index.clone(), n)?;
-            let flag = body.branch(
+            // Carry the evaluated input with its flag. Only valid lanes evaluate
+            // the producer; only selected lanes consume the retained element.
+            let retained = body.branch_with_type(
                 scope,
                 valid,
                 |body| {
                     let value =
                         element(body, scope, plan, input, index.clone(), &mut LookupMap::default())?;
-                    let predicate = body.callback(scope, operation, vec![value])?;
-                    body.cast(predicate, &uint)
+                    let predicate = body.callback(scope, operation, vec![value.clone()])?;
+                    let flag = body.cast(predicate, &uint)?;
+                    body.tuple(vec![flag, value])
                 },
-                |_| Ok(zero.clone()),
+                |body, ty| {
+                    let Type::Constructed(TypeName::Tuple(_), fields) = ty else {
+                        return Err(error("filter input pair has no tuple representation"));
+                    };
+                    let unused = body.op(
+                        OpTag::Intrinsic {
+                            id: catalog().known().uninit,
+                            overload_idx: 0,
+                        },
+                        vec![],
+                        fields[1].clone(),
+                    )?;
+                    body.tuple(vec![zero.clone(), unused])
+                },
                 None,
             )?;
+            let flag = body.field(retained.clone(), 0)?;
             let (prefixes, _, totals) = workgroup_scan(
                 body,
                 scope,
@@ -78,7 +95,8 @@ pub(super) fn compact(
             let selected = body.binary(BinaryOperator::NotEqual, flag, zero.clone())?;
             body.when(selected, |body| {
                 let mut cache = LookupMap::default();
-                let value = element(body, scope, plan, input, index.clone(), &mut cache)?;
+                let value = body.field(retained, 1)?;
+                cache.insert(input, value.clone());
                 cache.insert(source, value);
                 let offset = body.binary(BinaryOperator::Subtract, prefix, one.clone())?;
                 let output_index = body.binary(BinaryOperator::Add, state[0].clone(), offset)?;

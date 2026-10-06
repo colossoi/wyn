@@ -49,7 +49,7 @@
 (rule ((= input (SourceInput consumer i)) (= (Identity input) (Identity source)) (= source (SourceOperationValue producer)))
       ((InputFact (Group consumer) (Direct producer))
        (WholeStream (Group producer) (Group consumer))) :ruleset source-fusion)
-(rule ((= input (SourceInput consumer i)) (= (SourceHasOrigin input) false) (= (SourceExprKey input) (ExprId token)))
+(rule ((= input (SourceInput consumer i)) (= (SourceHasOrigin input) false) (= token (SourceOrdinal input)))
       ((InputFact (Group consumer) (External token))) :ruleset source-fusion)
 (rule ((= input (SourceInput op 0)) (= token (SourceIdentityToken (Identity input))))
       ((union (SourceDomain op) (DomainValue token))) :ruleset source-fusion)

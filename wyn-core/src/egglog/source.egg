@@ -1,10 +1,6 @@
 ; These are source identities and placement constraints, not arithmetic enodes.
 ; Occurrences include their execution scope. Equality of optimized values must
 ; never erase the distinction between executions in different scopes.
-(datatype SourceValue
-  (SourceTerm RegionKey i64)
-  (SourceFormal RegionKey i64)
-  (SourceGlobal i64))
 ; A lifted callback's implicit application belongs to its invocation region.
 (sort SourceArguments (Vec SourceValue))
 (constructor SourceInvocation (RegionKey SourceValue SourceArguments) SourceValue)
@@ -35,7 +31,6 @@
 (relation SourceCallable (SourceValue RegionKey))
 
 ; Finite source summaries. Arithmetic remains outside equality saturation.
-(function SourceExprKey (SourceValue) ExprKey :no-merge)
 (function SourceType (SourceValue) TypeKey :no-merge)
 (relation SourceScalarLayout (TypeKey))
 (relation SourceArrayElement (TypeKey TypeKey))

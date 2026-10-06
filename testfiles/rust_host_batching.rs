@@ -176,11 +176,29 @@ mod tests {
         check_sharing!(sharing_spv);
         check_sharing!(sharing_wgsl);
         macro_rules! check_collectives {
-            ($module:ident) => {{
+            ($module:ident, $ordered:expr) => {{
                 let mut context = $module::HostContext::new(&device).unwrap();
                 for n in [1, 63, 64, 65, 257, 16385] {
                     let values: Vec<i32> = (0..n).map(|i| i % 17 - 8).collect();
                     let xs = input(&device, &values);
+                    let expected = values.iter().fold((1, 0), |(a, b), &x| {
+                        let (c, d) = ((x + 8) % 7 + 1, (x + 8) % 251);
+                        ((a * c) % 251, (b * c + d) % 251)
+                    });
+                    let ordered = ($ordered)(&mut context, &xs, n).unwrap();
+                    assert_eq!(
+                        read(&device, &queue, buffer!($module, ordered, 0)),
+                        vec![expected.0],
+                        "ordered reduction at {n}"
+                    );
+                    assert_eq!(
+                        read(&device, &queue, buffer!($module, ordered, 1)),
+                        vec![expected.1],
+                        "ordered reduction at {n}"
+                    );
+                    let empty = ($ordered)(&mut context, &xs, 0).unwrap();
+                    assert_eq!(read(&device, &queue, buffer!($module, empty, 0)), vec![1]);
+                    assert_eq!(read(&device, &queue, buffer!($module, empty, 1)), vec![0]);
                     let scoped = $module::host_scoped(&mut context, &queue, &xs).unwrap();
                     let expected: Vec<_> = values.iter().map(|&x| (0..7).map(|i| if x == 0 { i } else { 120 / x + i }).sum::<i32>()).collect();
                     assert_eq!(&read(&device, &queue, buffer!($module, scoped))[..n as usize], expected, "guarded division at {n}");
@@ -217,8 +235,13 @@ mod tests {
                 }
             }};
         }
-        check_collectives!(collectives_spv);
-        check_collectives!(collectives_wgsl);
+        check_collectives!(collectives_spv, |context, xs, n: i32| {
+            collectives_spv::host_ordered(context, &queue, xs, &n.to_le_bytes())
+        });
+        check_collectives!(collectives_wgsl, |context, xs, n| {
+            let n = input(&device, &[n]);
+            collectives_wgsl::host_ordered(context, &queue, xs, &n, &n, &n)
+        });
         let mut setup_spv_context = setup_spv::HostContext::new(&device).unwrap();
         let mut setup_wgsl_context = setup_wgsl::HostContext::new(&device).unwrap();
         for [w, h] in [[1.0f32, 1.0f32], [1920.0, 1080.0], [1080.0, 1920.0]] {

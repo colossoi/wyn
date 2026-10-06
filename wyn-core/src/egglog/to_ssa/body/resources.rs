@@ -142,7 +142,7 @@ impl Body<'_, '_, '_> {
         // A parameter's Length(self) queries its bound descriptor. Other lengths
         // follow the plan, including compacted counts and slice bounds.
         if let Some(("Length", fields)) = self.compiler.facts.extent(extent) {
-            if self.compiler.facts.expr(fields[0]) == Some(source) {
+            if fields[0] == source {
                 let value = self.value(scope, source)?;
                 return self.length(value);
             }
@@ -277,9 +277,7 @@ impl Body<'_, '_, '_> {
                 self.literal(&n.to_string(), &types::i32())
             }
             "Length" | "Scalar" => {
-                let Some(source) = self.compiler.facts.expr(children[0]) else {
-                    return Err(error("extent source is missing"));
-                };
+                let source = children[0];
                 if name == "Length" {
                     self.source_length(scope, source)
                 } else {

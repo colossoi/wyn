@@ -110,9 +110,7 @@ impl<'a, 'source> Lower<'a, 'source> {
             ));
         }
         if let Some(fields) = self.facts.enode("Length", extent) {
-            let Some(source) = self.facts.lookup("SsaExprSource", (fields[0],)) else {
-                return Err(error("host length has no source identity").into());
-            };
+            let source = fields[0];
             if let Some((binding, stride)) = self.facts.input_storage(source)? {
                 return Ok(ScalarExpr::BufferLength {
                     source: ScalarSource::Binding {
@@ -129,9 +127,7 @@ impl<'a, 'source> Lower<'a, 'source> {
             return self.length(source);
         }
         if let Some(fields) = self.facts.enode("Scalar", extent) {
-            let Some(source) = self.facts.lookup("SsaExprSource", (fields[0],)) else {
-                return Err(error("host extent has no scalar identity").into());
-            };
+            let source = fields[0];
             let Some(context) = self.facts.lookup("ScalarSourceContext", (source,)) else {
                 return Err(error("host extent has no selected scalar context").into());
             };
@@ -382,8 +378,7 @@ impl<'a, 'source> Lower<'a, 'source> {
 
     fn stored(&self, source: Value) -> bool {
         self.facts
-            .lookup("SourceExprKey", (source,))
-            .and_then(|key| self.facts.lookup("SelectedAccess", (key,)))
+            .lookup("SelectedAccess", (source,))
             .is_some_and(|access| self.facts.enode("StoredRead", access).is_some())
     }
     fn term(&mut self, term: TermId) -> Result<ScalarExpr> {

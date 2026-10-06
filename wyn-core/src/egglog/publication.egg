@@ -4,7 +4,7 @@
 (rule ((EmitOriginalEntry owner) (SourceDefinition owner region))
       ((RootUsesRegion (EntryRoot owner) region)) :ruleset publication-uses)
 (rule ((PhaseCallback stage region)) ((RootUsesRegion (KernelRoot stage) region)) :ruleset publication-uses)
-(rule ((Demand (InStage stage) key) (= key (SourceExprKey source)))
+(rule ((Demand (InStage stage) source))
       ((RootValueUse (KernelRoot stage) source)) :ruleset publication-uses)
 (rule ((RootUsesRegion root region) (SourceRegionEnters region child))
       ((RootUsesRegion root child)) :ruleset publication-uses)
@@ -86,7 +86,7 @@
 
 (rule ((FinishEntry owner) (SourceDefinition owner region))
       ((RootUsesRegion (EntryRoot owner) region)) :ruleset publication-uses)
-(rule ((OutputWriter output root) (OutputExpression output key) (= key (SourceExprKey source)))
+(rule ((OutputWriter output root) (OutputExpression output source))
       ((RootValueUse root source)) :ruleset publication-uses)
 
 (rule ((PhaseCallback stage region) (SourceCapture region formal actual))

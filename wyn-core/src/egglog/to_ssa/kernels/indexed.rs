@@ -22,10 +22,7 @@ fn destination_value(
     let Some(fields) = body.compiler.facts.enode("DestinationValue", destination) else {
         return Err(error("unknown selected update destination"));
     };
-    let Some(source) = body.compiler.facts.expr(fields[0]) else {
-        return Err(error("selected destination has no source value"));
-    };
-    body.value(scope, source)
+    body.value(scope, fields[0])
 }
 
 pub(super) fn indexed(

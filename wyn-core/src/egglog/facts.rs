@@ -193,9 +193,7 @@ impl<'a, 'source> Facts<'a, 'source> {
         }
     }
     pub fn input_storage(&self, source: Value) -> Result<Option<(BindingRef, u32)>, OptimizeError> {
-        let Some(storage) =
-            self.lookup("SourceExprKey", (source,)).and_then(|key| self.lookup("AbiStorage", (key,)))
-        else {
+        let Some(storage) = self.lookup("AbiStorage", (source,)) else {
             return Ok(None);
         };
         let Some(fields) = self.enode("StorageInput", storage) else {

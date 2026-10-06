@@ -50,6 +50,8 @@ pub(super) fn import(source: &InputSliceBoundsInferred) -> Result<(EGraph, Ident
             operations: IdSource::new(),
             outputs: IdSource::new(),
             arrays: IdSource::new(),
+            imported_types: LookupMap::default(),
+            source_ordinals: LookupMap::default(),
             summaries: Summaries::default(),
         };
         // Native writes report engine errors; source validation also has its
@@ -64,7 +66,6 @@ pub(super) fn import(source: &InputSliceBoundsInferred) -> Result<(EGraph, Ident
 pub(super) struct Identities<'source> {
     terms: Interner<i64, TermId>,
     pub(super) symbols: Interner<i64, SymbolId>,
-    pub(super) values: Interner<i64, Value>,
     pub(super) types: Interner<i64, Type>,
     pub(super) scopes: LookupMap<Value, (Option<Value>, Option<&'source Term>)>,
     pub(super) arrays: LookupMap<
@@ -107,6 +108,8 @@ struct Import<'graph, 'db, 'ids, 'source> {
     operations: IdSource<i64>,
     outputs: IdSource<i64>,
     arrays: IdSource<i64>,
+    imported_types: LookupMap<i64, Value>,
+    source_ordinals: LookupMap<Value, i64>,
     summaries: Summaries,
 }
 
@@ -587,7 +590,9 @@ impl<'source> Import<'_, '_, '_, 'source> {
             captured.push(parameter);
             self.sink.add("SourceCapture", (scope.key, parameter, argument))?;
             self.summaries.captures.insert((operation, argument));
-            self.summaries.reads.push((operation, argument));
+            if let Some(reads) = self.summaries.reads.get_mut(&operation) {
+                reads.insert(argument);
+            }
         }
         self.parameters(params, &scope)?;
         if matches!(&body.kind, TermKind::Var(VarRef::Symbol(symbol)) if self.globals.contains(symbol)) {
@@ -630,10 +635,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         self.identities.arrays.entry(value).or_insert((array, scope.key));
         self.use_value(owner, value);
         let extent = match array {
-            ArrayExpr::Var(VarRef::Symbol(_), _) => {
-                let key = self.expression_key(value)?;
-                self.sink.add("Length", key)?
-            }
+            ArrayExpr::Var(VarRef::Symbol(_), _) => self.sink.add("Length", value)?,
             ArrayExpr::Var(VarRef::Builtin { .. }, _) => {
                 return Err(OptimizeError::Output("builtin used as a TLC array input".into()));
             }
@@ -642,8 +644,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                     let child = self.array(array, value, scope)?;
                     self.sink.add("SourceArrayPart", (value, index as i64, child))?;
                 }
-                let key = self.expression_key(value)?;
-                self.sink.add("Length", key)?
+                self.sink.add("Length", value)?
             }
             ArrayExpr::Literal(elements) => {
                 self.flags(value, false, true, true, true, 0)?;
@@ -659,8 +660,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 if let Some(step) = step {
                     self.operand(step, value, scope)?;
                 }
-                let key = self.expression_key(length)?;
-                self.sink.add("Scalar", key)?
+                self.sink.add("Scalar", length)?
             }
         };
         self.sink.set("SourceExtent", value, extent)?;
@@ -683,7 +683,9 @@ impl<'source> Import<'_, '_, '_, 'source> {
         self.summaries.values.entry(owner).or_default().dependencies = dependencies;
         self.sink.set("SourceInput", (operation, index), value)?;
         self.summaries.inputs.insert((operation, value));
-        self.summaries.reads.push((operation, value));
+        if let Some(reads) = self.summaries.reads.get_mut(&operation) {
+            reads.insert(value);
+        }
         self.dependencies(operation, value, "Input")?;
 
         Ok(())
@@ -705,6 +707,10 @@ impl<'source> Import<'_, '_, '_, 'source> {
             SoacOp::ReduceByIndex { op, .. } => ("reduce-by-index", op),
         };
         let operation = self.operation(value, kind, scope)?;
+        // Only scatter's in-place safety check consumes transitive read footprints.
+        if matches!(soac, SoacOp::Scatter { .. }) {
+            self.summaries.reads.entry(operation).or_default();
+        }
         self.operator_body(body, operation, value, scope)?;
         let count = match soac {
             SoacOp::Map { inputs, .. }

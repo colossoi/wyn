@@ -90,23 +90,20 @@ impl<'a, 'source> Facts<'a, 'source> {
     pub fn source(&self, value: Value) -> Option<Value> {
         self.lookup("SourceOperationValue", (value,))
     }
-    pub fn expr(&self, value: Value) -> Option<Value> {
-        self.lookup("SsaExprSource", (value,))
-    }
     pub fn value_ref(&self, value: Value) -> Option<Value> {
         self.lookup("SsaValueRef", (value,))
     }
     pub fn value_read(&self, source: Value) -> Option<Value> {
-        self.lookup("ValueRead", (self.lookup("SourceExprKey", (source,))?,))
+        self.lookup("ValueRead", (source,))
     }
     pub fn access(&self, source: Value) -> Option<Value> {
-        self.lookup("SelectedAccess", (self.lookup("SourceExprKey", (source,))?,))
+        self.lookup("SelectedAccess", (source,))
     }
     pub fn view_extent(&self, source: Value) -> Option<Value> {
         self.lookup("LogicalExtent", (source,))
     }
     pub fn external(&self, value: Value) -> Option<Value> {
-        self.expr(self.enode("Source", value)?[0])
+        Some(self.enode("Source", value)?[0])
     }
     pub fn live_length(&self, value: Value) -> Option<Value> {
         self.lookup("LiveLength", (value,))
@@ -115,7 +112,7 @@ impl<'a, 'source> Facts<'a, 'source> {
         self.lookup("CapacityExtent", (value,))
     }
     pub fn reuse_source(&self, value: Value) -> Option<Value> {
-        self.expr(self.lookup("SameBacking", (value,))?)
+        self.lookup("SameBacking", (value,))
     }
     pub fn domain(&self, value: Value) -> Option<Value> {
         self.lookup("SsaDomain", (value,))

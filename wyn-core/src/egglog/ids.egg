@@ -1,3 +1,10 @@
 ; Identities shared by the fusion, expression, and block layers.
 (datatype RegionKey (RegionId i64))
 (datatype OperationKey (OperationId i64))
+; Scoped source identities are shared directly by planning and scalar admission.
+(datatype SourceValue
+  (SourceTerm RegionKey i64)
+  (SourceFormal RegionKey i64)
+  (SourceGlobal i64))
+; Stable import order is only used for deterministic choices, never as a value wrapper.
+(function SourceOrdinal (SourceValue) i64 :no-merge)

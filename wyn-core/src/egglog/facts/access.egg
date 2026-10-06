@@ -1,8 +1,5 @@
 ; Keyed read access to selected facts. This ruleset runs once after optimization.
 (ruleset ssa-access)
-; SourceExprKey is a function; its inverse needs a keyed table.
-(function SsaExprSource (ExprKey) SourceValue :no-merge)
-(rule ((= e (SourceExprKey v))) ((set (SsaExprSource e) v)) :ruleset ssa-access)
 (function SsaDefinition (i64) RegionKey :no-merge)
 (rule ((SourceDefinition x y)) ((set (SsaDefinition x) y)) :ruleset ssa-access)
 (function SsaBranchYes (SourceValue) RegionKey :no-merge)
@@ -43,7 +40,7 @@
 (function SsaGroup (OperationKey) FusionPlan :no-merge)
 (rule ((PlannedOperation o owner p r)) ((set (SsaGroup o) p)) :ruleset ssa-access)
 (function SsaValueRef (SourceValue) ValueKey :no-merge)
-(rule ((ValueRef e b) (= e (SourceExprKey v))) ((set (SsaValueRef v) b)) :ruleset ssa-access)
+(rule ((ValueRef v b)) ((set (SsaValueRef v) b)) :ruleset ssa-access)
 (function SsaSlot (OperationKey String i64) ValueKey :no-merge)
 (rule ((BufferSlot o role i b)) ((set (SsaSlot o role i) b)) :ruleset ssa-access)
 (function SsaDomain (OperationKey) Extent :no-merge)

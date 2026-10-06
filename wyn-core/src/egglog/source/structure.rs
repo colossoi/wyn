@@ -22,7 +22,7 @@ impl Import<'_, '_, '_, '_> {
             EntryParamBindingKind::TupleOfViews(fields) => {
                 for (index, field) in fields.iter().enumerate() {
                     let component = self.sink.add("SourceProjected", (value, index as i64))?;
-                    self.expression_key(component)?;
+                    self.register_source(component)?;
                     self.sink.add("SourceProjection", (component, value, index as i64))?;
                     self.sink.add("SourceField", (value, index as i64, component))?;
                     self.sink.add("SourceStorageField", component)?;
@@ -46,10 +46,10 @@ impl Import<'_, '_, '_, '_> {
         stride: u32,
     ) -> Result<(), OptimizeError> {
         self.sink.add("SourceBinding", (value, i64::from(set), i64::from(binding)))?;
-        let source = self.expression_key(value)?;
+        self.register_source(value)?;
         let binding = self.sink.add("InputBinding", (i64::from(set), i64::from(binding)))?;
         let storage = self.sink.add("StorageInput", (binding, i64::from(stride)))?;
-        self.sink.set("AbiStorage", source, storage)?;
+        self.sink.set("AbiStorage", value, storage)?;
         Ok(())
     }
 

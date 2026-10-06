@@ -24,7 +24,7 @@
       ((SourceObserved op)) :ruleset source-summary)
 (function SourceOperationCheap (OperationKey) bool :merge (or old new))
 
-(rule ((= value (SourceInput op i)) (= (SourceExprKey value) (ExprId token))) ((set (SourceIdentityToken (Identity value)) token)) :ruleset source-summary)
+(rule ((= value (SourceInput op i)) (= token (SourceOrdinal value))) ((set (SourceIdentityToken (Identity value)) token)) :ruleset source-summary)
 (rule ((= value (SourceOperationValue op))) ((SourceOrigin value op) (Identity value)) :ruleset source-summary)
 (rule ((= target (SourceAlias value))) ((union (Identity value) (Identity target))) :ruleset source-summary)
 (rule ((= target (SourceAlias value)) (SourceOrigin target op)) ((SourceOrigin value op)) :ruleset source-summary)

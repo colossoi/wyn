@@ -3,12 +3,12 @@
 ; and estimated work is within budget. A larger budget cannot authorize motion.
 (relation ExecutionSummary (OperationKey bool bool bool))
 (function Rematerialize (OperationKey) bool :merge (or old new))
-(relation ScalarResult (ExprKey OperationKey))
-(relation LengthOperation (OperationKey ExprKey))
+(relation ScalarResult (SourceValue OperationKey))
+(relation LengthOperation (OperationKey SourceValue))
 (function ReadsLength (OperationKey) bool :merge (or old new))
-(relation LengthReference (ExprKey ExprKey))
-(relation ReferencedExtent (ExprKey Extent))
-(function ViewExtent (ExprKey) Extent :no-merge)
+(relation LengthReference (SourceValue SourceValue))
+(relation ReferencedExtent (SourceValue Extent))
+(function ViewExtent (SourceValue) Extent :no-merge)
 ; Source order comes from the shared dependency scheduler. Scalar invocations
 ; may join across independent, effect-free work in the same source region.
 (relation SourcePosition (OperationKey RegionKey i64))

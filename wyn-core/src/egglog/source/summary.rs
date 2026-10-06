@@ -63,7 +63,7 @@ impl Summary {
 pub(super) struct Summaries {
     pub values: LookupMap<Value, Summary>,
     pub uses: LookupMap<Value, LookupSet<Value>>,
-    pub reads: Vec<(Value, Value)>,
+    pub reads: LookupMap<Value, LookupSet<Value>>,
     pub operations: LookupMap<Value, Value>,
     pub inputs: LookupSet<(Value, Value)>,
     pub captures: LookupSet<(Value, Value)>,
@@ -103,10 +103,10 @@ impl Import<'_, '_, '_, '_> {
                 }
             }
         }
-        // Read footprints are source-walk summaries, not an egglog traversal
-        // through every scalar expression for each collective.
-        for &(operation, root) in &self.summaries.reads {
-            let mut pending = vec![root];
+        // Visit the union of each scatter's inputs and captures once, including
+        // shared dependencies. Other collectives do not consume this footprint.
+        for (&operation, roots) in &self.summaries.reads {
+            let mut pending: Vec<_> = roots.iter().copied().collect();
             let mut seen = LookupSet::default();
             while let Some(value) = pending.pop() {
                 if !seen.insert(value) {

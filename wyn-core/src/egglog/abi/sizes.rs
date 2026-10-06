@@ -146,9 +146,7 @@ pub(in crate::egglog) fn extent(compiler: &Compiler<'_, '_>, key: Value) -> Resu
             compiler.program.graph.value_to_base::<i64>(children[0]),
         )),
         "Length" | "Scalar" => {
-            let Some(source) = compiler.facts.expr(children[0]) else {
-                return Err(error("host extent identity missing"));
-            };
+            let source = children[0];
             source_size(compiler, source, name == "Length")
         }
         "Product" => Ok(extent(compiler, children[0])?.multiply(extent(compiler, children[1])?)),
@@ -169,7 +167,7 @@ pub(in crate::egglog) fn source_size(
             return Err(error(format!("array {source:?} has no host extent")));
         };
         if let Some(("Length", fields)) = compiler.facts.extent(bound) {
-            if compiler.facts.expr(fields[0]) == Some(source) {
+            if fields[0] == source {
                 let Some((binding, stride)) = compiler.facts.input_storage(source)? else {
                     return Err(error(format!("array {source:?} has no host length input")));
                 };

@@ -13,6 +13,24 @@ impl Body<'_, '_, '_> {
         no_value: impl FnOnce(&mut Self) -> Result<Typed, OptimizeError>,
         source_scopes: Option<(Value, Value)>,
     ) -> Result<Typed, OptimizeError> {
+        self.branch_with_type(
+            scope,
+            condition,
+            yes_value,
+            |body, _| no_value(body),
+            source_scopes,
+        )
+    }
+
+    /// Let a synthetic fallback use the representation produced by the true arm.
+    pub(in crate::egglog::to_ssa) fn branch_with_type(
+        &mut self,
+        scope: Value,
+        condition: Typed,
+        yes_value: impl FnOnce(&mut Self) -> Result<Typed, OptimizeError>,
+        no_value: impl FnOnce(&mut Self, &types::Type) -> Result<Typed, OptimizeError>,
+        source_scopes: Option<(Value, Value)>,
+    ) -> Result<Typed, OptimizeError> {
         let start = self.current()?;
         self.scopes.insert(scope, start);
         let yes = self.builder.create_block();
@@ -41,7 +59,7 @@ impl Body<'_, '_, '_> {
         if let Some((_, scope)) = source_scopes {
             self.scopes.insert(scope, no);
         }
-        let b = no_value(self)?;
+        let b = no_value(self, &a.ty)?;
         let no_end = self.current()?;
         if a.ty != b.ty {
             return Err(error(format!(

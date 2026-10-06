@@ -13,15 +13,20 @@ use egglog_engine::sort::VecContainer;
 use egglog_engine::{Core, RawValues, Value, Write};
 
 impl<'source> Import<'_, '_, '_, 'source> {
-    pub(super) fn expression_key(&mut self, value: Value) -> Result<Value, OptimizeError> {
-        let token = self.identities.values.intern(&value);
-        let key = self.sink.add("ExprId", token)?;
-        self.sink.set("SourceExprKey", value, key)?;
-        Ok(key)
+    pub(super) fn register_source(&mut self, value: Value) -> Result<(), OptimizeError> {
+        if !self.source_ordinals.contains_key(&value) {
+            let ordinal = self.source_ordinals.len() as i64;
+            self.sink.set("SourceOrdinal", value, ordinal)?;
+            self.source_ordinals.insert(value, ordinal);
+        }
+        Ok(())
     }
 
     pub(super) fn ty(&mut self, ty: &Type) -> Result<Value, OptimizeError> {
         let token = self.identities.types.intern(ty);
+        if let Some(&key) = self.imported_types.get(&token) {
+            return Ok(key);
+        }
         let key = self.sink.add("TypeId", token)?;
         let semantic = strip_existentials(ty);
         if semantic.is_array() {
@@ -66,13 +71,15 @@ impl<'source> Import<'_, '_, '_, 'source> {
         } else if !semantic.is_array() && matches!(semantic, Type::Constructed(_, _)) {
             self.sink.add("SourceAtomicType", key)?;
         }
-        if let Some((size, align)) = std430_type_layout(&storage_value_type(ty)) {
+        let storage = storage_value_type(ty);
+        if let Some((size, align)) = std430_type_layout(&storage) {
             self.sink.add("SourceBlockLayout", (key, i64::from(size), i64::from(align)))?;
         }
-        if let Some(size) = type_byte_size(&storage_value_type(ty)) {
+        let byte_size = type_byte_size(&storage);
+        if let Some(size) = byte_size {
             self.sink.set("SourceByteSize", key, i64::from(size))?;
         }
-        if let Some(stride) = storage_elem_stride(&storage_value_type(ty)) {
+        if let Some(stride) = storage_elem_stride(&storage) {
             self.sink.set("SourceStorageStride", key, i64::from(stride))?;
         }
         if semantic.array_variant().is_some_and(is_array_variant_view) {
@@ -81,7 +88,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         // Booleans are local scalar values even though their storage form is u32.
         // Classify aggregates using that form so boolean loop state remains a
         // device-local control boundary rather than exposing its inner SOACs.
-        if type_byte_size(&crate::ssa::layout::storage_value_type(ty)).is_some_and(|size| size > 0) {
+        if byte_size.is_some_and(|size| size > 0) {
             self.sink.add("SourceScalarLayout", key)?;
         }
         fn element(ty: &Type) -> Option<Type> {
@@ -96,11 +103,14 @@ impl<'source> Import<'_, '_, '_, 'source> {
             let element = self.ty(&element)?;
             self.sink.add("SourceArrayElement", (key, element))?;
         }
+        // Aggregate shape tokens can be interned before their facts are emitted.
+        // Cache only completed imports, independently of the type interner.
+        self.imported_types.insert(token, key);
         Ok(key)
     }
 
     pub(super) fn value_type(&mut self, value: Value, ty: &Type) -> Result<(), OptimizeError> {
-        self.expression_key(value)?;
+        self.register_source(value)?;
         if let Some(binding) = array_view_buffer(ty) {
             let Some(element) = ty.elem_type() else {
                 return Err(OptimizeError::Output("bound array has no element".into()));
@@ -242,16 +252,14 @@ impl<'source> Import<'_, '_, '_, 'source> {
             (TermKind::Var(VarRef::Builtin { id, .. }), &[length])
                 if *id == catalog().known().scratch_alloc =>
             {
-                let key = self.expression_key(length)?;
-                let extent = self.sink.add("Scalar", key)?;
+                let extent = self.sink.add("Scalar", length)?;
                 self.sink.add("SourceScratch", (value, extent))?;
             }
             (TermKind::Var(VarRef::Builtin { id, .. }), &[array])
                 if *id == catalog().known().scratch_annotation =>
             {
                 self.summaries.lengths.insert(value, array);
-                let key = self.expression_key(array)?;
-                let extent = self.sink.add("Length", key)?;
+                let extent = self.sink.add("Length", array)?;
                 self.sink.add("SourceScratch", (value, extent))?;
             }
             _ => {}

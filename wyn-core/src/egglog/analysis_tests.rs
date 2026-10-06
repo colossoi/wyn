@@ -8,7 +8,7 @@ fn work_proofs_distinguish_shared_regions_from_repeated_inline_work() {
             None,
             concat!(
                 include_str!("ids.egg"),
-                "\n(datatype SourceValue (SourceGlobal i64))
+                "\n
         (function SourceWork (SourceValue) i64 :no-merge)
         (function SourceRegionWork (RegionKey) i64 :no-merge)
         (function SourceRegionDuplicable (RegionKey) bool :no-merge)
