@@ -63,11 +63,12 @@ pub(super) fn prepare(program: &mut Program<'_, Optimized>) -> Result<(), Optimi
     roots.sort();
     roots.dedup();
     for root in roots {
-        let executor = super::abi::required(&program.graph, "PreferredExecutor", (root,))?;
-        if super::abi::fields(&program.graph, "GpuExecutor", executor)?.is_some() {
+        let executor =
+            crate::egglog::query::Query(&program.graph).required("PreferredExecutor", (root,))?;
+        if crate::egglog::query::Query(&program.graph).enode("GpuExecutor", executor)?.is_some() {
             continue;
         }
-        if super::abi::fields(&program.graph, "CpuExecutor", executor)?.is_none() {
+        if crate::egglog::query::Query(&program.graph).enode("CpuExecutor", executor)?.is_none() {
             return Err(OptimizeError::Output("unknown preferred executor".into()));
         }
         let mut targets = Vec::new();

@@ -16,7 +16,7 @@ use crate::host::{
     SamplerBindingType, SourceResultBinding, StageBindingUses, TextureSampleType, TextureViewDimension,
     VertexAttribute,
 };
-use crate::interface::{EntryInputKind, IoDecoration, StorageAccess, TextureSource};
+use crate::interface::{IoDecoration, StorageAccess, TextureSource};
 use crate::ssa::types::EntryPoint;
 
 #[derive(Debug, thiserror::Error)]
@@ -35,109 +35,23 @@ pub trait ModuleInterfacePublish {
     /// Append `Binding::StorageBuffer` / `Uniform` / `PushConstant` /
     /// `Texture` / `Sampler` entries to the descriptor's per-pipeline
     /// bindings list for each `(set, binding)` recorded on the entry's
-    /// `EntryInput`s, `EntryOutput`s, and `storage_bindings` (gather
-    /// intermediates). Bindings already present (e.g. those a
-    /// `MultiCompute` parallelization path pre-populated) are skipped.
-    fn publish_implicit_bindings(
+    /// `EntryInput`s, `EntryOutput`s, and `storage_bindings`. Generated
+    /// resource metadata is resolved directly from entries in the same source
+    /// family when the final binding is constructed.
+    fn publish_implicit_bindings<'a>(
         &mut self,
         entries: &[&EntryPoint],
         associations: &StageEntryAssociations,
+        source: impl Fn(&EntryPoint) -> &'a str,
     ) -> Result<(), DescriptorError>;
-
-    /// Record descriptor-binding access on the stage that performs it and
-    /// reconcile each pipeline's storage-buffer access from its own stages.
-    fn publish_stage_binding_uses(
-        &mut self,
-        entries: &[&EntryPoint],
-        associations: &StageEntryAssociations,
-    );
 
     /// Populate `vertex_inputs` and `fragment_outputs` on graphics
     /// pipelines from a vertex entry's `#[vertex_slot(n)]` inputs and a
     /// fragment entry's `#[target(name)]` outputs.
     fn publish_graphics_io(&mut self, entries: &[&EntryPoint], associations: &StageEntryAssociations);
 
-    /// Workgroup size the parallelizer chose for the compute entry
-    /// `entry_name`, or `(64, 1, 1)` when the entry isn't in the
-    /// descriptor (e.g. graphics entries — non-compute call sites skip
-    /// this anyway).
+    /// Apply authored input names to their final descriptor slots.
     fn relabel_input_storage_names(&mut self, names: &LookupMap<(u32, u32), String>);
-}
-
-pub(crate) fn entry_stage_binding_uses(entry: &EntryPoint, bindings: &[Binding]) -> StageBindingUses {
-    let indices = bindings
-        .iter()
-        .enumerate()
-        .filter_map(|(index, binding)| binding_slot(binding).map(|slot| (slot, index)))
-        .collect::<LookupMap<_, _>>();
-    let mut uses = StageBindingUses::default();
-    let mut record = |binding: BindingRef, access: Access| {
-        if let Some(&index) = indices.get(&binding) {
-            uses.record(index, access);
-        }
-    };
-
-    for input in &entry.inputs {
-        let Some(binding) = input.descriptor_binding() else {
-            continue;
-        };
-        let access = match input.kind {
-            EntryInputKind::Storage { access, .. } | EntryInputKind::StorageImage { access, .. } => {
-                Access::from(access)
-            }
-            EntryInputKind::Uniform { .. }
-            | EntryInputKind::Texture { .. }
-            | EntryInputKind::Sampler { .. } => Access::ReadOnly,
-            EntryInputKind::Value { .. } | EntryInputKind::PushConstant { .. } => unreachable!(),
-        };
-        record(binding, access);
-    }
-    for output in &entry.outputs {
-        if let Some(binding) = output.storage_binding() {
-            record(binding, Access::WriteOnly);
-        }
-    }
-    for declaration in &entry.storage_bindings {
-        let access = Access::from(StorageAccess::from(declaration.role));
-        record(declaration.binding, access);
-    }
-    for input in &entry.inputs {
-        let Some(constant) = input.push_constant() else {
-            continue;
-        };
-        for (index, binding) in bindings.iter().enumerate() {
-            if matches!(binding, Binding::PushConstant { offset, .. } if *offset == constant.offset) {
-                uses.record(index, Access::ReadOnly);
-            }
-        }
-    }
-    uses
-}
-
-fn merge_stage_binding_uses(uses: &mut StageBindingUses, declared: StageBindingUses) {
-    for binding in declared.reads {
-        uses.record(binding, Access::ReadOnly);
-    }
-    for binding in declared.writes {
-        uses.record(binding, Access::WriteOnly);
-    }
-}
-
-fn merge_non_storage_buffer_stage_binding_uses(
-    uses: &mut StageBindingUses,
-    declared: StageBindingUses,
-    bindings: &[Binding],
-) {
-    for binding in declared.reads {
-        if !matches!(bindings.get(binding), Some(Binding::StorageBuffer { .. })) {
-            uses.record(binding, Access::ReadOnly);
-        }
-    }
-    for binding in declared.writes {
-        if !matches!(bindings.get(binding), Some(Binding::StorageBuffer { .. })) {
-            uses.record(binding, Access::WriteOnly);
-        }
-    }
 }
 
 pub(crate) fn reconcile_storage_binding_access<'a>(
@@ -162,61 +76,12 @@ pub(crate) fn reconcile_storage_binding_access<'a>(
     }
 }
 
-fn publish_pipeline_stage_uses(pipeline: &mut Pipeline, entries: &[&EntryPoint], stage_ids: &[EntryId]) {
-    let entries = entries_by_id(entries);
-    match pipeline {
-        Pipeline::Compute(compute) => {
-            for (index, stage) in compute.stages.iter_mut().enumerate() {
-                if let Some(entry) = stage_ids.get(index).and_then(|id| entries.get(id).copied()) {
-                    let declared = entry_stage_binding_uses(entry, &compute.bindings);
-                    // The scheduler's physical resources are authoritative for
-                    // storage-buffer traffic. Other descriptor-backed inputs
-                    // do not participate in that resource graph, so recover
-                    // their stage uses from the emitted entry interface.
-                    merge_non_storage_buffer_stage_binding_uses(
-                        &mut stage.uses,
-                        declared,
-                        &compute.bindings,
-                    );
-                }
-            }
-            reconcile_storage_binding_access(
-                &mut compute.bindings,
-                compute.stages.iter().map(|stage| &stage.uses),
-            );
-        }
-        Pipeline::Graphics(graphics) => {
-            for (index, stage) in graphics.stages.iter_mut().enumerate() {
-                if let Some(entry) = stage_ids.get(index).and_then(|id| entries.get(id).copied()) {
-                    let declared = entry_stage_binding_uses(entry, &graphics.bindings);
-                    if stage.uses.is_empty() {
-                        merge_stage_binding_uses(&mut stage.uses, declared);
-                    } else {
-                        merge_non_storage_buffer_stage_binding_uses(
-                            &mut stage.uses,
-                            declared,
-                            &graphics.bindings,
-                        );
-                    }
-                }
-            }
-            let declared = stage_ids
-                .iter()
-                .filter_map(|id| entries.get(id).copied())
-                .map(|entry| entry_stage_binding_uses(entry, &graphics.bindings))
-                .collect::<Vec<_>>();
-            reconcile_storage_binding_access(
-                &mut graphics.bindings,
-                graphics.stages.iter().map(|stage| &stage.uses).chain(declared.iter()),
-            );
-        }
-    }
-}
 impl ModuleInterfacePublish for ModuleInterface {
-    fn publish_implicit_bindings(
+    fn publish_implicit_bindings<'a>(
         &mut self,
         entries: &[&EntryPoint],
         associations: &StageEntryAssociations,
+        source: impl Fn(&EntryPoint) -> &'a str,
     ) -> Result<(), DescriptorError> {
         let mut layout = DescriptorLayout::from_pipeline(self)?;
 
@@ -243,6 +108,35 @@ impl ModuleInterfacePublish for ModuleInterface {
             let mut local_claimed: LookupSet<BindingRef> =
                 bindings.iter().filter_map(binding_slot).collect();
 
+            let entry_source = source(entry);
+            let storage = |slot: BindingRef| {
+                let mut selected: Option<&crate::interface::StorageBindingDecl> = None;
+                for declaration in entries
+                    .iter()
+                    .filter(|candidate| source(candidate) == entry_source)
+                    .flat_map(|entry| &entry.storage_bindings)
+                    .filter(|declaration| declaration.binding == slot)
+                {
+                    if declaration.logical_resource.is_none() || declaration.length.is_none() {
+                        return Err(DescriptorError(
+                            "generated storage has no resource identity or capacity".into(),
+                        ));
+                    }
+                    if let Some(previous) = selected {
+                        if previous.logical_resource != declaration.logical_resource
+                            || previous.length != declaration.length
+                        {
+                            return Err(DescriptorError(format!(
+                                "generated resource identities disagree for {}: {slot}",
+                                entry_source
+                            )));
+                        }
+                    }
+                    selected = Some(declaration);
+                }
+                Ok(selected)
+            };
+
             for input in &entry.inputs {
                 if let Some(br) = input.uniform_binding() {
                     let (size, members) = uniform_block_members(&input.ty);
@@ -262,14 +156,21 @@ impl ModuleInterfacePublish for ModuleInterface {
                     }
                     bindings.push(binding);
                 } else if let Some(br) = input.storage_binding() {
+                    let generated = storage(br)?;
                     let binding = Binding::StorageBuffer {
                         set: br.set,
                         binding: br.binding,
                         access: Access::ReadOnly,
-                        usage: BufferUsage::Input,
+                        usage: if generated.is_some() {
+                            BufferUsage::Intermediate
+                        } else {
+                            BufferUsage::Input
+                        },
                         name: input.name.clone(),
-                        resource: None,
-                        length: input.storage_length().cloned(),
+                        resource: generated.and_then(|decl| decl.logical_resource.clone()),
+                        length: generated
+                            .and_then(|decl| decl.length.clone())
+                            .or_else(|| input.storage_length().cloned()),
                         members: Vec::new(),
                     };
                     let Some(slot) = binding_slot(&binding) else {
@@ -370,6 +271,7 @@ impl ModuleInterfacePublish for ModuleInterface {
             // Output (it writes) and the consumer Input (it reads); both surface
             // as a compiler-managed `Intermediate`, with access from the role.
             for decl in &entry.storage_bindings {
+                storage(decl.binding)?;
                 let access = Access::from(StorageAccess::from(decl.role));
                 let binding = Binding::StorageBuffer {
                     set: decl.binding.set,
@@ -431,14 +333,17 @@ impl ModuleInterfacePublish for ModuleInterface {
                         format!("{}_output_{}", entry.name, i)
                     }
                 });
+                let generated = storage(br)?;
                 let binding = Binding::StorageBuffer {
                     set: br.set,
                     binding: br.binding,
                     access: Access::WriteOnly,
                     usage: BufferUsage::Output,
                     name,
-                    resource: None,
-                    length: output.storage_length().cloned(),
+                    resource: generated.and_then(|decl| decl.logical_resource.clone()),
+                    length: generated
+                        .and_then(|decl| decl.length.clone())
+                        .or_else(|| output.storage_length().cloned()),
                     members: Vec::new(),
                 };
                 let Some(slot) = binding_slot(&binding) else {
@@ -453,20 +358,6 @@ impl ModuleInterfacePublish for ModuleInterface {
         }
 
         Ok(())
-    }
-
-    fn publish_stage_binding_uses(
-        &mut self,
-        entries: &[&EntryPoint],
-        associations: &StageEntryAssociations,
-    ) {
-        for (index, pipeline) in self.pipelines.iter_mut().enumerate() {
-            publish_pipeline_stage_uses(
-                pipeline,
-                entries,
-                associations.get(index).map(Vec::as_slice).unwrap_or_default(),
-            );
-        }
     }
 
     fn publish_graphics_io(&mut self, entries: &[&EntryPoint], associations: &StageEntryAssociations) {

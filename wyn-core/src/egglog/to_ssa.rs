@@ -54,6 +54,7 @@ pub(super) fn lower(
     let mut entries = Vec::new();
     for definition in &program.source.defs {
         if let DefMeta::EntryPoint(_) = &definition.meta {
+            let first_entry = entries.len();
             let Some(symbol) = program.identities.symbols.get(&definition.name) else {
                 return Err(error("entry symbol missing"));
             };
@@ -67,6 +68,17 @@ pub(super) fn lower(
             {
                 let entry = interface::entry(&mut compiler, definition.name, None, &entries)?;
                 entries.push(entry);
+            }
+            // Each stage's accesses were lowered with its interface. Form this
+            // source pipeline's layout union once from those final entries.
+            let mut accesses = LookupMap::<crate::BindingRef, crate::ResourceAccess>::default();
+            for entry in &entries[first_entry..] {
+                for (&binding, &access) in &entry.stage_descriptor_storage_accesses {
+                    accesses.entry(binding).and_modify(|old| *old = old.merge(access)).or_insert(access);
+                }
+            }
+            for entry in &mut entries[first_entry..] {
+                entry.pipeline_storage_accesses.clone_from(&accesses);
             }
         }
     }

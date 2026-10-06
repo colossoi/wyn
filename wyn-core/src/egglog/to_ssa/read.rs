@@ -170,6 +170,42 @@ impl<'a, 'source> Facts<'a, 'source> {
         self.lookup("SsaDefinitionName", (scope,))
             .is_some_and(|symbol| self.contains("SourceEntryPoint", (symbol, scope)))
     }
+    pub fn entry_root(&self, owner: SymbolId, stage: Option<Value>) -> Result<Value, OptimizeError> {
+        let root = if let Some(stage) = stage {
+            self.constructor("KernelRoot", (stage,))
+        } else {
+            let token = self
+                .program
+                .identities
+                .symbols
+                .get(&owner)
+                .ok_or_else(|| error("entry identity missing"))?;
+            self.constructor("EntryRoot", (token,))
+        };
+        root.ok_or_else(|| error("entry resource root missing"))
+    }
+    pub fn binding(&self, value: Value) -> Result<BindingRef, OptimizeError> {
+        let fields = self
+            .enode("InputBinding", value)
+            .ok_or_else(|| error("selected descriptor binding missing"))?;
+        Ok(BindingRef::new(
+            self.unsigned(fields[0], "descriptor set")?,
+            self.unsigned(fields[1], "descriptor binding")?,
+        ))
+    }
+    pub fn storage_access(
+        &self,
+        flags: Value,
+    ) -> Result<Option<crate::interface::StorageAccess>, OptimizeError> {
+        use crate::interface::StorageAccess;
+        match self.integer(flags) {
+            0 => Ok(None),
+            1 => Ok(Some(StorageAccess::ReadOnly)),
+            2 => Ok(Some(StorageAccess::WriteOnly)),
+            3 => Ok(Some(StorageAccess::ReadWrite)),
+            _ => Err(error("invalid selected storage access")),
+        }
+    }
     pub fn input_storage(&self, source: Value) -> Result<Option<(BindingRef, u32)>, OptimizeError> {
         let Some(storage) =
             self.lookup("SourceExprKey", (source,)).and_then(|key| self.lookup("AbiStorage", (key,)))
@@ -179,14 +215,8 @@ impl<'a, 'source> Facts<'a, 'source> {
         let Some(fields) = self.enode("StorageInput", storage) else {
             return Err(error("ABI storage has no input descriptor"));
         };
-        let Some(binding) = self.enode("InputBinding", fields[0]) else {
-            return Err(error("ABI storage has no input binding"));
-        };
         Ok(Some((
-            BindingRef::new(
-                self.unsigned(binding[0], "input descriptor set")?,
-                self.unsigned(binding[1], "input descriptor binding")?,
-            ),
+            self.binding(fields[0])?,
             self.positive(fields[1], "input element stride")?,
         )))
     }

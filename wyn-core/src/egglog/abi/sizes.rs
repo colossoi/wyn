@@ -35,7 +35,8 @@ pub(in crate::egglog) fn dispatch(
     compiler: &Compiler<'_, '_>,
     stage: Value,
 ) -> Result<DispatchSize, OptimizeError> {
-    let selected = super::required(&compiler.program.graph, "SelectedLaunch", (stage,))?;
+    let selected =
+        crate::egglog::query::Query(&compiler.program.graph).required("SelectedLaunch", (stage,))?;
     if let Some(fields) = compiler.facts.enode("FixedLaunch", selected) {
         let (x, y, z) = compiler.facts.grid(fields[0])?;
         return Ok(DispatchSize::Fixed {
@@ -106,7 +107,8 @@ pub(in crate::egglog) fn capacity(
     let Some(stride) = storage_elem_stride(&compiler.facts.physical_type(element, true)?) else {
         return Err(error("allocation stride missing"));
     };
-    let minimum = super::required(&compiler.program.graph, "MinimumArrayCapacity", RawValues(vec![]))?;
+    let minimum = crate::egglog::query::Query(&compiler.program.graph)
+        .required("MinimumArrayCapacity", RawValues(vec![]))?;
     let minimum = compiler.facts.integer(minimum);
     match extent(compiler, extent_value)? {
         Expr::Integer(n) => Ok(BufferLen::Fixed {

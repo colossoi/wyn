@@ -31,11 +31,7 @@ pub(super) fn entry<'source>(
     let scope = compiler.facts.definition(owner).ok_or_else(|| error("entry region missing"))?;
     let token =
         compiler.program.identities.symbols.get(&owner).ok_or_else(|| error("entry identity missing"))?;
-    let root = match stage {
-        Some(stage) => compiler.facts.constructor("KernelRoot", (stage,)),
-        None => compiler.facts.constructor("EntryRoot", (token,)),
-    }
-    .ok_or_else(|| error("entry root missing"))?;
+    let root = compiler.facts.entry_root(owner, stage)?;
     let (source, parameters) = crate::tlc::extract_lambda_params_ref(&definition.body);
     let original = compiler.facts.contains("EmitOriginalEntry", (token,));
     let outputs = if stage.is_none() && original {
@@ -72,7 +68,8 @@ pub(super) fn entry<'source>(
         EntryKind::Vertex => ExecutionModel::Vertex,
         EntryKind::Fragment => ExecutionModel::Fragment,
         EntryKind::Compute => {
-            let grid = crate::egglog::abi::required(&compiler.program.graph, "RootWorkgroup", (root,))?;
+            let grid =
+                crate::egglog::query::Query(&compiler.program.graph).required("RootWorkgroup", (root,))?;
             ExecutionModel::Compute {
                 local_size: compiler.facts.grid(grid)?,
             }
@@ -174,8 +171,15 @@ pub(super) fn entry<'source>(
         lower.values.insert(formal, value);
         parameter_inputs.push((first..inputs.len()).collect());
     }
-    let storage_bindings =
-        crate::egglog::abi::storage_bindings(lower.compiler, owner, stage, published, &mut inputs)?;
+    let mut accesses = crate::egglog::abi::entry_accesses(lower.compiler, root)?;
+    let storage_bindings = crate::egglog::abi::storage_bindings(
+        lower.compiler,
+        root,
+        stage,
+        published,
+        &mut inputs,
+        &mut accesses,
+    )?;
     let compute = decl.entry_kind == EntryKind::Compute;
     let original = lower
         .compiler
@@ -324,8 +328,8 @@ pub(super) fn entry<'source>(
         parameter_inputs,
         outputs,
         storage_bindings,
-        stage_descriptor_storage_accesses: crate::egglog::abi::entry_accesses(compiler, symbol, stage)?,
-        pipeline_storage_accesses: crate::egglog::abi::pipeline_accesses(compiler, symbol)?,
+        stage_descriptor_storage_accesses: accesses,
+        pipeline_storage_accesses: Default::default(),
         span: source.span,
     })
 }

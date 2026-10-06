@@ -21,7 +21,7 @@ use crate::tlc::DefMeta;
 use crate::types::{strip_existentials, Type, TypeName};
 use crate::BindingRef;
 use crate::ResourceAccess;
-use crate::{EntryId, LookupMap};
+use crate::{EntryId, LookupMap, SymbolId};
 use egglog_engine::Value;
 
 pub(in crate::egglog) fn publish(
@@ -51,7 +51,8 @@ pub(in crate::egglog) fn publish(
         let Some(token) = compiler.program.identities.symbols.get(owner) else {
             return Err(error("entry identity missing"));
         };
-        let selected = super::required(&compiler.program.graph, "DefaultThreads", (token,))?;
+        let selected =
+            crate::egglog::query::Query(&compiler.program.graph).required("DefaultThreads", (token,))?;
         let threads = u32::try_from(compiler.facts.integer(selected))
             .map_err(|_| error("invalid selected thread count"))?;
         let Some(threads) = std::num::NonZeroU32::new(threads) else {
@@ -157,7 +158,14 @@ pub(in crate::egglog) fn publish(
     }
     let publications: Vec<_> = entries.iter().collect();
     module
-        .publish_implicit_bindings(&publications, &associations)
+        .publish_implicit_bindings(&publications, &associations, |entry| {
+            let declaration = declarations[&compiler.entry_origins[&entry.id].0];
+            if let Some(group) = &declaration.graphics_group {
+                source.symbols.get(group.root).expect("validated graphics owner")
+            } else {
+                declaration.source_entry.as_ref().map_or(&declaration.name, |entry| &entry.name)
+            }
+        })
         .map_err(|err| error(err.to_string()))?;
     module.publish_graphics_io(&publications, &associations);
     for (index, pipeline) in module.pipelines.iter_mut().enumerate() {
@@ -167,24 +175,17 @@ pub(in crate::egglog) fn publish(
         };
         for (id, uses) in associations[index].iter().zip(stages) {
             let owner = compiler.entry_origins[id].0;
-            let accesses = super::entry_accesses(compiler, owner, compiler.entry_origins[id].1)?;
+            let entry = entries
+                .iter()
+                .find(|entry| entry.id == *id)
+                .ok_or_else(|| error("published entry missing"))?;
+            let accesses = &entry.stage_descriptor_storage_accesses;
             for (i, binding) in bindings.iter().enumerate() {
                 let Some((set, binding)) = binding.slot() else {
                     let Binding::PushConstant { offset, size, .. } = binding else {
                         unreachable!("non-descriptor binding");
                     };
-                    let root = match compiler.entry_origins[id].1 {
-                        Some(stage) => compiler.facts.constructor("KernelRoot", (stage,)),
-                        None => compiler
-                            .program
-                            .identities
-                            .symbols
-                            .get(&owner)
-                            .and_then(|symbol| compiler.facts.constructor("EntryRoot", (symbol,))),
-                    };
-                    let Some(root) = root else {
-                        return Err(error("stage resource root missing"));
-                    };
+                    let root = compiler.facts.entry_root(owner, compiler.entry_origins[id].1)?;
                     if compiler
                         .facts
                         .contains("RootPushInput", (root, i64::from(*offset), i64::from(*size)))
@@ -218,11 +219,28 @@ pub(in crate::egglog) fn publish(
             }
         }
     }
-    for (&owner, &pipeline_index) in &compute {
-        let declaration = declarations[&owner];
+    publish_results(compiler, &compute, &mut module)?;
+    publish_frame_graph(compiler, &associations, &mut module)?;
+    publish_scalars(compiler, entries, &mut module)?;
+    publish_loops(compiler, entries, &associations, &mut module)?;
+    Ok(module)
+}
+
+/// Map authored return values to their final buffers and mark returned storage.
+fn publish_results(
+    compiler: &Compiler<'_, '_>,
+    compute: &LookupMap<SymbolId, usize>,
+    module: &mut ModuleInterface,
+) -> Result<(), OptimizeError> {
+    let source = compiler.program.source;
+    for (&owner, &pipeline_index) in compute {
         let Some(definition) = source.defs.iter().find(|d| d.name == owner) else {
             return Err(error("output definition missing"));
         };
+        let DefMeta::EntryPoint(entry) = &definition.meta else {
+            return Err(error("output definition is not an entry"));
+        };
+        let declaration = &entry.declaration;
         let (body, _) = extract_lambda_params_ref(&definition.body);
         let result_type = strip_existentials(&body.ty);
         for (index, id) in compiler.plan.outputs(owner)?.into_iter().enumerate() {
@@ -288,81 +306,31 @@ pub(in crate::egglog) fn publish(
             }
         }
     }
-    let mut resources = LookupMap::default();
-    for entry in entries.iter() {
-        let owner = compiler.entry_origins[&entry.id].0;
-        let declaration = declarations[&owner];
-        let source = declaration.source_entry.as_ref().map_or(&declaration.name, |entry| &entry.name);
-        for storage in &entry.storage_bindings {
-            let (Some(name), Some(length)) = (&storage.logical_resource, &storage.length) else {
-                return Err(error("generated storage has no resource identity or capacity"));
-            };
-            let key = (source.clone(), storage.binding);
-            if let Some((previous, capacity)) = resources.insert(key, (name.clone(), length.clone())) {
-                if previous != *name || capacity != *length {
-                    return Err(error(format!("generated resource identities disagree for {source}: {:?}: {previous} versus {name}", storage.binding)));
-                }
-            }
-        }
-    }
-    for (index, pipeline) in module.pipelines.iter_mut().enumerate() {
-        let Some(first) = associations[index].first() else {
-            return Err(error("pipeline has no selected entry interface"));
-        };
-        let declaration = declarations[&compiler.entry_origins[first].0];
-        let owner = declaration.graphics_group.as_ref().map(|group| group.root);
-        let source = if let Some(owner) = owner {
-            let Some(name) = compiler.program.source.symbols.get(owner) else {
-                return Err(error("graphics source name missing"));
-            };
-            name
-        } else {
-            declaration.source_entry.as_ref().map_or(&declaration.name, |entry| &entry.name)
-        };
-        let bindings = match pipeline {
-            Pipeline::Compute(pipeline) => &mut pipeline.bindings,
-            Pipeline::Graphics(pipeline) => &mut pipeline.bindings,
-        };
-        for item in bindings {
-            if let Binding::StorageBuffer {
-                set,
-                binding,
-                resource,
-                usage,
-                length,
-                ..
-            } = item
-            {
-                if let Some((name, capacity)) =
-                    resources.get(&(source.clone(), BindingRef::new(*set, *binding)))
-                {
-                    *resource = Some(name.clone());
-                    *length = Some(capacity.clone());
-                    if *usage == BufferUsage::Input {
-                        *usage = BufferUsage::Intermediate;
-                    }
-                }
-            }
-        }
-    }
+    Ok(())
+}
+
+/// Translate selected execution dependencies into host stage order.
+fn publish_frame_graph(
+    compiler: &Compiler<'_, '_>,
+    associations: &[Vec<EntryId>],
+    module: &mut ModuleInterface,
+) -> Result<(), OptimizeError> {
     let mut locations = LookupMap::default();
     for (pipeline, entries) in associations.iter().enumerate() {
         for (index, entry) in entries.iter().enumerate() {
             let (owner, stage) = compiler.entry_origins[entry];
-            let root = if let Some(stage) = stage {
-                compiler.facts.constructor("KernelRoot", (stage,))
-            } else {
-                let Some(symbol) = compiler.program.identities.symbols.get(&owner) else {
-                    return Err(error("published entry identity missing"));
-                };
+            if stage.is_none() {
+                let symbol = compiler
+                    .program
+                    .identities
+                    .symbols
+                    .get(&owner)
+                    .ok_or_else(|| error("published entry identity missing"))?;
                 if compiler.facts.contains("InterfaceOnlyEntry", (symbol,)) {
                     continue;
                 }
-                compiler.facts.constructor("EntryRoot", (symbol,))
-            };
-            let Some(root) = root else {
-                return Err(error("published execution root missing"));
-            };
+            }
+            let root = compiler.facts.entry_root(owner, stage)?;
             let index = if matches!(module.pipelines[pipeline], Pipeline::Graphics(_)) { 0 } else { index };
             locations.insert(root, (pipeline, index));
         }
@@ -385,9 +353,7 @@ pub(in crate::egglog) fn publish(
         }
     }
     module.frame_graph = FrameGraph::from_selected_pipelines(&module.pipelines, &edges).map_err(error)?;
-    publish_scalars(compiler, entries, &mut module)?;
-    publish_loops(compiler, entries, &associations, &mut module)?;
-    Ok(module)
+    Ok(())
 }
 
 fn publish_scalars(
@@ -418,18 +384,9 @@ fn publish_scalars(
                 });
             }
         }
-        let root = if let Some(stage) = stage {
-            compiler.facts.constructor("KernelRoot", (*stage,))
-        } else {
-            let Some(token) = compiler.program.identities.symbols.get(owner) else {
-                return Err(error("host entry identity missing"));
-            };
-            compiler.facts.constructor("EntryRoot", (token,))
-        };
-        let Some(root) = root else {
-            return Err(error("host execution root missing"));
-        };
-        let preferred = super::required(&compiler.program.graph, "PreferredExecutor", (root,))?;
+        let root = compiler.facts.entry_root(*owner, *stage)?;
+        let preferred =
+            crate::egglog::query::Query(&compiler.program.graph).required("PreferredExecutor", (root,))?;
         if compiler.facts.enode("GpuExecutor", preferred).is_some() {
             continue;
         }
@@ -493,7 +450,8 @@ fn publish_loops(
         else {
             return Err(error("host loop has no count recipe"));
         };
-        let context = super::required(&compiler.program.graph, "ScalarSourceContext", (form[0],))?;
+        let context = crate::egglog::query::Query(&compiler.program.graph)
+            .required("ScalarSourceContext", (form[0],))?;
         let count = host::expression(compiler.program, context, form[0])
             .map_err(|error| error.required("loop count"))?;
         let initial = compiler.facts.loop_initial(header)?;

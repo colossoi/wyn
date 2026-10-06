@@ -2,13 +2,14 @@
 use super::read::Facts;
 use super::{error, OptimizeError, Optimized, Program};
 use crate::egglog::query::Query;
-use crate::interface::EntryOutput;
+use crate::interface::{EntryOutput, EntryParamBindingKind};
 use crate::ssa::types::AtomicOp;
 use crate::tlc::extract_lambda_params_ref;
 use crate::tlc::DefMeta;
 use crate::types::{strip_existentials, Type, TypeName};
 use crate::{BindingRef, LookupMap, SymbolId};
 use egglog_engine::{sort::S, Value};
+use wyn_base::IdSource;
 use wyn_graph::topo_sort_by_dependencies;
 
 pub(in crate::egglog) struct Plan<'a, 'source> {
@@ -26,17 +27,31 @@ impl<'a, 'source> Plan<'a, 'source> {
             let DefMeta::EntryPoint(entry) = &definition.meta else {
                 continue;
             };
-            let Some(scope) = query.definition(definition.name) else {
-                return Err(error("entry scope missing"));
+            let mut output_bindings = IdSource::new();
+            let mut reserve_input = |binding: BindingRef| {
+                reserved.insert(binding);
+                if binding.set == 0 {
+                    while output_bindings.peek_id() <= binding.binding {
+                        output_bindings.next_id();
+                    }
+                }
             };
-            for index in 0..entry.declaration.params.len() {
-                for input in query.parameter_inputs(scope, index as i64)? {
-                    if let Some(binding) = input.descriptor_binding() {
-                        reserved.insert(binding);
+            for parameter in &entry.declaration.params {
+                for (set, binding) in parameter.attributes.iter().filter_map(|a| a.binding_slot()) {
+                    reserve_input(BindingRef::new(set, binding));
+                }
+            }
+            for parameter in entry.data.param_bindings.iter().flatten() {
+                match &parameter.kind {
+                    EntryParamBindingKind::Single { binding, .. } => reserve_input(*binding),
+                    EntryParamBindingKind::TupleOfViews(fields) => {
+                        for field in fields {
+                            reserve_input(field.binding);
+                        }
                     }
                 }
             }
-            let outputs = crate::egglog::abi::outputs(program, definition.name)?;
+            let outputs = crate::egglog::abi::outputs(program, definition.name, &mut output_bindings)?;
             for output in &outputs {
                 if let Some(binding) = output.storage_binding() {
                     reserved.insert(binding);
@@ -51,13 +66,7 @@ impl<'a, 'source> Plan<'a, 'source> {
         let mut bindings = LookupMap::default();
         for &value in &allocations {
             if let Some(binding) = query.lookup("PhysicalBinding", (value,)) {
-                let Some(fields) = query.enode("InputBinding", binding) else {
-                    return Err(error("invalid selected binding"));
-                };
-                let binding = BindingRef::new(
-                    query.unsigned(fields[0], "descriptor set")?,
-                    query.unsigned(fields[1], "descriptor binding")?,
-                );
+                let binding = query.binding(binding)?;
                 reserved.insert(binding);
                 bindings.insert(value, binding);
             }

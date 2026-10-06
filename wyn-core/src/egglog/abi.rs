@@ -19,7 +19,7 @@ use crate::tlc::{extract_lambda_params_ref, DefMeta};
 use crate::types::{canonical_storage_buffer_ty, strip_existentials, Type, TypeName};
 use crate::SymbolId;
 use crate::{BindingRef, LookupMap, ResourceAccess};
-use egglog_engine::{EGraph, IntoValues, Read, Value};
+use egglog_engine::Value;
 use std::collections::BTreeSet;
 use wyn_base::IdSource;
 
@@ -28,130 +28,30 @@ mod sizes;
 
 pub(super) fn entry_accesses(
     compiler: &Compiler<'_, '_>,
-    owner: SymbolId,
-    stage: Option<Value>,
-) -> Result<LookupMap<BindingRef, ResourceAccess>, OptimizeError> {
-    let Some(token) = compiler.program.identities.symbols.get(&owner) else {
-        return Err(OptimizeError::Output("entry identity missing".into()));
-    };
-    let root = match stage {
-        Some(stage) => compiler.facts.constructor("KernelRoot", (stage,)),
-        None => compiler.facts.constructor("EntryRoot", (token,)),
-    };
-    let Some(root) = root else {
-        return Err(OptimizeError::Output("entry resource root missing".into()));
-    };
-    let mut result = root_accesses(compiler, root)?;
-    if let Some(stage) = stage {
-        for (&term, capture) in &compiler.program.stage.captures {
-            if capture.stages.contains(&stage) {
-                result.insert(compiler.plan.captures[&term], ResourceAccess::Read);
-            }
-        }
-    }
-    Ok(result)
-}
-
-pub(super) fn pipeline_accesses(
-    compiler: &Compiler<'_, '_>,
-    owner: SymbolId,
-) -> Result<LookupMap<BindingRef, ResourceAccess>, OptimizeError> {
-    let Some(token) = compiler.program.identities.symbols.get(&owner) else {
-        return Err(OptimizeError::Output("pipeline identity missing".into()));
-    };
-    let mut result = LookupMap::default();
-    Query(&compiler.program.graph).for_each("RootOwner", |row| {
-        if compiler.facts.integer(row[1]) == token {
-            for (binding, access) in root_accesses(compiler, row[0])? {
-                result
-                    .entry(binding)
-                    .and_modify(|old: &mut ResourceAccess| *old = old.merge(access))
-                    .or_insert(access);
-            }
-        }
-        Ok(())
-    })?;
-    for (&term, capture) in &compiler.program.stage.captures {
-        if capture.stages.iter().any(|&stage| compiler.facts.contains("PhaseOwner", (stage, token))) {
-            result.insert(compiler.plan.captures[&term], ResourceAccess::Read);
-        }
-    }
-    Ok(result)
-}
-
-fn root_accesses(
-    compiler: &Compiler<'_, '_>,
     root: Value,
 ) -> Result<LookupMap<BindingRef, ResourceAccess>, OptimizeError> {
-    let mut result = binding_accesses(compiler, "RootBindingAccess", |key| key == root)?;
-    for value in compiler.facts.set("RootResourceSet", (root,)) {
-        let flags = required(&compiler.program.graph, "RootResource", (root, value))?;
-        let access = match compiler.facts.integer(flags) {
-            0 => continue,
-            1 => ResourceAccess::Read,
-            2 => ResourceAccess::Write,
-            3 => ResourceAccess::ReadWrite,
-            _ => return Err(OptimizeError::Output("invalid root access".into())),
-        };
-        if let Some((binding, _, _)) = compiler.plan.buffer(value)? {
-            result.entry(binding).and_modify(|old| *old = old.merge(access)).or_insert(access);
-        }
-    }
-    Ok(result)
-}
-
-fn binding_accesses(
-    compiler: &Compiler<'_, '_>,
-    table: &str,
-    matches: impl Fn(Value) -> bool,
-) -> Result<LookupMap<BindingRef, ResourceAccess>, OptimizeError> {
-    let query = Query(&compiler.program.graph);
     let mut result = LookupMap::default();
-    query.for_function(table, |keys, flags| {
-        if !matches(keys[0]) {
-            return Ok(());
+    Query(&compiler.program.graph).for_function("RootBindingAccess", |keys, flags| {
+        if keys[0] == root {
+            let access = compiler
+                .facts
+                .storage_access(flags)?
+                .ok_or_else(|| OptimizeError::Output("empty selected binding access".into()))?;
+            result.insert(compiler.facts.binding(keys[1])?, ResourceAccess::from(access));
         }
-        let Some(binding) = query.enode("InputBinding", keys[1])? else {
-            return Err(OptimizeError::Output("selected access has no binding".into()));
-        };
-        let access = match compiler.facts.integer(flags) {
-            1 => ResourceAccess::Read,
-            2 => ResourceAccess::Write,
-            3 => ResourceAccess::ReadWrite,
-            _ => return Err(OptimizeError::Output("invalid selected binding access".into())),
-        };
-        result.insert(
-            BindingRef::new(
-                compiler.facts.unsigned(binding[0], "access set")?,
-                compiler.facts.unsigned(binding[1], "access binding")?,
-            ),
-            access,
-        );
         Ok(())
     })?;
     Ok(result)
 }
 
 pub(super) fn storage_bindings(
-    compiler: &mut Compiler<'_, '_>,
-    owner: SymbolId,
+    compiler: &Compiler<'_, '_>,
+    root: Value,
     stage: Option<Value>,
     published: &[crate::ssa::types::EntryPoint],
     inputs: &mut [EntryInput],
+    accesses: &mut LookupMap<BindingRef, ResourceAccess>,
 ) -> Result<Vec<StorageBindingDecl>, OptimizeError> {
-    let token = compiler
-        .program
-        .identities
-        .symbols
-        .get(&owner)
-        .ok_or_else(|| OptimizeError::Output("entry identity missing".into()))?;
-    let root = match stage {
-        Some(stage) => compiler.facts.constructor("KernelRoot", (stage,)),
-        None => compiler.facts.constructor("EntryRoot", (token,)),
-    };
-    let Some(root) = root else {
-        return Err(OptimizeError::Output("entry root missing".into()));
-    };
     let mut storage_bindings = Vec::new();
     let mut resource_names: BTreeSet<_> = compiler
         .program
@@ -173,15 +73,12 @@ pub(super) fn storage_bindings(
         )
         .collect();
     for value in compiler.facts.set("RootResourceSet", (root,)) {
-        let flags = required(&compiler.program.graph, "RootResource", (root, value))?;
-        let access = match compiler.facts.integer(flags) {
-            0 => None,
-            1 => Some(StorageAccess::ReadOnly),
-            2 => Some(StorageAccess::WriteOnly),
-            3 => Some(StorageAccess::ReadWrite),
-            _ => return Err(OptimizeError::Output("invalid planned access".into())),
-        };
+        let flags = Query(&compiler.program.graph).required("RootResource", (root, value))?;
+        let access = compiler.facts.storage_access(flags)?;
         if let Some((binding, element, _)) = compiler.plan.buffer(value)? {
+            if let Some(access) = access.map(ResourceAccess::from) {
+                accesses.entry(binding).and_modify(|old| *old = old.merge(access)).or_insert(access);
+            }
             let name = if let Some(name) = published
                 .iter()
                 .flat_map(|entry| &entry.storage_bindings)
@@ -239,6 +136,7 @@ pub(super) fn storage_bindings(
                 continue;
             }
             let binding = compiler.plan.captures[&term];
+            accesses.insert(binding, ResourceAccess::Read);
             let (_, fields) = compiler.program.stage.selected.app(term)?;
             let Some(ty) = compiler.facts.ty(compiler.program.stage.selected.values[fields[1]]) else {
                 return Err(OptimizeError::Output("capture type missing".into()));
@@ -253,26 +151,6 @@ pub(super) fn storage_bindings(
         }
     }
     Ok(storage_bindings)
-}
-
-pub(super) fn required(graph: &EGraph, table: &str, keys: impl IntoValues) -> Result<Value, OptimizeError> {
-    let Some(value) = graph.read(|r| r.lookup(table, keys))? else {
-        return Err(OptimizeError::Output(format!("missing selected {table}")));
-    };
-    Ok(value)
-}
-
-pub(super) fn fields(
-    graph: &EGraph,
-    name: &str,
-    value: Value,
-) -> Result<Option<Vec<Value>>, OptimizeError> {
-    let mut rows = Vec::new();
-    graph.read(|r| r.enodes_for_eclass(name, value, |row| rows.push(row.children.to_vec())))?;
-    if rows.len() > 1 {
-        return Err(OptimizeError::Output(format!("ambiguous selected {name}")));
-    }
-    Ok(rows.pop())
 }
 
 pub(super) fn parameter_inputs(
@@ -298,14 +176,11 @@ pub(super) fn parameter_inputs(
         return Err(OptimizeError::Output("missing parameter declaration".into()));
     };
     let binding = entry.data.param_bindings.get(index as usize).and_then(Option::as_ref);
-    let abi = required(&program.graph, "ParameterAbi", (scope, index))?;
-    let access = required(&program.graph, "ParameterStorageAccess", (scope, index))?;
-    let access = match program.graph.value_to_base::<i64>(access) {
-        1 => StorageAccess::ReadOnly,
-        2 => StorageAccess::WriteOnly,
-        3 => StorageAccess::ReadWrite,
-        _ => return Err(OptimizeError::Output("invalid parameter storage access".into())),
-    };
+    let abi = Query(&program.graph).required("ParameterAbi", (scope, index))?;
+    let access = Query(&program.graph).required("ParameterStorageAccess", (scope, index))?;
+    let access = facts
+        .storage_access(access)?
+        .ok_or_else(|| OptimizeError::Output("empty parameter storage access".into()))?;
     let mut inputs = Vec::new();
     if let Some(EntryParamBindingKind::TupleOfViews(fields)) = binding.map(|b| &b.kind) {
         let Type::Constructed(TypeName::Tuple(_), types) = strip_existentials(ty) else {
@@ -365,11 +240,11 @@ pub(super) fn parameter_inputs(
                     size,
                     resource: extract_storage_image_resource(param),
                 }
-            } else if fields(&program.graph, "ShaderInput", abi)?.is_some() {
+            } else if Query(&program.graph).enode("ShaderInput", abi)?.is_some() {
                 EntryInputKind::Value {
                     decoration: extract_io_decoration(param),
                 }
-            } else if let Some(fields) = fields(&program.graph, "PushInput", abi)? {
+            } else if let Some(fields) = Query(&program.graph).enode("PushInput", abi)? {
                 EntryInputKind::PushConstant {
                     slot: PushConstantSlot {
                         offset: program.graph.value_to_base::<i64>(fields[0]) as u32,
@@ -394,6 +269,7 @@ pub(super) fn parameter_inputs(
 pub(super) fn outputs(
     program: &Program<'_, super::Optimized>,
     symbol: SymbolId,
+    bindings: &mut IdSource<u32>,
 ) -> Result<Vec<crate::interface::EntryOutput>, OptimizeError> {
     let facts = super::to_ssa::read::Facts { program };
     let Some(token) = program.identities.symbols.get(&symbol) else {
@@ -408,20 +284,7 @@ pub(super) fn outputs(
     let DefMeta::EntryPoint(entry) = &definition.meta else {
         return Err(OptimizeError::Output("entry metadata missing".into()));
     };
-    let Some(scope) = facts.definition(symbol) else {
-        return Err(OptimizeError::Output("entry scope missing".into()));
-    };
-    let (body, parameters) = extract_lambda_params_ref(&definition.body);
-    let mut bindings = IdSource::new();
-    for index in 0..parameters.len() {
-        for input in parameter_inputs(program, scope, index as i64)? {
-            if let Some(binding) = input.descriptor_binding().filter(|b| b.set == 0) {
-                while bindings.peek_id() <= binding.binding {
-                    bindings.next_id();
-                }
-            }
-        }
-    }
+    let (body, _) = extract_lambda_params_ref(&definition.body);
     let mut capacities = Vec::new();
     if entry.declaration.entry_kind == EntryKind::Compute {
         let mut outputs = Vec::new();
@@ -433,7 +296,7 @@ pub(super) fn outputs(
         })?;
         outputs.sort_unstable();
         for output in outputs {
-            let capacity = required(&program.graph, "SelectedOutputCapacity", (output,))?;
+            let capacity = Query(&program.graph).required("SelectedOutputCapacity", (output,))?;
             capacities.push(sizes::output_capacity(&facts, capacity)?);
         }
     }
@@ -442,7 +305,7 @@ pub(super) fn outputs(
         &storage_value_type(&body.ty),
         &capacities,
         entry.declaration.entry_kind == EntryKind::Compute,
-        &mut bindings,
+        bindings,
     )
     .map_err(|error| OptimizeError::Output(error.to_string()))
 }
