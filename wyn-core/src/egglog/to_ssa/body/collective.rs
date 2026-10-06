@@ -13,10 +13,9 @@ impl Body<'_, '_, '_> {
         owner: Value,
         plan: Value,
     ) -> Result<Typed, OptimizeError> {
-        let Some(recipe) = self.compiler.facts.lookup("LocalRecipe", (owner,)) else {
-            return Err(error("local collective has no selected recipe"));
-        };
-        let phase = self.compiler.program.graph.value_to_base::<S>(recipe).to_string();
+        if !self.compiler.facts.contains("LocalCollective", (owner,)) {
+            return Err(error("local collective has not been selected"));
+        }
         let Some(domain) = self.compiler.facts.domain(owner) else {
             return Err(error("local domain missing"));
         };
@@ -67,7 +66,7 @@ impl Body<'_, '_, '_> {
                 self.copy_array(output, initial, n)?;
             }
         }
-        kernels::emit(self, scope, owner, &phase, domain, 1)?;
+        kernels::emit(self, scope, owner, "ordered", domain, 1)?;
         let mut output_index = 0;
         for (role, index, result) in self.compiler.facts.results(plan)? {
             if role == "scan" {

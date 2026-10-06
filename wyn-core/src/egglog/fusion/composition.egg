@@ -1,14 +1,10 @@
 ; Immutable operator composition, routing, and result signatures. Scalar bodies
 ; stay in their source scopes; these nodes describe how invocations connect.
-(datatype OperatorBodyPlan
-  (OriginalBody OperationKey)
-  (CombinedBody i64 OperatorBodyPlan OperatorBodyPlan bool))
 (datatype ResultTree
   (NoResults)
   (OneResult SourceValue TypeKey)
   (CountResult FusionPlan TypeKey)
   (JoinResults ResultTree ResultTree))
-(function PlanBody (FusionPlan) OperatorBodyPlan :no-merge)
 (function PlanTotals (FusionPlan) ResultTree :no-merge)
 (function PlanArrays (FusionPlan) ResultTree :no-merge)
 (function PlanScans (FusionPlan) ResultTree :no-merge)
@@ -18,8 +14,7 @@
 (relation PlanJoin (FusionPlan i64 FusionPlan FusionPlan bool))
 
 (rule ((SourceOperation op region kind))
-      ((set (PlanBody (FusionSource op)) (OriginalBody op))
-       (PlanMember (FusionSource op) op)) :ruleset source-fusion)
+      ((PlanMember (FusionSource op) op)) :ruleset source-fusion)
 (rule ((= value (SourceInput op i))) ((PlanRoute (FusionSource op) op i value)) :ruleset source-fusion)
 (rule ((= value (SourceInput op 0)) (= extent (SourceExtent value))) ((set (PlanExtent (FusionSource op)) extent)) :ruleset source-fusion)
 (rule ((= 0 (SourceInputCount op))) ((set (PlanExtent (FusionSource op)) (Fixed 0))) :ruleset source-fusion)
@@ -36,9 +31,8 @@
 (rule ((SourceOperation op r kind) (!= kind "scan")) ((set (PlanScans (FusionSource op)) (NoResults))) :ruleset source-fusion)
 
 (rule ((NewPlan round p c a b next) (Chosen round family p c) (= retained (Retained round p c))
-       (= left (PlanBody a)) (= right (PlanBody b)) (= extent (PlanExtent a)))
+       (= extent (PlanExtent a)))
       ((PlanJoin next family a b retained)
-       (set (PlanBody next) (CombinedBody family left right retained))
        (set (PlanExtent next) extent)) :ruleset fusion-commit)
 (rule ((PlanJoin next family a b retained) (PlanMember a op)) ((PlanMember next op)) :ruleset fusion-commit)
 (rule ((PlanJoin next family a b retained) (PlanMember b op)) ((PlanMember next op)) :ruleset fusion-commit)

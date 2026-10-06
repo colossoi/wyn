@@ -1,12 +1,6 @@
-; Planning expresses a location preference. Final readout resolves target support.
+; Candidate host targets; final readout resolves which computations are supported.
 (ruleset host-targets)
-(ruleset host-captures)
 (relation HostTarget (RootKey SourceValue ScalarContext ValueKey))
-(datatype Executor (CpuExecutor) (GpuExecutor))
-(function HasHostTargets (RootKey) bool :merge (or old new))
-(rule ((SourceOriginalEntry entry region compute)) ((set (HasHostTargets (EntryRoot entry)) false)) :ruleset host-targets)
-(rule ((Phase stage region)) ((set (HasHostTargets (KernelRoot stage)) false)) :ruleset host-targets)
-(rule ((HostTarget root source context storage)) ((set (HasHostTargets root) true)) :ruleset host-targets)
 (rule ((OutputWriter output (EntryRoot entry)) (SourceDefinition entry scope)
        (SourceOutput output entry source ty array) (= context (ScalarScopeContext scope))
        (OutputBacking output value) (= storage (Backing value)))
@@ -18,9 +12,6 @@
 (rule ((ScalarGroup op leader) (Phase (Stage leader "scalar") region)
        (= source (SourceOperationValue op)) (BufferSlot op "scalar" 0 value) (= storage (Backing value)))
       ((HostTarget (KernelRoot (Stage leader "scalar")) source (ScalarDispatch leader) storage)) :ruleset host-targets)
-(function PreferredExecutor (RootKey) Executor :no-merge)
-(rule ((= (HasHostTargets root) true)) ((set (PreferredExecutor root) (CpuExecutor))) :ruleset host-captures)
-(rule ((= (HasHostTargets root) false)) ((set (PreferredExecutor root) (GpuExecutor))) :ruleset host-captures)
 ; Callback roots identify the actual phase consumers of scalar host preferences.
 (relation ScalarPhaseSource (StageKey ScalarContext SourceValue))
 (relation ScalarHostParameter (RegionKey i64))

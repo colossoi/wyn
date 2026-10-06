@@ -103,10 +103,6 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
         }
         graph.run_program(commit.clone())?;
     }
-    graph.run_program(parse_program(
-        "fusion indexed schedule",
-        include_str!("schedule.egg"),
-    )?)?;
     Ok(())
 }
 

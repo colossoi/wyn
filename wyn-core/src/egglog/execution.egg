@@ -98,7 +98,6 @@
 (rule ((ReferencedExtent e (Length array))) ((LengthReference e array)) :ruleset residency)
 (rule ((ReferenceDemand e) (ReferencedExtent e (Stored value))) ((References e (Contents value))) :ruleset residency)
 (rule ((ReferencedExtent e (Scalar child))) ((ChildValue e child)) :ruleset residency)
-(rule ((ReferencedExtent e (ChunkCount n width))) ((ReferencedExtent e n)) :ruleset residency)
 (rule ((ReferencedExtent e (Product a b))) ((ReferencedExtent e a) (ReferencedExtent e b)) :ruleset residency)
 (rule ((ReferencedExtent e (Difference a b))) ((ReferencedExtent e a) (ReferencedExtent e b)) :ruleset residency)
 ; Keep exact view extents available even when their element slots are unused.

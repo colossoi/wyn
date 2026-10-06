@@ -29,7 +29,6 @@
 (relation SourceLoopInitial (RegionKey SourceValue SourceValue))
 (relation SourceLoopBackedge (RegionKey SourceValue SourceValue))
 (relation SourceLoopCondition (RegionKey SourceValue))
-(relation SourceLoopExtent (SourceValue SourceValue))
 (function SourceIterationValue (RegionKey) SourceValue :no-merge)
 (function SourceOperatorBody (OperationKey) RegionKey :no-merge)
 (relation SourceCapture (RegionKey SourceValue SourceValue))

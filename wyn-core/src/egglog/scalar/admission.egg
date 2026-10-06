@@ -92,5 +92,3 @@
        (ScalarContextScope (ScalarDispatch leader) r)) :ruleset scalar-import)
 (rule ((ScalarDispatchDemand leader r own) (ScalarLocalDemand r v))
       ((ScalarDispatchDemand leader r v)) :ruleset scalar-demands)
-(rule ((ScalarCallback plan op r) (= v (SourceResult r)))
-      ((ScalarInvocation plan op r)) :ruleset scalar-import)

@@ -27,7 +27,6 @@ fn missing_selected_abi_facts_are_errors() {
     for (table, diagnostic) in [
         ("SelectedLaunch", "missing selected SelectedLaunch"),
         ("RootWorkgroup", "missing selected RootWorkgroup"),
-        ("PreferredExecutor", "missing selected PreferredExecutor"),
         ("ParameterAbi", "missing selected ParameterAbi"),
         ("AbiStorage", "has no binding"),
     ] {

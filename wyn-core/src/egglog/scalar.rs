@@ -47,7 +47,7 @@ pub(super) fn run(
         Some("publication dependencies".into()),
         include_str!("publication.egg"),
     )?;
-    graph.parse_and_run_program(None, "(run-schedule (saturate scalar-admission) (saturate scalar-contexts) (saturate scalar-demands) (saturate host-targets) (run host-captures) (saturate scalar-import) (run readout) (saturate physical-abi) (run physical-bindings) (saturate publication-uses) (saturate (seq publication-access physical-abi)) (saturate publication-order))")?;
+    graph.parse_and_run_program(None, "(run-schedule (saturate scalar-admission) (saturate scalar-contexts) (saturate scalar-demands) (saturate host-targets) (saturate scalar-import) (run readout) (saturate physical-abi) (run physical-bindings) (saturate publication-uses) (saturate (seq publication-access physical-abi)) (saturate publication-order))")?;
     let schedule = parse_program(
         "scalar fixed point",
         match policy {

@@ -385,14 +385,6 @@ fn publish_scalars(
             }
         }
         let root = compiler.facts.entry_root(*owner, *stage)?;
-        let preferred =
-            crate::egglog::query::Query(&compiler.program.graph).required("PreferredExecutor", (root,))?;
-        if compiler.facts.enode("GpuExecutor", preferred).is_some() {
-            continue;
-        }
-        if compiler.facts.enode("CpuExecutor", preferred).is_none() {
-            return Err(error("unknown preferred executor"));
-        }
         if !compiler.program.stage.host.keys().any(|(owner, _)| *owner == root) {
             continue;
         }

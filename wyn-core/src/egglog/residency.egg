@@ -81,7 +81,6 @@
 (rule ((Needs stage value) (= n (CapacityExtent value))) ((ExtentDemand stage n)) :ruleset residency)
 (rule ((ExtentDemand stage (Length e))) ((LengthDemand stage e)) :ruleset residency)
 (rule ((ExtentDemand stage (Scalar e))) ((Demand (InStage stage) e)) :ruleset residency)
-(rule ((ExtentDemand stage (ChunkCount n width))) ((ExtentDemand stage n)) :ruleset residency)
 (rule ((ExtentDemand stage (Product a b))) ((ExtentDemand stage a) (ExtentDemand stage b)) :ruleset residency)
 (rule ((ExtentDemand stage (Difference a b))) ((ExtentDemand stage a) (ExtentDemand stage b)) :ruleset residency)
 (rule ((ExtentDemand stage (Stored value))) ((Needs stage value)) :ruleset residency)

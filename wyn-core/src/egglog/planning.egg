@@ -15,11 +15,9 @@
   (Fixed i64)
   (Length ExprKey)
   (Scalar ExprKey)
-  (ChunkCount Extent i64)
   (Product Extent Extent)
   (Difference Extent Extent)
   (Stored ValueKey))
-; Empty collectives have no chunks; their combine phase writes the neutral.
 (relation Site (OperationKey RegionKey))
 (relation HostRoot (i64 RegionKey))
 (relation Enters (OperationKey RegionKey))
@@ -127,7 +125,6 @@
 
 ; Final readout joins; Rust assigns arena IDs without reconstructing these joins.
 (relation PlannedBuffer (ValueKey i64 Extent))
-(relation PlannedStage (StageKey i64 String i64 Extent i64 DispatchGrid))
 ; Logical roots and resources remain independent of backend numbering.
 (datatype RootKey (EntryRoot i64) (KernelRoot StageKey))
 (datatype BindingKey (InputBinding i64 i64))
@@ -140,8 +137,6 @@
 (ruleset readout)
 (rule ((Allocation value n) (ElementType value (TypeId ty)))
       ((PlannedBuffer value ty n)) :ruleset readout)
-(rule ((PhaseOwner stage entry) (= stage (Stage (OperationId op) name)) (PhaseDomain stage n width) (= grid (PhaseGrid stage)))
-      ((PlannedStage stage op name entry n width grid)) :ruleset readout)
 
 (ruleset residency)
 (ruleset structure)

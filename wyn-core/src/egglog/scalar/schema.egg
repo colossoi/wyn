@@ -45,7 +45,6 @@
 (function ScalarArgsReadOnly (ScalarArgs) bool :merge (and old new))
 ; Callback contexts refer to selected fusion plans; scalar expressions stay
 ; in the scalar graph and are queried directly during SSA emission.
-(relation ScalarInvocation (FusionPlan OperationKey RegionKey))
 (ruleset scalar-analysis)
 (ruleset scalar-effects)
 (ruleset scalar-inline)

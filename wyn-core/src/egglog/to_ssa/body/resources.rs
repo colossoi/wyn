@@ -291,14 +291,6 @@ impl Body<'_, '_, '_> {
                 let zero = self.literal("0", &types::i32())?;
                 self.index(view, zero)
             }
-            "ChunkCount" => {
-                let value = self.extent(scope, children[0])?;
-                let width = self.compiler.program.graph.value_to_base::<i64>(children[1]);
-                let extra = self.literal(&(width - 1).to_string(), &types::i32())?;
-                let sum = self.binary(BinaryOperator::Add, value, extra)?;
-                let width = self.literal(&width.to_string(), &types::i32())?;
-                self.binary(BinaryOperator::Divide, sum, width)
-            }
             "Product" | "Difference" => {
                 let a = self.extent(scope, children[0])?;
                 let b = self.extent(scope, children[1])?;

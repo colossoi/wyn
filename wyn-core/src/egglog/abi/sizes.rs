@@ -44,7 +44,7 @@ pub(in crate::egglog) fn dispatch(
             x,
             y,
             z,
-            explicit: compiler.program.graph.value_to_base::<bool>(fields[1]),
+            explicit: true,
         });
     }
     if let Some(fields) = compiler.facts.enode("BufferLaunch", selected) {
@@ -151,9 +151,6 @@ pub(in crate::egglog) fn extent(compiler: &Compiler<'_, '_>, key: Value) -> Resu
             };
             source_size(compiler, source, name == "Length")
         }
-        "ChunkCount" => extent(compiler, children[0])?
-            .ceiling(compiler.facts.positive(children[1], "chunk width")?)
-            .map_err(|e| error(e.to_string())),
         "Product" => Ok(extent(compiler, children[0])?.multiply(extent(compiler, children[1])?)),
         "Difference" => Ok(Expr::Subtract(
             Box::new(extent(compiler, children[0])?),

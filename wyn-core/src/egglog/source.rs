@@ -63,7 +63,6 @@ pub(super) fn import(source: &InputSliceBoundsInferred) -> Result<(EGraph, Ident
 #[derive(Default)]
 pub(super) struct Identities<'source> {
     terms: Interner<i64, TermId>,
-    source_terms: LookupMap<TermId, &'source Term>,
     pub(super) symbols: Interner<i64, SymbolId>,
     pub(super) values: Interner<i64, Value>,
     pub(super) types: Interner<i64, Type>,
@@ -86,7 +85,6 @@ impl<'source> Identities<'source> {
                 "TLC source term has no stable identity".into(),
             ));
         }
-        self.source_terms.insert(term.id, term);
         Ok(self.terms.intern(&term.id))
     }
 }
@@ -516,13 +514,11 @@ impl<'source> Import<'_, '_, '_, 'source> {
         match kind {
             LoopKind::For { iter, .. } => {
                 let extent = self.operand(iter, owner, parent)?;
-                self.sink.add("SourceLoopExtent", (owner, extent))?;
                 let form = self.sink.add("ForEach", extent)?;
                 self.sink.set("SourceLoopForm", owner, form)?;
             }
             LoopKind::ForRange { bound, var_ty, .. } => {
                 let extent = self.operand(bound, owner, parent)?;
-                self.sink.add("SourceLoopExtent", (owner, extent))?;
                 let ty = self.ty(var_ty)?;
                 let form = self.sink.add("ForCount", (extent, ty))?;
                 self.sink.set("SourceLoopForm", owner, form)?;
