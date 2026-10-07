@@ -106,6 +106,101 @@ fn compile(directory: &Path, source: &str, target: &str, optimize: bool) -> Resu
 }
 
 #[test]
+fn inline_index_arrays_are_materialized_before_the_indexed_draw() {
+    let directory = std::env::temp_dir().join(format!("wyn_inline_indices_{}", std::process::id()));
+    fs::create_dir(&directory).expect("create test directory");
+    for target in ["spirv", "wgsl"] {
+        for optimize in [false, true] {
+            for draw in [
+                "indexed_draw(INDICES, 2u32)",
+                "indexed_draw_from(INDICES, 3u32, 2u32, 0u32, 0i32, 0u32)",
+            ] {
+                for (parameters, prefix, indices, generated) in [
+                    ("", "", "[0u32, 1u32, 2u32]", true),
+                    ("", "let indices = [0u32, 1u32, 2u32] in", "indices", true),
+                    ("indices: []u32,", "", "indices", false),
+                ] {
+                    let draw = draw.replace("INDICES", indices);
+                    let source = format!(
+                        "entry reproduce({parameters} screen: render_target<vec4f32>) render_target<vec4f32> =
+                          {prefix}
+                          let covered = rasterize_triangles({draw},
+                            |vi,ii,_| vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+                          shade_with({{depth_test = #less_equal, depth_write = true,
+                                      blend = #replace, color_write = true}},
+                            screen, covered, |_,_,_,_,_| @[1.0,0.0,0.0,1.0])"
+                    );
+                    let host = compile(&directory, &source, target, optimize)
+                        .unwrap_or_else(|error| panic!("{source}, {target}, -O={optimize}: {error}"));
+                    let count = if !generated && draw.starts_with("indexed_draw(") {
+                        "count-resource-0"
+                    } else {
+                        "3"
+                    };
+                    assert!(host.contains(&format!(" :u32 {count} 2 0 0 0)")), "{host}");
+                    if generated {
+                        assert_eq!(host.matches("(gpu-alloc ").count(), 1, "{host}");
+                        let allocated =
+                            host.split(" (gpu-alloc ").next().unwrap().rsplit('(').next().unwrap();
+                        assert!(
+                            host.contains(&format!(":draw (list :indexed {allocated} :u32")),
+                            "{host}"
+                        );
+                        let dispatch = host.find("(gpu-dispatch ").expect("index producer");
+                        let draw = host.find("(gpu-draw ").expect("indexed draw");
+                        assert!(dispatch < draw, "{host}");
+                        let parameters = host
+                            .split(":source-name \"reproduce\"")
+                            .nth(1)
+                            .unwrap()
+                            .split(":results")
+                            .next()
+                            .unwrap();
+                        assert_eq!(parameters.matches(":source-name ").count(), 2, "{host}");
+                    } else {
+                        assert!(!host.contains("(gpu-alloc "), "{host}");
+                        assert!(!host.contains("(gpu-dispatch "), "{host}");
+                    }
+                }
+            }
+        }
+    }
+    fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn indexed_indirect_draw_materializes_indices_and_command() {
+    let directory = std::env::temp_dir().join(format!("wyn_indexed_indirect_{}", std::process::id()));
+    fs::create_dir(&directory).expect("create test directory");
+    let source = include_str!("../../testfiles/regressions/indexed_indirect_draw.wyn");
+    let mut failures = Vec::new();
+    for target in ["spirv", "wgsl"] {
+        for optimize in [false, true] {
+            match compile(&directory, source, target, optimize) {
+                Ok(host) => {
+                    assert!(host.contains(":draw (list :indexed-indirect "), "{host}");
+                    assert!(host.contains(" 0 1 20))"), "one 20-byte indirect command: {host}");
+                    let parameters = host
+                        .split(":source-name \"reproduce\"")
+                        .nth(1)
+                        .expect("source entry")
+                        .split(":results")
+                        .next()
+                        .unwrap();
+                    assert!(
+                        !parameters.contains(":buffer"),
+                        "draw buffers must be internal: {host}"
+                    );
+                }
+                Err(error) => failures.push(format!("{target}, -O={optimize}: {error}")),
+            }
+        }
+    }
+    fs::remove_dir_all(directory).expect("remove test directory");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn filtered_indirect_draw_keeps_generated_outputs_internal() {
     let directory = std::env::temp_dir().join(format!("wyn_graphics_outputs_{}", std::process::id()));
     fs::create_dir(&directory).expect("create test directory");

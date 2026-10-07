@@ -236,7 +236,17 @@ pub struct GraphicsStageGroup {
     /// The operation's stable ordinal within that root.
     pub operation: u32,
     /// The invocation selected by the source rasterization operation.
-    pub invocation: host::GraphicsInvocation,
+    pub invocation: host::GraphicsInvocation<DrawBufferOperand>,
+}
+
+/// A draw consumes a logical value, not a preselected allocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DrawBufferOperand {
+    Input(host::DrawBufferRef),
+    Result {
+        entry: SymbolId,
+        slot: usize,
+    },
 }
 
 pub trait AttrExt<V = ViewAttribute> {
@@ -606,6 +616,9 @@ pub struct EntryParamDecl {
 /// later TLC stage.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntryDecl {
+    /// The body supplies one buffer-required value, including a whole command record.
+    /// It is internal to the source entry and has no prescribed storage binding.
+    pub buffer_demand: bool,
     pub entry_kind: EntryKind,
     pub compute_dispatch: Option<ComputeDispatchGrid>,
     /// Present on every compiler-extracted stage belonging to one graphics

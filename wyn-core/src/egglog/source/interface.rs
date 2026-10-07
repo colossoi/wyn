@@ -6,7 +6,7 @@ use crate::binding_layout::{
     extract_texture_binding, extract_texture_resource, extract_uniform_binding,
 };
 use crate::egglog::OptimizeError;
-use crate::interface::{Attribute, EntryParamBindingKind, StorageAccess};
+use crate::interface::{Attribute, DrawBufferOperand, EntryParamBindingKind, StorageAccess};
 use crate::ssa::layout::{storage_elem_stride, storage_value_type};
 use crate::tlc::data::EntryInputBounds;
 use crate::tlc::EntryPoint;
@@ -154,8 +154,16 @@ impl Import<'_, '_, '_, '_> {
             .into_iter()
             .flatten()
             {
-                let resource = self.interface_named("buffer", buffer.frame_name())?;
-                self.sink.add("SourceDrawRead", (owner, resource))?;
+                match buffer {
+                    DrawBufferOperand::Input(buffer) => {
+                        let resource = self.interface_named("buffer", buffer.frame_name())?;
+                        self.sink.add("SourceDrawRead", (owner, resource))?;
+                    }
+                    DrawBufferOperand::Result { entry, slot } => {
+                        let producer = self.identities.symbols.intern(entry);
+                        self.sink.add("SourceDrawValue", (owner, producer, *slot as i64))?;
+                    }
+                }
             }
         }
         Ok(())

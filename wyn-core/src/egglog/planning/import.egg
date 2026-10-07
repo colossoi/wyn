@@ -180,3 +180,11 @@
 (rule ((Phase (Stage leader "combine") region) (PlannedOperation op leader plan region)
        (= neutral (SourceNeutral op)))
       ((Demand (InStage (Stage leader "combine")) neutral)) :ruleset schedule)
+
+; A buffer consumer needs the selected view, not just its backing allocation.
+; Copy slices until the draw ABI can carry their offsets and logical lengths.
+(rule ((SourceBufferDemand owner) (SourceOutput output owner value ty true)
+       (SourceSlice value source start end))
+      ((set (OutputPinned output) true)) :ruleset planning-import)
+(rule ((SourceDrawValue draw owner slot) (SourceResultSlot owner slot output))
+      ((DrawOutputRead draw output)) :ruleset planning-import)

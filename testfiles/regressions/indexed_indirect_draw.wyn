@@ -1,0 +1,15 @@
+-- Failure: "graphics invocation that cannot be planned as an ordered
+-- rasterization and shading operation", even with let-bound indices and command.
+-- Expected: compile an indexed indirect draw of two triangle instances.
+-- Control: indexed_draw_from(indices,3u32,2u32,0u32,0i32,0u32) compiles.
+-- Reproduce from /home/jonah/wyn:
+-- wyn build fluid-simulation/test/repro_indexed_indirect.wyn --graphics -o /tmp/repro-indexed-indirect.spv
+entry reproduce(screen: render_target<vec4f32>) render_target<vec4f32> =
+  let indices = [0u32,1u32,2u32] in
+  let command = {index_count = 3u32, instance_count = 2u32, first_index = 0u32,
+                 vertex_offset = 0i32, first_instance = 0u32} in
+  let covered = rasterize_triangles(indexed_indirect_draw(indices,command),
+    |vi,ii,_| vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+  shade_with({depth_test = #less_equal, depth_write = true,
+              blend = #replace, color_write = true},
+    screen, covered, |_,_,_,_,_| @[1.0,0.0,0.0,1.0])

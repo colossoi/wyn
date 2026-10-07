@@ -274,6 +274,18 @@ impl<'source> Import<'_, '_, '_, 'source> {
         ty: &Type,
         outputs: &[crate::interface::EntryOutputDecl<crate::interface::ResolvedAttribute>],
     ) -> Result<(), OptimizeError> {
+        // A single declared aggregate output is one storage value. In
+        // particular, indirect commands cannot be split into field buffers.
+        if outputs.len() == 1
+            && outputs[0].ty == *ty
+            && matches!(
+                outputs[0].attribute,
+                Some(crate::interface::Attribute::Storage { .. })
+            )
+            && matches!(ty, Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), _))
+        {
+            return self.output_leaf(entry, 0, value, ty, outputs.first());
+        }
         match strip_existentials(ty) {
             Type::Constructed(TypeName::Unit | TypeName::SideEffect | TypeName::StorageTexture, _) => {}
             Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) => {
@@ -284,17 +296,18 @@ impl<'source> Import<'_, '_, '_, 'source> {
                     if !self.projection_summary(component, value, index as i64)? {
                         self.sink.add("SourceProjection", (component, value, index as i64))?;
                     }
-                    self.output_leaf(entry, component, field, outputs.get(index))?;
+                    self.output_leaf(entry, index, component, field, outputs.get(index))?;
                 }
             }
-            ty => self.output_leaf(entry, value, ty, outputs.first())?,
+            ty => self.output_leaf(entry, 0, value, ty, outputs.first())?,
         }
         Ok(())
     }
 
-    fn output_leaf(
+    pub(super) fn output_leaf(
         &mut self,
         entry: i64,
+        slot: usize,
         value: Value,
         ty: &Type,
         output: Option<&crate::interface::EntryOutputDecl<crate::interface::ResolvedAttribute>>,
@@ -312,6 +325,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         let ty_key = self.ty(ty)?;
         let array = ty.is_array() || crate::types::as_soa_tuple(ty).is_some();
         self.sink.add("SourceOutput", (id, entry, value, ty_key, array))?;
+        self.sink.add("SourceResultSlot", (entry, slot as i64, id))?;
         Ok(())
     }
 }

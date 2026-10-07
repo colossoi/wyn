@@ -486,9 +486,9 @@ pub struct GraphicsPipeline {
 
 /// The source-level rasterization request associated with one graphics pipeline.
 #[derive(Debug, Clone, PartialEq)]
-pub struct GraphicsInvocation {
+pub struct GraphicsInvocation<B = DrawBufferRef> {
     pub topology: PrimitiveTopology,
-    pub draw: DrawCall,
+    pub draw: DrawCall<B>,
     pub raster_state: RasterState,
     pub fragment_state: FragmentState,
 }
@@ -646,7 +646,7 @@ impl Default for DrawCount {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DrawCall {
+pub enum DrawCall<B = DrawBufferRef> {
     Direct {
         vertex_count: u32,
         instance_count: u32,
@@ -654,7 +654,7 @@ pub enum DrawCall {
         first_instance: u32,
     },
     Indexed {
-        indices: DrawBufferRef,
+        indices: B,
         index_format: IndexFormat,
         index_count: DrawCount,
         instance_count: u32,
@@ -663,14 +663,14 @@ pub enum DrawCall {
         first_instance: u32,
     },
     Indirect {
-        commands: DrawBufferRef,
+        commands: B,
         offset: u64,
         draw_count: DrawCount,
     },
     IndexedIndirect {
-        indices: DrawBufferRef,
+        indices: B,
         index_format: IndexFormat,
-        commands: DrawBufferRef,
+        commands: B,
         offset: u64,
         draw_count: DrawCount,
     },
@@ -682,15 +682,74 @@ impl DrawBufferRef {
     }
 }
 
-impl DrawCall {
-    pub fn indirect_commands(&self) -> Option<&DrawBufferRef> {
+impl<B> DrawCall<B> {
+    /// Resolve logical operands once their storage has been selected.
+    pub fn try_map_buffers<C, E>(
+        &self,
+        mut resolve: impl FnMut(&B) -> Result<C, E>,
+    ) -> Result<DrawCall<C>, E> {
+        Ok(match self {
+            Self::Direct {
+                vertex_count,
+                instance_count,
+                first_vertex,
+                first_instance,
+            } => DrawCall::Direct {
+                vertex_count: *vertex_count,
+                instance_count: *instance_count,
+                first_vertex: *first_vertex,
+                first_instance: *first_instance,
+            },
+            Self::Indexed {
+                indices,
+                index_format,
+                index_count,
+                instance_count,
+                first_index,
+                vertex_offset,
+                first_instance,
+            } => DrawCall::Indexed {
+                indices: resolve(indices)?,
+                index_format: *index_format,
+                index_count: *index_count,
+                instance_count: *instance_count,
+                first_index: *first_index,
+                vertex_offset: *vertex_offset,
+                first_instance: *first_instance,
+            },
+            Self::Indirect {
+                commands,
+                offset,
+                draw_count,
+            } => DrawCall::Indirect {
+                commands: resolve(commands)?,
+                offset: *offset,
+                draw_count: *draw_count,
+            },
+            Self::IndexedIndirect {
+                indices,
+                index_format,
+                commands,
+                offset,
+                draw_count,
+            } => DrawCall::IndexedIndirect {
+                indices: resolve(indices)?,
+                index_format: *index_format,
+                commands: resolve(commands)?,
+                offset: *offset,
+                draw_count: *draw_count,
+            },
+        })
+    }
+
+    pub fn indirect_commands(&self) -> Option<&B> {
         match self {
             Self::Indirect { commands, .. } | Self::IndexedIndirect { commands, .. } => Some(commands),
             Self::Direct { .. } | Self::Indexed { .. } => None,
         }
     }
 
-    pub fn indices(&self) -> Option<&DrawBufferRef> {
+    pub fn indices(&self) -> Option<&B> {
         match self {
             Self::Indexed { indices, .. } | Self::IndexedIndirect { indices, .. } => Some(indices),
             Self::Direct { .. } | Self::Indirect { .. } => None,

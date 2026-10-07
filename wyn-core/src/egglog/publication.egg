@@ -91,3 +91,15 @@
 
 (rule ((PhaseCallback stage region) (SourceCapture region formal actual))
       ((RootValueUse (KernelRoot stage) actual)) :ruleset publication-uses)
+
+; The draw waits for the writer chosen by the ordinary buffer planner. An
+; existing backing can have its own writer; a copied value has an OutputWriter.
+(rule ((DrawOutputRead draw output) (OutputWriter output writer))
+      ((PublicationDependency writer (EntryRoot draw))) :ruleset publication-order)
+(rule ((DrawOutputRead draw output) (OutputBacking output storage)
+       (Produces stage value) (= (Backing value) storage))
+      ((PublicationDependency (KernelRoot stage) (EntryRoot draw))) :ruleset publication-order)
+; Borrowed values preserve the external resource's dependency identity.
+(rule ((DrawOutputRead draw output) (OutputBacking output (Source value))
+       (SourceInterfaceParameter value resource flags))
+      ((set (PublicationAccess (EntryRoot draw) resource) 1)) :ruleset publication-access)

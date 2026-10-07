@@ -1,0 +1,14 @@
+-- Failure: compiler rejects the inline index array with "graphics invocation
+-- that cannot be planned as an ordered rasterization and shading operation".
+-- Expected: compile an indexed draw with three indices and two instances.
+-- Controls: direct_draw(3u32,2u32), or an entry-supplied []u32 index buffer,
+-- both compile. No compute, culling, fragment discard, or custom depth is needed.
+-- Reproduce from /home/jonah/wyn:
+-- wyn build fluid-simulation/test/repro_indexed_literal.wyn --graphics -o /tmp/repro-indexed-literal.spv
+entry reproduce(screen: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    indexed_draw_from([0u32,1u32,2u32],3u32,2u32,0u32,0i32,0u32),
+    |vi,ii,_| vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+  shade_with({depth_test = #less_equal, depth_write = true,
+              blend = #replace, color_write = true},
+    screen, covered, |_,_,_,_,_| @[1.0,0.0,0.0,1.0])

@@ -320,6 +320,7 @@ impl TermRewriter<data::Empty, data::Empty> for StageValueNormalizer<'_> {
 
 struct ComputeOperation<'a> {
     symbol: SymbolId,
+    entry: SymbolId,
     ty: Type,
     rhs: &'a Term,
     entry_name: String,
@@ -350,6 +351,7 @@ struct ComputedLeaf {
 #[derive(Clone)]
 struct ComputedValue {
     symbol: SymbolId,
+    entry: SymbolId,
     leaves: Vec<ComputedLeaf>,
 }
 
@@ -518,6 +520,7 @@ fn extract_root(
         builtins,
         computed_origins,
         binding_ids,
+        symbols,
     )?;
     let graphics_count =
         shape.operations.iter().filter(|operation| matches!(operation, RootOperation::Graphics(_))).count();
@@ -545,6 +548,7 @@ fn extract_root(
                     &root_lambda,
                     root_entry,
                     operation,
+                    false,
                     &shape.computed,
                     &shape.computed_origins,
                     &shape.targets,
@@ -592,11 +596,44 @@ fn extract_root(
                     raster_args.get(draw_index)?,
                     raster_state,
                     fragment_state,
-                    &root_lambda,
-                    root_entry,
-                    &shape.computed,
-                    &shape.computed_origins,
                     builtins,
+                    &mut |value| {
+                        if let Some(operand) = draw_buffer_source(
+                            value,
+                            &root_lambda,
+                            root_entry,
+                            &shape.computed,
+                            &shape.computed_origins,
+                        ) {
+                            return Some(operand);
+                        }
+                        let name = format!("{root_name}__draw_operand_{}", stages.len());
+                        let entry = symbols.alloc(name.clone());
+                        let operation = ComputeOperation {
+                            symbol: definition.name,
+                            entry,
+                            ty: value.ty.clone(),
+                            rhs: value,
+                            entry_name: name.clone(),
+                            outputs: vec![],
+                        };
+                        let region = build_compute_stage(
+                            definition,
+                            &root_lambda,
+                            root_entry,
+                            &operation,
+                            true,
+                            &shape.computed,
+                            &shape.computed_origins,
+                            &shape.targets,
+                            &[],
+                            builtins,
+                            symbols,
+                            term_ids,
+                        )?;
+                        stages.push(region);
+                        Some(interface::DrawBufferOperand::Result { entry, slot: 0 })
+                    },
                 )?;
                 let graphics_group = interface::GraphicsStageGroup {
                     root: definition.name,
@@ -757,6 +794,7 @@ fn root_shape<'a>(
     builtins: &InvocationBuiltins,
     computed_origins: ProjectionOrigins,
     binding_ids: &mut wyn_base::IdSource<u32>,
+    symbols: &mut SymbolTable,
 ) -> Option<RootShape<'a>> {
     let mut targets = LookupMap::new();
     for ((symbol, ty), declaration) in root_lambda.params.iter().zip(&root_entry.declaration.params) {
@@ -811,6 +849,7 @@ fn root_shape<'a>(
             if origin.producer == *name && origin.path.is_empty() {
                 operations.push(RootOperation::Compute(ComputeOperation {
                     symbol: *name,
+                    entry: symbols.alloc(root_name.to_string()),
                     ty: name_ty.clone(),
                     rhs: rhs.as_ref(),
                     entry_name: String::new(),
@@ -848,17 +887,13 @@ fn root_shape<'a>(
         } else {
             format!("{root_name}__compute_{compute_index}")
         };
+        *symbols.get_mut(operation.entry)? = operation.entry_name.clone();
         let leaf_types = computed_leaf_types(&operation.ty)?;
-        let multiple = leaf_types.len() > 1;
         operation.outputs = leaf_types
             .into_iter()
             .enumerate()
             .map(|(index, (path, _label, ty))| {
-                let output_name = if multiple {
-                    format!("{}_output_{index}", operation.entry_name)
-                } else {
-                    format!("{}_output", operation.entry_name)
-                };
+                let output_name = format!("{}_output_{index}", operation.entry_name);
                 let leaf = ComputedLeaf {
                     path,
                     ty,
@@ -870,6 +905,7 @@ fn root_shape<'a>(
             .collect();
         computed.push(ComputedValue {
             symbol: operation.symbol,
+            entry: operation.entry,
             leaves: operation.outputs.clone(),
         });
         compute_index += 1;
@@ -1254,12 +1290,9 @@ fn graphics_invocation(
     draw: &Term,
     raster_state: host::RasterState,
     fragment_state: host::FragmentState,
-    root_lambda: &Lambda,
-    root_entry: &EntryPoint<()>,
-    computed: &[ComputedValue],
-    computed_origins: &ProjectionOrigins,
     builtins: &InvocationBuiltins,
-) -> Option<host::GraphicsInvocation> {
+    buffer: &mut impl FnMut(&Term) -> Option<interface::DrawBufferOperand>,
+) -> Option<host::GraphicsInvocation<interface::DrawBufferOperand>> {
     use crate::host::{DrawCall, DrawCount, GraphicsInvocation, PrimitiveTopology};
 
     let topology_index = builtins
@@ -1315,7 +1348,7 @@ fn graphics_invocation(
             return None;
         };
         DrawCall::Indexed {
-            indices: draw_buffer_source(indices, root_lambda, root_entry, computed, computed_origins)?,
+            indices: buffer(indices)?,
             index_format: index_format(indices)?,
             index_count: array_draw_count(indices)?,
             instance_count: u32_literal(instance_count)?,
@@ -1329,7 +1362,7 @@ fn graphics_invocation(
             return None;
         };
         DrawCall::Indexed {
-            indices: draw_buffer_source(indices, root_lambda, root_entry, computed, computed_origins)?,
+            indices: buffer(indices)?,
             index_format: index_format(indices)?,
             index_count: DrawCount::Fixed(u32_literal(index_count)?),
             instance_count: u32_literal(instance_count)?,
@@ -1341,8 +1374,7 @@ fn graphics_invocation(
         let [command] = args else {
             return None;
         };
-        let (commands, offset) =
-            indirect_command_source(command, 16, root_lambda, root_entry, computed, computed_origins)?;
+        let (commands, offset) = indirect_command_source(command, 16, buffer)?;
         DrawCall::Indirect {
             commands,
             offset,
@@ -1353,7 +1385,7 @@ fn graphics_invocation(
             return None;
         };
         DrawCall::Indirect {
-            commands: draw_buffer_source(commands, root_lambda, root_entry, computed, computed_origins)?,
+            commands: buffer(commands)?,
             offset: 0,
             draw_count: array_draw_count(commands)?,
         }
@@ -1361,11 +1393,12 @@ fn graphics_invocation(
         let [indices, command] = args else {
             return None;
         };
-        let (commands, offset) =
-            indirect_command_source(command, 20, root_lambda, root_entry, computed, computed_origins)?;
+        let index_format = index_format(indices)?;
+        let indices = buffer(indices)?;
+        let (commands, offset) = indirect_command_source(command, 20, buffer)?;
         DrawCall::IndexedIndirect {
-            indices: draw_buffer_source(indices, root_lambda, root_entry, computed, computed_origins)?,
-            index_format: index_format(indices)?,
+            indices,
+            index_format,
             commands,
             offset,
             draw_count: DrawCount::Fixed(1),
@@ -1375,9 +1408,9 @@ fn graphics_invocation(
             return None;
         };
         DrawCall::IndexedIndirect {
-            indices: draw_buffer_source(indices, root_lambda, root_entry, computed, computed_origins)?,
+            indices: buffer(indices)?,
             index_format: index_format(indices)?,
-            commands: draw_buffer_source(commands, root_lambda, root_entry, computed, computed_origins)?,
+            commands: buffer(commands)?,
             offset: 0,
             draw_count: array_draw_count(commands)?,
         }
@@ -1393,23 +1426,15 @@ fn graphics_invocation(
 fn indirect_command_source(
     command: &Term,
     stride: u64,
-    root_lambda: &Lambda,
-    root_entry: &EntryPoint<()>,
-    computed: &[ComputedValue],
-    computed_origins: &ProjectionOrigins,
-) -> Option<(host::DrawBufferRef, u64)> {
+    buffer: &mut impl FnMut(&Term) -> Option<interface::DrawBufferOperand>,
+) -> Option<(interface::DrawBufferOperand, u64)> {
     if let TermKind::Index { array, index } = &command.kind {
-        let command_index = u32_literal(index)? as u64;
-        return Some((
-            draw_buffer_source(array, root_lambda, root_entry, computed, computed_origins)?,
-            command_index * stride,
-        ));
+        if let Some(command_index) = u32_literal(index) {
+            return Some((buffer(array)?, u64::from(command_index) * stride));
+        }
     }
 
-    Some((
-        draw_buffer_source(command, root_lambda, root_entry, computed, computed_origins)?,
-        0,
-    ))
+    Some((buffer(command)?, 0))
 }
 
 fn draw_buffer_source(
@@ -1418,28 +1443,35 @@ fn draw_buffer_source(
     root_entry: &EntryPoint<()>,
     computed: &[ComputedValue],
     computed_origins: &ProjectionOrigins,
-) -> Option<host::DrawBufferRef> {
+) -> Option<interface::DrawBufferOperand> {
     let (symbol, path) = projected_symbol_path(array)?;
     let (symbol, path) = resolve_projection(symbol, &path, computed_origins);
     if path.is_empty() {
         if let Some((index, _)) =
             root_lambda.params.iter().enumerate().find(|(_, (candidate, _))| *candidate == symbol)
         {
-            return Some(host::DrawBufferRef {
+            // A uniform command record is a value, not a draw buffer. Only
+            // reuse parameters whose ABI already supplies storage.
+            if !root_entry.declaration.params[index]
+                .attributes
+                .iter()
+                .any(|attribute| matches!(attribute, Attribute::Storage { .. }))
+            {
+                return None;
+            }
+            return Some(interface::DrawBufferOperand::Input(host::DrawBufferRef {
                 set: AUTO_STORAGE_SET,
                 binding: root_parameter_binding(&root_entry.declaration.params[index])?,
                 name: root_entry.declaration.params.get(index)?.name.clone(),
                 resource: None,
-            });
+            }));
         }
     }
     let value = computed.iter().find(|value| value.symbol == symbol)?;
-    let leaf = value.leaves.iter().find(|leaf| leaf.path == path)?;
-    Some(host::DrawBufferRef {
-        set: AUTO_STORAGE_SET,
-        binding: leaf.binding,
-        name: leaf.output_name.clone(),
-        resource: Some(leaf.output_name.clone()),
+    let slot = value.leaves.iter().position(|leaf| leaf.path == path)?;
+    Some(interface::DrawBufferOperand::Result {
+        entry: value.entry,
+        slot,
     })
 }
 fn array_type_parts(mut ty: &Type) -> Option<(&Type, &Type)> {
@@ -2103,6 +2135,7 @@ fn build_compute_stage(
     root_lambda: &Lambda,
     root_entry: &EntryPoint<()>,
     operation: &ComputeOperation<'_>,
+    buffer_demand: bool,
     computed: &[ComputedValue],
     computed_origins: &ProjectionOrigins,
     targets: &LookupMap<SymbolId, TargetValue>,
@@ -2157,7 +2190,11 @@ fn build_compute_stage(
         texture_sample: builtins.texture_sample,
     }
     .rewrite_owned(body);
-    let body = flatten_compute_output(body, &operation.outputs, symbols, term_ids)?;
+    let body = if buffer_demand {
+        body
+    } else {
+        flatten_compute_output(body, &operation.outputs, symbols, term_ids)?
+    };
     let outputs = operation
         .outputs
         .iter()
@@ -2186,19 +2223,27 @@ fn build_compute_stage(
     let DefMeta::EntryPoint(entry) = &mut stage.meta else {
         return None;
     };
+    stage.name = operation.entry;
+    entry.declaration.buffer_demand = buffer_demand;
     entry.declaration.source_entry = Some(interface::SourceEntry {
         name: root_entry.declaration.name.clone(),
-        outputs: operation
-            .outputs
-            .iter()
-            .map(|leaf| {
-                results
-                    .iter()
-                    .filter(|(origin, _)| origin.producer == operation.symbol && origin.path == leaf.path)
-                    .map(|(_, result)| result.clone())
-                    .collect()
-            })
-            .collect(),
+        outputs: if buffer_demand {
+            vec![vec![]]
+        } else {
+            operation
+                .outputs
+                .iter()
+                .map(|leaf| {
+                    results
+                        .iter()
+                        .filter(|(origin, _)| {
+                            origin.producer == operation.symbol && origin.path == leaf.path
+                        })
+                        .map(|(_, result)| result.clone())
+                        .collect()
+                })
+                .collect()
+        },
     });
     Some(stage)
 }
@@ -3122,6 +3167,7 @@ fn stage_def(
         body: lambda,
         meta: DefMeta::EntryPoint(EntryPoint {
             declaration: Box::new(interface::EntryDecl {
+                buffer_demand: false,
                 entry_kind: kind,
                 compute_dispatch: None,
                 graphics_group,

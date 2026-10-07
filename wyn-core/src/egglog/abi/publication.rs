@@ -1,20 +1,21 @@
 //! Source ABI declarations and publication for directly emitted entry bodies.
 use super::sizes;
+use crate::binding_layout::extract_storage_binding;
 use crate::egglog::host::lower::{self as host, scalar_type};
 use crate::egglog::to_ssa::{error, Compiler};
 use crate::egglog::OptimizeError;
 use crate::flow::ExecutionModel;
 use crate::host::ResultKind;
 use crate::host::SourceResultBinding;
-use crate::host::{Binding, BufferUsage};
+use crate::host::{Binding, BufferUsage, DrawBufferRef, DrawCall, DrawCount, GraphicsInvocation};
 use crate::host::{
     ComputePipeline, ComputeStage, DispatchSize, FrameGraph, GraphicsPipeline, GraphicsStage,
     ModuleInterface, Pipeline, ShaderStage,
 };
-use crate::host::{DispatchLoop, ScalarSource, ScalarTask};
+use crate::host::{DispatchLoop, ScalarExpr, ScalarSource, ScalarTask};
 use crate::interface::publish::{reconcile_storage_binding_access, ModuleInterfacePublish};
 use crate::interface::results::result_layout;
-use crate::interface::SourceResult;
+use crate::interface::{DrawBufferOperand, SourceResult};
 use crate::ssa::types::EntryPoint;
 use crate::tlc::extract_lambda_params_ref;
 use crate::tlc::DefMeta;
@@ -23,6 +24,84 @@ use crate::BindingRef;
 use crate::ResourceAccess;
 use crate::{EntryId, LookupMap, SymbolId};
 use egglog_engine::Value;
+
+/// Construct the physical draw operand only after the common storage planner
+/// has selected backing for the expression. No descriptor is allocated here.
+fn resolve_draw_buffer(
+    compiler: &Compiler<'_, '_>,
+    operand: &DrawBufferOperand,
+) -> Result<DrawBufferRef, OptimizeError> {
+    let (entry, slot) = match operand {
+        DrawBufferOperand::Input(input) => return Ok(input.clone()),
+        DrawBufferOperand::Result { entry, slot } => (entry, slot),
+    };
+    let outputs = compiler.facts.outputs(*entry)?;
+    let Some(&output) = outputs.get(*slot) else {
+        return Err(error("draw operand result missing"));
+    };
+    let (_, _, resource) = compiler.facts.output(output)?;
+    let Some(backing) = compiler.facts.backing(resource) else {
+        return Err(error("draw operand backing missing"));
+    };
+    let (binding, name) = if let Some((binding, _, _)) = compiler.bindings.buffer(backing)? {
+        (binding, compiler.bindings.buffer_name(backing)?)
+    } else {
+        let Some(source) = compiler.facts.external(backing) else {
+            return Err(error("draw operand source missing"));
+        };
+        let Some((binding, _)) = compiler.facts.input_storage(source)? else {
+            return Err(error("draw operand binding missing"));
+        };
+        let Some(name) = compiler.program.source.defs.iter().find_map(|d| {
+            let DefMeta::EntryPoint(e) = &d.meta else {
+                return None;
+            };
+            e.declaration
+                .params
+                .iter()
+                .find(|p| extract_storage_binding(p) == Some(binding))
+                .map(|p| p.name.clone())
+        }) else {
+            return Err(error("draw operand input name missing"));
+        };
+        (binding, name)
+    };
+    Ok(DrawBufferRef {
+        set: binding.set,
+        binding: binding.binding,
+        resource: Some(name.clone()),
+        name,
+    })
+}
+
+fn resolve_draw_count(
+    compiler: &Compiler<'_, '_>,
+    operand: &DrawBufferOperand,
+    count: DrawCount,
+) -> Result<DrawCount, OptimizeError> {
+    if count != DrawCount::BufferLength {
+        return Ok(count);
+    }
+    let DrawBufferOperand::Result { entry, slot } = operand else {
+        return Ok(count);
+    };
+    let outputs = compiler.facts.outputs(*entry)?;
+    let Some(&output) = outputs.get(*slot) else {
+        return Err(error("draw operand result missing"));
+    };
+    let (source, _, _) = compiler.facts.output(output)?;
+    match host::length(compiler.program, source) {
+        Ok(ScalarExpr::I32(value)) => {
+            return Ok(DrawCount::Fixed(
+                u32::try_from(value).map_err(|_| error("draw count exceeds u32"))?,
+            ))
+        }
+        Ok(ScalarExpr::U32(value)) => return Ok(DrawCount::Fixed(value)),
+        Ok(_) | Err(host::Error::Unsupported) => {}
+        Err(host::Error::Invalid(error)) => return Err(error),
+    }
+    Ok(count)
+}
 
 pub(in crate::egglog) fn publish(
     compiler: &mut Compiler<'_, '_>,
@@ -123,11 +202,34 @@ pub(in crate::egglog) fn publish(
                 let Some(group) = &declaration.graphics_group else {
                     return Err(error("graphics entry has no operation identity"));
                 };
+                let mut draw = group
+                    .invocation
+                    .draw
+                    .try_map_buffers(|operand| resolve_draw_buffer(compiler, operand))?;
+                match (&group.invocation.draw, &mut draw) {
+                    (DrawCall::Indexed { indices, .. }, DrawCall::Indexed { index_count, .. }) => {
+                        *index_count = resolve_draw_count(compiler, indices, *index_count)?;
+                    }
+                    (DrawCall::Indirect { commands, .. }, DrawCall::Indirect { draw_count, .. })
+                    | (
+                        DrawCall::IndexedIndirect { commands, .. },
+                        DrawCall::IndexedIndirect { draw_count, .. },
+                    ) => {
+                        *draw_count = resolve_draw_count(compiler, commands, *draw_count)?;
+                    }
+                    _ => {}
+                }
+                let invocation = GraphicsInvocation {
+                    topology: group.invocation.topology,
+                    raster_state: group.invocation.raster_state.clone(),
+                    fragment_state: group.invocation.fragment_state.clone(),
+                    draw,
+                };
                 let index = *graphics.entry((group.root, group.operation)).or_insert_with(|| {
                     let index = module.pipelines.len();
                     module.pipelines.push(Pipeline::Graphics(GraphicsPipeline {
                         source_operation: Some(group.operation),
-                        invocation: group.invocation.clone(),
+                        invocation,
                         stages: vec![],
                         bindings: vec![],
                         vertex_inputs: vec![],
@@ -241,6 +343,9 @@ fn publish_results(
             return Err(error("output definition is not an entry"));
         };
         let declaration = &entry.declaration;
+        if declaration.buffer_demand {
+            continue;
+        }
         let (body, _) = extract_lambda_params_ref(&definition.body);
         let result_type = strip_existentials(&body.ty);
         for (index, id) in compiler.facts.outputs(owner)?.into_iter().enumerate() {

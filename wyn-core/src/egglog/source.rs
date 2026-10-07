@@ -200,7 +200,12 @@ impl<'source> Import<'_, '_, '_, 'source> {
             }
             let result = self.finish_body(body, &mut scope)?;
             if let DefMeta::EntryPoint(entry) = &definition.meta {
-                self.output(symbol, result, &body.ty, &entry.declaration.outputs)?;
+                if entry.declaration.buffer_demand {
+                    self.sink.add("SourceBufferDemand", symbol)?;
+                    self.output_leaf(symbol, 0, result, &body.ty, None)?;
+                } else {
+                    self.output(symbol, result, &body.ty, &entry.declaration.outputs)?;
+                }
             }
             self.bindings.restore(checkpoint);
         }

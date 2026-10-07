@@ -160,6 +160,7 @@ impl<'a> Transformer<'a> {
             body,
             meta: DefMeta::EntryPoint(EntryPoint {
                 declaration: Box::new(interface::EntryDecl {
+                    buffer_demand: false,
                     entry_kind: entry.data.source.source.syntax.entry_kind,
                     compute_dispatch: entry.data.source.source.syntax.compute_dispatch.clone(),
                     graphics_group: None,

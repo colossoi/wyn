@@ -1353,3 +1353,143 @@ fn graphics_root_preserves_return_order_and_omits_intermediate_results() {
         }
     }
 }
+
+#[test]
+fn draw_buffer_demands_use_selected_storage_and_wait_for_writers() {
+    use crate::host::{DrawCall, DrawCount, FramePassKind, IndexFormat};
+
+    let command =
+        "{index_count=3u32,instance_count=2u32,first_index=0u32,vertex_offset=0i32,first_instance=0u32}";
+    let cases = [
+        ("literal", "", "", "indexed_draw_from([0u32,1u32,2u32],3u32,2u32,0u32,0i32,0u32)".to_string(), 1),
+        ("range", "", "", "indexed_draw_from(0u32..<3u32,3u32,2u32,0u32,0i32,0u32)".to_string(), 1),
+        ("implicit_count", "", "", "indexed_draw(0u32..<3u32,2u32)".to_string(), 1),
+        ("mapped", "xs:[3]u32,", "", "indexed_draw_from(map(|i|i+1u32,xs),3u32,2u32,0u32,0i32,0u32)".to_string(), 1),
+        ("named", "xs:[3]u32,", "let indices=map(|i|i+1u32,xs) in", "indexed_draw_from(indices,3u32,2u32,0u32,0i32,0u32)".to_string(), 1),
+        ("borrowed", "xs:[3]u32,", "", "indexed_draw_from(xs,3u32,2u32,0u32,0i32,0u32)".to_string(), 0),
+        ("slice", "xs:[5]u32,", "", "indexed_draw_from(xs[1..4],3u32,2u32,0u32,0i32,0u32)".to_string(), 1),
+        ("indirect", "", "", format!("indexed_indirect_draw([0u32,1u32,2u32],{command})"), 2),
+        ("nonindexed_command", "", "", "indirect_draw({vertex_count=3u32,instance_count=2u32,first_vertex=0u32,first_instance=0u32})".to_string(), 1),
+        ("nonindexed_commands", "", "", "indirect_draws([{vertex_count=3u32,instance_count=2u32,first_vertex=0u32,first_instance=0u32}])".to_string(), 1),
+        ("uniform_command", "cmd:{index_count:u32,instance_count:u32,first_index:u32,vertex_offset:i32,first_instance:u32},", "", "indexed_indirect_draw([0u32,1u32,2u32],cmd)".to_string(), 2),
+        ("named_command", "n:u32,", "let command={index_count=3u32,instance_count=n+1u32,first_index=0u32,vertex_offset=0i32,first_instance=0u32} in", "indexed_indirect_draw([0u32,1u32,2u32],command)".to_string(), 2),
+        ("commands", "", "", format!("indexed_indirect_draws([0u32,1u32,2u32],[{command}])"), 2),
+        ("offset", "", "", format!("indexed_indirect_draw([0u32,1u32,2u32],[{command},{command}][1])"), 2),
+        ("dynamic", "i:i32,", "", format!("indexed_indirect_draw([0u32,1u32,2u32],[{command},{command}][i])"), 2),
+    ];
+    for (name, params, setup, draw, allocations) in cases {
+        let source = format!(
+            "entry reproduce({params}screen:render_target<vec4f32>) render_target<vec4f32> =
+            {setup} let covered=rasterize_triangles({draw},
+                |vi,ii,_|vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+            shade(screen,covered,|_,_,_,_,_|@[1.0,0.0,0.0,1.0])"
+        );
+        let source = match name {
+            "literal" => include_str!("../../testfiles/regressions/indexed_literal_draw.wyn"),
+            "indirect" => include_str!("../../testfiles/regressions/indexed_indirect_draw.wyn"),
+            _ => &source,
+        };
+        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+            let ssa = compile_thru_ssa(source).unwrap_or_else(|error| panic!("{name}: {error}"));
+            let (program, module) = match format {
+                ShaderFormat::Spirv => {
+                    let compiled = lower_ssa_to_spirv(ssa).unwrap();
+                    let bytes: Vec<_> = compiled.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
+                    (
+                        compiled.program,
+                        naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap(),
+                    )
+                }
+                ShaderFormat::Wgsl => {
+                    let compiled = lower_ssa_to_wgsl_with_program(ssa).unwrap();
+                    (
+                        compiled.program,
+                        naga::front::wgsl::parse_str(&compiled.wgsl).unwrap(),
+                    )
+                }
+            };
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("{name}/{format:?}: {error:?}"));
+            let entry = &program.entries[0];
+            assert_eq!(
+                entry.allocations.iter().filter(|a| matches!(a, Allocation::Buffer { .. })).count(),
+                allocations,
+                "{name}"
+            );
+            let graph = &program.interface.frame_graph;
+            let (draw_pass, pass) =
+                graph.passes.iter().enumerate().find(|(_, p)| p.kind == FramePassKind::Draw).unwrap();
+            let (pipeline, graphics) = program
+                .interface
+                .pipelines
+                .iter()
+                .enumerate()
+                .find_map(|(i, p)| match p {
+                    Pipeline::Graphics(p) => Some((i, p)),
+                    _ => None,
+                })
+                .unwrap();
+            match &graphics.invocation.draw {
+                DrawCall::Indexed {
+                    index_count,
+                    instance_count,
+                    ..
+                } => {
+                    assert_eq!(*index_count, DrawCount::Fixed(3));
+                    assert_eq!(*instance_count, 2);
+                }
+                DrawCall::IndexedIndirect {
+                    index_format,
+                    offset,
+                    draw_count,
+                    ..
+                } => {
+                    assert_eq!(*index_format, IndexFormat::Uint32);
+                    assert_eq!(*offset, if name == "offset" { 20 } else { 0 });
+                    assert_eq!(*draw_count, DrawCount::Fixed(1));
+                }
+                DrawCall::Indirect {
+                    offset, draw_count, ..
+                } => {
+                    assert_eq!(*offset, 0);
+                    assert_eq!(*draw_count, DrawCount::Fixed(1));
+                }
+                _ => panic!("unexpected draw"),
+            }
+            for operand in [
+                graphics.invocation.draw.indices(),
+                graphics.invocation.draw.indirect_commands(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let resource = program.draw_resource(pipeline, operand).unwrap();
+                assert!(pass.reads.iter().any(|r| r.resource == resource.0), "{name}");
+                if name == "borrowed" {
+                    assert!(entry.inputs.contains(&resource));
+                } else {
+                    assert!(
+                        !entry.inputs.contains(&resource),
+                        "{name}: generated operand became a caller input"
+                    );
+                    assert!(entry.allocations.iter().any(|a| a.resource() == resource));
+                    let writer = graph
+                        .passes
+                        .iter()
+                        .position(|p| p.writes.iter().any(|w| w.resource == resource.0))
+                        .unwrap();
+                    assert!(
+                        writer < draw_pass && pass.depends_on.contains(&writer),
+                        "{name}: missing draw dependency"
+                    );
+                }
+            }
+            program.to_rust_wgpu("draw_buffers", format).unwrap();
+            program.to_whl("draw_buffers", format).unwrap();
+        }
+    }
+}

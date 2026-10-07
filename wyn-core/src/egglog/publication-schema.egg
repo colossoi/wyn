@@ -17,3 +17,9 @@
 (relation PublicationDependency (RootKey RootKey))
 (relation PhaseCallback (StageKey RegionKey))
 (relation RootPushInput (RootKey i64 i64))
+
+; Buffer consumers refer to expression results, before an allocation is selected.
+(relation SourceResultSlot (i64 i64 i64))
+(relation SourceBufferDemand (i64))
+(relation SourceDrawValue (i64 i64 i64))
+(relation DrawOutputRead (i64 i64))
