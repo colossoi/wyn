@@ -164,6 +164,29 @@ def run(binary):
                 definition = client.at('definition', local, constants, 'amount + amount')
                 assert definition['range']['start'] == {'line': 0, 'character': 4}, definition
                 print('PASS: folded integer constants retain definition and all references', flush=True)
+                iota = root / 'app/src/iota.wyn'
+                iota_source = 'entry indices() []i32 = iota(4)\n'
+                assert client.open(iota, iota_source) == []
+                hover = client.at('hover', iota, iota_source, 'iota')
+                assert 'i32' in hover['contents']['value'], hover
+                signature = client.at('signatureHelp', iota, iota_source, '4)')
+                assert 'i32' in signature['signatures'][0]['label'], signature
+                print('PASS: iota type checks and provides hover and signature help', flush=True)
+                # A newly opened invalid buffer has no previous checked document.
+                partial = root / 'app/src/partial.wyn'
+                partial_source = 'entry indices() []i32 = iot\n'
+                assert client.open(partial, partial_source)
+                completion = client.at('completion', partial, partial_source, 'iot')
+                assert any(item['label'] == 'iota' for item in completion), completion
+                for version, edited in enumerate([
+                    'entry indices() []i32 = iota(\n',
+                    'entry indices() []i32 = iota(true)\n',
+                ], start=2):
+                    assert client.change(iota, edited, version)
+                    completion = client.at('completion', iota, edited, 'iota')
+                    assert any(item['label'] == 'iota' for item in completion), completion
+                assert client.change(iota, iota_source, 4) == []
+                print('PASS: prelude completion survives unknown names, incomplete calls, and type errors', flush=True)
             except BaseException:
                 stderr.flush()
                 stderr.seek(0)

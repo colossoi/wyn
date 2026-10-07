@@ -14,6 +14,8 @@ also refreshes diagnostics in open callers.
 Imported functions provide hover and signature information. Package-member
 completion handles incomplete expressions such as `Math.` by analyzing complete
 top-level `module Math = import "pkg:math"` declarations independently.
+Prelude function completion, including `iota`, is available in new and incomplete
+buffers and in documents with type errors.
 
 Navigation currently requires successful type checking of the source being
 queried. Workspace references skip files that fail analysis and are collected on
@@ -32,5 +34,6 @@ python3 scripts/check_analyzer_navigation.py target/debug/wyn-analyzer
 The script starts the real server over stdio and creates temporary packages. It
 checks cross-package definitions, unopened callers, different import aliases,
 signatures, completion during an incomplete edit, unsaved dependency positions,
-diagnostic refresh, separate same-named bindings, and folded constant references.
+diagnostic refresh, separate same-named bindings, folded constant references,
+and `iota` completion in incomplete or invalid buffers.
 It uses only the Python standard library and removes its fixtures afterward.

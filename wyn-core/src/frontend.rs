@@ -66,19 +66,29 @@ impl ParsedModules {
 }
 
 fn compiler_prelude() -> Result<(PreElaboratedPrelude, NodeCounter)> {
-    if let Some((prelude, node_ids)) = COMPILER_PRELUDE_CACHE.get() {
-        return Ok((prelude.clone(), node_ids.clone()));
+    cached_compiler_prelude().cloned()
+}
+
+fn cached_compiler_prelude() -> Result<&'static (PreElaboratedPrelude, NodeCounter)> {
+    if let Some(cached) = COMPILER_PRELUDE_CACHE.get() {
+        return Ok(cached);
     }
 
     let mut node_ids = NodeCounter::new();
     let prelude = SemanticModules::create_prelude(&mut node_ids)?;
-    let (prelude, node_ids) = COMPILER_PRELUDE_CACHE.get_or_init(|| (prelude, node_ids));
-    Ok((prelude.clone(), node_ids.clone()))
+    Ok(COMPILER_PRELUDE_CACHE.get_or_init(|| (prelude, node_ids)))
 }
 
 /// Initialize and validate the cached compiler frontend without loading user source.
 pub fn initialize_frontend() -> Result<()> {
-    compiler_prelude().map(drop)
+    cached_compiler_prelude().map(|_| ())
+}
+
+/// Auto-imported prelude function names, available without parsing user source.
+/// Editor completion can use these even while a document contains errors.
+pub fn prelude_function_names() -> Result<Vec<String>> {
+    let (prelude, _) = cached_compiler_prelude()?;
+    Ok(prelude.prelude_functions.keys().cloned().collect())
 }
 
 /// The Wyn-specific adapter at the syntax-independent module graph boundary.

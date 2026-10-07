@@ -367,26 +367,21 @@ impl LanguageServer for Backend {
             }
         }
 
-        // Default: prelude function completions from the checked document.
-        let docs = self.documents.read().ok();
-        let doc = docs.as_ref().and_then(|documents| documents.get(uri));
-        let items = doc
-            .map(|document| {
-                document
-                    .ast
-                    .global_context
-                    .support_definitions
-                    .iter()
-                    .filter(|definition| definition.namespace.is_none())
-                    .map(|definition| CompletionItem {
-                        label: definition.definition.name.clone(),
-                        kind: Some(CompletionItemKind::FUNCTION),
-                        detail: Some("prelude function".to_string()),
-                        ..Default::default()
-                    })
-                    .collect()
+        // Prelude names are available even when an in-progress edit cannot
+        // parse or type check (and consequently has no cached DocumentState).
+        let items = wyn_core::prelude_function_names()
+            .map_err(|error| {
+                verbose!("[wyn-analyzer] prelude completion failed: {error}");
+                tower_lsp::jsonrpc::Error::internal_error()
+            })?
+            .into_iter()
+            .map(|name| CompletionItem {
+                label: name,
+                kind: Some(CompletionItemKind::FUNCTION),
+                detail: Some("prelude function".to_string()),
+                ..Default::default()
             })
-            .unwrap_or_default();
+            .collect();
 
         Ok(Some(CompletionResponse::Array(items)))
     }

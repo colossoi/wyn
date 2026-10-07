@@ -27,7 +27,7 @@ pub mod ssa;
 pub mod types;
 
 pub use error::{CompilationFailure, LoadModulesError};
-pub use frontend::{initialize_frontend, ParsedModules};
+pub use frontend::{initialize_frontend, prelude_function_names, ParsedModules};
 
 pub mod lowering_common;
 pub mod name_registry;
