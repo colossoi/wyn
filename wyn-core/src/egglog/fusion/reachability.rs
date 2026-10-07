@@ -5,7 +5,7 @@ use egglog_engine::constraint::{SimpleTypeConstraint, TypeConstraint};
 use egglog_engine::prelude::BaseSort;
 use egglog_engine::sort::{BoolSort, I64Sort};
 use egglog_engine::{ArcSort, Core, EGraph, Primitive, Read, ReadPrim, ReadState, Value, Write};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub(super) fn register(graph: &mut EGraph) -> Result<(), OptimizeError> {
     let Some(group) = graph.get_sort_by_name("FusionGroup").cloned() else {
@@ -60,6 +60,14 @@ impl ReadPrim for Path {
             unreachable!("invalid path predicate arity");
         };
         let table = if self.intermediate { "GroupBefore" } else { "GroupEdge" };
+        // Snapshot adjacency once per query instead of scanning every edge for
+        // each visited node. Keep it query-local so contractions cannot stale it.
+        let mut edges: HashMap<Value, Vec<Value>> = HashMap::new();
+        if let Err(error) = state.constructor_enodes(table, |row| {
+            edges.entry(row.children[0]).or_default().push(row.children[1]);
+        }) {
+            panic!("invalid native path relation {table}: {error}");
+        }
         let mut pending = vec![(from, false)];
         let mut visited = HashSet::new();
         while let Some((node, external)) = pending.pop() {
@@ -69,13 +77,10 @@ impl ReadPrim for Path {
             if node == to && (!self.intermediate || external) {
                 return Some(state.base_to_value(true));
             }
-            if let Err(error) = state.constructor_enodes(table, |row| {
-                if row.children[0] == node {
-                    let next = row.children[1];
+            if let Some(neighbors) = edges.get(&node) {
+                for &next in neighbors {
                     pending.push((next, external || (next != from && next != to)));
                 }
-            }) {
-                panic!("invalid native path relation {table}: {error}");
             }
         }
         Some(state.base_to_value(false))
