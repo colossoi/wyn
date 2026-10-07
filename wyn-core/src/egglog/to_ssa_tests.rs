@@ -511,6 +511,26 @@ fn scatter_local_destinations_reach_wgsl() {
 }
 
 #[test]
+fn stored_fixed_array_updates_materialize_owned_contents() {
+    for source in [
+        "entry main() [258]i32 =
+            ((replicate(258,-1i32) with [0] = 0) with [256] = 1) with [257] = 0",
+        "entry main(n:i32) [258]i32 =
+            let empty = replicate(258,-1i32) in
+            if n == 0 then (empty with [256] = 0) with [257] = 0 else
+            let (result,count) = loop (result,count) = (empty,0i32)
+                while count < n do (result with [count] = count,count+1) in
+            (result with [256] = count) with [257] = 0",
+    ] {
+        compile(source);
+        let output = compile_thru_spirv(source).unwrap();
+        let bytes: Vec<_> = output.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let module = spv::parse_u8_slice(&bytes, &spv::Options::default()).unwrap();
+        Validator::new(ValidationFlags::all(), Capabilities::all()).validate(&module).unwrap();
+    }
+}
+
+#[test]
 fn array_updates_preserve_loop_state_and_output_capacity() {
     use crate::host::interface::{Binding, BufferLen};
     for source in [

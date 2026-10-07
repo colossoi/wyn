@@ -170,7 +170,20 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                 }
                 "ScalarExecute" => self.local(scope, selected.values[fields[2]])?,
                 "ScalarInstruction" => {
-                    let arguments = self.arguments(scope, fields[4])?;
+                    let mut arguments = self.arguments(scope, fields[4])?;
+                    let tag = selected.operator(fields[3], arguments.len())?;
+                    if matches!(tag, OpTag::Intrinsic { id, .. }
+                        if id == catalog().known().array_with
+                            || id == catalog().known().array_with_in_place)
+                    {
+                        // A scheduled producer may reside in a read-only storage
+                        // view. Fixed-array updates operate on owned contents,
+                        // not on that descriptor or its shared backing buffer.
+                        let layout = self.compiler.facts.value_layout(selected.values[fields[2]])?;
+                        if self.compiler.facts.enode("ArrayLayout", layout).is_some() {
+                            arguments[0] = self.materialize(arguments[0].clone(), layout)?;
+                        }
+                    }
                     let Some(representation) =
                         self.compiler.facts.lookup("InstructionResult", (selected.values[fields[2]],))
                     else {
@@ -194,7 +207,6 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                     } else {
                         return Err(error("unknown instruction representation"));
                     };
-                    let tag = selected.operator(fields[3], arguments.len())?;
                     if matches!(tag, OpTag::Index) {
                         let [array, index]: [Typed; 2] =
                             arguments.try_into().map_err(|_| error("index needs two operands"))?;
