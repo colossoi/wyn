@@ -142,6 +142,83 @@ fn unrelated_compute_entries_preserve_graphics_inputs_and_resources() {
 }
 
 #[test]
+fn graphics_helper_returns_image_with_inline_array_results() {
+    let source = include_str!("../../testfiles/regressions/render_helper_tuple.wyn");
+    for source in [
+        source.to_string(),
+        source
+            .replace(
+                "([]i32,render_target<vec4f32>)",
+                "{values: []i32, image: render_target<vec4f32>}",
+            )
+            .replace("([1i32,2i32],image)", "{values = [1i32,2i32], image = image}"),
+    ] {
+        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+            let ssa = compile_thru_ssa(&source).unwrap();
+            let program = match format {
+                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+            };
+            let [entry] = program.entries.as_slice() else {
+                panic!("one source entry")
+            };
+            assert_eq!(entry.inputs.len(), 1);
+            assert_eq!(entry.results.len(), 2);
+            assert_eq!(entry.results[1], *entry.inputs.first().unwrap());
+            assert_ne!(entry.results[0], *entry.inputs.first().unwrap());
+            assert!(entry.allocations.iter().any(|allocation|
+                matches!(allocation, Allocation::Buffer { resource, .. } if *resource == entry.results[0])));
+            assert_eq!(
+                entry.operations.iter().filter(|op| matches!(op, Operation::Draw { .. })).count(),
+                1
+            );
+            assert!(entry.operations.iter().any(|op| matches!(op, Operation::Dispatch { .. })));
+            program.to_rust_wgpu("helper_tuple", format).unwrap();
+        }
+    }
+}
+
+#[test]
+fn graphics_result_demands_reuse_inputs_or_materialize_virtual_arrays() {
+    let source = include_str!("../../testfiles/regressions/render_helper_tuple.wyn");
+    for (expression, borrowed) in [
+        ("values", true),
+        ("0i32..<2i32", false),
+        ("map(|x|x+1i32,values)", false),
+    ] {
+        let source = source
+            .replace(
+                "entry reproduce(screen:",
+                "entry reproduce(values: []i32, screen:",
+            )
+            .replace("[1i32,2i32]", expression);
+        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+            let ssa = compile_thru_ssa(&source).unwrap();
+            let program = match format {
+                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+            };
+            let entry = &program.entries[0];
+            assert_eq!(entry.results.len(), 2, "{expression}");
+            assert_eq!(entry.inputs.contains(&entry.results[0]), borrowed, "{expression}");
+            let allocations =
+                entry.allocations.iter().filter(|a| matches!(a, Allocation::Buffer { .. })).count();
+            assert_eq!(allocations, usize::from(!borrowed), "{expression}");
+            assert_eq!(
+                entry.operations.iter().any(|op| matches!(op, Operation::Dispatch { .. })),
+                !borrowed,
+                "{expression}"
+            );
+            assert_eq!(
+                entry.operations.iter().filter(|op| matches!(op, Operation::Draw { .. })).count(),
+                1
+            );
+            program.to_rust_wgpu("result_demands", format).unwrap();
+        }
+    }
+}
+
+#[test]
 fn graphics_compute_helpers_capture_computed_records_and_return_both_arrays() {
     let source = include_str!("../../testfiles/graphics_computed_record_capture.wyn");
     for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {

@@ -140,7 +140,10 @@ fn hoist_soac_arguments(
     (wrap_let_bindings(bindings, app, term_ids), true)
 }
 
-fn flatten_nested_let(term: Term<Empty, Empty>, term_ids: &mut TermIdSource) -> (Term<Empty, Empty>, bool) {
+pub(super) fn flatten_nested_let(
+    term: Term<Empty, Empty>,
+    term_ids: &mut TermIdSource,
+) -> (Term<Empty, Empty>, bool) {
     let is_nested = matches!(
         &term.kind,
         TermKind::Let { rhs, .. } if matches!(rhs.kind, TermKind::Let { .. })

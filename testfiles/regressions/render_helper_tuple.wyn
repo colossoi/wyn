@@ -1,0 +1,10 @@
+def draw(screen: *render_target<vec4f32>) render_target<vec4f32> =
+  let triangles = rasterize_triangles(direct_draw(3u32,1u32),|vi,_,_|
+    vertex_output(if vi == 0u32 then @[-1.0,-1.0,0.0,1.0]
+      else if vi == 1u32 then @[3.0,-1.0,0.0,1.0] else @[-1.0,3.0,0.0,1.0],0.0)) in
+  let background = shade(screen,triangles,|_,_,_,_,_| @[0.0,0.0,0.0,1.0]) in
+  background
+
+entry reproduce(screen: render_target<vec4f32>) ([]i32,render_target<vec4f32>) =
+  let image = draw(screen) in
+  ([1i32,2i32],image)

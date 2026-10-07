@@ -106,6 +106,29 @@ fn compile(directory: &Path, source: &str, target: &str, optimize: bool) -> Resu
 }
 
 #[test]
+fn render_helper_preserves_tuple_results() {
+    let directory = std::env::temp_dir().join(format!("wyn_helper_tuple_{}", std::process::id()));
+    fs::create_dir(&directory).unwrap();
+    let source = include_str!("../../testfiles/regressions/render_helper_tuple.wyn");
+    for target in ["spirv", "wgsl"] {
+        for optimize in [false, true] {
+            let host = compile(&directory, source, target, optimize).unwrap();
+            assert_eq!(host.matches("(gpu-draw ").count(), 1, "{host}");
+            assert_eq!(host.matches("(gpu-alloc ").count(), 1, "{host}");
+            assert!(
+                host.contains(":source-name \"result_0\" :ownership :owned"),
+                "{host}"
+            );
+            assert!(
+                host.contains(":source-name \"screen\" :ownership :borrowed"),
+                "{host}"
+            );
+        }
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn inline_index_arrays_are_materialized_before_the_indexed_draw() {
     let directory = std::env::temp_dir().join(format!("wyn_inline_indices_{}", std::process::id()));
     fs::create_dir(&directory).expect("create test directory");

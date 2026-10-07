@@ -345,7 +345,8 @@ struct ComputedLeaf {
     path: Vec<usize>,
     ty: Type,
     output_name: String,
-    binding: u32,
+    /// Result demands leave storage selection to Egglog.
+    binding: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -713,11 +714,19 @@ fn extract_root(
 /// retaining computed projection aliases so stage planning can preserve their
 /// producer provenance without placing projections in SOAC input positions.
 fn normalize_root_bindings(
-    term: Term,
+    mut term: Term,
     builtins: &InvocationBuiltins,
     term_ids: &mut TermIdSource,
     computed_origins: &mut ProjectionOrigins,
 ) -> Term {
+    // Expose helper operation sequences without splitting ordinary compute regions.
+    if matches!(&term.kind, TermKind::Let { rhs, .. } if contains_graphics_invocation(rhs, builtins)) {
+        let (flattened_term, flattened) = super::soac_anf::flatten_nested_let(term, term_ids);
+        if flattened {
+            return normalize_root_bindings(flattened_term, builtins, term_ids, computed_origins);
+        }
+        term = flattened_term;
+    }
     let Term { id, ty, span, kind } = term;
     let TermKind::Let {
         name,
@@ -898,7 +907,7 @@ fn root_shape<'a>(
                     path,
                     ty,
                     output_name,
-                    binding: binding_ids.next_id(),
+                    binding: Some(binding_ids.next_id()),
                 };
                 leaf
             })
@@ -925,8 +934,9 @@ fn root_shape<'a>(
         target.binding = *target_bindings.get(&target.name)?;
     }
 
+    let results = source_results(current, &computed_origins, root_name, &mut operations, symbols);
     Some(RootShape {
-        results: source_results(current, &computed_origins, root_name),
+        results,
         operations,
         computed,
         computed_origins,
@@ -934,20 +944,25 @@ fn root_shape<'a>(
     })
 }
 
-/// Resolve returned array projections while the source root and its tuple/record
-/// shape are still available. Intermediate compute outputs have no source result.
-fn source_results(
-    term: &Term,
+/// Preserve source result positions and route existing producers to them.
+/// Unnamed expressions become unbound output demands in the same planner.
+fn source_results<'a>(
+    term: &'a Term,
     origins: &ProjectionOrigins,
     root_name: &str,
+    operations: &mut Vec<RootOperation<'a>>,
+    symbols: &mut SymbolTable,
 ) -> Vec<(ProjectionOrigin, interface::SourceResult)> {
-    fn collect(
-        term: &Term,
+    fn collect<'a>(
+        term: &'a Term,
         origins: &ProjectionOrigins,
         name: String,
         kind: host::ResultKind,
         index: &mut usize,
         results: &mut Vec<(ProjectionOrigin, interface::SourceResult)>,
+        operations: &mut Vec<RootOperation<'a>>,
+        symbols: &mut SymbolTable,
+        root_name: &str,
     ) {
         if let TermKind::Tuple(values) = &term.kind {
             let record_fields = match types::strip_existentials(&term.ty) {
@@ -959,13 +974,40 @@ fn source_results(
                     Some(name) => (name.clone(), host::ResultKind::RecordField),
                     None => (format!("result_{field}"), host::ResultKind::TupleField),
                 };
-                collect(value, origins, name, kind, index, results);
+                collect(
+                    value, origins, name, kind, index, results, operations, symbols, root_name,
+                );
             }
             return;
         }
-        if let (Some(origin), Some(leaves)) =
-            (projection_origin(term, origins), computed_leaf_types(&term.ty))
-        {
+        if let Some(leaves) = computed_leaf_types(&term.ty) {
+            let origin = projection_origin(term, origins).unwrap_or_else(|| {
+                // Preserve the expression as a result demand, without choosing a
+                // storage binding. Egglog plans its backing and producer work.
+                let entry_name = format!("{root_name}__result_{}", *index);
+                let entry = symbols.alloc(entry_name.clone());
+                let outputs = leaves
+                    .iter()
+                    .map(|(path, label, ty)| ComputedLeaf {
+                        path: path.clone(),
+                        ty: ty.clone(),
+                        output_name: label.clone(),
+                        binding: None,
+                    })
+                    .collect();
+                operations.push(RootOperation::Compute(ComputeOperation {
+                    symbol: entry,
+                    entry,
+                    ty: term.ty.clone(),
+                    rhs: term,
+                    entry_name,
+                    outputs,
+                }));
+                ProjectionOrigin {
+                    producer: entry,
+                    path: vec![],
+                }
+            });
             let multiple = leaves.len() > 1;
             for (path, label, _) in leaves {
                 let mut projected = origin.clone();
@@ -995,6 +1037,9 @@ fn source_results(
         host::ResultKind::Value,
         &mut index,
         &mut results,
+        operations,
+        symbols,
+        root_name,
     );
     results
 }
@@ -1974,7 +2019,7 @@ fn append_computed_captures(
                 &leaf.path,
                 &leaf.ty,
                 &leaf.output_name,
-                leaf.binding,
+                leaf.binding.expect("named compute captures have a storage binding"),
                 symbols,
                 params,
                 declarations,
@@ -2200,9 +2245,9 @@ fn build_compute_stage(
         .iter()
         .map(|leaf| interface::EntryOutputDecl {
             ty: leaf.ty.clone(),
-            attribute: Some(Attribute::Storage {
+            attribute: leaf.binding.map(|binding| Attribute::Storage {
                 set: AUTO_STORAGE_SET,
-                binding: leaf.binding,
+                binding,
                 layout: interface::StorageLayout::Std430,
                 access: interface::StorageAccess::WriteOnly,
             }),
@@ -2264,7 +2309,9 @@ fn flatten_compute_output(
         }
         return flatten_compute_output_many(body, outputs, symbols, term_ids);
     };
-    if only.path.is_empty() && only.ty == body.ty {
+    // Capture rewriting may refine an array's backing type. Unbound results
+    // retain that type instead of prescribing the source expression's backing.
+    if only.path.is_empty() && (only.binding.is_none() || only.ty == body.ty) {
         return Some(body);
     }
     flatten_compute_output_many(body, outputs, symbols, term_ids)
@@ -2306,7 +2353,7 @@ fn flatten_compute_output_many(
                 );
                 value_ty = component_ty;
             }
-            (value_ty == output.ty).then_some(value)
+            (output.binding.is_none() || value_ty == output.ty).then_some(value)
         })
         .collect::<Option<Vec<_>>>()?;
     let result = if leaves.len() == 1 {
