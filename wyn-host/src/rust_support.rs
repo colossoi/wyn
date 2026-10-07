@@ -20,6 +20,57 @@ impl Display for HostError {
 }
 impl Error for HostError {}
 
+/// CPU-owned parameter bytes and their private shader buffer. Each generated
+/// invocation records a fresh upload, capturing its values for batched calls.
+pub struct ParameterBuffer {
+    bytes: Vec<u8>,
+    buffer: Buffer,
+}
+
+impl ParameterBuffer {
+    /// Create a parameter with the shader's byte layout. Uploads are recorded
+    /// by generated entry functions, so no separate queue write is required.
+    pub fn new(device: &Device, bytes: &[u8]) -> Result<Self, HostError> {
+        if bytes.is_empty() || bytes.len() % 4 != 0 || bytes.len() as u64 > device.limits().max_buffer_size
+        {
+            return Err(HostError::Invalid(
+                "parameter size must be nonzero, four-byte aligned, and within the device limit".into(),
+            ));
+        }
+        let buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("Wyn CPU parameter"),
+            size: bytes.len() as u64,
+            usage: BufferUsages::UNIFORM | BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Ok(Self {
+            bytes: bytes.to_vec(),
+            buffer,
+        })
+    }
+
+    /// Replace the value for subsequent invocations, preserving its ABI size.
+    /// Calls already recorded retain the bytes captured when they were encoded.
+    pub fn set(&mut self, bytes: &[u8]) -> Result<(), HostError> {
+        if bytes.len() != self.bytes.len() {
+            return Err(HostError::Invalid(
+                "parameter update must preserve its byte size".into(),
+            ));
+        }
+        self.bytes.copy_from_slice(bytes);
+        Ok(())
+    }
+
+    pub(super) fn upload<'a>(
+        &'a self,
+        device: &Device,
+        encoder: &mut CommandEncoder,
+    ) -> (&'a [u8], &'a Buffer) {
+        write_buffer(device, encoder, &self.buffer, 0, &self.bytes);
+        (&self.bytes, &self.buffer)
+    }
+}
+
 pub fn scratch_buffer(
     device: &Device,
     buffers: &mut BTreeMap<usize, Buffer>,

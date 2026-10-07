@@ -5,6 +5,12 @@ mod collectives_spv;
 #[path = "collectives_wgsl.rs"]
 mod collectives_wgsl;
 #[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
+#[path = "resolution_sizes_spv.rs"]
+mod resolution_sizes_spv;
+#[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
+#[path = "resolution_sizes_wgsl.rs"]
+mod resolution_sizes_wgsl;
+#[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
 #[path = "sharing_spv.rs"]
 mod sharing_spv;
 #[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
@@ -56,10 +62,12 @@ mod wgsl;
 
 #[cfg(test)]
 mod tests {
-    use super::{collectives_spv, collectives_wgsl, sharing_spv, sharing_wgsl,
-        capture_spv, capture_wgsl, epilogues_spv, epilogues_wgsl, filter_command_spv, filter_command_wgsl,
-        filter_post_spv, filter_post_wgsl, filter_spv, filter_wgsl, setup_spv, setup_wgsl, spv, wgsl,
+    use super::{
+        capture_spv, capture_wgsl, collectives_spv, collectives_wgsl, epilogues_spv, epilogues_wgsl,
+        filter_command_spv, filter_command_wgsl, filter_post_spv, filter_post_wgsl, filter_spv,
+        filter_wgsl, setup_spv, setup_wgsl, sharing_spv, sharing_wgsl, spv, wgsl,
     };
+    use super::{resolution_sizes_spv, resolution_sizes_wgsl};
     use wgpu::util::DeviceExt;
 
     fn input(device: &wgpu::Device, values: &[i32]) -> wgpu::Buffer {
@@ -99,6 +107,77 @@ mod tests {
                 other => panic!("expected buffer, got {other:?}"),
             }
         };
+    }
+
+    #[test]
+    fn resolution_sizes_use_cpu_values_across_recorded_calls() {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+        let surface = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        macro_rules! check {
+            ($module:ident) => {{
+                let mut context = $module::HostContext::new(&device).unwrap();
+                // The parameter owns its buffer; callers supply only CPU values.
+                let mut frame = $module::ParameterBuffer::new(&device, &[0; 48]).unwrap();
+                let mut encoder = device.create_command_encoder(&Default::default());
+                let mut outputs = Vec::new();
+                for (w, h) in [(17i32, 9i32), (8, 16), (129, 33), (0, 0)] {
+                    let mut bytes = vec![0; 48];
+                    bytes[16..20].copy_from_slice(&(w as f32).to_le_bytes());
+                    bytes[20..24].copy_from_slice(&(h as f32).to_le_bytes());
+                    frame.set(&bytes).unwrap();
+                    let output =
+                        $module::encode_sizes(&mut context, &mut encoder, &frame, &surface)
+                            .unwrap();
+                    outputs.push((
+                        output,
+                        [
+                            w * h,
+                            ((w + 7) / 8) * ((h + 7) / 8),
+                            ((w + 1) / 2) * ((h + 1) / 2),
+                        ],
+                    ));
+                }
+                // Updating or dropping the object cannot change already recorded calls.
+                frame.set(&[0; 48]).unwrap();
+                assert!(frame.set(&[0; 16]).is_err());
+                drop(frame);
+                queue.submit(Some(encoder.finish()));
+                for (output, lengths) in outputs {
+                    for (index, length) in lengths.into_iter().enumerate() {
+                        let result = read(&device, &queue, buffer!($module, output, index));
+                        assert_eq!(result.len(), length.max(1) as usize);
+                        assert_eq!(
+                            &result[..length as usize],
+                            &(0..length).map(|i| i + index as i32 + 1).collect::<Vec<_>>()
+                        );
+                    }
+                }
+                let mut encoder = device.create_command_encoder(&Default::default());
+                // Both the host projections (24 bytes) and full shader layout (48) must fit.
+                for bytes in [16, 24] {
+                    let short = $module::ParameterBuffer::new(&device, &vec![0; bytes]).unwrap();
+                    assert!($module::encode_sizes(&mut context, &mut encoder, &short, &surface).is_err());
+                }
+                assert!($module::ParameterBuffer::new(&device, &[0; 3]).is_err());
+            }};
+        }
+        check!(resolution_sizes_spv);
+        check!(resolution_sizes_wgsl);
     }
 
     #[test]
@@ -329,16 +408,15 @@ mod tests {
             let output = wgsl::host_grouped(&mut wgsl, &queue, &xs, &scalar, &scalar).unwrap();
             assert_eq!(read(&device, &queue, buffer!(wgsl, output)), expected);
         }
-        // WGSL scalar inputs are GPU uniforms. These entries exercise the
-        // submitting API's readback boundary and subsequent recorded upload.
-        let n = input(&device, &[4]);
+        // Host expressions retain the CPU values used for WGSL parameter blocks.
+        let n = wgsl::ParameterBuffer::new(&device, &4i32.to_le_bytes()).unwrap();
         let output = wgsl::host_dynamic(&mut wgsl, &queue, &n).unwrap();
         assert_eq!(
             read(&device, &queue, buffer!(wgsl, output)),
             (0..11).collect::<Vec<_>>()
         );
-        for bias in [2, 3] {
-            let scalar = input(&device, &[bias]);
+        for bias in [2i32, 3] {
+            let scalar = wgsl::ParameterBuffer::new(&device, &bias.to_le_bytes()).unwrap();
             let output = wgsl::host_affine(&mut wgsl, &queue, &xs, &scalar).unwrap();
             assert_eq!(
                 read(&device, &queue, buffer!(wgsl, output)),
@@ -371,9 +449,15 @@ mod tests {
                     let actual: Vec<_> =
                         (0..3).map(|i| read(&device, &queue, buffer!(epilogues_spv, output, i))).collect();
                     assert_eq!(actual, expected);
-                    let output =
-                        epilogues_wgsl::host_attached(&mut attached_wgsl, &queue, &xs, &parameters, &parameters, &parameters)
-                            .unwrap();
+                    let output = epilogues_wgsl::host_attached(
+                        &mut attached_wgsl,
+                        &queue,
+                        &xs,
+                        &parameters,
+                        &parameters,
+                        &parameters,
+                    )
+                    .unwrap();
                     let actual: Vec<_> =
                         (0..3).map(|i| read(&device, &queue, buffer!(epilogues_wgsl, output, i))).collect();
                     assert_eq!(actual, expected);
@@ -442,7 +526,7 @@ mod tests {
                     .collect();
                 let expected: Vec<_> = values[..n as usize].iter().copied().filter(|x| *x > 0).collect();
                 let xs = input(&device, &values);
-                let scalar = input(&device, &[n]);
+                let scalar = filter_wgsl::ParameterBuffer::new(&device, &n.to_le_bytes()).unwrap();
                 let output = filter_spv::host_filtered(&mut spv, &queue, &xs, &n.to_le_bytes()).unwrap();
                 assert_eq!(
                     read(&device, &queue, buffer!(filter_spv, output, 0)),
@@ -453,7 +537,8 @@ mod tests {
                     expected
                 );
                 // WGSL publishes a uniform parameter block for each filter stage.
-                let output = filter_wgsl::host_filtered(&mut wgsl, &queue, &xs, &scalar).unwrap();
+                let output =
+                    filter_wgsl::host_filtered(&mut wgsl, &queue, &xs, &scalar).unwrap();
                 assert_eq!(
                     read(&device, &queue, buffer!(filter_wgsl, output, 0)),
                     vec![expected.len() as i32]
@@ -475,8 +560,14 @@ mod tests {
                     records,
                     "SPIR-V n={n}, pattern={pattern}"
                 );
-                let output =
-                    filter_post_wgsl::host_post_mapped(&mut post_wgsl, &queue, &xs, &scalar).unwrap();
+                let scalar = filter_post_wgsl::ParameterBuffer::new(&device, &n.to_le_bytes()).unwrap();
+                let output = filter_post_wgsl::host_post_mapped(
+                    &mut post_wgsl,
+                    &queue,
+                    &xs,
+                    &scalar,
+                )
+                .unwrap();
                 assert_eq!(
                     read(&device, &queue, buffer!(filter_post_wgsl, output, 0)),
                     vec![expected.len() as i32]
@@ -497,8 +588,14 @@ mod tests {
                     &read(&device, &queue, buffer!(filter_command_spv, output, 1))[..expected.len()],
                     expected
                 );
-                let output =
-                    filter_command_wgsl::host_command(&mut command_wgsl, &queue, &xs, &scalar).unwrap();
+                let scalar = filter_command_wgsl::ParameterBuffer::new(&device, &n.to_le_bytes()).unwrap();
+                let output = filter_command_wgsl::host_command(
+                    &mut command_wgsl,
+                    &queue,
+                    &xs,
+                    &scalar,
+                )
+                .unwrap();
                 assert_eq!(
                     read(&device, &queue, buffer!(filter_command_wgsl, output, 0)),
                     [36, expected.len() as i32, 0, 0]

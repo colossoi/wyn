@@ -6,7 +6,7 @@ $workspace = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $outDir = Join-Path $workspace 'tmp/rust-host-gpu'
 $null = New-Item -ItemType Directory -Force -Path $outDir
 $wyn = if ($Compiler) { (Resolve-Path -LiteralPath $Compiler).Path } else { Join-Path $workspace 'target/debug/wyn.exe' }
-foreach ($fixture in @('batching', 'filter', 'filter_post', 'filter_command', 'epilogues', 'capture', 'setup', 'collectives', 'sharing')) {
+foreach ($fixture in @('batching', 'filter', 'filter_post', 'filter_command', 'epilogues', 'capture', 'setup', 'collectives', 'sharing', 'resolution_sizes')) {
     $name = switch ($fixture) {
         'epilogues' { 'scalar_epilogues' }
         'capture' { 'tinyporto_capture_handoff' }
@@ -14,9 +14,10 @@ foreach ($fixture in @('batching', 'filter', 'filter_post', 'filter_command', 'e
         default { "rust_host_$fixture" }
     }
     $source = Join-Path $workspace "testfiles/$name.wyn"
+    $graphics = @(if ($fixture -eq 'resolution_sizes') { '--graphics' })
     foreach ($format in @('spirv', 'wgsl')) {
         $suffix = if ($format -eq 'spirv') { 'spv' } else { 'wgsl' }
-        & $wyn build -O --target $format --target-double rust-wgpu --max-warnings 0 $source -o (Join-Path $outDir "$($fixture)_$suffix.$suffix")
+        & $wyn build -O @graphics --target $format --target-double rust-wgpu --max-warnings 0 $source -o (Join-Path $outDir "$($fixture)_$suffix.$suffix")
         if ($LASTEXITCODE -ne 0) { throw "Host compilation failed: $fixture / $format" }
     }
 }
@@ -33,5 +34,5 @@ path = "lib.rs"
 wgpu = { version = "27", features = ["spirv"] }
 pollster = "0.3"
 '@ | Set-Content -LiteralPath (Join-Path $outDir 'Cargo.toml')
-& cargo test --manifest-path (Join-Path $outDir 'Cargo.toml') --offline -- --nocapture
+& cargo test --manifest-path (Join-Path $outDir 'Cargo.toml') --offline -- --nocapture --test-threads=1
 if ($LASTEXITCODE -ne 0) { throw 'Generated Rust host GPU tests failed' }

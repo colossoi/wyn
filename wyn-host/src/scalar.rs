@@ -63,6 +63,14 @@ pub enum ScalarExpr {
         offset: u32,
         ty: ScalarType,
     },
+    /// An entry parameter supplied by the CPU. Preserve that origin when its
+    /// shader ABI is a uniform/storage buffer, so host expressions do not
+    /// confuse a parameter projection with a device-produced scalar.
+    Parameter {
+        source: ScalarSource,
+        offset: u32,
+        ty: ScalarType,
+    },
     Apply {
         op: String,
         /// Operand type; comparisons return a boolean.
@@ -103,24 +111,25 @@ pub struct ScalarTask {
 }
 
 impl ScalarExpr {
-    pub fn sources<'a>(&'a self, out: &mut Vec<&'a ScalarSource>) {
+    /// Visit every expression, including conditional arms and loop scopes.
+    pub(crate) fn visit<'a>(&'a self, visit: &mut impl FnMut(&'a Self)) {
+        visit(self);
         match self {
-            Self::Read { source, .. } | Self::BufferLength { source, .. } => out.push(source),
             Self::Apply { args, .. } | Self::Tuple(args) => {
                 for arg in args {
-                    arg.sources(out);
+                    arg.visit(visit);
                 }
             }
             Self::If { condition, yes, no } => {
-                condition.sources(out);
-                yes.sources(out);
-                no.sources(out);
+                condition.visit(visit);
+                yes.visit(visit);
+                no.visit(visit);
             }
             Self::Let { bindings, result } => {
                 for (_, value) in bindings {
-                    value.sources(out);
+                    value.visit(visit);
                 }
-                result.sources(out);
+                result.visit(visit);
             }
             Self::Loop {
                 initial,
@@ -128,18 +137,29 @@ impl ScalarExpr {
                 step,
                 ..
             } => {
-                initial.sources(out);
-                condition.sources(out);
-                step.sources(out);
+                initial.visit(visit);
+                condition.visit(visit);
+                step.visit(visit);
             }
-            Self::Field { tuple, .. } => tuple.sources(out),
-            Self::I32(_) | Self::U32(_) | Self::F32(_) | Self::Bool(_) | Self::Local(_) => {}
+            Self::Field { tuple, .. } => tuple.visit(visit),
+            _ => {}
         }
+    }
+
+    pub fn sources<'a>(&'a self, out: &mut Vec<&'a ScalarSource>) {
+        self.visit(&mut |value| match value {
+            Self::Read { source, .. }
+            | Self::Parameter { source, .. }
+            | Self::BufferLength { source, .. } => out.push(source),
+            _ => {}
+        });
     }
 
     pub fn reads_mut(&mut self, visit: &mut impl FnMut(&mut ScalarSource, &mut u32)) {
         match self {
-            Self::Read { source, offset, .. } => visit(source, offset),
+            Self::Read { source, offset, .. } | Self::Parameter { source, offset, .. } => {
+                visit(source, offset)
+            }
             Self::BufferLength { source, .. } => visit(source, &mut 0),
             Self::Apply { args, .. } | Self::Tuple(args) => {
                 for arg in args {

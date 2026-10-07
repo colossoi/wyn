@@ -544,9 +544,24 @@ fn filters_emit_stable_workgroup_compaction() {
 }
 
 #[test]
-#[ignore = "tuple-with-boolean filters fail host-extent lowering"]
 fn filters_of_tuples_with_boolean_fields() {
     shaders("entry kept(xs:[]i32) [](i32,bool)=filter(|(x,b)|b,map(|x|(x,x>0),xs))");
+}
+
+#[test]
+fn projected_tuple_arrays_preserve_their_extents() {
+    for source in [
+        "entry kept(xs:[]i32) [](i32,i32)=filter(|(x,y)|x>0,map(|x|(x,x+1),xs))",
+        "entry kept(xs:[]i32) i32=length(filter(|(x,y)|x>0,map(|x|(x,x+1),xs)))",
+        "entry kept(xs:[]i32) []i32=map(|(x,y)|x+y,filter(|(x,y)|x>0,map(|x|(x,x+1),xs)))",
+        "entry kept(xs:[]i32,ys:[]i32) ([]i32,[]i32)=(xs,ys)",
+        "entry kept(xs:[]i32) ([]i32,[]i32)=(xs,map(|(x,y)|y,filter(|(x,y)|x>0,map(|x|(x,x+1),xs))))",
+        "entry kept(xs:[4]i32) [4](i32,i32)=map(|x|(x,x+1),xs)",
+        "entry kept() ([1]i32,[3]i32)=([1],[2,3,4])",
+        "entry kept(xs:[]i32) [](i32,(bool,i32))=filter(|(x,p)|x>0,map(|x|(x,(x>1,x+1)),xs))",
+    ] {
+        shaders(source);
+    }
 }
 
 #[test]

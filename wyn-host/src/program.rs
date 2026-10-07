@@ -57,7 +57,79 @@ pub enum Expr {
     Max(Box<Expr>, Box<Expr>),
 }
 
+/// Resource references and host arguments collected together while walking an
+/// expression. Zero CPU bytes means that only the resource itself is needed.
+#[derive(Default)]
+struct Dependencies {
+    resources: BTreeSet<ResourceId>,
+    host_inputs: BTreeMap<ResourceId, u64>,
+    scalar_inputs: BTreeSet<String>,
+}
+
+impl Dependencies {
+    fn resource(&mut self, id: ResourceId, host_bytes: u64) {
+        self.resources.insert(id);
+        if host_bytes > 0 {
+            self.host_inputs
+                .entry(id)
+                .and_modify(|bytes| *bytes = (*bytes).max(host_bytes))
+                .or_insert(host_bytes);
+        }
+    }
+
+    fn extend(&mut self, other: Self) {
+        self.resources.extend(other.resources);
+        self.scalar_inputs.extend(other.scalar_inputs);
+        for (id, bytes) in other.host_inputs {
+            self.resource(id, bytes);
+        }
+    }
+
+    fn scalar(
+        &mut self,
+        value: &ScalarExpr,
+        resolve: impl Fn(&ScalarSource) -> Result<ResourceId, HostError>,
+    ) -> Result<(), HostError> {
+        let mut sources = Vec::new();
+        value.visit(&mut |value| match value {
+            ScalarExpr::Parameter { source, offset, .. } => sources.push((source, u64::from(*offset) + 4)),
+            ScalarExpr::Read { source, .. } | ScalarExpr::BufferLength { source, .. } => {
+                sources.push((source, 0))
+            }
+            _ => {}
+        });
+        for (source, bytes) in sources {
+            self.resource(resolve(source)?, bytes);
+        }
+        Ok(())
+    }
+}
+
 impl Expr {
+    fn dependencies(&self, result: &mut Dependencies) -> Result<(), HostError> {
+        match self {
+            Self::Scalar(value) => result.scalar(value, ScalarSource::resource)?,
+            Self::BufferLength { source, .. } => result.resource(source.resource()?, 0),
+            Self::BufferSize(id)
+            | Self::ReadScalar { resource: id, .. }
+            | Self::TextureDimension { resource: id, .. } => result.resource(*id, 0),
+            Self::Input(name) => {
+                result.scalar_inputs.insert(name.clone());
+            }
+            Self::Subtract(a, b)
+            | Self::Multiply(a, b)
+            | Self::Floor(a, b)
+            | Self::Ceiling(a, b)
+            | Self::Min(a, b)
+            | Self::Max(a, b) => {
+                a.dependencies(result)?;
+                b.dependencies(result)?;
+            }
+            Self::Integer(_) => {}
+        }
+        Ok(())
+    }
+
     pub fn multiply(self, rhs: Self) -> Self {
         Self::Multiply(Box::new(self), Box::new(rhs))
     }
@@ -96,60 +168,6 @@ impl Expr {
                 right.reads_mut(visit);
             }
             _ => {}
-        }
-    }
-
-    pub(crate) fn resources(&self, result: &mut BTreeSet<ResourceId>) -> Result<(), HostError> {
-        match self {
-            Self::Scalar(value) => {
-                let mut sources = Vec::new();
-                value.sources(&mut sources);
-                for source in sources {
-                    result.insert(source.resource()?);
-                }
-            }
-            Self::BufferLength { source, .. } => {
-                result.insert(source.resource()?);
-            }
-            Self::BufferSize(id)
-            | Self::ReadScalar { resource: id, .. }
-            | Self::TextureDimension { resource: id, .. } => {
-                result.insert(*id);
-            }
-            Self::Subtract(a, b)
-            | Self::Multiply(a, b)
-            | Self::Floor(a, b)
-            | Self::Ceiling(a, b)
-            | Self::Min(a, b)
-            | Self::Max(a, b) => {
-                a.resources(result)?;
-                b.resources(result)?;
-            }
-            Self::Integer(_) | Self::Input(_) => {}
-        }
-        Ok(())
-    }
-
-    pub(crate) fn inputs(&self, result: &mut BTreeSet<String>) {
-        match self {
-            Self::Input(name) => {
-                result.insert(name.clone());
-            }
-            Self::Subtract(a, b)
-            | Self::Multiply(a, b)
-            | Self::Floor(a, b)
-            | Self::Ceiling(a, b)
-            | Self::Min(a, b)
-            | Self::Max(a, b) => {
-                a.inputs(result);
-                b.inputs(result);
-            }
-            Self::Scalar(_)
-            | Self::BufferLength { .. }
-            | Self::Integer(_)
-            | Self::BufferSize(_)
-            | Self::ReadScalar { .. }
-            | Self::TextureDimension { .. } => {}
         }
     }
 }
@@ -208,6 +226,10 @@ pub enum Operation {
 pub struct Entry {
     pub name: String,
     pub inputs: BTreeSet<ResourceId>,
+    /// CPU parameter dependencies and their minimum byte spans. Includes push
+    /// constants; buffer-backed parameters additionally retain a GPU binding.
+    /// Derived from host expressions, independently of either output language.
+    pub host_inputs: BTreeMap<ResourceId, u64>,
     pub scalar_inputs: BTreeSet<String>,
     pub allocations: Vec<Allocation>,
     pub operations: Vec<Operation>,
@@ -304,6 +326,7 @@ impl Program {
             let entry = entries.entry(owner.clone()).or_insert_with(|| Entry {
                 name: owner,
                 inputs: BTreeSet::new(),
+                host_inputs: BTreeMap::new(),
                 scalar_inputs: BTreeSet::new(),
                 allocations: vec![],
                 operations: vec![],
@@ -336,6 +359,7 @@ impl Program {
             entries.entry(result.entry.clone()).or_insert_with(|| Entry {
                 name: result.entry.clone(),
                 inputs: BTreeSet::new(),
+                host_inputs: BTreeMap::new(),
                 scalar_inputs: BTreeSet::new(),
                 allocations: vec![],
                 operations: vec![],
@@ -343,7 +367,6 @@ impl Program {
             });
         }
         for (_, mut entry) in entries {
-            program.prepare_entry(&mut entry)?;
             let stages = &entry_stages[&entry.name];
             let mut loops = BTreeMap::new();
             let mut members = BTreeSet::new();
@@ -409,6 +432,7 @@ impl Program {
                 }
             }
             entry.operations = operations;
+            program.prepare_entry(&mut entry)?;
             program.entries.push(entry);
         }
         Ok(program)
@@ -536,17 +560,37 @@ impl Program {
                         "missing scalar at push offset {offset}"
                     )));
                 };
-                Ok(Expr::ReadScalar {
-                    resource: self.binding_resource(pipeline, index)?,
+                Ok(Expr::Scalar(ScalarExpr::Parameter {
+                    source: ScalarSource::Resource(self.binding_resource(pipeline, index)?),
                     offset: offset - base,
-                    signed: false,
+                    ty: crate::ScalarType::U32,
+                }))
+            }
+            DispatchLen::StorageBuffer { set, binding, offset } => {
+                let resource = self.slot_resource(pipeline, set, binding)?;
+                let parameter = match self.resource_binding(resource) {
+                    Some(Binding::Uniform { .. }) => true,
+                    Some(Binding::StorageBuffer {
+                        usage: BufferUsage::Input,
+                        members,
+                        ..
+                    }) => !members.is_empty(),
+                    _ => false,
+                };
+                Ok(if parameter {
+                    Expr::Scalar(ScalarExpr::Parameter {
+                        source: ScalarSource::Resource(resource),
+                        offset,
+                        ty: crate::ScalarType::U32,
+                    })
+                } else {
+                    Expr::ReadScalar {
+                        resource,
+                        offset,
+                        signed: false,
+                    }
                 })
             }
-            DispatchLen::StorageBuffer { set, binding, offset } => Ok(Expr::ReadScalar {
-                resource: self.slot_resource(pipeline, set, binding)?,
-                offset,
-                signed: false,
-            }),
             DispatchLen::StorageImage { set, binding } => {
                 let resource = self.slot_resource(pipeline, set, binding)?;
                 Ok(Expr::TextureDimension { resource, axis: 0 }
@@ -594,24 +638,44 @@ impl Program {
     }
 
     fn prepare_entry(&self, entry: &mut Entry) -> Result<(), HostError> {
-        let mut used = BTreeSet::new();
+        let mut dependencies = Dependencies::default();
         let mut pipelines = BTreeSet::new();
-        for op in &entry.operations {
+        let mut operations: Vec<_> = entry.operations.iter().collect();
+        while let Some(op) = operations.pop() {
             let pipeline = match op {
                 Operation::Dispatch { pipeline, groups, .. } => {
                     for e in groups {
-                        e.resources(&mut used)?;
-                        e.inputs(&mut entry.scalar_inputs);
+                        e.dependencies(&mut dependencies)?;
                     }
                     *pipeline
                 }
-                Operation::Draw { pipeline }
-                | Operation::Scalar { pipeline, .. }
-                | Operation::Loop { pipeline, .. } => *pipeline,
+                Operation::Scalar { pipeline, task } => {
+                    dependencies.scalar(&self.interface.scalar_tasks[*task].value, |source| {
+                        self.scalar_resource(*pipeline, source)
+                    })?;
+                    *pipeline
+                }
+                Operation::Loop {
+                    pipeline,
+                    region,
+                    setup,
+                    body,
+                } => {
+                    let repeated = &self.interface.dispatch_loops[*region];
+                    for value in [&repeated.initial_length, &repeated.count] {
+                        dependencies.scalar(value, |source| self.scalar_resource(*pipeline, source))?;
+                    }
+                    operations.extend(setup);
+                    operations.extend(body);
+                    *pipeline
+                }
+                Operation::Draw { pipeline } => *pipeline,
             };
-            pipelines.insert(pipeline);
+            if !pipelines.insert(pipeline) {
+                continue;
+            }
             for index in 0..self.bindings(pipeline).len() {
-                used.insert(self.binding_resource(pipeline, index)?);
+                dependencies.resources.insert(self.binding_resource(pipeline, index)?);
             }
             if let Pipeline::Graphics(g) = &self.interface.pipelines[pipeline] {
                 for a in &g.vertex_inputs {
@@ -620,10 +684,10 @@ impl Program {
                     else {
                         return Err(HostError::Invalid(format!("missing vertex input {}", a.name)));
                     };
-                    used.insert(ResourceId(id));
+                    dependencies.resources.insert(ResourceId(id));
                 }
                 if g.invocation.fragment_state.depth_test != DepthTest::Disabled {
-                    used.insert(self.depth_target(pipeline)?);
+                    dependencies.resources.insert(self.depth_target(pipeline)?);
                 }
                 for target in &g.fragment_outputs {
                     let Some(id) = self.interface.frame_graph.resources.iter().position(|r| {
@@ -638,13 +702,13 @@ impl Program {
                             target.name
                         )));
                     };
-                    used.insert(ResourceId(id));
+                    dependencies.resources.insert(ResourceId(id));
                 }
                 if let Some(reference) = g.invocation.draw.indices() {
-                    used.insert(self.draw_resource(pipeline, reference)?);
+                    dependencies.resources.insert(self.draw_resource(pipeline, reference)?);
                 }
                 if let Some(reference) = g.invocation.draw.indirect_commands() {
-                    used.insert(self.draw_resource(pipeline, reference)?);
+                    dependencies.resources.insert(self.draw_resource(pipeline, reference)?);
                 }
                 match &g.invocation.draw {
                     DrawCall::Indexed {
@@ -652,7 +716,7 @@ impl Program {
                         indices,
                         ..
                     } => {
-                        entry.scalar_inputs.insert(format!(
+                        dependencies.scalar_inputs.insert(format!(
                             "count-resource-{}",
                             self.draw_resource(pipeline, indices)?.0
                         ));
@@ -667,7 +731,7 @@ impl Program {
                         commands,
                         ..
                     } => {
-                        entry.scalar_inputs.insert(format!(
+                        dependencies.scalar_inputs.insert(format!(
                             "count-resource-{}",
                             self.draw_resource(pipeline, commands)?.0
                         ));
@@ -701,35 +765,44 @@ impl Program {
                 }
             }
         }
-        used.extend(entry.results.iter().copied());
+        dependencies.resources.extend(entry.results.iter().copied());
         let mut pending = BTreeMap::new();
-        for id in used.clone() {
+        for id in dependencies.resources.clone() {
             if let Some(allocation) = self.allocation(id, &pipelines)? {
+                let mut required = Dependencies::default();
                 for expr in allocation.expressions() {
-                    expr.resources(&mut used)?;
-                    expr.inputs(&mut entry.scalar_inputs);
+                    expr.dependencies(&mut required)?;
                 }
-                pending.insert(id, allocation);
+                let refs = required.resources.clone();
+                dependencies.extend(required);
+                pending.insert(id, (allocation, refs));
             }
         }
-        entry.inputs = used.difference(&pending.keys().copied().collect()).copied().collect();
+        entry.inputs =
+            dependencies.resources.difference(&pending.keys().copied().collect()).copied().collect();
+        for &id in dependencies.host_inputs.keys() {
+            if !entry.inputs.contains(&id)
+                || !matches!(
+                    self.interface.frame_graph.resources[id.0].kind,
+                    FrameResourceKind::StorageBuffer
+                        | FrameResourceKind::Uniform
+                        | FrameResourceKind::PushConstant
+                )
+            {
+                return Err(HostError::Invalid(
+                    "CPU parameter is not an entry buffer input".into(),
+                ));
+            }
+        }
+        entry.host_inputs = dependencies.host_inputs;
+        entry.scalar_inputs = dependencies.scalar_inputs;
         let mut available = entry.inputs.clone();
         while !pending.is_empty() {
-            let mut next = None;
-            for (&id, allocation) in &pending {
-                let mut refs = BTreeSet::new();
-                for expression in allocation.expressions() {
-                    expression.resources(&mut refs)?;
-                }
-                if refs.is_subset(&available) {
-                    next = Some(id);
-                    break;
-                }
-            }
+            let next = pending.iter().find_map(|(&id, (_, refs))| refs.is_subset(&available).then_some(id));
             let Some(id) = next else {
                 return Err(HostError::Invalid("cyclic resource allocation sizes".into()));
             };
-            let Some(allocation) = pending.remove(&id) else {
+            let Some((allocation, _)) = pending.remove(&id) else {
                 return Err(HostError::Invalid("missing planned allocation".into()));
             };
             available.insert(id);

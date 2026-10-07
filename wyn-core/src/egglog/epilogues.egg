@@ -13,6 +13,10 @@
 (ruleset output-blockers)
 (ruleset output-select)
 (ruleset output-fallback)
+; Track returned lengths before choosing an output writer. Copying a projected
+; compacted component reads the parent's stored count as well as its elements.
+(rule ((ReturnArray output array))
+      ((LengthReference array array)) :ruleset residency)
 (rule ((Produces stage value) (PhaseDomain stage (Fixed 1) 1))
       ((EpilogueValue stage value)) :ruleset output-candidates)
 ; Compaction publishes its count in lane zero. Its element output is written

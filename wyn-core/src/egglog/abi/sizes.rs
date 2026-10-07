@@ -79,7 +79,7 @@ pub(in crate::egglog) fn dispatch(
             binding,
             elem_bytes: stride,
         },
-        Expr::Scalar(ScalarExpr::Read {
+        Expr::Scalar(ScalarExpr::Parameter {
             source: ScalarSource::PushConstant { offset: base, .. },
             offset,
             ..

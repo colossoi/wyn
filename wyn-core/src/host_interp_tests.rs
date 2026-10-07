@@ -18,6 +18,12 @@ fn interprets_emitted_size_calculation_before_allocating_and_dispatching() {
     let input = backend.input(7i32.to_le_bytes().to_vec());
     let result = program.run("main", &[input], &mut backend).unwrap();
     assert_eq!(backend.buffers[&result.handle().unwrap()].len(), 68);
+    assert!(!backend.host_reads.is_empty());
+    assert!(backend.device_reads.is_empty());
+    assert_eq!(
+        program.entry("main").unwrap().parameters[0].host_bytes().unwrap(),
+        Some(4)
+    );
     assert!(!backend.dispatches.is_empty());
 }
 

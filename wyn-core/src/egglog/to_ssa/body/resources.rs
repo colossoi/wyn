@@ -160,7 +160,12 @@ impl Body<'_, '_, '_> {
             return self.source_array(scope, actual);
         }
         if let Some((parent, field)) = self.compiler.facts.projection(source) {
-            if self.compiler.facts.source_type(parent).is_some_and(|ty| types::as_soa_tuple(ty).is_some()) {
+            if self
+                .compiler
+                .facts
+                .source_type(parent)
+                .is_some_and(|ty| types::as_soa_tuple(types::strip_existentials(ty)).is_some())
+            {
                 let (array, mut fields) = self.source_array(scope, parent)?;
                 if fields.is_empty() && types::as_soa_tuple(&array.ty).is_some() {
                     return Ok((self.field(array, field)?, fields));

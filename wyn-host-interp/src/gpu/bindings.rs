@@ -168,6 +168,11 @@ impl WgpuBackend {
             )));
         }
         for (parameter, value) in declaration.parameters.iter().zip(arguments) {
+            if matches!(self.resource(value)?, Resource::ParameterBuffer { .. })
+                && parameter.access.as_deref() != Some(":read")
+            {
+                return Err(gpu_error("CPU parameter buffers cannot be written by shaders"));
+            }
             if let Some(minimum) = parameter.minimum_bytes()? {
                 if self.buffer_size(value)? < minimum {
                     return Err(gpu_error(format!(
@@ -190,7 +195,9 @@ impl WgpuBackend {
                 continue;
             }
             let resource = match self.resource(value)? {
-                Resource::Buffer(buffer, _) => buffer.as_entire_binding(),
+                Resource::Buffer(buffer, _) | Resource::ParameterBuffer { buffer, .. } => {
+                    buffer.as_entire_binding()
+                }
                 Resource::View { view, .. } => BindingResource::TextureView(view),
                 Resource::Sampler(sampler) => BindingResource::Sampler(sampler),
                 Resource::Texture(_) => return Err(gpu_error("shader texture arguments require a view")),

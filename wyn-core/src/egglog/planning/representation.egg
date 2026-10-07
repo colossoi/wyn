@@ -56,6 +56,11 @@
        (= extent (ViewExtent value)) (= count (LocalCapacity extent))
        (SourceArrayElement ty element) (= layout (BoundaryLayout element)))
       ((set (ValueRepresentation value) (ArrayLayout count layout))) :ruleset representations)
+; Components projected from a stored array share that array's logical length.
+; An ordinary tuple of independently sized arrays has no ReadView for the tuple.
+(rule ((Projection e array i) (= (ValueRead array) (ReadView value))
+       (= ty (SourceType e)) (SourceArrayElement ty element) (= n (ViewExtent array)))
+      ((set (ViewExtent e) n)) :ruleset residency)
 ; A fixed logical dimension comes from its type. A dynamic dimension comes
 ; from the selected view, including slices and compacted live counts.
 (function LogicalExtent (SourceValue) Extent :no-merge)

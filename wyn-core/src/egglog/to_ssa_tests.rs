@@ -915,9 +915,9 @@ fn host_sized_outputs_publish_uniform_dependencies_and_storage_stride() {
         assert!(matches!(source, ScalarSource::Binding { .. }));
         reads.push(*offset);
     });
-    // Reading an aggregate may also read its other fields; both used vector
-    // components must have the std140 offsets, not packed scalar offsets.
-    assert!(reads.contains(&16) && reads.contains(&20), "{reads:?}");
+    // Project the two needed components before emitting parameter reads. Keep
+    // std140 offsets and do not touch padding or the unused resolution.z.
+    assert_eq!(reads, [16, 20]);
     let whl = output.program.to_whl("uniform.wgsl", host::ShaderFormat::Wgsl).unwrap();
     assert!(whl.contains("wyn-f32-to-i32"));
 }

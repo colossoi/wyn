@@ -58,7 +58,7 @@ impl WgpuBackend {
                 arity(args, 1)?;
                 Ok(Value::Number(Number::U64(self.buffer_size(&args[0])?)))
             }
-            "gpu-read-scalar" => {
+            "gpu-read-scalar" | "host-read-scalar" => {
                 arity(args, 3)?;
                 let ty = args[2].text()?;
                 let size = scalar_size(ty)?;
@@ -66,7 +66,19 @@ impl WgpuBackend {
                 if offset % size != 0 {
                     return Err(gpu_error("misaligned scalar read"));
                 }
-                let bytes = self.read_buffer(&args[0], offset, size)?;
+                let bytes = if name == "host-read-scalar" {
+                    let end =
+                        offset.checked_add(size).ok_or_else(|| gpu_error("CPU scalar range overflow"))?;
+                    let storage = self.parameter_bytes(&args[0])?;
+                    let start = usize::try_from(offset).map_err(gpu_error)?;
+                    let end = usize::try_from(end).map_err(gpu_error)?;
+                    storage
+                        .get(start..end)
+                        .ok_or_else(|| gpu_error("scalar lies outside its CPU byte span"))?
+                        .to_vec()
+                } else {
+                    self.read_buffer(&args[0], offset, size)?
+                };
                 let value = match ty {
                     "i8" => Number::I32(i32::from(bytes[0] as i8)),
                     "u8" => Number::U32(bytes[0].into()),
@@ -163,6 +175,9 @@ impl WgpuBackend {
                 }
                 if size == 0 {
                     return Ok(Value::Nil);
+                }
+                if matches!(self.resource(destination)?, Resource::ParameterBuffer { .. }) {
+                    return Err(gpu_error("CPU parameter buffers must be updated with CPU bytes"));
                 }
                 if source == destination && src < dst_end && dst < src_end {
                     return Err(gpu_error("overlapping buffer copy"));

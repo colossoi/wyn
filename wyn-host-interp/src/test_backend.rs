@@ -8,6 +8,8 @@ pub struct Trace {
     pub dispatches: Vec<(String, Vec<u32>)>,
     pub freed: Vec<u64>,
     pub scalar_writes: Vec<(u64, [u8; 4])>,
+    pub host_reads: Vec<(u64, u64)>,
+    pub device_reads: Vec<(u64, u64)>,
 }
 
 impl Trace {
@@ -29,7 +31,13 @@ impl Backend for Trace {
                 self.buffers.remove(&id);
                 Value::Nil
             }
-            "gpu-read-scalar" => {
+            "gpu-read-scalar" | "host-read-scalar" => {
+                let read = (args[0].handle()?, args[1].u64()?);
+                if name == "host-read-scalar" {
+                    self.host_reads.push(read);
+                } else {
+                    self.device_reads.push(read);
+                }
                 let bytes = &self.buffers[&args[0].handle()?];
                 let offset = args[1].u64()? as usize;
                 let word: [u8; 4] = bytes[offset..offset + 4].try_into().unwrap();

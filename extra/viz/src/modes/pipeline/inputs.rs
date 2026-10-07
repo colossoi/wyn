@@ -312,6 +312,8 @@ impl Runner {
         }
         if parameter.kind == ":host-buffer" {
             Ok(self.backend.import_host_buffer(bytes))
+        } else if parameter.host_bytes()?.is_some() {
+            Ok(self.backend.upload_parameter_buffer(bytes)?)
         } else {
             self.upload(&bytes)
         }

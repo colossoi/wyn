@@ -1,0 +1,17 @@
+-- Match tinyporto's full, coarse, and reduced-resolution working buffers.
+-- The unused fields also catch eager reads of the whole frame aggregate.
+type frame_globals = { time: f32, resolution: vec3f32, unused: vec4f32 }
+
+entry sizes(frame: frame_globals, surface: render_target<vec4f32>)
+    ([]i32, []i32, []i32, render_target<vec4f32>) =
+  let w = i32(frame.resolution.x)
+  let h = i32(frame.resolution.y)
+  let triangles = rasterize_triangles(direct_draw(3u32, 1u32),
+    |index: u32, _: u32, _: u32|
+      let positions = [@[-1.0, -1.0, 0.0, 1.0], @[3.0, -1.0, 0.0, 1.0], @[-1.0, 3.0, 0.0, 1.0]] in
+      vertex_output(positions[i32(index)], 0.0))
+  let image = shade(surface, triangles, |_, _, _, _, _| @[0.0, 0.0, 0.0, 1.0])
+  let full = map(|i| i + 1, iota(w * h))
+  let coarse = map(|i| i + 2, iota(((w + 7) / 8) * ((h + 7) / 8)))
+  let half = map(|i| i + 3, iota(((w + 1) / 2) * ((h + 1) / 2))) in
+  (full, coarse, half, image)

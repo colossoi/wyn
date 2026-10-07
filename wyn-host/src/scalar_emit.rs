@@ -150,6 +150,11 @@ pub(crate) fn whl_scalar(
             resolve(source)?.0,
             ty.name()
         ),
+        ScalarExpr::Parameter { source, offset, ty } => format!(
+            "(host-read-scalar resource-{} {offset} '{})",
+            resolve(source)?.0,
+            ty.name()
+        ),
         ScalarExpr::Apply { op, ty, args } => {
             let args = args.iter().map(|a| whl_scalar(a, resolve)).collect::<Result<Vec<_>, _>>()?;
             let function = format!("wyn-{}-{op}", ty.name());
@@ -223,6 +228,21 @@ pub(crate) fn rust_scalar(
                 quote!(#read != 0)
             } else {
                 read
+            }
+        }
+        ScalarExpr::Parameter { source, offset, ty } => {
+            let (resource, push_constant) = resolve(source)?;
+            let bytes = if push_constant {
+                crate::rust_wgpu::resource(resource)
+            } else {
+                crate::rust_wgpu::host_parameter(resource)
+            };
+            let primitive = format_ident!("{}", if *ty == ScalarType::Bool { "u32" } else { ty.name() });
+            let value = quote!(#primitive::from_le_bytes(support::scalar_bytes(#bytes, #offset)?));
+            if *ty == ScalarType::Bool {
+                quote!(#value != 0)
+            } else {
+                value
             }
         }
         ScalarExpr::Apply { op, ty, args } => {

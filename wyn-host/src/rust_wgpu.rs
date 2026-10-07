@@ -18,6 +18,9 @@ use crate::{
 pub(crate) fn resource(id: ResourceId) -> Ident {
     format_ident!("resource_{}", id.0)
 }
+pub(crate) fn host_parameter(id: ResourceId) -> Ident {
+    format_ident!("resource_{}_host", id.0)
+}
 fn scalar(name: &str) -> Ident {
     format_ident!("{}", name.replace('-', "_"))
 }
@@ -92,7 +95,7 @@ impl Program {
             mod support {#support pub mod arithmetic {#arithmetic}}
             pub mod output {#output_types #(#result_types)*}
             use output::{OutputDescriptor,OutputValue,OutputResource,BufferRange,ResultKind,ResultLayout,ResultScalar,ResultField};
-            pub use support::HostError;
+            pub use support::{HostError, ParameterBuffer};
             use support::{ceiling, dimension, floor, size};
             use std::borrow::Cow;
             use std::collections::{BTreeMap, HashMap};
@@ -323,7 +326,15 @@ impl Program {
         for &r in &entry.inputs {
             let id = resource(r);
             let ty = match self.interface.frame_graph.resources[r.0].kind {
-                FrameResourceKind::StorageBuffer | FrameResourceKind::Uniform => quote!(&Buffer),
+                FrameResourceKind::StorageBuffer | FrameResourceKind::Uniform => {
+                    if entry.host_inputs.contains_key(&r) {
+                        let bytes = host_parameter(r);
+                        input_checks.push(quote! { let (#bytes, #id) = #id.upload(device, encoder); });
+                        quote!(&ParameterBuffer)
+                    } else {
+                        quote!(&Buffer)
+                    }
+                }
                 FrameResourceKind::PushConstant => quote!(&[u8]),
                 FrameResourceKind::Texture | FrameResourceKind::StorageTexture => quote!(&Texture),
                 FrameResourceKind::Sampler => quote!(&Sampler),
@@ -332,6 +343,7 @@ impl Program {
             arguments.push(quote!(#id));
             let resource = &self.interface.frame_graph.resources[r.0];
             let mut expected = BTreeSet::new();
+            let mut uniform_bytes = 0u64;
             for binding in &resource.bindings {
                 if !pipelines.contains(&binding.pipeline_index) {
                     continue;
@@ -343,6 +355,11 @@ impl Program {
                 } = &self.bindings(binding.pipeline_index)[binding.binding_index]
                 {
                     expected.insert(*bytes);
+                }
+                if let Binding::Uniform { size, .. } =
+                    &self.bindings(binding.pipeline_index)[binding.binding_index]
+                {
+                    uniform_bytes = uniform_bytes.max(u64::from(*size));
                 }
             }
             if expected.len() > 1 {
@@ -361,11 +378,37 @@ impl Program {
                     }
                 });
             }
+            if entry.host_inputs.contains_key(&r) && uniform_bytes > 0 {
+                let label = &resource.name;
+                input_checks.push(quote! {
+                    if #id.size() < #uniform_bytes {
+                        return Err(HostError::Invalid(format!(
+                            "parameter {} requires at least {} shader bytes, got {}", #label, #uniform_bytes, #id.size()
+                        )));
+                    }
+                });
+            }
         }
         for name in &entry.scalar_inputs {
             let name = scalar(name);
             params.push(quote!(#name:u32));
             arguments.push(quote!(#name));
+        }
+        for (&id, &minimum) in &entry.host_inputs {
+            let bytes =
+                if self.interface.frame_graph.resources[id.0].kind == FrameResourceKind::PushConstant {
+                    resource(id)
+                } else {
+                    host_parameter(id)
+                };
+            let label = &self.interface.frame_graph.resources[id.0].name;
+            input_checks.push(quote! {
+                if (#bytes.len() as u64) < #minimum {
+                    return Err(HostError::Invalid(format!(
+                        "CPU parameter {} requires at least {} bytes, got {}", #label, #minimum, #bytes.len()
+                    )));
+                }
+            });
         }
         let mut carried = BTreeSet::new();
         self.loop_resources(&entry.operations, &mut carried)?;
@@ -449,6 +492,7 @@ impl Program {
         if used.contains("queue") {
             Ok(quote! {
                 pub const #entry_id:&str=#source_name;
+                /// Parameter buffers capture and upload their CPU values for this invocation.
                 pub fn #name(#context_param:&mut HostContext,queue:&Queue,#(#params),*)->Result<OutputDescriptor,HostError>{
                     #device
                     let mut commands=device.create_command_encoder(&Default::default());
@@ -464,6 +508,7 @@ impl Program {
             Ok(quote! {
                 pub const #entry_id:&str=#source_name;
                 /// Record and submit this entry. Reuse the context across calls.
+                /// Parameter buffers capture and upload their CPU values for this invocation.
                 pub fn #name(context:&mut HostContext,queue:&Queue,#(#params),*)->Result<OutputDescriptor,HostError>{
                     let mut encoder=context.device.create_command_encoder(&Default::default());
                     let output=#encode_name(context,&mut encoder,#(#arguments),*)?;
@@ -473,6 +518,7 @@ impl Program {
                 /// Record this entry without submitting or waiting for the GPU.
                 /// Submit recorded calls in order, including calls sharing a context.
                 /// On error, discard the encoder; it may contain partial commands.
+                /// Parameter uploads are recorded here, preserving each invocation's values.
                 pub fn #encode_name(#context_param:&mut HostContext,encoder:&mut CommandEncoder,#(#params),*)->Result<OutputDescriptor,HostError>{
                     #device
                     #(#code)*
@@ -657,30 +703,32 @@ impl Program {
 
 /// Emit only support items reachable from this program's host functions.
 fn retain_helpers(items: &mut Vec<Item>, roots: &BTreeSet<String>) {
+    fn name(item: &Item) -> Option<&Ident> {
+        match item {
+            Item::Fn(item) => Some(&item.sig.ident),
+            Item::Struct(item) => Some(&item.ident),
+            Item::Enum(item) => Some(&item.ident),
+            Item::Impl(item) => match item.self_ty.as_ref() {
+                syn::Type::Path(ty) => ty.path.segments.last().map(|segment| &segment.ident),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
     fn dependencies(items: &[Item], used: &mut BTreeSet<String>) {
         for item in items {
-            let name = match item {
-                Item::Fn(item) => Some(&item.sig.ident),
-                Item::Struct(item) => Some(&item.ident),
-                Item::Enum(item) => Some(&item.ident),
-                Item::Mod(item) => {
-                    if let Some((_, items)) = &item.content {
-                        dependencies(items, used);
-                    }
-                    None
+            if let Item::Mod(item) = item {
+                if let Some((_, items)) = &item.content {
+                    dependencies(items, used);
                 }
-                _ => None,
-            };
-            if name.is_some_and(|name| used.contains(&name.to_string())) {
+            }
+            if name(item).is_some_and(|name| used.contains(&name.to_string())) {
                 ReferencedNames(used).visit_item(item);
             }
         }
     }
     fn trim(items: &mut Vec<Item>, used: &BTreeSet<String>) {
         items.retain_mut(|item| match item {
-            Item::Fn(item) => used.contains(&item.sig.ident.to_string()),
-            Item::Struct(item) => used.contains(&item.ident.to_string()),
-            Item::Enum(item) => used.contains(&item.ident.to_string()),
             Item::Mod(item) => {
                 if let Some((_, items)) = &mut item.content {
                     trim(items, used);
@@ -689,7 +737,7 @@ fn retain_helpers(items: &mut Vec<Item>, roots: &BTreeSet<String>) {
                     true
                 }
             }
-            _ => true,
+            _ => name(item).is_none_or(|name| used.contains(&name.to_string())),
         });
         let mut references = BTreeSet::new();
         for item in items.iter().filter(|item| !matches!(item, Item::Use(_))) {

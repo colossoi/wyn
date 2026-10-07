@@ -295,7 +295,7 @@ fn integer_capacity_expressions_reach_both_hosts() {
         panic!("one host entry");
     };
     assert!(entry.allocations.iter().any(
-        |a| matches!(a,Allocation::Buffer{bytes,..} if bytes.to_whl().unwrap().contains("gpu-read-scalar"))
+        |a| matches!(a,Allocation::Buffer{bytes,..} if bytes.to_whl().unwrap().contains("host-read-scalar"))
     ));
     let whl = program.to_whl("sizes.wgsl", ShaderFormat::Wgsl).unwrap();
     check_whl(&whl);
@@ -305,14 +305,92 @@ fn integer_capacity_expressions_reach_both_hosts() {
     let rust = program.to_rust_wgpu("sizes.wgsl", ShaderFormat::Wgsl).unwrap();
     assert!(rust.contains(".wrapping_add("));
     assert!(rust.contains(".wrapping_mul("));
-    assert!(rust.contains("n: &Buffer"));
+    assert!(rust.contains("n: &ParameterBuffer"));
     let compact: String = rust.split_whitespace().collect();
-    assert!(compact.contains("support::read_i32(device,queue,encoder,&n,"));
+    assert!(!rust.contains("n_host: &[u8]"));
+    assert!(compact.contains("n.upload(device,encoder)"));
+    assert!(compact.contains("support::scalar_bytes(resource_"));
     assert!(!rust.contains("read_host_scalar"));
-    assert!(
-        !rust.contains("pub fn encode_main("),
-        "readback entries must own their submissions"
-    );
+    assert!(!rust.contains("read_gpu_word"));
+    assert!(rust.contains("pub fn encode_main("));
+}
+
+#[test]
+fn resolution_allocation_expressions_keep_cpu_parameters() {
+    let source = include_str!("../../testfiles/rust_host_resolution_sizes.wyn");
+    for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+        let ssa = compile_thru_ssa(source).unwrap();
+        let program = match format {
+            ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+            ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+        };
+        let entry = &program.entries[0];
+        assert_eq!(entry.results.len(), 4);
+        assert_eq!(entry.host_inputs.len(), 1);
+        let (&frame, &bytes) = entry.host_inputs.first_key_value().unwrap();
+        assert_eq!(program.interface.frame_graph.resources[frame.0].name, "frame");
+        assert_eq!(
+            bytes, 24,
+            "only resolution.x/y are needed at std140 offsets 16/20"
+        );
+        let whl = program.to_whl("resolution_sizes", format).unwrap();
+        assert!(whl.contains(":host-bytes 24"));
+        assert!(whl.contains("host-read-scalar"));
+        assert!(!whl.contains("gpu-read-scalar"));
+        for id in entry.results.iter().take(3) {
+            let Allocation::Buffer { bytes, .. } =
+                entry.allocations.iter().find(|a| a.resource() == *id).unwrap()
+            else {
+                panic!("computed output allocation");
+            };
+            let mut reads = Vec::new();
+            bytes.clone().reads_mut(&mut |_, offset| reads.push(*offset));
+            assert_eq!(reads, [16, 20]);
+        }
+        let rust = program.to_rust_wgpu("resolution_sizes", format).unwrap();
+        assert!(rust.contains("frame: &ParameterBuffer"), "{rust}");
+        assert!(!rust.contains("frame_host: &[u8]"), "{rust}");
+        assert!(rust.contains("frame.upload(device, encoder)"), "{rust}");
+        assert!(rust.contains("pub fn encode_sizes("), "{rust}");
+        for readback in [
+            "read_gpu_word",
+            "map_async",
+            "wait_indefinitely",
+            "support::read_f32",
+        ] {
+            assert!(!rust.contains(readback), "unexpected {readback}: {rust}");
+        }
+    }
+}
+
+#[test]
+fn cpu_input_dependencies_cover_scalar_work_and_dispatch_loops() {
+    for source in [
+        "entry main(n:i32) i32=if n>0 then n*n else n+1",
+        "entry main(n:i32) []i32=iota(n)",
+        "entry main(xs:[8]i32,n:i32) [8]i32=loop values=xs for i<n do map(|x|x+i,values)",
+        "entry main(xs:[]i32,n:i32) []i32=let a=loop acc=0 for i<n do acc+i in map(|x:i32|x+a,xs)",
+    ] {
+        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+            let ssa = compile_thru_ssa(source).unwrap();
+            let program = match format {
+                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+            };
+            let entry = &program.entries[0];
+            assert!(!entry.host_inputs.is_empty(), "{source} / {format:?}");
+            assert!(entry.host_inputs.values().all(|&bytes| bytes >= 4 && bytes % 4 == 0));
+            let whl = program.to_whl("cpu_inputs", format).unwrap();
+            assert!(whl.contains("host-read-scalar"), "{source}: {whl}");
+            assert!(!whl.contains("gpu-read-scalar"), "{source}: {whl}");
+            let rust = program.to_rust_wgpu("cpu_inputs", format).unwrap();
+            assert!(rust.contains("pub fn encode_main("));
+            assert!(!rust.contains("read_gpu_word"));
+        }
+    }
+    let device_only =
+        compile("entry main(xs:[137]i32) []i32=let total=reduce((+),0,xs) in map(|x:i32|x+total,xs)");
+    assert!(device_only.entries[0].host_inputs.is_empty());
 }
 
 #[test]
@@ -520,8 +598,9 @@ fn rust_generated_results_use_source_fields() {
         assert!(entry.results.iter().all(|id| !entry.inputs.contains(id)));
         assert!(entry.results.iter().all(|id| entry.allocations.iter().any(|a| a.resource() == *id)));
         let rust = program.to_rust_wgpu("results.wgsl", ShaderFormat::Wgsl).unwrap();
-        assert!(rust.contains("count: &Buffer"));
-        assert!(rust.contains("support::read_f32("));
+        assert!(rust.contains("count: &ParameterBuffer"));
+        assert!(!rust.contains("count_host: &[u8]"));
+        assert!(!rust.contains("read_gpu_word"));
         for field in fields {
             assert!(rust.contains(&format!("name: \"{field}\"")), "{rust}");
         }
@@ -558,7 +637,7 @@ entry scene(count:f32, target:render_target<vec4f32>) render_target<vec4f32> =
     assert!(program.interface.source_results.is_empty());
     assert!(entry.allocations.iter().any(|a| matches!(a, Allocation::Buffer { .. })));
     let rust = program.to_rust_wgpu("scratch.wgsl", ShaderFormat::Wgsl).unwrap();
-    assert!(rust.contains("count: &Buffer"));
+    assert!(rust.contains("count: &ParameterBuffer"));
     assert!(entry.inputs.iter().all(|id| {
         program.interface.frame_graph.resources[id.0].bindings.iter().all(|binding| {
             !matches!(
@@ -570,7 +649,8 @@ entry scene(count:f32, target:render_target<vec4f32>) render_target<vec4f32> =
             )
         })
     }));
-    assert!(rust.contains("support::read_f32("));
+    assert!(!rust.contains("count_host: &[u8]"));
+    assert!(!rust.contains("read_gpu_word"));
 }
 
 #[test]

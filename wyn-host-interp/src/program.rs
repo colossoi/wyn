@@ -78,12 +78,19 @@ impl Parameter {
                 ":ownership",
                 ":alias",
                 ":value-layout",
+                ":host-bytes",
             ],
         )?;
         if let Some(name) = options.optional(":source-name") {
             if !matches!(name, Value::String(_)) {
                 return Err(Error::Invalid(":source-name must be a string".into()));
             }
+        }
+        if let Some(bytes) = options.optional(":host-bytes") {
+            if !matches!(kind.as_str(), ":buffer" | ":host-buffer") {
+                return Err(Error::Invalid(":host-bytes requires a buffer parameter".into()));
+            }
+            bytes.u64()?;
         }
         Ok(Self {
             name,
@@ -130,6 +137,11 @@ impl Parameter {
             return Ok(Some(layout.get(":size")?.u64()?));
         }
         self.options.optional(":min-bytes").map(Value::u64).transpose()
+    }
+
+    /// Minimum CPU byte span required by the entry's host expressions.
+    pub fn host_bytes(&self) -> Result<Option<u64>> {
+        self.options.optional(":host-bytes").map(Value::u64).transpose()
     }
 
     pub fn fields(&self) -> Result<Vec<(String, u64, u64)>> {

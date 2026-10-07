@@ -2,6 +2,9 @@ use wgpu::{BindGroupLayout, ErrorFilter, MapMode, PollType, PrimitiveTopology, T
 mod bindings;
 mod commands;
 mod draw;
+#[cfg(test)]
+#[path = "gpu/tests.rs"]
+mod tests;
 
 use crate::{Backend, Error, Options, Parameter, Program, Result, Value};
 use std::borrow::Cow;
@@ -17,6 +20,11 @@ use wgpu::{
 #[derive(Clone)]
 enum Resource {
     Buffer(Buffer, u64),
+    /// One CPU-owned parameter value and its uploaded shader representation.
+    ParameterBuffer {
+        buffer: Buffer,
+        bytes: Vec<u8>,
+    },
     HostBuffer(Vec<u8>),
     Texture(Texture),
     View {
@@ -138,6 +146,40 @@ impl WgpuBackend {
         self.insert(Resource::HostBuffer(bytes), true)
     }
 
+    /// Upload CPU-owned parameters while retaining their value for host
+    /// expressions. Subsequent updates must use `write_buffer`; GPU writes to
+    /// these resources are rejected when binding a shader.
+    pub fn upload_parameter_buffer(&mut self, bytes: Vec<u8>) -> Result<Value> {
+        let value = self.allocate_buffer(bytes.len() as u64)?;
+        let buffer = self.buffer(&value)?.clone();
+        let mut padded = bytes.clone();
+        padded.resize(bytes.len().div_ceil(4) * 4, 0);
+        if !padded.is_empty() {
+            self.queue.write_buffer(&buffer, 0, &padded);
+        }
+        self.resources.insert(value.handle()?, Resource::ParameterBuffer { buffer, bytes });
+        self.imported.insert(value.handle()?);
+        Ok(value)
+    }
+
+    /// Read a CPU parameter value without consulting the device or falling
+    /// back to GPU readback. A device-only buffer does not satisfy this contract.
+    pub fn parameter_bytes(&self, value: &Value) -> Result<&[u8]> {
+        match self.resource(value)? {
+            Resource::HostBuffer(bytes) | Resource::ParameterBuffer { bytes, .. } => Ok(bytes),
+            _ => Err(gpu_error("CPU parameter bytes are unavailable for this resource")),
+        }
+    }
+
+    fn update_parameter_bytes(&mut self, value: &Value, offset: u64, bytes: &[u8]) -> Result<()> {
+        if let Some(Resource::ParameterBuffer { bytes: storage, .. }) =
+            self.resources.get_mut(&value.handle()?)
+        {
+            storage[offset as usize..offset as usize + bytes.len()].copy_from_slice(bytes);
+        }
+        Ok(())
+    }
+
     fn resource(&self, value: &Value) -> Result<&Resource> {
         let id = value.handle()?;
         let Some(resource) = self.resources.get(&id) else {
@@ -151,10 +193,10 @@ impl WgpuBackend {
         Ok(resource)
     }
     pub fn buffer(&self, value: &Value) -> Result<&Buffer> {
-        let Resource::Buffer(buffer, _) = self.resource(value)? else {
-            return Err(gpu_error("expected a device buffer"));
-        };
-        Ok(buffer)
+        match self.resource(value)? {
+            Resource::Buffer(buffer, _) | Resource::ParameterBuffer { buffer, .. } => Ok(buffer),
+            _ => Err(gpu_error("expected a device buffer")),
+        }
     }
     pub fn texture(&self, value: &Value) -> Result<&Texture> {
         match self.resource(value)? {
@@ -167,6 +209,7 @@ impl WgpuBackend {
         match self.resource(value)? {
             Resource::Buffer(_, size) => Ok(*size),
             Resource::HostBuffer(bytes) => Ok(bytes.len() as u64),
+            Resource::ParameterBuffer { bytes, .. } => Ok(bytes.len() as u64),
             _ => Err(gpu_error("expected a buffer")),
         }
     }
@@ -179,8 +222,10 @@ impl WgpuBackend {
         if bytes.is_empty() {
             return Ok(());
         }
-        if matches!(self.resource(value)?, Resource::Buffer(..))
-            && (offset % 4 != 0 || bytes.len() % 4 != 0)
+        if matches!(
+            self.resource(value)?,
+            Resource::Buffer(..) | Resource::ParameterBuffer { .. }
+        ) && (offset % 4 != 0 || bytes.len() % 4 != 0)
         {
             let start = offset / 4 * 4;
             let Some(aligned_end) = end.checked_add(3).map(|end| end / 4 * 4) else {
@@ -190,14 +235,20 @@ impl WgpuBackend {
                 return Err(gpu_error("unaligned write exceeds physical buffer capacity"));
             }
             let preserved_end = aligned_end.min(self.buffer_size(value)?);
-            let mut data = self.read_buffer(value, start, preserved_end - start)?;
+            let mut data = match self.resource(value)? {
+                Resource::ParameterBuffer { bytes, .. } => {
+                    bytes[start as usize..preserved_end as usize].to_vec()
+                }
+                _ => self.read_buffer(value, start, preserved_end - start)?,
+            };
             data.resize(usize::try_from(aligned_end - start).map_err(gpu_error)?, 0);
             data[(offset - start) as usize..(end - start) as usize].copy_from_slice(bytes);
             self.queue.write_buffer(self.buffer(value)?, start, &data);
+            self.update_parameter_bytes(value, offset, bytes)?;
             return Ok(());
         }
         match self.resources.get_mut(&value.handle()?) {
-            Some(Resource::Buffer(buffer, _)) => {
+            Some(Resource::Buffer(buffer, _)) | Some(Resource::ParameterBuffer { buffer, .. }) => {
                 self.queue.write_buffer(buffer, offset, bytes);
             }
             Some(Resource::HostBuffer(storage)) => {
@@ -205,6 +256,7 @@ impl WgpuBackend {
             }
             _ => return Err(gpu_error("expected a buffer")),
         }
+        self.update_parameter_bytes(value, offset, bytes)?;
         Ok(())
     }
     pub fn read_buffer(&self, value: &Value, offset: u64, bytes: u64) -> Result<Vec<u8>> {
@@ -346,6 +398,14 @@ impl Backend for WgpuBackend {
                 )));
             }
         }
+        if let Some(minimum) = parameter.host_bytes()? {
+            if (self.parameter_bytes(value)?.len() as u64) < minimum {
+                return Err(gpu_error(format!(
+                    "{} requires at least {minimum} CPU bytes",
+                    parameter.name
+                )));
+            }
+        }
         Ok(())
     }
     fn begin(&mut self, arguments: &[Value]) -> Result<()> {
@@ -366,6 +426,9 @@ impl Backend for WgpuBackend {
         Ok(())
     }
     fn call(&mut self, program: &Program, operation: &str, arguments: &[Value]) -> Result<Value> {
+        if operation == "host-read-scalar" {
+            return self.execute(program, operation, arguments);
+        }
         self.device.push_error_scope(ErrorFilter::Validation);
         let result = self.execute(program, operation, arguments);
         let validation = pollster::block_on(self.device.pop_error_scope());

@@ -467,6 +467,14 @@ impl<'a, 'source> Lower<'a, 'source> {
             }
             _ => return Err(error(format!("unresolved selected host constructor {name}")).into()),
         };
+        // Keep aggregate structure visible to projections. Parameter aggregates
+        // contain reads for every field; binding the whole tuple eagerly would
+        // read unrelated fields even when only one component is needed.
+        // Computed scalar children already have their own ordered bindings.
+        if matches!(value, ScalarExpr::Tuple(_)) {
+            self.terms.insert(term, value.clone());
+            return Ok(value);
+        }
         let name = self.name();
         self.bindings.push((name.clone(), value));
         let value = ScalarExpr::Local(name);
@@ -476,7 +484,7 @@ impl<'a, 'source> Lower<'a, 'source> {
 }
 fn read(source: ScalarSource, offset: u32, ty: &Type, rules: StorageLayout) -> Result<ScalarExpr> {
     if let Some(ty) = scalar_type(ty) {
-        return Ok(ScalarExpr::Read { source, offset, ty });
+        return Ok(ScalarExpr::Parameter { source, offset, ty });
     }
     if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = ty {
         let Some(layout) = block_layout(ty, rules) else {
@@ -506,6 +514,9 @@ fn read(source: ScalarSource, offset: u32, ty: &Type, rules: StorageLayout) -> R
     Err(Error::Unsupported)
 }
 fn field(tuple: ScalarExpr, index: usize) -> ScalarExpr {
+    if let ScalarExpr::Tuple(mut fields) = tuple {
+        return fields.swap_remove(index);
+    }
     ScalarExpr::Field {
         tuple: Box::new(tuple),
         index,

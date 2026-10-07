@@ -412,9 +412,11 @@ impl Program {
             string(&entry.name)
         )?;
         for &id in &entry.inputs {
+            let host =
+                entry.host_inputs.get(&id).map(|bytes| format!(" :host-bytes {bytes}")).unwrap_or_default();
             writeln!(
                 out,
-                "    ({} {} :source-name {})",
+                "    ({} {} :source-name {}{host})",
                 resource(id),
                 self.resource_description(id),
                 string(&self.interface.frame_graph.resources[id.0].name)

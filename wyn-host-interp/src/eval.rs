@@ -7,6 +7,7 @@ type Scope = BTreeMap<String, (Value, bool)>;
 
 pub(crate) fn builtin(name: &str) -> bool {
     name.starts_with("gpu-")
+        || name == "host-read-scalar"
         || name.starts_with("wyn-")
         || name.starts_with("define-")
         || NumberType::parse(name).is_some()
@@ -338,7 +339,9 @@ impl<B: Backend> Interpreter<'_, B> {
                             &values.iter().map(Value::number).collect::<Result<Vec<_>>>()?,
                         )?))
                     }
-                    name if name.starts_with("gpu-") => self.backend.call(self.program, name, &values),
+                    name if name.starts_with("gpu-") || name == "host-read-scalar" => {
+                        self.backend.call(self.program, name, &values)
+                    }
                     _ => self.function(
                         name,
                         &values.into_iter().map(Value::materialize).collect::<Result<Vec<_>>>()?,

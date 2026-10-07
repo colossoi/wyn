@@ -326,6 +326,14 @@ must be consistent, in bounds, and match the shader artifact. An optional
 binding size.
 Dynamic bounds remain host calculations and shader preconditions.
 
+An entry buffer or host-buffer parameter may also declare `:host-bytes N`.
+This requires at least `N` CPU-accessible bytes with the same layout and values
+as the shader input for that invocation. The compiler derives this requirement
+from parameter projections in host expressions, including allocations, dispatch
+dimensions, scalar work, and loops. Device-only buffers cannot satisfy it by
+reading back their contents. CPU parameter buffers cannot be shader-write or
+GPU-copy destinations; update both representations from the CPU instead.
+
 A texture parameter accepts a view with the declared dimension, format, and
 sample count. The ABI specifies sampled or storage usage. Sampled parameters
 are read-only and may specify `:sample-type` as `:filterable-float`, `:float`,
@@ -450,6 +458,7 @@ padding and spare capacity do not change the logical length.
 | `(gpu-buffer-size buffer)` | Return byte capacity as `u64`. |
 | `(gpu-copy destination destination-offset source source-offset bytes)` | Copy between device buffers, host spans, or one of each; return `nil`. |
 | `(gpu-read-scalar buffer offset 'type)` | Read a device scalar and return its host value. |
+| `(host-read-scalar buffer offset 'type)` | Read a CPU parameter scalar without submitting commands or waiting for the GPU. Missing CPU bytes are an error. |
 | `(gpu-write-scalar buffer offset 'type value)` | Encode and write a scalar; return `nil`. |
 
 Zero-byte allocation is valid even if the physical allocation is larger.
@@ -468,12 +477,18 @@ Scalar transfers use the types and byte encodings specified for shader
 interfaces. Their type argument is a quoted ordinary symbol, such as `'u32` or
 `'f32`, corresponding to the declaration keyword `:u32` or `:f32`. The offset
 must satisfy the scalar's alignment and leave room for the complete value.
-Reads wait for relevant prior GPU writes and make their result
+Device reads wait for relevant prior GPU writes and make their result
 available to subsequent host calculations. Writes capture their host value at
 the call and become visible to later GPU operations. Copies to host destinations
 complete before subsequent host use; copies from host sources capture their
 bytes before later host mutation can change them. Device-to-device copies need
 no host-visible wait.
+
+`host-read-scalar` uses the same scalar encodings and alignment, but reads only
+the retained CPU value. In the WGPU interpreter, `upload_parameter_buffer`
+creates a resource with CPU bytes and its GPU upload; `write_buffer` keeps them
+in sync. Push constants use `import_host_buffer`. The visualization runner
+selects the required representation from `:host-bytes` automatically.
 
 ## Compute dispatch
 
@@ -932,6 +947,20 @@ fixed-width scalar types. Host inputs are explicit function parameters;
 resource-name and packed-field tables expose their source
 identities and layouts. Scalar readback uses native WGPU polling. No WHL parser
 or interpreter is involved.
+
+CPU parameter dependencies are explicit in the shared host IR. A buffer input
+used in host expressions takes one `&ParameterBuffer` argument in Rust. Create
+it with `ParameterBuffer::new(&device, &bytes)?` and update it with
+`parameter.set(&bytes)?`. The object owns its CPU bytes and private GPU buffer;
+the bytes use the shader's ABI layout, and updates preserve their size.
+
+Generated entries record parameter uploads in their command encoder. CPU
+expressions and shader work therefore use the same captured value for each
+invocation, including multiple calls batched before submission. Updating or
+dropping a parameter after recording does not change those recorded values.
+Callers do not upload these parameters separately. Push constants already use
+byte slices. Only expressions that depend on device-produced values use GPU
+readback. Neither backend discovers CPU inputs by inspecting emitted source text.
 
 Create one generated `HostContext::new(&device)` per compiled module and reuse
 it across calls: `host_statistics(&mut context, &queue, ...)`. Context creation
