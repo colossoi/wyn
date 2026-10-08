@@ -11,7 +11,7 @@ use wyn_core::egglog::{
 };
 use wyn_core::host::{HostError, Program, ShaderFormat};
 use wyn_core::ssa::stage::Elaborated;
-use wyn_core::tlc::stage::InputSliceBoundsInferred;
+use wyn_core::tlc::stage::OwnershipApplied;
 use wyn_core::PipelineTopologyPolicy;
 use wyn_core::{CodegenTarget, CompilationFailure, CompilerOptions, LoadModulesError, ParsedModules};
 use wyn_diagnostics::{render_error, render_error_message, render_warning, render_warning_message};
@@ -70,7 +70,7 @@ struct Compilation {
 }
 
 struct TlcCompilation {
-    program: InputSliceBoundsInferred,
+    program: OwnershipApplied,
     source_graph: SourceGraph,
     auxiliary: Vec<TextArtifact>,
 }
@@ -706,9 +706,6 @@ fn compile_tlc(modules: ParsedModules, options: &CompileOptions) -> Result<TlcCo
         wyn_core::tlc::apply_ownership(program)
     });
 
-    let program = time("infer_input_slice_bounds", verbose, || {
-        wyn_core::tlc::infer_input_slice_bounds(program)
-    });
     Ok(TlcCompilation {
         program,
         source_graph,
@@ -717,7 +714,7 @@ fn compile_tlc(modules: ParsedModules, options: &CompileOptions) -> Result<TlcCo
 }
 
 fn compile_egglog(
-    program: &InputSliceBoundsInferred,
+    program: &OwnershipApplied,
     target: Target,
     algebra: bool,
     direct: bool,

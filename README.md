@@ -143,7 +143,6 @@ The passes below run in order. SOACs are second-order array combinators, such as
 | `defunctionalize` | Lift lambdas, make captures explicit, specialize higher-order functions, and lower closure applications to direct calls. |
 | `fold_generated_lambdas` | Inline applications of compiler-generated lifted lambdas and remove definitions made unreachable. |
 | `apply_ownership` | Promote eligible array updates to in-place updates and mark unique SOAC inputs. Egglog later decides storage reuse using the fused program. |
-| `infer_input_slice_bounds` | Attach minimum input-buffer sizes where every use of an input is a constant prefix slice. Other inputs still need sizes from their interface or runtime. |
 
 Specialization and helper inlining retain the source array shapes. SoA normalization
 then runs once, with concrete element types and the helper bodies exposed; later
@@ -152,7 +151,7 @@ so normalization does not change the shader's buffer interface.
 
 `fold_generated_lambdas` performs the final definition cleanup and checks that
 no function-typed parameters remain. Ownership rewriting preserves definition
-references, so no additional reachability pass is needed before input-bound inference.
+references, so no additional reachability pass is needed before egglog import.
 
 `--output-tlc` shows an early TLC snapshot after partial evaluation and entry
 interface resolution. It exposes resolved buffer bindings while functions are
@@ -190,6 +189,9 @@ The passes below run in order:
 | `egglog::schedule` | Select dispatch recipes, resource requirements, storage allocation and reuse, output routes, and effect ordering. |
 | `egglog::optimize` | Resolve scalar demands and physical interface facts, optimize demanded scalar regions, choose safe scopes for selected terms, and lower supported host scalar expressions and captures. |
 | `egglog::to_ssa` | Query the selected plan to emit scalar terms and scheduled kernels directly into SSA; publish final shader interfaces, sizes, resource accesses, dispatch loops, and the companion host program. |
+
+Egglog infers minimum input-buffer sizes for inputs used only in constant prefix
+slices. Other inputs need sizes from their interface or runtime.
 
 Scalar substitution finishes before safety analysis and reducing rewrites. Completed
 substitutions and replaced arithmetic forms are retired from matching. Unary and

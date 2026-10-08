@@ -16,7 +16,7 @@ use crate::interface::{
 use crate::interface::{EntryKind, StorageBindingDecl, StorageRole};
 use crate::ssa::layout::{storage_value_type, type_byte_size};
 use crate::tlc::{extract_lambda_params_ref, DefMeta};
-use crate::types::{canonical_storage_buffer_ty, strip_existentials, Type, TypeName};
+use crate::types::{canonical_storage_buffer_ty, strip_existentials, Type, TypeExt, TypeName};
 use crate::SymbolId;
 use crate::{BindingRef, LookupMap, ResourceAccess};
 use egglog_engine::Value;
@@ -26,6 +26,10 @@ use wyn_base::IdSource;
 pub(super) mod bindings;
 pub(super) mod publication;
 mod sizes;
+
+#[cfg(test)]
+#[path = "abi/input_bounds_tests.rs"]
+mod input_bounds_tests;
 
 pub(super) fn entry_accesses(
     compiler: &Compiler<'_, '_>,
@@ -170,7 +174,7 @@ pub(super) fn parameter_inputs(
         return Err(OptimizeError::Output("parameter region is not an entry".into()));
     };
     let (_, parameters) = extract_lambda_params_ref(&definition.body);
-    let Some((symbol, ty)) = parameters.get(index as usize) else {
+    let Some((_, ty)) = parameters.get(index as usize) else {
         return Err(OptimizeError::Output("entry parameter missing".into()));
     };
     let Some(param) = entry.declaration.params.get(index as usize) else {
@@ -213,50 +217,54 @@ pub(super) fn parameter_inputs(
             }
         }
         let storage = inferred.or(declared);
-        let kind =
-            if let Some(binding) = storage {
-                EntryInputKind::Storage {
-                    exposure: BindingExposure::Host(binding),
-                    access,
-                    length: entry.data.by_symbol.get(symbol).cloned().or_else(|| {
-                        type_byte_size(ty).map(|bytes| BufferLen::Fixed { bytes: bytes.into() })
-                    }),
-                }
-            } else if let Some(binding) = extract_uniform_binding(param) {
-                EntryInputKind::Uniform { binding }
-            } else if let Some(binding) = extract_texture_binding(param) {
-                let source = match (extract_texture_backing(param), extract_texture_resource(param)) {
-                    (backing, Some(name)) => TextureSource::Resource { name, backing },
-                    (Some(binding), None) => TextureSource::Backing(binding),
-                    (None, None) => TextureSource::External,
-                };
-                EntryInputKind::Texture { binding, source }
-            } else if let Some(binding) = extract_sampler_binding(param) {
-                EntryInputKind::Sampler { binding }
-            } else if let Some((binding, format, access, size)) = extract_storage_image_binding(param) {
-                EntryInputKind::StorageImage {
-                    binding,
-                    format,
-                    access,
-                    size,
-                    resource: extract_storage_image_resource(param),
-                }
-            } else if Query(&program.graph).enode("ShaderInput", abi)?.is_some() {
-                EntryInputKind::Value {
-                    decoration: extract_io_decoration(param),
-                }
-            } else if let Some(fields) = Query(&program.graph).enode("PushInput", abi)? {
-                EntryInputKind::PushConstant {
-                    slot: PushConstantSlot {
-                        offset: program.graph.value_to_base::<i64>(fields[0]) as u32,
-                        size: program.graph.value_to_base::<i64>(fields[1]) as u32,
-                    },
-                }
-            } else {
-                return Err(OptimizeError::Output(
-                    "selected input requires a declared binding".into(),
-                ));
+        let kind = if let Some(binding) = storage {
+            EntryInputKind::Storage {
+                exposure: BindingExposure::Host(binding),
+                access,
+                length: Query(&program.graph)
+                    .lookup("ParameterPrefixElements", (scope, index))?
+                    .and_then(|count| {
+                        type_byte_size(ty.elem_type()?).map(|bytes| BufferLen::Fixed {
+                            bytes: (facts.integer(count) as u64).saturating_mul(bytes.into()),
+                        })
+                    })
+                    .or_else(|| type_byte_size(ty).map(|bytes| BufferLen::Fixed { bytes: bytes.into() })),
+            }
+        } else if let Some(binding) = extract_uniform_binding(param) {
+            EntryInputKind::Uniform { binding }
+        } else if let Some(binding) = extract_texture_binding(param) {
+            let source = match (extract_texture_backing(param), extract_texture_resource(param)) {
+                (backing, Some(name)) => TextureSource::Resource { name, backing },
+                (Some(binding), None) => TextureSource::Backing(binding),
+                (None, None) => TextureSource::External,
             };
+            EntryInputKind::Texture { binding, source }
+        } else if let Some(binding) = extract_sampler_binding(param) {
+            EntryInputKind::Sampler { binding }
+        } else if let Some((binding, format, access, size)) = extract_storage_image_binding(param) {
+            EntryInputKind::StorageImage {
+                binding,
+                format,
+                access,
+                size,
+                resource: extract_storage_image_resource(param),
+            }
+        } else if Query(&program.graph).enode("ShaderInput", abi)?.is_some() {
+            EntryInputKind::Value {
+                decoration: extract_io_decoration(param),
+            }
+        } else if let Some(fields) = Query(&program.graph).enode("PushInput", abi)? {
+            EntryInputKind::PushConstant {
+                slot: PushConstantSlot {
+                    offset: program.graph.value_to_base::<i64>(fields[0]) as u32,
+                    size: program.graph.value_to_base::<i64>(fields[1]) as u32,
+                },
+            }
+        } else {
+            return Err(OptimizeError::Output(
+                "selected input requires a declared binding".into(),
+            ));
+        };
         inputs.push(EntryInput {
             name: param.name.clone(),
             ty: storage_value_type(&canonical_storage_buffer_ty(ty)),

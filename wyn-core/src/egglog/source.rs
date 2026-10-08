@@ -8,7 +8,7 @@ use crate::binding_layout::{
 };
 use crate::interface::{EntryKind, IoDecoration, StorageAccess};
 use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
-use crate::tlc::stage::InputSliceBoundsInferred;
+use crate::tlc::stage::OwnershipApplied;
 use crate::tlc::{
     self, extract_lambda_params_ref, ArrayExpr, DefMeta, Lambda, LoopKind, SoacBody, SoacOp, TermId,
     TermKind, VarRef,
@@ -29,7 +29,7 @@ use summary::{Summaries, Summary};
 pub(super) type Term = tlc::Term<ExplicitClosurePayload, ExplicitCapturesPayload>;
 type OperatorBody = SoacBody<ExplicitClosurePayload, ExplicitCapturesPayload>;
 
-pub(super) fn import(source: &InputSliceBoundsInferred) -> Result<(EGraph, Identities<'_>), OptimizeError> {
+pub(super) fn import(source: &OwnershipApplied) -> Result<(EGraph, Identities<'_>), OptimizeError> {
     let mut graph = fusion::new_graph()?;
     planning::load(&mut graph)?;
     graph.parse_and_run_program(Some("source.egg".into()), include_str!("source.egg"))?;
@@ -114,7 +114,7 @@ struct Import<'graph, 'db, 'ids, 'source> {
 }
 
 impl<'source> Import<'_, '_, '_, 'source> {
-    fn definitions(&mut self, source: &'source InputSliceBoundsInferred) -> Result<(), OptimizeError> {
+    fn definitions(&mut self, source: &'source OwnershipApplied) -> Result<(), OptimizeError> {
         let counter = self.ty(&Type::Constructed(TypeName::UInt(32), vec![]))?;
         self.sink.add("CounterType", counter)?;
         for (ordinal, definition) in source.defs.iter().enumerate() {
@@ -309,7 +309,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         scope: &mut Scope,
     ) -> Result<Value, OptimizeError> {
         let (value, evaluation) = self.visit(term, scope)?;
-        self.use_value(owner, value);
+        self.use_value(owner, value)?;
         self.summaries.values.entry(owner).or_default().evaluate(&evaluation);
         Ok(value)
     }
@@ -475,7 +475,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             }
             TermKind::Closure(closure) => {
                 let code = self.resolve(closure.code)?;
-                self.use_value(value, code);
+                self.use_value(value, code)?;
                 self.sink.add("SourceClosureCode", (value, code))?;
                 for capture in &closure.captures {
                     self.operand(capture, value, scope)?;
@@ -638,7 +638,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             value
         };
         self.identities.arrays.entry(value).or_insert((array, scope.key));
-        self.use_value(owner, value);
+        self.use_value(owner, value)?;
         let extent = match array {
             ArrayExpr::Var(VarRef::Symbol(_), _) => self.sink.add("Length", value)?,
             ArrayExpr::Var(VarRef::Builtin { .. }, _) => {
@@ -756,7 +756,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             SoacOp::Filter { input, .. } => self.input(input, operation, 0, value, scope)?,
             SoacOp::Scatter { dest, inputs, .. } | SoacOp::BucketScatter { dest, inputs, .. } => {
                 let destination = self.resolve(dest.id)?;
-                self.use_value(value, destination);
+                self.use_value(value, destination)?;
                 self.sink.set("SourceDestination", operation, destination)?;
                 self.use_summary(value, destination, false);
                 for (index, input) in inputs.iter().enumerate() {
@@ -771,7 +771,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 ..
             } => {
                 let destination = self.resolve(dest.id)?;
-                self.use_value(value, destination);
+                self.use_value(value, destination)?;
                 self.sink.set("SourceDestination", operation, destination)?;
                 self.use_summary(value, destination, false);
                 let neutral = self.operand(ne, value, scope)?;

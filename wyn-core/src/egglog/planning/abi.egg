@@ -9,6 +9,34 @@
       ((set (ParameterStorageAccess region index) access)) :ruleset planning-import)
 (rule ((SourceImmutableParameter region index))
       ((set (ParameterStorageAccess region index) 1)) :ruleset planning-import)
+
+; Prove that ALL uses of an input are constant prefix slices. Collect complete
+; use sets during planning-import; compare them only in physical-bindings,
+; after import has saturated. A return is a use too, even without an operand.
+; Source occurrences are immutable and are never equated by scalar rewrites.
+; Prefix counts describe minimum buffer capacity, never the value of length(xs).
+(datatype InputUse (InputOperand SourceValue) (InputReturn RegionKey))
+(sort InputUseSites (Set InputUse))
+(function AllInputUses (SourceValue) InputUseSites :merge (set-union old new))
+(function PrefixInputUses (SourceValue) InputUseSites :merge (set-union old new))
+(function MaxInputPrefix (SourceValue) i64 :merge (max old new))
+(function ParameterPrefixElements (RegionKey i64) i64 :no-merge)
+(rule ((SourceEntryPoint owner region) (= input (SourceParameter region i))
+       (= (AbiStorage input) (StorageInput binding stride)))
+      ((set (AllInputUses input) (set-empty))
+       (set (PrefixInputUses input) (set-empty))) :ruleset planning-import)
+(rule ((= uses (AllInputUses input)) (SourceDirectUse consumer input))
+      ((set (AllInputUses input) (set-of (InputOperand consumer)))) :ruleset planning-import)
+(rule ((= uses (AllInputUses input)) (= input (SourceResult region)))
+      ((set (AllInputUses input) (set-of (InputReturn region)))) :ruleset planning-import)
+(rule ((= uses (AllInputUses input)) (SourceSlice slice input start end)
+       (= (SourceInteger32 start) 0) (= n (SourceInteger32 end)) (>= n 0))
+      ((set (PrefixInputUses input) (set-of (InputOperand slice)))
+       (set (MaxInputPrefix input) n)) :ruleset planning-import)
+(rule ((SourceEntryPoint owner region) (= input (SourceParameter region i))
+       (= n (MaxInputPrefix input)) (= (AllInputUses input) (PrefixInputUses input)))
+      ((set (ParameterPrefixElements region i) n)) :ruleset physical-bindings)
+
 (function PushOffset (RegionKey i64) i64 :no-merge)
 (relation PushParameter (RegionKey i64))
 (function MinimumArrayCapacity () i64 :no-merge)

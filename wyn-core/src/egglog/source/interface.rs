@@ -8,7 +8,7 @@ use crate::binding_layout::{
 use crate::egglog::OptimizeError;
 use crate::interface::{Attribute, DrawBufferOperand, EntryParamBindingKind, StorageAccess};
 use crate::ssa::layout::{storage_elem_stride, storage_value_type};
-use crate::tlc::data::EntryInputBounds;
+use crate::tlc::data::PinnedEntry;
 use crate::tlc::EntryPoint;
 use crate::types::{Type, TypeExt};
 use crate::{BindingRef, SymbolId};
@@ -30,7 +30,7 @@ impl Import<'_, '_, '_, '_> {
     }
     pub(super) fn interface(
         &mut self,
-        entry: &EntryPoint<EntryInputBounds>,
+        entry: &EntryPoint<PinnedEntry>,
         owner: i64,
         parameters: &[(SymbolId, Type)],
     ) -> Result<(), OptimizeError> {

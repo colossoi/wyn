@@ -77,8 +77,10 @@ pub(super) struct Summaries {
 }
 
 impl Import<'_, '_, '_, '_> {
-    pub(super) fn use_value(&mut self, owner: Value, value: Value) {
+    pub(super) fn use_value(&mut self, owner: Value, value: Value) -> Result<(), OptimizeError> {
+        self.sink.add("SourceDirectUse", (owner, value))?;
         self.summaries.uses.entry(owner).or_default().insert(value);
+        Ok(())
     }
 
     /// Publish operation operands once; scalar dependencies retain their shared
@@ -180,7 +182,7 @@ impl Import<'_, '_, '_, '_> {
         parent.summary.regions.insert(child);
         if let Some(free) = self.summaries.free.get(&child).cloned() {
             for value in free {
-                self.use_value(owner, value);
+                self.summaries.uses.entry(owner).or_default().insert(value);
                 self.use_summary(owner, value, false);
             }
         }

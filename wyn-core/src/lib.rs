@@ -273,8 +273,6 @@ pub use polytype::Context as PolytypeContext;
 //       tlc::defunctionalize(...)        -> tlc::stage::Defunctionalized
 //       tlc::fold_generated_lambdas(...) -> tlc::stage::GeneratedLambdasFolded
 //       tlc::apply_ownership(...)        -> tlc::stage::OwnershipApplied
-//       tlc::infer_input_slice_bounds(...)
-//                                      -> tlc::stage::InputSliceBoundsInferred
 // Egglog stages:
 //       egglog::from_tlc(&program)       -> Imported
 //       egglog::fuse(...)                -> Fused
@@ -675,7 +673,7 @@ fn compile_thru_ssa_for_target(
     source: &str,
     target: CodegenTarget,
 ) -> std::result::Result<ssa::stage::Elaborated, Box<dyn std::error::Error>> {
-    let program = tlc::infer_input_slice_bounds(compile_thru_tlc(source)?);
+    let program = compile_thru_tlc(source)?;
     let program = egglog::from_tlc(&program)?;
     let program = egglog::fuse(program)?;
     let program = egglog::place(program, PipelineTopologyPolicy::AllowGenerated)?;

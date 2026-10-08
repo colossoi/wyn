@@ -10,7 +10,6 @@ pub mod defunctionalize;
 mod from_ast;
 pub mod if_over_producer;
 pub mod inline;
-pub mod input_slice_bounds;
 pub mod monomorphize;
 pub mod ownership;
 pub mod partial_eval;
@@ -302,7 +301,6 @@ pub mod context {
 /// Stable names for the recursive families defined by their producing passes.
 pub mod family {
     pub use super::defunctionalize::ClosureConverted;
-    pub use super::input_slice_bounds::InputBounded;
     pub use super::monomorphize::Monomorphic;
     pub use super::pin_entry_buffers::Polymorphic;
 }
@@ -312,7 +310,6 @@ pub mod stage {
     pub use super::defunctionalize::Defunctionalized;
     pub use super::if_over_producer::ConditionalProducersCanonicalized;
     pub use super::inline::{GeneratedLambdasFolded, SoacHelpersInlined};
-    pub use super::input_slice_bounds::InputSliceBoundsInferred;
     pub use super::monomorphize::Monomorphized;
     pub use super::ownership::{OwnershipApplied, OwnershipValidated};
     pub use super::partial_eval::PartialEvaled;
@@ -330,7 +327,6 @@ pub mod stage {
 pub use defunctionalize::defunctionalize;
 pub use if_over_producer::canonicalize_conditional_producers;
 pub use inline::{fold_generated_lambdas, force_inline_soac_helpers};
-pub use input_slice_bounds::infer_input_slice_bounds;
 pub use monomorphize::monomorphize;
 pub use ownership::{apply_ownership, validate_ownership};
 pub use partial_eval::partial_eval;

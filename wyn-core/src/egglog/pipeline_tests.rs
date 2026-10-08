@@ -102,7 +102,7 @@ fn basic_scalar_policy_retains_calls_and_validates_both_backends() {
         include_str!("../../../testfiles/select_lowering.wyn"),
         include_str!("../../../testfiles/filter_then_map.wyn"),
     ] {
-        let tlc = crate::tlc::infer_input_slice_bounds(crate::compile_thru_tlc(source).unwrap());
+        let tlc = crate::compile_thru_tlc(source).unwrap();
         for policy in [ScalarOptimization::Basic, ScalarOptimization::Full] {
             for target in [CodegenTarget::Spirv, CodegenTarget::Wgsl] {
                 let program = optimize_with_policy(

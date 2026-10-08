@@ -5,10 +5,9 @@
 //! representation and live here so consumers do not depend on producing
 //! passes.
 
-use crate::host::BufferLen;
 use crate::interface;
 use crate::types;
-use crate::{LookupMap, SymbolId};
+use crate::SymbolId;
 
 /// No payload is stored at this position in the selected phase.
 ///
@@ -162,12 +161,4 @@ impl super::Payload for ExplicitCapturesPayload {
 #[derive(Debug, Clone, Default)]
 pub struct PinnedEntry {
     pub param_bindings: Vec<Option<interface::EntryParamBinding>>,
-}
-
-/// Buffer layout and minimum required storage-input lengths attached directly
-/// to an entry after input-bound inference.
-#[derive(Debug, Clone, Default)]
-pub struct EntryInputBounds {
-    pub param_bindings: Vec<Option<interface::EntryParamBinding>>,
-    pub by_symbol: LookupMap<SymbolId, BufferLen>,
 }

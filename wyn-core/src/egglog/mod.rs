@@ -3,7 +3,7 @@
 //! [`from_tlc`] → [`fuse`] → [`place`] → [`schedule`] → [`optimize`] → [`to_ssa`].
 use crate::host::ScalarExpr;
 use crate::ssa::stage::Elaborated;
-use crate::tlc::stage::InputSliceBoundsInferred;
+use crate::tlc::stage::OwnershipApplied;
 use crate::{CodegenTarget, LookupMap, PipelineTopologyPolicy};
 use egglog_engine::ast::{Command, Parser};
 use egglog_engine::Error;
@@ -36,7 +36,7 @@ pub enum OptimizeError {
 
 /// Summarize semantic values, operations, and execution scopes in one TLC walk.
 /// Resolve lexical bindings directly; scalar bodies remain source references.
-pub fn from_tlc(source: &InputSliceBoundsInferred) -> Result<Program<'_, Imported>, OptimizeError> {
+pub fn from_tlc(source: &OwnershipApplied) -> Result<Program<'_, Imported>, OptimizeError> {
     let _timing = timing::span("egglog import");
     let (graph, identities) = source::import(source)?;
     Ok(Program {
@@ -109,7 +109,7 @@ pub fn to_ssa(program: Program<'_, Optimized>, target: CodegenTarget) -> Result<
 /// Original TLC supplies untouched bodies and source metadata. The graph owns
 /// structural transformations and planning facts; Rust does not mirror its terms.
 pub struct Program<'source, Stage> {
-    source: &'source InputSliceBoundsInferred,
+    source: &'source OwnershipApplied,
     graph: EGraph,
     identities: source::Identities<'source>,
     stage: Stage,

@@ -14,6 +14,9 @@
 (function SourceParameterRegion (SourceValue) RegionKey :no-merge)
 (function SourceParameterIndex (SourceValue) i64 :no-merge)
 (relation SourceComputedUse (SourceValue SourceValue))
+; Immediate operands, including aliases and SOAC inputs. Region dependency
+; summaries are deliberately excluded: these are actual value uses.
+(relation SourceDirectUse (SourceValue SourceValue))
 (relation SourceOperand (OperationKey SourceValue))
 (function SourceAlias (SourceValue) SourceValue :no-merge)
 (function SourceResult (RegionKey) SourceValue :no-merge)

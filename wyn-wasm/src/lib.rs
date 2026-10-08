@@ -671,7 +671,6 @@ fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileRe
     let program = wyn_core::tlc::defunctionalize(program);
     let program = wyn_core::tlc::fold_generated_lambdas(program);
     let program = wyn_core::tlc::apply_ownership(program);
-    let program = wyn_core::tlc::infer_input_slice_bounds(program);
     let topology =
         if direct { PipelineTopologyPolicy::AuthoredOnly } else { PipelineTopologyPolicy::AllowGenerated };
     let lower = || -> Result<_, Box<dyn std::error::Error>> {

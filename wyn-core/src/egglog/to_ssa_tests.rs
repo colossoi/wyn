@@ -1,7 +1,6 @@
 use crate::egglog::{from_tlc, fuse, optimize, place, schedule, to_ssa};
 use crate::host::Pipeline;
 use crate::interface::ComputeDispatchGrid;
-use crate::tlc::infer_input_slice_bounds;
 use crate::tlc::DefMeta;
 use crate::PipelineTopologyPolicy;
 use crate::{
@@ -30,9 +29,7 @@ fn missing_selected_abi_facts_are_errors() {
         ("ParameterAbi", "missing selected ParameterAbi"),
         ("AbiStorage", "has no binding"),
     ] {
-        let tlc = infer_input_slice_bounds(
-            compile_thru_tlc("entry main(xs:[]i32,k:i32) []i32=map(|x|x+k,xs)").unwrap(),
-        );
+        let tlc = compile_thru_tlc("entry main(xs:[]i32,k:i32) []i32=map(|x|x+k,xs)").unwrap();
         let mut program = optimize(
             schedule(
                 place(
@@ -55,8 +52,7 @@ fn missing_selected_abi_facts_are_errors() {
 #[test]
 fn invalid_selected_workgroup_is_an_error() {
     use egglog_engine::Write;
-    let tlc =
-        infer_input_slice_bounds(compile_thru_tlc("entry main(xs:[4]i32) [4]i32=map(|x|x+1,xs)").unwrap());
+    let tlc = compile_thru_tlc("entry main(xs:[4]i32) [4]i32=map(|x|x+1,xs)").unwrap();
     let mut program = optimize(
         schedule(
             place(
@@ -340,12 +336,10 @@ fn scalar_domain_collectives_publish_scratch_and_capacity_dependencies() {
 
 #[test]
 fn external_functions_retain_their_declared_signatures() {
-    let tlc = infer_input_slice_bounds(
-        compile_thru_tlc(
-            "#[linked(\"foreign_add\")] extern add(a:i32,b:i32) i32\nentry main(x:i32) i32 = add(x, 3)",
-        )
-        .unwrap(),
-    );
+    let tlc = compile_thru_tlc(
+        "#[linked(\"foreign_add\")] extern add(a:i32,b:i32) i32\nentry main(x:i32) i32 = add(x, 3)",
+    )
+    .unwrap();
     let program = optimize(
         schedule(
             place(
@@ -584,7 +578,7 @@ fn existing_spirv_backend_also_accepts_the_handoff() {
         include_str!("../../../testfiles/filter_then_map.wyn"),
         "entry main(xs: [4]i32, n: i32) [4]i32 = loop acc = xs for k < n do map(|x: i32| x + k, acc)",
     ] {
-        let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
+        let tlc = compile_thru_tlc(source).unwrap();
         let program = optimize(
             schedule(
                 place(
@@ -639,7 +633,7 @@ fn pipeline(source: &str) -> LoweredWgsl {
 }
 
 fn pipeline_with_grid(source: &str, grid: Option<(u32, u32, u32)>) -> LoweredWgsl {
-    let mut tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
+    let mut tlc = compile_thru_tlc(source).unwrap();
     for definition in &mut tlc.defs {
         if let DefMeta::EntryPoint(entry) = &mut definition.meta {
             entry.declaration.compute_dispatch = grid.map(|(x, y, z)| ComputeDispatchGrid { x, y, z });
@@ -974,7 +968,7 @@ fn runtime_launches_use_buffer_and_scalar_domains() {
 fn unsigned_ranges_keep_their_extent_in_the_element_representation() {
     let source = "entry main(n:u32) []u32 = map(|i:u32|i+1u32, 0u32..<n)";
     compile(source);
-    let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
+    let tlc = compile_thru_tlc(source).unwrap();
     let program = optimize(
         schedule(
             place(
@@ -1099,7 +1093,7 @@ fn direct_mode_keeps_collectives_in_the_authored_entry() {
         "entry main(xs:[137]i32) [137]i32 = map(|x:i32|x+1,xs)",
         include_str!("../../../testfiles/unified_triangle.wyn"),
     ] {
-        let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
+        let tlc = compile_thru_tlc(source).unwrap();
         let scheduled = optimize(
             schedule(
                 place(
@@ -1159,7 +1153,7 @@ fn authored_outputs_consume_selected_capacities() {
             BufferLen::SameAsDispatch { elem_bytes: 4 },
         ),
     ] {
-        let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
+        let tlc = compile_thru_tlc(source).unwrap();
         let program = optimize(
             schedule(
                 place(
@@ -1190,7 +1184,7 @@ fn authored_outputs_consume_selected_capacities() {
 
 #[test]
 fn missing_authored_output_capacity_is_an_error() {
-    let tlc = infer_input_slice_bounds(compile_thru_tlc("entry main() i32=42").unwrap());
+    let tlc = compile_thru_tlc("entry main() i32=42").unwrap();
     let mut program = optimize(
         schedule(
             place(
