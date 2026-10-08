@@ -6,7 +6,7 @@
 
 use super::data::{Empty, ExplicitCapturesPayload, ExplicitClosurePayload};
 use super::defunctionalize::{ClosureConverted, Defunctionalized};
-use super::rep_specialize::RepSpecialized;
+use super::monomorphize::Monomorphized;
 use super::VarRef;
 use super::{
     clone_term_with_fresh_ids, extract_lambda_params, Bindings, Def, DefMeta, LetBinding, Payload,
@@ -41,7 +41,7 @@ pub type GeneratedLambdasFolded = super::Program<
 /// SOAC helper) fully expand: one round inlines `center`, the next sees
 /// `sum` calls inside the freshly-expanded clump body and inlines those
 /// too.
-pub fn force_inline_soac_helpers(mut program: RepSpecialized) -> SoacHelpersInlined {
+pub fn force_inline_soac_helpers(mut program: Monomorphized) -> SoacHelpersInlined {
     expand_constants(&mut program);
     super::dce::eliminate_unreachable_defs(&mut program.defs);
     force_inline_array_work_helpers_to_fixpoint(&mut program);
@@ -64,7 +64,7 @@ struct CalledArrayWorkHelper {
 /// source-level inlining as the one boundary operation that exposes every
 /// array-work helper before conversion, then let egglog own all
 /// producer/consumer and scheduling decisions.
-fn verify_array_work_helpers_inlined(program: &RepSpecialized) -> Result<(), Vec<CalledArrayWorkHelper>> {
+fn verify_array_work_helpers_inlined(program: &Monomorphized) -> Result<(), Vec<CalledArrayWorkHelper>> {
     let array_work_bearing: LookupSet<SymbolId> =
         program.defs.iter().filter(|def| contains_array_work(&def.body)).map(|def| def.name).collect();
     let mut violations = Vec::new();
@@ -99,7 +99,7 @@ fn collect_called_array_work_helpers(
     });
 }
 
-fn force_inline_array_work_helpers_to_fixpoint(program: &mut RepSpecialized) {
+fn force_inline_array_work_helpers_to_fixpoint(program: &mut Monomorphized) {
     // Bound iterations to guard against pathological recursion through
     // hand-crafted call graphs; typical wyn helper depth is 2–3.
     for _ in 0..8 {
@@ -124,7 +124,7 @@ fn force_inline_array_work_helpers_to_fixpoint(program: &mut RepSpecialized) {
 }
 
 fn build_array_work_helper_candidates(
-    program: &RepSpecialized,
+    program: &Monomorphized,
 ) -> LookupMap<SymbolId, InlineBody<Empty, Empty>> {
     let mut candidates = LookupMap::new();
     for def in &program.defs {
@@ -181,7 +181,7 @@ fn is_array_shape_intrinsic_call<C: Payload, S: Payload>(term: &Term<C, S>) -> b
 }
 
 fn any_def_calls_candidate(
-    program: &RepSpecialized,
+    program: &Monomorphized,
     candidates: &LookupMap<SymbolId, InlineBody<Empty, Empty>>,
 ) -> bool {
     fn walk(term: &Term<Empty, Empty>, cs: &LookupMap<SymbolId, InlineBody<Empty, Empty>>) -> bool {
@@ -204,7 +204,7 @@ fn any_def_calls_candidate(
 }
 
 /// Expose constant bodies before selecting helpers that contain array work.
-fn expand_constants(program: &mut RepSpecialized) {
+fn expand_constants(program: &mut Monomorphized) {
     let all_constants = find_all_constants(program);
     let mut constants = ConstantInliner {
         constants: &all_constants,
@@ -247,7 +247,7 @@ struct InlineBody<C: Payload, S: Payload> {
 }
 
 /// Find zero-arity, non-entry, non-extern definitions by their SymbolId.
-fn find_all_constants(program: &RepSpecialized) -> LookupMap<SymbolId, Term<Empty, Empty>> {
+fn find_all_constants(program: &Monomorphized) -> LookupMap<SymbolId, Term<Empty, Empty>> {
     program
         .defs
         .iter()

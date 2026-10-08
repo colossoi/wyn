@@ -261,7 +261,6 @@ pub use polytype::Context as PolytypeContext;
 //       tlc::extract_stages(...)          -> tlc::stage::StagesExtracted
 //       tlc::pin_entry_buffers(...)       -> tlc::stage::BuffersPinned
 //       tlc::monomorphize(...)           -> tlc::stage::Monomorphized
-//       tlc::rep_specialize(...)         -> tlc::stage::RepSpecialized
 //       tlc::force_inline_soac_helpers(...)
 //                                      -> tlc::stage::SoacHelpersInlined
 //       tlc::canonicalize_conditional_producers(...)
@@ -322,7 +321,6 @@ pub(crate) fn optimize_tlc_for_test_thru_soac_normalization(
     let program = tlc::extract_stages(program)?;
     let program = tlc::pin_entry_buffers(program)?;
     let program = tlc::monomorphize(program)?;
-    let program = tlc::rep_specialize(program);
     let program = tlc::force_inline_soac_helpers(program);
     let program = tlc::canonicalize_conditional_producers(program);
     let program = tlc::normalize_soacs(program);

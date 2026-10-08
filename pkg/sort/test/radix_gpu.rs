@@ -83,24 +83,26 @@ mod tests {
         for k in [0, 1, 2, 3, 5] {
             eprintln!("checking tuple loops k={k}");
             let bound = input(&device, &[k]);
+            let tuple_k = tuples::ParameterBuffer::new(&device, &k.to_le_bytes()).unwrap();
+            let nested_k = nested::ParameterBuffer::new(&device, &k.to_le_bytes()).unwrap();
             check!(
                 tuples,
-                tuples::host_mapped(&mut tuples, &queue, &bound, &bound, &bound),
+                tuples::host_mapped(&mut tuples, &queue, &tuple_k, &bound, &bound),
                 vec![vec![1 + k, 3 + k], vec![2 + 2 * k, 4 + 2 * k]]
             );
             check!(
                 tuples,
-                tuples::host_scanned(&mut tuples, &queue, &bound, &bound, &bound, &bound, &bound),
+                tuples::host_scanned(&mut tuples, &queue, &tuple_k, &bound, &bound, &bound, &bound),
                 vec![vec![1, 3 + k], vec![2, 4 + 2 * k]]
             );
             check!(
                 tuples,
-                tuples::host_flags(&mut tuples, &queue, &bound, &bound, &bound),
+                tuples::host_flags(&mut tuples, &queue, &tuple_k, &bound, &bound),
                 vec![vec![1, 2]]
             );
             check!(
                 tuples,
-                tuples::host_nested(&mut tuples, &queue, &bound, &bound, &bound),
+                tuples::host_nested(&mut tuples, &queue, &tuple_k, &bound, &bound),
                 vec![vec![(3 << k) - 2, (4 << k) - 2]]
             );
             check!(
@@ -110,7 +112,7 @@ mod tests {
             );
             check!(
                 nested,
-                nested::host_updated(&mut nested, &queue, &bound, &bound, &bound),
+                nested::host_updated(&mut nested, &queue, &nested_k, &bound, &bound),
                 vec![vec![1 + k, 3 + k], vec![2 + 2 * k, 1 - k % 2, 4 + 2 * k, k % 2]]
             );
         }

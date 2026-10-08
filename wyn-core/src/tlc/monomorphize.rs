@@ -1,44 +1,34 @@
-//! Monomorphization of TLC definitions.
+//! Specialize reachable TLC definitions by type and array representation.
 //!
-//! The pass starts from entry points and emits one reachable definition for
-//! each concrete instantiation it encounters. Type schemes are consumed from
-//! their owning definitions; specialization indexes and the worklist are
-//! derived state private to this run.
-//!
-//! **Representation variants.** Type substitution replaces type variables but
-//! deliberately preserves `ArrayVariantAbstract`. It is a first-class
-//! representation-polymorphic variant, not a placeholder. egglog lowering
-//! chooses the concrete representation, and `ssa::backend_validation` guards
-//! the backend boundary.
+//! One cache and worklist own all instantiations. Producer facts are local to
+//! the definition being rewritten and follow let bindings, including those
+//! introduced while instantiating local polymorphic lambdas.
 
 use super::data::Empty;
 use super::pin_entry_buffers::{BuffersPinned, Polymorphic};
 use super::{
-    apply_type_substitution, extend_type_substitution, ArrayExpr, Def, DefMeta, Program, RewriteDecision,
-    Term, TermId, TermIdSource, TermKind, TermRewriter, TypeSubstitution, VarRef,
+    apply_type_substitution, curried_function_type, extend_type_substitution, ArrayExpr, Def, DefMeta,
+    Program, RewriteDecision, SoacOp, Term, TermId, TermIdSource, TermKind, TermRewriter, TypeSubstitution,
+    VarRef,
 };
 use crate::ast::TypeName;
 use crate::error::CompilerError;
 use crate::types::{TypeExt, TypeScheme};
-use crate::{LookupMap, LookupSet, SymbolId, SymbolTable};
+use crate::{LookupMap, SymbolId, SymbolTable};
 use polytype::Type;
 use std::collections::VecDeque;
 
-/// Monomorphic TLC stores no per-definition payload; monomorphization consumes
+/// Monomorphic TLC stores no per-definition payload; specialization consumes
 /// the source schemes while constructing this family.
 pub type Monomorphic = super::TreeFamily<(), super::data::PinnedEntry, Empty, Empty>;
 
-/// TLC after intrinsic specialization and reachable user-function
-/// monomorphization.
+/// TLC after intrinsic, type, and producer-derived representation specialization.
 #[derive(Debug, Clone, Copy)]
 pub enum MonomorphizedTag {}
 pub type Monomorphized = super::Program<MonomorphizedTag, Monomorphic, super::context::RewriteGlobal>;
 
-/// Specialize intrinsic calls, then consume the polymorphic definition graph
-/// into its reachable monomorphic graph.
 pub fn monomorphize(mut program: BuffersPinned) -> std::result::Result<Monomorphized, CompilerError> {
     super::specialize::specialize_intrinsics(&mut program);
-
     let Program {
         defs,
         mut symbols,
@@ -54,23 +44,17 @@ pub fn monomorphize(mut program: BuffersPinned) -> std::result::Result<Monomorph
 
 struct Monomorphizer<'symbols, 'ids> {
     symbols: &'symbols mut SymbolTable,
-    /// Definition metadata and the tree it validates live under one key.
-    ///
-    /// A work item can no longer find the signature while independently
-    /// failing to find (or consume) its specialization template.
     definitions: LookupMap<SymbolId, DefinitionRecord>,
-    mono_functions: Vec<Def<Monomorphic>>,
-    specializations: LookupMap<(SymbolId, SpecKey), SymbolId>,
+    specializations: LookupMap<(SymbolId, SpecKey), Specialization>,
     worklist: VecDeque<WorkItem>,
-    processed: LookupSet<(SymbolId, SpecKey)>,
+    producer_variants: ProducerVariants,
     term_ids: &'ids mut TermIdSource,
 }
 
 struct DefinitionRecord {
     info: DefinitionInfo,
-    /// `Some` until an ordinary monomorphic definition is moved into the
-    /// output. Polymorphic definitions retain this tree and clone it for each
-    /// specialization.
+    /// Ordinary definitions are moved into the output; specializable ones
+    /// retain their template for further instantiations.
     template: Option<Def<Polymorphic>>,
 }
 
@@ -79,6 +63,10 @@ impl DefinitionRecord {
         let info = DefinitionInfo {
             scheme: definition.data.scheme.clone(),
             ty: definition.ty.clone(),
+            specialize_representations: matches!(
+                definition.meta,
+                DefMeta::Function | DefMeta::LiftedLambda
+            ),
         };
         Self {
             info,
@@ -99,6 +87,7 @@ impl DefinitionRecord {
 struct DefinitionInfo {
     scheme: Option<TypeScheme>,
     ty: Type<TypeName>,
+    specialize_representations: bool,
 }
 
 impl DefinitionInfo {
@@ -107,14 +96,22 @@ impl DefinitionInfo {
     }
 
     fn may_need_as_template(&self) -> bool {
-        matches!(&self.scheme, Some(TypeScheme::Polytype { .. })) || !self.ty.vars().is_empty()
+        matches!(&self.scheme, Some(TypeScheme::Polytype { .. }))
+            || !self.ty.vars().is_empty()
+            || (self.specialize_representations && type_has_specializable_array_variant(&self.ty))
     }
+}
+
+#[derive(Clone)]
+struct Specialization {
+    symbol: SymbolId,
+    ty: Type<TypeName>,
 }
 
 struct WorkItem {
     original_sym: SymbolId,
     spec_key: SpecKey,
-    output_sym: SymbolId,
+    output: Specialization,
 }
 
 /// Deterministic, hashable form of a type substitution.
@@ -124,6 +121,8 @@ struct SubstKey(Vec<(usize, Type<TypeName>)>);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SpecKey {
     type_subst: SubstKey,
+    /// Trailing empty slots are omitted, so an all-empty key is canonical.
+    representations: Vec<Option<ConcreteVariant>>,
 }
 
 impl SubstKey {
@@ -133,10 +132,6 @@ impl SubstKey {
         Self(items)
     }
 
-    fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
     fn to_subst(&self) -> TypeSubstitution {
         self.0.iter().cloned().collect()
     }
@@ -144,19 +139,18 @@ impl SubstKey {
 
 impl SpecKey {
     fn empty() -> Self {
-        Self {
-            type_subst: SubstKey(Vec::new()),
-        }
+        Self::new(&TypeSubstitution::new())
     }
 
     fn new(subst: &TypeSubstitution) -> Self {
         Self {
             type_subst: SubstKey::from_subst(subst),
+            representations: Vec::new(),
         }
     }
 
     fn needs_specialization(&self) -> bool {
-        !self.type_subst.is_empty()
+        !self.type_subst.0.is_empty() || !self.representations.is_empty()
     }
 }
 
@@ -189,44 +183,33 @@ impl<'symbols, 'ids> Monomorphizer<'symbols, 'ids> {
         defs: Vec<Def<Polymorphic>>,
         term_ids: &'ids mut TermIdSource,
     ) -> Self {
-        let mut definitions = LookupMap::new();
-        let mut worklist = VecDeque::new();
-
-        for def in defs {
-            let symbol = def.name;
-            if matches!(&def.meta, DefMeta::EntryPoint(_)) {
-                worklist.push_back(WorkItem {
-                    original_sym: symbol,
-                    spec_key: SpecKey::empty(),
-                    output_sym: symbol,
-                });
-            }
-            definitions.insert(symbol, DefinitionRecord::new(def));
-        }
-
-        Self {
+        let entries: Vec<_> = defs
+            .iter()
+            .filter(|def| matches!(def.meta, DefMeta::EntryPoint(_)))
+            .map(|def| def.name)
+            .collect();
+        let mut this = Self {
             symbols,
-            definitions,
-            mono_functions: Vec::new(),
+            definitions: defs.into_iter().map(|def| (def.name, DefinitionRecord::new(def))).collect(),
             specializations: LookupMap::new(),
-            worklist,
-            processed: LookupSet::new(),
+            worklist: VecDeque::new(),
+            producer_variants: LookupMap::new(),
             term_ids,
+        };
+        for entry in entries {
+            this.get_or_create_specialization(entry, SpecKey::empty());
         }
+        this
     }
 
     fn monomorphize(mut self) -> std::result::Result<Vec<Def<Monomorphic>>, CompilerError> {
+        let mut defs = Vec::new();
         while let Some(work_item) = self.worklist.pop_front() {
-            let key = (work_item.original_sym, work_item.spec_key.clone());
-            if !self.processed.insert(key) {
-                continue;
-            }
-
+            self.producer_variants.clear();
             let def = self.materialize_work_item(&work_item)?;
-            let def = self.process_def(def);
-            self.mono_functions.push(def);
+            defs.push(self.process_def(def));
         }
-        Ok(self.mono_functions)
+        Ok(defs)
     }
 
     fn materialize_work_item(
@@ -247,12 +230,20 @@ impl<'symbols, 'ids> Monomorphizer<'symbols, 'ids> {
                 work_item.original_sym
             )));
         };
-
+        def.name = work_item.output.symbol;
+        def.ty = work_item.output.ty.clone();
         if work_item.spec_key.needs_specialization() {
             let subst = work_item.spec_key.type_subst.to_subst();
-            def.name = work_item.output_sym;
-            def.ty = apply_type_substitution(&def.ty, &subst);
             def.body.rewrite_types(self.term_ids, &mut |ty| apply_type_substitution(ty, &subst));
+        }
+        if !work_item.spec_key.representations.is_empty() {
+            specialize_lambda_params(
+                &mut def.body,
+                &work_item.spec_key.representations,
+                &mut 0,
+                &mut self.producer_variants,
+                self.term_ids,
+            );
         }
         Ok(def)
     }
@@ -282,41 +273,17 @@ impl<'symbols, 'ids> Monomorphizer<'symbols, 'ids> {
         }
     }
 
-    fn ensure_in_worklist(&mut self, symbol: SymbolId) {
-        let spec_key = SpecKey::empty();
-        let key = (symbol, spec_key.clone());
-        if self.processed.contains(&key)
-            || self
-                .worklist
-                .iter()
-                .any(|work| work.original_sym == symbol && !work.spec_key.needs_specialization())
-        {
-            return;
-        }
-        self.worklist.push_back(WorkItem {
-            original_sym: symbol,
-            spec_key,
-            output_sym: symbol,
-        });
-    }
-
     fn rewrite_symbol_reference(
         &mut self,
         symbol: SymbolId,
         concrete_type: &Type<TypeName>,
     ) -> Option<SymbolId> {
-        let info = self.definitions.get(&symbol)?.info.clone();
-        let Some(subst) = self.infer_var_substitution(&info, concrete_type) else {
-            self.ensure_in_worklist(symbol);
-            return None;
-        };
-        let spec_key = SpecKey::new(&subst);
-        if spec_key.needs_specialization() {
-            Some(self.get_or_create_specialization(symbol, &spec_key))
-        } else {
-            self.ensure_in_worklist(symbol);
-            None
-        }
+        let info = &self.definitions.get(&symbol)?.info;
+        let mut subst = TypeSubstitution::new();
+        extend_type_substitution(info.polymorphic_type(), concrete_type, &mut subst);
+        normalize_buffer_substitutions(info.polymorphic_type(), &mut subst);
+        let specialized = self.get_or_create_specialization(symbol, SpecKey::new(&subst));
+        (specialized.symbol != symbol).then_some(specialized.symbol)
     }
 
     fn rewrite_array_references(&mut self, array: &mut ArrayExpr<Empty, Empty>) -> bool {
@@ -341,45 +308,73 @@ impl<'symbols, 'ids> Monomorphizer<'symbols, 'ids> {
         }
     }
 
-    fn infer_substitution(&self, info: &DefinitionInfo, arg_types: &[Type<TypeName>]) -> TypeSubstitution {
+    fn infer_call_key(&self, info: &DefinitionInfo, args: &[Term<Empty, Empty>]) -> SpecKey {
         let mut subst = TypeSubstitution::new();
-        let (param_types, _) = split_function_type(info.polymorphic_type());
-        for (param_ty, arg_ty) in param_types.iter().zip(arg_types) {
-            extend_type_substitution(param_ty, arg_ty, &mut subst);
+        let (params, _) = split_function_type(info.polymorphic_type());
+        for (param, arg) in params.iter().zip(args) {
+            extend_type_substitution(param, &arg.ty, &mut subst);
         }
         normalize_buffer_substitutions(info.polymorphic_type(), &mut subst);
-        subst
+        let mut key = SpecKey::new(&subst);
+        if info.specialize_representations {
+            key.representations = params
+                .iter()
+                .zip(args)
+                .map(|(param, arg)| {
+                    if type_has_specializable_array_variant(&apply_type_substitution(param, &subst)) {
+                        if let TermKind::Var(VarRef::Symbol(symbol)) = &arg.kind {
+                            return self.producer_variants.get(symbol).copied();
+                        }
+                    }
+                    None
+                })
+                .collect();
+            while key.representations.last() == Some(&None) {
+                key.representations.pop();
+            }
+        }
+        key
     }
 
-    fn infer_var_substitution(
-        &self,
-        info: &DefinitionInfo,
-        concrete_type: &Type<TypeName>,
-    ) -> Option<TypeSubstitution> {
-        let mut subst = TypeSubstitution::new();
-        extend_type_substitution(info.polymorphic_type(), concrete_type, &mut subst);
-        normalize_buffer_substitutions(info.polymorphic_type(), &mut subst);
-        (!subst.is_empty()).then_some(subst)
-    }
-
-    fn get_or_create_specialization(&mut self, function: SymbolId, spec_key: &SpecKey) -> SymbolId {
+    fn get_or_create_specialization(&mut self, function: SymbolId, spec_key: SpecKey) -> Specialization {
         let cache_key = (function, spec_key.clone());
         if let Some(specialized) = self.specializations.get(&cache_key) {
-            return *specialized;
+            return specialized.clone();
         }
-
         let subst = spec_key.type_subst.to_subst();
-        let function_name = self.symbols.get(function).expect("BUG: function symbol is missing");
-        let suffix = format_subst(&subst);
-        let specialized_name =
-            if suffix.is_empty() { function_name.to_string() } else { format!("{function_name}${suffix}") };
-        let specialized = self.symbols.alloc(specialized_name);
+        let symbol = if spec_key.needs_specialization() {
+            let function_name = self.symbols.get(function).expect("BUG: function symbol is missing");
+            let suffix = format_subst(&subst);
+            let rep_suffix: String = spec_key
+                .representations
+                .iter()
+                .enumerate()
+                .filter_map(|(index, variant)| {
+                    variant.map(|variant| format!("_p{index}{}", variant.key_str()))
+                })
+                .collect();
+            self.symbols.alloc(format!("{function_name}${suffix}{rep_suffix}"))
+        } else {
+            function
+        };
+        let mut ty = apply_type_substitution(&self.definitions[&function].info.ty, &subst);
+        if !spec_key.representations.is_empty() {
+            let (mut params, result) = split_function_type(&ty);
+            for (param, variant) in params.iter_mut().zip(&spec_key.representations) {
+                if let Some(variant) = variant {
+                    *param = substitute_specializable_variant_in_type(param, *variant);
+                }
+            }
+            ty = curried_function_type(params.iter(), &result);
+        }
+        let specialized = Specialization { symbol, ty };
+        // Register both the symbol and ABI before its body can request a recursive instance.
+        self.specializations.insert(cache_key, specialized.clone());
         self.worklist.push_back(WorkItem {
             original_sym: function,
-            spec_key: spec_key.clone(),
-            output_sym: specialized,
+            spec_key,
+            output: specialized.clone(),
         });
-        self.specializations.insert(cache_key, specialized);
         specialized
     }
 }
@@ -408,6 +403,11 @@ impl TermRewriter<Empty, Empty> for Monomorphizer<'_, '_> {
                 self.rewrite_node_before_children(term);
                 return RewriteDecision::Changed;
             }
+            // Let bodies are visited after their RHS; unique symbols let facts
+            // propagate through aliases without a separate analysis or scope stack.
+            if let Some(variant) = detect_producer_variant(rhs, &self.producer_variants) {
+                self.producer_variants.insert(*name, variant);
+            }
         }
         let TermKind::App { func, args } = &mut term.kind else {
             return RewriteDecision::Unchanged;
@@ -416,20 +416,19 @@ impl TermRewriter<Empty, Empty> for Monomorphizer<'_, '_> {
             return RewriteDecision::Unchanged;
         };
         let symbol = *symbol;
-        let Some(info) = self.definitions.get(&symbol).map(|definition| definition.info.clone()) else {
+        let Some(definition) = self.definitions.get(&symbol) else {
             return RewriteDecision::Unchanged;
         };
-
-        let arg_types = args.iter().map(|arg| arg.ty.clone()).collect::<Vec<_>>();
-        let subst = self.infer_substitution(&info, &arg_types);
-        let spec_key = SpecKey::new(&subst);
-        if !spec_key.needs_specialization() {
-            self.ensure_in_worklist(symbol);
+        let key = self.infer_call_key(&definition.info, args);
+        let specialize_abi = !key.representations.is_empty();
+        let specialized = self.get_or_create_specialization(symbol, key);
+        if specialized.symbol == symbol {
             return RewriteDecision::Unchanged;
         }
-
-        let specialized = self.get_or_create_specialization(symbol, &spec_key);
-        func.kind = TermKind::Var(VarRef::Symbol(specialized));
+        func.kind = TermKind::Var(VarRef::Symbol(specialized.symbol));
+        if specialize_abi {
+            func.ty = specialized.ty;
+        }
         func.id = self.term_ids.next_id();
         RewriteDecision::Changed
     }
@@ -452,6 +451,30 @@ impl TermRewriter<Empty, Empty> for Monomorphizer<'_, '_> {
             }
             _ => RewriteDecision::Unchanged,
         }
+    }
+}
+
+/// Change only leading lambda parameter ABIs and carry their producer facts
+/// into the body. Logical result sizes and unrelated arrays stay unchanged.
+fn specialize_lambda_params(
+    term: &mut Term<Empty, Empty>,
+    representations: &[Option<ConcreteVariant>],
+    index: &mut usize,
+    variants: &mut ProducerVariants,
+    term_ids: &mut TermIdSource,
+) {
+    if let TermKind::Lambda(lambda) = &mut term.kind {
+        for (symbol, ty) in &mut lambda.params {
+            if let Some(variant) = representations.get(*index).copied().flatten() {
+                *ty = substitute_specializable_variant_in_type(ty, variant);
+                variants.insert(*symbol, variant);
+            }
+            *index += 1;
+        }
+        specialize_lambda_params(&mut lambda.body, representations, index, variants, term_ids);
+        lambda.ret_ty = lambda.body.ty.clone();
+        term.ty = curried_function_type(lambda.params.iter().map(|(_, ty)| ty), &lambda.ret_ty);
+        term.id = term_ids.next_id();
     }
 }
 
@@ -558,5 +581,133 @@ fn normalize_buffer_substitutions(ty: &Type<TypeName>, subst: &mut TypeSubstitut
         for field in fields {
             normalize_buffer_substitutions(field, subst);
         }
+    }
+}
+
+/// Concrete array representation selected from a known producer.
+///
+/// `Bounded` carries the producer's static capacity because its consumer ABI
+/// must also expose that capacity. The other variants leave the array's size
+/// slot unchanged.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+#[allow(dead_code)]
+enum ConcreteVariant {
+    Bounded {
+        capacity: usize,
+    },
+    View,
+    Composite,
+    Virtual,
+}
+
+impl ConcreteVariant {
+    fn variant_type(self) -> Type<TypeName> {
+        let name = match self {
+            Self::Bounded { .. } => TypeName::ArrayVariantBounded,
+            Self::View => TypeName::ArrayVariantView,
+            Self::Composite => TypeName::ArrayVariantComposite,
+            Self::Virtual => TypeName::ArrayVariantVirtual,
+        };
+        Type::Constructed(name, vec![])
+    }
+
+    fn size_type(self) -> Option<Type<TypeName>> {
+        match self {
+            Self::Bounded { capacity } => Some(Type::Constructed(TypeName::Size(capacity), vec![])),
+            _ => None,
+        }
+    }
+
+    fn key_str(self) -> String {
+        match self {
+            Self::Bounded { capacity } => format!("bounded{capacity}"),
+            Self::View => "view".to_string(),
+            Self::Composite => "composite".to_string(),
+            Self::Virtual => "virtual".to_string(),
+        }
+    }
+}
+
+type ProducerVariants = LookupMap<SymbolId, ConcreteVariant>;
+
+/// Recognize let-bound producers whose representation follows from the tree.
+///
+/// A filter over a statically-sized input produces `Bounded`; otherwise it
+/// produces `View`. Simple aliases propagate the source binding's fact.
+fn detect_producer_variant(
+    rhs: &Term<Empty, Empty>,
+    variants: &ProducerVariants,
+) -> Option<ConcreteVariant> {
+    match &rhs.kind {
+        TermKind::Soac(SoacOp::Filter { input, .. }) => {
+            let input_ty = input.array_type();
+            let size = array_size(&input_ty)?;
+            Some(match size {
+                Type::Constructed(TypeName::Size(capacity), _) => {
+                    ConcreteVariant::Bounded { capacity: *capacity }
+                }
+                _ => ConcreteVariant::View,
+            })
+        }
+        // `open_existential` introduces an alias after the filter-producing
+        // ANF binding. Carry the representation through that alias.
+        TermKind::Var(VarRef::Symbol(source)) => variants.get(source).copied(),
+        _ => None,
+    }
+}
+
+fn array_size(ty: &Type<TypeName>) -> Option<&Type<TypeName>> {
+    if let Type::Constructed(TypeName::Array, args) = ty {
+        return args.get(2);
+    }
+    None
+}
+
+/// Return whether any representation-polymorphic array variant appears in the
+/// type. `ArrayVariantAbstract` comes from a filter existential; a variable in
+/// the variant slot comes from an ordinary representation-polymorphic helper.
+fn type_has_specializable_array_variant(ty: &Type<TypeName>) -> bool {
+    match ty {
+        Type::Variable(_) => false,
+        Type::Constructed(TypeName::Array, args) if args.len() >= 4 => {
+            matches!(
+                &args[1],
+                Type::Constructed(TypeName::ArrayVariantAbstract, _) | Type::Variable(_)
+            ) || args.iter().any(type_has_specializable_array_variant)
+        }
+        Type::Constructed(_, args) => args.iter().any(type_has_specializable_array_variant),
+    }
+}
+
+/// Replace representation-polymorphic array variants with `target`.
+///
+/// A bounded representation also supplies a static capacity when the existing
+/// size slot is non-literal.
+fn substitute_specializable_variant_in_type(
+    ty: &Type<TypeName>,
+    target: ConcreteVariant,
+) -> Type<TypeName> {
+    match ty {
+        Type::Variable(_) => ty.clone(),
+        Type::Constructed(TypeName::Array, args) if args.len() >= 4 => {
+            let mut new_args: Vec<Type<TypeName>> =
+                args.iter().map(|arg| substitute_specializable_variant_in_type(arg, target)).collect();
+            if matches!(
+                &args[1],
+                Type::Constructed(TypeName::ArrayVariantAbstract, _) | Type::Variable(_)
+            ) {
+                new_args[1] = target.variant_type();
+                if let Some(size_ty) = target.size_type() {
+                    if !matches!(&new_args[2], Type::Constructed(TypeName::Size(_), _)) {
+                        new_args[2] = size_ty;
+                    }
+                }
+            }
+            Type::Constructed(TypeName::Array, new_args)
+        }
+        Type::Constructed(name, args) => Type::Constructed(
+            name.clone(),
+            args.iter().map(|arg| substitute_specializable_variant_in_type(arg, target)).collect(),
+        ),
     }
 }

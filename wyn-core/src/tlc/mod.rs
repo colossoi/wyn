@@ -16,7 +16,6 @@ pub mod ownership;
 pub mod partial_eval;
 pub mod patterns;
 pub mod pin_entry_buffers;
-pub mod rep_specialize;
 #[cfg(test)]
 #[path = "rep_specialize_tests.rs"]
 mod rep_specialize_tests;
@@ -316,7 +315,6 @@ pub mod stage {
     pub use super::ownership::{OwnershipApplied, OwnershipValidated};
     pub use super::partial_eval::PartialEvaled;
     pub use super::pin_entry_buffers::BuffersPinned;
-    pub use super::rep_specialize::RepSpecialized;
     pub use super::run::Transformed;
     pub use super::runtime_index_producers::RuntimeIndexProducersFloated;
     pub use super::soa::SoaNormalized;
@@ -333,7 +331,6 @@ pub use monomorphize::monomorphize;
 pub use ownership::{apply_ownership, validate_ownership};
 pub use partial_eval::partial_eval;
 pub use pin_entry_buffers::pin_entry_buffers;
-pub use rep_specialize::rep_specialize;
 pub use run::lower_from_ast;
 pub use runtime_index_producers::float_runtime_index_nested_producers;
 pub use soa::normalize_soacs;

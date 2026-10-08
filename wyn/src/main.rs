@@ -675,9 +675,6 @@ fn compile_tlc(modules: ParsedModules, options: &CompileOptions) -> Result<TlcCo
         }),
         &source_graph,
     )?;
-    let program = time("tlc_rep_specialize", verbose, || {
-        wyn_core::tlc::rep_specialize(program)
-    });
     let program = time("force_inline_soac_helpers", verbose, || {
         wyn_core::tlc::force_inline_soac_helpers(program)
     });

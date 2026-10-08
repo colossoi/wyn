@@ -133,8 +133,7 @@ The passes below run in order. SOACs are second-order array combinators, such as
 | `partial_eval` | Evaluate known applications and constants, simplify their residual terms, and retain computations that depend on runtime values. |
 | `extract_stages` | Extract compute, vertex, and fragment entries and their interfaces from root orchestration, including graphics callbacks and the compute work feeding them. |
 | `pin_entry_buffers` | Substitute each storage parameter's assigned binding into its buffer-region type before specialization. |
-| `monomorphize` | Specialize intrinsic calls by type and instantiate reachable user definitions from entry points. Array representation specialization is a separate step. |
-| `rep_specialize` | Specialize callees with abstract-array parameters for known producer representations, including the bounded capacity of filter results. |
+| `monomorphize` | Specialize intrinsic calls by type and instantiate reachable user definitions by type and known array-producer representation, including the bounded capacity of filter results. |
 | `force_inline_soac_helpers` | Expand constants, then repeatedly inline helpers containing SOACs, array producers, or length queries so fusion and dispatch planning can see that work in the caller. Scalar helper optimization is left to egglog. |
 | `canonicalize_conditional_producers` | Rewrite supported array-valued conditionals into a pointwise map with the branch inside its callback. |
 | `normalize_soacs` | Lower local arrays of tuples and their operations to tuples of arrays, constructing terms and type annotations together; turn standalone `zip` into tuple construction. |
