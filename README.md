@@ -9,6 +9,7 @@ operations into GPU computation, with SPIR-V and WGSL output.
 ## Features
 
 - Higher-order functions and array combinators such as `map`, `reduce`, `scan`, and `filter`
+- Expression-based loops with explicit iteration state
 - Arrays as the primary data type, with multiple dimensions and sizes tracked by the type system
 - Hindley-Milner type inference with polymorphic types
 - Type holes (`???`) that report the type expected at an unfinished expression
@@ -17,7 +18,7 @@ operations into GPU computation, with SPIR-V and WGSL output.
 - SPIR-V and WGSL code generation, with host code for resource management and execution
 - Vector and matrix types optimized for GPU operations
 - Uniqueness types that permit safe in-place array updates
-- Modules, package imports, and expression-based loops
+- Modules and package imports for organizing code
 
 ## Example
 
@@ -40,6 +41,8 @@ Device code performs the GPU computation; the host program manages resources and
 coordinates its execution. A single source entry can become several kernels,
 with the compiler determining their intermediate storage, dispatch dimensions,
 dependencies, and result handling.
+Supported counted loops over array state become host loops that repeat the
+scheduled GPU dispatches, with the iteration count computed on the CPU.
 
 The primary application output is a SPIR-V shader (`.spv`) paired with a generated
 Rust/WGPU wrapper (`.rs`). The wrapper allocates resources, binds inputs, records
@@ -145,8 +148,11 @@ The passes below run in order. SOACs are second-order array combinators, such as
 | `filter_reachable` | Remove definitions not reachable from entry points. |
 | `infer_input_slice_bounds` | Attach minimum input-buffer sizes where every use of an input is a constant prefix slice. Other inputs still need sizes from their interface or runtime. |
 
-`--output-tlc` captures the `BuffersPinned` checkpoint, before SoA normalization
-and monomorphization. The TLC input to egglog is `InputSliceBoundsInferred`.
+`--output-tlc` shows an early TLC snapshot after partial evaluation and entry
+interface resolution. It exposes resolved buffer bindings while functions are
+still polymorphic and higher-order. The remaining passes normalize arrays,
+specialize functions, and eliminate function values before handing the program
+to egglog.
 
 ### Egglog passes
 
@@ -168,16 +174,16 @@ scalar expressions and eligible helper templates. Context keys keep functions,
 fused callbacks, and scalar dispatch groups distinct: batching their rule execution
 does not let expressions in unrelated contexts optimize against one another.
 
-Pass order is enforced by typestate:
+The passes below run in order:
 
-| Pass | Output checkpoint | Responsibility |
-| --- | --- | --- |
-| `egglog::from_tlc` | `Imported` | Walk normalized TLC once, resolve bindings, and import structural summaries with source identities and scope relationships. |
-| `egglog::fuse` | `Fused` | Derive structural dependencies and select a deterministic greedy fusion plan, recording callback composition and argument routing in egglog. |
-| `egglog::place` | `Placed` | Choose execution domains, rematerialization, and scalar dispatch groups under the selected topology policy. |
-| `egglog::schedule` | `Scheduled` | Select dispatch recipes, resource requirements, storage allocation and reuse, output routes, and effect ordering. |
-| `egglog::optimize` | `Optimized` | Import demanded scalar regions, run the inlining and simplification fixed point, extract selected terms, and choose safe scopes for shared and loop-invariant computations. |
-| `egglog::to_ssa` | SSA `Elaborated` | Emit selected scalar terms and scheduled kernels directly into SSA; finalize captures, sizes, shader interfaces, and the companion host program. |
+| Pass | Responsibility |
+| --- | --- |
+| `egglog::from_tlc` | Walk normalized TLC once, resolve bindings, and import structural summaries with source identities and scope relationships. |
+| `egglog::fuse` | Derive structural dependencies and select a deterministic greedy fusion plan, recording callback composition and argument routing in egglog. |
+| `egglog::place` | Choose execution domains, rematerialization, and scalar dispatch groups under the selected topology policy. |
+| `egglog::schedule` | Select dispatch recipes, resource requirements, storage allocation and reuse, output routes, and effect ordering. |
+| `egglog::optimize` | Resolve scalar demands and physical interface facts, optimize demanded scalar regions, choose safe scopes for selected terms, and lower supported host scalar expressions and captures. |
+| `egglog::to_ssa` | Query the selected plan to emit scalar terms and scheduled kernels directly into SSA; publish final shader interfaces, sizes, resource accesses, dispatch loops, and the companion host program. |
 
 Scalar substitution finishes before safety analysis and reducing rewrites. Completed
 substitutions and replaced arithmetic forms are retired from matching. Unary and
@@ -185,6 +191,12 @@ binary operations have direct operands; argument lists serve variable-arity form
 Native bulk extraction shares reconstruction across demanded roots and compares
 candidate DAGs by their shared operation cost. Only selected terms reach placement
 and SSA emission; there is no intervening Rust expression IR.
+
+The [fact-query layer](wyn-core/src/egglog/facts.rs) borrows planning facts from
+egglog for both device emission and [host scalar lowering](wyn-core/src/egglog/host/lower.rs).
+[Interface publication](wyn-core/src/egglog/abi/publication.rs) resolves final
+resource bindings and execution dependencies from those facts and the emitted
+entries, including storage used by graphics draw operands.
 
 Hoisting is an exit analysis over the selected DAG. Egglog proves whether evaluation
 is safe, while scope and dominator analyses determine where operands are available
@@ -235,12 +247,14 @@ its own kernel, and one fused operation can require several dispatches.
 | Work | Physical execution |
 | --- | --- |
 | Maps | Parallel elementwise evaluation, including any fused map chain. |
-| Reductions | Chunk reduction followed by an ordered workgroup reduction tree; fused array outputs can be written during chunk processing. |
-| Scans | Chunk prefixes, serial combination of chunk totals, then parallel offset application and post-map work. This recipe also handles reductions fused with scans. |
+| Reductions | Workgroup reduction trees within chunks, followed by a workgroup combine pass; fused array outputs can be written during chunk processing. |
+| Scans | Workgroup prefix scans within chunks, a workgroup scan of chunk totals, then parallel offset application and post-map work. This recipe also handles reductions fused with scans. |
 | Filters | When a compacted array is needed, tiled workgroup evaluation computes predicate prefixes, writes survivors in input order, and publishes the result length. |
 | Eligible indexed reductions | Parallel atomic updates, including compare/exchange where needed. |
 | Eligible bucket scatter | A count-clearing dispatch followed by parallel slot reservation and writes. |
-| Scatter and other work without a parallel-safe recipe | Ordered single-invocation kernels. |
+| Eligible scatter | Parallel indexed writes, with a separate initialization dispatch when needed. Colliding writes must have identical values; conflicting destination reads or effectful callbacks require serial execution. |
+| Work without a parallel-safe recipe | Ordered single-invocation kernels. |
+| Supported counted array loops | Host-controlled repetition of the scheduled body dispatches, with setup and completion phases for array state. |
 | Nested array work | Local device loops within the enclosing invocation. |
 
 Parallel recipes require compatible callback effects; otherwise execution falls
@@ -257,9 +271,10 @@ ownership candidates, and resource accesses.
 
 Publication turns the plan into the shader interface and companion host program,
 including resource accesses, dispatch dimensions, dependencies, inputs, and results.
-Published pipelines currently use static dispatch sites; conditional or repeated
-host dispatches remain a limitation. Direct mode retains the authored stages and
-rejects programs requiring generated prepasses or intermediate host storage.
+Supported counted array loops publish repeated dispatches with a CPU-computable
+iteration count. General conditional dispatch orchestration remains unsupported.
+Direct mode retains the authored stages and rejects programs requiring generated
+prepasses or intermediate host storage.
 
 ### SSA passes
 
@@ -274,7 +289,7 @@ listed in execution order. Names are relative to `ssa::` unless otherwise qualif
 
 | Orchestration pass | Subpass | Responsibility |
 | --- | --- | --- |
-| `optimize` | `materialize_dynamic_index` | Introduce and share addressable storage for dynamic array indexing. |
+| `optimize` | `materialize_dynamic_index` | Introduce and share addressable storage for dynamic indexing of fixed scalar-array values, preserving existing array views. |
 | `place_floating` | `ir::schedule_floating` | Assign the generated array materializations to concrete control-flow blocks. |
 | `filter_reachable` | Reachability walk | Prune functions and constants unreachable from entries. |
 | `prepare_wgsl` | `promote_addressable_constants` | Promote constants needing addressable storage. |
@@ -344,7 +359,6 @@ Other projects and supporting directories include:
 | Directory | Contents |
 | --- | --- |
 | `wyn-wasm/` | WebAssembly compiler interface, built separately from the root workspace. |
-| `playground/app/` | Browser playground. |
 | `extra/viz/` | WGPU runner for SPIR-V/WGSL shaders and their WHL companions, including rendering and headless compute. |
 | `extra/tephra/` | Vulkan runner for SPIR-V compute shaders. |
 | `extra/tree-sitter-wyn/` | Tree-sitter grammar and editor bindings. |
@@ -354,13 +368,18 @@ Other projects and supporting directories include:
 | `pkg/` | Wyn library packages. |
 | `testfiles/`, `tests/`, `scripts/` | Example and regression programs, integration fixtures, and build/validation scripts. |
 
+The browser playground is maintained separately in the `wyn-web` repository.
+
 ## Usage
 
 Build a source file or a package directory, selecting device and host output as
 described above. See [Writing Wyn Packages](PACKAGES.md) for multi-file programs
-and dependencies.
+and dependencies. Save the example above as `input.wyn` to try these commands:
 
 ```bash
+# Default SPIR-V shader and WHL host program (input.spv and input.wynhost)
+cargo run --bin wyn -- build input.wyn
+
 # SPIR-V with a Rust/WGPU wrapper
 cargo run --bin wyn -- build input.wyn -t spirv --target-double rust-wgpu -o output.spv
 
@@ -373,10 +392,15 @@ cargo run --bin wyn -- check input.wyn
 
 Add `--graphics` to `check` for a rendering program. Use `--output-tlc FILE` and
 `--output-mir FILE` to inspect compiler checkpoints; `--verbose` prints pass timings
-to stderr. For runnable graphics and compute examples, see
+to stderr. Add `-O` to `build` for scalar helper expansion and extraction search;
+fusion and basic cleanup also run without it. Both commands accept
+`--max-warnings N` (`0` suppresses warnings). For runnable graphics and compute examples, see
 [testfiles](testfiles/) and the [viz runner](extra/viz/README.md).
 
 ## Building and Testing
+
+Use Rust and Cargo with a native toolchain for your platform. Run these commands
+from the repository root:
 
 ```bash
 cargo build --workspace --all-targets
@@ -395,7 +419,10 @@ cargo test --manifest-path wyn-wasm/Cargo.toml
 ```
 
 Run `scripts/validate_testfiles.ps1` for SPIR-V testfile validation and add
-`-Wgsl` for WGSL. The Bash and Nushell variants accept `--wgsl`.
+`-Wgsl` for WGSL. SPIR-V validation requires `spirv-val` on `PATH`; WGSL
+validation builds and uses `extra/viz`. Add `-TrackedOnly` to the PowerShell
+script to skip local, untracked experiments, and `-Release` to use release
+binaries. The Bash and Nushell variants accept `--wgsl` and `--release`.
 
 `wyn-wasm` has its own lockfile and needs a separate browser-target check.
 Install `wasm32-unknown-unknown`, then run `bash scripts/check_wasm.sh` or
@@ -426,9 +453,10 @@ in detail.
   Record destructuring and guards on `match` cases are not implemented.
 - Modules: parameterized modules are supported, but explicit functor-type
   signatures are not. Module-type declarations must be at file scope.
-- Host control flow: conditional or repeated GPU dispatches cannot yet be
-  published through the compiler's runtime interface. This does not prevent
-  branches and loops within shaders.
+- Host control flow: dispatch loops are supported for eligible counted loops over
+  array state with CPU-computable bounds. General conditional dispatches and
+  arbitrary host dispatch loops are not supported. Branches and loops within
+  shaders remain available.
 - Device-local storage: temporary arrays allocated within a shader invocation
   need statically known capacities; arbitrary dynamic local allocation is not
   supported.
