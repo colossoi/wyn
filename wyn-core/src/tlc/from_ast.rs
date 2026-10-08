@@ -1066,16 +1066,18 @@ impl<'a> Transformer<'a> {
         let func_term = self.transform_expr(&args[0]);
         let arr_term = self.transform_expr(&args[1]);
 
-        let lam = self.term_to_lambda(func_term);
+        let mut lam = self.term_to_lambda(func_term);
 
-        // Absorb zip: if arr_term is ArrayExpr(Zip(...)), flatten into inputs.
-        // The lambda still takes a single tuple param — the soa::normalize pass
-        // will rewrite it to take separate params. A zip whose children needed
-        // let-binding arrives wrapped in those lets (from `transform_soac_zip`),
-        // so peel them off and re-wrap around the whole map.
+        // Absorb a zip and adapt its callback together, so every constructed
+        // Map already has one element parameter per input. Nested zip inputs
+        // keep their tuple element; only this zip's outer tuple is unpacked.
+        // Preserve bindings introduced while lowering the zip's producers.
         let (mut binds, core) = peel_lets(arr_term);
         let inputs = match core.kind {
-            TermKind::ArrayExpr(ArrayExpr::Zip(exprs)) => exprs,
+            TermKind::ArrayExpr(ArrayExpr::Zip(exprs)) => {
+                lam.lam = self.unpack_map_tuple_parameter(lam.lam, exprs.len());
+                exprs
+            }
             _ => vec![self.soac_input(core, &mut binds)],
         };
 
@@ -1089,6 +1091,47 @@ impl<'a> Transformer<'a> {
             }),
         );
         self.wrap_binds(binds, soac, span)
+    }
+
+    /// Adapt the logical tuple element of a zip to a multi-input Map.
+    /// Rebind the original parameter once, preserving its typed tuple shape
+    /// and all uses in the callback, including nested array-input positions.
+    fn unpack_map_tuple_parameter(&mut self, lam: Lambda, input_count: usize) -> Lambda {
+        let [(tuple_name, tuple_ty)] = lam.params.as_slice() else {
+            panic!("BUG: a map over zip must take one tuple parameter");
+        };
+        let Type::Constructed(TypeName::Tuple(_), fields) = tuple_ty else {
+            panic!("BUG: a map over zip must take a tuple element");
+        };
+        assert_eq!(fields.len(), input_count, "map zip input/parameter arity");
+        let tuple_name = *tuple_name;
+        let tuple_ty = tuple_ty.clone();
+        let params: Vec<_> = fields
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| (self.fresh(&format!("_map_{index}")), ty.clone()))
+            .collect();
+        let span = lam.body.span;
+        let elements = params
+            .iter()
+            .map(|(name, ty)| self.mk_term(ty.clone(), span, TermKind::Var(VarRef::Symbol(*name))))
+            .collect();
+        let tuple = self.mk_term(tuple_ty.clone(), span, TermKind::Tuple(elements));
+        let body = self.mk_term(
+            lam.ret_ty.clone(),
+            span,
+            TermKind::Let {
+                name: tuple_name,
+                name_ty: tuple_ty,
+                rhs: Box::new(tuple),
+                body: lam.body,
+            },
+        );
+        Lambda {
+            params,
+            body: Box::new(body),
+            ret_ty: lam.ret_ty,
+        }
     }
 
     /// Transform `reduce(op, ne, arr)` → `Soac(Reduce { op, ne, input })`.

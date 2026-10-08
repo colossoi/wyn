@@ -664,8 +664,8 @@ fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileRe
     };
     let program = wyn_core::tlc::rep_specialize(program);
     let program = wyn_core::tlc::force_inline_soac_helpers(program);
-    let program = wyn_core::tlc::normalize_soacs(program);
     let program = wyn_core::tlc::canonicalize_conditional_producers(program);
+    let program = wyn_core::tlc::normalize_soacs(program);
     let program = wyn_core::tlc::normalize_soacs_to_anf(program);
     let program = wyn_core::tlc::float_runtime_index_nested_producers(program);
     let program = wyn_core::tlc::defunctionalize(program);

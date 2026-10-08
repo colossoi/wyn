@@ -1,4 +1,4 @@
-//! Structure-of-Arrays (SoA) transform and SOAC normalization for TLC.
+//! Structure-of-Arrays (SoA) lowering for TLC.
 //!
 //! This pass normalizes the concrete shapes exposed by specialization and inlining:
 //!
@@ -6,18 +6,15 @@
 //!    (tuple of arrays) for local arrays. Operations on array-of-tuple types
 //!    (index, array_with, array_lit, uninit, length) operate on the distributed components.
 //!
-//! 2. **SOAC normalization**: When a Map has multiple inputs (from an absorbed zip) but
-//!    the lambda takes a single tuple parameter, rewrites the lambda to take N separate
-//!    parameters. Also converts standalone `zip(a, b)` into `_w_tuple(a, b)`.
+//! 2. Converts standalone `zip(a, b)` into tuple construction. Map inputs and
+//!    callback parameters already correspond when the Map is constructed.
 //!
 //! Runs once, after monomorphization and helper inlining, before fusion and
 //! defunctionalization. Storage-backed arrays retain their declared layout.
 
 use super::data::Empty;
-use super::inline::SoacHelpersInlined;
-use super::{
-    ArrayExpr, Lambda, RewriteDecision, SoacOp, Term, TermId, TermIdSource, TermKind, TermRewriter, VarRef,
-};
+use super::if_over_producer::ConditionalProducersCanonicalized;
+use super::{ArrayExpr, RewriteDecision, Term, TermId, TermIdSource, TermKind, TermRewriter, VarRef};
 use crate::ast::{Span, TypeName};
 use crate::builtins::{by_id, catalog};
 use crate::tlc;
@@ -170,22 +167,6 @@ fn array_of_tuple_parts(
 }
 
 // =============================================================================
-// SOAC normalization helpers (standalone, don't need self)
-// =============================================================================
-
-/// A SoA input still supplies one logical tuple element to its callback.
-fn map_input_element_type(ty: &Type<TypeName>) -> Option<Type<TypeName>> {
-    if let Type::Constructed(TypeName::Tuple(n), fields) = ty {
-        Some(Type::Constructed(
-            TypeName::Tuple(*n),
-            fields.iter().map(map_input_element_type).collect::<Option<_>>()?,
-        ))
-    } else {
-        ty.elem_type().cloned()
-    }
-}
-
-// =============================================================================
 // Term rewriting
 // =============================================================================
 
@@ -199,11 +180,6 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
     fn transform_term(&mut self, term: &mut Term<Empty, Empty>) {
         self.rewrite_tracked(term);
         term.rewrite_types(self.term_ids, &mut soa_type);
-        MapNormalizer {
-            term_ids: &mut *self.term_ids,
-            symbols: &mut *self.symbols,
-        }
-        .rewrite_tracked(term);
     }
 
     fn structural_replacement(&mut self, term: &Term<Empty, Empty>) -> Option<Term<Empty, Empty>> {
@@ -606,107 +582,6 @@ impl TermRewriter<Empty, Empty> for SoaTransformer<'_, '_> {
     }
 }
 
-/// Normalize multi-input maps only after the uniform SoA type rewrite, so the
-/// lambda parameter shape and the input shapes are compared in the same type
-/// representation.
-struct MapNormalizer<'a, 'ids> {
-    term_ids: &'ids mut TermIdSource,
-    symbols: &'a mut SymbolTable,
-}
-
-impl MapNormalizer<'_, '_> {
-    fn normalize_map(
-        &mut self,
-        lam: &mut Lambda<Empty, Empty>,
-        inputs: &[ArrayExpr<Empty, Empty>],
-    ) -> Option<()> {
-        if inputs.len() <= 1 || lam.params.len() != 1 {
-            return None;
-        }
-
-        let (old_param, param_ty) = &lam.params[0];
-        if !matches!(&param_ty, Type::Constructed(TypeName::Tuple(_), _)) {
-            return None;
-        }
-        let input_types = inputs
-            .iter()
-            .map(|input| map_input_element_type(&input.array_type()))
-            .collect::<Option<Vec<_>>>()?;
-
-        let new_params: Vec<(SymbolId, Type<TypeName>)> = input_types
-            .into_iter()
-            .enumerate()
-            .map(|(index, ty)| (self.symbols.alloc(format!("_sn_{index}")), ty))
-            .collect();
-        let span = lam.body.span;
-        let mut remaining = new_params.as_slice();
-        let reconstruction = build_tuple_reconstruction(&mut remaining, param_ty, span, self.term_ids)?;
-        if !remaining.is_empty() {
-            return None;
-        }
-        lam.body = Box::new(super::subst::substitute_with(
-            (*lam.body).clone(),
-            *old_param,
-            &mut |_occurrence, term_ids| tlc::clone_term_with_fresh_ids(&reconstruction, term_ids),
-            self.term_ids,
-        ));
-        lam.params = new_params;
-        Some(())
-    }
-}
-
-impl TermRewriter<Empty, Empty> for MapNormalizer<'_, '_> {
-    fn next_term_id(&mut self) -> TermId {
-        self.term_ids.next_id()
-    }
-
-    fn rewrite_node(&mut self, term: &mut Term<Empty, Empty>) -> RewriteDecision {
-        if let TermKind::Soac(SoacOp::Map { lam, inputs, .. }) = &mut term.kind {
-            if self.normalize_map(&mut lam.lam, inputs).is_some() {
-                return RewriteDecision::Changed;
-            }
-        }
-        RewriteDecision::Unchanged
-    }
-}
-
-/// Reconstruct the tuple pattern from the actual input shapes. An input can
-/// supply an entire nested tuple; only tuples spread over inputs are rebuilt.
-fn build_tuple_reconstruction(
-    new_params: &mut &[(SymbolId, Type<TypeName>)],
-    tuple_ty: &Type<TypeName>,
-    span: Span,
-    term_ids: &mut TermIdSource,
-) -> Option<Term<Empty, Empty>> {
-    if let Some(((symbol, ty), rest)) = new_params.split_first() {
-        if ty == tuple_ty {
-            *new_params = rest;
-            return Some(Term::fresh(
-                term_ids,
-                ty.clone(),
-                span,
-                TermKind::Var(VarRef::Symbol(*symbol)),
-            ));
-        }
-    }
-    let kind = match tuple_ty {
-        Type::Constructed(TypeName::Tuple(_), component_types) if !component_types.is_empty() => {
-            let mut elements = Vec::with_capacity(component_types.len());
-            for component_type in component_types {
-                elements.push(build_tuple_reconstruction(
-                    new_params,
-                    component_type,
-                    span,
-                    term_ids,
-                )?);
-            }
-            TermKind::Tuple(elements)
-        }
-        _ => return None,
-    };
-    Some(Term::fresh(term_ids, tuple_ty.clone(), span, kind))
-}
-
 // =============================================================================
 // Public API
 // =============================================================================
@@ -715,9 +590,8 @@ fn build_tuple_reconstruction(
 ///
 /// 1. Rewrites `[n](A,B)` types to `([n]A, [n]B)` and adjusts all operations
 ///    that touch array-of-tuple types.
-/// 2. Flattens Map+Zip into multi-input Map with split lambda params.
-/// 3. Converts standalone Zip to tuple construction.
-pub fn normalize_soacs(mut program: SoacHelpersInlined) -> SoaNormalized {
+/// 2. Converts standalone Zip to tuple construction.
+pub fn normalize_soacs(mut program: ConditionalProducersCanonicalized) -> SoaNormalized {
     let mut transformer = SoaTransformer {
         term_ids: &mut program.term_ids,
         symbols: &mut program.symbols,

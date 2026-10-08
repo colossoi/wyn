@@ -264,9 +264,9 @@ pub use polytype::Context as PolytypeContext;
 //       tlc::rep_specialize(...)         -> tlc::stage::RepSpecialized
 //       tlc::force_inline_soac_helpers(...)
 //                                      -> tlc::stage::SoacHelpersInlined
-//       tlc::normalize_soacs(...)        -> tlc::stage::SoaNormalized
 //       tlc::canonicalize_conditional_producers(...)
 //                                      -> tlc::stage::ConditionalProducersCanonicalized
+//       tlc::normalize_soacs(...)        -> tlc::stage::SoaNormalized
 //       tlc::normalize_soacs_to_anf(...) -> tlc::stage::SoacsAnfNormalized
 //       tlc::float_runtime_index_nested_producers(...)
 //                                      -> tlc::stage::RuntimeIndexProducersFloated
@@ -324,8 +324,8 @@ pub(crate) fn optimize_tlc_for_test_thru_soac_normalization(
     let program = tlc::monomorphize(program)?;
     let program = tlc::rep_specialize(program);
     let program = tlc::force_inline_soac_helpers(program);
-    let program = tlc::normalize_soacs(program);
     let program = tlc::canonicalize_conditional_producers(program);
+    let program = tlc::normalize_soacs(program);
     Ok(tlc::normalize_soacs_to_anf(program))
 }
 

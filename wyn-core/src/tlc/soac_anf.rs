@@ -17,9 +17,7 @@ pub enum SoacsAnfNormalizedTag {}
 pub type SoacsAnfNormalized =
     super::Program<SoacsAnfNormalizedTag, super::monomorphize::Monomorphic, super::context::RewriteGlobal>;
 
-pub fn normalize_soacs_to_anf(
-    program: super::stage::ConditionalProducersCanonicalized,
-) -> SoacsAnfNormalized {
+pub fn normalize_soacs_to_anf(program: super::stage::SoaNormalized) -> SoacsAnfNormalized {
     let Program {
         defs,
         mut symbols,

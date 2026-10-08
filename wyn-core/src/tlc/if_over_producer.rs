@@ -6,6 +6,8 @@
 //! reaches egglog in that shape, output routing sees a branch that produces an
 //! array instead of a producer. This pass rewrites
 //! the conservative cases to one `Map` whose lambda contains the branch.
+//! Runs on logical array types before SoA lowering distributes tuple elements;
+//! Map inputs and callback parameters already correspond at construction.
 
 use super::data::Empty;
 use super::VarRef;
@@ -35,7 +37,7 @@ pub type ConditionalProducersCanonicalized = super::Program<
 >;
 
 pub fn canonicalize_conditional_producers(
-    mut program: super::stage::SoaNormalized,
+    mut program: super::stage::SoacHelpersInlined,
 ) -> ConditionalProducersCanonicalized {
     let mut rewriter = ConditionalProducerRewriter {
         symbols: &mut program.symbols,
@@ -46,6 +48,10 @@ pub fn canonicalize_conditional_producers(
     }
     program.retag()
 }
+
+#[cfg(test)]
+#[path = "if_over_producer_tests.rs"]
+mod tests;
 
 struct ConditionalProducerRewriter<'a> {
     symbols: &'a mut SymbolTable,

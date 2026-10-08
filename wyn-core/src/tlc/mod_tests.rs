@@ -47,6 +47,46 @@ fn compile_to_tlc_raw(source: &str) -> stage::Transformed {
     lower_from_ast(program).expect("lower_from_ast")
 }
 
+/// Check the Map interface before partial evaluation, specialization, or SoA
+/// lowering has an opportunity to repair it.
+fn assert_map_input_parameters(term: &Term) -> usize {
+    let mut count = 0;
+    if let TermKind::Soac(SoacOp::Map { lam, inputs, .. }) = &term.kind {
+        assert_eq!(lam.lam.params.len(), inputs.len());
+        for ((_, param_ty), input) in lam.lam.params.iter().zip(inputs) {
+            assert_eq!(Some(param_ty), crate::types::array_elem(&input.array_type()));
+        }
+        count += 1;
+    }
+    term.for_each_child(&mut |child| count += assert_map_input_parameters(child));
+    count
+}
+
+#[test]
+fn map_zip_parameters_match_inputs_at_construction() {
+    let program = compile_to_tlc_raw("entry main(xs: []i32, ys: []i32) []i32 = map(|(x,y)|x+y,zip(xs,ys))");
+    assert_eq!(assert_map_input_parameters(find_def_body(&program, "main")), 1);
+}
+
+#[test]
+fn map_nested_zip_keeps_nested_tuple_elements_at_construction() {
+    let program = compile_to_tlc_raw(
+        "entry main(xs: []i32, ys: []i32, zs: []i32) []i32 =
+         map(|(x,(y,z))|x+y+z,zip(xs,zip(ys,zs)))",
+    );
+    assert_eq!(assert_map_input_parameters(find_def_body(&program, "main")), 1);
+}
+
+#[test]
+fn map_zip_parameters_match_before_generic_instantiation() {
+    let program = compile_to_tlc_raw(
+        "def pairs<[n], A>(xs: [n]A, ys: [n]i32) [n](A,i32) =
+         map(|pair|pair,zip(xs,ys))
+         entry main(xs: [4](i32,i32), ys: [4]i32) [4]((i32,i32),i32) = pairs(xs,ys)",
+    );
+    assert_eq!(assert_map_input_parameters(find_def_body(&program, "pairs")), 1);
+}
+
 fn find_def_body<'a>(program: &'a stage::Transformed, name: &str) -> &'a Term {
     let def = program
         .defs

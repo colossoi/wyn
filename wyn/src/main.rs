@@ -681,11 +681,11 @@ fn compile_tlc(modules: ParsedModules, options: &CompileOptions) -> Result<TlcCo
     let program = time("force_inline_soac_helpers", verbose, || {
         wyn_core::tlc::force_inline_soac_helpers(program)
     });
-    let program = time("normalize_soacs", verbose, || {
-        wyn_core::tlc::normalize_soacs(program)
-    });
     let program = time("canonicalize_conditional_producers", verbose, || {
         wyn_core::tlc::canonicalize_conditional_producers(program)
+    });
+    let program = time("normalize_soacs", verbose, || {
+        wyn_core::tlc::normalize_soacs(program)
     });
     let program = time("normalize_soacs_to_anf", verbose, || {
         wyn_core::tlc::normalize_soacs_to_anf(program)

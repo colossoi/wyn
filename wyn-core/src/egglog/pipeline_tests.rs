@@ -594,6 +594,18 @@ fn generic_tuple_array_helpers_reach_both_backends() {
 }
 
 #[test]
+fn conditional_tuple_and_zipped_maps_reach_both_backends() {
+    for source in [
+        "entry main(xs:[4]i32,ys:[4]i32,flag:bool) [4](i32,i32) =
+         if flag then map(|x|(x,x+1),xs) else map(|y|(y,y+2),ys)",
+        "entry main(xs:[4]i32,ys:[4]i32,flag:bool) [4]i32 =
+         if flag then map(|(x,y)|x+y,zip(xs,ys)) else map(|(y,x)|y-x,zip(ys,xs))",
+    ] {
+        shaders(source);
+    }
+}
+
+#[test]
 fn compaction_retains_producer_elements_across_the_scan() {
     for source in [
         "entry kept(xs:[]i32) []i32=filter(|x|x>0,map(|x|x*x+17,xs))",

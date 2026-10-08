@@ -128,7 +128,7 @@ The passes below run in order. SOACs are second-order array combinators, such as
 
 | Pass (`tlc::`) | Responsibility |
 | --- | --- |
-| `lower_from_ast` | Lower the typed AST to polymorphic TLC, including pattern lowering, while retaining unified root entries and source ownership contracts. |
+| `lower_from_ast` | Lower the typed AST to polymorphic TLC, including patterns and maps whose inputs and callback parameters already correspond, while retaining unified root entries and source ownership contracts. |
 | `validate_ownership` | Check source consumption and aliasing rules before evaluation or inlining can erase call boundaries. This includes graphics resource ownership. |
 | `partial_eval` | Evaluate known applications and constants, simplify their residual terms, and retain computations that depend on runtime values. |
 | `extract_stages` | Extract compute, vertex, and fragment entries and their interfaces from root orchestration, including graphics callbacks and the compute work feeding them. |
@@ -136,16 +136,17 @@ The passes below run in order. SOACs are second-order array combinators, such as
 | `monomorphize` | Specialize intrinsic calls by type and instantiate reachable user definitions from entry points. Array representation specialization is a separate step. |
 | `rep_specialize` | Specialize callees with abstract-array parameters for known producer representations, including the bounded capacity of filter results. |
 | `force_inline_soac_helpers` | Expand constants, then repeatedly inline helpers containing SOACs, array producers, or length queries so fusion and dispatch planning can see that work in the caller. Scalar helper optimization is left to egglog. |
-| `normalize_soacs` | Convert local arrays of tuples to tuples of arrays, normalize multi-input map parameters, and turn standalone `zip` into tuple construction. |
 | `canonicalize_conditional_producers` | Rewrite supported array-valued conditionals into a pointwise map with the branch inside its callback. |
+| `normalize_soacs` | Convert local arrays of tuples to tuples of arrays and turn standalone `zip` into tuple construction. |
 | `normalize_soacs_to_anf` | Lift nested SOAC expressions into explicit let bindings, exposing producer/consumer edges for egglog. |
 | `float_runtime_index_nested_producers` | Move eligible runtime-indexed producers out of nested callbacks before defunctionalization, exposing the producer and gather separately. |
 | `defunctionalize` | Lift lambdas, make captures explicit, specialize higher-order functions, and lower closure applications to direct calls. |
 | `fold_generated_lambdas` | Inline applications of compiler-generated lifted lambdas and remove definitions made unreachable. |
 | `apply_ownership` | Promote eligible array updates to in-place updates and mark unique SOAC inputs. Egglog later decides storage reuse using the fused program. |
 
-Specialization and helper inlining retain the source array shapes. SoA normalization
-then runs once, with concrete element types and the helper bodies exposed; later
+Specialization, helper inlining, and conditional-producer rewriting retain the
+source array shapes. SoA normalization then runs once, with concrete element
+types and the helper bodies exposed; later
 TLC passes preserve that layout. Storage-backed arrays keep their declared layout
 so normalization does not change the shader's buffer interface.
 
