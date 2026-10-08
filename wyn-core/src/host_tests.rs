@@ -858,6 +858,97 @@ fn graphics_capture_uses_the_produced_buffer_after_its_writer() {
 }
 
 #[test]
+fn graphics_aliases_preserve_host_buffer_identity() {
+    // The exhaustive spellings stop at stage extraction. These two in-process
+    // compilations check the final allocation and scheduling contract as well.
+    for (prefix, input, computed) in [
+        ("", "values", false),
+        (
+            "let produced = map(|v| v + @[1.0, 0.0, 0.0, 0.0], values)",
+            "produced",
+            true,
+        ),
+    ] {
+        let program = compile(&format!(
+            "entry reproduce(values: []vec4f32, target: render_target<vec4f32>) render_target<vec4f32> =
+               {prefix}
+               let first = ({input}, target) let (unpacked, _) = first
+               let second = {{ data = (unpacked, values), tag = 2i32 }}
+               let alias = second.data.0
+               let fragments = rasterize_triangles(direct_draw(3u32, 1u32),
+                 |_, _, _| vertex_output(alias[0], ())) in
+               shade(target, fragments, |_, _, _, _, _| alias[0])"
+        ));
+        let [entry] = program.entries.as_slice() else {
+            panic!("one source entry")
+        };
+        assert_eq!(entry.inputs.len(), 2, "generated buffers must remain internal");
+        assert_eq!(entry.results.len(), 1, "only the render target is returned");
+        assert!(entry.inputs.contains(&entry.results[0]), "borrowed render target");
+        assert_eq!(entry.allocations.len(), usize::from(computed));
+        let captured = if computed {
+            let Allocation::Buffer { resource, .. } = entry.allocations[0] else {
+                panic!("computed capture needs one buffer")
+            };
+            assert!(!entry.inputs.contains(&resource));
+            resource
+        } else {
+            assert!(entry.operations.iter().all(|op| matches!(op, Operation::Draw { .. })));
+            *entry.inputs.iter().find(|id| **id != entry.results[0]).unwrap()
+        };
+        let draws = entry
+            .operations
+            .iter()
+            .enumerate()
+            .filter_map(|(index, op)| match op {
+                Operation::Draw { pipeline } => Some((index, *pipeline)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let [(draw, pipeline)] = draws.as_slice() else {
+            panic!("one draw")
+        };
+        let Pipeline::Graphics(graphics) = &program.interface.pipelines[*pipeline] else {
+            panic!("graphics pipeline")
+        };
+        assert_eq!(graphics.stages.len(), 2);
+        for stage in &graphics.stages {
+            let buffers = stage
+                .uses
+                .reads
+                .iter()
+                .filter(|&&binding| matches!(graphics.bindings[binding], Binding::StorageBuffer { .. }))
+                .map(|&binding| program.binding_resource(*pipeline, binding).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                buffers,
+                [captured],
+                "{:?} capture, computed={computed}",
+                stage.stage
+            );
+        }
+        if computed {
+            assert!(
+                entry.operations[..*draw].iter().any(|op| {
+                    let Operation::Dispatch { pipeline, stage, .. } = op else {
+                        return false;
+                    };
+                    let Pipeline::Compute(compute) = &program.interface.pipelines[*pipeline] else {
+                        return false;
+                    };
+                    compute.stages[*stage]
+                        .uses
+                        .writes
+                        .iter()
+                        .any(|&binding| program.binding_resource(*pipeline, binding).unwrap() == captured)
+                }),
+                "the captured buffer must be produced before the draw"
+            );
+        }
+    }
+}
+
+#[test]
 fn whl_paths_escape_lisp_strings() {
     let program = compile("entry main() i32 = 1");
     let whl = program.to_whl("a\\b\"c.wgsl", ShaderFormat::Wgsl).unwrap();

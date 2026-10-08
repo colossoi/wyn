@@ -669,12 +669,22 @@ fn compile_thru_ssa_for_target(
     source: &str,
     target: CodegenTarget,
 ) -> std::result::Result<ssa::stage::Elaborated, Box<dyn std::error::Error>> {
+    compile_thru_ssa_with_policy(source, target, egglog::ScalarOptimization::Full)
+}
+
+/// Run the canonical pipeline with the same scalar policy selected by CLI -O.
+#[cfg(test)]
+pub(crate) fn compile_thru_ssa_with_policy(
+    source: &str,
+    target: CodegenTarget,
+    policy: egglog::ScalarOptimization,
+) -> std::result::Result<ssa::stage::Elaborated, Box<dyn std::error::Error>> {
     let program = compile_thru_tlc(source)?;
     let program = egglog::from_tlc(&program)?;
     let program = egglog::fuse(program)?;
     let program = egglog::place(program, PipelineTopologyPolicy::AllowGenerated)?;
     let program = egglog::schedule(program)?;
-    let program = egglog::optimize(program)?;
+    let program = egglog::optimize_with_policy(program, policy)?;
     Ok(egglog::to_ssa(program, target)?)
 }
 
@@ -692,6 +702,9 @@ mod literal_expansion_tests;
 
 #[cfg(test)]
 mod host_tests;
+
+#[cfg(test)]
+mod graphics_host_tests;
 
 #[cfg(test)]
 mod host_interp_tests;

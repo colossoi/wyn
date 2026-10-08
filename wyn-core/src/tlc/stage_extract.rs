@@ -28,6 +28,10 @@ use crate::types::{Diet, Type, TypeExt, TypeName, TypeScheme};
 use crate::BindingRef;
 use crate::{LookupMap, LookupSet, SymbolId, SymbolTable};
 
+#[cfg(test)]
+#[path = "stage_extract_tests.rs"]
+mod tests;
+
 struct InvocationBuiltins {
     direct_draw: builtins::BuiltinId,
     direct_draw_from: builtins::BuiltinId,

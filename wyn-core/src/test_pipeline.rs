@@ -71,6 +71,12 @@ fn front_end(src: &str) -> tlc::stage::OwnershipValidated {
     tlc::validate_ownership(program).expect("validate_ownership")
 }
 
+/// Extract graphics stages without running scheduling, optimization, or a backend.
+pub(crate) fn compile_thru_stage_extraction(src: &str) -> tlc::stage::StagesExtracted {
+    let program = tlc::partial_eval(front_end(src));
+    tlc::extract_stages(program).expect("extract_stages")
+}
+
 // Stage-boundary helpers for source-normalization pass tests. Each
 // returns the program at the input boundary of the next pass, so a test can run
 // that pass itself and observe its effect (rather than re-running the whole
