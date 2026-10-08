@@ -7,7 +7,7 @@ use crate::ssa::builder::BuilderError;
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::types::{BlockId, FuncBody, InstKind, Terminator};
 use crate::ssa::types::{PlaceId, ValueRef};
-use crate::types::{self, Type, TypeName};
+use crate::types::{self, Type, TypeExt, TypeName};
 use crate::BindingRef;
 use crate::FunctionId;
 use crate::{LookupMap, LookupSet};
@@ -169,6 +169,25 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                     }
                 }
                 "ScalarExecute" => self.local(scope, selected.values[fields[2]])?,
+                "ScalarInstruction" if selected.text(fields[3])? == "index" => {
+                    let [array, index]: [TermId; 2] = selected
+                        .arguments(fields[4])?
+                        .try_into()
+                        .map_err(|_| error("index needs two operands"))?;
+                    let (array, path) = selected.projected_array(array)?;
+                    let mut array = self.scalar(scope, array)?;
+                    let mut path = path.into_iter().peekable();
+                    while !array.ty.is_array() && path.peek().is_some() {
+                        array = self.field(array, path.next().unwrap())?;
+                    }
+                    let index = self.scalar(scope, index)?;
+                    let mut value = self.index(array, index)?;
+                    // Stored AoS components are fields of the indexed element.
+                    for field in path {
+                        value = self.field(value, field)?;
+                    }
+                    self.cast(value, &ty)?
+                }
                 "ScalarInstruction" => {
                     let mut arguments = self.arguments(scope, fields[4])?;
                     let tag = selected.operator(fields[3], arguments.len())?;
@@ -207,14 +226,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                     } else {
                         return Err(error("unknown instruction representation"));
                     };
-                    if matches!(tag, OpTag::Index) {
-                        let [array, index]: [Typed; 2] =
-                            arguments.try_into().map_err(|_| error("index needs two operands"))?;
-                        let value = self.index(array, index)?;
-                        self.cast(value, &ty)?
-                    } else {
-                        self.op(tag, arguments, ty)?
-                    }
+                    self.op(tag, arguments, ty)?
                 }
                 "ScalarCall" => {
                     let args = self.arguments(scope, fields[4])?;

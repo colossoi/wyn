@@ -496,6 +496,10 @@ impl HofSpecializer<'_> {
 
         let function_param = get_func_param_sym(hof_def, function_param_index);
         let (params, inner_body) = tlc::extract_lambda_params(&hof_def.body);
+        let mut param_diets = (0..params.len())
+            .filter(|&index| index != function_param_index)
+            .map(|index| hof_def.param_diets.get(index).cloned().unwrap_or_default())
+            .collect::<Vec<_>>();
         let mut new_params = params
             .into_iter()
             .enumerate()
@@ -541,6 +545,7 @@ impl HofSpecializer<'_> {
             .collect::<Vec<_>>();
         let body = tlc::rebuild_nested_lam(&new_params, body, hof_def.body.span, self.term_ids);
         let arity = new_params.len();
+        param_diets.resize(arity, types::Diet::observing());
         let def = Def {
             data: (),
             name: specialized_symbol,
@@ -549,8 +554,8 @@ impl HofSpecializer<'_> {
             body,
             meta: DefMeta::Function,
             arity,
-            param_diets: vec![types::Diet::observing(); arity],
-            return_diet: types::Diet::observing(),
+            param_diets,
+            return_diet: hof_def.return_diet.clone(),
         };
         self.register(&def);
         self.specialized_defs.push(def);
@@ -689,6 +694,12 @@ impl HofSpecializer<'_> {
             .clone();
         let (params, inner_body) = tlc::extract_lambda_params(&lifted_def.body);
         let dropped = callable_indices.iter().map(|index| captures[*index].0).collect::<LookupSet<_>>();
+        let mut param_diets = params
+            .iter()
+            .enumerate()
+            .filter(|(_, (symbol, _))| !dropped.contains(symbol))
+            .map(|(index, _)| lifted_def.param_diets.get(index).cloned().unwrap_or_default())
+            .collect::<Vec<_>>();
         let mut new_params =
             params.into_iter().filter(|(symbol, _)| !dropped.contains(symbol)).collect::<Vec<_>>();
         let mut body = inner_body;
@@ -737,6 +748,7 @@ impl HofSpecializer<'_> {
         let symbol = self.symbols.alloc(format!("{name}${}", self.specialization_counter));
         self.specialization_counter += 1;
         let arity = new_params.len();
+        param_diets.resize(arity, types::Diet::observing());
         let def = Def {
             data: (),
             name: symbol,
@@ -745,8 +757,8 @@ impl HofSpecializer<'_> {
             body,
             meta: lifted_def.meta,
             arity,
-            param_diets: vec![types::Diet::observing(); arity],
-            return_diet: types::Diet::observing(),
+            param_diets,
+            return_diet: lifted_def.return_diet.clone(),
         };
         self.register(&def);
         self.specialized_defs.push(def);

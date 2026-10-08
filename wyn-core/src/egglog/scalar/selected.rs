@@ -46,6 +46,18 @@ impl Selected {
             }
         }
     }
+    pub fn projected_array(&self, mut term: TermId) -> Result<(TermId, Vec<usize>), OptimizeError> {
+        let mut path = Vec::new();
+        loop {
+            let (name, fields) = self.app(term)?;
+            if name != "ScalarProject" {
+                path.reverse();
+                return Ok((term, path));
+            }
+            path.push(usize::try_from(self.integer(fields[3])?).map_err(|_| error("invalid projection"))?);
+            term = fields[2];
+        }
+    }
     pub fn operation_arguments(&self, term: TermId) -> Result<Vec<TermId>, OptimizeError> {
         let (name, fields) = self.app(term)?;
         match name {

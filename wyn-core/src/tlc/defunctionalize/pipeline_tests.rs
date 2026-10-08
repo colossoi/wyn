@@ -605,12 +605,6 @@ fn test_nested_hof_passthrough() {
 }
 
 #[test]
-#[ignore = "known shortcut: hof_specialize stamps specialized functions with \
-            all-observing diets, so a consuming array data parameter of a user \
-            HOF loses its consuming contract (and, in the optimizer, its in-place \
-            promotion). Sound — validate_ownership checks consumption on the \
-            un-specialized program before this pass — but imprecise. Fixing it \
-            needs the real per-parameter diet remap in hof_specialize."]
 fn specialized_hof_preserves_consuming_data_param_diet() {
     // A user HOF `apply(f, a)` with a callback `f` and a consuming array
     // `a`. hof_specialize inlines the callback and drops `f`, leaving a
@@ -750,8 +744,40 @@ fn specialized_hof_preserves_consuming_data_param_diet() {
         .iter()
         .find(|d| matches!(d.meta, DefMeta::Function) && d.name != main_sym && d.arity == 1)
         .expect("a specialized apply def with the callback removed should exist");
-    assert!(
-        specialized.param_diets.iter().any(|d| d.is_consuming()),
+    assert_eq!(
+        specialized.param_diets,
+        vec![types::Diet::Leaf(true)],
         "specialized HOF must keep its consumed array parameter's consuming diet",
     );
+}
+
+#[test]
+fn specialized_hof_preserves_diet_order_and_return_with_captures() {
+    let program = crate::test_pipeline::compile_thru_static_index(
+        "def apply(left:[4]i32,f:i32 -> i32,a:*[4]i32) *[4]i32 =
+         a with [0]=f(left[0])
+         entry main(xs:*[4]i32,ys:[4]i32,bias:i32) [4]i32 =
+         apply(ys,|x|x+bias,xs)",
+    );
+    let program = defunctionalize(tlc::float_runtime_index_nested_producers(program));
+    let specialized = program
+        .defs
+        .iter()
+        .find(|def| {
+            program.symbols.get(def.name).is_some_and(|name| name.starts_with("apply$"))
+                && !super::hof_specialize::extract_param_types(&def.ty)
+                    .iter()
+                    .any(super::hof_specialize::is_arrow_type)
+        })
+        .expect("specialized apply");
+    assert_eq!(specialized.arity, 3);
+    assert_eq!(
+        specialized.param_diets,
+        vec![
+            types::Diet::observing(),
+            types::Diet::Leaf(true),
+            types::Diet::observing(),
+        ],
+    );
+    assert_eq!(specialized.return_diet, types::Diet::Leaf(true));
 }

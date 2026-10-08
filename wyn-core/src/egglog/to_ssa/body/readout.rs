@@ -32,6 +32,16 @@ impl Body<'_, '_, '_> {
         if name == "ScalarChoice" {
             return vec![fields[2]];
         }
+        if name == "ScalarInstruction" && matches!(selected.text(fields[3]), Ok("index")) {
+            if let Ok(arguments) = selected.arguments(fields[4]) {
+                if let [array, index] = arguments.as_slice() {
+                    if let Ok((base, _)) = selected.projected_array(*array) {
+                        // Component projections depend on the array's physical layout.
+                        return vec![base, *index];
+                    }
+                }
+            }
+        }
         operands(name, fields)
     }
 

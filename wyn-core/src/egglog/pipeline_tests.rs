@@ -101,6 +101,8 @@ fn basic_scalar_policy_retains_calls_and_validates_both_backends() {
         include_str!("../../../testfiles/regressions/aggregate_forwarding.wyn"),
         include_str!("../../../testfiles/select_lowering.wyn"),
         include_str!("../../../testfiles/filter_then_map.wyn"),
+        "entry main(xs:[4]i32,i:i32) (i32,(i32,i32)) =
+         let ys=map(|x|(x,(x+1,x+2)),xs) in ys[i]",
     ] {
         let tlc = crate::compile_thru_tlc(source).unwrap();
         for policy in [ScalarOptimization::Basic, ScalarOptimization::Full] {
@@ -608,12 +610,22 @@ fn nested_tuple_array_operations_reach_both_backends() {
 }
 
 #[test]
-#[ignore = "Known layout mismatch: runtime indexing a tuple-valued map projects an AoS storage view as a tuple"]
 fn runtime_indexing_a_tuple_valued_map_preserves_storage_layout() {
-    shaders(
+    for source in [
         "entry main(xs:[4]i32,i:i32) (i32,(i32,i32)) =
          let ys=map(|x|(x,(x+1,x+2)),xs) in ys[i]",
-    );
+        "entry main(xs:[]i32,i:i32) (i32,(bool,i32)) =
+         let ys=map(|x|(x,(x>0,x+2)),xs) in ys[i]",
+        "entry main(xs:[4]i32,i:i32) (i32,i32) =
+         let (_,ys)=unzip(map(|x|(x,(x+1,x+2)),xs)) in ys[i]",
+        "entry main(xs:[4]i32,i:i32) (i32,(i32,i32)) =
+         let ys=filter(|(x,p)|x>0,map(|x|(x,(x+1,x+2)),xs)) in ys[i]",
+        "entry main(xs:[1]i32,ys:[4]i32,zs:[4]i32,flag:bool,i:i32) i32 =
+         let arrays=if flag then (xs,ys) else (xs,zs) in
+         let (_,right)=arrays in right[i]",
+    ] {
+        shaders(source);
+    }
 }
 
 #[test]
