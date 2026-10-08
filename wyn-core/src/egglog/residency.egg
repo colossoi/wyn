@@ -73,8 +73,10 @@
 ; Only actual uses join those summaries; there is no stage x expression search.
 (rule ((PhaseInput stage op role) (Operand op role e)) ((Demand (InStage stage) e)) :ruleset residency)
 ; Scalar control bodies may capture earlier executions through nested regions.
+(relation ScalarContentNeed (StageKey ValueKey))
 (rule ((ScalarGroup op leader) (Phase (Stage leader "scalar") r) (SourceDependency op before) (Produces producer (Result before i)))
-      ((Needs (Stage leader "scalar") (Result before i))) :ruleset residency)
+      ((Needs (Stage leader "scalar") (Result before i))
+       (ScalarContentNeed (Stage leader "scalar") (Result before i))) :ruleset residency)
 ; Lengths follow view metadata; reading an allocation's size does not require
 ; waiting for its element writer. Compacted lengths do require the count writer.
 (rule ((PhaseDomain stage n width)) ((ExtentDemand stage n)) :ruleset residency)

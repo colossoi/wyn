@@ -741,39 +741,23 @@ where
     M: FnMut(Term<C, S>) -> Term<C, S>,
 {
     match soac {
-        SoacOp::Map {
-            lam,
-            inputs,
-            destination,
-        } => SoacOp::Map {
+        SoacOp::Map { lam, inputs } => SoacOp::Map {
             lam: map_soac_body_children(lam, f),
             inputs: inputs.into_iter().map(|ae| map_array_expr_children(ae, f)).collect(),
-            destination,
         },
         SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
             op: map_soac_body_children(op, f),
             ne: Box::new(f(*ne)),
             input: map_array_expr_children(input, f),
         },
-        SoacOp::Scan {
-            op,
-            ne,
-            input,
-            destination,
-        } => SoacOp::Scan {
+        SoacOp::Scan { op, ne, input } => SoacOp::Scan {
             op: map_soac_body_children(op, f),
             ne: Box::new(f(*ne)),
             input: map_array_expr_children(input, f),
-            destination,
         },
-        SoacOp::Filter {
-            pred,
-            input,
-            destination,
-        } => SoacOp::Filter {
+        SoacOp::Filter { pred, input } => SoacOp::Filter {
             pred: map_soac_body_children(pred, f),
             input: map_array_expr_children(input, f),
-            destination,
         },
         SoacOp::Scatter { dest, lam, inputs } => SoacOp::Scatter {
             dest,

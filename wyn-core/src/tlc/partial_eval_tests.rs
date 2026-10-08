@@ -1467,7 +1467,6 @@ fn let_bound_array_substituted_through_soac_input() {
         kind: TermKind::Soac(SoacOp::Map {
             lam: SoacBody { lam, data: () },
             inputs: vec![input_ae(Box::new(m_var))],
-            destination: types::SoacOwnership::Fresh,
         }),
     };
 

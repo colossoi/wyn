@@ -468,7 +468,6 @@ fn map_input_and_callback_metadata_follow_nested_array_lowering() {
                 data: (),
             },
             inputs: vec![ArrayExpr::Var(VarRef::Symbol(input), input_ty.clone())],
-            destination: tlc::SoacOwnership::Fresh,
         }),
     );
     let result = lower_checked(term.clone(), &mut ids, &mut symbols);

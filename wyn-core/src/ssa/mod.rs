@@ -23,8 +23,10 @@ mod if_conversion;
 pub mod ir;
 pub mod layout;
 mod optimize;
+mod ownership;
 pub mod print;
 pub mod reachability;
+mod storage;
 pub(crate) mod storage_function_variants;
 mod texture_sampling;
 pub mod types;
@@ -94,6 +96,7 @@ pub fn prepare_wgsl(mut program: stage::Reachable) -> error::Result<stage::WgslR
     }
     promote_addressable_constants(&mut program);
     simplify_values(&mut program);
+    ownership::apply(&mut program);
     texture_sampling::publish_texture_sampling(&mut program);
     backend_validation::verify_no_abstract_types(&program)?;
     Ok(program.retag())

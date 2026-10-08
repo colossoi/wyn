@@ -79,7 +79,9 @@
 (datatype StorageChoice (Allocate) (Reuse SourceValue))
 (function StorageFor (ValueKey) StorageChoice :no-merge)
 (function ReuseSelected (ValueKey) bool :merge (or old new))
-(relation ReusePermission (OperationKey i64 SourceValue))
+(relation PreferredReuse (ValueKey SourceValue))
+(relation ReusableSource (SourceValue TypeKey RegionKey))
+(relation FixedInputLength (SourceValue i64))
 (function SameBacking (ValueKey) SourceValue :no-merge)
 (relation ValueRef (SourceValue ValueKey))
 ; A value crossing a storage boundary is either a descriptor or an element load.

@@ -65,7 +65,6 @@ fn map_producer(xs: u32, ids: &mut TermIdSource) -> SoacOp {
     SoacOp::Map {
         lam: trivial_lam(i32_ty(), TermKind::IntLit("0".into()), ids),
         inputs: vec![arr_var(xs)],
-        destination: types::SoacOwnership::Fresh,
     }
 }
 
@@ -75,7 +74,6 @@ fn filter_term(input: ArrayExpr, ids: &mut TermIdSource) -> Term {
         TermKind::Soac(SoacOp::Filter {
             pred: trivial_lam(bool_ty(), TermKind::BoolLit(true), ids),
             input,
-            destination: types::SoacOwnership::Fresh,
         }),
         arr_ty(),
         ids,

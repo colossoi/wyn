@@ -2,23 +2,23 @@
 
 mod analysis;
 mod apply;
+mod facts;
 mod liveness;
 mod validate;
 
-pub use apply::{apply_ownership, OwnershipApplied};
+pub use apply::{apply_ownership, OwnershipApplied, OwnershipGlobal};
+pub use facts::OwnershipFacts;
 pub use validate::{check, validate_ownership, OwnershipValidated};
 
 #[cfg(test)]
 use super::VarRef;
 #[cfg(test)]
 use analysis::{analyze, build, AnalysisState, Origin, OwnerId};
-#[cfg(test)]
-use apply::eligible_unique_input_soacs;
 
 #[cfg(test)]
 #[path = "ownership_tests.rs"]
 mod ownership_tests;
 
 #[cfg(test)]
-#[path = "ownership_rebuild_tests.rs"]
-mod ownership_rebuild_tests;
+#[path = "ownership_facts_tests.rs"]
+mod ownership_facts_tests;

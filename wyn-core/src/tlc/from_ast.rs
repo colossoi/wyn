@@ -13,7 +13,7 @@ use crate::builtins::{catalog, BuiltinId};
 use crate::op;
 use crate::op::BinaryOperator;
 use crate::types;
-use crate::types::{SoacOwnership, TypeExt};
+use crate::types::TypeExt;
 use crate::{interface, LookupMap, SymbolId, SymbolTable};
 use polytype::Type;
 
@@ -993,7 +993,6 @@ impl<'a> Transformer<'a> {
                     len: Box::new(size),
                     step: None,
                 }],
-                destination: SoacOwnership::Fresh,
             }),
         );
         self.mk_term(
@@ -1040,15 +1039,7 @@ impl<'a> Transformer<'a> {
             _ => vec![self.soac_input(core, &mut binds)],
         };
 
-        let soac = self.mk_term(
-            ty,
-            span,
-            TermKind::Soac(SoacOp::Map {
-                lam,
-                inputs,
-                destination: SoacOwnership::Fresh,
-            }),
-        );
+        let soac = self.mk_term(ty, span, TermKind::Soac(SoacOp::Map { lam, inputs }));
         binds.finish(soac, self.term_ids)
     }
 
@@ -1144,8 +1135,6 @@ impl<'a> Transformer<'a> {
                 op,
                 ne: Box::new(ne_term),
                 input,
-                // Initial construction; apply_ownership may flip later.
-                destination: SoacOwnership::Fresh,
             }),
         );
         binds.finish(soac, self.term_ids)
@@ -1166,16 +1155,7 @@ impl<'a> Transformer<'a> {
 
         let mut binds = Bindings::new();
         let input = self.soac_input(arr_term, &mut binds);
-        let soac = self.mk_term(
-            ty,
-            span,
-            TermKind::Soac(SoacOp::Filter {
-                pred,
-                input,
-                // Initial construction; apply_ownership may flip later.
-                destination: SoacOwnership::Fresh,
-            }),
-        );
+        let soac = self.mk_term(ty, span, TermKind::Soac(SoacOp::Filter { pred, input }));
         binds.finish(soac, self.term_ids)
     }
 

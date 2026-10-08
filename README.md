@@ -136,11 +136,11 @@ The passes below run in order. SOACs are second-order array combinators, such as
 | `monomorphize` | Specialize intrinsic calls by type and instantiate reachable user definitions by type and known array-producer representation, including the bounded capacity of filter results. |
 | `force_inline_soac_helpers` | Expand constants, then repeatedly inline helpers containing SOACs, array producers, or length queries so fusion and dispatch planning can see that work in the caller. Scalar helper optimization is left to egglog. |
 | `canonicalize_conditional_producers` | Rewrite supported array-valued conditionals into a pointwise map with the branch inside its callback. |
-| `normalize_soacs` | Lower local arrays of tuples and their operations to tuples of arrays; turn standalone `zip` into tuple construction; name SOAC application arguments and flatten let chains for egglog. |
+| `normalize_soacs` | Lower local arrays of tuples and their operations to tuples of arrays; turn standalone `zip` into tuple construction; name SOAC application arguments and flatten let chains. |
 | `float_runtime_index_nested_producers` | Move eligible runtime-indexed producers out of nested callbacks before defunctionalization, exposing the producer and gather separately. |
 | `defunctionalize` | Lift lambdas, make captures explicit, specialize higher-order functions, and lower closure applications to direct calls. |
 | `fold_generated_lambdas` | Inline applications of compiler-generated lifted lambdas and remove definitions made unreachable. |
-| `apply_ownership` | Promote eligible array updates to in-place updates and mark unique SOAC inputs. Egglog later decides storage reuse using the fused program. |
+| `apply_ownership` | Export ownership permission on values without changing the functional TLC tree. Egglog decides buffer reuse after fusion and dispatch planning; SSA commits optional local array updates after placement. |
 
 Specialization, helper inlining, and conditional-producer rewriting retain the
 source array shapes. SoA lowering then runs once, with concrete element types
@@ -157,8 +157,21 @@ boundaries remains an explicit transformation. SoA lowering completes binding
 normalization in the same traversal, including expressions emitted by earlier rewrites.
 
 `fold_generated_lambdas` performs the final definition cleanup and checks that
-no function-typed parameters remain. Ownership rewriting preserves definition
-references, so no additional reachability pass is needed before egglog import.
+no function-typed parameters remain. Ownership export preserves the tree and
+its term identities, so no additional reachability pass is needed before egglog import.
+
+Ownership permission survives eliminated producers and applies to any compatible
+input of a fused operation. Reuse planning checks final element types, live
+content reads, captures, aliases, output bindings, and execution regions before
+selecting storage. Length-only observations retain descriptor metadata without
+keeping the old contents live. Local composite updates remain functional through
+scalar optimization. WGSL preparation uses SSA's use map, dominance, and
+instruction storage semantics to check aliases before eliding a local copy.
+Each rewrite is visible to subsequent decisions. Donors from dominating blocks
+in the same loop scope can be reused; escaping aliases, loop-invariant donors
+used inside loops, and incomparable branch uses remain functional. SPIR-V
+currently lowers both local update forms identically and skips this pass.
+Storage-view writes are made explicit during representation lowering.
 
 `--output-tlc` shows an early TLC snapshot after partial evaluation and entry
 interface resolution. It exposes resolved buffer bindings while functions are
@@ -304,6 +317,7 @@ listed in execution order. Names are relative to `ssa::` unless otherwise qualif
 
 | Orchestration pass | Subpass | Responsibility |
 | --- | --- | --- |
+| `optimize` | `storage::lower_array_update` | Make authored storage-view writes explicit during concrete representation lowering. |
 | `optimize` | `materialize_dynamic_index` | Introduce and share addressable storage for dynamic indexing of fixed scalar-array values, preserving existing array views. |
 | `place_floating` | `ir::schedule_floating` | Assign the generated array materializations to concrete control-flow blocks. |
 | `filter_reachable` | Reachability walk | Prune functions and constants unreachable from entries. |
@@ -313,6 +327,7 @@ listed in execution order. Names are relative to `ssa::` unless otherwise qualif
 | `prepare_*` → `if_conversion` | `constant_folding::fold` | Fold generated constants and simplify constant selections. |
 | `prepare_*` → `if_conversion` | `eliminate_dead_pure_instructions` | Remove computations made unused by conversion and folding. |
 | `prepare_*` | `ir::eliminate_single_input_params` | Replace single-input block parameters with their dominating incoming values. |
+| `prepare_wgsl` | `ownership` | Use placed SSA aliases and uses to elide local array copies. |
 | `prepare_*` | `texture_sampling::publish_texture_sampling` | Publish texture-sampling requirements. |
 | `prepare_*` | `backend_validation::verify_no_abstract_types` | Reject unresolved type representations. |
 | `prepare_spirv` | `spirv::verify_buffer_layouts` | Verify concrete buffer layouts. |
@@ -382,8 +397,6 @@ Other projects and supporting directories include:
 | `prelude/` | Automatically loaded standard library written in Wyn. |
 | `pkg/` | Wyn library packages. |
 | `testfiles/`, `tests/`, `scripts/` | Example and regression programs, integration fixtures, and build/validation scripts. |
-
-The browser playground is maintained separately in the `wyn-web` repository.
 
 ## Usage
 

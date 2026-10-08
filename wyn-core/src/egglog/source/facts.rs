@@ -31,6 +31,12 @@ impl<'source> Import<'_, '_, '_, 'source> {
         let semantic = strip_existentials(ty);
         if semantic.is_array() {
             self.sink.add("SourceArrayType", key)?;
+            if semantic
+                .array_variant()
+                .is_some_and(|variant| !crate::types::is_array_variant_virtual(variant))
+            {
+                self.sink.add("SourceBufferedArrayType", key)?;
+            }
             if !semantic.array_variant().is_some_and(is_array_variant_view) {
                 self.sink.add("SourceOwnedArrayType", key)?;
             }
@@ -127,7 +133,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
 
     pub(super) fn properties(&mut self, term: &Term, value: Value) -> Result<(), OptimizeError> {
         let (device, pure, readonly, duplicate, work) = match &term.kind {
-            TermKind::App { func, .. } => match &func.kind {
+            TermKind::App { func, args } => match &func.kind {
                 TermKind::BinOp(operator) => {
                     let speculative = operator.op.is_speculatable();
                     (false, speculative, true, true, 1)
@@ -138,7 +144,14 @@ impl<'source> Import<'_, '_, '_, 'source> {
                     let Some(overload) = builtin.overloads().get(*overload_idx) else {
                         return Err(OptimizeError::Output("invalid TLC builtin overload".into()));
                     };
-                    let pure = builtin.raw.purity == Purity::Pure;
+                    // An authored update of a storage view already writes
+                    // shared storage in both backends. Preserve its effect
+                    // ordering even while the TLC builtin remains functional.
+                    let storage_update = *id == catalog().known().array_with
+                        && args
+                            .first()
+                            .is_some_and(|arg| arg.ty.array_variant().is_some_and(is_array_variant_view));
+                    let pure = builtin.raw.purity == Purity::Pure && !storage_update;
                     let reusable = pure && overload.lowering.is_reusable();
                     let structural = *id == catalog().known().length || *id == catalog().known().slice;
                     (

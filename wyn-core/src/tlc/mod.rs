@@ -33,7 +33,6 @@ mod traversal;
 use crate::ast::{self, Span, TypeName};
 use crate::builtins::BuiltinId;
 use crate::types;
-use crate::types::SoacOwnership;
 use crate::{interface, LookupMap, LookupSet, SymbolId, SymbolTable};
 use polytype::Type;
 use std::num::NonZeroU32;
@@ -909,9 +908,6 @@ pub enum SoacOp<C: Payload = data::Empty, S: Payload = data::Empty> {
         lam: SoacBody<C, S>,
         /// Parallel inputs. `inputs.len() == lam.lam.params.len()`.
         inputs: Vec<ArrayExpr<C, S>>,
-        /// Logical uniqueness fact from TLC ownership; egglog decides whether
-        /// the candidate becomes an in-place write.
-        destination: SoacOwnership,
     },
     Reduce {
         op: SoacBody<C, S>,
@@ -923,18 +919,10 @@ pub enum SoacOp<C: Payload = data::Empty, S: Payload = data::Empty> {
         op: SoacBody<C, S>,
         ne: Box<Term<C, S>>,
         input: ArrayExpr<C, S>,
-        /// TLC may mark a pointwise-safe uniquely owned input as
-        /// `UniqueInput`; egglog resolves post-fusion liveness and routing into
-        /// the physical destination.
-        destination: SoacOwnership,
     },
     Filter {
         pred: SoacBody<C, S>,
         input: ArrayExpr<C, S>,
-        /// TLC may mark a pointwise-safe uniquely owned input as
-        /// `UniqueInput`; egglog resolves post-fusion liveness and routing into
-        /// the physical destination.
-        destination: SoacOwnership,
     },
     /// Indexed writes into `dest`: over the parallel `inputs`, `lam` yields an
     /// `(index, value)` pair per element, written as `dest[index] = value`.

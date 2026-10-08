@@ -272,7 +272,6 @@ fn runtime_index_inside_fused_scatter_envelope_becomes_let_bound_gather_shape() 
                 static_array_ty(i32_ty(), 8),
                 &mut ids,
             )))],
-            destination: types::SoacOwnership::Fresh,
         }),
         runtime_array_ty(i32_ty()),
         &mut ids,

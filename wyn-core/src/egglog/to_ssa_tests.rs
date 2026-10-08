@@ -12,6 +12,99 @@ use naga::front::spv;
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 
 #[test]
+fn fused_map_chain_keeps_permission_to_reuse_its_external_input() {
+    let output = pipeline("entry main(xs:*[]i32) []i32 = let ys=map(|x:i32|x+1,xs) in map(|x:i32|x*2,ys)");
+    let Pipeline::Compute(p) = &output.program.interface.pipelines[0] else {
+        panic!("compute")
+    };
+    assert_eq!(p.stages.len(), 1);
+    assert_eq!(p.bindings.len(), 1);
+    assert_eq!(output.program.interface.source_results[0].binding, 0);
+}
+
+#[test]
+fn length_observers_do_not_block_content_reuse() {
+    let output =
+        pipeline("entry main(xs:*[]i32) ([]i32,i32) = let ys=map(|x:i32|x+1,xs) in (ys,length(xs))");
+    assert_eq!(output.program.interface.source_results[0].binding, 0);
+    let Pipeline::Compute(p) = &output.program.interface.pipelines[0] else {
+        panic!("compute")
+    };
+    assert_eq!(p.bindings.len(), 2, "input/result array and scalar length output");
+}
+
+#[test]
+fn multi_input_map_can_reuse_its_nonprimary_unique_input() {
+    let output = pipeline("entry main(xs:[4]i32,ys:*[4]i32) [4]i32 = map(|(x,y)|x+y,zip(xs,ys))");
+    let Pipeline::Compute(p) = &output.program.interface.pipelines[0] else {
+        panic!("compute")
+    };
+    let result = &output.program.interface.source_results[0];
+    assert!(p.bindings.iter().any(|b| matches!(
+        b,
+        host::Binding::StorageBuffer { name, set, binding, .. }
+            if name == "ys" && (*set, *binding) == (result.set, result.binding)
+    )));
+    assert_eq!(p.bindings.len(), 2);
+}
+
+#[test]
+fn fused_intermediate_element_types_do_not_restrict_final_reuse() {
+    let output = pipeline(
+        "entry main(xs:*[]i32) []i32 = let bs=map(|x:i32|x>0,xs) in map(|b:bool|if b then 1 else 0,bs)",
+    );
+    assert_eq!(output.program.interface.source_results[0].binding, 0);
+    let Pipeline::Compute(p) = &output.program.interface.pipelines[0] else {
+        panic!("compute")
+    };
+    assert_eq!(p.stages.len(), 1);
+    assert_eq!(p.bindings.len(), 1);
+}
+
+#[test]
+fn permission_alone_does_not_allow_overwriting_observed_or_captured_contents() {
+    for source in [
+        "entry main(xs:[]i32) []i32 = map(|x:i32|x+1,xs)",
+        "entry main(xs:*[]i32) ([]i32,[]i32) = (map(|x:i32|x+1,xs),xs)",
+        "entry main(xs:*[]i32) []i32 = map(|x:i32|x+xs[0],xs)",
+        "entry main(xs:*[]i32) []bool = map(|x:i32|x>0,xs)",
+    ] {
+        let output = pipeline(source);
+        assert_ne!(output.program.interface.source_results[0].binding, 0, "{source}");
+    }
+}
+
+#[test]
+fn independent_writers_cannot_both_reuse_one_input() {
+    let output = pipeline("entry main(xs:*[]i32) ([]i32,[]i32) = (map(|x:i32|x+1,xs),map(|x:i32|x*2,xs))");
+    let results = &output.program.interface.source_results;
+    assert_eq!(results.len(), 2);
+    assert_ne!(results[0].binding, results[1].binding);
+}
+
+#[test]
+fn scatter_preserves_observed_and_captured_destination_contents() {
+    for body in [
+        "(scatter(ys,[0],[7]),ys)",
+        "(scatter(ys,[0,1],map(|i|ys[1-i],[0,1])),xs)",
+    ] {
+        let output = pipeline(&format!(
+            "entry main(xs:[]i32) ([]i32,[]i32) = let ys=map(|x:i32|x+1,xs) in {body}"
+        ));
+        let Pipeline::Compute(p) = &output.program.interface.pipelines[0] else {
+            panic!("compute")
+        };
+        assert_eq!(
+            p.bindings.len(),
+            3,
+            "input, map result, and separate scatter result: {body}"
+        );
+        let results = &output.program.interface.source_results;
+        assert_ne!(results[0].binding, results[1].binding, "{body}");
+    }
+}
+
+#[test]
 fn zipped_runtime_loop_retains_its_domain() {
     let source = "entry main(xs:[]i32) []i32 =
       let pairs=zip(xs,iota(length(xs))) in
@@ -27,7 +120,7 @@ fn missing_selected_abi_facts_are_errors() {
         ("SelectedLaunch", "missing selected SelectedLaunch"),
         ("RootWorkgroup", "missing selected RootWorkgroup"),
         ("ParameterAbi", "missing selected ParameterAbi"),
-        ("AbiStorage", "has no binding"),
+        ("AbiStorage", "has no host length input"),
     ] {
         let tlc = compile_thru_tlc("entry main(xs:[]i32,k:i32) []i32=map(|x|x+k,xs)").unwrap();
         let mut program = optimize(

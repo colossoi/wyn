@@ -907,9 +907,9 @@ pub enum ExprKind<T: TreeFamily = SourceTree> {
     VecMatLiteral(Vec<Expression<T>>), // @[...] - vector or matrix literal (type inferred from context)
     ArrayIndex(Box<Expression<T>>, Box<Expression<T>>),
     /// Array update: `a with [i] = v`. At AST level this is always
-    /// the functional form (returns a fresh array). The TLC ownership
-    /// pass (`tlc::ownership::apply_ownership`) decides post-lowering
-    /// whether the call should become the in-place intrinsic.
+    /// the functional form. Optional local mutation is selected in placed SSA;
+    /// storage-view updates retain their authored write semantics throughout
+    /// structural optimization.
     ArrayWith {
         array: Box<Expression<T>>,
         index: Box<Expression<T>>,

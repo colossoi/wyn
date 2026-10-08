@@ -694,7 +694,7 @@ fn compile_tlc(modules: ParsedModules, options: &CompileOptions) -> Result<TlcCo
         wyn_core::tlc::fold_generated_lambdas(program)
     });
 
-    // TLC establishes uniqueness candidates. egglog owns post-fusion liveness,
+    // TLC exports value ownership permission. egglog owns post-fusion liveness,
     // output routes, resources, and physical entry structure.
     let program = time("apply_ownership", verbose, || {
         wyn_core::tlc::apply_ownership(program)

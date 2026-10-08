@@ -53,7 +53,8 @@
 (function SourceInput (OperationKey i64) SourceValue :no-merge)
 (function SourceNeutral (OperationKey) SourceValue :no-merge)
 (function SourceDestination (OperationKey) SourceValue :no-merge)
-(relation SourceReuse (OperationKey i64))
+; Permission belongs to a value, independently of its current consumers.
+(relation SourceReusePermission (SourceValue RegionKey))
 (relation SourceBucketDomain (OperationKey Extent))
 (relation SourceKnownBucketDomain (OperationKey bool))
 (function SourceExtent (SourceValue) Extent :no-merge)
@@ -76,6 +77,7 @@
 (function SourceTypeFields (TypeKey) SourceTypes :no-merge)
 (function SourceAggregateShape (TypeKey) TypeKey :no-merge)
 (relation SourceOwnedArrayType (TypeKey))
+(relation SourceBufferedArrayType (TypeKey))
 (relation SourceAtomicType (TypeKey))
 (relation SourceSameShape (SourceValue SourceValue))
 (relation SourceResultOperand (SourceValue i64))

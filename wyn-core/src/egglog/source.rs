@@ -13,7 +13,7 @@ use crate::tlc::{
     self, extract_lambda_params_ref, ArrayExpr, DefMeta, Lambda, LoopKind, SoacBody, SoacOp, TermId,
     TermKind, VarRef,
 };
-use crate::types::{as_soa_tuple, SoacOwnership, Type, TypeExt, TypeName};
+use crate::types::{as_soa_tuple, Type, TypeExt, TypeName};
 use crate::{LookupMap, LookupSet, SymbolId};
 use egglog_engine::sort::VecContainer;
 use egglog_engine::{Core, EGraph, FullState, RawValues, Value, Write};
@@ -53,6 +53,7 @@ pub(super) fn import(source: &OwnershipApplied) -> Result<(EGraph, Identities<'_
             imported_types: LookupMap::default(),
             source_ordinals: LookupMap::default(),
             summaries: Summaries::default(),
+            ownership: &source.global_context.ownership,
         };
         // Native writes report engine errors; source validation also has its
         // own error type. On either failure the whole new graph is discarded.
@@ -111,6 +112,7 @@ struct Import<'graph, 'db, 'ids, 'source> {
     imported_types: LookupMap<i64, Value>,
     source_ordinals: LookupMap<Value, i64>,
     summaries: Summaries,
+    ownership: &'source tlc::ownership::OwnershipFacts,
 }
 
 impl<'source> Import<'_, '_, '_, 'source> {
@@ -244,6 +246,10 @@ impl<'source> Import<'_, '_, '_, 'source> {
     fn bind(&mut self, symbol: SymbolId, value: Value, scope: &Scope) -> Result<(), OptimizeError> {
         self.bindings.insert(symbol, value);
         self.summaries.owners.entry(value).or_insert(scope.key);
+        if self.ownership.reusable.contains(&symbol) {
+            let region = self.summaries.owners[&value];
+            self.sink.add("SourceReusePermission", (value, region))?;
+        }
         Ok(())
     }
 
@@ -725,23 +731,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
             SoacOp::ReduceByIndex { .. } => 2,
         };
         self.sink.set("SourceInputCount", operation, count as i64)?;
-        match soac {
-            SoacOp::Map {
-                destination: SoacOwnership::UniqueInput,
-                ..
-            }
-            | SoacOp::Scan {
-                destination: SoacOwnership::UniqueInput,
-                ..
-            }
-            | SoacOp::Filter {
-                destination: SoacOwnership::UniqueInput,
-                ..
-            } => {
-                self.sink.add("SourceReuse", (operation, 0i64))?;
-            }
-            _ => {}
-        }
         match soac {
             SoacOp::Map { inputs, .. } => {
                 for (index, input) in inputs.iter().enumerate() {

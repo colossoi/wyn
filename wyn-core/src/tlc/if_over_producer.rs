@@ -19,7 +19,6 @@ use crate::ast::{Span, TypeName};
 use crate::builtins::{catalog, BuiltinId};
 use crate::op;
 use crate::tlc;
-use crate::types;
 use crate::types::TypeExt;
 use crate::LookupSet;
 use crate::SymbolId;
@@ -134,11 +133,7 @@ fn extract_map_branch(
             Some(branch)
         }
         TermKind::Coerce { inner, .. } => extract_map_branch(*inner, symbols, term_ids),
-        TermKind::Soac(SoacOp::Map {
-            lam,
-            inputs,
-            destination: _,
-        }) => Some(MapBranch {
+        TermKind::Soac(SoacOp::Map { lam, inputs }) => Some(MapBranch {
             prefix: Vec::new(),
             lam,
             inputs,
@@ -154,11 +149,7 @@ fn try_compose_prefix_map(
     term_ids: &mut TermIdSource,
 ) -> bool {
     let (producer_lam, producer_inputs) = match &prefix.rhs.kind {
-        TermKind::Soac(SoacOp::Map {
-            lam,
-            inputs,
-            destination: types::SoacOwnership::Fresh,
-        }) => (lam, inputs),
+        TermKind::Soac(SoacOp::Map { lam, inputs }) => (lam, inputs),
         _ => return false,
     };
     let mut composed = false;
@@ -316,7 +307,6 @@ fn build_fused_map_if(
                 data: (),
             },
             inputs,
-            destination: types::SoacOwnership::Fresh,
         }),
     );
 

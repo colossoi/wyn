@@ -13,6 +13,47 @@ fn binary(op: BinaryOperator, a: ValueRef, b: ValueRef) -> InstKind {
 }
 
 #[test]
+fn representation_lowering_makes_view_updates_explicit_without_selecting_local_reuse() {
+    let composite = sized_array(4, i32());
+    let view = crate::types::view_array_with_size(
+        &i32(),
+        composite.array_size().unwrap().clone(),
+        composite.array_buffer().unwrap().clone(),
+    );
+    for (ty, expected) in [
+        (composite, crate::builtins::catalog().known().array_with),
+        (view, crate::builtins::catalog().known().array_with_in_place),
+    ] {
+        let mut builder = FuncBuilder::new(vec![(ty.clone(), "xs".into())], ty.clone());
+        let source = builder.get_param(0);
+        let result = builder
+            .push_inst(
+                InstKind::Op {
+                    tag: OpTag::Intrinsic {
+                        id: crate::builtins::catalog().known().array_with,
+                        overload_idx: 0,
+                    },
+                    operands: vec![
+                        source.into(),
+                        ValueRef::Const(ConstantValue::I32(0)),
+                        ValueRef::Const(ConstantValue::I32(7)),
+                    ],
+                },
+                ty,
+            )
+            .unwrap();
+        builder.terminate(Terminator::Return(Some(result.into()))).unwrap();
+        let mut body = builder.finish().unwrap();
+        prepare_values(&mut body);
+        let ValueDef::Inst { inst } = body.inner.values[result].def else {
+            panic!("instruction result")
+        };
+        assert!(matches!(body.inner.insts[inst].data,
+            InstKind::Op { tag: OpTag::Intrinsic { id, .. }, .. } if id == expected));
+    }
+}
+
+#[test]
 fn division_and_remainder_used_by_a_condition_are_reused_in_both_arms() {
     for source in [
         r#"entry repro(indices: []i32, width: i32) []i32 =

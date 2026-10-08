@@ -20,6 +20,14 @@ impl LoopScopes {
         let dominators = DominatorTree::build(function.entry, |block, successors| {
             successors.extend(function.blocks[block].term.successors())
         });
+        Self::with_dominators(function, &dominators)
+    }
+
+    /// Reuse a caller's dominance analysis when it also needs loop scopes.
+    pub(crate) fn with_dominators<I, T>(
+        function: &Function<I, T>,
+        dominators: &DominatorTree<BlockId>,
+    ) -> Self {
         let mut scopes = LookupMap::new();
         let mut parents = LookupMap::new();
         for &block in dominators.preorder() {

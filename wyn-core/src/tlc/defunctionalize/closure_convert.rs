@@ -729,39 +729,23 @@ impl ClosureConverter {
         span: Span,
     ) -> SoacOp<ExplicitClosurePayload, ExplicitCapturesPayload> {
         match soac {
-            SoacOp::Map {
-                lam,
-                inputs,
-                destination,
-            } => SoacOp::Map {
+            SoacOp::Map { lam, inputs } => SoacOp::Map {
                 lam: self.lift_soac_lambda(lam.lam, span),
                 inputs: inputs.into_iter().map(|input| self.convert_array_expr(input)).collect(),
-                destination,
             },
             SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
                 op: self.lift_soac_lambda(op.lam, span),
                 ne: Box::new(self.convert_term(*ne)),
                 input: self.convert_array_expr(input),
             },
-            SoacOp::Scan {
-                op,
-                ne,
-                input,
-                destination,
-            } => SoacOp::Scan {
+            SoacOp::Scan { op, ne, input } => SoacOp::Scan {
                 op: self.lift_soac_lambda(op.lam, span),
                 ne: Box::new(self.convert_term(*ne)),
                 input: self.convert_array_expr(input),
-                destination,
             },
-            SoacOp::Filter {
-                pred,
-                input,
-                destination,
-            } => SoacOp::Filter {
+            SoacOp::Filter { pred, input } => SoacOp::Filter {
                 pred: self.lift_soac_lambda(pred.lam, span),
                 input: self.convert_array_expr(input),
-                destination,
             },
             SoacOp::Scatter { dest, lam, inputs } => SoacOp::Scatter {
                 dest,

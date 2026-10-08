@@ -11,15 +11,12 @@
 //!    with fixed-point iteration over loops and SOAC bodies. Records
 //!    per-term `live_out`.
 //!
-//! 3. **Use** — three consumers read the populated model:
+//! 3. **Use** — validation and provenance export read the model:
 //!    - use-after-move checking: an owner in `kills[T] ∩ live_out[T]`
 //!      is consumed at `T` while a successor still needs it.
-//!    - in-place promotion: at each `_w_intrinsic_array_with` call,
-//!      promote to `_w_intrinsic_array_with_inplace` when the source's
-//!      owner is mutable and absent from `live_out`.
-//!    - SOAC uniqueness annotation: mark pointwise-safe SOAC inputs whose
-//!      owners are unique. egglog separately decides physical reuse from the
-//!      post-fusion semantic graph and its liveness.
+//!    - ownership export uses only the build layer, retaining permission on
+//!      values independently of TLC liveness. Egglog decides physical reuse
+//!      after fusion; local update promotion uses placed SSA aliases and uses.
 
 use crate::builtins;
 use crate::builtins::catalog;

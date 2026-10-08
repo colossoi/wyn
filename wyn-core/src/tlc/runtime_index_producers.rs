@@ -471,11 +471,7 @@ fn float_soac(
     symbols: &mut SymbolTable,
 ) -> (Vec<LetBinding<Empty, Empty>>, SoacOp<Empty, Empty>) {
     match soac {
-        SoacOp::Map {
-            lam,
-            inputs,
-            destination,
-        } => {
+        SoacOp::Map { lam, inputs } => {
             let (mut floats, lam) = float_soac_body(lam, blocked, ids, symbols);
             let inputs = inputs
                 .into_iter()
@@ -485,14 +481,7 @@ fn float_soac(
                     input
                 })
                 .collect();
-            (
-                floats,
-                SoacOp::Map {
-                    lam,
-                    inputs,
-                    destination,
-                },
-            )
+            (floats, SoacOp::Map { lam, inputs })
         }
         SoacOp::Reduce { op, ne, input } => {
             let (mut floats, op) = float_soac_body(op, blocked, ids, symbols);
@@ -509,12 +498,7 @@ fn float_soac(
                 },
             )
         }
-        SoacOp::Scan {
-            op,
-            ne,
-            input,
-            destination,
-        } => {
+        SoacOp::Scan { op, ne, input } => {
             let (mut floats, op) = float_soac_body(op, blocked, ids, symbols);
             let (mut ne_floats, ne) = float_term(*ne, blocked, ids, symbols, true);
             let (mut input_floats, input) = float_array_expr(input, blocked, ids, symbols);
@@ -526,26 +510,14 @@ fn float_soac(
                     op,
                     ne: Box::new(ne),
                     input,
-                    destination,
                 },
             )
         }
-        SoacOp::Filter {
-            pred,
-            input,
-            destination,
-        } => {
+        SoacOp::Filter { pred, input } => {
             let (mut floats, pred) = float_soac_body(pred, blocked, ids, symbols);
             let (mut input_floats, input) = float_array_expr(input, blocked, ids, symbols);
             floats.append(&mut input_floats);
-            (
-                floats,
-                SoacOp::Filter {
-                    pred,
-                    input,
-                    destination,
-                },
-            )
+            (floats, SoacOp::Filter { pred, input })
         }
         SoacOp::Scatter { dest, lam, inputs } => {
             let (mut floats, lam) = float_soac_body(lam, blocked, ids, symbols);
