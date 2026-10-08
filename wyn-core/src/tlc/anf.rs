@@ -33,7 +33,7 @@ pub fn check<Tag, F: Family, GlobalContext>(
 /// `debug_assert` the ANF invariant at a pass boundary. A no-op in release;
 /// in debug/test builds it fires the moment a pass leaves an inline producer in
 /// an `Index`/`App` Term position. Passes call this after
-/// `normalize_soacs_to_anf` establishes the floated form and after every
+/// `normalize_soacs` establishes the floated form and after every
 /// subsequent rewrite that must preserve it. `stage` names the pass for the
 /// panic.
 pub fn debug_check<Tag, F: Family, GlobalContext>(

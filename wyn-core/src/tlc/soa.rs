@@ -12,6 +12,7 @@
 //! Runs once, after monomorphization and helper inlining, before fusion and
 //! defunctionalization. Storage-backed arrays retain their declared layout.
 
+use super::bindings::flatten_nested_let;
 use super::data::Empty;
 use super::if_over_producer::ConditionalProducersCanonicalized;
 use super::{
@@ -25,11 +26,11 @@ use crate::types::TypeExt;
 use crate::SymbolTable;
 use polytype::Type;
 
-/// Monomorphic TLC after helper expansion and SoA normalization.
+/// Monomorphic TLC after SoA lowering and SOAC binding normalization.
 #[derive(Debug, Clone, Copy)]
-pub enum SoaNormalizedTag {}
-pub type SoaNormalized =
-    super::Program<SoaNormalizedTag, super::monomorphize::Monomorphic, super::context::RewriteGlobal>;
+pub enum SoacsAnfNormalizedTag {}
+pub type SoacsAnfNormalized =
+    super::Program<SoacsAnfNormalizedTag, super::monomorphize::Monomorphic, super::context::RewriteGlobal>;
 
 // =============================================================================
 // Type rewriting
@@ -355,14 +356,31 @@ impl TermRewriter<Empty, Empty> for SoaTransformer<'_, '_> {
         RewriteDecision::Unchanged
     }
 
-    fn rewrite_node(&mut self, term: &mut Term) -> RewriteDecision {
+    fn rewrite_owned_node(&mut self, mut term: Term) -> (Term, RewriteDecision) {
         // Child expressions are already in the target representation. Rewrite
         // this node's annotations and construct its target operation together.
         term.rewrite_node_types(&mut soa_type);
-        if let Some(replacement) = self.structural_replacement(term) {
-            *term = replacement;
+        if let Some(replacement) = self.structural_replacement(&term) {
+            term = replacement;
         }
-        RewriteDecision::Changed
+        if let TermKind::App { args, .. } = &mut term.kind {
+            if args.iter().any(|arg| matches!(arg.kind, TermKind::Soac(_))) {
+                let mut bindings = Bindings::new();
+                crate::map_in_place(args, |arg| {
+                    if matches!(arg.kind, TermKind::Soac(_)) {
+                        bindings.name(arg, "_anf", self.symbols, self.term_ids)
+                    } else {
+                        arg
+                    }
+                });
+                // The application becomes a child of the new lets, so the
+                // walker's root-ID refresh no longer covers it.
+                term.id = self.next_term_id();
+                term = bindings.finish(term, self.term_ids);
+            }
+        }
+        let (term, _) = flatten_nested_let(term, self.term_ids);
+        (term, RewriteDecision::Changed)
     }
 }
 
@@ -375,16 +393,39 @@ impl TermRewriter<Empty, Empty> for SoaTransformer<'_, '_> {
 /// 1. Rewrites `[n](A,B)` types to `([n]A, [n]B)` and adjusts all operations
 ///    that touch array-of-tuple types.
 /// 2. Converts standalone Zip to tuple construction.
-pub fn normalize_soacs(mut program: ConditionalProducersCanonicalized) -> SoaNormalized {
+/// 3. Names SOAC application arguments and flattens nested let RHSs.
+pub fn normalize_soacs(mut program: ConditionalProducersCanonicalized) -> SoacsAnfNormalized {
     let mut transformer = SoaTransformer {
         term_ids: &mut program.term_ids,
         symbols: &mut program.symbols,
     };
-    for def in &mut program.defs {
+    crate::map_in_place(&mut program.defs, |mut def| {
         def.ty = soa_type(&def.ty);
-        transformer.rewrite_tracked(&mut def.body);
+        def.body = def.body.rewrite_owned(&mut transformer);
+        def
+    });
+    let program = program.retag();
+    debug_assert!(
+        verify_flattened(&program).is_ok(),
+        "SOAC normalization left a nested let rhs"
+    );
+    program
+}
+
+fn verify_flattened(program: &SoacsAnfNormalized) -> Result<(), ()> {
+    fn walk(term: &Term) -> Result<(), ()> {
+        if matches!(&term.kind, TermKind::Let { rhs, .. } if matches!(rhs.kind, TermKind::Let { .. })) {
+            return Err(());
+        }
+        let mut result = Ok(());
+        term.for_each_child(&mut |child| {
+            if result.is_ok() {
+                result = walk(child);
+            }
+        });
+        result
     }
-    program.retag()
+    program.defs.iter().try_for_each(|def| walk(&def.body))
 }
 
 // =============================================================================

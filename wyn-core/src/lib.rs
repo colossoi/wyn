@@ -265,8 +265,7 @@ pub use polytype::Context as PolytypeContext;
 //                                      -> tlc::stage::SoacHelpersInlined
 //       tlc::canonicalize_conditional_producers(...)
 //                                      -> tlc::stage::ConditionalProducersCanonicalized
-//       tlc::normalize_soacs(...)        -> tlc::stage::SoaNormalized
-//       tlc::normalize_soacs_to_anf(...) -> tlc::stage::SoacsAnfNormalized
+//       tlc::normalize_soacs(...)        -> tlc::stage::SoacsAnfNormalized
 //       tlc::float_runtime_index_nested_producers(...)
 //                                      -> tlc::stage::RuntimeIndexProducersFloated
 //       tlc::defunctionalize(...)        -> tlc::stage::Defunctionalized
@@ -323,8 +322,7 @@ pub(crate) fn optimize_tlc_for_test_thru_soac_normalization(
     let program = tlc::monomorphize(program)?;
     let program = tlc::force_inline_soac_helpers(program);
     let program = tlc::canonicalize_conditional_producers(program);
-    let program = tlc::normalize_soacs(program);
-    Ok(tlc::normalize_soacs_to_anf(program))
+    Ok(tlc::normalize_soacs(program))
 }
 
 /// Target capabilities selected before scheduled blocks are lowered to SSA.

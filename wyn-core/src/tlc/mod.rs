@@ -22,7 +22,6 @@ mod rep_specialize_tests;
 pub mod run;
 pub mod runtime_index_producers;
 pub mod soa;
-pub mod soac_anf;
 mod specialize;
 mod stage_extract;
 pub mod subst;
@@ -317,8 +316,7 @@ pub mod stage {
     pub use super::pin_entry_buffers::BuffersPinned;
     pub use super::run::Transformed;
     pub use super::runtime_index_producers::RuntimeIndexProducersFloated;
-    pub use super::soa::SoaNormalized;
-    pub use super::soac_anf::SoacsAnfNormalized;
+    pub use super::soa::SoacsAnfNormalized;
     pub use super::stage_extract::StagesExtracted;
 }
 
@@ -334,7 +332,6 @@ pub use pin_entry_buffers::pin_entry_buffers;
 pub use run::lower_from_ast;
 pub use runtime_index_producers::float_runtime_index_nested_producers;
 pub use soa::normalize_soacs;
-pub use soac_anf::normalize_soacs_to_anf;
 pub use stage_extract::extract_stages;
 
 // =============================================================================

@@ -143,8 +143,8 @@ fn builtin(id: crate::builtins::BuiltinId) -> VarRef {
     VarRef::Builtin { id, overload_idx: 0 }
 }
 
-/// Check the result immediately after SoA construction, without ANF or any
-/// later rewriting. In particular, projections and calls must already agree
+/// Check the result immediately after the combined normalization pass.
+/// In particular, projections and calls must already agree
 /// with their operands, and duplicated uses must have distinct term IDs.
 fn lower_checked(term: Term, ids: &mut TermIdSource, symbols: &mut SymbolTable) -> Term {
     fn check(term: &Term, ids: &mut std::collections::HashSet<TermId>) {
@@ -167,10 +167,12 @@ fn lower_checked(term: Term, ids: &mut TermIdSource, symbols: &mut SymbolTable) 
             TermKind::Let {
                 name_ty, rhs, body, ..
             } => {
+                assert!(!matches!(rhs.kind, TermKind::Let { .. }));
                 assert_eq!(*name_ty, rhs.ty);
                 assert_eq!(term.ty, body.ty);
             }
             TermKind::App { func, args } => {
+                assert!(args.iter().all(|arg| !matches!(arg.kind, TermKind::Soac(_))));
                 assert_eq!(
                     func.ty,
                     tlc::curried_function_type(args.iter().map(|arg| &arg.ty), &term.ty)
@@ -211,7 +213,7 @@ fn lower_checked(term: Term, ids: &mut TermIdSource, symbols: &mut SymbolTable) 
         term_ids: ids,
         symbols,
     }
-    .rewrite(term);
+    .rewrite_owned(term);
     check(&result, &mut std::collections::HashSet::new());
     result
 }
@@ -469,11 +471,42 @@ fn map_input_and_callback_metadata_follow_nested_array_lowering() {
             destination: tlc::SoacOwnership::Fresh,
         }),
     );
-    let result = lower_checked(term, &mut ids, &mut symbols);
+    let result = lower_checked(term.clone(), &mut ids, &mut symbols);
     let TermKind::Soac(tlc::SoacOp::Map { lam, inputs, .. }) = result.kind else {
         panic!("map")
     };
     assert_eq!(lam.lam.params[0].1, soa_type(&row_ty));
     assert_eq!(lam.lam.ret_ty, lam.lam.body.ty);
     assert_eq!(inputs[0].array_type(), soa_type(&input_ty));
+
+    // A consumer of the map must stay inside its lambda, with the original
+    // let flattened after hoisting and all generated bindings correctly typed.
+    let consume = VarRef::Symbol(symbols.alloc("consume".into()));
+    let rhs = call(&mut ids, consume, vec![term], i32_ty());
+    let name = symbols.alloc("result".into());
+    let body = value(&mut ids, i32_ty(), TermKind::Var(VarRef::Symbol(name)));
+    let bound = value(
+        &mut ids,
+        i32_ty(),
+        TermKind::Let {
+            name,
+            name_ty: i32_ty(),
+            rhs: Box::new(rhs),
+            body: Box::new(body),
+        },
+    );
+    let lambda = tlc::rebuild_nested_lam(&[(input, input_ty)], bound, Span::generated(), &mut ids);
+    let result = lower_checked(lambda, &mut ids, &mut symbols);
+    let TermKind::Lambda(lam) = result.kind else {
+        panic!("lambda")
+    };
+    let TermKind::Let { rhs, body, .. } = lam.body.kind else {
+        panic!("map binding")
+    };
+    assert!(matches!(rhs.kind, TermKind::Soac(_)));
+    let TermKind::Let { rhs, .. } = body.kind else {
+        panic!("consumer binding")
+    };
+    assert!(matches!(rhs.kind, TermKind::App { .. }));
+    assert_eq!(count_calls(&rhs, consume), 1);
 }

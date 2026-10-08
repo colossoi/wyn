@@ -136,8 +136,7 @@ The passes below run in order. SOACs are second-order array combinators, such as
 | `monomorphize` | Specialize intrinsic calls by type and instantiate reachable user definitions by type and known array-producer representation, including the bounded capacity of filter results. |
 | `force_inline_soac_helpers` | Expand constants, then repeatedly inline helpers containing SOACs, array producers, or length queries so fusion and dispatch planning can see that work in the caller. Scalar helper optimization is left to egglog. |
 | `canonicalize_conditional_producers` | Rewrite supported array-valued conditionals into a pointwise map with the branch inside its callback. |
-| `normalize_soacs` | Lower local arrays of tuples and their operations to tuples of arrays, constructing terms and type annotations together; turn standalone `zip` into tuple construction. |
-| `normalize_soacs_to_anf` | Lift nested SOAC expressions into explicit let bindings, exposing producer/consumer edges for egglog. |
+| `normalize_soacs` | Lower local arrays of tuples and their operations to tuples of arrays; turn standalone `zip` into tuple construction; name SOAC application arguments and flatten let chains for egglog. |
 | `float_runtime_index_nested_producers` | Move eligible runtime-indexed producers out of nested callbacks before defunctionalization, exposing the producer and gather separately. |
 | `defunctionalize` | Lift lambdas, make captures explicit, specialize higher-order functions, and lower closure applications to direct calls. |
 | `fold_generated_lambdas` | Inline applications of compiler-generated lifted lambdas and remove definitions made unreachable. |
@@ -154,8 +153,8 @@ SOAC construction, helper inlining, and SoA lowering share a binding builder tha
 preserves evaluation order and flattens leading lets as they are emitted.
 Distribution across tuple components binds each computed operand once. Branches,
 loops, and callbacks retain their own evaluation scopes; moving producers across those
-boundaries remains an explicit transformation. The ANF pass completes binding
-normalization for expressions emitted by other rewrites.
+boundaries remains an explicit transformation. SoA lowering completes binding
+normalization in the same traversal, including expressions emitted by earlier rewrites.
 
 `fold_generated_lambdas` performs the final definition cleanup and checks that
 no function-typed parameters remain. Ownership rewriting preserves definition
