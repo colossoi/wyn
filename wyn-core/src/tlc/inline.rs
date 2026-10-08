@@ -1,16 +1,16 @@
 //! TLC inlining passes.
 //!
-//! The monomorphic passes inline small functions/constants and force array-work
-//! helpers across call boundaries. After defunctionalization, the same generic
-//! inliner folds compiler-generated lifted lambdas back into their call sites.
+//! The monomorphic pass expands constants and forces array-work helpers across
+//! call boundaries. After defunctionalization, the same generic inliner folds
+//! compiler-generated lifted lambdas back into their call sites.
 
 use super::data::{Empty, ExplicitCapturesPayload, ExplicitClosurePayload};
 use super::defunctionalize::{ClosureConverted, Defunctionalized};
 use super::rep_specialize::RepSpecialized;
 use super::VarRef;
 use super::{
-    clone_term_with_fresh_ids, extract_lambda_params, term_size, Def, DefMeta, Payload, RewriteDecision,
-    Term, TermId, TermIdSource, TermKind, TermRewriter,
+    clone_term_with_fresh_ids, extract_lambda_params, Def, DefMeta, Payload, RewriteDecision, Term, TermId,
+    TermIdSource, TermKind, TermRewriter,
 };
 use crate::ast::{Span, TypeName};
 use crate::builtins;
@@ -18,11 +18,6 @@ use crate::map_in_place;
 use crate::{LookupMap, LookupSet};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
-
-#[derive(Debug, Clone, Copy)]
-pub enum SmallInlinedTag {}
-pub type SmallInlined =
-    super::Program<SmallInlinedTag, super::monomorphize::Monomorphic, super::context::RewriteGlobal>;
 
 #[derive(Debug, Clone, Copy)]
 pub enum SoacHelpersInlinedTag {}
@@ -37,22 +32,18 @@ pub type GeneratedLambdasFolded = super::Program<
     super::context::PostClosureGlobal,
 >;
 
-/// Maximum term size for a user function to be inlined.
-const INLINE_SIZE_THRESHOLD: usize = 30;
-
-/// Force-inline every helper whose body contains a SOAC or an explicit array
-/// producer anywhere in its term tree. This mirrors Futhark's "inline
-/// array/parallel callees" rule: a helper that performs SOAC work or constructs
-/// a range/literal behind a call boundary blocks egglog from seeing the complete
-/// producer/consumer relationship and dispatch extent, so we expose it by
-/// inlining. Size threshold is ignored — such a helper is by definition
-/// critical to fusion and scheduling, regardless of source LOC.
+/// Expand constants, then force-inline helpers whose bodies contain array work.
+/// Array computations and shape queries must be visible in the caller so
+/// egglog can infer producer/consumer relationships and dispatch extents.
+/// Scalar helper optimization is left to egglog.
 ///
 /// Iterates to a fixpoint so chains like `clump → center → sum` (each a
 /// SOAC helper) fully expand: one round inlines `center`, the next sees
 /// `sum` calls inside the freshly-expanded clump body and inlines those
 /// too.
-pub fn force_inline_soac_helpers(mut program: SmallInlined) -> SoacHelpersInlined {
+pub fn force_inline_soac_helpers(mut program: RepSpecialized) -> SoacHelpersInlined {
+    expand_constants(&mut program);
+    super::dce::eliminate_unreachable_defs(&mut program.defs);
     force_inline_array_work_helpers_to_fixpoint(&mut program);
     debug_assert!(
         verify_array_work_helpers_inlined(&program).is_ok(),
@@ -73,7 +64,7 @@ struct CalledArrayWorkHelper {
 /// source-level inlining as the one boundary operation that exposes every
 /// array-work helper before conversion, then let egglog own all
 /// producer/consumer and scheduling decisions.
-fn verify_array_work_helpers_inlined(program: &SmallInlined) -> Result<(), Vec<CalledArrayWorkHelper>> {
+fn verify_array_work_helpers_inlined(program: &RepSpecialized) -> Result<(), Vec<CalledArrayWorkHelper>> {
     let array_work_bearing: LookupSet<SymbolId> =
         program.defs.iter().filter(|def| contains_array_work(&def.body)).map(|def| def.name).collect();
     let mut violations = Vec::new();
@@ -108,7 +99,7 @@ fn collect_called_array_work_helpers(
     });
 }
 
-fn force_inline_array_work_helpers_to_fixpoint(program: &mut SmallInlined) {
+fn force_inline_array_work_helpers_to_fixpoint(program: &mut RepSpecialized) {
     // Bound iterations to guard against pathological recursion through
     // hand-crafted call graphs; typical wyn helper depth is 2–3.
     for _ in 0..8 {
@@ -133,7 +124,7 @@ fn force_inline_array_work_helpers_to_fixpoint(program: &mut SmallInlined) {
 }
 
 fn build_array_work_helper_candidates(
-    program: &SmallInlined,
+    program: &RepSpecialized,
 ) -> LookupMap<SymbolId, InlineBody<Empty, Empty>> {
     let mut candidates = LookupMap::new();
     for def in &program.defs {
@@ -190,7 +181,7 @@ fn is_array_shape_intrinsic_call<C: Payload, S: Payload>(term: &Term<C, S>) -> b
 }
 
 fn any_def_calls_candidate(
-    program: &SmallInlined,
+    program: &RepSpecialized,
     candidates: &LookupMap<SymbolId, InlineBody<Empty, Empty>>,
 ) -> bool {
     fn walk(term: &Term<Empty, Empty>, cs: &LookupMap<SymbolId, InlineBody<Empty, Empty>>) -> bool {
@@ -212,13 +203,9 @@ fn any_def_calls_candidate(
     program.defs.iter().any(|def| walk(&def.body, candidates))
 }
 
-/// Expand constants, then inline small user functions at their call sites.
-///
-/// Candidate size and control flow are measured after constant expansion.
-///
-/// Skips `LiftedLambda` defs (SOAC bodies) — handled by `inline()`.
-pub fn inline_small(mut program: RepSpecialized) -> SmallInlined {
-    let all_constants = find_all_constants(&program);
+/// Expose constant bodies before selecting helpers that contain array work.
+fn expand_constants(program: &mut RepSpecialized) {
+    let all_constants = find_all_constants(program);
     let mut constants = ConstantInliner {
         constants: &all_constants,
         term_ids: &mut program.term_ids,
@@ -226,15 +213,6 @@ pub fn inline_small(mut program: RepSpecialized) -> SmallInlined {
     for def in &mut program.defs {
         constants.rewrite_tracked(&mut def.body);
     }
-    let small_candidates = find_small_candidates(&program.defs, &program.symbols);
-    let term_ids = &mut program.term_ids;
-    map_in_place(&mut program.defs, |def| {
-        let body = inline_term(def.body, &small_candidates, term_ids);
-        Def { body, ..def }
-    });
-
-    super::dce::eliminate_unreachable_defs(&mut program.defs);
-    program.retag()
 }
 
 /// Inline compiler-generated lifted lambdas, remove unreachable definitions,
@@ -268,52 +246,7 @@ struct InlineBody<C: Payload, S: Payload> {
     body: Term<C, S>,
 }
 
-/// Find small user functions suitable for inlining.
-///
-/// A function qualifies if:
-/// - It's a `DefMeta::Function` (lifted lambdas are handled by
-///   `fold_generated_lambdas`)
-/// - It has parameters (not a constant)
-/// - Its body is small (term_size ≤ threshold)
-/// - Its expanded body has no control flow (If, Loop)
-fn find_small_candidates(
-    defs: &[Def<super::monomorphize::Monomorphic>],
-    _symbols: &SymbolTable,
-) -> LookupMap<SymbolId, InlineBody<Empty, Empty>> {
-    let mut candidates = LookupMap::new();
-
-    for def in defs {
-        if !matches!(def.meta, DefMeta::Function) {
-            continue;
-        }
-
-        let (params, body) = extract_lambda_params(&def.body);
-        if params.is_empty() {
-            continue; // constant, not a function
-        }
-
-        // Size check.
-        if term_size(&body) > INLINE_SIZE_THRESHOLD {
-            continue;
-        }
-
-        // Skip functions with control flow (If, Loop) — they'd become multi-block in SSA.
-        // SOACs are fine to inline — they're single instructions in SSA.
-        if has_control_flow(&body) {
-            continue;
-        }
-
-        candidates.insert(def.name, InlineBody { params, body });
-    }
-
-    candidates
-}
-
-/// Find all constant defs, indexed by every SymbolId that could reference them.
-///
-/// A constant is an arity-0, non-entry, non-extern function def.
-/// After monomorphization, the same constant name may be referenced through
-/// different SymbolIds, so we index by name as well as by def SymbolId.
+/// Find zero-arity, non-entry, non-extern definitions by their SymbolId.
 fn find_all_constants(program: &RepSpecialized) -> LookupMap<SymbolId, Term<Empty, Empty>> {
     program
         .defs
@@ -323,22 +256,6 @@ fn find_all_constants(program: &RepSpecialized) -> LookupMap<SymbolId, Term<Empt
         .filter(|def| def.arity == 0)
         .map(|def| (def.name, def.body.clone()))
         .collect()
-}
-
-/// Check if a term contains control flow (If, Loop).
-fn has_control_flow<C: Payload, S: Payload>(term: &Term<C, S>) -> bool {
-    match &term.kind {
-        TermKind::If { .. } | TermKind::Loop { .. } => true,
-        _ => {
-            let mut found = false;
-            term.for_each_child(&mut |child| {
-                if !found {
-                    found = has_control_flow(child);
-                }
-            });
-            found
-        }
-    }
 }
 
 struct ConstantInliner<'a, 'ids> {

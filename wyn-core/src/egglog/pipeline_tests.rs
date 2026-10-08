@@ -93,8 +93,11 @@ fn basic_scalar_policy_retains_calls_and_validates_both_backends() {
     let helper = "def helper(x:i32) i32 =
         (x-x)+(x-x)+(x-x)+(x-x)+(x-x)+(x-x)+(x-x)+(x-x)
         entry main(x:i32) i32 = helper(x)+1";
+    let small_helper = "def helper(x:i32) i32=x+1
+        entry main(x:i32) i32=helper(x)*2";
     for source in [
         helper,
+        small_helper,
         include_str!("../../../testfiles/regressions/aggregate_forwarding.wyn"),
         include_str!("../../../testfiles/select_lowering.wyn"),
         include_str!("../../../testfiles/filter_then_map.wyn"),
@@ -118,10 +121,17 @@ fn basic_scalar_policy_retains_calls_and_validates_both_backends() {
                 program.stage.scalars.constructor_enodes("ScalarInlineBody", |_| templates += 1).unwrap();
                 if policy == ScalarOptimization::Basic {
                     assert_eq!(templates, 0, "basic mode must not import optional templates");
-                } else if source == helper {
+                } else if source == helper || source == small_helper {
                     assert!(templates > 0, "fixture must exercise optional helper expansion");
                 }
                 let ssa = to_ssa(program, target).unwrap();
+                if source == small_helper {
+                    assert_eq!(
+                        ssa.functions.iter().any(|function| function.name.contains("helper")),
+                        policy == ScalarOptimization::Basic,
+                        "scalar policy controls tiny helpers as well as larger ones"
+                    );
+                }
                 let module = match target {
                     CodegenTarget::Portable => unreachable!("test uses concrete shader targets"),
                     CodegenTarget::Spirv => {

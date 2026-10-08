@@ -311,7 +311,7 @@ pub mod family {
 pub mod stage {
     pub use super::defunctionalize::Defunctionalized;
     pub use super::if_over_producer::ConditionalProducersCanonicalized;
-    pub use super::inline::{GeneratedLambdasFolded, SmallInlined, SoacHelpersInlined};
+    pub use super::inline::{GeneratedLambdasFolded, SoacHelpersInlined};
     pub use super::input_slice_bounds::InputSliceBoundsInferred;
     pub use super::monomorphize::Monomorphized;
     pub use super::ownership::{OwnershipApplied, OwnershipValidated};
@@ -329,7 +329,7 @@ pub mod stage {
 // `tlc::stage`, while callers compose the pipeline as ordinary functions.
 pub use defunctionalize::defunctionalize;
 pub use if_over_producer::canonicalize_conditional_producers;
-pub use inline::{fold_generated_lambdas, force_inline_soac_helpers, inline_small};
+pub use inline::{fold_generated_lambdas, force_inline_soac_helpers};
 pub use input_slice_bounds::infer_input_slice_bounds;
 pub use monomorphize::monomorphize;
 pub use ownership::{apply_ownership, validate_ownership};
@@ -558,14 +558,6 @@ pub(crate) fn extract_lambda_params_ref<C: Payload, S: Payload>(
         current = &lam.body;
     }
     (current, params)
-}
-
-/// Count the number of nodes in a term tree.
-/// Used as a size heuristic for inlining decisions.
-pub fn term_size<C: Payload, S: Payload>(term: &Term<C, S>) -> usize {
-    let mut count = 1; // count this node
-    term.for_each_child(&mut |child| count += term_size(child));
-    count
 }
 
 // =============================================================================
