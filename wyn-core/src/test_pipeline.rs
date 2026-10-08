@@ -8,7 +8,6 @@ use crate::ast_type_holes;
 use crate::compile_thru_frontend;
 use crate::error::{CompilerError, LoadModulesError};
 use crate::frontend::{ParsedModules, WynFrontend};
-use crate::optimize_tlc_for_test;
 use crate::optimize_tlc_for_test_thru_soac_normalization;
 use crate::semantic_modules::SemanticModules;
 use crate::tlc;
@@ -70,11 +69,6 @@ fn front_end(src: &str) -> tlc::stage::OwnershipValidated {
     let program = ast_type_holes::reject_type_holes(type_checked).expect("type holes");
     let program = tlc::lower_from_ast(program).expect("lower_from_ast");
     tlc::validate_ownership(program).expect("validate_ownership")
-}
-
-/// Run the front-end + the canonical TLC pipeline to `tlc::stage::Reachable`.
-pub(crate) fn compile_to_reachable(src: &str) -> tlc::stage::Reachable {
-    optimize_tlc_for_test(front_end(src)).expect("TLC optimization")
 }
 
 // Stage-boundary helpers for source-normalization pass tests. Each

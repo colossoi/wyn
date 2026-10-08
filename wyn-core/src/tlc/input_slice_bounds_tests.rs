@@ -2,13 +2,12 @@
 //! on `input_slice_bounds` for the contract.
 
 use crate::host::BufferLen;
-use crate::test_pipeline;
 use crate::tlc::{self, DefMeta};
 use crate::LookupMap;
 use crate::SymbolId;
 
 fn program_from(src: &str) -> tlc::stage::InputSliceBoundsInferred {
-    tlc::infer_input_slice_bounds(test_pipeline::compile_to_reachable(src))
+    tlc::infer_input_slice_bounds(crate::compile_thru_tlc(src).expect("TLC optimization"))
 }
 
 fn bounds_for_entry<'a>(
@@ -37,7 +36,7 @@ fn transition_reuses_entry_term_tree() {
 entry e(xs: []i32) i32 =
   length(xs)
 "#;
-    let reachable = test_pipeline::compile_to_reachable(src);
+    let reachable = crate::compile_thru_tlc(src).expect("TLC optimization");
     let mut before = Vec::new();
     for def in &reachable.defs {
         collect_term_ids(&def.body, &mut before);

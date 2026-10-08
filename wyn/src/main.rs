@@ -708,10 +708,6 @@ fn compile_tlc(modules: ParsedModules, options: &CompileOptions) -> Result<TlcCo
     let program = time("apply_ownership", verbose, || {
         wyn_core::tlc::apply_ownership(program)
     });
-    // Eliminate dead TLC defs
-    let program = time("tlc_filter_reachable", verbose, || {
-        wyn_core::tlc::filter_reachable(program)
-    });
 
     let program = time("infer_input_slice_bounds", verbose, || {
         wyn_core::tlc::infer_input_slice_bounds(program)

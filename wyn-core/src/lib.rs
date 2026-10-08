@@ -274,7 +274,6 @@ pub use polytype::Context as PolytypeContext;
 //       tlc::defunctionalize(...)        -> tlc::stage::Defunctionalized
 //       tlc::fold_generated_lambdas(...) -> tlc::stage::GeneratedLambdasFolded
 //       tlc::apply_ownership(...)        -> tlc::stage::OwnershipApplied
-//       tlc::filter_reachable(...)       -> tlc::stage::Reachable
 //       tlc::infer_input_slice_bounds(...)
 //                                      -> tlc::stage::InputSliceBoundsInferred
 // Egglog stages:
@@ -310,13 +309,12 @@ pub struct CompilerOptions {
 #[cfg(test)]
 pub(crate) fn optimize_tlc_for_test(
     program: tlc::stage::OwnershipValidated,
-) -> error::Result<tlc::stage::Reachable> {
+) -> error::Result<tlc::stage::OwnershipApplied> {
     let program = optimize_tlc_for_test_thru_soac_normalization(program)?;
     let program = tlc::float_runtime_index_nested_producers(program);
     let program = tlc::defunctionalize(program);
     let program = tlc::fold_generated_lambdas(program);
-    let program = tlc::apply_ownership(program);
-    Ok(tlc::filter_reachable(program))
+    Ok(tlc::apply_ownership(program))
 }
 
 #[cfg(test)]
@@ -632,7 +630,7 @@ pub struct LoweredWgsl {
 // just the milestone value. Each subsumes the previous one:
 //
 //   compile_thru_frontend  →  types::run::TypeChecked
-//   compile_thru_tlc       →  tlc::stage::Reachable
+//   compile_thru_tlc       →  tlc::stage::OwnershipApplied
 //   compile_thru_ssa       →  ssa::Elaborated
 //   compile_thru_spirv     →  Lowered              (final SPIR-V binary)
 //
@@ -656,9 +654,9 @@ pub fn compile_thru_frontend_with_options(
 }
 
 /// Run the canonical TLC optimization pipeline (no physical scheduling or
-/// hole-filling) through `filter_reachable`.
+/// hole-filling) through `apply_ownership`.
 #[cfg(test)]
-pub fn compile_thru_tlc(source: &str) -> error::Result<tlc::stage::Reachable> {
+pub fn compile_thru_tlc(source: &str) -> error::Result<tlc::stage::OwnershipApplied> {
     let type_checked = compile_thru_frontend(source)?;
     let program = ast_type_holes::reject_type_holes(type_checked)?;
     let program = tlc::lower_from_ast(program)?;

@@ -16,7 +16,6 @@ pub mod ownership;
 pub mod partial_eval;
 pub mod patterns;
 pub mod pin_entry_buffers;
-pub mod reachability;
 pub mod rep_specialize;
 #[cfg(test)]
 #[path = "rep_specialize_tests.rs"]
@@ -298,12 +297,6 @@ pub mod context {
     pub struct PostClosureGlobal {
         pub auto_storage_binding_ids: IdSource<u32>,
     }
-
-    /// Global state retained at the TLC-to-egglog boundary.
-    #[derive(Debug, Clone)]
-    pub struct BackendGlobal {
-        pub auto_storage_binding_ids: IdSource<u32>,
-    }
 }
 
 /// Stable names for the recursive families defined by their producing passes.
@@ -324,7 +317,6 @@ pub mod stage {
     pub use super::ownership::{OwnershipApplied, OwnershipValidated};
     pub use super::partial_eval::PartialEvaled;
     pub use super::pin_entry_buffers::BuffersPinned;
-    pub use super::reachability::Reachable;
     pub use super::rep_specialize::RepSpecialized;
     pub use super::run::Transformed;
     pub use super::runtime_index_producers::RuntimeIndexProducersFloated;
@@ -343,7 +335,6 @@ pub use monomorphize::monomorphize;
 pub use ownership::{apply_ownership, validate_ownership};
 pub use partial_eval::partial_eval;
 pub use pin_entry_buffers::pin_entry_buffers;
-pub use reachability::filter_reachable;
 pub use rep_specialize::rep_specialize;
 pub use run::lower_from_ast;
 pub use runtime_index_producers::float_runtime_index_nested_producers;
@@ -1120,33 +1111,7 @@ impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
     /// Read-only validation passes use this after proving their invariant. No
     /// tree nodes, vectors, symbol tables, or allocator state are rebuilt.
     pub fn retag<NewTag>(self) -> Program<NewTag, F, GlobalContext> {
-        self.map_global_context(std::convert::identity)
-    }
-
-    /// Change the program-wide context without rebuilding the selected tree
-    /// family.
-    ///
-    /// This is the consuming transition for passes that update or narrow only
-    /// global state. The definition vector, definitions, and term trees all
-    /// move directly into the destination program.
-    pub fn map_global_context<NewTag, NewGlobalContext>(
-        self,
-        map_global: impl FnOnce(GlobalContext) -> NewGlobalContext,
-    ) -> Program<NewTag, F, NewGlobalContext> {
-        let Program {
-            defs,
-            symbols,
-            term_ids,
-            global_context,
-            state: _,
-        } = self;
-        Program {
-            defs,
-            symbols,
-            term_ids,
-            global_context: map_global(global_context),
-            state: std::marker::PhantomData,
-        }
+        Program::from_parts(self.defs, self.symbols, self.term_ids, self.global_context)
     }
 
     /// Assert no def body contains nested Apps.

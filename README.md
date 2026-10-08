@@ -135,7 +135,7 @@ The passes below run in order. SOACs are second-order array combinators, such as
 | `pin_entry_buffers` | Substitute each storage parameter's assigned binding into its buffer-region type before specialization. |
 | `monomorphize` | Specialize intrinsic calls by type and instantiate reachable user definitions from entry points. Array representation specialization is a separate step. |
 | `rep_specialize` | Specialize callees with abstract-array parameters for known producer representations, including the bounded capacity of filter results. |
-| `inline_small` | Inline eligible small functions and constants. |
+| `inline_small` | Expand constants, then inline functions whose expanded bodies are small and contain no conditionals or loops. |
 | `force_inline_soac_helpers` | Repeatedly inline helpers containing SOACs, array producers, or length queries so fusion and dispatch planning can see that work in the caller. |
 | `normalize_soacs` | Convert local arrays of tuples to tuples of arrays, normalize multi-input map parameters, and turn standalone `zip` into tuple construction. |
 | `canonicalize_conditional_producers` | Rewrite supported array-valued conditionals into a pointwise map with the branch inside its callback. |
@@ -144,13 +144,16 @@ The passes below run in order. SOACs are second-order array combinators, such as
 | `defunctionalize` | Lift lambdas, make captures explicit, specialize higher-order functions, and lower closure applications to direct calls. |
 | `fold_generated_lambdas` | Inline applications of compiler-generated lifted lambdas and remove definitions made unreachable. |
 | `apply_ownership` | Promote eligible array updates to in-place updates and mark unique SOAC inputs. Egglog later decides storage reuse using the fused program. |
-| `filter_reachable` | Remove definitions not reachable from entry points. |
 | `infer_input_slice_bounds` | Attach minimum input-buffer sizes where every use of an input is a constant prefix slice. Other inputs still need sizes from their interface or runtime. |
 
 Specialization and helper inlining retain the source array shapes. SoA normalization
 then runs once, with concrete element types and the helper bodies exposed; later
 TLC passes preserve that layout. Storage-backed arrays keep their declared layout
 so normalization does not change the shader's buffer interface.
+
+`fold_generated_lambdas` performs the final definition cleanup and checks that
+no function-typed parameters remain. Ownership rewriting preserves definition
+references, so no additional reachability pass is needed before input-bound inference.
 
 `--output-tlc` shows an early TLC snapshot after partial evaluation and entry
 interface resolution. It exposes resolved buffer bindings while functions are

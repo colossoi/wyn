@@ -79,6 +79,8 @@ fn analyze_application<Tag, F: tlc::Family, GlobalContext>(
 /// Analysis produces every mutation before reconstruction begins. The generic
 /// term rewriter consumes those patches, preserves untouched subtree IDs, and
 /// allocates fresh IDs only along changed paths.
+/// Only builtin calls and ownership flags change, preserving the definition
+/// reachability and first-order signatures established by lambda folding.
 pub fn apply_ownership(program: GeneratedLambdasFolded) -> OwnershipApplied {
     apply_ownership_rewrite(program).retag()
 }

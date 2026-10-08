@@ -59,15 +59,14 @@ pub type InputBounded = super::TreeFamily<
 #[derive(Debug, Clone, Copy)]
 pub enum InputSliceBoundsInferredTag {}
 pub type InputSliceBoundsInferred =
-    super::Program<InputSliceBoundsInferredTag, InputBounded, super::context::BackendGlobal>;
+    super::Program<InputSliceBoundsInferredTag, InputBounded, super::context::PostClosureGlobal>;
 
-type SourceStage = super::stage::Reachable;
 type EntryPatches = LookupMap<SymbolId, data::EntryInputBounds>;
 
 /// Infer every entry patch, then consume the old phase into the phase whose
 /// entry nodes own those bounds. Both families select the same closure and
 /// SOAC-body variables, so every term body moves without traversal.
-pub fn infer_input_slice_bounds(program: SourceStage) -> InputSliceBoundsInferred {
+pub fn infer_input_slice_bounds(program: super::stage::OwnershipApplied) -> InputSliceBoundsInferred {
     let mut patches = analyze(&program);
     let rebuilt = program.rebuild(std::convert::identity, |def, _term_ids| {
         attach_entry_bounds(def, &mut patches)
@@ -82,7 +81,7 @@ pub fn infer_input_slice_bounds(program: SourceStage) -> InputSliceBoundsInferre
 
 /// Build one patch for every entry, including entries for which no finite
 /// minimum can be inferred. Definition `SymbolId`s are globally unique.
-fn analyze(program: &SourceStage) -> EntryPatches {
+fn analyze(program: &super::stage::OwnershipApplied) -> EntryPatches {
     let mut out = EntryPatches::new();
     for def in &program.defs {
         let DefMeta::EntryPoint(entry) = &def.meta else {

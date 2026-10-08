@@ -212,37 +212,24 @@ fn any_def_calls_candidate(
     program.defs.iter().any(|def| walk(&def.body, candidates))
 }
 
-/// Inline small user functions and constants at their call/reference sites.
+/// Expand constants, then inline small user functions at their call sites.
 ///
-/// Inlines:
-/// - Small user functions (term size ≤ threshold, no control flow or SOACs)
-/// - Constants (arity-0 defs, substituted at Var reference sites)
+/// Candidate size and control flow are measured after constant expansion.
 ///
 /// Skips `LiftedLambda` defs (SOAC bodies) — handled by `inline()`.
 pub fn inline_small(mut program: RepSpecialized) -> SmallInlined {
     let all_constants = find_all_constants(&program);
-    let mut small_candidates = find_small_candidates(&program.defs, &program.symbols);
-
-    if small_candidates.is_empty() && all_constants.is_empty() {
-        return program.retag();
+    let mut constants = ConstantInliner {
+        constants: &all_constants,
+        term_ids: &mut program.term_ids,
+    };
+    for def in &mut program.defs {
+        constants.rewrite_tracked(&mut def.body);
     }
-
-    // Inline constants into small candidate bodies so that when we inline
-    // the candidate into a call site, the inlined body doesn't carry stale
-    // Var references to constants.
-    small_candidates = small_candidates
-        .into_iter()
-        .map(|(symbol, mut candidate)| {
-            candidate.body = inline_constants(candidate.body, &all_constants, &mut program.term_ids);
-            (symbol, candidate)
-        })
-        .collect();
-
+    let small_candidates = find_small_candidates(&program.defs, &program.symbols);
     let term_ids = &mut program.term_ids;
     map_in_place(&mut program.defs, |def| {
-        // Constants are pure — inline them everywhere, including lambda bodies.
-        let body = inline_constants(def.body, &all_constants, term_ids);
-        let body = inline_term(body, &small_candidates, term_ids);
+        let body = inline_term(def.body, &small_candidates, term_ids);
         Def { body, ..def }
     });
 
@@ -250,7 +237,8 @@ pub fn inline_small(mut program: RepSpecialized) -> SmallInlined {
     program.retag()
 }
 
-/// Inline compiler-generated lifted-lambda defs (`DefMeta::LiftedLambda`) in a TLC program.
+/// Inline compiler-generated lifted lambdas, remove unreachable definitions,
+/// and verify that the remaining definitions have no function-typed parameters.
 pub fn fold_generated_lambdas(mut program: Defunctionalized) -> GeneratedLambdasFolded {
     let inline_candidates = find_inline_candidates(&program.defs, &program.symbols);
 
@@ -264,6 +252,9 @@ pub fn fold_generated_lambdas(mut program: Defunctionalized) -> GeneratedLambdas
     super::dce::eliminate_unreachable_defs(&mut program.defs);
 
     program.assert_flat_apps();
+    super::defunctionalize::verify_hof_specialized(&program).unwrap_or_else(|error| {
+        panic!("hof-specialization verifier failed after fold_generated_lambdas: {error}")
+    });
     program.retag()
 }
 
@@ -284,7 +275,7 @@ struct InlineBody<C: Payload, S: Payload> {
 ///   `fold_generated_lambdas`)
 /// - It has parameters (not a constant)
 /// - Its body is small (term_size ≤ threshold)
-/// - Its body has no control flow (If, Loop) or SOACs
+/// - Its expanded body has no control flow (If, Loop)
 fn find_small_candidates(
     defs: &[Def<super::monomorphize::Monomorphic>],
     _symbols: &SymbolTable,
@@ -334,7 +325,7 @@ fn find_all_constants(program: &RepSpecialized) -> LookupMap<SymbolId, Term<Empt
         .collect()
 }
 
-/// Check if a term contains control flow (If, Loop) or SOACs.
+/// Check if a term contains control flow (If, Loop).
 fn has_control_flow<C: Payload, S: Payload>(term: &Term<C, S>) -> bool {
     match &term.kind {
         TermKind::If { .. } | TermKind::Loop { .. } => true,
@@ -348,15 +339,6 @@ fn has_control_flow<C: Payload, S: Payload>(term: &Term<C, S>) -> bool {
             found
         }
     }
-}
-
-/// Replace `Var(sym)` references with the constant body when `sym` is a constant candidate.
-fn inline_constants(
-    term: Term<Empty, Empty>,
-    constants: &LookupMap<SymbolId, Term<Empty, Empty>>,
-    term_ids: &mut TermIdSource,
-) -> Term<Empty, Empty> {
-    term.rewrite(&mut ConstantInliner { constants, term_ids })
 }
 
 struct ConstantInliner<'a, 'ids> {

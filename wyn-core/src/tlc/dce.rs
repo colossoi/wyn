@@ -13,8 +13,7 @@ mod dce_tests;
 
 /// Remove definitions that are not reachable from an entry point.
 ///
-/// This is shared by the final reachability phase and by transformations such
-/// as inlining that make definitions dead as a local consequence.
+/// Inlining passes use this to clean up definitions they make dead.
 pub(super) fn eliminate_unreachable_defs<F: Family>(defs: &mut Vec<Def<F>>) {
     let reachable = {
         let def_map: LookupMap<SymbolId, &Def<F>> = defs.iter().map(|def| (def.name, def)).collect();

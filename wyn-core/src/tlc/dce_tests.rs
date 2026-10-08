@@ -7,7 +7,7 @@ use wyn_module_graph::{
     DependencyAlias, LocalSources, ModuleKey, ModulePath, PackageGraphBuilder, PackageIdentity, PackagePlan,
 };
 
-fn has_definition(program: &super::super::stage::Reachable, name: &str) -> bool {
+fn has_definition(program: &super::super::stage::OwnershipApplied, name: &str) -> bool {
     program.defs.iter().any(|definition| symbol_name_or_bug(&program.symbols, definition.name) == name)
 }
 
