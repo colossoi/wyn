@@ -4,8 +4,8 @@
 //! lowering and the pattern-binding helpers that extend `Transformer`.
 
 use super::{
-    count_function_arity, data, peel_lets, run, ArrayExpr, Def, DefMeta, EntryPoint, Lambda, LoopKind,
-    Place, ProgramParts, SoacBody, SoacOp, Term, TermIdSource, TermKind, VarRef,
+    count_function_arity, data, run, ArrayExpr, Bindings, Def, DefMeta, EntryPoint, Lambda, LetBinding,
+    LoopKind, Place, ProgramParts, SoacBody, SoacOp, Term, TermIdSource, TermKind, VarRef,
 };
 use crate::ast::{self, Span, TypeName};
 use crate::ast_type_holes;
@@ -1008,51 +1008,9 @@ impl<'a> Transformer<'a> {
         )
     }
 
-    /// Convert a transformed array-argument term into an ANF SOAC input. A bare
-    /// variable passes through as `Var`; any other term (a producer SOAC, a
-    /// call, …) is let-bound to a fresh `_anf` name, with the binding pushed to
-    /// `binds` for the caller to wrap around the SOAC via [`Self::wrap_binds`].
-    fn soac_input(
-        &mut self,
-        arr_term: Term,
-        binds: &mut Vec<(SymbolId, Type<TypeName>, Term)>,
-    ) -> ArrayExpr {
-        // Lift any binding lets above the SOAC (e.g. `iota(N)` desugars to
-        // `let arg = N in Range{…}`), keeping the input itself atomic.
-        let (mut peeled, core) = peel_lets(arr_term);
-        binds.append(&mut peeled);
-        match core.kind {
-            TermKind::Var(vr) => ArrayExpr::Var(vr, core.ty),
-            // An array expression (Range / Literal / Zip) is
-            // itself an atomic SOAC input; consume it directly rather than
-            // let-binding a name to it.
-            TermKind::ArrayExpr(ae) => ae,
-            _ => {
-                let ty = core.ty.clone();
-                let sym = self.fresh("_anf");
-                binds.push((sym, ty.clone(), core));
-                ArrayExpr::Var(VarRef::Symbol(sym), ty)
-            }
-        }
-    }
-
-    /// Wrap `binds` as nested `let`s (outermost first) around `body`.
-    fn wrap_binds(&mut self, binds: Vec<(SymbolId, Type<TypeName>, Term)>, body: Term, span: Span) -> Term {
-        let mut result = body;
-        for (name, name_ty, rhs) in binds.into_iter().rev() {
-            let body_ty = result.ty.clone();
-            result = self.mk_term(
-                body_ty,
-                span,
-                TermKind::Let {
-                    name,
-                    name_ty,
-                    rhs: Box::new(rhs),
-                    body: Box::new(result),
-                },
-            );
-        }
-        result
+    /// Build an atomic input in the consuming SOAC's evaluation scope.
+    fn soac_input(&mut self, arr_term: Term, binds: &mut Bindings<data::Empty, data::Empty>) -> ArrayExpr {
+        binds.input(arr_term, self.symbols, self.term_ids)
     }
 
     /// Transform `map(f, arr)` → `Soac(Map { lam, inputs })`.
@@ -1072,7 +1030,8 @@ impl<'a> Transformer<'a> {
         // Map already has one element parameter per input. Nested zip inputs
         // keep their tuple element; only this zip's outer tuple is unpacked.
         // Preserve bindings introduced while lowering the zip's producers.
-        let (mut binds, core) = peel_lets(arr_term);
+        let mut binds = Bindings::new();
+        let core = binds.append(arr_term);
         let inputs = match core.kind {
             TermKind::ArrayExpr(ArrayExpr::Zip(exprs)) => {
                 lam.lam = self.unpack_map_tuple_parameter(lam.lam, exprs.len());
@@ -1090,7 +1049,7 @@ impl<'a> Transformer<'a> {
                 destination: SoacOwnership::Fresh,
             }),
         );
-        self.wrap_binds(binds, soac, span)
+        binds.finish(soac, self.term_ids)
     }
 
     /// Adapt the logical tuple element of a zip to a multi-input Map.
@@ -1148,7 +1107,7 @@ impl<'a> Transformer<'a> {
 
         let op = self.term_to_lambda(op_term);
 
-        let mut binds = Vec::new();
+        let mut binds = Bindings::new();
         let input = self.soac_input(arr_term, &mut binds);
         let soac = self.mk_term(
             ty,
@@ -1159,7 +1118,7 @@ impl<'a> Transformer<'a> {
                 input,
             }),
         );
-        self.wrap_binds(binds, soac, span)
+        binds.finish(soac, self.term_ids)
     }
 
     /// Transform `scan(op, ne, arr)` → `Soac(Scan { op, ne, input })`.
@@ -1176,7 +1135,7 @@ impl<'a> Transformer<'a> {
 
         let op = self.term_to_lambda(op_term);
 
-        let mut binds = Vec::new();
+        let mut binds = Bindings::new();
         let input = self.soac_input(arr_term, &mut binds);
         let soac = self.mk_term(
             ty,
@@ -1189,7 +1148,7 @@ impl<'a> Transformer<'a> {
                 destination: SoacOwnership::Fresh,
             }),
         );
-        self.wrap_binds(binds, soac, span)
+        binds.finish(soac, self.term_ids)
     }
 
     /// Transform `filter(pred, arr)` → `Soac(Filter { pred, input })`.
@@ -1205,7 +1164,7 @@ impl<'a> Transformer<'a> {
 
         let pred = self.term_to_lambda(pred_term);
 
-        let mut binds = Vec::new();
+        let mut binds = Bindings::new();
         let input = self.soac_input(arr_term, &mut binds);
         let soac = self.mk_term(
             ty,
@@ -1217,7 +1176,7 @@ impl<'a> Transformer<'a> {
                 destination: SoacOwnership::Fresh,
             }),
         );
-        self.wrap_binds(binds, soac, span)
+        binds.finish(soac, self.term_ids)
     }
 
     /// Transform `zip(a, b, ...)` → `ArrayExpr(Zip(...))`. Each child becomes an
@@ -1229,14 +1188,14 @@ impl<'a> Transformer<'a> {
         ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        let mut binds = Vec::new();
+        let mut binds = Bindings::new();
         let mut exprs = Vec::with_capacity(args.len());
         for a in args {
             let t = self.transform_expr(a);
             exprs.push(self.soac_input(t, &mut binds));
         }
         let zip = self.mk_term(ty, span, TermKind::ArrayExpr(ArrayExpr::Zip(exprs)));
-        self.wrap_binds(binds, zip, span)
+        binds.finish(zip, self.term_ids)
     }
 
     /// Transform `reduce_by_index(dest, op, ne, indices, values)`.
@@ -1269,7 +1228,7 @@ impl<'a> Transformer<'a> {
             elem_ty: dest_elem_ty,
         };
 
-        let mut binds = Vec::new();
+        let mut binds = Bindings::new();
         let indices = self.soac_input(indices_term, &mut binds);
         let values = self.soac_input(values_term, &mut binds);
         let soac = self.mk_term(
@@ -1283,7 +1242,7 @@ impl<'a> Transformer<'a> {
                 values,
             }),
         );
-        self.wrap_binds(binds, soac, span)
+        binds.finish(soac, self.term_ids)
     }
 
     /// `scatter(dest, indices, values)` → `SoacOp::Scatter`. Writes
@@ -1304,13 +1263,18 @@ impl<'a> Transformer<'a> {
         let dest_elem_ty = self.get_array_element_type(&dest_term.ty);
         let idx_elem_ty = self.get_array_element_type(&indices_term.ty);
         let val_elem_ty = self.get_array_element_type(&values_term.ty);
-        let mut binds = Vec::new();
+        let mut binds = Bindings::new();
         let dest = Place {
             id: match &dest_term.kind {
                 TermKind::Var(VarRef::Symbol(sym)) => sym.clone(),
                 _ => {
                     let sym = self.fresh("_w_scatter_dest");
-                    binds.push((sym, dest_term.ty.clone(), dest_term));
+                    binds.push(LetBinding {
+                        name: sym,
+                        name_ty: dest_term.ty.clone(),
+                        rhs: dest_term,
+                        span,
+                    });
                     sym
                 }
             },
@@ -1346,7 +1310,7 @@ impl<'a> Transformer<'a> {
                 inputs: vec![indices, values],
             }),
         );
-        self.wrap_binds(binds, soac, span)
+        binds.finish(soac, self.term_ids)
     }
 
     /// Transform `bucket_scatter_Nd(dest, items)`, where every ranked item
@@ -1382,7 +1346,7 @@ impl<'a> Transformer<'a> {
             elem_ty: dest_elem_ty,
         };
 
-        let mut binds = Vec::new();
+        let mut binds = Bindings::new();
         let items = self.soac_input(items_term, &mut binds);
         let item = self.fresh("_w_bucket_scatter_item");
         let item_value = self.mk_term(pair_ty.clone(), span, TermKind::Var(VarRef::Symbol(item)));
@@ -1420,7 +1384,7 @@ impl<'a> Transformer<'a> {
                 domain_rank: input_rank,
             }),
         );
-        self.wrap_binds(binds, soac, span)
+        binds.finish(soac, self.term_ids)
     }
 
     /// Convert a term to a SoacBody. If it's already a Lambda, wrap it.

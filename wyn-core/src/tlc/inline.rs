@@ -9,8 +9,8 @@ use super::defunctionalize::{ClosureConverted, Defunctionalized};
 use super::rep_specialize::RepSpecialized;
 use super::VarRef;
 use super::{
-    clone_term_with_fresh_ids, extract_lambda_params, Def, DefMeta, Payload, RewriteDecision, Term, TermId,
-    TermIdSource, TermKind, TermRewriter,
+    clone_term_with_fresh_ids, extract_lambda_params, Bindings, Def, DefMeta, LetBinding, Payload,
+    RewriteDecision, Term, TermId, TermIdSource, TermKind, TermRewriter,
 };
 use crate::ast::{Span, TypeName};
 use crate::builtins;
@@ -395,7 +395,9 @@ pub(crate) fn build_inline_lets<C: Payload, S: Payload>(
     span: Span,
     ids: &mut TermIdSource,
 ) -> Term<C, S> {
-    let mut result = body;
+    let mut body_bindings = Bindings::new();
+    let tail = body_bindings.append(body);
+    let mut result = body_bindings.finish(tail, ids);
     for ((sym, _param_ty), arg) in params.iter().rev().zip(args.into_iter().rev()) {
         if let TermKind::Var(VarRef::Symbol(arg_sym)) = &arg.kind {
             // Substituting the *symbol* alone is not enough: the param's
@@ -410,17 +412,14 @@ pub(crate) fn build_inline_lets<C: Payload, S: Payload>(
             result = substitute_sym_and_retype(result, *sym, *arg_sym, &arg.ty, ids);
             continue;
         }
-        result = Term::fresh(
-            ids,
-            result.ty.clone(),
+        let mut bindings = Bindings::new();
+        bindings.push(LetBinding {
+            name: *sym,
+            name_ty: arg.ty.clone(),
+            rhs: arg,
             span,
-            TermKind::Let {
-                name: *sym,
-                name_ty: arg.ty.clone(),
-                rhs: Box::new(arg),
-                body: Box::new(result),
-            },
-        );
+        });
+        result = bindings.finish(result, ids);
     }
     result
 }

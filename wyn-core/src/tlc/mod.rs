@@ -4,6 +4,7 @@
 //! Lambdas remain as values (not yet defunctionalized).
 
 pub mod anf;
+mod bindings;
 pub mod data;
 mod dce;
 pub mod defunctionalize;
@@ -40,6 +41,7 @@ use polytype::Type;
 use std::num::NonZeroU32;
 use wyn_module_graph::PackageId;
 
+pub(crate) use bindings::{wrap_let_bindings, Bindings, LetBinding};
 pub(crate) use from_ast::{PendingBinding, Transformer};
 
 // =============================================================================
@@ -486,41 +488,6 @@ pub fn build_app_call<C: Payload, S: Payload>(
             args,
         },
     )
-}
-
-/// One pending `let` wrapper around a rebuilt term.
-#[derive(Debug, Clone)]
-pub(crate) struct LetBinding<C: Payload, S: Payload> {
-    pub name: SymbolId,
-    pub name_ty: Type<TypeName>,
-    pub rhs: Term<C, S>,
-    pub span: Span,
-}
-
-/// Wrap a term in pending lets, preserving binding order.
-///
-/// This is shared by normalizations that hoist producers or other expressions
-/// and then materialize their plans as tree nodes.
-pub(crate) fn wrap_let_bindings<C: Payload, S: Payload>(
-    bindings: Vec<LetBinding<C, S>>,
-    mut body: Term<C, S>,
-    term_ids: &mut TermIdSource,
-) -> Term<C, S> {
-    for binding in bindings.into_iter().rev() {
-        let body_ty = body.ty.clone();
-        body = Term::fresh(
-            term_ids,
-            body_ty,
-            binding.span,
-            TermKind::Let {
-                name: binding.name,
-                name_ty: binding.name_ty,
-                rhs: Box::new(binding.rhs),
-                body: Box::new(body),
-            },
-        );
-    }
-    body
 }
 
 /// Clone a term subtree into the same program with fresh IDs throughout.
@@ -1228,26 +1195,6 @@ pub fn term_as_input_atom<C: Payload, S: Payload>(t: Term<C, S>) -> ArrayExpr<C,
         TermKind::Tuple(elems) => ArrayExpr::Zip(elems.into_iter().map(term_as_input_atom).collect()),
         other => panic!("ANF: cannot use a non-atom term as a SOAC input: {other:?}"),
     }
-}
-
-/// Peel leading `let` bindings off `term`, returning them (outermost first)
-/// plus the inner non-`let` term. Lets a SOAC transform lift binding lets above
-/// the SOAC so the SOAC input stays a bare zip / atom (ANF).
-fn peel_lets<C: Payload, S: Payload>(
-    mut term: Term<C, S>,
-) -> (Vec<(SymbolId, Type<TypeName>, Term<C, S>)>, Term<C, S>) {
-    let mut binds = Vec::new();
-    while let TermKind::Let {
-        name,
-        name_ty,
-        rhs,
-        body,
-    } = term.kind
-    {
-        binds.push((name, name_ty, *rhs));
-        term = *body;
-    }
-    (binds, term)
 }
 
 #[cfg(test)]

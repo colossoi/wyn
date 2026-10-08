@@ -87,6 +87,26 @@ fn map_zip_parameters_match_before_generic_instantiation() {
     assert_eq!(assert_map_input_parameters(find_def_body(&program, "pairs")), 1);
 }
 
+#[test]
+fn nested_soac_input_bindings_are_flat_at_construction() {
+    let program = compile_to_tlc_raw(
+        "entry main(xs: []i32) []i32 =
+         map(|x|x*2, let ys=(let zs=map(|x|x+1,xs) in zs) in map(|x|x+3,ys))",
+    );
+    let body = find_def_body(&program, "main");
+    fn check(term: &Term) {
+        if let TermKind::Let { rhs, .. } = &term.kind {
+            assert!(
+                !matches!(rhs.kind, TermKind::Let { .. }),
+                "AST lowering left a nested let RHS"
+            );
+        }
+        term.for_each_child(&mut check);
+    }
+    check(body);
+    assert_eq!(assert_map_input_parameters(body), 3);
+}
+
 fn find_def_body<'a>(program: &'a stage::Transformed, name: &str) -> &'a Term {
     let def = program
         .defs

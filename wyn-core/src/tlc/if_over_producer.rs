@@ -12,8 +12,8 @@
 use super::data::Empty;
 use super::VarRef;
 use super::{
-    wrap_let_bindings, ArrayExpr, Lambda, LetBinding, RewriteDecision, SoacBody, SoacOp, Term, TermId,
-    TermIdSource, TermKind, TermRewriter,
+    wrap_let_bindings, ArrayExpr, Bindings, Lambda, LetBinding, RewriteDecision, SoacBody, SoacOp, Term,
+    TermId, TermIdSource, TermKind, TermRewriter,
 };
 use crate::ast::{Span, TypeName};
 use crate::builtins::{catalog, BuiltinId};
@@ -209,19 +209,16 @@ fn compose_map_into_branch(
     let body = substitute_sym(*envelope.body, slot_param, fresh_sym, term_ids);
     let mut params = envelope.params;
     params.splice(slot..=slot, producer.params);
+    let mut bindings = Bindings::new();
+    bindings.push(LetBinding {
+        name: fresh_sym,
+        name_ty: slot_ty,
+        rhs: *producer.body,
+        span,
+    });
     Lambda {
         params,
-        body: Box::new(Term::fresh(
-            term_ids,
-            envelope.ret_ty.clone(),
-            span,
-            TermKind::Let {
-                name: fresh_sym,
-                name_ty: slot_ty,
-                rhs: producer.body,
-                body: Box::new(body),
-            },
-        )),
+        body: Box::new(bindings.finish(body, term_ids)),
         ret_ty: envelope.ret_ty,
     }
 }

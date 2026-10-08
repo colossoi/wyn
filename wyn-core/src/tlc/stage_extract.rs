@@ -721,7 +721,7 @@ fn normalize_root_bindings(
 ) -> Term {
     // Expose helper operation sequences without splitting ordinary compute regions.
     if matches!(&term.kind, TermKind::Let { rhs, .. } if contains_graphics_invocation(rhs, builtins)) {
-        let (flattened_term, flattened) = super::soac_anf::flatten_nested_let(term, term_ids);
+        let (flattened_term, flattened) = super::bindings::flatten_nested_let(term, term_ids);
         if flattened {
             return normalize_root_bindings(flattened_term, builtins, term_ids, computed_origins);
         }

@@ -150,6 +150,12 @@ types and the helper bodies exposed; later
 TLC passes preserve that layout. Storage-backed arrays keep their declared layout
 so normalization does not change the shader's buffer interface.
 
+SOAC construction and helper inlining share a binding builder that preserves
+evaluation order and flattens leading lets as they are emitted. Branches, loops,
+and callbacks retain their own evaluation scopes; moving producers across those
+boundaries remains an explicit transformation. The ANF pass completes binding
+normalization for expressions emitted by other rewrites.
+
 `fold_generated_lambdas` performs the final definition cleanup and checks that
 no function-typed parameters remain. Ownership rewriting preserves definition
 references, so no additional reachability pass is needed before egglog import.
