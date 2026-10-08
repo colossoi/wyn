@@ -260,14 +260,12 @@ pub use polytype::Context as PolytypeContext;
 //       tlc::partial_eval(...)           -> tlc::stage::PartialEvaled
 //       tlc::extract_stages(...)          -> tlc::stage::StagesExtracted
 //       tlc::pin_entry_buffers(...)       -> tlc::stage::BuffersPinned
-//       tlc::normalize_soacs(...)        -> tlc::stage::SoaNormalized
 //       tlc::monomorphize(...)           -> tlc::stage::Monomorphized
 //       tlc::rep_specialize(...)         -> tlc::stage::RepSpecialized
 //       tlc::inline_small(...)           -> tlc::stage::SmallInlined
 //       tlc::force_inline_soac_helpers(...)
 //                                      -> tlc::stage::SoacHelpersInlined
-//       tlc::renormalize_inlined_soa(...)
-//                                      -> tlc::stage::InlinedSoaNormalized
+//       tlc::normalize_soacs(...)        -> tlc::stage::SoaNormalized
 //       tlc::canonicalize_conditional_producers(...)
 //                                      -> tlc::stage::ConditionalProducersCanonicalized
 //       tlc::normalize_soacs_to_anf(...) -> tlc::stage::SoacsAnfNormalized
@@ -328,12 +326,11 @@ pub(crate) fn optimize_tlc_for_test_thru_soac_normalization(
     let program = tlc::partial_eval(program);
     let program = tlc::extract_stages(program)?;
     let program = tlc::pin_entry_buffers(program)?;
-    let program = tlc::normalize_soacs(program);
     let program = tlc::monomorphize(program)?;
     let program = tlc::rep_specialize(program);
     let program = tlc::inline_small(program);
     let program = tlc::force_inline_soac_helpers(program);
-    let program = tlc::renormalize_inlined_soa(program);
+    let program = tlc::normalize_soacs(program);
     let program = tlc::canonicalize_conditional_producers(program);
     Ok(tlc::normalize_soacs_to_anf(program))
 }

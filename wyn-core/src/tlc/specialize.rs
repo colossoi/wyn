@@ -4,7 +4,7 @@
 //! `sign(x)` at `f32` becomes the structural catalog reference `f32.sign`.
 
 use super::data::Empty;
-use super::soa::SoaNormalized;
+use super::pin_entry_buffers::BuffersPinned;
 use super::{RewriteDecision, Term, TermId, TermIdSource, TermKind, TermRewriter, VarRef};
 use crate::ast;
 use crate::builtins::catalog;
@@ -12,7 +12,7 @@ use crate::op;
 use crate::types::TypeExt;
 use polytype::Type;
 
-pub(super) fn specialize_intrinsics(program: &mut SoaNormalized) {
+pub(super) fn specialize_intrinsics(program: &mut BuffersPinned) {
     let (defs, term_ids) = (&mut program.defs, &mut program.term_ids);
     let mut specializer = IntrinsicSpecializer { term_ids };
     for def in defs {

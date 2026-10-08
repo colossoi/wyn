@@ -133,12 +133,11 @@ The passes below run in order. SOACs are second-order array combinators, such as
 | `partial_eval` | Evaluate known applications and constants, simplify their residual terms, and retain computations that depend on runtime values. |
 | `extract_stages` | Extract compute, vertex, and fragment entries and their interfaces from root orchestration, including graphics callbacks and the compute work feeding them. |
 | `pin_entry_buffers` | Substitute each storage parameter's assigned binding into its buffer-region type before specialization. |
-| `normalize_soacs` | Convert arrays of tuples to tuples of arrays, normalize multi-input map parameters, and turn standalone `zip` into tuple construction. |
 | `monomorphize` | Specialize intrinsic calls by type and instantiate reachable user definitions from entry points. Array representation specialization is a separate step. |
 | `rep_specialize` | Specialize callees with abstract-array parameters for known producer representations, including the bounded capacity of filter results. |
 | `inline_small` | Inline eligible small functions and constants. |
 | `force_inline_soac_helpers` | Repeatedly inline helpers containing SOACs, array producers, or length queries so fusion and dispatch planning can see that work in the caller. |
-| `renormalize_inlined_soa` | Repeat SoA and SOAC normalization for array structure exposed by inlining. |
+| `normalize_soacs` | Convert local arrays of tuples to tuples of arrays, normalize multi-input map parameters, and turn standalone `zip` into tuple construction. |
 | `canonicalize_conditional_producers` | Rewrite supported array-valued conditionals into a pointwise map with the branch inside its callback. |
 | `normalize_soacs_to_anf` | Lift nested SOAC expressions into explicit let bindings, exposing producer/consumer edges for egglog. |
 | `float_runtime_index_nested_producers` | Move eligible runtime-indexed producers out of nested callbacks before defunctionalization, exposing the producer and gather separately. |
@@ -148,10 +147,15 @@ The passes below run in order. SOACs are second-order array combinators, such as
 | `filter_reachable` | Remove definitions not reachable from entry points. |
 | `infer_input_slice_bounds` | Attach minimum input-buffer sizes where every use of an input is a constant prefix slice. Other inputs still need sizes from their interface or runtime. |
 
+Specialization and helper inlining retain the source array shapes. SoA normalization
+then runs once, with concrete element types and the helper bodies exposed; later
+TLC passes preserve that layout. Storage-backed arrays keep their declared layout
+so normalization does not change the shader's buffer interface.
+
 `--output-tlc` shows an early TLC snapshot after partial evaluation and entry
 interface resolution. It exposes resolved buffer bindings while functions are
-still polymorphic and higher-order. The remaining passes normalize arrays,
-specialize functions, and eliminate function values before handing the program
+still polymorphic and higher-order. The remaining passes specialize functions,
+normalize arrays, and eliminate function values before handing the program
 to egglog.
 
 ### Egglog passes
@@ -403,6 +407,7 @@ Use Rust and Cargo with a native toolchain for your platform. Run these commands
 from the repository root:
 
 ```bash
+cargo fmt --all
 cargo build --workspace --all-targets
 cargo test --workspace
 ```

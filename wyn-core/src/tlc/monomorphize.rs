@@ -12,8 +12,7 @@
 //! the backend boundary.
 
 use super::data::Empty;
-use super::pin_entry_buffers::Polymorphic;
-use super::soa::SoaNormalized;
+use super::pin_entry_buffers::{BuffersPinned, Polymorphic};
 use super::{
     apply_type_substitution, extend_type_substitution, ArrayExpr, Def, DefMeta, Program, RewriteDecision,
     Term, TermId, TermIdSource, TermKind, TermRewriter, TypeSubstitution, VarRef,
@@ -37,7 +36,7 @@ pub type Monomorphized = super::Program<MonomorphizedTag, Monomorphic, super::co
 
 /// Specialize intrinsic calls, then consume the polymorphic definition graph
 /// into its reachable monomorphic graph.
-pub fn monomorphize(mut program: SoaNormalized) -> std::result::Result<Monomorphized, CompilerError> {
+pub fn monomorphize(mut program: BuffersPinned) -> std::result::Result<Monomorphized, CompilerError> {
     super::specialize::specialize_intrinsics(&mut program);
 
     let Program {

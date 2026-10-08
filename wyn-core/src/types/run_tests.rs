@@ -100,8 +100,7 @@ fn source_package_identity_reaches_typed_and_tlc_definitions() {
     let partial = tlc::partial_eval(ownership);
     let extracted = tlc::extract_stages(partial).expect("stages should extract");
     let pinned = tlc::pin_entry_buffers(extracted).expect("entry buffers should pin");
-    let normalized = tlc::normalize_soacs(pinned);
-    let monomorphic = tlc::monomorphize(normalized).expect("TLC should monomorphize");
+    let monomorphic = tlc::monomorphize(pinned).expect("TLC should monomorphize");
     let dependency_specialization = monomorphic
         .defs
         .iter()

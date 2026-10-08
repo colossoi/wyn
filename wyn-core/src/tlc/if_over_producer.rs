@@ -35,7 +35,7 @@ pub type ConditionalProducersCanonicalized = super::Program<
 >;
 
 pub fn canonicalize_conditional_producers(
-    mut program: super::stage::InlinedSoaNormalized,
+    mut program: super::stage::SoaNormalized,
 ) -> ConditionalProducersCanonicalized {
     let mut rewriter = ConditionalProducerRewriter {
         symbols: &mut program.symbols,

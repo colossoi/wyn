@@ -1,48 +1,36 @@
 //! Structure-of-Arrays (SoA) transform and SOAC normalization for TLC.
 //!
-//! This pass does two things in a single recursive walk:
+//! This pass normalizes the concrete shapes exposed by specialization and inlining:
 //!
 //! 1. **SoA transform**: Rewrites `[n](A,B)` (array of tuples) into `([n]A, [n]B)`
-//!    (tuple of arrays). After this, arrays never contain tuples — they only contain
-//!    scalars or other arrays. Operations on array-of-tuple types (index, array_with,
-//!    array_lit, uninit, length) are rewritten to operate on the distributed components.
+//!    (tuple of arrays) for local arrays. Operations on array-of-tuple types
+//!    (index, array_with, array_lit, uninit, length) operate on the distributed components.
 //!
 //! 2. **SOAC normalization**: When a Map has multiple inputs (from an absorbed zip) but
 //!    the lambda takes a single tuple parameter, rewrites the lambda to take N separate
 //!    parameters. Also converts standalone `zip(a, b)` into `_w_tuple(a, b)`.
 //!
-//! Runs before fusion and defunctionalization.
+//! Runs once, after monomorphization and helper inlining, before fusion and
+//! defunctionalization. Storage-backed arrays retain their declared layout.
 
 use super::data::Empty;
 use super::inline::SoacHelpersInlined;
-use super::pin_entry_buffers::BuffersPinned;
 use super::{
-    ArrayExpr, Family, Lambda, Program, RewriteDecision, SoacBody, SoacOp, Term, TermId, TermIdSource,
-    TermKind, TermRewriter, VarRef,
+    ArrayExpr, Lambda, RewriteDecision, SoacOp, Term, TermId, TermIdSource, TermKind, TermRewriter, VarRef,
 };
 use crate::ast::{Span, TypeName};
 use crate::builtins::{by_id, catalog};
 use crate::tlc;
-use crate::types;
 use crate::types::TypeExt;
 use crate::SymbolId;
 use crate::SymbolTable;
 use polytype::Type;
 
-/// TLC after its first SoA normalization.
+/// Monomorphic TLC after helper expansion and SoA normalization.
 #[derive(Debug, Clone, Copy)]
 pub enum SoaNormalizedTag {}
 pub type SoaNormalized =
-    super::Program<SoaNormalizedTag, super::pin_entry_buffers::Polymorphic, super::context::RewriteGlobal>;
-
-/// TLC after normalization of array structure exposed by inlining.
-#[derive(Debug, Clone, Copy)]
-pub enum InlinedSoaNormalizedTag {}
-pub type InlinedSoaNormalized = super::Program<
-    InlinedSoaNormalizedTag,
-    super::monomorphize::Monomorphic,
-    super::context::RewriteGlobal,
->;
+    super::Program<SoaNormalizedTag, super::monomorphize::Monomorphic, super::context::RewriteGlobal>;
 
 // =============================================================================
 // Type rewriting
@@ -93,13 +81,6 @@ pub fn soa_type(ty: &Type<TypeName>) -> Type<TypeName> {
             } else {
                 array_type(elem, variant, &dims, storage.region.clone())
             }
-        }
-        Type::Constructed(TypeName::Tuple(n), args) => {
-            let rewritten: Vec<Type<TypeName>> = args.iter().map(soa_type).collect();
-            Type::Constructed(TypeName::Tuple(*n), rewritten)
-        }
-        Type::Constructed(TypeName::Arrow, args) if args.len() == 2 => {
-            Type::Constructed(TypeName::Arrow, vec![soa_type(&args[0]), soa_type(&args[1])])
         }
         Type::Constructed(name, args) => {
             // For other constructed types (Vec, Mat, scalars, etc.), recurse into args
@@ -204,13 +185,6 @@ fn map_input_element_type(ty: &Type<TypeName>) -> Option<Type<TypeName>> {
     }
 }
 
-fn has_type_variables(ty: &Type<TypeName>) -> bool {
-    match ty {
-        Type::Variable(_) => true,
-        Type::Constructed(_, args) => args.iter().any(has_type_variables),
-    }
-}
-
 // =============================================================================
 // Term rewriting
 // =============================================================================
@@ -222,17 +196,14 @@ struct SoaTransformer<'a, 'ids> {
 }
 
 impl<'a, 'ids> SoaTransformer<'a, 'ids> {
-    fn new(symbols: &'a mut SymbolTable, term_ids: &'ids mut TermIdSource) -> Self {
-        SoaTransformer { term_ids, symbols }
-    }
-
-    fn transform_term(&mut self, term: Term<Empty, Empty>) -> Term<Empty, Empty> {
-        let mut term = term.rewrite(self);
+    fn transform_term(&mut self, term: &mut Term<Empty, Empty>) {
+        self.rewrite_tracked(term);
         term.rewrite_types(self.term_ids, &mut soa_type);
-        term.rewrite(&mut MapNormalizer {
+        MapNormalizer {
             term_ids: &mut *self.term_ids,
             symbols: &mut *self.symbols,
-        })
+        }
+        .rewrite_tracked(term);
     }
 
     fn structural_replacement(&mut self, term: &Term<Empty, Empty>) -> Option<Term<Empty, Empty>> {
@@ -646,16 +617,15 @@ struct MapNormalizer<'a, 'ids> {
 impl MapNormalizer<'_, '_> {
     fn normalize_map(
         &mut self,
-        body: SoacBody<Empty, Empty>,
-        inputs: Vec<ArrayExpr<Empty, Empty>>,
-        destination: types::SoacOwnership,
-    ) -> Option<SoacOp<Empty, Empty>> {
-        if inputs.len() <= 1 || body.lam.params.len() != 1 {
+        lam: &mut Lambda<Empty, Empty>,
+        inputs: &[ArrayExpr<Empty, Empty>],
+    ) -> Option<()> {
+        if inputs.len() <= 1 || lam.params.len() != 1 {
             return None;
         }
 
-        let (old_param, param_ty) = (body.lam.params[0].0, body.lam.params[0].1.clone());
-        if !matches!(&param_ty, Type::Constructed(TypeName::Tuple(_), _)) || has_type_variables(&param_ty) {
+        let (old_param, param_ty) = &lam.params[0];
+        if !matches!(&param_ty, Type::Constructed(TypeName::Tuple(_), _)) {
             return None;
         }
         let input_types = inputs
@@ -663,7 +633,6 @@ impl MapNormalizer<'_, '_> {
             .map(|input| map_input_element_type(&input.array_type()))
             .collect::<Option<Vec<_>>>()?;
 
-        let SoacBody { lam, data } = body;
         let new_params: Vec<(SymbolId, Type<TypeName>)> = input_types
             .into_iter()
             .enumerate()
@@ -671,29 +640,18 @@ impl MapNormalizer<'_, '_> {
             .collect();
         let span = lam.body.span;
         let mut remaining = new_params.as_slice();
-        let reconstruction = build_tuple_reconstruction(&mut remaining, &param_ty, span, self.term_ids)?;
+        let reconstruction = build_tuple_reconstruction(&mut remaining, param_ty, span, self.term_ids)?;
         if !remaining.is_empty() {
             return None;
         }
-        let rewritten_body = super::subst::substitute_with(
-            *lam.body,
-            old_param,
+        lam.body = Box::new(super::subst::substitute_with(
+            (*lam.body).clone(),
+            *old_param,
             &mut |_occurrence, term_ids| tlc::clone_term_with_fresh_ids(&reconstruction, term_ids),
             self.term_ids,
-        );
-
-        Some(SoacOp::Map {
-            lam: SoacBody {
-                lam: Lambda {
-                    params: new_params,
-                    body: Box::new(rewritten_body),
-                    ret_ty: lam.ret_ty,
-                },
-                data,
-            },
-            inputs,
-            destination,
-        })
+        ));
+        lam.params = new_params;
+        Some(())
     }
 }
 
@@ -703,19 +661,12 @@ impl TermRewriter<Empty, Empty> for MapNormalizer<'_, '_> {
     }
 
     fn rewrite_node(&mut self, term: &mut Term<Empty, Empty>) -> RewriteDecision {
-        let replacement = match &term.kind {
-            TermKind::Soac(SoacOp::Map {
-                lam,
-                inputs,
-                destination,
-            }) => self.normalize_map(lam.clone(), inputs.clone(), *destination).map(TermKind::Soac),
-            _ => None,
-        };
-        let Some(kind) = replacement else {
-            return RewriteDecision::Unchanged;
-        };
-        term.kind = kind;
-        RewriteDecision::Changed
+        if let TermKind::Soac(SoacOp::Map { lam, inputs, .. }) = &mut term.kind {
+            if self.normalize_map(&mut lam.lam, inputs).is_some() {
+                return RewriteDecision::Changed;
+            }
+        }
+        RewriteDecision::Unchanged
     }
 }
 
@@ -760,45 +711,22 @@ fn build_tuple_reconstruction(
 // Public API
 // =============================================================================
 
-/// Run the first combined SoA transform and SOAC normalization.
+/// Normalize concrete array shapes after specialization and helper expansion.
 ///
 /// 1. Rewrites `[n](A,B)` types to `([n]A, [n]B)` and adjusts all operations
 ///    that touch array-of-tuple types.
 /// 2. Flattens Map+Zip into multi-input Map with split lambda params.
 /// 3. Converts standalone Zip to tuple construction.
-pub fn normalize_soacs(program: BuffersPinned) -> SoaNormalized {
-    transform_program(program)
-}
-
-/// Re-run the same normalization after inlining exposes new array structure.
-pub fn renormalize_inlined_soa(program: SoacHelpersInlined) -> InlinedSoaNormalized {
-    transform_program(program)
-}
-
-fn transform_program<InputTag, OutputTag, F, GlobalContext>(
-    program: Program<InputTag, F, GlobalContext>,
-) -> Program<OutputTag, F, GlobalContext>
-where
-    F: Family<ClosureData = Empty, SoacBodyData = Empty>,
-{
-    let Program {
-        defs,
-        mut symbols,
-        mut term_ids,
-        global_context,
-        state: _,
-    } = program;
-    let mut transformer = SoaTransformer::new(&mut symbols, &mut term_ids);
-    let defs = defs
-        .into_iter()
-        .map(|mut def| {
-            def.ty = soa_type(&def.ty);
-            def.body = transformer.transform_term(def.body);
-            def
-        })
-        .collect();
-    drop(transformer);
-    Program::from_parts(defs, symbols, term_ids, global_context)
+pub fn normalize_soacs(mut program: SoacHelpersInlined) -> SoaNormalized {
+    let mut transformer = SoaTransformer {
+        term_ids: &mut program.term_ids,
+        symbols: &mut program.symbols,
+    };
+    for def in &mut program.defs {
+        def.ty = soa_type(&def.ty);
+        transformer.transform_term(&mut def.body);
+    }
+    program.retag()
 }
 
 // =============================================================================

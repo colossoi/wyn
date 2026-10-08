@@ -565,6 +565,25 @@ fn projected_tuple_arrays_preserve_their_extents() {
 }
 
 #[test]
+fn generic_tuple_array_helpers_reach_both_backends() {
+    for source in [
+        "entry main(xs:[]i32,ys:[]i32) ([]i32,[]i32)=unzip(zip(xs,ys))",
+        "entry main(xs:[]i32) []i32=
+         let (a,b)=unzip(map(|x|(x,(x,x+1)),xs)) in map(|(c,d)|c+d,b)",
+        "def duplicate<[n], A>(xs:[n]A) [n](A,A)=map(|x|(x,x),xs)
+         entry main(xs:[]i32) []i32=map(|((a,b),(c,d))|a+b+c+d,duplicate(duplicate(xs)))",
+        "def firsts<[n], A, B>(xs:[n](A,B)) [n]A=map(|(a,b)|a,xs)
+         entry main(xs:[]i32,ys:[]i32) []i32=firsts(zip(xs,ys))",
+        "def firsts<[n], A, B>(xs:[n](A,B)) [n]A=map(|(a,b)|a,xs)
+         entry main(xs:[](i32,i32)) []i32=firsts(xs)",
+        "def firsts<[n], A, B>(xs:[n](A,B)) [n]A=map(|(a,b)|a,xs)
+         entry main(xs:[4]i32) []i32=firsts(filter(|(a,b)|a>0,map(|x|(x,x+1),xs)))",
+    ] {
+        shaders(source);
+    }
+}
+
+#[test]
 fn compaction_retains_producer_elements_across_the_scan() {
     for source in [
         "entry kept(xs:[]i32) []i32=filter(|x|x>0,map(|x|x*x+17,xs))",
