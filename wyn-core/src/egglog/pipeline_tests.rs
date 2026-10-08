@@ -594,6 +594,29 @@ fn generic_tuple_array_helpers_reach_both_backends() {
 }
 
 #[test]
+fn nested_tuple_array_operations_reach_both_backends() {
+    for source in [
+        "entry main(xs:[4]i32) [4]i32 = map(|(a,(b,c))|a+b+c,map(|x|(x,(x+1,x+2)),xs))",
+        "entry main(x:i32,i:i32) (i32,(i32,i32)) =
+         let ys=[(x,(x+1,x+2)),(x+3,(x+4,x+5))] in
+         let zs=ys with [i]=(7,(8,9)) in zs[i]",
+        "entry main(xs:[](i32,i32),i:i32) (i32,i32)=xs[i]",
+        "entry main(x:i32,i:i32) (i32,(i32,i32)) = [(x,(x+1,x+2)),(x+3,(x+4,x+5))][i]",
+    ] {
+        shaders(source);
+    }
+}
+
+#[test]
+#[ignore = "Known layout mismatch: runtime indexing a tuple-valued map projects an AoS storage view as a tuple"]
+fn runtime_indexing_a_tuple_valued_map_preserves_storage_layout() {
+    shaders(
+        "entry main(xs:[4]i32,i:i32) (i32,(i32,i32)) =
+         let ys=map(|x|(x,(x+1,x+2)),xs) in ys[i]",
+    );
+}
+
+#[test]
 fn conditional_tuple_and_zipped_maps_reach_both_backends() {
     for source in [
         "entry main(xs:[4]i32,ys:[4]i32,flag:bool) [4](i32,i32) =

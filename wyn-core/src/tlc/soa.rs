@@ -14,12 +14,14 @@
 
 use super::data::Empty;
 use super::if_over_producer::ConditionalProducersCanonicalized;
-use super::{ArrayExpr, RewriteDecision, Term, TermId, TermIdSource, TermKind, TermRewriter, VarRef};
+use super::{
+    clone_term_with_fresh_ids, ArrayExpr, Bindings, RewriteDecision, Term, TermId, TermIdSource, TermKind,
+    TermRewriter, VarRef,
+};
 use crate::ast::{Span, TypeName};
-use crate::builtins::{by_id, catalog};
+use crate::builtins::catalog;
 use crate::tlc;
 use crate::types::TypeExt;
-use crate::SymbolId;
 use crate::SymbolTable;
 use polytype::Type;
 
@@ -106,464 +108,230 @@ fn is_storage_backed_array(ty: &Type<TypeName>) -> bool {
     matches!(ty.array_buffer(), Some(Type::Constructed(TypeName::Buffer(_), _)))
 }
 
-/// The BROAD predicate: will SoA expand this array's element into a tuple (so
-/// the array as a whole becomes a tuple-of-arrays)? True when the element is
-/// directly a tuple, OR becomes one after `soa_type` (a nested array-of-tuple
-/// element). Returns the resulting tuple arity.
-///
-/// Use this ONLY where you need the yes/no shape question and then call
-/// `soa_type` yourself (e.g. `uninit`/`length` rewrites). Do NOT use it to guard
-/// `array_of_tuple_parts`: this predicate is strictly broader than that
-/// extractor's domain (it also accepts the nested case, for which no flat tuple
-/// components exist), so guarding with it and then unwrapping the parts panics.
-/// Guard with `array_of_tuple_parts` directly instead.
-fn soa_yields_tuple_arrays(ty: &Type<TypeName>) -> Option<usize> {
-    if is_storage_backed_array(ty) {
-        return None;
-    }
-    let elem = ty.elem_type()?;
-    if !ty.is_array() {
-        return None;
-    }
-    match elem {
-        Type::Constructed(TypeName::Tuple(n), _) => Some(*n),
-        // The element might become a tuple after soa_type (nested array-of-tuple).
-        _ => match soa_type(elem) {
-            Type::Constructed(TypeName::Tuple(n), _) => Some(n),
-            _ => None,
-        },
-    }
-}
-
-/// Extract the parts of an array whose element is DIRECTLY a tuple:
-/// `(arity, component_types, variant, dimensions, region)`. Returns `None` for any
-/// other type — including the nested array-of-tuple case that
-/// `soa_yields_tuple_arrays` accepts but for which no flat components exist.
-///
-/// This IS its own guard: `if let Some(parts) = array_of_tuple_parts(ty)`. The
-/// invariant "the thing I checked has extractable parts" holds by construction
-/// because the check and the extraction are the same function.
-fn array_of_tuple_parts(
-    ty: &Type<TypeName>,
-) -> Option<(
-    usize,
-    Vec<Type<TypeName>>,
-    Type<TypeName>,
-    Vec<Type<TypeName>>,
-    Type<TypeName>,
-)> {
-    let tensor = ty.as_tensor()?;
-    let storage = ty.array_storage()?;
-    match tensor.elem {
-        Type::Constructed(TypeName::Tuple(n), components) => Some((
-            *n,
-            components.clone(),
-            storage.variant.clone(),
-            tensor.dims.to_vec(),
-            storage.region.clone(),
-        )),
-        _ => None,
-    }
-}
-
-// =============================================================================
-// Term rewriting
-// =============================================================================
-
-/// SoA transformer state.
+/// Rebuild operations from already-lowered children. Generated terms carry
+/// their final types and are never fed back through the source transformation.
 struct SoaTransformer<'a, 'ids> {
     term_ids: &'ids mut TermIdSource,
     symbols: &'a mut SymbolTable,
 }
 
-impl<'a, 'ids> SoaTransformer<'a, 'ids> {
-    fn transform_term(&mut self, term: &mut Term<Empty, Empty>) {
-        self.rewrite_tracked(term);
-        term.rewrite_types(self.term_ids, &mut soa_type);
-    }
-
-    fn structural_replacement(&mut self, term: &Term<Empty, Empty>) -> Option<Term<Empty, Empty>> {
+impl SoaTransformer<'_, '_> {
+    fn structural_replacement(&mut self, term: &Term) -> Option<Term> {
+        let span = term.span;
+        let known = catalog().known();
         match &term.kind {
-            TermKind::App { func, args } => self.rewrite_special_app(func, args, &term.ty, term.span),
-            TermKind::Index { array, index } => {
-                let (n, component_types, variant, dims, region) = array_of_tuple_parts(&array.ty)?;
-                Some(self.rewrite_index_aot(
-                    array,
-                    index,
-                    &component_types,
-                    &variant,
-                    &dims,
-                    &region,
-                    n,
-                    term.span,
-                ))
+            TermKind::Index { array, index }
+                if matches!(array.ty, Type::Constructed(TypeName::Tuple(_), _)) =>
+            {
+                let mut bindings = Bindings::new();
+                let array = bindings.name((**array).clone(), "_soa_array", self.symbols, self.term_ids);
+                let index = bindings.name((**index).clone(), "_soa_index", self.symbols, self.term_ids);
+                let result = self.distribute_index(&array, &index, &term.ty, span);
+                Some(bindings.finish(result, self.term_ids))
             }
-            TermKind::ArrayExpr(array) => self.rewrite_special_array_expr(array, &term.ty, term.span),
+            TermKind::App { func, args } => {
+                let id = tlc::var_term_builtin_id(func, self.symbols)?;
+                if (id == known.array_with || id == known.array_with_in_place)
+                    && args.len() == 3
+                    && matches!(args[0].ty, Type::Constructed(TypeName::Tuple(_), _))
+                {
+                    let mut bindings = Bindings::new();
+                    let array = bindings.name(args[0].clone(), "_soa_array", self.symbols, self.term_ids);
+                    let index = bindings.name(args[1].clone(), "_soa_index", self.symbols, self.term_ids);
+                    let value = bindings.name(args[2].clone(), "_soa_value", self.symbols, self.term_ids);
+                    let result = self.distribute_update(&array, &index, &value, span);
+                    return Some(bindings.finish(result, self.term_ids));
+                }
+                if id == known.length
+                    && args.len() == 1
+                    && matches!(args[0].ty, Type::Constructed(TypeName::Tuple(_), _))
+                {
+                    let mut bindings = Bindings::new();
+                    let mut array =
+                        bindings.name(args[0].clone(), "_soa_array", self.symbols, self.term_ids);
+                    while matches!(array.ty, Type::Constructed(TypeName::Tuple(_), _)) {
+                        array = self.project(&array, 0, span);
+                    }
+                    let result = self.builtin_call(known.length, vec![array], term.ty.clone(), span);
+                    return Some(bindings.finish(result, self.term_ids));
+                }
+                None
+            }
+            TermKind::Var(VarRef::Builtin { id, .. })
+                if *id == known.uninit && matches!(term.ty, Type::Constructed(TypeName::Tuple(_), _)) =>
+            {
+                Some(self.distribute_uninit(&term.ty, span))
+            }
+            TermKind::ArrayExpr(array @ ArrayExpr::Zip(_)) => Some(self.array_value(array, &term.ty, span)),
+            TermKind::ArrayExpr(ArrayExpr::Literal(elements))
+                if matches!(term.ty, Type::Constructed(TypeName::Tuple(_), _)) =>
+            {
+                Some(self.literal_value(elements, &term.ty, span))
+            }
             _ => None,
         }
     }
 
-    /// Transform a function application. This is where we intercept intrinsics
-    /// that operate on array-of-tuple types and rewrite them.
-    fn rewrite_special_app(
+    /// Distribute through the target layout, including nested tuple components.
+    /// The operands are references, so distribution never repeats a computation.
+    fn distribute_index(
         &mut self,
-        func: &Term<Empty, Empty>,
-        args: &[Term<Empty, Empty>],
-        orig_result_ty: &Type<TypeName>,
+        array: &Term,
+        index: &Term,
+        result_ty: &Type<TypeName>,
         span: Span,
-    ) -> Option<Term<Empty, Empty>> {
-        let known = catalog().known();
-        if let Some(id) = tlc::var_term_builtin_id(func, &self.symbols) {
-            // array_with(arr, i, val) where arr was [n](A,B)
-            if (id == known.array_with || id == known.array_with_in_place) && args.len() == 3 {
-                let arr_orig_ty = &args[0].ty;
-                if let Some((n, comp_tys, variant, dims, region)) = array_of_tuple_parts(arr_orig_ty) {
-                    return Some(self.rewrite_array_with_aot(
-                        &args[0], &args[1], &args[2], &comp_tys, &variant, &dims, &region, n, span,
-                    ));
-                }
-            }
-
-            // _w_intrinsic_uninit() where result was [n](A,B)
-            if id == known.uninit && args.is_empty() {
-                if soa_yields_tuple_arrays(orig_result_ty).is_some() {
-                    let sym = match &func.kind {
-                        TermKind::Var(VarRef::Symbol(s)) => *s,
-                        // For Builtin form, we need a Symbol for `rewrite_uninit_aot`.
-                        // Look up the surface name and intern it.
-                        _ => self.symbols.alloc(by_id(id).raw.surface_name.to_string()),
-                    };
-                    let soa_ty = soa_type(orig_result_ty);
-                    return Some(self.rewrite_uninit_aot(&soa_ty, sym, span));
-                }
-            }
-
-            // _w_intrinsic_length(arr) where arr was [n](A,B)
-            if id == known.length && args.len() == 1 {
-                let arr_orig_ty = &args[0].ty;
-                if soa_yields_tuple_arrays(arr_orig_ty).is_some() {
-                    let sym = match &func.kind {
-                        TermKind::Var(VarRef::Symbol(s)) => *s,
-                        _ => self.symbols.alloc(by_id(id).raw.surface_name.to_string()),
-                    };
-                    return Some(self.rewrite_length_aot(&args[0], sym, soa_type(orig_result_ty), span));
-                }
-            }
-        }
-        None
-    }
-
-    // =========================================================================
-    // Array-of-Tuple rewrite helpers
-    // =========================================================================
-
-    /// Distribute an index over an array-of-tuple input. For
-    /// `arr: [n](A,B)` distributed to `([n]A, [n]B)`, rewrites
-    /// `arr[i]` to `(proj(arr,0)[i], proj(arr,1)[i])`.
-    fn rewrite_index_aot(
-        &mut self,
-        arr: &Term<Empty, Empty>,
-        idx: &Term<Empty, Empty>,
-        comp_tys: &[Type<TypeName>],
-        variant: &Type<TypeName>,
-        dims: &[Type<TypeName>],
-        region: &Type<TypeName>,
-        n: usize,
-        span: Span,
-    ) -> Term<Empty, Empty> {
-        let components: Vec<Term<Empty, Empty>> = (0..n)
-            .map(|i| {
-                // Recursively soa_type the constructed array so nested array-of-tuples
-                // like [8](int, vec3) are further distributed to ([8]int, [8]vec3).
-                let comp_arr_ty = soa_type(&array_type(
-                    soa_type(&comp_tys[i]),
-                    variant.clone(),
-                    dims,
-                    region.clone(),
-                ));
-                let proj = self.mk_tuple_proj(arr.clone(), i, comp_arr_ty, span);
-                let elem_ty = soa_type(&comp_tys[i]);
-                self.mk_index(proj, idx.clone(), elem_ty, span)
-            })
-            .collect();
-
-        let result_ty =
-            Type::Constructed(TypeName::Tuple(n), comp_tys.iter().map(|t| soa_type(t)).collect());
-        self.mk_tuple(components, result_ty, span)
-    }
-
-    /// `_w_array_with(arr, i, val)` where arr was `[n](A,B)`:
-    /// -> `_w_tuple(array_with(proj(arr,0), i, proj(val,0)), ...)`
-    fn rewrite_array_with_aot(
-        &mut self,
-        arr: &Term<Empty, Empty>,
-        idx: &Term<Empty, Empty>,
-        val: &Term<Empty, Empty>,
-        comp_tys: &[Type<TypeName>],
-        variant: &Type<TypeName>,
-        dims: &[Type<TypeName>],
-        region: &Type<TypeName>,
-        n: usize,
-        span: Span,
-    ) -> Term<Empty, Empty> {
-        let components: Vec<Term<Empty, Empty>> = (0..n)
-            .map(|i| {
-                let soa_comp_ty = soa_type(&comp_tys[i]);
-                let comp_arr_ty = soa_type(&array_type(
-                    soa_comp_ty.clone(),
-                    variant.clone(),
-                    dims,
-                    region.clone(),
-                ));
-                let arr_proj = self.mk_tuple_proj(arr.clone(), i, comp_arr_ty.clone(), span);
-                let val_proj = self.mk_tuple_proj(val.clone(), i, soa_comp_ty, span);
-                self.mk_array_with(arr_proj, idx.clone(), val_proj, comp_arr_ty, span)
-            })
-            .collect();
-
-        let result_ty = Type::Constructed(
-            TypeName::Tuple(n),
-            (0..n)
-                .map(|i| {
-                    soa_type(&array_type(
-                        soa_type(&comp_tys[i]),
-                        variant.clone(),
-                        dims,
-                        region.clone(),
-                    ))
-                })
-                .collect(),
-        );
-        self.mk_tuple(components, result_ty, span)
-    }
-
-    /// `_w_array_lit(e1, e2, ...)` where result was `[n](A,B)`:
-    /// -> `_w_tuple(_w_array_lit(proj(e1,0), proj(e2,0), ...), ...)`
-    fn rewrite_array_lit_aot(
-        &mut self,
-        elems: &[Term<Empty, Empty>],
-        comp_tys: &[Type<TypeName>],
-        variant: &Type<TypeName>,
-        dims: &[Type<TypeName>],
-        region: &Type<TypeName>,
-        span: Span,
-    ) -> Term<Empty, Empty> {
-        let n = comp_tys.len();
-        let components: Vec<Term<Empty, Empty>> = (0..n)
-            .map(|i| {
-                let soa_comp_ty = soa_type(&comp_tys[i]);
-                let projected_elems: Vec<Term<Empty, Empty>> = elems
+    ) -> Term {
+        if let Type::Constructed(TypeName::Tuple(_), fields) = result_ty {
+            // A storage-backed array of tuples remains an array and is indexed
+            // directly, even when its element/result type is a tuple.
+            if matches!(array.ty, Type::Constructed(TypeName::Tuple(_), _)) {
+                let fields = fields
                     .iter()
-                    .map(|e| self.mk_tuple_proj(e.clone(), i, soa_comp_ty.clone(), span))
-                    .collect();
-                let arr_ty = soa_type(&array_type(soa_comp_ty, variant.clone(), dims, region.clone()));
-                self.mk_array_lit(projected_elems, arr_ty, span)
-            })
-            .collect();
-
-        let result_ty = Type::Constructed(
-            TypeName::Tuple(n),
-            (0..n)
-                .map(|i| {
-                    soa_type(&array_type(
-                        soa_type(&comp_tys[i]),
-                        variant.clone(),
-                        dims,
-                        region.clone(),
-                    ))
-                })
-                .collect(),
-        );
-        self.mk_tuple(components, result_ty, span)
-    }
-
-    /// `_w_intrinsic_uninit()` where result was `[n](A,B)`:
-    /// -> `_w_tuple(_w_intrinsic_uninit(), _w_intrinsic_uninit())`
-    fn rewrite_uninit_aot(
-        &mut self,
-        soa_ty: &Type<TypeName>,
-        uninit_sym: SymbolId,
-        span: Span,
-    ) -> Term<Empty, Empty> {
-        match soa_ty {
-            Type::Constructed(TypeName::Tuple(_), comp_tys) => {
-                let components: Vec<Term<Empty, Empty>> = comp_tys
-                    .iter()
-                    .map(|ct| {
-                        // Each component is a call to _w_intrinsic_uninit with the component type
-                        self.mk_term(ct.clone(), span, TermKind::Var(VarRef::Symbol(uninit_sym)))
+                    .enumerate()
+                    .map(|(i, field_ty)| {
+                        let component = self.project(array, i, span);
+                        self.distribute_index(&component, index, field_ty, span)
                     })
                     .collect();
-                self.mk_tuple(components, soa_ty.clone(), span)
-            }
-            _ => self.mk_term(soa_ty.clone(), span, TermKind::Var(VarRef::Symbol(uninit_sym))),
-        }
-    }
-
-    /// `_w_intrinsic_length(arr)` where arr was `[n](A,B)`:
-    /// -> `_w_intrinsic_length(proj(arr, 0))`
-    fn rewrite_length_aot(
-        &mut self,
-        arr: &Term<Empty, Empty>,
-        length_sym: SymbolId,
-        result_ty: Type<TypeName>,
-        span: Span,
-    ) -> Term<Empty, Empty> {
-        // arr is now a tuple of arrays. Project the first component and take its length.
-        let first_comp_ty = match &arr.ty {
-            Type::Constructed(TypeName::Tuple(_), comp_tys) => comp_tys[0].clone(),
-            _ => arr.ty.clone(),
-        };
-        let first_arr = self.mk_tuple_proj(arr.clone(), 0, first_comp_ty, span);
-
-        let func_ty = Type::Constructed(TypeName::Arrow, vec![first_arr.ty.clone(), result_ty.clone()]);
-        let func = self.mk_term(func_ty, span, TermKind::Var(VarRef::Symbol(length_sym)));
-        self.mk_term(
-            result_ty,
-            span,
-            TermKind::App {
-                func: Box::new(func),
-                args: vec![first_arr],
-            },
-        )
-    }
-
-    /// Rewrite a standalone array expression whose representation changes.
-    fn rewrite_special_array_expr(
-        &mut self,
-        ae: &ArrayExpr<Empty, Empty>,
-        orig_ty: &Type<TypeName>,
-        span: Span,
-    ) -> Option<Term<Empty, Empty>> {
-        let new_ty = soa_type(orig_ty);
-
-        // Standalone Zip -> tuple construction: zip(a, b) becomes a Tuple term.
-        if let ArrayExpr::Zip(exprs) = ae {
-            if !exprs.is_empty() {
-                let components: Vec<Term<Empty, Empty>> = exprs
-                    .iter()
-                    .map(|inner_ae| match inner_ae {
-                        ArrayExpr::Var(vr, ty) => tlc::atom_var_term(*vr, ty.clone(), &mut self.term_ids),
-                        _ => self.mk_term(new_ty.clone(), span, TermKind::ArrayExpr(inner_ae.clone())),
-                    })
-                    .collect();
-                return Some(self.mk_tuple(components, new_ty, span));
+                return self.tuple(fields, span);
             }
         }
-
-        // Array-of-tuple literal: distribute into per-component arrays.
-        if let ArrayExpr::Literal(elems) = ae {
-            if !elems.is_empty() {
-                if let Some((_n, comp_tys, variant, dims, region)) = array_of_tuple_parts(orig_ty) {
-                    return Some(
-                        self.rewrite_array_lit_aot(elems, &comp_tys, &variant, &dims, &region, span),
-                    );
-                }
-            }
-        }
-        None
-    }
-
-    // =========================================================================
-    // Term construction helpers
-    // =========================================================================
-
-    fn mk_term(
-        &mut self,
-        ty: Type<TypeName>,
-        span: Span,
-        kind: TermKind<Empty, Empty>,
-    ) -> Term<Empty, Empty> {
-        Term::fresh(&mut self.term_ids, ty, span, kind)
-    }
-
-    /// Build a `TermKind::Tuple` term.
-    fn mk_tuple(
-        &mut self,
-        components: Vec<Term<Empty, Empty>>,
-        result_ty: Type<TypeName>,
-        span: Span,
-    ) -> Term<Empty, Empty> {
-        self.mk_term(result_ty, span, TermKind::Tuple(components))
-    }
-
-    /// Build a `TermKind::TupleProj` term.
-    fn mk_tuple_proj(
-        &mut self,
-        term: Term<Empty, Empty>,
-        index: usize,
-        result_ty: Type<TypeName>,
-        span: Span,
-    ) -> Term<Empty, Empty> {
-        self.mk_term(
-            result_ty,
-            span,
-            TermKind::TupleProj {
-                tuple: Box::new(term),
-                idx: index,
-            },
-        )
-    }
-
-    /// Build a `TermKind::Index` term.
-    fn mk_index(
-        &mut self,
-        arr: Term<Empty, Empty>,
-        idx: Term<Empty, Empty>,
-        result_ty: Type<TypeName>,
-        span: Span,
-    ) -> Term<Empty, Empty> {
-        self.mk_term(
-            result_ty,
+        let array = clone_term_with_fresh_ids(array, self.term_ids);
+        let index = clone_term_with_fresh_ids(index, self.term_ids);
+        self.term(
+            result_ty.clone(),
             span,
             TermKind::Index {
-                array: Box::new(arr),
-                index: Box::new(idx),
+                array: Box::new(array),
+                index: Box::new(index),
             },
         )
     }
 
-    /// Build `_w_intrinsic_array_with(arr, idx, val)` as a
-    /// `VarRef::Builtin` call so downstream passes dispatch by id.
-    fn mk_array_with(
+    fn distribute_update(&mut self, array: &Term, index: &Term, value: &Term, span: Span) -> Term {
+        if let Type::Constructed(TypeName::Tuple(n), _) = &array.ty {
+            let fields = (0..*n)
+                .map(|i| {
+                    let array = self.project(array, i, span);
+                    let value = self.project(value, i, span);
+                    self.distribute_update(&array, index, &value, span)
+                })
+                .collect();
+            return self.tuple(fields, span);
+        }
+        let args = [array, index, value]
+            .into_iter()
+            .map(|term| clone_term_with_fresh_ids(term, self.term_ids))
+            .collect();
+        self.builtin_call(catalog().known().array_with, args, array.ty.clone(), span)
+    }
+
+    fn literal_value(&mut self, elements: &[Term], result_ty: &Type<TypeName>, span: Span) -> Term {
+        let mut bindings = Bindings::new();
+        let elements: Vec<_> = elements
+            .iter()
+            .map(|element| bindings.name(element.clone(), "_soa_element", self.symbols, self.term_ids))
+            .collect();
+        let result = self.distribute_literal(&elements, result_ty, span);
+        bindings.finish(result, self.term_ids)
+    }
+
+    fn distribute_literal(&mut self, elements: &[Term], result_ty: &Type<TypeName>, span: Span) -> Term {
+        if let Type::Constructed(TypeName::Tuple(_), fields) = result_ty {
+            let fields = fields
+                .iter()
+                .enumerate()
+                .map(|(i, field_ty)| {
+                    let projected: Vec<_> =
+                        elements.iter().map(|element| self.project(element, i, span)).collect();
+                    self.distribute_literal(&projected, field_ty, span)
+                })
+                .collect();
+            return self.tuple(fields, span);
+        }
+        let elements =
+            elements.iter().map(|element| clone_term_with_fresh_ids(element, self.term_ids)).collect();
+        self.term(
+            result_ty.clone(),
+            span,
+            TermKind::ArrayExpr(ArrayExpr::Literal(elements)),
+        )
+    }
+
+    fn distribute_uninit(&mut self, ty: &Type<TypeName>, span: Span) -> Term {
+        if let Type::Constructed(TypeName::Tuple(_), fields) = ty {
+            let fields = fields.iter().map(|ty| self.distribute_uninit(ty, span)).collect();
+            self.tuple(fields, span)
+        } else {
+            self.builtin_call(catalog().known().uninit, vec![], ty.clone(), span)
+        }
+    }
+
+    /// Turn a standalone array atom into a value with its own component type.
+    /// Its child terms and named-atom types have already been lowered.
+    fn array_value(&mut self, array: &ArrayExpr, ty: &Type<TypeName>, span: Span) -> Term {
+        match array {
+            ArrayExpr::Var(reference, ty) => self.term(ty.clone(), span, TermKind::Var(*reference)),
+            ArrayExpr::Zip(inputs) => {
+                let Type::Constructed(TypeName::Tuple(_), fields) = ty else {
+                    panic!("lowered zip type")
+                };
+                assert_eq!(inputs.len(), fields.len(), "zip layout arity");
+                let values = inputs
+                    .iter()
+                    .zip(fields)
+                    .map(|(input, ty)| self.array_value(input, ty, span))
+                    .collect();
+                self.tuple(values, span)
+            }
+            ArrayExpr::Literal(elements) if matches!(ty, Type::Constructed(TypeName::Tuple(_), _)) => {
+                self.literal_value(elements, ty, span)
+            }
+            _ => self.term(ty.clone(), span, TermKind::ArrayExpr(array.clone())),
+        }
+    }
+
+    fn term(&mut self, ty: Type<TypeName>, span: Span, kind: TermKind) -> Term {
+        Term::fresh(self.term_ids, ty, span, kind)
+    }
+
+    fn tuple(&mut self, fields: Vec<Term>, span: Span) -> Term {
+        let ty = Type::Constructed(
+            TypeName::Tuple(fields.len()),
+            fields.iter().map(|field| field.ty.clone()).collect(),
+        );
+        self.term(ty, span, TermKind::Tuple(fields))
+    }
+
+    fn project(&mut self, tuple: &Term, idx: usize, span: Span) -> Term {
+        let Type::Constructed(TypeName::Tuple(_), fields) = &tuple.ty else {
+            panic!("tuple projection input")
+        };
+        let ty = fields[idx].clone();
+        let tuple = Box::new(clone_term_with_fresh_ids(tuple, self.term_ids));
+        self.term(ty, span, TermKind::TupleProj { tuple, idx })
+    }
+
+    fn builtin_call(
         &mut self,
-        arr: Term<Empty, Empty>,
-        idx: Term<Empty, Empty>,
-        val: Term<Empty, Empty>,
+        id: crate::builtins::BuiltinId,
+        args: Vec<Term>,
         result_ty: Type<TypeName>,
         span: Span,
-    ) -> Term<Empty, Empty> {
-        let aw_id = catalog().known().array_with;
-        let t3 = Type::Constructed(TypeName::Arrow, vec![val.ty.clone(), result_ty.clone()]);
-        let t2 = Type::Constructed(TypeName::Arrow, vec![idx.ty.clone(), t3.clone()]);
-        let t1 = Type::Constructed(TypeName::Arrow, vec![arr.ty.clone(), t2.clone()]);
-        let func = self.mk_term(
-            t1,
-            span,
-            TermKind::Var(VarRef::Builtin {
-                id: aw_id,
-                overload_idx: 0,
-            }),
-        );
-
-        self.mk_term(
+    ) -> Term {
+        let ty = tlc::curried_function_type(args.iter().map(|arg| &arg.ty), &result_ty);
+        let func = self.term(ty, span, TermKind::Var(VarRef::Builtin { id, overload_idx: 0 }));
+        if args.is_empty() {
+            return func;
+        }
+        self.term(
             result_ty,
             span,
             TermKind::App {
                 func: Box::new(func),
-                args: vec![arr, idx, val],
+                args,
             },
         )
-    }
-
-    /// Build a `TermKind::ArrayExpr(ArrayExpr::Literal(elems))` term.
-    fn mk_array_lit(
-        &mut self,
-        elems: Vec<Term<Empty, Empty>>,
-        result_ty: Type<TypeName>,
-        span: Span,
-    ) -> Term<Empty, Empty> {
-        self.mk_term(result_ty, span, TermKind::ArrayExpr(ArrayExpr::Literal(elems)))
     }
 }
 
@@ -572,12 +340,28 @@ impl TermRewriter<Empty, Empty> for SoaTransformer<'_, '_> {
         self.term_ids.next_id()
     }
 
-    fn rewrite_node_before_children(&mut self, term: &mut Term<Empty, Empty>) -> RewriteDecision {
-        let Some(mut replacement) = self.structural_replacement(term) else {
-            return RewriteDecision::Unchanged;
-        };
-        replacement.id = term.id;
-        *term = replacement;
+    fn rewrite_node_before_children(&mut self, term: &mut Term) -> RewriteDecision {
+        // A nullary uninit denotes the value itself. Consume its call edge
+        // before lowering so distribution happens at the value position,
+        // rather than turning the callee into a tuple of component values.
+        if let TermKind::App { func, args } = &term.kind {
+            if args.is_empty()
+                && tlc::var_term_builtin_id(func, self.symbols) == Some(catalog().known().uninit)
+            {
+                term.kind = func.kind.clone();
+                return RewriteDecision::Changed;
+            }
+        }
+        RewriteDecision::Unchanged
+    }
+
+    fn rewrite_node(&mut self, term: &mut Term) -> RewriteDecision {
+        // Child expressions are already in the target representation. Rewrite
+        // this node's annotations and construct its target operation together.
+        term.rewrite_node_types(&mut soa_type);
+        if let Some(replacement) = self.structural_replacement(term) {
+            *term = replacement;
+        }
         RewriteDecision::Changed
     }
 }
@@ -598,7 +382,7 @@ pub fn normalize_soacs(mut program: ConditionalProducersCanonicalized) -> SoaNor
     };
     for def in &mut program.defs {
         def.ty = soa_type(&def.ty);
-        transformer.transform_term(&mut def.body);
+        transformer.rewrite_tracked(&mut def.body);
     }
     program.retag()
 }

@@ -44,6 +44,18 @@ impl<C: Payload, S: Payload> Term<C, S> {
     where
         M: FnMut(&Type<TypeName>) -> Type<TypeName>,
     {
+        self.rewrite_node_types(map);
+        self.for_each_child_mut(&mut |child| child.rewrite_types(term_ids, map));
+        self.id = term_ids.next_id();
+    }
+
+    /// Rewrite this node's type annotations, including embedded binder and
+    /// array-atom metadata, without visiting child terms. The enclosing
+    /// reconstruction must refresh the node's ID.
+    pub(super) fn rewrite_node_types<M>(&mut self, map: &mut M)
+    where
+        M: FnMut(&Type<TypeName>) -> Type<TypeName>,
+    {
         self.ty = map(&self.ty);
         match &mut self.kind {
             TermKind::Lambda(lambda) => rewrite_lambda_types(lambda, map),
@@ -70,8 +82,6 @@ impl<C: Payload, S: Payload> Term<C, S> {
             TermKind::ArrayExpr(array) => rewrite_array_expr_types(array, map),
             _ => {}
         }
-        self.for_each_child_mut(&mut |child| child.rewrite_types(term_ids, map));
-        self.id = term_ids.next_id();
     }
 
     /// If this term is `App { func: Var(sym), args }` — a direct named

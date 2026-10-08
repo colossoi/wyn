@@ -137,7 +137,7 @@ The passes below run in order. SOACs are second-order array combinators, such as
 | `rep_specialize` | Specialize callees with abstract-array parameters for known producer representations, including the bounded capacity of filter results. |
 | `force_inline_soac_helpers` | Expand constants, then repeatedly inline helpers containing SOACs, array producers, or length queries so fusion and dispatch planning can see that work in the caller. Scalar helper optimization is left to egglog. |
 | `canonicalize_conditional_producers` | Rewrite supported array-valued conditionals into a pointwise map with the branch inside its callback. |
-| `normalize_soacs` | Convert local arrays of tuples to tuples of arrays and turn standalone `zip` into tuple construction. |
+| `normalize_soacs` | Lower local arrays of tuples and their operations to tuples of arrays, constructing terms and type annotations together; turn standalone `zip` into tuple construction. |
 | `normalize_soacs_to_anf` | Lift nested SOAC expressions into explicit let bindings, exposing producer/consumer edges for egglog. |
 | `float_runtime_index_nested_producers` | Move eligible runtime-indexed producers out of nested callbacks before defunctionalization, exposing the producer and gather separately. |
 | `defunctionalize` | Lift lambdas, make captures explicit, specialize higher-order functions, and lower closure applications to direct calls. |
@@ -145,14 +145,16 @@ The passes below run in order. SOACs are second-order array combinators, such as
 | `apply_ownership` | Promote eligible array updates to in-place updates and mark unique SOAC inputs. Egglog later decides storage reuse using the fused program. |
 
 Specialization, helper inlining, and conditional-producer rewriting retain the
-source array shapes. SoA normalization then runs once, with concrete element
-types and the helper bodies exposed; later
-TLC passes preserve that layout. Storage-backed arrays keep their declared layout
-so normalization does not change the shader's buffer interface.
+source array shapes. SoA lowering then runs once, with concrete element types
+and the helper bodies exposed. It constructs operations from lowered operands
+with their target types, including binder and callback annotations; later TLC
+passes preserve that layout. Storage-backed arrays keep their declared layout
+so lowering does not change the shader's buffer interface.
 
-SOAC construction and helper inlining share a binding builder that preserves
-evaluation order and flattens leading lets as they are emitted. Branches, loops,
-and callbacks retain their own evaluation scopes; moving producers across those
+SOAC construction, helper inlining, and SoA lowering share a binding builder that
+preserves evaluation order and flattens leading lets as they are emitted.
+Distribution across tuple components binds each computed operand once. Branches,
+loops, and callbacks retain their own evaluation scopes; moving producers across those
 boundaries remains an explicit transformation. The ANF pass completes binding
 normalization for expressions emitted by other rewrites.
 
