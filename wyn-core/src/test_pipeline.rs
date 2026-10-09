@@ -71,10 +71,16 @@ fn front_end(src: &str) -> tlc::stage::OwnershipValidated {
     tlc::validate_ownership(program).expect("validate_ownership")
 }
 
+/// Normalize unified helpers while graphics calls still have ordinary TLC form.
+pub(crate) fn compile_thru_unified_helpers(src: &str) -> tlc::stage::UnifiedHelpersInlined {
+    let program = tlc::partial_eval(front_end(src));
+    let program = tlc::specialize_types(program).expect("specialize_types");
+    tlc::inline_unified_helpers(program)
+}
+
 /// Extract graphics stages without running scheduling, optimization, or a backend.
 pub(crate) fn compile_thru_stage_extraction(src: &str) -> tlc::stage::StagesExtracted {
-    let program = tlc::partial_eval(front_end(src));
-    tlc::extract_stages(program).expect("extract_stages")
+    tlc::extract_stages(compile_thru_unified_helpers(src)).expect("extract_stages")
 }
 
 // Stage-boundary helpers for source-normalization pass tests. Each

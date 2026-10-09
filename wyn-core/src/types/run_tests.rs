@@ -98,17 +98,19 @@ fn source_package_identity_reaches_typed_and_tlc_definitions() {
 
     let ownership = tlc::validate_ownership(lowered).expect("ownership should validate");
     let partial = tlc::partial_eval(ownership);
-    let extracted = tlc::extract_stages(partial).expect("stages should extract");
-    let pinned = tlc::pin_entry_buffers(extracted).expect("entry buffers should pin");
-    let monomorphic = tlc::monomorphize(pinned).expect("TLC should monomorphize");
-    let dependency_specialization = monomorphic
+    let specialized = tlc::specialize_types(partial).expect("types should specialize");
+    let dependency_specialization = specialized
         .defs
         .iter()
         .find(|definition| {
-            symbol_name_or_bug(&monomorphic.symbols, definition.name).starts_with("Dependency.identity$")
+            symbol_name_or_bug(&specialized.symbols, definition.name).starts_with("Dependency.identity$")
         })
         .expect("dependency generic should be specialized for the root call");
     assert_eq!(dependency_specialization.package, Some(dependency_package));
+    let inlined = tlc::inline_unified_helpers(specialized);
+    let extracted = tlc::extract_stages(inlined).expect("stages should extract");
+    let pinned = tlc::pin_entry_buffers(extracted).expect("entry buffers should pin");
+    let monomorphic = tlc::monomorphize(pinned).expect("TLC should monomorphize");
     let root_entry = monomorphic
         .defs
         .iter()

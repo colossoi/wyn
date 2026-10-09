@@ -32,14 +32,12 @@ fn empty_model_lookups() {
     assert!(model.live_out.is_empty());
 }
 
-fn compile_to_tlc(source: &str) -> tlc::stage::BuffersPinned {
+fn compile_to_tlc(source: &str) -> tlc::stage::PartialEvaled {
     let type_checked = compile_thru_frontend(source).expect("type_check");
     let program = ast_type_holes::reject_type_holes(type_checked).expect("type holes");
     let program = tlc::lower_from_ast(program).expect("lower_from_ast");
     let program = tlc::validate_ownership(program).expect("validate_ownership");
-    let program = tlc::partial_eval(program);
-    let program = tlc::extract_stages(program).expect("extract_stages");
-    tlc::pin_entry_buffers(program).expect("pin_entry_buffers")
+    tlc::partial_eval(program)
 }
 
 fn find_def<'a, Tag, F: tlc::Family, GlobalContext>(
@@ -55,7 +53,7 @@ fn find_def<'a, Tag, F: tlc::Family, GlobalContext>(
 
 fn param_origin(
     model: &AnalysisState,
-    def: &tlc::Def<tlc::family::Polymorphic>,
+    def: &tlc::Def<tlc::run::UnpinnedPolymorphic>,
     param_index: usize,
 ) -> Origin {
     let lam = match &def.body.kind {
@@ -111,7 +109,7 @@ def f(x: i32) i32 = x + 1
 /// Build a Let term by hand and run `build` on a synthesized program.
 /// Bypasses partial_eval, which would otherwise inline trivial
 /// `let x = y in body` aliases away before they reach our pass.
-fn synth_program_with_alias_let() -> (tlc::stage::BuffersPinned, SymbolId, SymbolId) {
+fn synth_program_with_alias_let() -> (tlc::stage::PartialEvaled, SymbolId, SymbolId) {
     use crate::ast::{Span, TypeName};
     use crate::tlc::{Def, DefMeta, Lambda, Term, TermIdSource, TermKind};
     use polytype::Type;
@@ -191,7 +189,7 @@ fn synth_program_with_alias_let() -> (tlc::stage::BuffersPinned, SymbolId, Symbo
         vec![def],
         symbols,
         ids,
-        tlc::context::RewriteGlobal {
+        tlc::context::TransformedGlobal {
             known_defs: Default::default(),
             auto_storage_binding_ids: Default::default(),
         },
@@ -322,9 +320,9 @@ def f(a: *[4]i32) i32 = a[0]
 fn find_app_call_to<'a>(
     body: &'a Term,
     names: &[&str],
-    program: &tlc::stage::BuffersPinned,
+    program: &tlc::stage::PartialEvaled,
 ) -> Option<&'a Term> {
-    fn func_matches(t: &Term, names: &[&str], program: &tlc::stage::BuffersPinned) -> bool {
+    fn func_matches(t: &Term, names: &[&str], program: &tlc::stage::PartialEvaled) -> bool {
         match &t.kind {
             TermKind::Var(VarRef::Symbol(sym)) => {
                 program.symbols.get(*sym).map(|s| names.contains(&s.as_str())).unwrap_or(false)
@@ -338,7 +336,7 @@ fn find_app_call_to<'a>(
             _ => false,
         }
     }
-    fn walk<'a>(t: &'a Term, names: &[&str], program: &tlc::stage::BuffersPinned) -> Option<&'a Term> {
+    fn walk<'a>(t: &'a Term, names: &[&str], program: &tlc::stage::PartialEvaled) -> Option<&'a Term> {
         if let TermKind::App { func, args } = &t.kind {
             if func_matches(func, names, program) {
                 return Some(t);
@@ -1053,11 +1051,11 @@ def main(arr: *[4]i32) i32 =
 /// false-positive matches against prelude symbols with the same
 /// surface name.
 fn binder_origin(
-    program: &tlc::stage::BuffersPinned,
+    program: &tlc::stage::PartialEvaled,
     fn_name: &str,
     var_name: &str,
 ) -> (super::OwnerId, Origin) {
-    fn find_let_sym(t: &Term, var_name: &str, program: &tlc::stage::BuffersPinned) -> Option<SymbolId> {
+    fn find_let_sym(t: &Term, var_name: &str, program: &tlc::stage::PartialEvaled) -> Option<SymbolId> {
         if let TermKind::Let { name, .. } = &t.kind {
             if program.symbols.get(*name).map(|s| s.as_str()) == Some(var_name) {
                 return Some(*name);

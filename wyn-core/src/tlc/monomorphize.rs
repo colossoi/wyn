@@ -4,8 +4,8 @@
 //! the definition being rewritten and follow let bindings, including those
 //! introduced while instantiating local polymorphic lambdas.
 
-use super::data::Empty;
-use super::pin_entry_buffers::{BuffersPinned, Polymorphic};
+use super::data::{Empty, PolymorphicDefinition};
+use super::pin_entry_buffers::BuffersPinned;
 use super::{
     apply_type_substitution, curried_function_type, extend_type_substitution, ArrayExpr, Def, DefMeta,
     Program, RewriteDecision, SoacOp, Term, TermId, TermIdSource, TermKind, TermRewriter, TypeSubstitution,
@@ -17,6 +17,9 @@ use crate::types::{TypeExt, TypeScheme};
 use crate::{LookupMap, SymbolId, SymbolTable};
 use polytype::Type;
 use std::collections::VecDeque;
+use std::fmt::Debug;
+
+type Specializable<E> = super::TreeFamily<PolymorphicDefinition, E, Empty, Empty>;
 
 /// Monomorphic TLC stores no per-definition payload; specialization consumes
 /// the source schemes while constructing this family.
@@ -27,6 +30,24 @@ pub type Monomorphic = super::TreeFamily<(), super::data::PinnedEntry, Empty, Em
 pub enum MonomorphizedTag {}
 pub type Monomorphized = super::Program<MonomorphizedTag, Monomorphic, super::context::RewriteGlobal>;
 
+/// Type specialization leaves descriptor regions unresolved until final stages exist.
+#[derive(Debug, Clone, Copy)]
+pub enum TypesSpecializedTag {}
+pub type TypesSpecialized =
+    super::Program<TypesSpecializedTag, super::run::UnpinnedPolymorphic, super::context::TransformedGlobal>;
+
+/// Specialize unified roots without erasing regions that final stages will bind.
+pub fn specialize_types(
+    mut program: super::stage::PartialEvaled,
+) -> Result<TypesSpecialized, CompilerError> {
+    super::specialize::specialize_intrinsics(&mut program);
+    program.defs = Monomorphizer::new(&mut program.symbols, program.defs, &mut program.term_ids, false)
+        .monomorphize()?;
+    program.assert_flat_apps();
+    Ok(program.retag())
+}
+
+/// Finish representation and buffer specialization after physical interfaces are known.
 pub fn monomorphize(mut program: BuffersPinned) -> std::result::Result<Monomorphized, CompilerError> {
     super::specialize::specialize_intrinsics(&mut program);
     let Program {
@@ -36,30 +57,45 @@ pub fn monomorphize(mut program: BuffersPinned) -> std::result::Result<Monomorph
         global_context,
         state: _,
     } = program;
-    let defs = Monomorphizer::new(&mut symbols, defs, &mut term_ids).monomorphize()?;
+    let defs = Monomorphizer::new(&mut symbols, defs, &mut term_ids, true).monomorphize()?;
+    let defs = defs
+        .into_iter()
+        .map(|def| Def {
+            data: (),
+            name: def.name,
+            package: def.package,
+            ty: def.ty,
+            body: def.body,
+            meta: def.meta,
+            arity: def.arity,
+            param_diets: def.param_diets,
+            return_diet: def.return_diet,
+        })
+        .collect();
     let program = Program::from_parts(defs, symbols, term_ids, global_context);
     program.assert_flat_apps();
     Ok(program)
 }
 
-struct Monomorphizer<'symbols, 'ids> {
+struct Monomorphizer<'symbols, 'ids, E: Clone + Debug> {
+    regions_pinned: bool,
     symbols: &'symbols mut SymbolTable,
-    definitions: LookupMap<SymbolId, DefinitionRecord>,
+    definitions: LookupMap<SymbolId, DefinitionRecord<E>>,
     specializations: LookupMap<(SymbolId, SpecKey), Specialization>,
     worklist: VecDeque<WorkItem>,
     producer_variants: ProducerVariants,
     term_ids: &'ids mut TermIdSource,
 }
 
-struct DefinitionRecord {
+struct DefinitionRecord<E: Clone + Debug> {
     info: DefinitionInfo,
     /// Ordinary definitions are moved into the output; specializable ones
     /// retain their template for further instantiations.
-    template: Option<Def<Polymorphic>>,
+    template: Option<Def<Specializable<E>>>,
 }
 
-impl DefinitionRecord {
-    fn new(definition: Def<Polymorphic>) -> Self {
+impl<E: Clone + Debug> DefinitionRecord<E> {
+    fn new(definition: Def<Specializable<E>>) -> Self {
         let info = DefinitionInfo {
             scheme: definition.data.scheme.clone(),
             ty: definition.ty.clone(),
@@ -74,7 +110,7 @@ impl DefinitionRecord {
         }
     }
 
-    fn materialize(&mut self, retain_template: bool) -> Option<Def<Polymorphic>> {
+    fn materialize(&mut self, retain_template: bool) -> Option<Def<Specializable<E>>> {
         if retain_template {
             self.template.clone()
         } else {
@@ -177,11 +213,12 @@ fn split_function_type(ty: &Type<TypeName>) -> (Vec<Type<TypeName>>, Type<TypeNa
     (params, current)
 }
 
-impl<'symbols, 'ids> Monomorphizer<'symbols, 'ids> {
+impl<'symbols, 'ids, E: Clone + Debug> Monomorphizer<'symbols, 'ids, E> {
     fn new(
         symbols: &'symbols mut SymbolTable,
-        defs: Vec<Def<Polymorphic>>,
+        defs: Vec<Def<Specializable<E>>>,
         term_ids: &'ids mut TermIdSource,
+        regions_pinned: bool,
     ) -> Self {
         let entries: Vec<_> = defs
             .iter()
@@ -189,6 +226,7 @@ impl<'symbols, 'ids> Monomorphizer<'symbols, 'ids> {
             .map(|def| def.name)
             .collect();
         let mut this = Self {
+            regions_pinned,
             symbols,
             definitions: defs.into_iter().map(|def| (def.name, DefinitionRecord::new(def))).collect(),
             specializations: LookupMap::new(),
@@ -202,7 +240,7 @@ impl<'symbols, 'ids> Monomorphizer<'symbols, 'ids> {
         this
     }
 
-    fn monomorphize(mut self) -> std::result::Result<Vec<Def<Monomorphic>>, CompilerError> {
+    fn monomorphize(mut self) -> std::result::Result<Vec<Def<Specializable<E>>>, CompilerError> {
         let mut defs = Vec::new();
         while let Some(work_item) = self.worklist.pop_front() {
             self.producer_variants.clear();
@@ -215,7 +253,7 @@ impl<'symbols, 'ids> Monomorphizer<'symbols, 'ids> {
     fn materialize_work_item(
         &mut self,
         work_item: &WorkItem,
-    ) -> std::result::Result<Def<Polymorphic>, CompilerError> {
+    ) -> std::result::Result<Def<Specializable<E>>, CompilerError> {
         let Some(definition) = self.definitions.get_mut(&work_item.original_sym) else {
             return Err(CompilerError::Internal(format!(
                 "monomorphization work item refers to missing definition {:?}",
@@ -248,29 +286,10 @@ impl<'symbols, 'ids> Monomorphizer<'symbols, 'ids> {
         Ok(def)
     }
 
-    fn process_def(&mut self, def: Def<Polymorphic>) -> Def<Monomorphic> {
-        let Def {
-            data: _,
-            name,
-            package,
-            ty,
-            body,
-            meta,
-            arity,
-            param_diets,
-            return_diet,
-        } = def;
-        Def {
-            data: (),
-            name,
-            package,
-            ty,
-            body: body.rewrite(self),
-            meta,
-            arity,
-            param_diets,
-            return_diet,
-        }
+    fn process_def(&mut self, mut def: Def<Specializable<E>>) -> Def<Specializable<E>> {
+        def.data.scheme = None;
+        def.body = def.body.rewrite(self);
+        def
     }
 
     fn rewrite_symbol_reference(
@@ -281,7 +300,9 @@ impl<'symbols, 'ids> Monomorphizer<'symbols, 'ids> {
         let info = &self.definitions.get(&symbol)?.info;
         let mut subst = TypeSubstitution::new();
         extend_type_substitution(info.polymorphic_type(), concrete_type, &mut subst);
-        normalize_buffer_substitutions(info.polymorphic_type(), &mut subst);
+        if self.regions_pinned {
+            normalize_buffer_substitutions(info.polymorphic_type(), &mut subst);
+        }
         let specialized = self.get_or_create_specialization(symbol, SpecKey::new(&subst));
         (specialized.symbol != symbol).then_some(specialized.symbol)
     }
@@ -308,13 +329,22 @@ impl<'symbols, 'ids> Monomorphizer<'symbols, 'ids> {
         }
     }
 
-    fn infer_call_key(&self, info: &DefinitionInfo, args: &[Term<Empty, Empty>]) -> SpecKey {
+    fn infer_call_key(
+        &self,
+        info: &DefinitionInfo,
+        args: &[Term<Empty, Empty>],
+        callee_ty: &Type<TypeName>,
+    ) -> SpecKey {
         let mut subst = TypeSubstitution::new();
+        // The instantiated callee includes result-only variables and opened existential inputs.
+        extend_type_substitution(info.polymorphic_type(), callee_ty, &mut subst);
         let (params, _) = split_function_type(info.polymorphic_type());
         for (param, arg) in params.iter().zip(args) {
             extend_type_substitution(param, &arg.ty, &mut subst);
         }
-        normalize_buffer_substitutions(info.polymorphic_type(), &mut subst);
+        if self.regions_pinned {
+            normalize_buffer_substitutions(info.polymorphic_type(), &mut subst);
+        }
         let mut key = SpecKey::new(&subst);
         if info.specialize_representations {
             key.representations = params
@@ -379,7 +409,7 @@ impl<'symbols, 'ids> Monomorphizer<'symbols, 'ids> {
     }
 }
 
-impl TermRewriter<Empty, Empty> for Monomorphizer<'_, '_> {
+impl<E: Clone + Debug> TermRewriter<Empty, Empty> for Monomorphizer<'_, '_, E> {
     fn next_term_id(&mut self) -> TermId {
         self.term_ids.next_id()
     }
@@ -419,7 +449,7 @@ impl TermRewriter<Empty, Empty> for Monomorphizer<'_, '_> {
         let Some(definition) = self.definitions.get(&symbol) else {
             return RewriteDecision::Unchanged;
         };
-        let key = self.infer_call_key(&definition.info, args);
+        let key = self.infer_call_key(&definition.info, args, &func.ty);
         let specialize_abi = !key.representations.is_empty();
         let specialized = self.get_or_create_specialization(symbol, key);
         if specialized.symbol == symbol {

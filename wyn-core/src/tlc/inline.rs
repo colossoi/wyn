@@ -1,16 +1,16 @@
 //! TLC inlining passes.
 //!
-//! The monomorphic pass expands constants and forces array-work helpers across
-//! call boundaries. After defunctionalization, the same generic inliner folds
-//! compiler-generated lifted lambdas back into their call sites.
+//! Common inlining exposes constants, array work, and compile-time values
+//! before stage extraction and physical specialization. After defunctionalization,
+//! the same inliner folds generated lambdas back into their call sites.
 
 use super::data::{Empty, ExplicitCapturesPayload, ExplicitClosurePayload};
 use super::defunctionalize::{ClosureConverted, Defunctionalized};
 use super::monomorphize::Monomorphized;
 use super::VarRef;
 use super::{
-    clone_term_with_fresh_ids, extract_lambda_params, Bindings, Def, DefMeta, LetBinding, Payload,
-    RewriteDecision, Term, TermId, TermIdSource, TermKind, TermRewriter,
+    clone_term_with_fresh_ids, extract_lambda_params, Bindings, Def, DefMeta, Family, LetBinding, Payload,
+    Program, RewriteDecision, Term, TermId, TermIdSource, TermKind, TermRewriter,
 };
 use crate::ast::{Span, TypeName};
 use crate::builtins;
@@ -18,6 +18,20 @@ use crate::map_in_place;
 use crate::{LookupMap, LookupSet};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
+
+/// Unified calls have been specialized and exposed, before execution boundaries
+/// assign physical interfaces to their callbacks.
+#[derive(Debug, Clone, Copy)]
+pub enum UnifiedHelpersInlinedTag {}
+pub type UnifiedHelpersInlined =
+    Program<UnifiedHelpersInlinedTag, super::run::UnpinnedPolymorphic, super::context::TransformedGlobal>;
+
+pub fn inline_unified_helpers(mut program: super::stage::TypesSpecialized) -> UnifiedHelpersInlined {
+    expand_constants(&mut program);
+    inline_helpers_to_fixpoint(&mut program, true);
+    program.assert_flat_apps();
+    program.retag()
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum SoacHelpersInlinedTag {}
@@ -44,7 +58,7 @@ pub type GeneratedLambdasFolded = super::Program<
 pub fn force_inline_soac_helpers(mut program: Monomorphized) -> SoacHelpersInlined {
     expand_constants(&mut program);
     super::dce::eliminate_unreachable_defs(&mut program.defs);
-    force_inline_array_work_helpers_to_fixpoint(&mut program);
+    inline_helpers_to_fixpoint(&mut program, false);
     debug_assert!(
         verify_array_work_helpers_inlined(&program).is_ok(),
         "force-inline left an array-work helper behind a call boundary; \
@@ -99,33 +113,47 @@ fn collect_called_array_work_helpers(
     });
 }
 
-fn force_inline_array_work_helpers_to_fixpoint(program: &mut Monomorphized) {
-    // Bound iterations to guard against pathological recursion through
-    // hand-crafted call graphs; typical wyn helper depth is 2–3.
+fn inline_helpers_to_fixpoint<Tag, F, G>(program: &mut Program<Tag, F, G>, unified: bool)
+where
+    F: Family<ClosureData = Empty, SoacBodyData = Empty>,
+{
+    // Bound expansion of recursive helpers.
     for _ in 0..8 {
-        let candidates = build_array_work_helper_candidates(program);
-        if candidates.is_empty() {
-            return;
-        }
-        // Stop when nothing in the program calls any current candidate.
-        // (Inlining one round may expose new candidates — e.g. inlining
-        // `sum` into `center`'s body makes `center` SOAC-bearing and a
-        // candidate next round — so we re-detect candidates each iter.)
-        if !any_def_calls_candidate(program, &candidates) {
-            return;
-        }
-        let term_ids = &mut program.term_ids;
+        let candidates = build_helper_candidates(program, unified);
+        let mut changed = false;
         map_in_place(&mut program.defs, |def| {
-            let body = inline_term(def.body, &candidates, term_ids);
+            let mut inliner = FunctionInliner {
+                candidates: &candidates,
+                term_ids: &mut program.term_ids,
+                expand_values: unified,
+            };
+            let (body, inlined) = inliner.rewrite_owned_tracked(def.body);
+            let (body, normalized) =
+                if unified { normalize_values(body, &mut program.term_ids) } else { (body, false) };
+            changed |= inlined || normalized;
             Def { body, ..def }
         });
         super::dce::eliminate_unreachable_defs(&mut program.defs);
+        if !changed {
+            break;
+        }
     }
 }
 
-fn build_array_work_helper_candidates(
-    program: &Monomorphized,
-) -> LookupMap<SymbolId, InlineBody<Empty, Empty>> {
+fn build_helper_candidates<Tag, F, G>(
+    program: &Program<Tag, F, G>,
+    unified: bool,
+) -> LookupMap<SymbolId, InlineBody<Empty, Empty>>
+where
+    F: Family<ClosureData = Empty, SoacBodyData = Empty>,
+{
+    let mut callbacks = LookupSet::new();
+    if unified {
+        for def in &program.defs {
+            let (body, _) = super::extract_lambda_params_ref(&def.body);
+            collect_function_values(body, &mut callbacks);
+        }
+    }
     let mut candidates = LookupMap::new();
     for def in &program.defs {
         if !matches!(def.meta, DefMeta::Function) {
@@ -139,12 +167,42 @@ fn build_array_work_helper_candidates(
         // Any helper containing array work is a candidate, control flow or
         // not, so neither a SOAC nor an explicit range/literal producer is
         // reachable behind a call (`verify_array_work_helpers_inlined`).
-        if !contains_array_work(&body) {
+        if !contains_array_work(&body)
+            && !(unified
+                && (contains_opaque_type(&def.ty)
+                    || callbacks.contains(&def.name)
+                    || is_structural_value(&body)))
+        {
             continue;
         }
         candidates.insert(def.name, InlineBody { params, body });
     }
     candidates
+}
+
+/// Function values must expose their bodies before callback interfaces are selected.
+fn collect_function_values(term: &Term, out: &mut LookupSet<SymbolId>) {
+    match &term.kind {
+        TermKind::Var(VarRef::Symbol(symbol)) => {
+            out.insert(*symbol);
+        }
+        TermKind::App { func, args } => {
+            if !matches!(func.kind, TermKind::Var(_)) {
+                collect_function_values(func, out);
+            }
+            for arg in args {
+                collect_function_values(arg, out);
+            }
+        }
+        TermKind::Lambda(lambda) => {
+            // Expose forwarding callbacks without expanding their scalar call trees.
+            if let TermKind::App { func, .. } = &lambda.body.kind {
+                collect_function_values(func, out);
+            }
+            collect_function_values(&lambda.body, out);
+        }
+        _ => term.for_each_child(&mut |child| collect_function_values(child, out)),
+    }
 }
 
 /// True if `term` contains a SOAC, an explicit array producer, or a `length` / `#[scratch]`
@@ -180,31 +238,11 @@ fn is_array_shape_intrinsic_call<C: Payload, S: Payload>(term: &Term<C, S>) -> b
     *id == builtins::catalog().known().length || *id == builtins::catalog().known().scratch_annotation
 }
 
-fn any_def_calls_candidate(
-    program: &Monomorphized,
-    candidates: &LookupMap<SymbolId, InlineBody<Empty, Empty>>,
-) -> bool {
-    fn walk(term: &Term<Empty, Empty>, cs: &LookupMap<SymbolId, InlineBody<Empty, Empty>>) -> bool {
-        if let TermKind::App { func, .. } = &term.kind {
-            if let TermKind::Var(VarRef::Symbol(s)) = &func.kind {
-                if cs.contains_key(s) {
-                    return true;
-                }
-            }
-        }
-        let mut found = false;
-        term.for_each_child(&mut |c| {
-            if !found {
-                found = walk(c, cs);
-            }
-        });
-        found
-    }
-    program.defs.iter().any(|def| walk(&def.body, candidates))
-}
-
 /// Expose constant bodies before selecting helpers that contain array work.
-fn expand_constants(program: &mut Monomorphized) {
+fn expand_constants<Tag, F, G>(program: &mut Program<Tag, F, G>)
+where
+    F: Family<ClosureData = Empty, SoacBodyData = Empty>,
+{
     let all_constants = find_all_constants(program);
     let mut constants = ConstantInliner {
         constants: &all_constants,
@@ -247,7 +285,10 @@ struct InlineBody<C: Payload, S: Payload> {
 }
 
 /// Find zero-arity, non-entry, non-extern definitions by their SymbolId.
-fn find_all_constants(program: &Monomorphized) -> LookupMap<SymbolId, Term<Empty, Empty>> {
+fn find_all_constants<Tag, F, G>(program: &Program<Tag, F, G>) -> LookupMap<SymbolId, Term<Empty, Empty>>
+where
+    F: Family<ClosureData = Empty, SoacBodyData = Empty>,
+{
     program
         .defs
         .iter()
@@ -322,10 +363,15 @@ fn inline_term<C: Payload, S: Payload>(
     candidates: &LookupMap<SymbolId, InlineBody<C, S>>,
     term_ids: &mut TermIdSource,
 ) -> Term<C, S> {
-    term.rewrite_owned(&mut FunctionInliner { candidates, term_ids })
+    term.rewrite_owned(&mut FunctionInliner {
+        candidates,
+        term_ids,
+        expand_values: false,
+    })
 }
 
 struct FunctionInliner<'a, 'ids, C: Payload, S: Payload> {
+    expand_values: bool,
     candidates: &'a LookupMap<SymbolId, InlineBody<C, S>>,
     term_ids: &'ids mut TermIdSource,
 }
@@ -336,20 +382,47 @@ impl<C: Payload, S: Payload> TermRewriter<C, S> for FunctionInliner<'_, '_, C, S
     }
 
     fn rewrite_owned_node(&mut self, term: Term<C, S>) -> (Term<C, S>, RewriteDecision) {
-        let candidate = match &term.kind {
+        if self.expand_values {
+            if let TermKind::Var(VarRef::Symbol(symbol)) = &term.kind {
+                if let Some(candidate) = self.candidates.get(symbol) {
+                    let body = clone_term_with_fresh_ids(&candidate.body, self.term_ids);
+                    return (
+                        Term {
+                            kind: TermKind::Lambda(super::Lambda {
+                                params: candidate.params.clone(),
+                                ret_ty: body.ty.clone(),
+                                body: Box::new(body),
+                            }),
+                            ..term
+                        },
+                        RewriteDecision::Changed,
+                    );
+                }
+            }
+        }
+        let (params, body) = match &term.kind {
             TermKind::App { func, args } => match &func.kind {
                 TermKind::Var(VarRef::Symbol(symbol)) => {
-                    self.candidates.get(symbol).filter(|candidate| args.len() == candidate.params.len())
+                    let Some(candidate) = self
+                        .candidates
+                        .get(symbol)
+                        .filter(|candidate| args.len() == candidate.params.len())
+                    else {
+                        return (term, RewriteDecision::Unchanged);
+                    };
+                    (
+                        candidate.params.clone(),
+                        clone_term_with_fresh_ids(&candidate.body, self.term_ids),
+                    )
                 }
-                _ => None,
+                TermKind::Lambda(lambda) if lambda.params.len() == args.len() => (
+                    lambda.params.clone(),
+                    clone_term_with_fresh_ids(&lambda.body, self.term_ids),
+                ),
+                _ => return (term, RewriteDecision::Unchanged),
             },
-            _ => None,
+            _ => return (term, RewriteDecision::Unchanged),
         };
-        let Some(candidate) = candidate else {
-            return (term, RewriteDecision::Unchanged);
-        };
-        let params = candidate.params.clone();
-        let body = clone_term_with_fresh_ids(&candidate.body, self.term_ids);
 
         let Term {
             id,
@@ -450,4 +523,119 @@ fn substitute_sym_and_retype<C: Payload, S: Payload>(
         },
         term_ids,
     )
+}
+
+/// Inline aliases and structural tuple/record packing before stage planning:
+/// naming or assembling existing arrays does not create a compute producer.
+/// Also scalar-replace aggregates containing compile-time-only resources, whose
+/// leaves have no shader representation. Keep projections of computed values
+/// bound so SOAC inputs retain symbols and producer provenance. Repeating to a
+/// fixed point folds projections exposed by substitution.
+fn normalize_values(mut term: Term, term_ids: &mut TermIdSource) -> (Term, bool) {
+    let mut any_changed = false;
+    loop {
+        let (rewritten, changed) = ValueNormalizer { term_ids }.rewrite_owned_tracked(term);
+        term = rewritten;
+        any_changed |= changed;
+        if !changed {
+            return (term, any_changed);
+        }
+    }
+}
+
+struct ValueNormalizer<'a> {
+    term_ids: &'a mut TermIdSource,
+}
+
+impl TermRewriter<Empty, Empty> for ValueNormalizer<'_> {
+    fn next_term_id(&mut self) -> super::TermId {
+        self.term_ids.next_id()
+    }
+
+    fn rewrite_owned_node(&mut self, term: Term) -> (Term, RewriteDecision) {
+        match term.kind {
+            TermKind::Let {
+                name,
+                name_ty,
+                rhs,
+                body,
+            } if is_structural_value(&rhs)
+                && (matches!(
+                    &rhs.kind,
+                    TermKind::Var(_) | TermKind::Tuple(_) | TermKind::Lambda(_)
+                ) || (!is_static_resource_type(&name_ty)
+                    && contains_static_resource_type(&name_ty))) =>
+            {
+                let replacement = *rhs;
+                let body = super::subst::substitute_with(
+                    *body,
+                    name,
+                    &mut |occurrence, ids| {
+                        let mut value = clone_term_with_fresh_ids(&replacement, ids);
+                        value.span = occurrence.span;
+                        value
+                    },
+                    self.term_ids,
+                );
+                (body, RewriteDecision::Changed)
+            }
+            TermKind::TupleProj { tuple, idx } if matches!(&tuple.kind, TermKind::Tuple(values) if values.iter().all(is_structural_value)) =>
+            {
+                let TermKind::Tuple(mut values) = tuple.kind else {
+                    unreachable!()
+                };
+                (values.remove(idx), RewriteDecision::Changed)
+            }
+            kind => (Term { kind, ..term }, RewriteDecision::Unchanged),
+        }
+    }
+}
+
+fn is_static_resource_type(ty: &Type<TypeName>) -> bool {
+    matches!(
+        ty,
+        Type::Constructed(TypeName::RenderTarget | TypeName::StorageTexture, _)
+    )
+}
+
+fn contains_static_resource_type(ty: &Type<TypeName>) -> bool {
+    match ty {
+        _ if is_static_resource_type(ty) => true,
+        Type::Constructed(
+            TypeName::Record(_) | TypeName::Tuple(_) | TypeName::Existential(_),
+            components,
+        ) => components.iter().any(contains_static_resource_type),
+        _ => false,
+    }
+}
+
+/// Whether evaluating a term only assembles or projects an already-existing
+/// value. This deliberately excludes applications, indexing, control flow,
+/// array work, and loops: dropping any of those merely because their result is
+/// unused could discard an effect.
+fn is_structural_value(term: &Term) -> bool {
+    match &term.kind {
+        TermKind::Var(_)
+        | TermKind::IntLit(_)
+        | TermKind::FloatLit(_)
+        | TermKind::BoolLit(_)
+        | TermKind::UnitLit => true,
+        TermKind::Lambda(_) => true,
+        TermKind::Coerce { inner, .. } => is_structural_value(inner),
+        TermKind::Tuple(values) | TermKind::VecLit(values) => values.iter().all(is_structural_value),
+        TermKind::TupleProj { tuple, .. } => is_structural_value(tuple),
+        TermKind::Let { rhs, body, .. } => is_structural_value(rhs) && is_structural_value(body),
+        _ => false,
+    }
+}
+
+fn contains_opaque_type(ty: &Type<TypeName>) -> bool {
+    match ty {
+        Type::Constructed(
+            TypeName::RenderTarget | TypeName::StorageTexture | TypeName::Raster | TypeName::Vertex,
+            _,
+        ) => true,
+        Type::Constructed(_, fields) => fields.iter().any(contains_opaque_type),
+        _ => false,
+    }
 }

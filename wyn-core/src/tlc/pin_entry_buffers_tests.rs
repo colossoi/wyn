@@ -15,6 +15,8 @@ fn pin(src: &str) -> tlc::stage::BuffersPinned {
     let program = tlc::lower_from_ast(program).expect("lower_from_ast");
     let program = tlc::validate_ownership(program).expect("validate_ownership");
     let program = tlc::partial_eval(program);
+    let program = tlc::specialize_types(program).expect("specialize_types");
+    let program = tlc::inline_unified_helpers(program);
     let program = tlc::extract_stages(program).expect("extract_stages");
     tlc::pin_entry_buffers(program).expect("pin_entry_buffers")
 }

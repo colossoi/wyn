@@ -648,6 +648,11 @@ fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileRe
         Err(e) => return CompileResultWgsl::err(source, e),
     };
     let program = wyn_core::tlc::partial_eval(program);
+    let program = match wyn_core::tlc::specialize_types(program) {
+        Ok(t) => t,
+        Err(e) => return CompileResultWgsl::err(source, e),
+    };
+    let program = wyn_core::tlc::inline_unified_helpers(program);
     let program = match wyn_core::tlc::extract_stages(program) {
         Ok(t) => t,
         Err(e) => return CompileResultWgsl::err(source, e),

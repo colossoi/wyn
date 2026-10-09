@@ -652,6 +652,15 @@ fn compile_tlc(modules: ParsedModules, options: &CompileOptions) -> Result<TlcCo
         wyn_core::tlc::partial_eval(program)
     });
     let program = retain_source(
+        time("specialize_types", verbose, || {
+            wyn_core::tlc::specialize_types(program)
+        }),
+        &source_graph,
+    )?;
+    let program = time("inline_unified_helpers", verbose, || {
+        wyn_core::tlc::inline_unified_helpers(program)
+    });
+    let program = retain_source(
         time("extract_stages", verbose, || {
             wyn_core::tlc::extract_stages(program)
         }),
@@ -872,6 +881,8 @@ fn check(input: PathBuf, graphics: bool, warning_limit: usize, verbose: bool) ->
     let program = retain_source(wyn_core::tlc::lower_from_ast(program), &source_graph)?;
     let program = retain_source(wyn_core::tlc::validate_ownership(program), &source_graph)?;
     let program = wyn_core::tlc::partial_eval(program);
+    let program = retain_source(wyn_core::tlc::specialize_types(program), &source_graph)?;
+    let program = wyn_core::tlc::inline_unified_helpers(program);
     let program = retain_source(wyn_core::tlc::extract_stages(program), &source_graph)?;
     retain_source(wyn_core::tlc::pin_entry_buffers(program), &source_graph)?;
 

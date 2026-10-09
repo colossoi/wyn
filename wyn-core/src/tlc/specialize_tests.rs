@@ -55,7 +55,7 @@ fn test_specialize_sign_f32() {
 
     let (symbols, term_ids) = b.finish();
 
-    let mut program = Program::from_parts(
+    let mut program: crate::tlc::stage::BuffersPinned = Program::from_parts(
         vec![Def {
             data: PolymorphicDefinition { scheme: None },
             name: test_sym,
@@ -144,7 +144,7 @@ fn test_specialize_min_i32() {
 
     let (symbols, term_ids) = b.finish();
 
-    let mut program = Program::from_parts(
+    let mut program: crate::tlc::stage::BuffersPinned = Program::from_parts(
         vec![Def {
             data: PolymorphicDefinition { scheme: None },
             name: test_sym,

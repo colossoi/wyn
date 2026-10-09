@@ -258,6 +258,8 @@ pub use polytype::Context as PolytypeContext;
 //       tlc::lower_from_ast(program)    -> tlc::stage::Transformed
 //       tlc::validate_ownership(...)     -> tlc::stage::OwnershipValidated
 //       tlc::partial_eval(...)           -> tlc::stage::PartialEvaled
+//       tlc::specialize_types(...)      -> tlc::stage::TypesSpecialized
+//       tlc::inline_unified_helpers(...) -> tlc::stage::UnifiedHelpersInlined
 //       tlc::extract_stages(...)          -> tlc::stage::StagesExtracted
 //       tlc::pin_entry_buffers(...)       -> tlc::stage::BuffersPinned
 //       tlc::monomorphize(...)           -> tlc::stage::Monomorphized
@@ -317,6 +319,8 @@ pub(crate) fn optimize_tlc_for_test_thru_soac_normalization(
     program: tlc::stage::OwnershipValidated,
 ) -> error::Result<tlc::stage::SoacsAnfNormalized> {
     let program = tlc::partial_eval(program);
+    let program = tlc::specialize_types(program)?;
+    let program = tlc::inline_unified_helpers(program);
     let program = tlc::extract_stages(program)?;
     let program = tlc::pin_entry_buffers(program)?;
     let program = tlc::monomorphize(program)?;

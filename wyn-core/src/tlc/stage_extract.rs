@@ -3,16 +3,16 @@
 //! Source programs expose one host-visible root. Rasterization and shading calls
 //! in that root delimit callbacks whose bodies execute in platform stage
 //! contexts. This pass consumes those delimiters after unified-program
-//! analysis and before representation-oriented TLC transforms can mistake
-//! their opaque orchestration values for shader values.
+//! specialization and helper normalization, before representation-oriented TLC
+//! transforms can mistake opaque orchestration values for shader values.
 
 use super::data;
-use super::partial_eval::PartialEvaled;
+use super::inline::UnifiedHelpersInlined;
 use super::run::UnpinnedPolymorphic;
 use super::{
-    apply_type_substitution, clone_term_with_fresh_ids, curried_function_type, extend_type_substitution,
-    Def, DefMeta, EntryPoint, Lambda, Program, ProgramParts, RewriteDecision, Term, TermIdSource, TermKind,
-    TermRewriter, TermVisitor, TypeSubstitution, VarRef, WalkDecision,
+    clone_term_with_fresh_ids, curried_function_type, Def, DefMeta, EntryPoint, Lambda, Program,
+    ProgramParts, RewriteDecision, Term, TermIdSource, TermKind, TermRewriter, TermVisitor, VarRef,
+    WalkDecision,
 };
 use crate::ast;
 use crate::ast::Span;
@@ -122,206 +122,6 @@ fn contains_graphics_invocation(term: &Term, builtins: &InvocationBuiltins) -> b
     found
 }
 
-#[derive(Clone)]
-struct StageHelper {
-    params: Vec<(SymbolId, Type)>,
-    body: Term,
-}
-
-fn stage_helper(definition: &Def<UnpinnedPolymorphic>) -> Option<(SymbolId, StageHelper)> {
-    if !matches!(definition.meta, DefMeta::Function) || definition.arity == 0 {
-        return None;
-    }
-    let (body, params) = super::extract_lambda_params_ref(&definition.body);
-    Some((
-        definition.name,
-        StageHelper {
-            params,
-            body: body.clone(),
-        },
-    ))
-}
-
-fn stage_constant(definition: &Def<UnpinnedPolymorphic>) -> Option<(SymbolId, StageHelper)> {
-    if !matches!(definition.meta, DefMeta::Function) || definition.arity != 0 {
-        return None;
-    }
-    Some((
-        definition.name,
-        StageHelper {
-            params: Vec::new(),
-            body: definition.body.clone(),
-        },
-    ))
-}
-
-fn inline_stage_helpers(
-    term: Term,
-    helpers: &LookupMap<SymbolId, StageHelper>,
-    term_ids: &mut TermIdSource,
-) -> Term {
-    let term = StageHelperInliner {
-        helpers,
-        term_ids,
-        active: LookupSet::new(),
-    }
-    .rewrite_owned(term);
-    normalize_stage_values(term, term_ids)
-}
-
-struct StageHelperInliner<'a> {
-    helpers: &'a LookupMap<SymbolId, StageHelper>,
-    term_ids: &'a mut TermIdSource,
-    active: LookupSet<SymbolId>,
-}
-
-impl TermRewriter<data::Empty, data::Empty> for StageHelperInliner<'_> {
-    fn next_term_id(&mut self) -> super::TermId {
-        self.term_ids.next_id()
-    }
-
-    fn rewrite_owned_node(&mut self, term: Term) -> (Term, RewriteDecision) {
-        let candidate = match &term.kind {
-            TermKind::Var(VarRef::Symbol(symbol)) => self
-                .helpers
-                .get(symbol)
-                .filter(|candidate| candidate.params.is_empty())
-                .cloned()
-                .map(|candidate| (*symbol, candidate, true, false)),
-            TermKind::App { func, args } => match &func.kind {
-                TermKind::Var(VarRef::Symbol(symbol)) => self
-                    .helpers
-                    .get(symbol)
-                    .filter(|candidate| candidate.params.len() == args.len())
-                    .cloned()
-                    .map(|candidate| {
-                        let carries_static_resource =
-                            args.iter().any(|argument| contains_static_resource_type(&argument.ty));
-                        (*symbol, candidate, false, carries_static_resource)
-                    }),
-                _ => None,
-            },
-            _ => None,
-        };
-        let Some((symbol, candidate, is_constant, carries_static_resource)) = candidate else {
-            return (term, RewriteDecision::Unchanged);
-        };
-        if !self.active.insert(symbol) {
-            return (term, RewriteDecision::Unchanged);
-        }
-        let mut params = candidate.params.clone();
-        let mut body = clone_term_with_fresh_ids(&candidate.body, self.term_ids);
-        let Term { id, ty, span, kind } = term;
-        let mut replacement = match kind {
-            TermKind::Var(VarRef::Symbol(_)) => body,
-            TermKind::App { args, .. } => {
-                // This is the same structural specialization used by the
-                // monomorphizer. Applying it while exposing a stage helper
-                // preserves hidden array/resource slots in the cloned body.
-                let mut subst = TypeSubstitution::new();
-                for ((_, param_ty), argument) in params.iter().zip(&args) {
-                    extend_type_substitution(param_ty, &argument.ty, &mut subst);
-                }
-                // Result-only size variables also belong to this call site.
-                // Normalize them throughout the body before removing the
-                // argument lets that carry the application's result type.
-                extend_type_substitution(&body.ty, &ty, &mut subst);
-                if !subst.is_empty() {
-                    for (_, param_ty) in &mut params {
-                        *param_ty = apply_type_substitution(param_ty, &subst);
-                    }
-                    body.rewrite_types(self.term_ids, &mut |ty| apply_type_substitution(ty, &subst));
-                }
-                super::inline::build_inline_lets(&params, args, body, span, self.term_ids)
-            }
-            _ => unreachable!(),
-        };
-        replacement.id = id;
-        replacement.ty = ty;
-        // The normal post-order rewrite intentionally expands each function
-        // helper only once; revisiting every inserted body would explode
-        // prelude SOAC helpers such as filter. Constants must be expanded
-        // transitively so a named descriptor can itself use named constants.
-        // Render targets also cannot survive as shader-stage values, so expose
-        // those helper chains before target_load/target_sample rewriting.
-        // Active-call tracking leaves a recursive source edge intact instead
-        // of recursing forever.
-        // Raster/vertex wrappers must also be exposed transitively: these
-        // opaque values disappear during stage extraction, so leaving a
-        // forwarding helper would leak their types into shader lowering.
-        let carries_stage_result = matches!(
-            replacement.ty,
-            Type::Constructed(TypeName::Raster | TypeName::Vertex, _)
-        );
-        if is_constant || carries_static_resource || carries_stage_result {
-            replacement = self.rewrite_owned(replacement);
-        }
-        self.active.remove(&symbol);
-        (replacement, RewriteDecision::Changed)
-    }
-}
-
-/// Inline aliases and structural tuple/record packing before stage planning:
-/// naming or assembling existing arrays does not create a compute producer.
-/// Also scalar-replace aggregates containing compile-time-only resources, whose
-/// leaves have no shader representation. Keep projections of computed values
-/// bound so SOAC inputs retain symbols and producer provenance. Repeating to a
-/// fixed point folds projections exposed by substitution.
-fn normalize_stage_values(mut term: Term, term_ids: &mut TermIdSource) -> Term {
-    loop {
-        let (rewritten, changed) = StageValueNormalizer { term_ids }.rewrite_owned_tracked(term);
-        term = rewritten;
-        if !changed {
-            return term;
-        }
-    }
-}
-
-struct StageValueNormalizer<'a> {
-    term_ids: &'a mut TermIdSource,
-}
-
-impl TermRewriter<data::Empty, data::Empty> for StageValueNormalizer<'_> {
-    fn next_term_id(&mut self) -> super::TermId {
-        self.term_ids.next_id()
-    }
-
-    fn rewrite_owned_node(&mut self, term: Term) -> (Term, RewriteDecision) {
-        match term.kind {
-            TermKind::Let {
-                name,
-                name_ty,
-                rhs,
-                body,
-            } if is_structural_value(&rhs)
-                && (matches!(&rhs.kind, TermKind::Var(_) | TermKind::Tuple(_))
-                    || (!is_static_resource_type(&name_ty) && contains_static_resource_type(&name_ty))) =>
-            {
-                let replacement = *rhs;
-                let body = super::subst::substitute_with(
-                    *body,
-                    name,
-                    &mut |occurrence, ids| {
-                        let mut value = clone_term_with_fresh_ids(&replacement, ids);
-                        value.span = occurrence.span;
-                        value
-                    },
-                    self.term_ids,
-                );
-                (body, RewriteDecision::Changed)
-            }
-            TermKind::TupleProj { tuple, idx } if matches!(&tuple.kind, TermKind::Tuple(values) if values.iter().all(is_structural_value)) =>
-            {
-                let TermKind::Tuple(mut values) = tuple.kind else {
-                    unreachable!()
-                };
-                (values.remove(idx), RewriteDecision::Changed)
-            }
-            kind => (Term { kind, ..term }, RewriteDecision::Unchanged),
-        }
-    }
-}
-
 struct ComputeOperation<'a> {
     symbol: SymbolId,
     entry: SymbolId,
@@ -390,9 +190,8 @@ pub enum StagesExtractedTag {}
 pub type StagesExtracted =
     Program<StagesExtractedTag, UnpinnedPolymorphic, super::context::TransformedGlobal>;
 
-/// Extract the final entry stages after source ownership and compile-time
-/// evaluation have finished observing the unified program.
-pub fn extract_stages(program: PartialEvaled) -> error::Result<StagesExtracted> {
+/// Extract final stages after common specialization and helper normalization.
+pub fn extract_stages(program: UnifiedHelpersInlined) -> error::Result<StagesExtracted> {
     let Program {
         defs,
         mut symbols,
@@ -420,8 +219,6 @@ fn extract(
 ) -> error::Result<()> {
     let builtins = InvocationBuiltins::get();
     let source_defs = std::mem::take(&mut parts.defs);
-    let helpers = source_defs.iter().filter_map(stage_helper).collect::<LookupMap<_, _>>();
-    let constants = source_defs.iter().filter_map(stage_constant).collect::<LookupMap<_, _>>();
     let mut extracted = Vec::with_capacity(source_defs.len());
 
     for mut definition in source_defs {
@@ -435,25 +232,15 @@ fn extract(
         }
 
         let mut root_binding_ids = binding_ids.clone();
-        if let Some(stages) = extract_root(
-            &definition,
-            &builtins,
-            &helpers,
-            &constants,
-            symbols,
-            term_ids,
-            &mut root_binding_ids,
-        ) {
+        if let Some(stages) = extract_root(&definition, &builtins, symbols, term_ids, &mut root_binding_ids)
+        {
             *binding_ids = root_binding_ids;
             extracted.extend(stages);
             continue;
         }
 
         let contains_invocation = match &definition.body.kind {
-            TermKind::Lambda(lambda) => {
-                let normalized = inline_stage_helpers((*lambda.body).clone(), &helpers, term_ids);
-                contains_graphics_invocation(&normalized, &builtins)
-            }
+            TermKind::Lambda(lambda) => contains_graphics_invocation(&lambda.body, &builtins),
             _ => false,
         };
         if contains_invocation {
@@ -479,8 +266,6 @@ fn extract(
 fn extract_root(
     definition: &Def<UnpinnedPolymorphic>,
     builtins: &InvocationBuiltins,
-    helpers: &LookupMap<SymbolId, StageHelper>,
-    constants: &LookupMap<SymbolId, StageHelper>,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
     binding_ids: &mut wyn_base::IdSource<u32>,
@@ -495,14 +280,10 @@ fn extract_root(
     let TermKind::Lambda(source_root_lambda) = &definition.body.kind else {
         return None;
     };
-    // Orchestration helpers have ordinary call semantics. Inline them before
-    // recognizing the operation chain so a helper can forward a raster or
-    // contain an invocation without becoming a separate host entry.
     let mut root_lambda = source_root_lambda.clone();
-    let body = inline_stage_helpers(*root_lambda.body, helpers, term_ids);
     let mut computed_origins = LookupMap::new();
     root_lambda.body = Box::new(normalize_root_bindings(
-        body,
+        *root_lambda.body,
         builtins,
         term_ids,
         &mut computed_origins,
@@ -573,26 +354,21 @@ fn extract_root(
                     return None;
                 }
 
-                let mut vertex_lambda =
+                let vertex_lambda =
                     callback_lambda(raster_args.get(callback_index)?, "vertex", 3, symbols, term_ids)?;
-                let mut fragment_lambda =
+                let fragment_lambda =
                     callback_lambda(shade_args.last()?, "fragment", 5, symbols, term_ids)?;
                 if vertex_lambda.params.len() != 3 || fragment_lambda.params.len() != 5 {
                     return None;
                 }
-                vertex_lambda.body = Box::new(inline_stage_helpers(*vertex_lambda.body, helpers, term_ids));
-                fragment_lambda.body =
-                    Box::new(inline_stage_helpers(*fragment_lambda.body, helpers, term_ids));
 
                 let raster_state = if has_raster_state {
-                    let state = inline_stage_helpers(raster_args.first()?.clone(), constants, term_ids);
-                    parse_raster_state(&state)?
+                    parse_raster_state(raster_args.first()?)?
                 } else {
                     Default::default()
                 };
                 let fragment_state = if shade_builtin == builtins.shade_with {
-                    let state = inline_stage_helpers(shade_args.first()?.clone(), constants, term_ids);
-                    parse_fragment_state(&state)?
+                    parse_fragment_state(shade_args.first()?)?
                 } else {
                     Default::default()
                 };
@@ -1232,43 +1008,6 @@ fn resolve_projection(
 
 fn is_render_target_type(ty: &Type) -> bool {
     matches!(ty, Type::Constructed(TypeName::RenderTarget, _))
-}
-
-fn is_static_resource_type(ty: &Type) -> bool {
-    matches!(
-        ty,
-        Type::Constructed(TypeName::RenderTarget | TypeName::StorageTexture, _)
-    )
-}
-
-fn contains_static_resource_type(ty: &Type) -> bool {
-    match ty {
-        _ if is_static_resource_type(ty) => true,
-        Type::Constructed(
-            TypeName::Record(_) | TypeName::Tuple(_) | TypeName::Existential(_),
-            components,
-        ) => components.iter().any(contains_static_resource_type),
-        _ => false,
-    }
-}
-
-/// Whether evaluating a term only assembles or projects an already-existing
-/// value. This deliberately excludes applications, indexing, control flow,
-/// array work, and loops: dropping any of those merely because their result is
-/// unused could discard an effect.
-fn is_structural_value(term: &Term) -> bool {
-    match &term.kind {
-        TermKind::Var(_)
-        | TermKind::IntLit(_)
-        | TermKind::FloatLit(_)
-        | TermKind::BoolLit(_)
-        | TermKind::UnitLit => true,
-        TermKind::Coerce { inner, .. } => is_structural_value(inner),
-        TermKind::Tuple(values) | TermKind::VecLit(values) => values.iter().all(is_structural_value),
-        TermKind::TupleProj { tuple, .. } => is_structural_value(tuple),
-        TermKind::Let { rhs, body, .. } => is_structural_value(rhs) && is_structural_value(body),
-        _ => false,
-    }
 }
 
 fn builtin_app<'a>(
