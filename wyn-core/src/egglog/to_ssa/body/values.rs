@@ -163,11 +163,21 @@ impl Body<'_, '_, '_> {
         let ty = types::tuple(values.iter().map(|value| value.ty.clone()).collect());
         self.op(OpTag::Tuple(values.len()), values, ty)
     }
-    fn number(n: u32) -> Typed {
+    pub fn number(n: u32) -> Typed {
         Typed {
             value: ValueRef::Const(ConstantValue::U32(n)),
             ty: Type::Constructed(TypeName::UInt(32), vec![]),
         }
+    }
+    pub fn local_id(&mut self) -> Result<Typed, OptimizeError> {
+        self.op(
+            OpTag::Intrinsic {
+                id: catalog().known().local_id,
+                overload_idx: 0,
+            },
+            vec![],
+            Type::Constructed(TypeName::UInt(32), vec![]),
+        )
     }
     pub(in crate::egglog::to_ssa) fn select(
         &mut self,

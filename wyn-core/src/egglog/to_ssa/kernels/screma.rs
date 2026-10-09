@@ -1,9 +1,9 @@
 // Expand scheduled phases straight into SSA instructions and structured loops.
-use super::super::{builder_error, error, Body, OptimizeError, Typed};
+use super::super::{error, Body, OptimizeError, Typed};
 use super::{element, indexed, invocation, write_arrays};
-use crate::builtins::catalog;
-use crate::op::{BinaryOperator, OpTag, PureViewSource};
-use crate::ssa::types::InstKind;
+use crate::op::BinaryOperator::{
+    Add, Divide, Equal, Greater, GreaterEqual, Less, Multiply, Remainder, Subtract,
+};
 use crate::types::{self, Type, TypeName};
 use crate::LookupMap;
 use egglog_engine::Value;
@@ -18,30 +18,28 @@ pub(super) fn screma(
     results: &[(String, i64, Value)],
 ) -> Result<(), OptimizeError> {
     let scans: Vec<_> = results.iter().filter(|r| r.0 == "scan").map(|r| r.2).collect();
-    let totals: Vec<_> = results.iter().filter(|r| r.0 == "total").map(|r| r.2).collect();
-    let mut sources: Vec<_> = scans.iter().chain(&totals).copied().collect();
-    let mut initial = Vec::new();
-    let mut operators = Vec::new();
-    for &source in &sources {
+    let totals = results.iter().filter(|r| r.0 == "total").map(|r| r.2);
+    let mut accumulators = Vec::new();
+    for source in scans.iter().copied().chain(totals) {
         let Some(operation) = body.compiler.facts.operation(source) else {
             return Err(error("accumulator operation missing"));
         };
         let neutral = body.compiler.facts.neutral(operation)?;
-        initial.push(body.value(scope, neutral)?);
-        operators.push(operation);
+        let neutral = body.value(scope, neutral)?;
+        accumulators.push(Accumulator::new(body, plan, source, operation, neutral)?);
     }
     for (index, filter) in body.compiler.facts.counts(plan)? {
         let index = scans.len() + usize::try_from(index).map_err(|_| error("negative count slot"))?;
-        if index > operators.len() {
+        if index > accumulators.len() {
             return Err(error("noncontiguous count accumulator"));
         }
         let Some(source) = body.compiler.facts.source(filter) else {
             return Err(error("filter accumulator source missing"));
         };
-        sources.insert(index, source);
-        operators.insert(index, filter);
-        initial.insert(index, body.literal("0", &types::i32())?);
+        let neutral = body.literal("0", &types::i32())?;
+        accumulators.insert(index, Accumulator::new(body, plan, source, filter, neutral)?);
     }
+    let initial: Vec<_> = accumulators.iter().map(|a| a.neutral.clone()).collect();
     let Some(domain) = body.compiler.facts.domain(phase_owner) else {
         return Err(error("collective domain missing"));
     };
@@ -52,17 +50,9 @@ pub(super) fn screma(
         let state = body.counted(zero.clone(), n, one, initial, |body, index, state| {
             let mut cache = LookupMap::default();
             let mut next = Vec::new();
-            for (i, &operator) in operators.iter().enumerate() {
-                let value = accumulate_at(
-                    body,
-                    scope,
-                    plan,
-                    operator,
-                    state[i].clone(),
-                    index.clone(),
-                    &mut cache,
-                )?;
-                cache.insert(sources[i], value.clone());
+            for (accumulator, state) in accumulators.iter().zip(state) {
+                let value = accumulator.accumulate(body, scope, plan, state, &index, &mut cache)?;
+                cache.insert(accumulator.source, value.clone());
                 next.push(value);
             }
             write_arrays(body, scope, phase_owner, plan, results, index, &mut cache)?;
@@ -77,8 +67,6 @@ pub(super) fn screma(
     }
     let uint = Type::Constructed(TypeName::UInt(32), vec![]);
     let n = body.cast(n, &uint)?;
-    let zero = body.literal("0", &uint)?;
-    let one = body.literal("1", &uint)?;
     let Some(key) = body.compiler.facts.constructor("Stage", (phase_owner, "chunks")) else {
         return Err(error("collective chunk schedule missing"));
     };
@@ -91,118 +79,98 @@ pub(super) fn screma(
     if threads > i32::MAX as u64 {
         return Err(error("collective grid exceeds the 32-bit index range"));
     }
-    let width = body.literal(&chunks_width.to_string(), &uint)?;
-    let lane = body.op(
-        OpTag::Intrinsic {
-            id: catalog().known().local_id,
-            overload_idx: 0,
-        },
-        vec![],
-        uint.clone(),
-    )?;
+    let width = Body::number(chunks_width);
+    let lane = body.local_id()?;
     // Workgroups own contiguous ranges of whole tiles, preserving operand order.
-    let extra = body.literal(&(threads - 1).to_string(), &uint)?;
-    let threads = body.literal(&threads.to_string(), &uint)?;
-    let tiles = body.binary(BinaryOperator::Add, n.clone(), extra)?;
-    let tiles = body.binary(BinaryOperator::Divide, tiles, threads)?;
-    let span = body.binary(BinaryOperator::Multiply, tiles.clone(), width.clone())?;
+    let tiles = body.binary(Add, n.clone(), Body::number((threads - 1) as u32))?;
+    let tiles = body.binary(Divide, tiles, Body::number(threads as u32))?;
+    let span = body.binary(Multiply, tiles.clone(), width.clone())?;
     match phase {
         "chunks" => {
             let (thread, _) = invocation(body, phase_width)?;
-            let group = body.binary(BinaryOperator::Divide, thread, width.clone())?;
-            let base = body.binary(BinaryOperator::Multiply, group.clone(), span.clone())?;
-            let state = body.counted(zero.clone(), tiles, one, initial.clone(), |body, tile, carry| {
-                let offset = body.binary(BinaryOperator::Multiply, tile, width.clone())?;
-                let offset = body.binary(BinaryOperator::Add, base.clone(), offset)?;
-                let index = body.binary(BinaryOperator::Add, offset, lane.clone())?;
-                let valid = body.binary(BinaryOperator::Less, index.clone(), n.clone())?;
-                let tuple_ty = types::tuple(initial.iter().map(|value| value.ty.clone()).collect());
-                let incoming = body.branch(
-                    scope,
-                    valid.clone(),
-                    |body| {
-                        let mut cache = LookupMap::default();
-                        let mut values = Vec::new();
-                        for (i, &operator) in operators.iter().enumerate() {
-                            let value = accumulate_at(
-                                body,
-                                scope,
-                                plan,
-                                operator,
-                                initial[i].clone(),
-                                index.clone(),
-                                &mut cache,
-                            )?;
-                            values.push(value);
-                        }
-                        if scans.is_empty() {
-                            write_arrays(
-                                body,
-                                scope,
-                                phase_owner,
-                                plan,
-                                results,
-                                index.clone(),
-                                &mut cache,
-                            )?;
-                        }
-                        body.op(OpTag::Tuple(values.len()), values, tuple_ty.clone())
-                    },
-                    |body| body.op(OpTag::Tuple(initial.len()), initial.clone(), tuple_ty.clone()),
-                    None,
-                )?;
-                let values = (0..operators.len())
-                    .map(|i| body.field(incoming.clone(), i))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let (prefixes, totals) = if scans.is_empty() {
-                    (
-                        Vec::new(),
-                        workgroup_reduce(
-                            body,
-                            scope,
-                            &operators,
-                            values,
-                            &initial,
-                            lane.clone(),
-                            phase_width,
-                        )?,
-                    )
-                } else {
-                    let (prefixes, _, totals) = workgroup_scan(
-                        body,
+            let group = body.binary(Divide, thread, width.clone())?;
+            let base = body.binary(Multiply, group.clone(), span.clone())?;
+            let state = body.counted(
+                Body::number(0),
+                tiles,
+                Body::number(1),
+                initial.clone(),
+                |body, tile, carry| {
+                    let offset = body.binary(Multiply, tile, width.clone())?;
+                    let offset = body.binary(Add, base.clone(), offset)?;
+                    let index = body.binary(Add, offset, lane.clone())?;
+                    let valid = body.binary(Less, index.clone(), n.clone())?;
+                    let incoming = body.branch(
                         scope,
-                        &operators,
-                        values,
-                        &initial,
-                        lane.clone(),
-                        phase_width,
+                        valid.clone(),
+                        |body| {
+                            let mut cache = LookupMap::default();
+                            let mut values = Vec::new();
+                            for accumulator in &accumulators {
+                                let value = accumulator.accumulate(
+                                    body,
+                                    scope,
+                                    plan,
+                                    accumulator.neutral.clone(),
+                                    &index,
+                                    &mut cache,
+                                )?;
+                                values.push(value);
+                            }
+                            if scans.is_empty() {
+                                write_arrays(
+                                    body,
+                                    scope,
+                                    phase_owner,
+                                    plan,
+                                    results,
+                                    index.clone(),
+                                    &mut cache,
+                                )?;
+                            }
+                            body.tuple(values)
+                        },
+                        |body| body.tuple(initial.clone()),
+                        None,
                     )?;
-                    (prefixes, totals)
-                };
-                body.when(valid, |body| {
-                    for (i, prefix) in prefixes.iter().take(scans.len()).enumerate() {
-                        if let Some(output) = body.slot(scope, phase_owner, "prefix", i as i64, 2)? {
-                            let value = combine_accumulator(
+                    let values = (0..accumulators.len())
+                        .map(|i| body.field(incoming.clone(), i))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let (prefixes, totals) = if scans.is_empty() {
+                        (
+                            Vec::new(),
+                            workgroup_reduce(
                                 body,
                                 scope,
-                                operators[i],
-                                carry[i].clone(),
-                                prefix.clone(),
-                            )?;
-                            body.store(output, index.clone(), value)?;
+                                &accumulators,
+                                values,
+                                lane.clone(),
+                                phase_width,
+                            )?,
+                        )
+                    } else {
+                        let (prefixes, _, totals) =
+                            workgroup_scan(body, scope, &accumulators, values, lane.clone(), phase_width)?;
+                        (prefixes, totals)
+                    };
+                    body.when(valid, |body| {
+                        for (i, prefix) in prefixes.into_iter().take(scans.len()).enumerate() {
+                            if let Some(output) = body.slot(scope, phase_owner, "prefix", i as i64, 2)? {
+                                let value =
+                                    accumulators[i].combine(body, scope, carry[i].clone(), prefix)?;
+                                body.store(output, index.clone(), value)?;
+                            }
                         }
-                    }
-                    Ok(())
-                })?;
-                operators
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &operator)| {
-                        combine_accumulator(body, scope, operator, carry[i].clone(), totals[i].clone())
-                    })
-                    .collect()
-            })?;
-            let first = body.binary(BinaryOperator::Equal, lane, zero)?;
+                        Ok(())
+                    })?;
+                    accumulators
+                        .iter()
+                        .zip(carry.into_iter().zip(totals))
+                        .map(|(accumulator, (carry, total))| accumulator.combine(body, scope, carry, total))
+                        .collect()
+                },
+            )?;
+            let first = body.binary(Equal, lane, Body::number(0))?;
             body.when(first, |body| {
                 for (i, value) in state.into_iter().enumerate() {
                     if let Some(output) = body.slot(scope, phase_owner, "partial", i as i64, 2)? {
@@ -213,16 +181,15 @@ pub(super) fn screma(
             })?;
         }
         "combine" => {
-            let groups = body.literal(&groups.to_string(), &uint)?;
-            let width = body.literal(&phase_width.to_string(), &uint)?;
+            let groups = Body::number(groups as u32);
             let totals = body.counted(
-                zero.clone(),
+                Body::number(0),
                 groups.clone(),
-                width.clone(),
+                Body::number(phase_width),
                 initial.clone(),
                 |body, base, carry| {
-                    let index = body.binary(BinaryOperator::Add, base, lane.clone())?;
-                    let valid = body.binary(BinaryOperator::Less, index.clone(), groups)?;
+                    let index = body.binary(Add, base, lane.clone())?;
+                    let valid = body.binary(Less, index.clone(), groups)?;
                     let mut values = Vec::new();
                     for (i, neutral) in initial.iter().enumerate() {
                         values.push(body.branch(
@@ -247,54 +214,39 @@ pub(super) fn screma(
                             workgroup_reduce(
                                 body,
                                 scope,
-                                &operators,
+                                &accumulators,
                                 values,
-                                &initial,
                                 lane.clone(),
                                 phase_width,
                             )?,
                         )
                     } else {
-                        let (_, offsets, totals) = workgroup_scan(
-                            body,
-                            scope,
-                            &operators,
-                            values,
-                            &initial,
-                            lane.clone(),
-                            phase_width,
-                        )?;
+                        let (_, offsets, totals) =
+                            workgroup_scan(body, scope, &accumulators, values, lane.clone(), phase_width)?;
                         (offsets, totals)
                     };
                     body.when(valid, |body| {
                         for (i, offset) in offsets.into_iter().take(scans.len()).enumerate() {
                             if let Some(output) = body.slot(scope, phase_owner, "offset", i as i64, 2)? {
-                                let value = combine_accumulator(
-                                    body,
-                                    scope,
-                                    operators[i],
-                                    carry[i].clone(),
-                                    offset,
-                                )?;
+                                let value =
+                                    accumulators[i].combine(body, scope, carry[i].clone(), offset)?;
                                 body.store(output, index.clone(), value)?;
                             }
                         }
                         Ok(())
                     })?;
-                    operators
+                    accumulators
                         .iter()
-                        .enumerate()
-                        .map(|(i, &operator)| {
-                            combine_accumulator(body, scope, operator, carry[i].clone(), totals[i].clone())
-                        })
+                        .zip(carry.into_iter().zip(totals))
+                        .map(|(accumulator, (carry, total))| accumulator.combine(body, scope, carry, total))
                         .collect()
                 },
             )?;
-            let first = body.binary(BinaryOperator::Equal, lane, zero.clone())?;
+            let first = body.binary(Equal, lane, Body::number(0))?;
             body.when(first, |body| {
                 for (i, value) in totals.into_iter().skip(scans.len()).enumerate() {
                     if let Some(output) = body.slot(scope, phase_owner, "total", i as i64, 2)? {
-                        body.store(output, zero.clone(), value)?;
+                        body.store(output, Body::number(0), value)?;
                     }
                 }
                 Ok(())
@@ -302,8 +254,9 @@ pub(super) fn screma(
         }
         "offsets" => {
             let (start, step) = invocation(body, phase_width)?;
+            let writes_destination = body.compiler.facts.destination(phase_owner).is_some();
             body.counted(start, n, step, vec![], |body, index, _| {
-                let chunk = body.binary(BinaryOperator::Divide, index.clone(), span)?;
+                let chunk = body.binary(Divide, index.clone(), span)?;
                 let mut cache = LookupMap::default();
                 for (i, &source) in scans.iter().enumerate() {
                     let Some(prefix) = body.slot(scope, phase_owner, "prefix", i as i64, 1)? else {
@@ -314,10 +267,10 @@ pub(super) fn screma(
                     };
                     let a = body.index(offset, chunk.clone())?;
                     let b = body.index(prefix, index.clone())?;
-                    let value = combine_accumulator(body, scope, operators[i], a, b)?;
+                    let value = accumulators[i].combine(body, scope, a, b)?;
                     cache.insert(source, value);
                 }
-                if body.compiler.facts.destination(phase_owner).is_some() {
+                if writes_destination {
                     let Some(output) = body.slot(scope, phase_owner, "output", 0, 2)? else {
                         return Err(error("scan output action has no destination"));
                     };
@@ -338,9 +291,8 @@ pub(super) fn screma(
 fn workgroup_reduce(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
-    operators: &[Value],
+    accumulators: &[Accumulator],
     values: Vec<Typed>,
-    neutral: &[Typed],
     lane: Typed,
     width: u32,
 ) -> Result<Vec<Typed>, OptimizeError> {
@@ -348,58 +300,46 @@ fn workgroup_reduce(
         width.is_power_of_two(),
         "workgroup reduction width must be a power of two: {width}"
     );
-    let zero = body.literal("0", &lane.ty)?;
-    let length = body.literal(&width.to_string(), &lane.ty)?;
     let mut shared = Vec::new();
     for (i, value) in values.into_iter().enumerate() {
-        let buffer = body.op(
-            OpTag::StorageView(PureViewSource::Workgroup {
-                id: i as u32,
-                count: width,
-            }),
-            vec![zero.clone(), length.clone()],
-            Body::view_type(&value.ty, types::no_buffer()),
-        )?;
+        let buffer = body.workgroup_array(i as u32, width, &value.ty)?;
         body.store(buffer.clone(), lane.clone(), value)?;
         shared.push(buffer);
     }
-    body.builder.push_void_inst(InstKind::ControlBarrier).map_err(builder_error)?;
+    body.workgroup_barrier()?;
     for bit in 0..width.trailing_zeros() {
-        let distance = body.literal(&(1u32 << bit).to_string(), &lane.ty)?;
-        let span = body.literal(&(2u32 << bit).to_string(), &lane.ty)?;
-        let remainder = body.binary(BinaryOperator::Remainder, lane.clone(), span)?;
-        let active = body.binary(BinaryOperator::Equal, remainder, zero.clone())?;
+        let remainder = body.binary(Remainder, lane.clone(), Body::number(2 << bit))?;
+        let active = body.binary(Equal, remainder, Body::number(0))?;
         body.when(active, |body| {
-            let right = body.binary(BinaryOperator::Add, lane.clone(), distance)?;
+            let right = body.binary(Add, lane.clone(), Body::number(1 << bit))?;
             for (i, buffer) in shared.iter().enumerate() {
                 let a = body.index(buffer.clone(), lane.clone())?;
                 let b = body.index(buffer.clone(), right.clone())?;
-                let value = combine_accumulator(body, scope, operators[i], a, b)?;
+                let value = accumulators[i].combine(body, scope, a, b)?;
                 body.store(buffer.clone(), lane.clone(), value)?;
             }
             Ok(())
         })?;
-        body.builder.push_void_inst(InstKind::ControlBarrier).map_err(builder_error)?;
+        body.workgroup_barrier()?;
     }
     let totals = shared
         .into_iter()
-        .zip(neutral)
-        .map(|(buffer, neutral)| {
-            let total = body.index(buffer, zero.clone())?;
-            body.cast(total, &neutral.ty)
+        .zip(accumulators)
+        .map(|(buffer, accumulator)| {
+            let total = body.index(buffer, Body::number(0))?;
+            body.cast(total, &accumulator.neutral.ty)
         })
         .collect::<Result<Vec<_>, _>>()?;
     // Every lane reads the total before the next tile overwrites shared storage.
-    body.builder.push_void_inst(InstKind::ControlBarrier).map_err(builder_error)?;
+    body.workgroup_barrier()?;
     Ok(totals)
 }
 
 pub(super) fn workgroup_scan(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
-    operators: &[Value],
+    accumulators: &[Accumulator],
     mut values: Vec<Typed>,
-    neutral: &[Typed],
     lane: Typed,
     width: u32,
 ) -> Result<(Vec<Typed>, Vec<Typed>, Vec<Typed>), OptimizeError> {
@@ -407,38 +347,28 @@ pub(super) fn workgroup_scan(
         width.is_power_of_two(),
         "workgroup scan width must be a power of two: {width}"
     );
-    let zero = body.literal("0", &lane.ty)?;
-    let length = body.literal(&width.to_string(), &lane.ty)?;
-    let last = body.literal(&(width - 1).to_string(), &lane.ty)?;
     let mut shared = Vec::new();
     for (i, value) in values.iter().enumerate() {
-        let mut banks = Vec::new();
-        for bank in 0..2 {
-            banks.push(body.op(
-                OpTag::StorageView(PureViewSource::Workgroup {
-                    id: (i * 2 + bank) as u32,
-                    count: width,
-                }),
-                vec![zero.clone(), length.clone()],
-                Body::view_type(&value.ty, types::no_buffer()),
-            )?);
-        }
+        let banks = [
+            body.workgroup_array((i * 2) as u32, width, &value.ty)?,
+            body.workgroup_array((i * 2 + 1) as u32, width, &value.ty)?,
+        ];
         body.store(banks[0].clone(), lane.clone(), value.clone())?;
         shared.push(banks);
     }
-    body.builder.push_void_inst(InstKind::ControlBarrier).map_err(builder_error)?;
+    body.workgroup_barrier()?;
     let mut bank = 0;
     for bit in 0..width.trailing_zeros() {
-        let distance = body.literal(&(1u32 << bit).to_string(), &lane.ty)?;
-        let valid = body.binary(BinaryOperator::GreaterEqual, lane.clone(), distance.clone())?;
+        let distance = Body::number(1 << bit);
+        let valid = body.binary(GreaterEqual, lane.clone(), distance.clone())?;
         for (i, value) in values.iter_mut().enumerate() {
             *value = body.branch(
                 scope,
                 valid.clone(),
                 |body| {
-                    let index = body.binary(BinaryOperator::Subtract, lane.clone(), distance.clone())?;
+                    let index = body.binary(Subtract, lane.clone(), distance.clone())?;
                     let peer = body.index(shared[i][bank].clone(), index)?;
-                    combine_accumulator(body, scope, operators[i], peer, value.clone())
+                    accumulators[i].combine(body, scope, peer, value.clone())
                 },
                 |_| Ok(value.clone()),
                 None,
@@ -446,96 +376,129 @@ pub(super) fn workgroup_scan(
             body.store(shared[i][1 - bank].clone(), lane.clone(), value.clone())?;
         }
         bank = 1 - bank;
-        body.builder.push_void_inst(InstKind::ControlBarrier).map_err(builder_error)?;
+        body.workgroup_barrier()?;
     }
-    let one = body.literal("1", &lane.ty)?;
-    let after_first = body.binary(BinaryOperator::Greater, lane.clone(), zero)?;
+    let after_first = body.binary(Greater, lane.clone(), Body::number(0))?;
     let mut exclusive = Vec::new();
     let mut totals = Vec::new();
     for (i, banks) in shared.iter().enumerate() {
+        let neutral = &accumulators[i].neutral;
         exclusive.push(body.branch(
             scope,
             after_first.clone(),
             |body| {
-                let previous = body.binary(BinaryOperator::Subtract, lane.clone(), one.clone())?;
+                let previous = body.binary(Subtract, lane.clone(), Body::number(1))?;
                 let value = body.index(banks[bank].clone(), previous)?;
-                body.cast(value, &neutral[i].ty)
+                body.cast(value, &neutral.ty)
             },
-            |_| Ok(neutral[i].clone()),
+            |_| Ok(neutral.clone()),
             None,
         )?);
-        let value = body.index(banks[bank].clone(), last.clone())?;
-        totals.push(body.cast(value, &neutral[i].ty)?);
+        let value = body.index(banks[bank].clone(), Body::number(width - 1))?;
+        totals.push(body.cast(value, &neutral.ty)?);
     }
     // All lanes must finish reading before the next tile reuses shared storage.
-    body.builder.push_void_inst(InstKind::ControlBarrier).map_err(builder_error)?;
+    body.workgroup_barrier()?;
     Ok((values, exclusive, totals))
 }
 
-/// Accumulate from the source stream, guarding fused filter inputs in place.
-/// Reading the filtered array would recursively execute this same collective.
-fn accumulate_at(
-    body: &mut Body<'_, '_, '_>,
-    scope: Value,
-    plan: Value,
-    operator: Value,
-    state: Typed,
-    index: Typed,
-    cache: &mut LookupMap<Value, Typed>,
-) -> Result<Typed, OptimizeError> {
-    let Some(input) = body.compiler.facts.input(operator, 0) else {
-        return Err(error("accumulator input missing"));
-    };
-    let filtered = match body.compiler.facts.operation(input) {
-        Some(filter) if body.compiler.facts.member(plan, filter) && is_count(body, filter)? => Some(filter),
-        _ => None,
-    };
-    if let Some(filter) = filtered {
-        let Some(source) = body.compiler.facts.input(filter, 0) else {
-            return Err(error("filter input missing"));
-        };
-        let incoming = element(body, scope, plan, source, index, cache)?;
-        let keep = body.callback(scope, filter, vec![incoming.clone()])?;
-        body.branch(
-            scope,
-            keep,
-            |body| accumulate_element(body, scope, operator, state.clone(), incoming),
-            |_| Ok(state.clone()),
-            None,
-        )
-    } else {
-        let incoming = element(body, scope, plan, input, index, cache)?;
-        accumulate_element(body, scope, operator, state, incoming)
-    }
+/// Resolved recipe inputs, shared by serial accumulation and cooperative phases.
+pub(super) struct Accumulator {
+    source: Value,
+    input: Value,
+    filter: Option<Value>,
+    operation: Value,
+    count: bool,
+    neutral: Typed,
 }
 
-fn is_count(body: &Body<'_, '_, '_>, operator: Value) -> Result<bool, OptimizeError> {
-    Ok(body.compiler.facts.operation_kind(operator)? == "filter")
-}
-fn accumulate_element(
-    body: &mut Body<'_, '_, '_>,
-    scope: Value,
-    operator: Value,
-    state: Typed,
-    incoming: Typed,
-) -> Result<Typed, OptimizeError> {
-    if is_count(body, operator)? {
-        let keep = body.callback(scope, operator, vec![incoming])?;
-        let increment = body.cast(keep, &state.ty)?;
-        return body.binary(BinaryOperator::Add, state, increment);
+impl Accumulator {
+    pub fn new(
+        body: &Body<'_, '_, '_>,
+        plan: Value,
+        source: Value,
+        operation: Value,
+        neutral: Typed,
+    ) -> Result<Self, OptimizeError> {
+        let Some(mut input) = body.compiler.facts.input(operation, 0) else {
+            return Err(error("accumulator input missing"));
+        };
+        let filter = match body.compiler.facts.operation(input) {
+            Some(filter)
+                if body.compiler.facts.member(plan, filter)
+                    && body.compiler.facts.operation_kind(filter)? == "filter" =>
+            {
+                Some(filter)
+            }
+            _ => None,
+        };
+        if let Some(filter) = filter {
+            let Some(source) = body.compiler.facts.input(filter, 0) else {
+                return Err(error("filter input missing"));
+            };
+            input = source;
+        }
+        Ok(Self {
+            source,
+            input,
+            filter,
+            operation,
+            count: body.compiler.facts.operation_kind(operation)? == "filter",
+            neutral,
+        })
     }
-    body.callback(scope, operator, vec![state, incoming])
-}
-fn combine_accumulator(
-    body: &mut Body<'_, '_, '_>,
-    scope: Value,
-    operator: Value,
-    a: Typed,
-    b: Typed,
-) -> Result<Typed, OptimizeError> {
-    if is_count(body, operator)? {
-        body.binary(BinaryOperator::Add, a, b)
-    } else {
-        body.callback(scope, operator, vec![a, b])
+
+    /// Guard fused filter inputs in place; reading their array would reenter this collective.
+    fn accumulate(
+        &self,
+        body: &mut Body<'_, '_, '_>,
+        scope: Value,
+        plan: Value,
+        state: Typed,
+        index: &Typed,
+        cache: &mut LookupMap<Value, Typed>,
+    ) -> Result<Typed, OptimizeError> {
+        let incoming = element(body, scope, plan, self.input, index.clone(), cache)?;
+        if let Some(filter) = self.filter {
+            let keep = body.callback(scope, filter, vec![incoming.clone()])?;
+            body.branch(
+                scope,
+                keep,
+                |body| self.accumulate_element(body, scope, state.clone(), incoming),
+                |_| Ok(state.clone()),
+                None,
+            )
+        } else {
+            self.accumulate_element(body, scope, state, incoming)
+        }
+    }
+
+    fn accumulate_element(
+        &self,
+        body: &mut Body<'_, '_, '_>,
+        scope: Value,
+        state: Typed,
+        incoming: Typed,
+    ) -> Result<Typed, OptimizeError> {
+        if self.count {
+            let keep = body.callback(scope, self.operation, vec![incoming])?;
+            let increment = body.cast(keep, &state.ty)?;
+            return body.binary(Add, state, increment);
+        }
+        body.callback(scope, self.operation, vec![state, incoming])
+    }
+
+    fn combine(
+        &self,
+        body: &mut Body<'_, '_, '_>,
+        scope: Value,
+        a: Typed,
+        b: Typed,
+    ) -> Result<Typed, OptimizeError> {
+        if self.count {
+            body.binary(Add, a, b)
+        } else {
+            body.callback(scope, self.operation, vec![a, b])
+        }
     }
 }

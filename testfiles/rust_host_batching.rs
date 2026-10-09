@@ -289,6 +289,13 @@ mod tests {
                     let prefixes = $module::host_prefixes(&mut context, &queue, &xs).unwrap();
                     let expected: Vec<i32> = values.iter().scan(0, |sum, value| { *sum += value; Some(*sum) }).collect();
                     assert_eq!(&read(&device, &queue, buffer!($module, prefixes))[..n as usize], expected, "prefixes at {n}");
+                    let prefixes = $module::host_ordered_prefixes(&mut context, &queue, &xs).unwrap();
+                    let expected: Vec<i32> = values.iter().scan((1, 0), |state, &x| {
+                        let (c, d) = ((x + 8) % 7 + 1, (x + 8) % 251);
+                        *state = ((state.0 * c) % 251, (state.1 * c + d) % 251);
+                        Some(state.1)
+                    }).collect();
+                    assert_eq!(&read(&device, &queue, buffer!($module, prefixes))[..n as usize], expected, "ordered prefixes at {n}");
                     let survivors = $module::host_survivors(&mut context, &queue, &xs).unwrap();
                     let positives: Vec<_> = values.iter().copied().filter(|x| *x > 0).collect();
                     assert_eq!(read(&device, &queue, buffer!($module, survivors, 0))[0], positives.len() as i32, "count at {n}");

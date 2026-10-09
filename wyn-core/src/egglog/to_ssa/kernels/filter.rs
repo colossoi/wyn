@@ -1,4 +1,4 @@
-use super::screma::workgroup_scan;
+use super::screma::{workgroup_scan, Accumulator};
 // Expand scheduled phases straight into SSA instructions and structured loops.
 use super::super::{error, Body, OptimizeError};
 use super::{element, write_arrays};
@@ -29,20 +29,13 @@ pub(super) fn compact(
     let n = body.extent(scope, domain)?;
     let uint = Type::Constructed(TypeName::UInt(32), vec![]);
     let n = body.cast(n, &uint)?;
-    let zero = body.literal("0", &uint)?;
-    let one = body.literal("1", &uint)?;
-    let width = body.literal(&phase_width.to_string(), &uint)?;
-    let last = body.literal(&(phase_width - 1).to_string(), &uint)?;
-    let sum = body.binary(BinaryOperator::Add, n.clone(), last.clone())?;
+    let zero = Body::number(0);
+    let accumulator = Accumulator::new(body, plan, source, operation, zero.clone())?;
+    let one = Body::number(1);
+    let width = Body::number(phase_width);
+    let sum = body.binary(BinaryOperator::Add, n.clone(), Body::number(phase_width - 1))?;
     let chunks = body.binary(BinaryOperator::Divide, sum, width.clone())?;
-    let lane = body.op(
-        OpTag::Intrinsic {
-            id: catalog().known().local_id,
-            overload_idx: 0,
-        },
-        vec![],
-        uint.clone(),
-    )?;
+    let lane = body.local_id()?;
     let counts = body.counted(
         zero.clone(),
         chunks,
@@ -84,9 +77,8 @@ pub(super) fn compact(
             let (prefixes, _, totals) = workgroup_scan(
                 body,
                 scope,
-                &[operation],
+                std::slice::from_ref(&accumulator),
                 vec![flag.clone()],
-                &[zero.clone()],
                 lane.clone(),
                 phase_width,
             )?;

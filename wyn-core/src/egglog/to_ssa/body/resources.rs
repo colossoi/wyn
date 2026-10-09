@@ -1,10 +1,23 @@
 //! Final storage views and launch extents decoded from the selected plan.
-use super::{error, Body, OptimizeError, Typed, Value};
+use super::{builder_error, error, Body, OptimizeError, Typed, Value};
 use crate::builtins::catalog;
 use crate::op::{BinaryOperator, OpTag, PureViewSource};
+use crate::ssa::types::InstKind;
 use crate::types::{self, buffer_tag, Type, TypeExt, TypeName};
 
 impl Body<'_, '_, '_> {
+    pub fn workgroup_array(&mut self, id: u32, count: u32, element: &Type) -> Result<Typed, OptimizeError> {
+        self.op(
+            OpTag::StorageView(PureViewSource::Workgroup { id, count }),
+            vec![Self::number(0), Self::number(count)],
+            Self::view_type(element, types::no_buffer()),
+        )
+    }
+
+    pub fn workgroup_barrier(&mut self) -> Result<(), OptimizeError> {
+        self.builder.push_void_inst(InstKind::ControlBarrier).map(|_| ()).map_err(builder_error)
+    }
+
     pub(super) fn boundary(&mut self, scope: Value, source: Value) -> Result<Typed, OptimizeError> {
         if let Some(access) = self.compiler.facts.access(source) {
             if let Some(fields) = self.compiler.facts.enode("RunCollective", access) {
