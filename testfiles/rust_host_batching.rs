@@ -257,6 +257,27 @@ mod tests {
         macro_rules! check_collectives {
             ($module:ident, $ordered:expr) => {{
                 let mut context = $module::HostContext::new(&device).unwrap();
+                let items = input(&device, &[5, 105, 2, 102, 4, 104, 0, 100, 3, 103, 1, 101]);
+                let dest = input(&device, &[-1; 6]);
+                let stored = $module::host_ranked_stored(&mut context, &queue, &dest, &items).unwrap();
+                assert_eq!(read(&device, &queue, buffer!($module, stored, 0)), (100..106).collect::<Vec<_>>());
+                assert_eq!(read(&device, &queue, buffer!($module, stored, 1)), vec![1; 6]);
+                assert_eq!(read(&device, &queue, buffer!($module, stored, 2)), vec![0]);
+                let bias = input(&device, &[7]);
+                let dest = input(&device, &[-1; 120]);
+                let generated = $module::host_ranked_generated(&mut context, &queue, &dest, &bias).unwrap();
+                let expected: Vec<_> = (0..2).flat_map(|i| (0..3).flat_map(move |j|
+                    (0..4).flat_map(move |k| (0..5).map(move |l| 1000*i+100*j+10*k+l+7)))).collect();
+                assert_eq!(read(&device, &queue, buffer!($module, generated, 0)), expected);
+                assert_eq!(read(&device, &queue, buffer!($module, generated, 1)), vec![1; 120]);
+                assert_eq!(read(&device, &queue, buffer!($module, generated, 2)), vec![0]);
+                let dest = input(&device, &[-1; 24]);
+                let generated = $module::host_ranked_3d(&mut context, &queue, &bias, &dest).unwrap();
+                let expected: Vec<_> = (0..2).flat_map(|i| (0..3).flat_map(move |j|
+                    (0..4).map(move |k| 100*i+10*j+k+7))).collect();
+                assert_eq!(read(&device, &queue, buffer!($module, generated, 0)), expected);
+                assert_eq!(read(&device, &queue, buffer!($module, generated, 1)), vec![1; 24]);
+                assert_eq!(read(&device, &queue, buffer!($module, generated, 2)), vec![0]);
                 for n in [1, 63, 64, 65, 257, 16385] {
                     let values: Vec<i32> = (0..n).map(|i| i % 17 - 8).collect();
                     let xs = input(&device, &values);

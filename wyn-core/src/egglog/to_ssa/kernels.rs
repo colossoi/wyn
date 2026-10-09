@@ -8,6 +8,7 @@ use crate::LookupMap;
 use egglog_engine::sort::S;
 use egglog_engine::Value;
 
+mod coordinates;
 mod filter;
 mod indexed;
 mod loops;

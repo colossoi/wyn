@@ -687,6 +687,20 @@ fn ranked_buckets_preserve_nested_storage_and_atomic_counters() {
 }
 
 #[test]
+#[ignore = "nested scheduling follow-up: ranked buckets inside map fail with an unbound TLC symbol during source import"]
+fn ranked_bucket_scatter_inside_map_reaches_both_backends() {
+    shaders(
+        "entry ranked_local(bias: []i32) [2][24][1]i32 =
+          map(|b|
+            let items: [2][3][4](i32,i32) =
+              map(|i|map(|j|map(|k|
+                ((i*3+j)*4+k,100*i+10*j+k+b),iota(4)),iota(3)),iota(2))
+            in let (values,_,_)=bucket_scatter_3d(replicate(24,[0]),items) in values,
+            bias[0..2])",
+    );
+}
+
+#[test]
 fn integer_histogram_uses_the_selected_atomic_update() {
     let module=shaders("entry bins(dest:*[3]i32,xs:[5]i32) [3]i32=reduce_by_index(dest,|a:i32,b:i32|a+b,0,map(|x:i32|x-1,xs),map(|x:i32|x*3,xs))");
     assert_eq!(module.entry_points.len(), 1);

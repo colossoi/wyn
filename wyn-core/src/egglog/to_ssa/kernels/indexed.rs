@@ -1,7 +1,7 @@
 //! Expand scheduled phases straight into SSA instructions and structured loops.
 
 use super::super::{builder_error, error, Body, OptimizeError, Typed};
-use super::{element, invocation};
+use super::{coordinates, element, invocation};
 use crate::op::{BinaryOperator, OpTag};
 use crate::ssa::types::{AtomicOp, InstKind};
 use crate::types::{self, Type, TypeExt, TypeName};
@@ -238,7 +238,7 @@ pub(super) fn buckets(
     )
 }
 
-pub(in crate::egglog::to_ssa) fn bucket_updates(
+fn bucket_updates(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
     operation: Value,
@@ -277,10 +277,7 @@ pub(in crate::egglog::to_ssa) fn bucket_updates(
             Ok(dimension)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let mut n = one.clone();
-    for dimension in &dimensions {
-        n = body.binary(BinaryOperator::Multiply, n, dimension.clone())?;
-    }
+    let n = coordinates::length(body, &dimensions)?;
     let capacity = match output.ty.elem_type().and_then(|row| row.array_size()) {
         Some(Type::Constructed(TypeName::Size(n), _)) => *n,
         _ => return Err(error("bucket capacity must be static")),
@@ -292,29 +289,8 @@ pub(in crate::egglog::to_ssa) fn bucket_updates(
     let bucket_count = body.length(output.clone())?;
     let (start, step) = if serial { (zero.clone(), one.clone()) } else { invocation(body, width)? };
     body.counted(start, n, step, vec![], |body, index, _| {
-        let mut coordinates = vec![zero.clone(); dimensions.len()];
-        let mut remainder = index;
-        for i in (0..dimensions.len()).rev() {
-            coordinates[i] = body.binary(
-                BinaryOperator::Remainder,
-                remainder.clone(),
-                dimensions[i].clone(),
-            )?;
-            remainder = body.binary(BinaryOperator::Divide, remainder, dimensions[i].clone())?;
-        }
-        let mut args = Vec::new();
-        let mut cache = LookupMap::default();
-        for ((_, source), axes) in inputs.iter().zip(input_dimensions) {
-            let Some((&first, rest)) = axes.split_first() else {
-                args.push(body.value(scope, *source)?);
-                continue;
-            };
-            let mut value = element(body, scope, plan, *source, coordinates[first].clone(), &mut cache)?;
-            for &axis in rest {
-                value = body.index(value, coordinates[axis].clone())?;
-            }
-            args.push(value);
-        }
+        let coordinates = coordinates::decode(body, &dimensions, index)?;
+        let args = coordinates::arguments(body, scope, plan, &inputs, input_dimensions, &coordinates)?;
         let emission = body.callback(scope, operation, args)?;
         let active = body.field(emission.clone(), 0)?;
         body.when(active, |body| {
