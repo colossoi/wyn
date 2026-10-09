@@ -27,4 +27,4 @@ wyn-host-interp = { path = "../wyn-host-interp" }
 env_logger.workspace = true
 stacker = "0.1.25"
 # Used for in-process WGSL and SPIR-V validation in backend tests.
-naga = { version = "26.0", features = ["wgsl-in", "spv-in"] }
+naga = { version = "27.0", features = ["wgsl-in", "spv-in"] }
