@@ -402,7 +402,7 @@ fn adapt_host_interface_for_wgsl(
     descriptor: &mut host::ModuleInterface,
     parameter_blocks: &[wgsl::ssa_lowering::ParameterBlock],
 ) -> error::Result<()> {
-    use host::{Access, Binding, BufferLen, BufferUsage, DispatchLen, DispatchSize, Pipeline};
+    use host::{Access, Binding, BufferLen, BufferUsage, Pipeline};
 
     for (pipeline_index, pipeline) in descriptor.pipelines.iter_mut().enumerate() {
         let Pipeline::Compute(compute) = pipeline else {
@@ -491,19 +491,26 @@ fn adapt_host_interface_for_wgsl(
                     .flat_map(|repeated| [&mut repeated.count, &mut repeated.initial_length]),
             );
         let mut missing = None;
-        let mut legalize = |source: &mut ScalarSource, offset: &mut u32| {
+        let mut legalize = |source: &mut ScalarSource, offset: &mut u32, stage: Option<&str>| {
             let ScalarSource::PushConstant { name, offset: base } = source else {
                 return;
             };
             let found = blocks.iter().find_map(|block| {
-                block
-                    .members
-                    .iter()
-                    .find(|member| member.name == *name && member.push_constant_offset == *base)
-                    .map(|member| (*block, member))
+                if stage.is_some_and(|stage| block.entry_point != stage) {
+                    return None;
+                }
+                block.members.iter().find_map(|member| {
+                    if member.name != *name
+                        || member.push_constant_offset != *base
+                        || offset.checked_add(4)? > member.size
+                    {
+                        return None;
+                    }
+                    Some((*block, member.offset.checked_add(*offset)?))
+                })
             });
-            if let Some((block, member)) = found {
-                *offset += member.offset;
+            if let Some((block, storage_offset)) = found {
+                *offset = storage_offset;
                 *source = ScalarSource::Binding {
                     set: block.set,
                     binding: block.binding,
@@ -513,15 +520,20 @@ fn adapt_host_interface_for_wgsl(
             }
         };
         for value in values {
-            value.reads_mut(&mut legalize);
+            value.reads_mut(&mut |source, offset| legalize(source, offset, None));
         }
         for binding in &mut compute.bindings {
             if let Binding::StorageBuffer {
                 length: Some(length), ..
             } = binding
             {
-                length.reads_mut(&mut legalize);
+                length.reads_mut(&mut |source, offset| legalize(source, offset, None));
             }
+        }
+        for stage in &mut compute.stages {
+            stage.dispatch_size.reads_mut(&mut |source, offset| {
+                legalize(source, offset, Some(&stage.entry_point));
+            });
         }
         if let Some(name) = missing {
             return Err(err_wgsl!("host scalar '{}' has no WGSL parameter", name));
@@ -546,38 +558,6 @@ fn adapt_host_interface_for_wgsl(
                         stage.reads.push(binding_index);
                     }
                 }
-            }
-
-            if let DispatchSize::DerivedFrom { len, .. } = &mut stage.dispatch_size {
-                let DispatchLen::PushConstant { offset } = *len else {
-                    continue;
-                };
-                let Some((block, storage_offset)) = blocks.iter().find_map(|block| {
-                    (block.entry_point == stage.entry_point)
-                        .then(|| {
-                            block.members.iter().find_map(|member| {
-                                let relative = offset.checked_sub(member.push_constant_offset)?;
-                                let end = relative.checked_add(4)?;
-                                (end <= member.size)
-                                    .then(|| {
-                                        member.offset.checked_add(relative).map(|offset| (*block, offset))
-                                    })
-                                    .flatten()
-                            })
-                        })
-                        .flatten()
-                }) else {
-                    return Err(err_wgsl!(
-                        "entry '{}': dynamic dispatch push constant at offset {} has no containing WGSL storage parameter",
-                        stage.entry_point,
-                        offset
-                    ));
-                };
-                *len = DispatchLen::StorageBuffer {
-                    set: block.set,
-                    binding: block.binding,
-                    offset: storage_offset,
-                };
             }
         }
     }

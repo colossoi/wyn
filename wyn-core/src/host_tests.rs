@@ -1100,7 +1100,14 @@ fn uniform_sized_maps_launch_from_their_domain_capacity() {
         };
         let expected = Expr::Min(
             Box::new(Expr::Max(
-                Box::new(Expr::BufferSize(pixels).floor(16).unwrap().ceiling(64).unwrap()),
+                Box::new(
+                    Expr::BufferLength {
+                        source: crate::host::ScalarSource::Resource(pixels),
+                        stride: 16,
+                    }
+                    .ceiling(64)
+                    .unwrap(),
+                ),
                 Box::new(Expr::Integer(0)),
             )),
             Box::new(Expr::Integer(65_535)),

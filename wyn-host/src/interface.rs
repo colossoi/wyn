@@ -1,6 +1,6 @@
 //! Published shader interfaces, resource identities, and execution domains.
 
-use crate::{ResultKind, ResultLayout, ScalarExpr, ScalarSource, ScalarTask};
+use crate::{Expr, HostError, ResultKind, ResultLayout, ScalarExpr, ScalarSource, ScalarTask};
 use std::collections::{BTreeMap, VecDeque};
 
 /// Published shader declarations and physical resource interfaces for one module.
@@ -803,56 +803,40 @@ pub enum DispatchSize {
         /// from the unspecified default instead of guessing from the value.
         explicit: bool,
     },
-    /// Dispatch `ceil(len / workgroup_size)` workgroups, where `len` is the
-    /// launch bound resolved from the explicit `DispatchLen` source.
-    DerivedFrom {
-        len: DispatchLen,
-        workgroup_size: u32,
+    Computed {
+        /// Unrounded launch bound, which may be an allocation capacity.
+        /// Kernels enforce their logical iteration count independently.
+        elements: Expr,
+        /// Physical workgroup counts, including any selected rounding and limits.
+        groups: [Expr; 3],
     },
 }
 
-/// The source of a `DerivedFrom` dispatch's launch bound. Grid-stride kernels
-/// enforce their logical iteration count independently of this bound.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DispatchLen {
-    /// Launch from the capacity of the buffer at (`set`, `binding`) — e.g.
-    /// the input to `map(f, arr)`, or an output covering a uniform-sized domain.
-    /// The host uses the buffer's byte size without reading its contents.
-    InputBinding {
-        set: u32,
-        binding: u32,
-        /// Bytes per element of that buffer, so the host recovers the element
-        /// count from its byte size.
-        elem_bytes: u32,
-    },
-    /// A compile-time-known iteration count — e.g. `map(f, iota(6144))`.
-    Fixed {
-        count: u32,
-    },
-    /// A runtime count read from a scalar push-constant — e.g. `map(f,
-    /// iota(n))` where `n` is an entry parameter. The host reads the u32 at
-    /// `offset` in the push-constant block.
-    PushConstant {
-        offset: u32,
-    },
-    /// A runtime u32 read from a packed, read-only storage parameter block.
-    /// WGSL/WebGPU uses this in place of `PushConstant`.
-    StorageBuffer {
-        set: u32,
-        binding: u32,
-        offset: u32,
-    },
-    /// One iteration per texel of the storage texture at (`set`,
-    /// `binding`) — used for compute entries whose primary output is a
-    /// storage image update. The host reads the allocated
-    /// `wgpu::Texture`'s `width × height` (the storage texture's
-    /// resolution is set by the descriptor's `StorageTextureSize`
-    /// policy at allocation time). 2D dispatch: the host divides by
-    /// the workgroup_size's x/y dims to produce workgroup counts.
-    StorageImage {
-        set: u32,
-        binding: u32,
-    },
+impl DispatchSize {
+    /// Bound a one-dimensional grid-stride launch to the portable group limit.
+    /// The kernel still processes the full domain. A zero divisor is an error.
+    pub fn linear(elements: Expr, workgroup_size: u32) -> Result<Self, HostError> {
+        let groups = Expr::Min(
+            Box::new(Expr::Max(
+                Box::new(elements.clone().ceiling(workgroup_size)?),
+                Box::new(Expr::Integer(0)),
+            )),
+            Box::new(Expr::Integer(65_535)),
+        );
+        Ok(Self::Computed {
+            elements,
+            groups: [groups, Expr::Integer(1), Expr::Integer(1)],
+        })
+    }
+
+    pub fn reads_mut(&mut self, visit: &mut impl FnMut(&mut ScalarSource, &mut u32)) {
+        if let Self::Computed { elements, groups } = self {
+            elements.reads_mut(visit);
+            for group in groups {
+                group.reads_mut(visit);
+            }
+        }
+    }
 }
 
 /// One named member of a host-populated interface block: where the host writes

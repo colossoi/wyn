@@ -1,11 +1,10 @@
 use super::{
-    Access, BackingRef, Binding, BufferUsage, ComputePipeline, ComputeStage, DispatchLen, DispatchLoop,
-    DispatchSize, FragmentOutput, FrameGraph, FramePass, FramePassKind, FrameResourceExtent,
-    FrameResourceKind, GraphicsInvocation, GraphicsPipeline, GraphicsStage, ModuleInterface, Pipeline,
-    ShaderStage, StageBindingUses, StorageImageFormat, StorageTextureSize, TextureSampleType,
-    TextureViewDimension,
+    Access, BackingRef, Binding, BufferUsage, ComputePipeline, ComputeStage, DispatchLoop, DispatchSize,
+    FragmentOutput, FrameGraph, FramePass, FramePassKind, FrameResourceExtent, FrameResourceKind,
+    GraphicsInvocation, GraphicsPipeline, GraphicsStage, ModuleInterface, Pipeline, ShaderStage,
+    StageBindingUses, StorageImageFormat, StorageTextureSize, TextureSampleType, TextureViewDimension,
 };
-use crate::{ScalarExpr, ScalarSource};
+use crate::{Expr, ScalarExpr, ScalarSource};
 
 #[test]
 fn selected_loops_stay_contiguous_and_wait_for_outer_dependencies() {
@@ -58,6 +57,14 @@ fn selected_loops_stay_contiguous_and_wait_for_outer_dependencies() {
 
 #[test]
 fn frame_graph_aliases_storage_texture_views_and_orders_consumers() {
+    let width = Expr::TextureDimension {
+        source: ScalarSource::Binding { set: 1, binding: 0 },
+        axis: 0,
+    };
+    let height = Expr::TextureDimension {
+        source: ScalarSource::Binding { set: 1, binding: 0 },
+        axis: 1,
+    };
     let mut descriptor = ModuleInterface {
         scalar_tasks: vec![],
         dispatch_loops: vec![],
@@ -80,9 +87,13 @@ fn frame_graph_aliases_storage_texture_views_and_orders_consumers() {
                     entry_point: "paint".to_string(),
                     owner: "paint".to_string(),
                     workgroup_size: (8, 8, 1),
-                    dispatch_size: DispatchSize::DerivedFrom {
-                        len: DispatchLen::StorageImage { set: 1, binding: 0 },
-                        workgroup_size: 8,
+                    dispatch_size: DispatchSize::Computed {
+                        elements: width.clone().multiply(height.clone()),
+                        groups: [
+                            width.ceiling(8).unwrap(),
+                            height.ceiling(8).unwrap(),
+                            Expr::Integer(1),
+                        ],
                     },
                     uses: StageBindingUses {
                         reads: vec![],
@@ -138,6 +149,21 @@ fn frame_graph_aliases_storage_texture_views_and_orders_consumers() {
     ));
     assert_eq!(graph.passes.len(), 2);
     assert_eq!(graph.passes[1].depends_on, vec![0]);
+
+    let program = crate::Program::new(descriptor).unwrap();
+    let entry = program.entries.iter().find(|entry| entry.name == "paint").unwrap();
+    let [crate::Operation::Dispatch { groups, .. }] = entry.operations.as_slice() else {
+        panic!("one texture dispatch");
+    };
+    assert_eq!(
+        groups[0].to_whl().unwrap(),
+        "(ceiling (i64 (gpu-texture-dimension resource-0 0 'width)) (i64 8))"
+    );
+    assert_eq!(
+        groups[1].to_whl().unwrap(),
+        "(ceiling (i64 (gpu-texture-dimension resource-0 0 'height)) (i64 8))"
+    );
+    assert_eq!(groups[2], Expr::Integer(1));
 }
 
 #[test]
@@ -296,6 +322,32 @@ fn frame_graph_orders_a_consumer_after_its_producer_in_either_declaration_order(
             "producer_first={producer_first}: schedule runs the consumer first: {order:?}"
         );
     }
+}
+
+#[test]
+fn dispatch_sized_allocations_keep_the_unrounded_expression() {
+    let mut descriptor = producer_consumer_descriptor(true);
+    let Pipeline::Compute(producer) = &mut descriptor.pipelines[0] else {
+        panic!("compute producer");
+    };
+    let Binding::StorageBuffer { length, .. } = &mut producer.bindings[0] else {
+        panic!("output buffer");
+    };
+    *length = Some(super::BufferLen::SameAsDispatch { elem_bytes: 4 });
+    let elements = Expr::Input("rows".into()).multiply(Expr::Input("columns".into()));
+    producer.stages[0].dispatch_size = DispatchSize::linear(elements.clone(), 64).unwrap();
+    descriptor.frame_graph = descriptor.frame_graph.refresh_resources(&descriptor.pipelines).unwrap();
+    let program = crate::Program::new(descriptor).unwrap();
+    let entry = program.entries.iter().find(|entry| entry.name == "producer").unwrap();
+    let [crate::Allocation::Buffer { bytes, .. }] = entry.allocations.as_slice() else {
+        panic!("one output allocation");
+    };
+    assert_eq!(bytes, &elements.multiply(Expr::Integer(4)));
+    assert_eq!(
+        entry.scalar_inputs,
+        ["columns".into(), "rows".into()].into_iter().collect()
+    );
+    assert!(DispatchSize::linear(Expr::Integer(1), 0).is_err());
 }
 
 #[test]

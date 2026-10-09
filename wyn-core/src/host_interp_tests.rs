@@ -70,6 +70,56 @@ fn uses_input_buffer_capacity_and_preserves_returned_aliases() {
 }
 
 #[test]
+fn computed_dispatch_extents_preserve_parameters_wrapping_and_grid_limits() {
+    let source = "entry main(dest:*[128]i32, shape:(i32,i32)) [128]i32 =
+        let indices=iota(shape.0*shape.1) in scatter(dest,indices,map(|i|i+1,indices))";
+    for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+        let ssa = compile_thru_ssa(source).unwrap();
+        let host = match format {
+            ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+            ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+        };
+        assert!(
+            host.entries[0].allocations.is_empty(),
+            "scatter reuses its destination"
+        );
+        host.to_rust_wgpu("computed_dispatch", format).unwrap();
+        let program = Program::parse(&host.to_whl("computed_dispatch", format).unwrap()).unwrap();
+        for (rows, columns, groups) in [
+            (0i32, 4i32, 0),
+            (8, 8, 1),
+            (5, 13, 2),
+            (-1, 4, 0),
+            (i32::MAX, 2, 0),
+            (65_536, 64, 65_535),
+        ] {
+            let mut backend = Trace::default();
+            let arguments: Vec<_> = program
+                .entry("main")
+                .unwrap()
+                .parameters
+                .iter()
+                .map(|parameter| {
+                    backend.input(match parameter.source_name() {
+                        "dest" => vec![0; 128 * 4],
+                        name => {
+                            assert_eq!(parameter.host_bytes().unwrap(), Some(8), "{name}");
+                            rows.to_le_bytes().into_iter().chain(columns.to_le_bytes()).collect()
+                        }
+                    })
+                })
+                .collect();
+            program.run("main", &arguments, &mut backend).unwrap();
+            let [(_, actual)] = backend.dispatches.as_slice() else {
+                panic!("one scatter dispatch: {:?}", backend.dispatches);
+            };
+            assert_eq!(actual, &[groups, 1, 1], "{format:?}, shape=({rows},{columns})");
+            assert!(backend.device_reads.is_empty(), "parameters stay host-readable");
+        }
+    }
+}
+
+#[test]
 fn uniform_sized_launches_allocate_capacity_and_clamp_the_grid() {
     #[derive(Default)]
     struct LaunchTrace {

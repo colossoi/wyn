@@ -1038,7 +1038,7 @@ fn shared_helper_reuses_its_emitted_body_and_storage_requirements() {
 
 #[test]
 fn runtime_launches_use_buffer_and_scalar_domains() {
-    use host::{DispatchLen, DispatchSize};
+    use host::{DispatchSize, Expr};
     for source in [
         "entry main(xs: []i32) []i32 = map(|x:i32|x+1,xs)",
         "entry main(n: i32) []i32 = map(|i|i+1,iota(n))",
@@ -1049,9 +1049,9 @@ fn runtime_launches_use_buffer_and_scalar_domains() {
         };
         assert!(matches!(
             p.stages[0].dispatch_size,
-            DispatchSize::DerivedFrom {
-                len: DispatchLen::InputBinding { .. } | DispatchLen::StorageBuffer { .. },
-                workgroup_size: 64
+            DispatchSize::Computed {
+                elements: Expr::BufferLength { .. } | Expr::Scalar(_),
+                ..
             }
         ));
     }

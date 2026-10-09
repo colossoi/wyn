@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use crate::{
-    Binding, BufferLen, BufferUsage, DepthTest, DispatchLen, DispatchSize, DrawBufferRef, DrawCall,
-    DrawCount, FrameResource, FrameResourceKind, ModuleInterface, Pipeline, ScalarExpr, ScalarSource,
+    Binding, BufferLen, BufferUsage, DepthTest, DispatchSize, DrawBufferRef, DrawCall, DrawCount,
+    FrameResource, FrameResourceKind, ModuleInterface, Pipeline, ScalarExpr, ScalarSource,
     StorageTextureSize,
 };
 
@@ -46,7 +46,7 @@ pub enum Expr {
         signed: bool,
     },
     TextureDimension {
-        resource: ResourceId,
+        source: ScalarSource,
         axis: usize,
     },
     Subtract(Box<Expr>, Box<Expr>),
@@ -109,10 +109,10 @@ impl Expr {
     fn dependencies(&self, result: &mut Dependencies) -> Result<(), HostError> {
         match self {
             Self::Scalar(value) => result.scalar(value, ScalarSource::resource)?,
-            Self::BufferLength { source, .. } => result.resource(source.resource()?, 0),
-            Self::BufferSize(id)
-            | Self::ReadScalar { resource: id, .. }
-            | Self::TextureDimension { resource: id, .. } => result.resource(*id, 0),
+            Self::BufferLength { source, .. } | Self::TextureDimension { source, .. } => {
+                result.resource(source.resource()?, 0)
+            }
+            Self::BufferSize(id) | Self::ReadScalar { resource: id, .. } => result.resource(*id, 0),
             Self::Input(name) => {
                 result.scalar_inputs.insert(name.clone());
             }
@@ -157,7 +157,9 @@ impl Expr {
     pub fn reads_mut(&mut self, visit: &mut impl FnMut(&mut ScalarSource, &mut u32)) {
         match self {
             Self::Scalar(value) => value.reads_mut(visit),
-            Self::BufferLength { source, .. } => visit(source, &mut 0),
+            Self::BufferLength { source, .. } | Self::TextureDimension { source, .. } => {
+                visit(source, &mut 0)
+            }
             Self::Subtract(left, right)
             | Self::Multiply(left, right)
             | Self::Floor(left, right)
@@ -312,7 +314,7 @@ impl Program {
                         Operation::Dispatch {
                             pipeline,
                             stage: pass.stage_index,
-                            groups: program.groups(pipeline, &stage.dispatch_size, stage.workgroup_size)?,
+                            groups: program.groups(pipeline, &stage.dispatch_size)?,
                         },
                     )
                 }
@@ -535,105 +537,20 @@ impl Program {
             .find_map(|r| self.bindings(r.pipeline_index).get(r.binding_index))
     }
 
-    pub fn logical_count(&self, pipeline: usize, len: &DispatchLen) -> Result<Expr, HostError> {
-        match *len {
-            DispatchLen::Fixed { count } => Ok(Expr::Integer(count.into())),
-            DispatchLen::InputBinding {
-                set,
-                binding,
-                elem_bytes,
-            } => Expr::BufferSize(self.slot_resource(pipeline, set, binding)?).floor(elem_bytes),
-            DispatchLen::PushConstant { offset } => {
-                let Some((index, base)) =
-                    self.bindings(pipeline).iter().enumerate().find_map(|(i, b)| match b {
-                        Binding::PushConstant {
-                            offset: base, size, ..
-                        } if offset >= *base
-                            && u64::from(offset) + 4 <= u64::from(*base) + u64::from(*size) =>
-                        {
-                            Some((i, *base))
-                        }
-                        _ => None,
-                    })
-                else {
-                    return Err(HostError::Invalid(format!(
-                        "missing scalar at push offset {offset}"
-                    )));
-                };
-                Ok(Expr::Scalar(ScalarExpr::Parameter {
-                    source: ScalarSource::Resource(self.binding_resource(pipeline, index)?),
-                    offset: offset - base,
-                    ty: crate::ScalarType::U32,
-                }))
-            }
-            DispatchLen::StorageBuffer { set, binding, offset } => {
-                let resource = self.slot_resource(pipeline, set, binding)?;
-                let parameter = match self.resource_binding(resource) {
-                    Some(Binding::Uniform { .. }) => true,
-                    Some(Binding::StorageBuffer {
-                        usage: BufferUsage::Input,
-                        members,
-                        ..
-                    }) => !members.is_empty(),
-                    _ => false,
-                };
-                Ok(if parameter {
-                    Expr::Scalar(ScalarExpr::Parameter {
-                        source: ScalarSource::Resource(resource),
-                        offset,
-                        ty: crate::ScalarType::U32,
-                    })
-                } else {
-                    Expr::ReadScalar {
-                        resource,
-                        offset,
-                        signed: false,
-                    }
-                })
-            }
-            DispatchLen::StorageImage { set, binding } => {
-                let resource = self.slot_resource(pipeline, set, binding)?;
-                Ok(Expr::TextureDimension { resource, axis: 0 }
-                    .multiply(Expr::TextureDimension { resource, axis: 1 }))
-            }
-        }
-    }
-
-    fn groups(
-        &self,
-        pipeline: usize,
-        size: &DispatchSize,
-        workgroup: (u32, u32, u32),
-    ) -> Result<[Expr; 3], HostError> {
-        let one = Expr::Integer(1);
+    fn groups(&self, pipeline: usize, size: &DispatchSize) -> Result<[Expr; 3], HostError> {
         match size {
             DispatchSize::Fixed { x, y, z, .. } => Ok([
                 Expr::Integer((*x).into()),
                 Expr::Integer((*y).into()),
                 Expr::Integer((*z).into()),
             ]),
-            DispatchSize::DerivedFrom {
-                len: DispatchLen::StorageImage { set, binding },
-                ..
-            } => {
-                let resource = self.slot_resource(pipeline, *set, *binding)?;
-                Ok([
-                    Expr::TextureDimension { resource, axis: 0 }.ceiling(workgroup.0)?,
-                    Expr::TextureDimension { resource, axis: 1 }.ceiling(workgroup.1)?,
-                    one,
-                ])
+            DispatchSize::Computed { groups, .. } => {
+                let mut groups = groups.clone();
+                for group in &mut groups {
+                    self.resolve_size_sources(pipeline, group)?;
+                }
+                Ok(groups)
             }
-            DispatchSize::DerivedFrom { len, workgroup_size } => Ok([
-                Expr::Min(
-                    Box::new(Expr::Max(
-                        Box::new(self.logical_count(pipeline, len)?.ceiling(*workgroup_size)?),
-                        Box::new(Expr::Integer(0)),
-                    )),
-                    Box::new(Expr::Integer(65_535)),
-                ),
-                one.clone(),
-                one,
-            ]),
         }
     }
 
@@ -857,14 +774,15 @@ impl Program {
                                 return Ok(None);
                             };
                             let domain = p.stages.iter().find_map(|s| match &s.dispatch_size {
-                                DispatchSize::DerivedFrom { len, .. } => Some(len),
+                                DispatchSize::Computed { elements, .. } => Some(elements),
                                 DispatchSize::Fixed { .. } => None,
                             });
                             let Some(domain) = domain else {
                                 return Ok(None);
                             };
-                            self.logical_count(r.pipeline_index, domain)?
-                                .multiply(Expr::Integer((*elem_bytes).into()))
+                            let mut domain = domain.clone();
+                            self.resolve_size_sources(r.pipeline_index, &mut domain)?;
+                            domain.multiply(Expr::Integer((*elem_bytes).into()))
                         }
                         BufferLen::Computed { bytes } => {
                             let mut bytes = bytes.clone();

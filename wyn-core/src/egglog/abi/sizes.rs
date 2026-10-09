@@ -3,7 +3,7 @@
 use crate::egglog::to_ssa::{error, Compiler};
 use crate::egglog::OptimizeError;
 use crate::egglog::{facts::Facts, host::lower as host};
-use crate::host::{BufferLen, DispatchLen, DispatchSize, Expr, ScalarExpr, ScalarSource};
+use crate::host::{BufferLen, DispatchSize, Expr, ScalarExpr, ScalarSource};
 use crate::ssa::layout::storage_elem_stride;
 use egglog_engine::{RawValues, Value};
 
@@ -35,6 +35,7 @@ pub(super) fn output_capacity(facts: &Facts<'_, '_>, capacity: Value) -> Result<
 pub(in crate::egglog) fn dispatch(
     compiler: &Compiler<'_, '_>,
     stage: Value,
+    workgroup_width: u32,
 ) -> Result<DispatchSize, OptimizeError> {
     let selected =
         crate::egglog::query::Query(&compiler.program.graph).required("SelectedLaunch", (stage,))?;
@@ -47,55 +48,35 @@ pub(in crate::egglog) fn dispatch(
             explicit: true,
         });
     }
-    if let Some(fields) = compiler.facts.enode("BufferLaunch", selected) {
+    let (elements, divisor) = if let Some(fields) = compiler.facts.enode("BufferLaunch", selected) {
         let Some((binding, element, _)) = compiler.bindings.buffer(fields[0])? else {
             return Err(error("launch buffer missing"));
         };
         let Some(elem_bytes) = storage_elem_stride(&compiler.facts.physical_type(element, true)?) else {
             return Err(error("launch element stride missing"));
         };
-        return Ok(DispatchSize::DerivedFrom {
-            len: DispatchLen::InputBinding {
-                set: binding.set,
-                binding: binding.binding,
-                elem_bytes,
+        (
+            Expr::BufferLength {
+                source: ScalarSource::Binding {
+                    set: binding.set,
+                    binding: binding.binding,
+                },
+                stride: elem_bytes,
             },
-            workgroup_size: compiler.facts.positive(fields[1], "launch divisor")?,
-        });
-    }
-    let Some(fields) = compiler.facts.enode("ExtentLaunch", selected) else {
+            compiler.facts.positive(fields[1], "launch divisor")?,
+        )
+    } else if let Some(fields) = compiler.facts.enode("ExtentLaunch", selected) {
+        (
+            extent(compiler, fields[0])?,
+            compiler.facts.positive(fields[1], "launch divisor")?,
+        )
+    } else {
         return Err(error("unknown selected launch"));
     };
-    let len = match extent(compiler, fields[0])? {
-        Expr::Integer(count) => DispatchLen::Fixed {
-            count: u32::try_from(count)
-                .map_err(|_| error("launch extent must fit an unsigned 32-bit integer"))?,
-        },
-        Expr::BufferLength {
-            source: ScalarSource::Binding { set, binding },
-            stride,
-        } => DispatchLen::InputBinding {
-            set,
-            binding,
-            elem_bytes: stride,
-        },
-        Expr::Scalar(ScalarExpr::Parameter {
-            source: ScalarSource::PushConstant { offset: base, .. },
-            offset,
-            ..
-        }) => DispatchLen::PushConstant {
-            offset: base + offset,
-        },
-        value => {
-            return Err(error(format!(
-                "selected launch has no supported physical length: {value:?}"
-            )))
-        }
-    };
-    Ok(DispatchSize::DerivedFrom {
-        len,
-        workgroup_size: compiler.facts.positive(fields[1], "launch divisor")?,
-    })
+    if workgroup_width == 0 || divisor % workgroup_width != 0 {
+        return Err(error("launch divisor must cover whole workgroups"));
+    }
+    DispatchSize::linear(elements, divisor).map_err(|e| error(e.to_string()))
 }
 
 pub(in crate::egglog) fn capacity(

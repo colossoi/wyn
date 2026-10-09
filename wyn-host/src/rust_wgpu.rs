@@ -259,8 +259,8 @@ impl Program {
                     quote!(i64::from(support::#read(device,queue,encoder,&#id,#offset)?))
                 }
             }
-            Expr::TextureDimension { resource: r, axis } => {
-                let id = resource(*r);
+            Expr::TextureDimension { source, axis } => {
+                let id = resource(source.resource()?);
                 match axis {
                     0 => quote!(i64::from(#id.width())),
                     1 => quote!(i64::from(#id.height())),

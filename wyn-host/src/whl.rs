@@ -115,9 +115,9 @@ impl Expr {
                 resource(*r),
                 if *signed { "i32" } else { "u32" }
             ),
-            Self::TextureDimension { resource: r, axis } => format!(
+            Self::TextureDimension { source, axis } => format!(
                 "(i64 (gpu-texture-dimension {} 0 '{}))",
-                resource(*r),
+                resource(source.resource()?),
                 match axis {
                     0 => "width",
                     1 => "height",

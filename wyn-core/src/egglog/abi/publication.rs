@@ -150,7 +150,7 @@ pub(in crate::egglog) fn publish(
                     index
                 });
                 let dispatch = if let Some(stage) = stage {
-                    sizes::dispatch(compiler, *stage)?
+                    sizes::dispatch(compiler, *stage, local_size.0)?
                 } else {
                     let Some(symbol) = compiler.program.identities.symbols.get(owner) else {
                         return Err(error("entry symbol missing"));
@@ -192,11 +192,6 @@ pub(in crate::egglog) fn publish(
                     uses: Default::default(),
                 });
                 associations[index].push(entry.id);
-                if let DispatchSize::DerivedFrom { workgroup_size, .. } = dispatch {
-                    if workgroup_size % local_size.0 != 0 {
-                        return Err(error("launch divisor must cover whole workgroups"));
-                    }
-                }
             }
             ExecutionModel::Vertex | ExecutionModel::Fragment => {
                 let Some(group) = &declaration.graphics_group else {
