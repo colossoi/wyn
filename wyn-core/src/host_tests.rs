@@ -1,7 +1,7 @@
 use crate::host::arithmetic::{add, ceiling, dimension, floor, multiply, signed_size, size, subtract};
 use crate::host::{
-    Allocation, Binding, Expr, Operation, Pipeline, Program, ResultKind, ResultLayout, ResultScalar,
-    ShaderFormat, TextureSampleType,
+    Allocation, Binding, Expr, FrameGraph, Operation, Pipeline, Program, ResultKind, ResultLayout,
+    ResultScalar, ShaderFormat, TextureSampleType,
 };
 use crate::{compile_thru_ssa, lower_ssa_to_spirv, lower_ssa_to_wgsl_with_program};
 use std::collections::BTreeSet;
@@ -9,6 +9,23 @@ use wyn_host_interp::Program as WhlProgram;
 
 fn compile(source: &str) -> Program {
     lower_ssa_to_wgsl_with_program(compile_thru_ssa(source).unwrap()).unwrap().program
+}
+
+fn assert_dependency(graph: &FrameGraph, before: usize, after: usize) {
+    let mut pending = graph.passes[after].depends_on.clone();
+    let mut visited = BTreeSet::new();
+    while let Some(index) = pending.pop() {
+        if index == before {
+            return;
+        }
+        if visited.insert(index) {
+            pending.extend(&graph.passes[index].depends_on);
+        }
+    }
+    panic!(
+        "{} must depend on {}",
+        graph.passes[after].name, graph.passes[before].name
+    );
 }
 
 #[test]
@@ -1157,6 +1174,53 @@ fn indirect_draw_waits_for_both_count_epilogue_and_compacted_vertices() {
 }
 
 #[test]
+fn texture_readers_finish_before_the_target_is_overwritten() {
+    let program = compile(
+        "def replace_state: fragment_state = {
+             depth_test = #disabled, depth_write = false, blend = #replace, color_write = true
+         }
+         entry main(vertices:[3]vec4f32, coords:[137]vec2i32, target:render_target<f32>)
+         ([137]f32,render_target<f32>) =
+         let first = rasterize_triangles(direct_draw(3u32,1u32),
+             |i,_,_|vertex_output(vertices[i32(i)],()))
+         let image = shade_with(replace_state,target,first,|_,_,_,_,_|0.25)
+         let old = map(|coord|target_load(image,coord,0u32),coords)
+         let second = rasterize_triangles(direct_draw(3u32,1u32),
+             |i,_,_|vertex_output(vertices[i32(i)],()))
+         let updated = shade_with(replace_state,image,second,|_,_,_,_,_|0.75)
+         in (old,updated)",
+    );
+    let entry = &program.entries[0];
+    let [sampled, target] = entry.results.as_slice() else {
+        panic!("sampled values and updated target")
+    };
+    let graph = &program.interface.frame_graph;
+    let draw = |operation| {
+        graph
+            .passes
+            .iter()
+            .position(|pass| {
+                matches!(
+                    &program.interface.pipelines[pass.pipeline_index],
+                    Pipeline::Graphics(graphics) if graphics.source_operation == Some(operation)
+                )
+            })
+            .unwrap()
+    };
+    let reader = graph
+        .passes
+        .iter()
+        .position(|pass| pass.writes.iter().any(|access| access.resource == sampled.0))
+        .unwrap();
+    assert!(graph.passes[reader].reads.iter().any(|access| access.resource == target.0));
+    for writer in [draw(0), draw(1)] {
+        assert!(graph.passes[writer].writes.iter().any(|access| access.resource == target.0));
+    }
+    assert_dependency(graph, draw(0), reader);
+    assert_dependency(graph, reader, draw(1));
+}
+
+#[test]
 fn texture_consumers_wait_for_draws_with_delayed_vertex_inputs() {
     let source = include_str!("../../testfiles/rust_host_draw_consumer_order.wyn");
     let control = source.replace(
@@ -1217,6 +1281,32 @@ fn texture_consumers_wait_for_draws_with_delayed_vertex_inputs() {
                 ground < props && props < sample_position && sample_position < resolve,
                 "{format:?}: ground={ground}, props={props}, sampling={sample_position}, resolve={resolve}"
             );
+            let graph = &program.interface.frame_graph;
+            let passes = [
+                (ground_pipeline, 0),
+                (props_pipeline, 0),
+                (sample_pipeline, sample_stage),
+                (resolve_pipeline, 0),
+            ]
+            .map(|(pipeline, stage)| {
+                graph
+                    .passes
+                    .iter()
+                    .position(|pass| pass.pipeline_index == pipeline && pass.stage_index == stage)
+                    .unwrap()
+            });
+            for pair in passes.windows(2) {
+                assert_dependency(graph, pair[0], pair[1]);
+            }
+            let [ground_pass, props_pass, sample_pass, resolve_pass] =
+                passes.map(|index| &graph.passes[index]);
+            let scene = entry.results[1].0;
+            for pass in [ground_pass, props_pass] {
+                assert!(pass.writes.iter().any(|access| access.resource == scene));
+            }
+            assert!(sample_pass.reads.iter().any(|access| access.resource == scene));
+            assert!(sample_pass.writes.iter().any(|access| access.resource == sampled.0));
+            assert!(resolve_pass.reads.iter().any(|access| access.resource == sampled.0));
             let rust = program.to_rust_wgpu("draw_order", format).unwrap();
             let call: String =
                 rust.split_once("pub fn host_reproduce(").unwrap().1.split_whitespace().collect();

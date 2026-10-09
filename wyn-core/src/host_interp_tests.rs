@@ -1,5 +1,5 @@
 use crate::{compile_thru_ssa, lower_ssa_to_spirv, lower_ssa_to_wgsl_with_program};
-use wyn_host::ShaderFormat;
+use wyn_host::{ResultLayout, ResultScalar, ShaderFormat};
 use wyn_host_interp::{Backend, Error, Number, Options, Program, Result, Value};
 
 #[path = "../../wyn-host-interp/src/test_backend.rs"]
@@ -67,6 +67,62 @@ fn uses_input_buffer_capacity_and_preserves_returned_aliases() {
         program.run("echo", &[input.clone()], &mut backend).unwrap(),
         input
     );
+}
+
+#[test]
+fn nested_maps_and_reductions_preserve_result_shapes_and_capacity() {
+    for (source, dimensions) in [
+        (
+            "entry main(xs:[137]i32) [137][3]i32 = map(|x|map(|j|x+j,iota(3)),xs)",
+            &[3][..],
+        ),
+        (
+            "entry main(xs:[137]i32) [137][3][5]i32 =
+             map(|x|map(|j|map(|k|x+j+k,iota(5)),iota(3)),xs)",
+            &[3, 5][..],
+        ),
+        (
+            "entry main(xs:[137]i32) [137]i32 =
+             map(|x|reduce((+),0,map(|y|y+x,iota(5))),xs)",
+            &[][..],
+        ),
+    ] {
+        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+            let ssa = compile_thru_ssa(source).unwrap();
+            let host = match format {
+                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+            };
+            let element =
+                dimensions.iter().rev().fold(ResultLayout::Scalar(ResultScalar::I32), |element, &count| {
+                    ResultLayout::Sequence {
+                        stride: element.byte_size().unwrap(),
+                        element: Box::new(element),
+                        count,
+                    }
+                });
+            let stride = element.byte_size().unwrap();
+            let [result] = host.interface.source_results.as_slice() else {
+                panic!("one source result")
+            };
+            assert_eq!(
+                result.layout,
+                ResultLayout::Array {
+                    element: Box::new(element),
+                    stride,
+                    length: Some(137)
+                }
+            );
+            let program = Program::parse(&host.to_whl("nested", format).unwrap()).unwrap();
+            let mut backend = Trace::default();
+            let input = backend.input(vec![0; 137 * 4]);
+            let result = program.run("main", &[input], &mut backend).unwrap();
+            assert!(
+                backend.buffers[&result.handle().unwrap()].len() >= 137 * stride as usize,
+                "{format:?}: returned storage must hold every nested element"
+            );
+        }
+    }
 }
 
 #[test]
