@@ -1,0 +1,24 @@
+-- FIXED with installed compiler dated 2026-10-08 21:11 EDT: one Function
+-- array with element access, no whole-array copies in the loop. All 128
+-- numeric output components pass on GTX 1660 Ti.
+-- Former suspected performance failure: each dynamic queue read/update emits a whole
+-- 1024-element vec2 array store/load in SPIR-V, rather than just element access.
+-- Expected efficient lowering: initialize private queue once, read/write one
+-- element per iteration. Inspect disassembly; numeric output can still pass.
+-- Whether the driver eliminates these copies requires native-code inspection
+-- or timing; this reproducer establishes the emitted SPIR-V pattern only.
+-- CWD: /home/jonah/wyn
+-- wyn build fluid-simulation/test/repro_local_queue_copy.wyn -o /tmp/queue-copy.spv
+-- spirv-dis /tmp/queue-copy.spv -o /tmp/queue-copy.spvasm
+-- For input steps=64, output lane i should be [i+64,64].
+-- extra/viz/target/release/viz pipeline /tmp/queue-copy.spv --push-constant steps:i32=64 --verbose
+-- Verified 2026-10-08 on GTX 1660 Ti: all 128 output components correct.
+def walk(seed: u32, steps: i32) vec2u32 =
+  let initial = replicate(1024,@[0u32,0u32]) with [0] = @[seed,0u32] in
+  let (queue,k) = loop (queue,k) = (initial,0i32) while k < steps do
+    let value = queue[k%1024] in
+    (queue with [(k+1)%1024] = value+@[1u32,1u32],k+1) in
+  queue[k%1024]
+
+entry reproduce(steps: i32) []vec2u32 =
+  map(|i| walk(u32(i),steps),0i32..<64)

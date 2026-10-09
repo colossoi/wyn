@@ -1,0 +1,83 @@
+; Selected DAG indices are local to this planning graph. Source scopes and
+; identities stay opaque in the importer; scope dominance is an input proof.
+(relation EvaluationEdge (i64 i64))
+(relation EvaluationLeaf (i64))
+(relation EvaluationReadOnly (i64))
+(relation EvaluationTotal (i64))
+(relation EvaluationContains (i64 i64))
+(relation EvaluationAvailable (i64 i64))
+(relation EvaluationBefore (i64 i64))
+(relation EvaluationHoistable (i64))
+(ruleset evaluation-reachability)
+(ruleset evaluation-placement)
+(rule ((EvaluationLeaf leaf)) ((EvaluationContains leaf leaf)) :ruleset evaluation-reachability)
+(rule ((EvaluationEdge root child) (EvaluationContains child leaf))
+      ((EvaluationContains root leaf)) :ruleset evaluation-reachability)
+; Earlier bindings already execute in their enclosing region; this restores
+; their evaluation without granting permission to speculate their producers.
+(rule ((EvaluationContains boundary leaf) (EvaluationAvailable boundary leaf)
+       (EvaluationReadOnly leaf))
+      ((EvaluationBefore boundary leaf)) :ruleset evaluation-placement)
+; Read-only alone is insufficient for moving an expression across a guard.
+(rule ((EvaluationReadOnly term) (EvaluationTotal term))
+      ((EvaluationHoistable term)) :ruleset evaluation-placement)
+
+; Only branch-arm queries need transitive mandatory-demand sets. Keeping their
+; roots explicit avoids computing the all-pairs closure of the expression DAG.
+(relation EvaluationOperand (i64 i64))
+(relation EvaluationPair (i64 i64))
+(relation EvaluationDemand (i64 i64))
+(relation EvaluationShared (i64 i64 i64))
+(relation EvaluationSharedBinding (i64 i64 i64))
+(rule ((EvaluationPair yes no)) ((EvaluationDemand yes yes) (EvaluationDemand no no)) :ruleset evaluation-reachability)
+(rule ((EvaluationDemand root parent) (EvaluationOperand parent child))
+      ((EvaluationDemand root child)) :ruleset evaluation-reachability)
+(rule ((EvaluationPair yes no) (EvaluationReadOnly yes) (EvaluationReadOnly no)
+       (EvaluationDemand yes term) (EvaluationDemand no term))
+      ((EvaluationShared yes no term)) :ruleset evaluation-placement)
+(rule ((EvaluationPair yes no) (EvaluationReadOnly yes) (EvaluationReadOnly no)
+       (EvaluationContains yes leaf) (EvaluationContains no leaf))
+      ((EvaluationSharedBinding yes no leaf)) :ruleset evaluation-placement)
+
+; Choose minimal execution frequency, then the latest lexical ancestor at that
+; frequency. Ranking stages run separately so provisional minima never become
+; permanent placement facts.
+(relation EvaluationSite (i64 i64 i64 i64 i64))
+(function EvaluationLoopDepth (i64) i64 :merge (min old new))
+(function EvaluationLexicalDepth (i64) i64 :merge (max old new))
+(function EvaluationTarget (i64) i64 :no-merge)
+(ruleset evaluation-frequency)
+(ruleset evaluation-lifetime)
+(ruleset evaluation-target)
+(rule ((EvaluationSite query term site loops depth) (EvaluationHoistable term))
+      ((set (EvaluationLoopDepth query) loops)) :ruleset evaluation-frequency)
+(rule ((EvaluationSite query term site loops depth) (= loops (EvaluationLoopDepth query)))
+      ((set (EvaluationLexicalDepth query) depth)) :ruleset evaluation-lifetime)
+(rule ((EvaluationSite query term site loops depth) (= loops (EvaluationLoopDepth query))
+       (= depth (EvaluationLexicalDepth query)))
+      ((set (EvaluationTarget query) site)) :ruleset evaluation-target)
+
+; A source leaf is an evaluation anchor: its producer has its own schedule.
+; Order inside each anchor is dependency postorder, with pure choices grouped
+; only after their mandatory operands. Emission consumes these decisions.
+(relation ScheduleNode (i64 i64))
+(relation ScheduleOperand (i64 i64))
+(relation ScheduleChoice (i64 i64))
+(function ScheduleRank (i64) i64 :merge (max old new))
+(relation ScheduleRequest (i64 bool))
+(relation ScheduleMember (i64 i64))
+(function ScheduleOrder (i64 i64) i64 :no-merge)
+(function ScheduleGroup (i64 i64) i64 :no-merge)
+(ruleset schedule-rank)
+(ruleset schedule-anchors)
+(rule ((ScheduleNode term weight)) ((set (ScheduleRank term) weight)) :ruleset schedule-rank)
+(rule ((ScheduleNode term weight) (ScheduleOperand term child) (= rank (ScheduleRank child)))
+      ((set (ScheduleRank term) (+ rank weight))) :ruleset schedule-rank)
+(rule ((ScheduleRequest request true) (ScheduleMember request term) (= rank (ScheduleRank term)))
+      ((set (ScheduleOrder request term) rank)) :ruleset schedule-anchors)
+(rule ((ScheduleRequest request false) (ScheduleMember request term))
+      ((set (ScheduleOrder request term) 0)) :ruleset schedule-anchors)
+(rule ((ScheduleRequest request true) (ScheduleMember request term) (ScheduleChoice term condition))
+      ((set (ScheduleGroup request term) condition)) :ruleset schedule-anchors)
+(rule ((ScheduleRequest request false) (ScheduleMember request term) (ScheduleChoice term condition))
+      ((set (ScheduleGroup request term) term)) :ruleset schedule-anchors)

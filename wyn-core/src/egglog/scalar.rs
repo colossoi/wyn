@@ -5,6 +5,7 @@ use super::{parse_program, source, timing, OptimizeError, ScalarOptimization};
 use crate::LookupMap;
 use egglog_engine::EGraph;
 
+pub(super) mod evaluation;
 pub(super) mod extract;
 mod fold;
 mod import;

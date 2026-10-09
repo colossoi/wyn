@@ -756,6 +756,227 @@ fn independent_scalar_results_do_not_share_a_host_resource() {
     }
 }
 
+// Inspect both emitted shader formats under the CLI's default and -O policies.
+fn placement_shaders(source: &str, mut check: impl FnMut(&naga::Module)) {
+    for policy in [super::ScalarOptimization::Basic, super::ScalarOptimization::Full] {
+        for target in [crate::CodegenTarget::Spirv, crate::CodegenTarget::Wgsl] {
+            let program = crate::compile_thru_ssa_with_policy(source, target, policy).unwrap();
+            let module = match target {
+                crate::CodegenTarget::Spirv => {
+                    let binary = lower_ssa_to_spirv(program).unwrap();
+                    naga::front::spv::Frontend::new(
+                        binary.spirv.iter().copied(),
+                        &naga::front::spv::Options::default(),
+                    )
+                    .parse()
+                    .unwrap()
+                }
+                crate::CodegenTarget::Wgsl => {
+                    naga::front::wgsl::parse_str(&lower_ssa_to_wgsl(program).unwrap()).unwrap()
+                }
+                _ => unreachable!(),
+            };
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap();
+            check(&module);
+        }
+    }
+}
+
+fn visit_loop_depths(block: &naga::Block, depth: usize, visit: &mut impl FnMut(&Statement, usize)) {
+    for statement in block.iter() {
+        visit(statement, depth);
+        match statement {
+            Statement::Loop { body, continuing, .. } => {
+                visit_loop_depths(body, depth + 1, visit);
+                visit_loop_depths(continuing, depth + 1, visit);
+            }
+            Statement::If { accept, reject, .. } => {
+                visit_loop_depths(accept, depth, visit);
+                visit_loop_depths(reject, depth, visit);
+            }
+            Statement::Block(block) => visit_loop_depths(block, depth, visit),
+            Statement::Switch { cases, .. } => {
+                for case in cases {
+                    visit_loop_depths(&case.body, depth, visit);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn earlier_loop_result_is_not_recomputed_inside_its_consumer() {
+    for consumer in [
+        "let (value,k) = loop (value,k) = (seed,0i32)
+          while k < 64 do ((value+total)%100003,k+1) in value",
+        "loop value=seed for k<64 do (value+total)%100003",
+        "loop value=seed while value < total do value+1",
+        // The dependency is behind a branch execution boundary, as in the BFS.
+        "let (value,k) = loop (value,k) = (seed,0i32)
+          while k < 64 do
+            if k%2 == 0 then ((value+total)%100003,k+1) else (value,k+1)
+          in value",
+    ] {
+        let source = format!(
+            "def walk(xs:[]i32, seed:i32) i32 =
+            let (total,j) = loop (total,j) = (0i32,0i32)
+              while j < length(xs) do (total+xs[j],j+1) in
+            {consumer}
+            entry reproduce(xs:[]i32) []i32 = map(|i|walk(xs,i),0i32..<64)"
+        );
+        placement_shaders(&source, |module| {
+            let mut depths = Vec::new();
+            for function in module
+                .functions
+                .iter()
+                .map(|(_, f)| f)
+                .chain(module.entry_points.iter().map(|e| &e.function))
+            {
+                visit_loop_depths(&function.body, 0, &mut |statement, depth| {
+                    if matches!(statement, Statement::Loop { .. }) {
+                        depths.push(depth);
+                    }
+                });
+            }
+            // Two helper loops and the entry point's grid-stride loop.
+            assert_eq!(
+                depths,
+                vec![0, 0, 0],
+                "sum and walk must be sibling loops: {consumer}"
+            );
+        });
+    }
+}
+
+#[test]
+fn loop_binding_placement_preserves_guards_and_outer_iterations() {
+    for (body, expected) in [
+        // This scan belongs to an arm inside the walk, so it must stay there.
+        (
+            "loop value=0 for k<4 do
+            if k < seed then
+                let total = loop total=0 for j<length(xs) do total+xs[j] in value+total
+            else value",
+            vec![0, 0, 1],
+        ),
+        // Each outer iteration computes its own sum, once before its inner walk.
+        (
+            "loop value=0 for k<4 do
+            let total = loop total=0 for j<length(xs) do total+xs[j]*k in
+            loop result=value for step<3 do result+total",
+            vec![0, 0, 1, 1],
+        ),
+    ] {
+        let source = format!(
+            "def walk(xs:[]i32,seed:i32) i32 = {body}
+            entry reproduce(xs:[]i32) []i32 = map(|i|walk(xs,i),0i32..<64)"
+        );
+        placement_shaders(&source, |module| {
+            let mut depths = Vec::new();
+            for function in module
+                .functions
+                .iter()
+                .map(|(_, f)| f)
+                .chain(module.entry_points.iter().map(|e| &e.function))
+            {
+                visit_loop_depths(&function.body, 0, &mut |statement, depth| {
+                    if matches!(statement, Statement::Loop { .. }) {
+                        depths.push(depth);
+                    }
+                });
+            }
+            depths.sort();
+            assert_eq!(depths, expected, "{body}");
+        });
+    }
+}
+
+#[test]
+fn fluid_leaf_bounds_are_computed_outside_the_bfs() {
+    stacker::grow(32 * 1024 * 1024, || {
+        // Use the simulator's implementation, including its queue sizes and guards.
+        let neighbors = include_str!("../../../fluid-simulation/packages/spatial/src/neighbors.wyn")
+            .replace(
+                "module Tree = import \"octree\"",
+                &format!(
+                    "module Tree = {{ {} }}",
+                    include_str!("../../../fluid-simulation/packages/spatial/src/octree.wyn")
+                ),
+            )
+            .replace(
+                "module Hilbert = import \"hilbert\"",
+                &format!(
+                    "module Hilbert = {{ {} }}",
+                    include_str!("../../../fluid-simulation/packages/spatial/src/hilbert.wyn")
+                ),
+            );
+        let source = format!(
+            "{neighbors}
+        entry neighbors(positions:[]vec4f32, corners:[]u32, offsets:[]i32) [258]i32 =
+            leaf_neighbors(0,positions,corners,offsets,1.7,16.0)"
+        );
+        placement_shaders(&source, |module| {
+            let mut bounds_depths = Vec::new();
+            let mut queues = 0;
+            for function in module
+                .functions
+                .iter()
+                .map(|(_, f)| f)
+                .chain(module.entry_points.iter().map(|e| &e.function))
+            {
+                let queue_variables: Vec<_> = function
+                    .local_variables
+                    .iter()
+                    .filter_map(|(id, v)| {
+                        matches!(module.types[v.ty].inner,
+                        naga::TypeInner::Array { base, .. } if matches!(module.types[base].inner,
+                            naga::TypeInner::Vector { size: naga::VectorSize::Bi, scalar }
+                                if scalar.kind == naga::ScalarKind::Uint))
+                        .then_some(id)
+                    })
+                    .collect();
+                queues += queue_variables.len();
+                let whole_queue = |pointer| {
+                    matches!(function.expressions[pointer],
+                    Expression::LocalVariable(v) if queue_variables.contains(&v))
+                };
+                assert!(!function
+                    .expressions
+                    .iter()
+                    .any(|(_, e)| matches!(e, Expression::Load { pointer } if whole_queue(*pointer))));
+                visit_loop_depths(&function.body, 0, &mut |statement, depth| {
+                    if let Statement::Store { pointer, .. } = statement {
+                        assert!(!whole_queue(*pointer), "BFS must update queue elements in place");
+                    }
+                    if let Statement::Emit(range) = statement {
+                        for value in range.clone() {
+                            if matches!(
+                                function.expressions[value],
+                                Expression::Math {
+                                    fun: naga::MathFunction::Max,
+                                    ..
+                                }
+                            ) {
+                                bounds_depths.push(depth);
+                            }
+                        }
+                    }
+                });
+            }
+            // Max updates the upper bound inside the bounds loop, never in a
+            // second enclosing loop (the BFS). Also reject duplicated bounds scans.
+            assert_eq!(bounds_depths, vec![1]);
+            assert_eq!(queues, 1);
+        });
+    });
+}
+
 #[test]
 fn nested_loop_invariants_keep_outer_iteration_dependencies() {
     shaders("entry nested(xs:[]i32) []i32 = map(|x:i32| loop a=0 for i<4 do a+(loop b=0 for j<3 do b+x*i+j), xs)");

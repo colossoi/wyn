@@ -140,7 +140,7 @@ impl Placement {
         })
     }
 
-    pub fn outside_loops(&self, context: Value, scope: Value, term: TermId) -> Value {
-        self.scopes.outside_loops(context, scope, &self.requirements[term])
+    pub fn sites(&self, context: Value, scope: Value, term: TermId) -> Vec<(Value, usize, usize)> {
+        self.scopes.sites(context, scope, &self.requirements[term])
     }
 }

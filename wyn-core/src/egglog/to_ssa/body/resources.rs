@@ -45,6 +45,7 @@ impl Body<'_, '_, '_> {
     }
 
     pub(super) fn local(&mut self, scope: Value, source: Value) -> Result<Typed, OptimizeError> {
+        self.planned_boundary(scope, source)?;
         if let Some(access) = self.compiler.facts.access(source) {
             if let Some(fields) = self.compiler.facts.enode("RunCollective", access) {
                 return self.collective(scope, source, fields[0], fields[1]);
@@ -70,8 +71,10 @@ impl Body<'_, '_, '_> {
             ) else {
                 return Err(error("branch has no selected result roots"));
             };
-            let shared = self.scalar_common(scope, [&[a_root], &[b_root]])?;
-            self.scalar_roots(scope, &shared, &mut crate::LookupSet::default())?;
+            let shared = self.scalar_common(scope, [&[a_root], &[b_root]]);
+            for term in shared {
+                self.scalar_roots(scope, &[term], &mut crate::LookupSet::default())?;
+            }
             return self.branch(
                 scope,
                 condition,

@@ -96,3 +96,5 @@
 
 (relation SourceCountedArrayLoop (SourceValue))
 (function SourceInteger32 (SourceValue) i64 :no-merge)
+
+(function SourceEvaluationPosition (SourceValue) i64 :merge (min old new))

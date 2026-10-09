@@ -1,4 +1,6 @@
 //! Emit selected egglog expressions and scheduled execution directly into SSA.
+use super::scalar::evaluation::Evaluation;
+use super::scalar::placement::Placement;
 use super::{timing, OptimizeError, Optimized, Program};
 use crate::ssa::builder::BuilderError;
 use crate::ssa::context::BackendGlobal;
@@ -28,11 +30,14 @@ pub(super) fn lower(
 ) -> Result<Elaborated, OptimizeError> {
     let _timing = timing::span("egglog to SSA");
     let facts = Facts { program };
+    let placements = Placement::new(program)?;
+    let evaluations = Evaluation::new(program, &placements)?;
     let mut compiler = Compiler {
         program,
         facts,
         bindings: super::abi::bindings::Bindings::new(program)?,
-        placements: super::scalar::placement::Placement::new(program)?,
+        placements,
+        evaluations,
         entry_origins: LookupMap::default(),
         entry_names: Default::default(),
         functions: Vec::new(),
@@ -90,7 +95,8 @@ pub(super) fn lower(
 }
 
 pub(super) struct Compiler<'a, 'source> {
-    placements: super::scalar::placement::Placement,
+    placements: Placement,
+    evaluations: Evaluation,
     pub(super) program: &'a Program<'source, Optimized>,
     pub(super) facts: Facts<'a, 'source>,
     pub(super) bindings: super::abi::bindings::Bindings<'a, 'source>,

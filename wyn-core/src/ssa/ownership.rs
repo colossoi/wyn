@@ -1,4 +1,4 @@
-//! Elide local array copies after WGSL storage placement.
+//! Prove local value-update reuse after shared storage placement.
 
 use super::ir::{LoopScopes, UseSite, ValueDef, ValueUses};
 use super::storage::{contains_array, is_local_value, ResultStorage, StorageUse};

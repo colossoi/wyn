@@ -22,6 +22,7 @@ mod constant_folding;
 mod if_conversion;
 pub mod ir;
 pub mod layout;
+mod local_storage;
 mod optimize;
 mod ownership;
 pub mod print;
@@ -80,6 +81,7 @@ pub fn prepare_spirv(mut program: stage::Reachable) -> error::Result<stage::Spir
         ));
     }
     simplify_values(&mut program);
+    local_storage::apply(&mut program)?;
     texture_sampling::publish_texture_sampling(&mut program);
     backend_validation::verify_no_abstract_types(&program)?;
     spirv::verify_buffer_layouts::verify_buffer_layouts(&program)?;
@@ -96,7 +98,7 @@ pub fn prepare_wgsl(mut program: stage::Reachable) -> error::Result<stage::WgslR
     }
     promote_addressable_constants(&mut program);
     simplify_values(&mut program);
-    ownership::apply(&mut program);
+    local_storage::apply(&mut program)?;
     texture_sampling::publish_texture_sampling(&mut program);
     backend_validation::verify_no_abstract_types(&program)?;
     Ok(program.retag())

@@ -1,0 +1,22 @@
+-- FIXED with installed compiler dated 2026-10-08 20:10 EDT: sequential loops
+-- in SPIR-V; all 64 numeric outputs still pass on GTX 1660 Ti.
+-- Former performance failure: input-summing loop emitted INSIDE the walk loop,
+-- although its result is invariant and the source computes it before the walk.
+-- Expected: sum input once per map lane, then reuse that sum for all 64 steps.
+-- Numeric result remains correct; inspect SPIR-V loop nesting, not just output.
+-- CWD: /home/jonah/wyn
+-- wyn build fluid-simulation/test/repro_loop_invariant_bounds.wyn -o /tmp/invariant-bounds.spv
+-- spirv-dis /tmp/invariant-bounds.spv -o /tmp/invariant-bounds.spvasm
+-- Generate 32 little-endian i32 inputs, then check output lane i = 31744+i:
+-- python3 -c 'import struct; open("/tmp/invariant-input.bin","wb").write(struct.pack("<32i",*range(32)))'
+-- extra/viz/target/release/viz pipeline /tmp/invariant-bounds.spv --input xs:/tmp/invariant-input.bin --verbose
+-- Verified 2026-10-08 on GTX 1660 Ti: all 64 outputs correct.
+def walk(xs: []i32, seed: i32) i32 =
+  let (total,j) = loop (total,j) = (0i32,0i32)
+    while j < length(xs) do (total+xs[j],j+1) in
+  let (value,k) = loop (value,k) = (seed,0i32)
+    while k < 64 do ((value+total)%100003,k+1) in
+  value
+
+entry reproduce(xs: []i32) []i32 =
+  map(|i| walk(xs,i),0i32..<64)

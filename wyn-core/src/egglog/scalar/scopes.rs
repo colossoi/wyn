@@ -106,20 +106,30 @@ impl Scopes {
             .find(scope)
             .is_some_and(|scope| required.iter().all(|&d| self.definitions.ancestor(d, scope)))
     }
-    pub fn outside_loops(&self, context: Value, scope: Value, required: &[Scope]) -> Value {
+    /// Legal lexical ancestors, annotated with loop depth and lexical depth.
+    /// The policy choosing among these proofs belongs to evaluation.egg.
+    pub fn sites(&self, context: Value, scope: Value, required: &[Scope]) -> Vec<(Value, usize, usize)> {
         let Some(tree) = self.contexts.get(&context) else {
-            return scope;
+            return Vec::new();
         };
         let Some(mut current) = tree.find(scope) else {
-            return scope;
+            return Vec::new();
         };
-        let mut selected = scope;
+        let mut ancestors = vec![current];
         while let Some(parent) = tree.parent(current) {
-            if self.loops.contains(&tree.value(current)) && self.available(required, tree.value(parent)) {
-                selected = tree.value(parent);
-            }
+            ancestors.push(parent);
             current = parent;
         }
-        selected
+        let mut loops = 0;
+        ancestors
+            .into_iter()
+            .rev()
+            .enumerate()
+            .filter_map(|(depth, scope)| {
+                let scope = tree.value(scope);
+                loops += usize::from(self.loops.contains(&scope));
+                self.available(required, scope).then_some((scope, loops, depth))
+            })
+            .collect()
     }
 }

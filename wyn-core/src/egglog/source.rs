@@ -509,6 +509,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             }
         }
         self.finish_summary(value, scope)?;
+        self.sink.set("SourceEvaluationPosition", value, scope.position)?;
         scope.position += 1;
         Ok(value)
     }
