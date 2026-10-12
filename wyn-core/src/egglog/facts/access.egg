@@ -37,8 +37,6 @@
 (rule ((SourceCapture r p v)) ((set (SsaCaptures r) (set-of p))) :ruleset ssa-access)
 (function SsaDefinitionName (RegionKey) i64 :no-merge)
 (rule ((SourceDefinition s r)) ((set (SsaDefinitionName r) s)) :ruleset ssa-access)
-(function SsaGroup (OperationKey) FusionPlan :no-merge)
-(rule ((PlannedOperation o owner p r)) ((set (SsaGroup o) p)) :ruleset ssa-access)
 (function SsaValueRef (SourceValue) ValueKey :no-merge)
 (rule ((ValueRef v b)) ((set (SsaValueRef v) b)) :ruleset ssa-access)
 (function SsaSlot (OperationKey String i64) ValueKey :no-merge)

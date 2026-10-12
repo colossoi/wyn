@@ -85,7 +85,7 @@ impl<'a, 'source> Facts<'a, 'source> {
         Ok((row[2], ty, query.required("SsaOutputBacking", (id,))?))
     }
     pub fn group(&self, value: Value) -> Option<Value> {
-        self.lookup("SsaGroup", (value,))
+        self.lookup("SelectedPlan", (value,))
     }
     pub fn source(&self, value: Value) -> Option<Value> {
         self.lookup("SourceOperationValue", (value,))
@@ -134,9 +134,6 @@ impl<'a, 'source> Facts<'a, 'source> {
     }
     pub fn member(&self, plan: Value, op: Value) -> bool {
         self.contains("PlanMember", (plan, op))
-    }
-    pub fn bucket_axis(&self, op: Value, axis: i64) -> Option<Value> {
-        self.lookup("SourceBucketAxis", (op, axis))
     }
     pub fn slot(&self, op: Value, role: &str, index: i64) -> Option<Value> {
         self.lookup("SsaSlot", (op, role, index))

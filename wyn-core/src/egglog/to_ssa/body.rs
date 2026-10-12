@@ -360,14 +360,27 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         let Some(scope) = self.compiler.facts.callback(operation) else {
             return Err(error("collective callback is missing"));
         };
+        self.in_region(owner, scope, arguments, |body, source| {
+            let Some(&term) = body.compiler.program.stage.selected.roots.get(&(body.context, source))
+            else {
+                return Err(error("callback has no selected scalar body"));
+            };
+            body.scalar_body(scope, term)
+        })
+    }
+
+    pub fn in_region(
+        &mut self,
+        owner: Value,
+        scope: Value,
+        arguments: Vec<Typed>,
+        emit: impl FnOnce(&mut Self, Value) -> Result<Typed, OptimizeError>,
+    ) -> Result<Typed, OptimizeError> {
         let Some(context) = self.compiler.facts.context(scope) else {
             return Err(error("callback scalar context is missing"));
         };
         let Some(source) = self.compiler.facts.result(scope) else {
             return Err(error("callback result is missing"));
-        };
-        let Some(&term) = self.compiler.program.stage.selected.roots.get(&(context, source)) else {
-            return Err(error("callback has no selected scalar body"));
         };
         let mut bindings = Vec::new();
         for (formal, actual) in self.compiler.facts.captures(scope)? {
@@ -396,7 +409,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         for (formal, value) in bindings {
             self.values.insert(formal, value);
         }
-        let result = self.scalar_body(scope, term);
+        let result = emit(self, source);
         self.context = old_context;
         self.values.restore(old_values);
         self.scopes = old_scopes;

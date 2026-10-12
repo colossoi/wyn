@@ -1,5 +1,10 @@
 ; Structural scheduling only. Scalar instruction placement happens during SSA emission.
 (run-schedule (seq
+    (saturate map-types)
+    (saturate map-discover)
+    (saturate map-repeatability) (run map-proofs)
+    (saturate map-shapes)
+    (run map-blockers) (saturate map-select) (saturate map-launch)
     (saturate type-layouts)
     (saturate representations)
     (saturate (seq (run residency) (run representations) (run schedule) (run allocation) (run dispatch)))

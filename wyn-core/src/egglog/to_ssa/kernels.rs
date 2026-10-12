@@ -12,6 +12,7 @@ mod coordinates;
 mod filter;
 mod indexed;
 mod loops;
+mod maps;
 mod screma;
 use filter::{compact, serial_filter};
 use indexed::{buckets, indexed};
@@ -51,16 +52,15 @@ pub(super) fn emit(
     };
     let results = body.compiler.facts.results(plan)?;
     match phase {
-        "elements" => {
-            let n = body.extent(scope, phase_extent)?;
-            let (start, step) = invocation(body, phase_width)?;
-            body.counted(start, n, step, vec![], |body, index, _| {
-                let mut cache = LookupMap::default();
-                write_arrays(body, scope, phase_owner, plan, &results, index, &mut cache)?;
-                Ok(vec![])
-            })?;
-            Ok(())
-        }
+        "elements" => maps::emit(
+            body,
+            scope,
+            phase_owner,
+            phase_extent,
+            phase_width,
+            plan,
+            &results,
+        ),
         "scatter" | "initialize" | "atomic" => {
             indexed(body, scope, phase_owner, phase, phase_extent, phase_width, plan)
         }
@@ -129,47 +129,104 @@ pub(super) fn element(
     scope: Value,
     plan: Value,
     source: Value,
-    index: Typed,
+    indices: &[Typed],
     cache: &mut LookupMap<Value, Typed>,
 ) -> Result<Typed, OptimizeError> {
+    let Some((index, rest)) = indices.split_first() else {
+        return body.value(scope, source);
+    };
     if let Some(value) = cache.get(&source) {
         return Ok(value.clone());
     }
     if let Some(actual) = body.compiler.facts.alias(source) {
-        return element(body, scope, plan, actual, index, cache);
+        return element(body, scope, plan, actual, indices, cache);
     }
     if let Some((parent, field)) = body.compiler.facts.projection(source) {
-        let value = element(body, scope, plan, parent, index, cache)?;
+        let value = element(body, scope, plan, parent, indices, cache)?;
         return body.field(value, field);
     }
     if let Some((array, start, _)) = body.compiler.facts.slice(source) {
         let start = body.value(scope, start)?;
         let start = body.cast(start, &index.ty)?;
-        let index = body.binary(BinaryOperator::Add, index, start)?;
+        let index = body.binary(BinaryOperator::Add, index.clone(), start)?;
+        let mut indices = indices.to_vec();
+        indices[0] = index;
         // The base is evaluated at a different index from this stream's cache.
-        let value = element(body, scope, plan, array, index, &mut LookupMap::default())?;
+        let value = element(body, scope, plan, array, &indices, &mut LookupMap::default())?;
         cache.insert(source, value.clone());
         return Ok(value);
     }
     if let Some(operation) = body.compiler.facts.operation(source) {
-        if body.compiler.facts.member(plan, operation) {
-            if body.compiler.facts.operation_kind(operation)? == "map" {
-                let owner = body.compiler.facts.operation_scope(operation)?;
-                let inputs = body.compiler.facts.inputs(operation)?;
-                let mut arguments = Vec::new();
-                for (_, input) in inputs {
-                    arguments.push(element(body, scope, plan, input, index.clone(), cache)?);
-                }
-                let value = body.callback(owner, operation, arguments)?;
-                cache.insert(source, value.clone());
-                return Ok(value);
+        if body
+            .compiler
+            .facts
+            .lookup("PlanMapping", (plan, operation))
+            .is_some_and(|mapping| body.compiler.program.graph.value_to_base::<bool>(mapping))
+        {
+            let Some(callback) = body.compiler.facts.callback(operation) else {
+                return Err(error("mapping component has no callback"));
+            };
+            let owner = body.compiler.facts.operation_scope(operation)?;
+            let inputs = body.compiler.facts.inputs(operation)?;
+            let mut arguments = Vec::new();
+            // Input elements and nested output leaves have different ranks.
+            let mut input_cache = LookupMap::default();
+            for (_, input) in inputs {
+                let cache = if rest.is_empty() { &mut *cache } else { &mut input_cache };
+                arguments.push(element(
+                    body,
+                    scope,
+                    plan,
+                    input,
+                    std::slice::from_ref(index),
+                    cache,
+                )?);
             }
+            let value = if rest.is_empty() {
+                body.callback(owner, operation, arguments)?
+            } else {
+                body.in_region(owner, callback, arguments, |body, result| {
+                    region_element(body, callback, result, rest)
+                })?
+            };
+            cache.insert(source, value.clone());
+            return Ok(value);
         }
     }
-    let array = body.value(scope, source)?;
-    let value = body.index(array, index)?;
+    let mut value = body.value(scope, source)?;
+    for index in indices {
+        value = body.index(value, index.clone())?;
+    }
     cache.insert(source, value.clone());
     Ok(value)
+}
+
+fn region_element(
+    body: &mut Body<'_, '_, '_>,
+    scope: Value,
+    source: Value,
+    indices: &[Typed],
+) -> Result<Typed, OptimizeError> {
+    if let Some(actual) = body.compiler.facts.alias(source) {
+        return region_element(body, scope, actual, indices);
+    }
+    if let Some(callee) = body.compiler.facts.lookup("PlanCallee", (source,)) {
+        let Some(fields) = body.compiler.facts.enode("SourceInvocation", source) else {
+            return Err(error("planned callback call has no invocation"));
+        };
+        let mut arguments = Vec::new();
+        for argument in body.compiler.facts.vector(fields[2])? {
+            arguments.push(body.value(scope, argument)?);
+        }
+        return body.in_region(scope, callee, arguments, |body, result| {
+            region_element(body, callee, result, indices)
+        });
+    }
+    let Some(plan) = body.compiler.facts.operation(source).and_then(|op| body.compiler.facts.group(op))
+    else {
+        return Err(error("nested domain has no selected fusion plan"));
+    };
+    element(body, scope, plan, source, indices, &mut LookupMap::default())
 }
 
 pub(super) fn write_arrays(
@@ -178,7 +235,7 @@ pub(super) fn write_arrays(
     operation: Value,
     plan: Value,
     results: &[(String, i64, Value)],
-    index: Typed,
+    indices: &[Typed],
     cache: &mut LookupMap<Value, Typed>,
 ) -> Result<(), OptimizeError> {
     let mut position = 0;
@@ -187,8 +244,8 @@ pub(super) fn write_arrays(
             continue;
         }
         if let Some(output) = body.slot(scope, operation, "output", position, 2)? {
-            let value = element(body, scope, plan, *source, index.clone(), cache)?;
-            body.store(output, index.clone(), value)?;
+            let value = element(body, scope, plan, *source, indices, cache)?;
+            body.store_at(output, indices, value)?;
         }
         position += 1;
     }

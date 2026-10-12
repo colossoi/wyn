@@ -75,14 +75,10 @@ impl Import<'_, '_, '_, '_> {
             } => {
                 let mut axes = vec![None; usize::from(*domain_rank)];
                 for (input, mapping) in input_dimensions.iter().enumerate() {
-                    self.sink.set(
-                        "SourceBucketInputRank",
-                        (operation, input as i64),
-                        mapping.len() as i64,
-                    )?;
+                    self.sink.set("SourceInputRank", (operation, input as i64), mapping.len() as i64)?;
                     for (dimension, &axis) in mapping.iter().enumerate() {
                         self.sink.set(
-                            "SourceBucketInputDimension",
+                            "SourceInputDimension",
                             (operation, input as i64, dimension as i64),
                             i64::from(axis),
                         )?;
@@ -106,15 +102,15 @@ impl Import<'_, '_, '_, '_> {
                     "SourceKnownBucketDomain",
                     (operation, axes.iter().all(Option::is_some)),
                 )?;
-                self.sink.set("SourceBucketRank", operation, i64::from(*domain_rank))?;
+                self.sink.set("SourceDomainRank", operation, i64::from(*domain_rank))?;
                 for (axis, dimension) in axes.into_iter().enumerate() {
                     if let Some((input, fixed)) = dimension {
                         if let Some(n) = fixed {
                             let extent = self.sink.add("Fixed", n as i64)?;
-                            self.sink.set("SourceBucketAxis", (operation, axis as i64), extent)?;
+                            self.sink.set("SourceDomainAxis", (operation, axis as i64), extent)?;
                         } else {
                             self.sink
-                                .add("SourceBucketInputAxis", (operation, axis as i64, input as i64))?;
+                                .add("SourceDomainInputAxis", (operation, axis as i64, input as i64))?;
                         }
                     }
                 }

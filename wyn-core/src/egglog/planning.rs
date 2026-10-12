@@ -3,6 +3,10 @@ use super::{timing, OptimizeError};
 use crate::PipelineTopologyPolicy;
 use egglog_engine::{EGraph, RawValues, Write};
 
+#[cfg(test)]
+#[path = "planning_tests.rs"]
+mod tests;
+
 pub(super) const RULES: &str = concat!(
     include_str!("planning.egg"),
     "\n",
@@ -37,7 +41,9 @@ pub(super) fn place(graph: &mut EGraph, topology: PipelineTopologyPolicy) -> Res
             "\n",
             include_str!("planning/abi.egg"),
             "\n",
-            include_str!("planning/representation.egg")
+            include_str!("planning/representation.egg"),
+            "\n",
+            include_str!("planning/maps.egg")
         ),
     )?;
     let policy = match topology {

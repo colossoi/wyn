@@ -92,7 +92,7 @@ pub(super) fn update(
     let inputs = body.compiler.facts.inputs(phase_owner)?;
     let mut arguments = Vec::new();
     for &(_, input) in &inputs {
-        arguments.push(element(body, scope, plan, input, index.clone(), cache)?);
+        arguments.push(element(body, scope, plan, input, &[index.clone()], cache)?);
     }
     let (key, value) = if kind == "scatter" {
         let pair = body.callback(scope, phase_owner, arguments)?;
@@ -189,7 +189,7 @@ pub(super) fn buckets(
     phase_width: u32,
     plan: Value,
 ) -> Result<(), OptimizeError> {
-    let (domain_rank, input_dimensions) = body.compiler.facts.bucket_shape(phase_owner)?;
+    let (dimensions, input_dimensions) = body.compiler.facts.domain_shape(phase_owner)?;
     let output = destination_value(body, scope, phase_owner)?;
     let Some(counts) = body.slot(
         scope,
@@ -232,7 +232,7 @@ pub(super) fn buckets(
         counts,
         overflow,
         &input_dimensions,
-        domain_rank,
+        &dimensions,
         serial,
         phase_width,
     )
@@ -247,36 +247,15 @@ fn bucket_updates(
     counts: Typed,
     overflow: Typed,
     input_dimensions: &[Vec<usize>],
-    domain_rank: usize,
+    dimensions: &[Value],
     serial: bool,
     width: u32,
 ) -> Result<(), OptimizeError> {
     let zero = body.literal("0", &types::i32())?;
     let one = body.literal("1", &types::i32())?;
     let inputs = body.compiler.facts.inputs(operation)?;
-    let mut dimensions = vec![None; domain_rank];
-    for axes in input_dimensions {
-        for &axis in axes {
-            let n = if let Some(extent) = body.compiler.facts.bucket_axis(operation, axis as i64) {
-                body.extent(scope, extent)?
-            } else {
-                return Err(error("bucket axis has no planned extent"));
-            };
-            let Some(slot) = dimensions.get_mut(axis) else {
-                return Err(error("bucket axis out of range"));
-            };
-            *slot = Some(n);
-        }
-    }
-    let dimensions = dimensions
-        .into_iter()
-        .map(|dimension| {
-            let Some(dimension) = dimension else {
-                return Err(error("unbound bucket dimension"));
-            };
-            Ok(dimension)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let dimensions =
+        dimensions.iter().map(|&extent| body.extent(scope, extent)).collect::<Result<Vec<_>, _>>()?;
     let n = coordinates::length(body, &dimensions)?;
     let capacity = match output.ty.elem_type().and_then(|row| row.array_size()) {
         Some(Type::Constructed(TypeName::Size(n), _)) => *n,

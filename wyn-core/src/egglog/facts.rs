@@ -116,34 +116,49 @@ impl<'a, 'source> Facts<'a, 'source> {
         };
         Ok(initial)
     }
-    pub fn bucket_shape(&self, operation: Value) -> Result<(usize, Vec<Vec<usize>>), OptimizeError> {
-        let Some(rank) = self.lookup("SourceBucketRank", (operation,)) else {
-            return Err(error("bucket operation has no domain rank"));
+    pub fn domain_shape(&self, operation: Value) -> Result<(Vec<Value>, Vec<Vec<usize>>), OptimizeError> {
+        let Some(plan) = self.group(operation) else {
+            return Err(error("operation has no fusion plan"));
         };
-        let rank = usize::try_from(self.integer(rank)).map_err(|_| error("invalid bucket domain rank"))?;
+        let Some(domain) = self.lookup("PlanDomain", (plan,)) else {
+            return Err(error("plan has no iteration domain"));
+        };
+        let Some(rank) = self.lookup("SourceDomainRank", (domain,)) else {
+            return Err(error("iteration domain has no rank"));
+        };
+        let rank = usize::try_from(self.integer(rank)).map_err(|_| error("invalid domain rank"))?;
+        let mut dimensions = Vec::with_capacity(rank);
+        for axis in 0..rank {
+            let Some(extent) = self.lookup("SourceDomainAxis", (domain, axis as i64)) else {
+                return Err(error("domain axis has no planned extent"));
+            };
+            dimensions.push(extent);
+        }
         let mut inputs = Vec::new();
         for (input, _) in self.inputs(operation)? {
-            let Some(dimensions) = self.lookup("SourceBucketInputRank", (operation, input)) else {
-                return Err(error("bucket input has no dimension mapping"));
+            let Some(input_rank) = self.lookup("SourceInputRank", (operation, input)) else {
+                return Err(error("input has no dimension mapping"));
             };
+            let input_rank =
+                usize::try_from(self.integer(input_rank)).map_err(|_| error("invalid input rank"))?;
             let mut axes = Vec::new();
-            for dimension in 0..self.integer(dimensions) {
-                let Some(axis) = self.lookup("SourceBucketInputDimension", (operation, input, dimension))
+            for dimension in 0..input_rank {
+                let Some(axis) = self.lookup("SourceInputDimension", (operation, input, dimension as i64))
                 else {
-                    return Err(error("bucket input dimension is missing"));
+                    return Err(error("input dimension is missing"));
                 };
-                let axis = usize::try_from(self.integer(axis)).map_err(|_| error("invalid bucket axis"))?;
+                let axis = usize::try_from(self.integer(axis)).map_err(|_| error("invalid domain axis"))?;
                 if axis >= rank {
-                    return Err(error("bucket input axis exceeds its domain rank"));
+                    return Err(error("input axis exceeds its domain rank"));
                 }
                 axes.push(axis);
             }
             inputs.push(axes);
         }
-        Ok((rank, inputs))
+        Ok((dimensions, inputs))
     }
     pub fn callback(&self, value: Value) -> Option<Value> {
-        self.lookup("SourceOperatorBody", (value,))
+        self.lookup("PlanCallback", (self.group(value)?, value))
     }
     pub fn definition_name(&self, scope: Value) -> Option<SymbolId> {
         let token = self.lookup("SsaDefinitionName", (scope,))?;
@@ -302,10 +317,13 @@ impl<'a, 'source> Facts<'a, 'source> {
         ))
     }
     pub fn input(&self, operation: Value, index: i64) -> Option<Value> {
-        self.lookup("SourceInput", (operation, index))
+        self.lookup("PlanRoute", (self.group(operation)?, operation, index))
     }
     pub fn inputs(&self, operation: Value) -> Result<Vec<(i64, Value)>, OptimizeError> {
-        let Some(count) = self.lookup("SourceInputCount", (operation,)) else {
+        let Some(plan) = self.group(operation) else {
+            return Err(error("operation has no fusion plan"));
+        };
+        let Some(count) = self.lookup("PlanInputCount", (plan, operation)) else {
             return Err(error("operation has no input count"));
         };
         let count = self.integer(count);

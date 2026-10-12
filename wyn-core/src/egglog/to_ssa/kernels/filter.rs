@@ -51,8 +51,14 @@ pub(super) fn compact(
                 scope,
                 valid,
                 |body| {
-                    let value =
-                        element(body, scope, plan, input, index.clone(), &mut LookupMap::default())?;
+                    let value = element(
+                        body,
+                        scope,
+                        plan,
+                        input,
+                        &[index.clone()],
+                        &mut LookupMap::default(),
+                    )?;
                     let predicate = body.callback(scope, operation, vec![value.clone()])?;
                     let flag = body.cast(predicate, &uint)?;
                     body.tuple(vec![flag, value])
@@ -97,7 +103,8 @@ pub(super) fn compact(
                         continue;
                     }
                     if let Some(output) = body.slot(scope, phase_owner, "output", 0, 2)? {
-                        let value = element(body, scope, plan, *output_source, index.clone(), &mut cache)?;
+                        let value =
+                            element(body, scope, plan, *output_source, &[index.clone()], &mut cache)?;
                         body.store(output, output_index.clone(), value)?;
                     }
                 }
@@ -141,7 +148,7 @@ pub(super) fn serial_filter(
         vec![zero.clone()],
         |body, index, state| {
             let mut cache = LookupMap::default();
-            let value = element(body, scope, plan, input, index.clone(), &mut cache)?;
+            let value = element(body, scope, plan, input, &[index.clone()], &mut cache)?;
             let keep = body.callback(scope, phase_owner, vec![value.clone()])?;
             let next = body.branch(
                 scope,
@@ -154,7 +161,7 @@ pub(super) fn serial_filter(
                         phase_owner,
                         plan,
                         results,
-                        state[0].clone(),
+                        &[state[0].clone()],
                         &mut cache,
                     )?;
                     body.binary(BinaryOperator::Add, state[0].clone(), one.clone())

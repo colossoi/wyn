@@ -244,7 +244,29 @@ impl Body<'_, '_, '_> {
         index: Typed,
         value: Typed,
     ) -> Result<(), OptimizeError> {
-        let (place, ty) = self.index_place(array, index)?;
+        self.store_at(array, &[index], value)
+    }
+
+    pub fn store_at(&mut self, array: Typed, indices: &[Typed], value: Typed) -> Result<(), OptimizeError> {
+        let Some((first, rest)) = indices.split_first() else {
+            return Err(error("array store requires an index"));
+        };
+        let (mut place, mut ty) = self.index_place(array, first.clone())?;
+        for index in rest {
+            let Some(element) = ty.elem_type().cloned() else {
+                return Err(error("store index exceeds array rank"));
+            };
+            let next = self.builder.new_place(element.clone());
+            self.builder
+                .push_void_inst(InstKind::PlaceIndex {
+                    place,
+                    index: index.value,
+                    result: next,
+                })
+                .map_err(builder_error)?;
+            place = next;
+            ty = element;
+        }
         let value = self.cast(value, &ty)?;
         self.builder
             .push_void_inst(InstKind::Store {

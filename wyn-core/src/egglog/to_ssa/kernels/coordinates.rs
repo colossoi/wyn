@@ -47,7 +47,14 @@ pub fn arguments(
             arguments.push(body.value(scope, *source)?);
             continue;
         };
-        let mut value = element(body, scope, plan, *source, coordinates[first].clone(), &mut cache)?;
+        let mut value = element(
+            body,
+            scope,
+            plan,
+            *source,
+            &[coordinates[first].clone()],
+            &mut cache,
+        )?;
         for &axis in rest {
             value = body.index(value, coordinates[axis].clone())?;
         }

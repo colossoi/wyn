@@ -55,7 +55,7 @@ pub(super) fn screma(
                 cache.insert(accumulator.source, value.clone());
                 next.push(value);
             }
-            write_arrays(body, scope, phase_owner, plan, results, index, &mut cache)?;
+            write_arrays(body, scope, phase_owner, plan, results, &[index], &mut cache)?;
             Ok(next)
         })?;
         for (i, value) in state.into_iter().skip(scans.len()).enumerate() {
@@ -124,7 +124,7 @@ pub(super) fn screma(
                                     phase_owner,
                                     plan,
                                     results,
-                                    index.clone(),
+                                    &[index.clone()],
                                     &mut cache,
                                 )?;
                             }
@@ -276,7 +276,7 @@ pub(super) fn screma(
                     };
                     indexed::update(body, scope, phase_owner, phase, plan, output, index, &mut cache)?;
                 } else {
-                    write_arrays(body, scope, phase_owner, plan, results, index, &mut cache)?;
+                    write_arrays(body, scope, phase_owner, plan, results, &[index], &mut cache)?;
                 }
                 Ok(vec![])
             })?;
@@ -458,7 +458,7 @@ impl Accumulator {
         index: &Typed,
         cache: &mut LookupMap<Value, Typed>,
     ) -> Result<Typed, OptimizeError> {
-        let incoming = element(body, scope, plan, self.input, index.clone(), cache)?;
+        let incoming = element(body, scope, plan, self.input, std::slice::from_ref(index), cache)?;
         if let Some(filter) = self.filter {
             let keep = body.callback(scope, filter, vec![incoming.clone()])?;
             body.branch(

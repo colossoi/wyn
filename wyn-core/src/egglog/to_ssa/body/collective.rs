@@ -13,8 +13,11 @@ impl Body<'_, '_, '_> {
         owner: Value,
         plan: Value,
     ) -> Result<Typed, OptimizeError> {
-        if !self.compiler.facts.contains("LocalCollective", (owner,)) {
+        let Some(execution) = self.compiler.facts.lookup("LocalExecution", (owner,)) else {
             return Err(error("local collective has not been selected"));
+        };
+        if self.compiler.facts.enode("InvocationScope", execution).is_none() {
+            return Err(error("local collective requires an invocation recipe"));
         }
         let Some(domain) = self.compiler.facts.domain(owner) else {
             return Err(error("local domain missing"));

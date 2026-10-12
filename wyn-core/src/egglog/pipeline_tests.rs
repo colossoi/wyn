@@ -536,6 +536,34 @@ fn pointwise_map_emits_a_parallel_dispatch() {
 }
 
 #[test]
+fn rectangular_map_nests_reach_both_backends() {
+    for source in [
+        "entry main(xs:[4]i32) [4][3]i32=map(|x|map(|y|x+y,iota(3)),xs)",
+        "entry main(xs:[4][3]i32) [4][3]i32=map(|row|map(|x|x+1,row),xs)",
+        "entry main(xs:[][3]i32) [][3]i32=map(|row|map(|x|x+1,row),xs)",
+        "entry main(xs:[]i32) [][3]i32=map(|x|let t=x*x in map(|y|t+y,iota(3)),xs)",
+        "entry main(xs:[2]i32) [2][3][4]i32=map(|x|map(|y|map(|z|x+y+z,iota(4)),iota(3)),xs)",
+        "entry main(xs:[2]i32) [2][3][4][5]i32=map(|x|map(|y|map(|z|map(|w|x+y+z+w,iota(5)),iota(4)),iota(3)),xs)",
+        "entry main(xs:[4][3]i32) [3][4]i32=map(|j|map(|i|xs[i][j],iota(4)),iota(3))",
+        "entry main(xs:[]i32) [][3]i32=map(|x|map(|y|reduce(|a,b|a+b,0,[x,y]),iota(3)),xs)",
+        "entry main(xs:[]i32) [][3]i32=map(|x|map(|y|x+y,iota(3)),map(|x|x+1,xs))",
+        "entry main(xs:[]i32) [][3]i32=map(|x|map(|y|x+y,map(|y|y+1,iota(3))),xs)",
+        "entry main(xs:[]i32) [][3]i32=map(|x|let t=loop a=x for i<16 do a+i in map(|y|t+y,iota(3)),xs)",
+    ] {
+        placement_shaders(source, |_| {});
+    }
+}
+
+#[test]
+#[ignore = "existing nested tuple-stream layout conversion is unsupported"]
+fn rectangular_map_tuple_rows_reach_both_backends() {
+    placement_shaders(
+        "entry main(xs:[]i32) [][3](i32,i32)=map(|x|map(|y|(x,y),iota(3)),xs)",
+        |_| {},
+    );
+}
+
+#[test]
 fn fused_maps_preserve_captured_inputs() {
     shaders("entry result(xs:[]i32,n:i32) []i32=map(|x:i32|x*2,map(|x:i32|x+n,xs))");
 }
