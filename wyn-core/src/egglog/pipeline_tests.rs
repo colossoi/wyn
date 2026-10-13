@@ -605,6 +605,19 @@ fn projected_tuple_arrays_preserve_their_extents() {
 }
 
 #[test]
+fn resource_records_passed_to_helpers_reach_both_backends() {
+    placement_shaders(
+        "type textures = { image: texture2d, filtering: sampler }
+         def sample(maps: textures, uv: vec2f32) vec4f32 =
+           texture_sample(maps.image, maps.filtering, uv, 0.0)
+         entry main(image: texture2d, filtering: sampler, pixels: []vec2f32) []vec4f32 =
+           let maps = { image = image, filtering = filtering } in
+           map(|uv| sample(maps, uv), pixels)",
+        |_| {},
+    );
+}
+
+#[test]
 fn generic_tuple_array_helpers_reach_both_backends() {
     for source in [
         "entry main(xs:[]i32,ys:[]i32) ([]i32,[]i32)=unzip(zip(xs,ys))",

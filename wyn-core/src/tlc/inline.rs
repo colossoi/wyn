@@ -594,7 +594,10 @@ impl TermRewriter<Empty, Empty> for ValueNormalizer<'_> {
 fn is_static_resource_type(ty: &Type<TypeName>) -> bool {
     matches!(
         ty,
-        Type::Constructed(TypeName::RenderTarget | TypeName::StorageTexture, _)
+        Type::Constructed(
+            TypeName::RenderTarget | TypeName::StorageTexture | TypeName::Texture2D | TypeName::Sampler,
+            _
+        )
     )
 }
 
@@ -631,6 +634,12 @@ fn is_structural_value(term: &Term) -> bool {
 
 fn contains_opaque_type(ty: &Type<TypeName>) -> bool {
     match ty {
+        // Texture/sampler leaves can be parameters, but resource aggregates cannot.
+        Type::Constructed(TypeName::Record(_) | TypeName::Tuple(_), _)
+            if contains_static_resource_type(ty) =>
+        {
+            true
+        }
         Type::Constructed(
             TypeName::RenderTarget | TypeName::StorageTexture | TypeName::Raster | TypeName::Vertex,
             _,
