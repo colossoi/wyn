@@ -169,8 +169,12 @@ impl ValueGraph {
         }
     }
 
-    pub fn projected_source(&self, term: TermId, fields: &[usize]) -> Option<Source> {
-        let value = self.project(self.terms.get(&term)?.value, fields)?;
+    pub fn projected_source(&self, source: Source, fields: &[usize]) -> Option<Source> {
+        let expr = match source {
+            Source::Input(symbol) => self.bindings.get(&symbol)?,
+            Source::Term(term) => self.terms.get(&term)?,
+        };
+        let value = self.project(expr.value, fields)?;
         Some(self.sources[value.0])
     }
 

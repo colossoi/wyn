@@ -10,6 +10,7 @@
 //! Map inputs and callback parameters already correspond at construction.
 
 use super::data::Empty;
+use super::value_graph::ValueGraph;
 use super::VarRef;
 use super::{
     wrap_let_bindings, ArrayExpr, Bindings, Lambda, LetBinding, RewriteDecision, SoacBody, SoacOp, Term,
@@ -93,7 +94,7 @@ fn rewrite_if_over_map(
 
     let then_map = extract_map_branch((**then_branch).clone(), symbols, term_ids)?;
     let else_map = extract_map_branch((**else_branch).clone(), symbols, term_ids)?;
-    if !can_fuse_if_maps(cond, &then_map, &else_map, &term.ty) {
+    if !can_fuse_if_maps(term, &then_map, &else_map) {
         return None;
     }
 
@@ -243,12 +244,7 @@ fn dedup_branch_inputs(
     )
 }
 
-fn can_fuse_if_maps(
-    cond: &Term<Empty, Empty>,
-    then_map: &MapBranch,
-    else_map: &MapBranch,
-    result_ty: &Type<TypeName>,
-) -> bool {
+fn can_fuse_if_maps(term: &Term<Empty, Empty>, then_map: &MapBranch, else_map: &MapBranch) -> bool {
     if then_map.inputs.is_empty() || else_map.inputs.is_empty() {
         return false;
     }
@@ -260,8 +256,8 @@ fn can_fuse_if_maps(
     {
         return false;
     }
-    branches_have_same_domain(then_map, else_map, result_ty)
-        && prefixes_can_be_hoisted(cond, then_map, else_map)
+    branches_have_same_domain(then_map, else_map, &term.ty)
+        && prefixes_can_be_hoisted(term, then_map, else_map)
 }
 
 fn build_fused_map_if(
@@ -348,7 +344,15 @@ fn branch_len_key(branch: &MapBranch) -> Option<LenKey> {
     array_expr_len_key(branch.inputs.first()?, &env, &mut LookupSet::new())
 }
 
-fn prefixes_can_be_hoisted(cond: &Term<Empty, Empty>, then_map: &MapBranch, else_map: &MapBranch) -> bool {
+fn prefixes_can_be_hoisted(term: &Term<Empty, Empty>, then_map: &MapBranch, else_map: &MapBranch) -> bool {
+    let TermKind::If {
+        cond,
+        then_branch,
+        else_branch,
+    } = &term.kind
+    else {
+        return false;
+    };
     let mut names = LookupSet::new();
     for prefix in then_map.prefix.iter().chain(&else_map.prefix) {
         if !names.insert(prefix.name) {
@@ -359,33 +363,15 @@ fn prefixes_can_be_hoisted(cond: &Term<Empty, Empty>, then_map: &MapBranch, else
         return true;
     }
 
-    let mut cond_refs = LookupSet::new();
-    collect_symbol_refs(cond, &mut cond_refs);
-    if names.iter().any(|name| cond_refs.contains(name)) {
+    if ValueGraph::evaluation_uses(cond, |symbol| names.contains(&symbol)) {
         return false;
     }
-
-    let mut then_refs = LookupSet::new();
-    for input in &then_map.inputs {
-        collect_symbol_refs_array(input, &mut then_refs);
-    }
-    collect_symbol_refs_soac_body(&then_map.lam, &mut then_refs);
-
-    let mut else_refs = LookupSet::new();
-    for input in &else_map.inputs {
-        collect_symbol_refs_array(input, &mut else_refs);
-    }
-    collect_symbol_refs_soac_body(&else_map.lam, &mut else_refs);
 
     let then_names: LookupSet<_> = then_map.prefix.iter().map(|prefix| prefix.name).collect();
     let else_names: LookupSet<_> = else_map.prefix.iter().map(|prefix| prefix.name).collect();
-    if then_names.iter().any(|name| else_refs.contains(name)) {
-        return false;
-    }
-    if else_names.iter().any(|name| then_refs.contains(name)) {
-        return false;
-    }
-    true
+    // Include discarded evaluations and SOAC destinations, not just returned values.
+    !ValueGraph::evaluation_uses(else_branch, |symbol| then_names.contains(&symbol))
+        && !ValueGraph::evaluation_uses(then_branch, |symbol| else_names.contains(&symbol))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -567,60 +553,4 @@ fn is_builtin(term: &Term<Empty, Empty>, id: BuiltinId) -> bool {
 
 fn is_zero_term(term: &Term<Empty, Empty>) -> bool {
     matches!(&term.kind, TermKind::IntLit(s) if s == "0")
-}
-
-fn collect_symbol_refs(term: &Term<Empty, Empty>, out: &mut LookupSet<SymbolId>) {
-    if let TermKind::Var(VarRef::Symbol(sym)) = &term.kind {
-        out.insert(*sym);
-    }
-    collect_symbol_refs_in_soac_places(term, out);
-    term.for_each_child(&mut |child| collect_symbol_refs(child, out));
-}
-
-fn collect_symbol_refs_soac_body(body: &SoacBody<Empty, Empty>, out: &mut LookupSet<SymbolId>) {
-    collect_symbol_refs(&body.lam.body, out);
-}
-
-fn collect_symbol_refs_array(ae: &ArrayExpr<Empty, Empty>, out: &mut LookupSet<SymbolId>) {
-    match ae {
-        ArrayExpr::Var(vr, _) => {
-            if let VarRef::Symbol(s) = vr {
-                out.insert(*s);
-            }
-        }
-        ArrayExpr::Zip(items) => {
-            for item in items {
-                collect_symbol_refs_array(item, out);
-            }
-        }
-        ArrayExpr::Literal(items) => {
-            for item in items {
-                collect_symbol_refs(item, out);
-            }
-        }
-        ArrayExpr::Range { start, len, step } => {
-            collect_symbol_refs(start, out);
-            collect_symbol_refs(len, out);
-            if let Some(step) = step {
-                collect_symbol_refs(step, out);
-            }
-        }
-    }
-}
-
-fn collect_symbol_refs_in_soac_places(term: &Term<Empty, Empty>, out: &mut LookupSet<SymbolId>) {
-    if let TermKind::Soac(soac) = &term.kind {
-        match soac {
-            SoacOp::Scatter { dest, .. }
-            | SoacOp::BucketScatter { dest, .. }
-            | SoacOp::ReduceByIndex { dest, .. } => {
-                collect_symbol_refs_place(dest, out);
-            }
-            _ => {}
-        }
-    }
-}
-
-fn collect_symbol_refs_place(place: &super::Place, out: &mut LookupSet<SymbolId>) {
-    out.insert(place.id);
 }

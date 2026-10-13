@@ -24,7 +24,13 @@ fn array_components_keep_parameter_and_constant_origins_through_aliases() {
     let dependent = values.dependent_bindings(|symbol| symbol == parameters[0]);
     for symbol in values.bindings.keys() {
         match symbols.get(*symbol).map(String::as_str) {
-            Some("alias" | "copy" | "x") => assert!(dependent.contains(symbol)),
+            Some("alias" | "copy" | "x") => {
+                assert!(dependent.contains(symbol));
+                assert!(matches!(
+                    values.projected_source(Source::Input(*symbol), &[]),
+                    Some(Source::Input(input)) if input == parameters[0]
+                ));
+            }
             Some("y") => assert!(!dependent.contains(symbol)),
             _ => {}
         }
@@ -112,6 +118,10 @@ fn producer_paths_survive_aliases_and_nested_projections() {
         matches!(values.sources[field.0], Source::Term(_)),
         "computed field retains its occurrence"
     );
+    assert!(matches!(
+        values.projected_source(Source::Input(selected), &[]),
+        Some(Source::Term(_))
+    ));
 }
 
 #[test]
@@ -176,4 +186,14 @@ fn capture_identity_distinguishes_shadowed_parameters() {
         values.free_symbols().collect::<Vec<_>>(),
         [parameters[1], parameters[0]]
     );
+}
+
+#[test]
+fn evaluation_dependencies_include_scatter_destinations() {
+    let program = crate::test_pipeline::compile_thru_static_index(
+        "entry main(dest: *[4]i32) [4]i32 = scatter(dest, [0, 1], [2, 3])",
+    );
+    let entry = program.defs.iter().find(|def| matches!(def.meta, DefMeta::EntryPoint(_))).unwrap();
+    let (body, parameters) = tlc::extract_lambda_params_ref(&entry.body);
+    assert!(ValueGraph::evaluation_uses(body, |symbol| symbol == parameters[0].0));
 }

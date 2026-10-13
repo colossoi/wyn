@@ -65,3 +65,32 @@ fn two_view_params_pin_to_distinct_bindings() {
         Type::Constructed(TypeName::Buffer(BindingRef::new(0, 1)), vec![]),
     );
 }
+
+#[test]
+fn aliased_and_nested_slices_keep_the_input_descriptor() {
+    for body in [
+        "let alias = xs in let copy = alias in let sliced = copy[start..7] in sliced[0]",
+        "let pair = (0, xs) in let alias = pair.1 in alias[start..7][0]",
+        "let first = xs[start..7] in let alias = first in alias[1..3][0]",
+    ] {
+        let program = pin(&format!("entry main(xs: []i32, start: i32) i32 = {body}"));
+        let mut slices = 0;
+        for def in program.defs.iter().filter(|def| matches!(def.meta, DefMeta::EntryPoint(_))) {
+            def.body.walk(&mut |term: &Term| {
+                if matches!(&term.kind, TermKind::App { func, .. }
+                    if matches!(func.kind, TermKind::Var(VarRef::Builtin { id, .. })
+                        if id == builtins::catalog().known().slice))
+                {
+                    slices += 1;
+                    assert_eq!(
+                        term.ty.array_buffer(),
+                        Some(&buffer_tag(BindingRef::new(0, 0))),
+                        "{body}"
+                    );
+                }
+                tlc::WalkDecision::Recurse
+            });
+        }
+        assert!(slices > 0, "fixture must retain a slice: {body}");
+    }
+}

@@ -46,3 +46,15 @@ fn conditional_maps_with_unproven_domains_stay_separate() {
         2
     );
 }
+
+#[test]
+fn conditional_maps_keep_branch_local_prefixes_and_captures() {
+    assert_eq!(
+        entry_map_count(
+            "entry main(xs: [4]i32, ys: [4]i32, flag: bool, bias: i32) [4]i32 =
+             if flag then let offset = bias + 1 in map(|x| x + offset, xs)
+             else let offset = bias + 2 in map(|y| y + offset, ys)"
+        ),
+        1
+    );
+}

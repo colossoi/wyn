@@ -25,6 +25,7 @@ mod pin_entry_buffers_tests;
 
 use super::data::Empty;
 use super::stage_extract::StagesExtracted;
+use super::value_graph::{Source, ValueGraph};
 use super::{
     apply_type_substitution, data, extract_lambda_params_ref, Def, DefMeta, EntryPoint, Program, Term,
     TermIdSource, TermKind, VarRef,
@@ -141,7 +142,8 @@ fn pin_definition(
                 &mut buffer_env,
                 span,
             )?;
-            while collect_view_slice_buffer_subst(&body, &mut subst, &buffer_env)? {}
+            let (values, _) = ValueGraph::build(&body);
+            while collect_view_slice_buffer_subst(&body, &mut subst, &buffer_env, &values) {}
             if !subst.is_empty() {
                 ty = apply_type_substitution(&ty, &subst);
                 body.rewrite_types(term_ids, &mut |ty| apply_type_substitution(ty, &subst));
@@ -260,42 +262,31 @@ fn collect_view_slice_buffer_subst(
     term: &Term<Empty, Empty>,
     subst: &mut BufferSubst,
     buffer_env: &LookupMap<SymbolId, Type<TypeName>>,
-) -> error::Result<bool> {
+    values: &ValueGraph,
+) -> bool {
     if let TermKind::Let {
-        name,
-        name_ty,
-        rhs,
-        body,
+        name_ty, rhs, body, ..
     } = &term.kind
     {
-        let mut changed = collect_view_slice_buffer_subst(rhs, subst, buffer_env)?;
-        let mut scoped_env = buffer_env.clone();
-        if let Some(region) = view_buffer_for_term(rhs, subst, buffer_env) {
+        let mut changed = collect_view_slice_buffer_subst(rhs, subst, buffer_env, values);
+        if let Some(region) = view_buffer_for_term(rhs, subst, buffer_env, values) {
             if let Some(Type::Variable(id)) = apply_type_substitution(name_ty, subst).array_buffer() {
                 if !subst.contains_key(id) {
-                    subst.insert(*id, region.clone());
+                    subst.insert(*id, region);
                     changed = true;
                 }
             }
-            scoped_env.insert(*name, region);
         }
-        changed |= collect_view_slice_buffer_subst(body, subst, &scoped_env)?;
-        return Ok(changed);
+        changed |= collect_view_slice_buffer_subst(body, subst, buffer_env, values);
+        return changed;
     }
 
     let mut changed = false;
-    let mut err = None;
-    term.for_each_child(
-        &mut |child| match collect_view_slice_buffer_subst(child, subst, buffer_env) {
-            Ok(child_changed) => changed |= child_changed,
-            Err(e) => err = Some(e),
-        },
-    );
-    if let Some(e) = err {
-        return Err(e);
-    }
+    term.for_each_child(&mut |child| {
+        changed |= collect_view_slice_buffer_subst(child, subst, buffer_env, values);
+    });
 
-    if let Some(source_buffer) = view_buffer_for_term(term, subst, buffer_env) {
+    if let Some(source_buffer) = view_buffer_for_term(term, subst, buffer_env, values) {
         let result_ty = apply_type_substitution(&term.ty, subst);
         if result_ty.array_variant().map(types::is_array_variant_view).unwrap_or(false) {
             if let Some(Type::Variable(id)) = result_ty.array_buffer() {
@@ -306,13 +297,14 @@ fn collect_view_slice_buffer_subst(
             }
         }
     }
-    Ok(changed)
+    changed
 }
 
 fn view_buffer_for_term(
     term: &Term<Empty, Empty>,
     subst: &BufferSubst,
     buffer_env: &LookupMap<SymbolId, Type<TypeName>>,
+    values: &ValueGraph,
 ) -> Option<Type<TypeName>> {
     if let Some(region @ Type::Constructed(TypeName::Buffer(_), _)) =
         apply_type_substitution(&term.ty, subst).array_buffer().cloned()
@@ -321,13 +313,18 @@ fn view_buffer_for_term(
     }
 
     match &term.kind {
-        TermKind::Var(VarRef::Symbol(sym)) => buffer_env.get(sym).cloned(),
+        TermKind::Var(VarRef::Symbol(symbol)) => {
+            let Source::Input(input) = values.projected_source(Source::Input(*symbol), &[])? else {
+                return None;
+            };
+            buffer_env.get(&input).cloned()
+        }
         TermKind::App { func, args } => {
             let TermKind::Var(VarRef::Builtin { id, .. }) = &func.kind else {
                 return None;
             };
             if *id == builtins::catalog().known().slice && args.len() == 3 {
-                view_buffer_for_term(&args[0], subst, buffer_env)
+                view_buffer_for_term(&args[0], subst, buffer_env, values)
             } else {
                 None
             }

@@ -415,9 +415,12 @@ fn extract_root(
                     format!("{root_name}__graphics_{graphics_index}")
                 };
 
+                let (vertex_values, _) = ValueGraph::build(&vertex_lambda.body);
+                let (fragment_values, _) = ValueGraph::build(&fragment_lambda.body);
                 let (vertex_external, vertex_external_decls, vertex_substitutions, vertex_target_reads) =
                     stage_captures(
                         &vertex_lambda,
+                        &vertex_values,
                         &root_lambda,
                         root_entry,
                         &shape.computed,
@@ -433,6 +436,7 @@ fn extract_root(
                     fragment_target_reads,
                 ) = stage_captures(
                     &fragment_lambda,
+                    &fragment_values,
                     &root_lambda,
                     root_entry,
                     &shape.computed,
@@ -446,6 +450,7 @@ fn extract_root(
                     definition,
                     &owner,
                     &vertex_lambda,
+                    &vertex_values,
                     vertex_external,
                     vertex_external_decls,
                     vertex_substitutions,
@@ -459,6 +464,7 @@ fn extract_root(
                     definition,
                     &owner,
                     &fragment_lambda,
+                    &fragment_values,
                     fragment_external,
                     fragment_external_decls,
                     fragment_substitutions,
@@ -1499,11 +1505,6 @@ fn is_trivially_discardable_value(term: &Term) -> bool {
     }
 }
 
-fn target_dependent_bindings(body: &Term, reads: &TargetReads) -> LookupSet<SymbolId> {
-    let (values, _) = ValueGraph::build(body);
-    values.dependent_bindings(|symbol| reads.by_symbol.contains_key(&symbol))
-}
-
 type StageCaptures = (
     Vec<(SymbolId, Type)>,
     Vec<interface::EntryParamDecl>,
@@ -1513,6 +1514,7 @@ type StageCaptures = (
 
 fn stage_captures(
     callback: &Lambda,
+    callback_values: &ValueGraph,
     root_lambda: &Lambda,
     root_entry: &EntryPoint<()>,
     computed: &[ComputedValue],
@@ -1526,7 +1528,7 @@ fn stage_captures(
     // set; representation lowering below decides how each typed capture crosses
     // the stage ABI.
     let bound = callback.params.iter().map(|(symbol, _)| *symbol).collect();
-    let used = captured_symbols(&callback.body, &bound);
+    let used = captured_symbols(callback_values, &bound);
     let mut params = Vec::new();
     let mut declarations = Vec::new();
     let mut substitutions = LookupMap::new();
@@ -1561,8 +1563,7 @@ fn stage_captures(
     Some((params, declarations, substitutions, target_reads))
 }
 
-fn captured_symbols(term: &Term, bound: &LookupSet<SymbolId>) -> LookupSet<SymbolId> {
-    let (values, _) = ValueGraph::build(term);
+fn captured_symbols(values: &ValueGraph, bound: &LookupSet<SymbolId>) -> LookupSet<SymbolId> {
     values.free_symbols().filter(|symbol| !bound.contains(symbol)).collect()
 }
 
@@ -1823,7 +1824,8 @@ fn build_compute_stage(
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Option<Def<UnpinnedPolymorphic>> {
-    let used = captured_symbols(operation.rhs, &LookupSet::new());
+    let (body_values, _) = ValueGraph::build(operation.rhs);
+    let used = captured_symbols(&body_values, &LookupSet::new());
     let mut params = Vec::new();
     let mut declarations = Vec::new();
     let mut substitutions = LookupMap::new();
@@ -1856,8 +1858,9 @@ fn build_compute_stage(
         &mut target_reads,
     )?;
 
+    let target_bindings =
+        body_values.dependent_bindings(|symbol| target_reads.by_symbol.contains_key(&symbol));
     let body = clone_term_with_fresh_ids(operation.rhs, term_ids);
-    let target_bindings = target_dependent_bindings(&body, &target_reads);
     let body = ExternalValueRewriter {
         term_ids,
         substitutions,
@@ -2397,6 +2400,7 @@ fn build_vertex_stage(
     root: &Def<UnpinnedPolymorphic>,
     owner: &str,
     callback: &Lambda,
+    callback_values: &ValueGraph,
     external_params: Vec<(SymbolId, Type)>,
     external_decls: Vec<interface::EntryParamDecl>,
     substitutions: ExternalSubstitutions,
@@ -2422,7 +2426,7 @@ fn build_vertex_stage(
                 .collect(),
         )
     };
-    let used = captured_symbols(&callback.body, &LookupSet::new());
+    let used = captured_symbols(callback_values, &LookupSet::new());
     let mut invocation_params = Vec::new();
     let mut invocation_decls = Vec::new();
     for (index, (symbol, ty)) in callback.params.iter().enumerate() {
@@ -2444,8 +2448,9 @@ fn build_vertex_stage(
         ));
     }
 
+    let target_bindings =
+        callback_values.dependent_bindings(|symbol| target_reads.by_symbol.contains_key(&symbol));
     let mut body = clone_term_with_fresh_ids(&callback.body, term_ids);
-    let target_bindings = target_dependent_bindings(&body, &target_reads);
     body = ExternalValueRewriter {
         term_ids,
         substitutions,
@@ -2649,6 +2654,7 @@ fn build_fragment_stage(
     root: &Def<UnpinnedPolymorphic>,
     owner: &str,
     callback: &Lambda,
+    callback_values: &ValueGraph,
     external_params: Vec<(SymbolId, Type)>,
     external_decls: Vec<interface::EntryParamDecl>,
     substitutions: ExternalSubstitutions,
@@ -2672,7 +2678,7 @@ fn build_fragment_stage(
         fragment_output_color_type(&callback.ret_ty).filter(|color| *color == target_color_ty)
     };
     let has_fragment_output = fragment_output.is_some();
-    let referenced = captured_symbols(&callback.body, &LookupSet::new());
+    let referenced = captured_symbols(callback_values, &LookupSet::new());
     let mut used: Vec<_> = callback.params.iter().map(|(symbol, _)| referenced.contains(symbol)).collect();
     if has_fragment_output {
         used[1] = true;
@@ -2737,7 +2743,9 @@ fn build_fragment_stage(
             term_ids,
         );
     }
-    let target_bindings = target_dependent_bindings(&body, &target_reads);
+    let (body_values, _) = ValueGraph::build(&body);
+    let target_bindings =
+        body_values.dependent_bindings(|symbol| target_reads.by_symbol.contains_key(&symbol));
     body = ExternalValueRewriter {
         term_ids,
         substitutions,

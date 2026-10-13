@@ -164,7 +164,7 @@ impl Import<'_, '_, '_, '_> {
         fields: &[usize],
         mut scope: Value,
     ) -> Result<Option<Value>, OptimizeError> {
-        let Some(source) = self.values.projected_source(term, fields) else {
+        let Some(source) = self.values.projected_source(Source::Term(term), fields) else {
             return Ok(None);
         };
         Ok(Some(match source {
