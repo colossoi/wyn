@@ -2,6 +2,100 @@ use super::import;
 use crate::egglog::query::Query;
 use crate::tlc::{self, DefMeta, TermKind};
 use crate::{compile_thru_tlc, types};
+use egglog_engine::sort::S;
+
+#[test]
+fn repeated_free_references_keep_dependencies_in_sibling_and_nested_regions() {
+    for (ty, producer, yes, no, step, kind) in [
+        (
+            "i32",
+            "reduce((+),0,xs)",
+            "alias+alias+produced",
+            "produced+produced",
+            "acc+produced+produced",
+            "reduce",
+        ),
+        (
+            "[]i32",
+            "map(|x|x+1,xs)",
+            "map(|(x,y)|x+y,zip(alias,produced))",
+            "map(|(x,y)|x-y,zip(produced,produced))",
+            "map(|(x,y)|x+y,zip(acc,produced))",
+            "map",
+        ),
+    ] {
+        let source = format!(
+            "entry main(xs:[]i32,n:i32,choose:bool,other:bool) {ty} =
+             let produced={producer} in
+             if choose then let alias=produced in if other then {yes} else {no}
+             else loop acc=produced for i<n do {step}"
+        );
+        let program = compile_thru_tlc(&source).unwrap();
+        let (graph, identities) = import(&program).unwrap();
+        let query = Query(&graph);
+        let entry = query.row("SourceEntryPoint", |_| true).unwrap().unwrap()[1];
+        let producer = query
+            .row("SourceOperation", |row| {
+                row[1] == entry && graph.value_to_base::<S>(row[2]).as_str() == kind
+            })
+            .unwrap()
+            .expect("outer producer")[0];
+        let mut nested = Vec::new();
+        for table in ["SourceBranch", "SourceLoop"] {
+            query
+                .for_each(table, |row| {
+                    nested.extend_from_slice(&row[row.len() - 2..]);
+                    Ok(())
+                })
+                .unwrap();
+        }
+        // Lifted helpers depend on their own parameters, not this entry's producer.
+        nested.retain(|&region| {
+            let mut root = region;
+            while let Some(parent) = identities.scopes[&root].0 {
+                root = parent;
+            }
+            root == entry
+        });
+        assert!(!nested.is_empty(), "fixture must retain nested execution regions");
+        for region in nested {
+            assert!(
+                query.contains("SourceRegionDependency", (region, producer)).unwrap(),
+                "{source}: missing dependency in {region:?}"
+            );
+        }
+        assert!(
+            !query.contains("SourceRegionDependency", (entry, producer)).unwrap(),
+            "a reference must stop at the producer's own region"
+        );
+    }
+}
+
+#[test]
+fn scatter_reads_include_branch_dependencies_without_turning_them_into_operand_uses() {
+    let program = compile_thru_tlc(
+        "entry main(xs:[]i32,ys:[]i32,choose:bool) []i32 =
+         let selected=if choose then xs[0] else ys[0] in scatter(xs,[0],[selected])",
+    )
+    .unwrap();
+    let (mut graph, _) = import(&program).unwrap();
+    graph.parse_and_run_program(None, "(run-schedule (saturate source-summary))").unwrap();
+    let query = Query(&graph);
+    let entry = query.row("SourceEntryPoint", |_| true).unwrap().unwrap()[1];
+    let scatter = query
+        .row("SourceOperation", |row| {
+            graph.value_to_base::<S>(row[2]).as_str() == "scatter"
+        })
+        .unwrap()
+        .unwrap()[0];
+    let branch = query.row("SourceBranch", |_| true).unwrap().unwrap()[0];
+    for index in [0i64, 1] {
+        let input = query.required("SourceParameter", (entry, index)).unwrap();
+        assert!(query.contains("SourceReadCandidate", (scatter, input)).unwrap());
+        assert!(query.contains("SourceNestedUse", (branch, input)).unwrap());
+        assert!(!query.contains("SourceDirectUse", (branch, input)).unwrap());
+    }
+}
 
 #[test]
 fn source_import_resolves_coerced_tuple_fields_in_their_visible_scope() {

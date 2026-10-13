@@ -64,8 +64,7 @@ impl Summary {
 #[derive(Default)]
 pub(super) struct Summaries {
     pub values: LookupMap<Value, Summary>,
-    pub uses: LookupMap<Value, LookupSet<Value>>,
-    pub reads: LookupMap<Value, LookupSet<Value>>,
+    pub pending_uses: Vec<(Value, Value)>,
     pub operations: LookupMap<Value, Value>,
     pub inputs: LookupSet<(Value, Value)>,
     pub captures: LookupSet<(Value, Value)>,
@@ -73,50 +72,32 @@ pub(super) struct Summaries {
     pub aliases: LookupSet<Value>,
     pub lengths: LookupMap<Value, Value>,
     pub owners: LookupMap<Value, Value>,
-    pub parents: LookupMap<Value, Value>,
     pub free: LookupMap<Value, LookupSet<Value>>,
 }
 
 impl Import<'_, '_, '_, '_> {
     pub(super) fn use_value(&mut self, owner: Value, value: Value) -> Result<(), OptimizeError> {
         self.sink.add("SourceDirectUse", (owner, value))?;
-        self.summaries.uses.entry(owner).or_default().insert(value);
+        self.summaries.pending_uses.push((owner, value));
         Ok(())
     }
 
-    /// Publish operation operands once; scalar dependencies retain their shared
-    /// DAG rather than expanding a transitive operand set at every source node.
+    /// Classify uses after operation inputs and captures are known.
+    /// Scalar dependencies remain direct edges rather than transitive sets.
     pub(super) fn finish_uses(&mut self) -> Result<(), OptimizeError> {
-        for (&value, children) in &self.summaries.uses {
+        for &(value, child) in &self.summaries.pending_uses {
             if self.summaries.aliases.contains(&value) {
                 continue;
             }
             if let Some(&operation) = self.summaries.operations.get(&value) {
-                for &child in children {
-                    if self.summaries.inputs.contains(&(operation, child))
-                        && !self.summaries.captures.contains(&(operation, child))
-                    {
-                        continue;
-                    }
-                    self.sink.add("SourceOperand", (operation, child))?;
-                }
-            } else {
-                for &child in children {
-                    self.sink.add("SourceComputedUse", (value, child))?;
-                }
-            }
-        }
-        // Visit the union of each scatter's inputs and captures once, including
-        // shared dependencies. Other collectives do not consume this footprint.
-        for (&operation, roots) in &self.summaries.reads {
-            let mut pending: Vec<_> = roots.iter().copied().collect();
-            let mut seen = LookupSet::default();
-            while let Some(value) = pending.pop() {
-                if !seen.insert(value) {
+                if self.summaries.inputs.contains(&(operation, child))
+                    && !self.summaries.captures.contains(&(operation, child))
+                {
                     continue;
                 }
-                self.sink.add("SourceReadCandidate", (operation, value))?;
-                pending.extend(self.summaries.uses.get(&value).into_iter().flatten().copied());
+                self.sink.add("SourceOperand", (operation, child))?;
+            } else {
+                self.sink.add("SourceComputedUse", (value, child))?;
             }
         }
         Ok(())
@@ -135,16 +116,19 @@ impl Import<'_, '_, '_, '_> {
     pub(super) fn free_reference(&mut self, target: Value, mut scope: Value) -> Result<(), OptimizeError> {
         let owner = self.summaries.owners.get(&target).copied();
         while Some(scope) != owner {
-            self.summaries.free.entry(scope).or_default().insert(target);
+            // Referenced dependencies are settled; the first visit covered all ancestors.
+            if !self.summaries.free.entry(scope).or_default().insert(target) {
+                break;
+            }
             if let Some(summary) = self.summaries.values.get(&target) {
                 for &before in &summary.dependencies {
                     self.sink.add("SourceRegionDependency", (scope, before))?;
                 }
             }
-            let Some(&parent) = self.summaries.parents.get(&scope) else {
+            let Some((Some(parent), _)) = self.identities.scopes.get(&scope) else {
                 break;
             };
-            scope = parent;
+            scope = *parent;
         }
         Ok(())
     }
@@ -189,12 +173,12 @@ impl Import<'_, '_, '_, '_> {
                 if let Some(&value) = self.identities.occurrences.get(&(scope, term)) {
                     break value;
                 }
-                let Some(&parent) = self.summaries.parents.get(&scope) else {
+                let Some((Some(parent), _)) = self.identities.scopes.get(&scope) else {
                     return Err(OptimizeError::Output(
                         "projected TLC value has no visible source occurrence".into(),
                     ));
                 };
-                scope = parent;
+                scope = *parent;
             },
         }))
     }
@@ -209,7 +193,8 @@ impl Import<'_, '_, '_, '_> {
         parent.summary.regions.insert(child);
         if let Some(free) = self.summaries.free.get(&child).cloned() {
             for value in free {
-                self.summaries.uses.entry(owner).or_default().insert(value);
+                self.sink.add("SourceNestedUse", (owner, value))?;
+                self.summaries.pending_uses.push((owner, value));
                 self.use_summary(owner, value, false);
             }
         }

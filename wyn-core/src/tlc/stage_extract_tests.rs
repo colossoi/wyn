@@ -117,10 +117,10 @@ fn stage_bindings(source: &str) -> Vec<StageBindings> {
             let TermKind::Lambda(lambda) = &def.body.kind else {
                 panic!("stage lambda")
             };
-            let used = captured_symbols(&lambda.body, &LookupSet::new(), &program.symbols);
+            let used = captured_symbols(&lambda.body, &LookupSet::new());
             let bound = lambda.params.iter().map(|(symbol, _)| *symbol).collect();
             assert!(
-                captured_symbols(&lambda.body, &bound, &program.symbols).is_empty(),
+                captured_symbols(&lambda.body, &bound).is_empty(),
                 "{} retains a capture that is not a stage parameter",
                 entry.declaration.name
             );

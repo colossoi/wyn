@@ -1526,7 +1526,7 @@ fn stage_captures(
     // set; representation lowering below decides how each typed capture crosses
     // the stage ABI.
     let bound = callback.params.iter().map(|(symbol, _)| *symbol).collect();
-    let used = captured_symbols(&callback.body, &bound, symbols);
+    let used = captured_symbols(&callback.body, &bound);
     let mut params = Vec::new();
     let mut declarations = Vec::new();
     let mut substitutions = LookupMap::new();
@@ -1561,18 +1561,9 @@ fn stage_captures(
     Some((params, declarations, substitutions, target_reads))
 }
 
-fn captured_symbols(
-    term: &Term,
-    bound: &LookupSet<SymbolId>,
-    symbols: &SymbolTable,
-) -> LookupSet<SymbolId> {
-    super::defunctionalize::compute_free_vars(term, bound, &LookupSet::new(), &LookupSet::new(), symbols)
-        .into_iter()
-        .filter_map(|term| match term.kind {
-            TermKind::Var(VarRef::Symbol(symbol)) => Some(symbol),
-            _ => None,
-        })
-        .collect()
+fn captured_symbols(term: &Term, bound: &LookupSet<SymbolId>) -> LookupSet<SymbolId> {
+    let (values, _) = ValueGraph::build(term);
+    values.free_symbols().filter(|symbol| !bound.contains(symbol)).collect()
 }
 
 fn referenced_symbols(term: &Term) -> LookupSet<SymbolId> {
@@ -1832,7 +1823,7 @@ fn build_compute_stage(
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Option<Def<UnpinnedPolymorphic>> {
-    let used = captured_symbols(operation.rhs, &LookupSet::new(), symbols);
+    let used = captured_symbols(operation.rhs, &LookupSet::new());
     let mut params = Vec::new();
     let mut declarations = Vec::new();
     let mut substitutions = LookupMap::new();
@@ -2431,7 +2422,7 @@ fn build_vertex_stage(
                 .collect(),
         )
     };
-    let used = captured_symbols(&callback.body, &LookupSet::new(), symbols);
+    let used = captured_symbols(&callback.body, &LookupSet::new());
     let mut invocation_params = Vec::new();
     let mut invocation_decls = Vec::new();
     for (index, (symbol, ty)) in callback.params.iter().enumerate() {
@@ -2681,7 +2672,7 @@ fn build_fragment_stage(
         fragment_output_color_type(&callback.ret_ty).filter(|color| *color == target_color_ty)
     };
     let has_fragment_output = fragment_output.is_some();
-    let referenced = captured_symbols(&callback.body, &LookupSet::new(), symbols);
+    let referenced = captured_symbols(&callback.body, &LookupSet::new());
     let mut used: Vec<_> = callback.params.iter().map(|(symbol, _)| referenced.contains(symbol)).collect();
     if has_fragment_output {
         used[1] = true;

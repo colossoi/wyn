@@ -228,7 +228,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
         let key = self.sink.add("RegionId", self.regions.next_id())?;
         self.identities.scopes.insert(key, (parent, body));
         if let Some(parent) = parent {
-            self.summaries.parents.insert(key, parent);
             self.sink.add("SourceParent", (key, parent))?;
         } else {
             self.sink.add("SourceRootRegion", key)?;
@@ -606,9 +605,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
             captured.push(parameter);
             self.sink.add("SourceCapture", (scope.key, parameter, argument))?;
             self.summaries.captures.insert((operation, argument));
-            if let Some(reads) = self.summaries.reads.get_mut(&operation) {
-                reads.insert(argument);
-            }
         }
         self.parameters(params, &scope)?;
         if matches!(&body.kind, TermKind::Var(VarRef::Symbol(symbol)) if self.globals.contains(symbol)) {
@@ -699,9 +695,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
         self.summaries.values.entry(owner).or_default().dependencies = dependencies;
         self.sink.set("SourceInput", (operation, index), value)?;
         self.summaries.inputs.insert((operation, value));
-        if let Some(reads) = self.summaries.reads.get_mut(&operation) {
-            reads.insert(value);
-        }
         self.dependencies(operation, value, "Input")?;
 
         Ok(())
@@ -723,10 +716,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
             SoacOp::ReduceByIndex { op, .. } => ("reduce-by-index", op),
         };
         let operation = self.operation(value, kind, scope)?;
-        // Only scatter's in-place safety check consumes transitive read footprints.
-        if matches!(soac, SoacOp::Scatter { .. }) {
-            self.summaries.reads.entry(operation).or_default();
-        }
         self.operator_body(body, operation, value, scope)?;
         let count = match soac {
             SoacOp::Map { inputs, .. }

@@ -17,6 +17,8 @@
 ; Immediate operands, including aliases and SOAC inputs. Region dependency
 ; summaries are deliberately excluded: these are actual value uses.
 (relation SourceDirectUse (SourceValue SourceValue))
+; Free values evaluated by a nested region, not direct operand occurrences.
+(relation SourceNestedUse (SourceValue SourceValue))
 (relation SourceOperand (OperationKey SourceValue))
 (function SourceAlias (SourceValue) SourceValue :no-merge)
 (function SourceResult (RegionKey) SourceValue :no-merge)

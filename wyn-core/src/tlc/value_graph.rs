@@ -1,8 +1,10 @@
 //! Value identity and evaluation dependencies for a typed TLC body.
 //! Rebuild this snapshot after transformations; source term IDs are not updated.
 
-use super::{ArrayExpr, Payload, SoacOp, Term, TermId, TermKind, VarRef};
-use crate::{LookupMap, LookupSet, SymbolId};
+use super::{ArrayExpr, LoopKind, Payload, SoacOp, Term, TermId, TermKind, VarRef};
+use crate::ast::Span;
+use crate::types::Type;
+use crate::{LookupMap, LookupSet, StableMap, SymbolId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Value(usize);
@@ -40,6 +42,12 @@ struct Expression {
 
 pub(crate) struct Dependencies(Vec<bool>);
 
+struct Reference {
+    id: TermId,
+    ty: Type,
+    span: Span,
+}
+
 #[derive(Default)]
 pub(crate) struct ValueGraph {
     // Operands precede consumers; lexical binders have globally unique symbols.
@@ -48,6 +56,8 @@ pub(crate) struct ValueGraph {
     bindings: LookupMap<SymbolId, Expression>,
     terms: LookupMap<TermId, Expression>,
     producers: LookupMap<Value, SymbolId>,
+    references: StableMap<SymbolId, Reference>,
+    locals: LookupSet<SymbolId>,
 }
 
 impl ValueGraph {
@@ -55,6 +65,28 @@ impl ValueGraph {
         let mut graph = Self::default();
         let result = graph.import(term).value;
         (graph, result)
+    }
+
+    /// First references in traversal order, excluding this body's binders and
+    /// caller-supplied parameters/globals. Returned-value dependencies are insufficient.
+    pub fn free_variables<C: Payload, S: Payload>(
+        &self,
+        mut excluded: impl FnMut(SymbolId) -> bool,
+    ) -> Vec<Term<C, S>> {
+        self.references
+            .iter()
+            .filter(|(symbol, _)| !self.locals.contains(symbol) && !excluded(**symbol))
+            .map(|(&symbol, reference)| Term {
+                id: reference.id,
+                ty: reference.ty.clone(),
+                span: reference.span,
+                kind: TermKind::Var(VarRef::Symbol(symbol)),
+            })
+            .collect()
+    }
+
+    pub fn free_symbols(&self) -> impl Iterator<Item = SymbolId> + '_ {
+        self.references.keys().copied().filter(|symbol| !self.locals.contains(symbol))
     }
 
     /// Includes control inputs and evaluated operands, even if their values are discarded.
@@ -227,10 +259,50 @@ impl ValueGraph {
     }
 
     fn import<C: Payload, S: Payload>(&mut self, term: &Term<C, S>) -> Expression {
+        // Alpha-renamed binders are unique within a body, so membership suffices
+        // for whole-body capture queries without copying environments at each let.
+        match &term.kind {
+            TermKind::Let { name, .. } => {
+                self.locals.insert(*name);
+            }
+            TermKind::Lambda(lambda) => self.locals.extend(lambda.params.iter().map(|(name, _)| *name)),
+            TermKind::Loop {
+                loop_var,
+                init_bindings,
+                kind,
+                ..
+            } => {
+                self.locals.insert(*loop_var);
+                self.locals.extend(init_bindings.iter().map(|(name, _, _)| *name));
+                if let LoopKind::For { var, .. } | LoopKind::ForRange { var, .. } = kind {
+                    self.locals.insert(*var);
+                }
+            }
+            TermKind::Soac(soac) => {
+                let body = match soac {
+                    SoacOp::Map { lam, .. }
+                    | SoacOp::Scatter { lam, .. }
+                    | SoacOp::BucketScatter { lam, .. } => lam,
+                    SoacOp::Reduce { op, .. }
+                    | SoacOp::Scan { op, .. }
+                    | SoacOp::ReduceByIndex { op, .. } => op,
+                    SoacOp::Filter { pred, .. } => pred,
+                };
+                self.locals.extend(body.lam.params.iter().map(|(name, _)| *name));
+            }
+            _ => {}
+        }
         let source = Source::Term(term.id);
         let expr = match &term.kind {
             TermKind::Var(VarRef::Symbol(symbol))
-            | TermKind::ArrayExpr(ArrayExpr::Var(VarRef::Symbol(symbol), _)) => self.symbol(*symbol),
+            | TermKind::ArrayExpr(ArrayExpr::Var(VarRef::Symbol(symbol), _)) => {
+                self.references.entry(*symbol).or_insert_with(|| Reference {
+                    id: term.id,
+                    ty: term.ty.clone(),
+                    span: term.span,
+                });
+                self.symbol(*symbol)
+            }
             TermKind::Coerce { inner, .. } => self.import(inner),
             TermKind::Let { name, rhs, body, .. } => {
                 let rhs = self.import(rhs);

@@ -10,6 +10,7 @@ use crate::ast::{Span, TypeName};
 use crate::tlc::data::{
     Empty, ExplicitCaptures, ExplicitCapturesPayload, ExplicitClosure, ExplicitClosurePayload,
 };
+use crate::tlc::value_graph::ValueGraph;
 use crate::tlc::{
     self, ArrayExpr, Def, DefMeta, Lambda, LoopKind, Program, SoacBody, SoacOp, Term, TermIdSource,
     TermKind, VarRef,
@@ -32,249 +33,6 @@ fn append_capture_params(
     let mut all_params = orig_params;
     all_params.extend(captures.iter().cloned());
     tlc::rebuild_nested_lam(&all_params, inner_body, span, term_ids)
-}
-
-// =============================================================================
-// Free-variable analysis
-// =============================================================================
-
-/// Compute the free variables of a term. The returned terms are the first
-/// variable occurrences for each free symbol, in traversal order.
-pub fn compute_free_vars<C, S>(
-    term: &Term<C, S>,
-    bound: &LookupSet<SymbolId>,
-    top_level: &LookupSet<SymbolId>,
-    known_defs: &LookupSet<SymbolId>,
-    symbols: &SymbolTable,
-) -> Vec<Term<C, S>>
-where
-    C: tlc::Payload,
-    S: tlc::Payload,
-{
-    let mut free = Vec::new();
-    let mut seen = LookupSet::new();
-    collect_free_vars(term, bound, top_level, known_defs, symbols, &mut free, &mut seen);
-    free
-}
-
-fn collect_free_vars<C, S>(
-    term: &Term<C, S>,
-    bound: &LookupSet<SymbolId>,
-    top_level: &LookupSet<SymbolId>,
-    known_defs: &LookupSet<SymbolId>,
-    symbols: &SymbolTable,
-    free: &mut Vec<Term<C, S>>,
-    seen: &mut LookupSet<SymbolId>,
-) where
-    C: tlc::Payload,
-    S: tlc::Payload,
-{
-    match &term.kind {
-        TermKind::Var(VarRef::Symbol(sym)) => {
-            if !bound.contains(sym)
-                && !top_level.contains(sym)
-                && !known_defs.contains(sym)
-                && seen.insert(*sym)
-            {
-                free.push(term.clone());
-            }
-        }
-        TermKind::Let { name, rhs, body, .. } => {
-            collect_free_vars(rhs, bound, top_level, known_defs, symbols, free, seen);
-            let mut body_bound = bound.clone();
-            body_bound.insert(*name);
-            collect_free_vars(body, &body_bound, top_level, known_defs, symbols, free, seen);
-        }
-        TermKind::Lambda(lam) => {
-            collect_free_vars_lambda(lam, bound, top_level, known_defs, symbols, free, seen);
-        }
-        TermKind::Loop {
-            loop_var,
-            init,
-            init_bindings,
-            kind,
-            body,
-            ..
-        } => {
-            collect_free_vars(init, bound, top_level, known_defs, symbols, free, seen);
-            let mut loop_bound = bound.clone();
-            loop_bound.insert(*loop_var);
-            loop_bound.extend(init_bindings.iter().map(|(name, _, _)| *name));
-            match kind {
-                LoopKind::For { var, iter, .. } => {
-                    collect_free_vars(iter, bound, top_level, known_defs, symbols, free, seen);
-                    loop_bound.insert(*var);
-                }
-                LoopKind::ForRange {
-                    var,
-                    bound: range_bound,
-                    ..
-                } => {
-                    collect_free_vars(range_bound, bound, top_level, known_defs, symbols, free, seen);
-                    loop_bound.insert(*var);
-                }
-                LoopKind::While { cond } => {
-                    collect_free_vars(cond, &loop_bound, top_level, known_defs, symbols, free, seen);
-                }
-            }
-            for (_, _, expr) in init_bindings {
-                collect_free_vars(expr, &loop_bound, top_level, known_defs, symbols, free, seen);
-            }
-            collect_free_vars(body, &loop_bound, top_level, known_defs, symbols, free, seen);
-        }
-        TermKind::Soac(soac) => {
-            collect_free_vars_soac(soac, bound, top_level, known_defs, symbols, free, seen)
-        }
-        TermKind::Closure(data) => C::for_each(data, &mut |capture| {
-            collect_free_vars(capture, bound, top_level, known_defs, symbols, free, seen)
-        }),
-        TermKind::Var(VarRef::Builtin { .. })
-        | TermKind::IntLit(_)
-        | TermKind::FloatLit(_)
-        | TermKind::BoolLit(_)
-        | TermKind::UnitLit
-        | TermKind::BinOp(_)
-        | TermKind::UnOp(_)
-        | TermKind::Extern(_) => {}
-        _ => term.for_each_child(&mut |child| {
-            collect_free_vars(child, bound, top_level, known_defs, symbols, free, seen)
-        }),
-    }
-}
-
-fn collect_free_vars_lambda<C, S>(
-    lam: &Lambda<C, S>,
-    bound: &LookupSet<SymbolId>,
-    top_level: &LookupSet<SymbolId>,
-    known_defs: &LookupSet<SymbolId>,
-    symbols: &SymbolTable,
-    free: &mut Vec<Term<C, S>>,
-    seen: &mut LookupSet<SymbolId>,
-) where
-    C: tlc::Payload,
-    S: tlc::Payload,
-{
-    let mut body_bound = bound.clone();
-    body_bound.extend(lam.params.iter().map(|(param, _)| *param));
-    collect_free_vars(&lam.body, &body_bound, top_level, known_defs, symbols, free, seen);
-}
-
-fn collect_free_vars_soac_body<C, S>(
-    body: &SoacBody<C, S>,
-    bound: &LookupSet<SymbolId>,
-    top_level: &LookupSet<SymbolId>,
-    known_defs: &LookupSet<SymbolId>,
-    symbols: &SymbolTable,
-    free: &mut Vec<Term<C, S>>,
-    seen: &mut LookupSet<SymbolId>,
-) where
-    C: tlc::Payload,
-    S: tlc::Payload,
-{
-    collect_free_vars_lambda(&body.lam, bound, top_level, known_defs, symbols, free, seen);
-    S::for_each(&body.data, &mut |(_, _, capture)| {
-        collect_free_vars(capture, bound, top_level, known_defs, symbols, free, seen)
-    });
-}
-
-fn collect_free_vars_soac<C, S>(
-    soac: &SoacOp<C, S>,
-    bound: &LookupSet<SymbolId>,
-    top_level: &LookupSet<SymbolId>,
-    known_defs: &LookupSet<SymbolId>,
-    symbols: &SymbolTable,
-    free: &mut Vec<Term<C, S>>,
-    seen: &mut LookupSet<SymbolId>,
-) where
-    C: tlc::Payload,
-    S: tlc::Payload,
-{
-    let mut visit_body = |body: &SoacBody<C, S>| {
-        collect_free_vars_soac_body(body, bound, top_level, known_defs, symbols, free, seen)
-    };
-    match soac {
-        SoacOp::Map { lam, inputs, .. } => {
-            visit_body(lam);
-            for input in inputs {
-                collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
-            }
-        }
-        SoacOp::Reduce { op, ne, input } | SoacOp::Scan { op, ne, input, .. } => {
-            visit_body(op);
-            collect_free_vars(ne, bound, top_level, known_defs, symbols, free, seen);
-            collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
-        }
-        SoacOp::Filter { pred, input, .. } => {
-            visit_body(pred);
-            collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
-        }
-        SoacOp::Scatter { lam, inputs, .. } => {
-            visit_body(lam);
-            for input in inputs {
-                collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
-            }
-        }
-        SoacOp::BucketScatter { lam, inputs, .. } => {
-            visit_body(lam);
-            for input in inputs {
-                collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
-            }
-        }
-        SoacOp::ReduceByIndex {
-            op,
-            ne,
-            indices,
-            values,
-            ..
-        } => {
-            visit_body(op);
-            collect_free_vars(ne, bound, top_level, known_defs, symbols, free, seen);
-            collect_free_vars_array_expr(indices, bound, top_level, known_defs, symbols, free, seen);
-            collect_free_vars_array_expr(values, bound, top_level, known_defs, symbols, free, seen);
-        }
-    }
-}
-
-fn collect_free_vars_array_expr<C, S>(
-    array: &ArrayExpr<C, S>,
-    bound: &LookupSet<SymbolId>,
-    top_level: &LookupSet<SymbolId>,
-    known_defs: &LookupSet<SymbolId>,
-    symbols: &SymbolTable,
-    free: &mut Vec<Term<C, S>>,
-    seen: &mut LookupSet<SymbolId>,
-) where
-    C: tlc::Payload,
-    S: tlc::Payload,
-{
-    match array {
-        ArrayExpr::Var(var, ty) => collect_free_vars(
-            &tlc::synthetic_atom_var_term(*var, ty.clone()),
-            bound,
-            top_level,
-            known_defs,
-            symbols,
-            free,
-            seen,
-        ),
-        ArrayExpr::Zip(parts) => {
-            for part in parts {
-                collect_free_vars_array_expr(part, bound, top_level, known_defs, symbols, free, seen);
-            }
-        }
-        ArrayExpr::Literal(terms) => {
-            for term in terms {
-                collect_free_vars(term, bound, top_level, known_defs, symbols, free, seen);
-            }
-        }
-        ArrayExpr::Range { start, len, step } => {
-            collect_free_vars(start, bound, top_level, known_defs, symbols, free, seen);
-            collect_free_vars(len, bound, top_level, known_defs, symbols, free, seen);
-            if let Some(step) = step {
-                collect_free_vars(step, bound, top_level, known_defs, symbols, free, seen);
-            }
-        }
-    }
 }
 
 // =============================================================================
@@ -812,15 +570,12 @@ impl ClosureConverter {
         body: &Term<ExplicitClosurePayload, ExplicitCapturesPayload>,
         bound: &LookupSet<SymbolId>,
     ) -> Vec<Term<ExplicitClosurePayload, ExplicitCapturesPayload>> {
-        let mut result = compute_free_vars(body, bound, &self.top_level, &LookupSet::new(), &self.symbols);
-        result.retain(|term| {
-            !matches!(
-                &term.kind,
-                TermKind::Var(VarRef::Symbol(symbol))
-                    if self.known_def_symbols.contains(symbol)
-            )
-        });
-        result
+        let (values, _) = ValueGraph::build(body);
+        values.free_variables(|symbol| {
+            bound.contains(&symbol)
+                || self.top_level.contains(&symbol)
+                || self.known_def_symbols.contains(&symbol)
+        })
     }
 }
 

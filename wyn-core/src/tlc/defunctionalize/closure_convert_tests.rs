@@ -8,7 +8,6 @@ use crate::tlc::{
     Def, DefMeta, Lambda, Payload, Place, Program, SoacBody, SoacOp, Term, TermIdSource, TermKind,
 };
 use crate::types;
-use crate::LookupSet;
 use crate::SymbolId;
 use crate::SymbolTable;
 use polytype::Type;
@@ -299,13 +298,8 @@ fn scatter_envelope_params_count_as_bound_symbols() {
         }),
     };
 
-    let free = compute_free_vars(
-        &scatter,
-        &LookupSet::new(),
-        &LookupSet::new(),
-        &LookupSet::new(),
-        &symbols,
-    );
+    let (values, _) = ValueGraph::build(&scatter);
+    let free = values.free_variables::<ExplicitClosurePayload, ExplicitCapturesPayload>(|_| false);
     assert!(
         !free
             .iter()

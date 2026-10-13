@@ -143,3 +143,37 @@ fn structural_forwarding_does_not_select_a_value_inside_a_branch() {
     );
     assert!(values.project(result, &[0]).is_none());
 }
+
+#[test]
+fn captures_include_discarded_evaluations_and_exclude_nested_binders() {
+    let (values, _, parameters, symbols) = graph(
+        "entry main(xs: []i32, bias: i32, n: i32) []i32 =
+           let ignored = bias in
+           map(|x| loop acc = x for i < n do acc + i, xs)",
+    );
+    assert_eq!(
+        values.free_symbols().collect::<Vec<_>>(),
+        [parameters[1], parameters[2], parameters[0]]
+    );
+    let captures: Vec<tlc::Term> = values.free_variables(|symbol| symbol == parameters[0]);
+    assert_eq!(captures.len(), 2);
+    for (capture, name) in captures.iter().zip(["bias", "n"]) {
+        let tlc::TermKind::Var(tlc::VarRef::Symbol(symbol)) = capture.kind else {
+            panic!("variable capture")
+        };
+        assert_eq!(symbols.get(symbol).map(String::as_str), Some(name));
+        assert_ne!(capture.id, tlc::TermId::SYNTHETIC);
+    }
+}
+
+#[test]
+fn capture_identity_distinguishes_shadowed_parameters() {
+    let (values, _, parameters, _) = graph(
+        "entry main(xs: []i32, x: i32) []i32 =
+           let saved = x in map(|x| x + saved, xs)",
+    );
+    assert_eq!(
+        values.free_symbols().collect::<Vec<_>>(),
+        [parameters[1], parameters[0]]
+    );
+}

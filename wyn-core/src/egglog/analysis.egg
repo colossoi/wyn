@@ -66,6 +66,15 @@
 ; Backing equivalence is conservative and never equates value versions.
 (datatype SourceBacking (BackingIdentity SourceValue))
 (relation SourceReadCandidate (OperationKey SourceValue))
+; Only scatter's in-place safety check needs transitive input/capture reads.
+(rule ((SourceOperation op region "scatter") (= input (SourceInput op i)))
+      ((SourceReadCandidate op input)) :ruleset source-summary)
+(rule ((SourceOperation op region "scatter") (= body (SourceOperatorBody op)) (SourceCapture body formal actual))
+      ((SourceReadCandidate op actual)) :ruleset source-summary)
+(rule ((SourceReadCandidate op value) (SourceDirectUse value child))
+      ((SourceReadCandidate op child)) :ruleset source-summary)
+(rule ((SourceReadCandidate op value) (SourceNestedUse value child))
+      ((SourceReadCandidate op child)) :ruleset source-summary)
 (rule ((SourceReadCandidate op value)) ((BackingIdentity value)) :ruleset source-summary)
 (rule ((= value (SourceDestination op))) ((BackingIdentity value)) :ruleset source-summary)
 (rule ((= target (SourceAlias value))) ((union (BackingIdentity value) (BackingIdentity target))) :ruleset source-summary)
