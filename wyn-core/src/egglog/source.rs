@@ -1,6 +1,5 @@
-//! One source walk establishes lexical bindings and structured execution scopes.
-//! Arithmetic stays in TLC; source uses and placement facts accompany later
-//! imports into local optimization graphs.
+//! Import execution scopes and source facts, using TLC's value graph for forwarding.
+//! Arithmetic stays in TLC until import into local optimization graphs.
 use super::{fusion, planning, OptimizeError};
 use crate::binding_layout::{
     extract_io_decoration, extract_sampler_binding, extract_storage_access, extract_storage_binding,
@@ -9,6 +8,7 @@ use crate::binding_layout::{
 use crate::interface::{EntryKind, IoDecoration, StorageAccess};
 use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
 use crate::tlc::stage::OwnershipApplied;
+use crate::tlc::value_graph::ValueGraph;
 use crate::tlc::{
     self, extract_lambda_params_ref, ArrayExpr, DefMeta, Lambda, LoopKind, SoacBody, SoacOp, TermId,
     TermKind, VarRef,
@@ -23,6 +23,9 @@ mod facts;
 mod interface;
 mod structure;
 mod summary;
+#[cfg(test)]
+#[path = "source_tests.rs"]
+mod tests;
 use super::bindings::Bindings;
 use summary::{Summaries, Summary};
 
@@ -53,6 +56,7 @@ pub(super) fn import(source: &OwnershipApplied) -> Result<(EGraph, Identities<'_
             imported_types: LookupMap::default(),
             source_ordinals: LookupMap::default(),
             summaries: Summaries::default(),
+            values: ValueGraph::default(),
             ownership: &source.global_context.ownership,
         };
         // Native writes report engine errors; source validation also has its
@@ -112,6 +116,7 @@ struct Import<'graph, 'db, 'ids, 'source> {
     imported_types: LookupMap<i64, Value>,
     source_ordinals: LookupMap<Value, i64>,
     summaries: Summaries,
+    values: ValueGraph,
     ownership: &'source tlc::ownership::OwnershipFacts,
 }
 
@@ -121,6 +126,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         self.sink.add("CounterType", counter)?;
         for (ordinal, definition) in source.defs.iter().enumerate() {
             let (body, parameters) = extract_lambda_params_ref(&definition.body);
+            self.values = ValueGraph::build(body).0;
             let mut scope = self.scope(Some(body), None)?;
             let symbol = self.identities.symbols.intern(&definition.name);
             self.sink.add("SourceDefinition", (symbol, scope.key))?;
@@ -206,7 +212,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                     self.sink.add("SourceBufferDemand", symbol)?;
                     self.output_leaf(symbol, 0, result, &body.ty, None)?;
                 } else {
-                    self.output(symbol, result, &body.ty, &entry.declaration.outputs)?;
+                    self.output(symbol, result, body, scope.key, &entry.declaration.outputs)?;
                 }
             }
             self.bindings.restore(checkpoint);
@@ -488,14 +494,13 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 }
             }
             TermKind::Coerce { inner, .. } => {
-                let inner = self.operand(inner, value, scope)?;
-                self.alias_summary(value, inner)?;
+                let input = self.operand(inner, value, scope)?;
+                let source = self.graph_source(inner.id, &[], scope.key)?.unwrap_or(input);
+                self.alias_summary(value, source)?;
             }
             TermKind::TupleProj { tuple, idx } => {
-                let tuple = self.operand(tuple, value, scope)?;
-                if !self.projection_summary(value, tuple, *idx as i64)? {
-                    self.sink.add("SourceProjection", (value, tuple, *idx as i64))?;
-                }
+                let input = self.operand(tuple, value, scope)?;
+                self.project_source(value, input, tuple.id, *idx, scope.key)?;
             }
             TermKind::Tuple(fields) | TermKind::VecLit(fields) => {
                 for (index, field) in fields.iter().enumerate() {
@@ -504,7 +509,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
                     if as_soa_tuple(&term.ty).is_some() {
                         self.sink.add("SourceArrayPart", (value, index as i64, field))?;
                     }
-                    self.summaries.fields.insert((value, index as i64), field);
                 }
             }
         }

@@ -2,6 +2,8 @@
 //! expressions. Only operation/region summaries enter structural fixed points.
 use super::{Import, Scope};
 use crate::egglog::OptimizeError;
+use crate::tlc::value_graph::Source;
+use crate::tlc::TermId;
 use crate::BindingRef;
 use crate::{LookupMap, LookupSet};
 use egglog_engine::{RawValues, Value, Write};
@@ -68,9 +70,8 @@ pub(super) struct Summaries {
     pub inputs: LookupSet<(Value, Value)>,
     pub captures: LookupSet<(Value, Value)>,
     pub regions_with_operations: LookupSet<Value>,
-    pub canonical: LookupMap<Value, Value>,
+    pub aliases: LookupSet<Value>,
     pub lengths: LookupMap<Value, Value>,
-    pub fields: LookupMap<(Value, i64), Value>,
     pub owners: LookupMap<Value, Value>,
     pub parents: LookupMap<Value, Value>,
     pub free: LookupMap<Value, LookupSet<Value>>,
@@ -87,7 +88,7 @@ impl Import<'_, '_, '_, '_> {
     /// DAG rather than expanding a transitive operand set at every source node.
     pub(super) fn finish_uses(&mut self) -> Result<(), OptimizeError> {
         for (&value, children) in &self.summaries.uses {
-            if self.summaries.canonical.contains_key(&value) {
+            if self.summaries.aliases.contains(&value) {
                 continue;
             }
             if let Some(&operation) = self.summaries.operations.get(&value) {
@@ -149,27 +150,53 @@ impl Import<'_, '_, '_, '_> {
     }
 
     pub(super) fn alias_summary(&mut self, value: Value, target: Value) -> Result<(), OptimizeError> {
-        let target = self.summaries.canonical.get(&target).copied().unwrap_or(target);
-        self.summaries.canonical.insert(value, target);
+        self.summaries.aliases.insert(value);
         self.sink.set("SourceAlias", value, target)?;
         Ok(())
     }
 
-    pub(super) fn projection_summary(
+    pub(super) fn project_source(
         &mut self,
         value: Value,
         tuple: Value,
-        index: i64,
-    ) -> Result<bool, OptimizeError> {
-        let tuple = self.summaries.canonical.get(&tuple).copied().unwrap_or(tuple);
-        if let Some(&field) = self.summaries.fields.get(&(tuple, index)) {
-            self.alias_summary(value, field)?;
-            let dependencies =
-                self.summaries.values.get(&field).map(|s| s.dependencies.clone()).unwrap_or_default();
-            self.summaries.values.entry(value).or_default().dependencies = dependencies;
-            return Ok(true);
-        }
-        Ok(false)
+        term: TermId,
+        index: usize,
+        scope: Value,
+    ) -> Result<(), OptimizeError> {
+        let Some(field) = self.graph_source(term, &[index], scope)? else {
+            self.sink.add("SourceProjection", (value, tuple, index as i64))?;
+            return Ok(());
+        };
+        self.alias_summary(value, field)?;
+        let dependencies =
+            self.summaries.values.get(&field).map(|s| s.dependencies.clone()).unwrap_or_default();
+        self.summaries.values.entry(value).or_default().dependencies = dependencies;
+        Ok(())
+    }
+
+    pub(super) fn graph_source(
+        &mut self,
+        term: TermId,
+        fields: &[usize],
+        mut scope: Value,
+    ) -> Result<Option<Value>, OptimizeError> {
+        let Some(source) = self.values.projected_source(term, fields) else {
+            return Ok(None);
+        };
+        Ok(Some(match source {
+            Source::Input(symbol) => self.resolve(symbol)?,
+            Source::Term(term) => loop {
+                if let Some(&value) = self.identities.occurrences.get(&(scope, term)) {
+                    break value;
+                }
+                let Some(&parent) = self.summaries.parents.get(&scope) else {
+                    return Err(OptimizeError::Output(
+                        "projected TLC value has no visible source occurrence".into(),
+                    ));
+                };
+                scope = parent;
+            },
+        }))
     }
 
     pub(super) fn enter_summary(

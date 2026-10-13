@@ -34,7 +34,7 @@ pub enum OptimizeError {
     Output(String),
 }
 
-/// Summarize semantic values, operations, and execution scopes in one TLC walk.
+/// Summarize semantic values, operations, and execution scopes from typed TLC.
 /// Resolve lexical bindings directly; scalar bodies remain source references.
 pub fn from_tlc(source: &OwnershipApplied) -> Result<Program<'_, Imported>, OptimizeError> {
     let _timing = timing::span("egglog import");

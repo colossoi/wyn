@@ -27,6 +27,7 @@ mod stage_extract;
 pub mod subst;
 #[cfg(test)]
 pub(crate) mod test_support;
+pub(crate) mod value_graph;
 
 mod traversal;
 

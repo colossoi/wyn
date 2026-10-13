@@ -9,6 +9,7 @@
 use super::data;
 use super::inline::UnifiedHelpersInlined;
 use super::run::UnpinnedPolymorphic;
+use super::value_graph::{Origin, ValueGraph};
 use super::{
     clone_term_with_fresh_ids, curried_function_type, Def, DefMeta, EntryPoint, Lambda, Program,
     ProgramParts, RewriteDecision, Term, TermIdSource, TermKind, TermRewriter, TermVisitor, VarRef,
@@ -160,14 +161,6 @@ struct ComputedValue {
     leaves: Vec<ComputedLeaf>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ProjectionOrigin {
-    producer: SymbolId,
-    path: Vec<usize>,
-}
-
-type ProjectionOrigins = LookupMap<SymbolId, ProjectionOrigin>;
-
 #[derive(Clone)]
 struct TargetValue {
     ty: Type,
@@ -178,9 +171,9 @@ struct TargetValue {
 struct RootShape<'a> {
     operations: Vec<RootOperation<'a>>,
     computed: Vec<ComputedValue>,
-    computed_origins: ProjectionOrigins,
+    values: ValueGraph,
     targets: LookupMap<SymbolId, TargetValue>,
-    results: Vec<(ProjectionOrigin, interface::SourceResult)>,
+    results: Vec<(Origin, interface::SourceResult)>,
 }
 
 /// Unified roots have been replaced by their final compute or graphics stage
@@ -281,13 +274,8 @@ fn extract_root(
         return None;
     };
     let mut root_lambda = source_root_lambda.clone();
-    let mut computed_origins = LookupMap::new();
-    root_lambda.body = Box::new(normalize_root_bindings(
-        *root_lambda.body,
-        builtins,
-        term_ids,
-        &mut computed_origins,
-    ));
+    root_lambda.body = Box::new(normalize_root_bindings(*root_lambda.body, builtins, term_ids));
+    let (values, _) = ValueGraph::build(&root_lambda.body);
     let root_name = root_entry_name(definition)?;
     // Allocate one module-wide descriptor namespace, shared by all stages
     // of this root and by the later compute buffer allocator.
@@ -304,7 +292,7 @@ fn extract_root(
         root_entry,
         &root_name,
         builtins,
-        computed_origins,
+        values,
         binding_ids,
         symbols,
     )?;
@@ -336,7 +324,7 @@ fn extract_root(
                     operation,
                     false,
                     &shape.computed,
-                    &shape.computed_origins,
+                    &shape.values,
                     &shape.targets,
                     &shape.results,
                     builtins,
@@ -384,7 +372,7 @@ fn extract_root(
                             &root_lambda,
                             root_entry,
                             &shape.computed,
-                            &shape.computed_origins,
+                            &shape.values,
                         ) {
                             return Some(operand);
                         }
@@ -405,7 +393,7 @@ fn extract_root(
                             &operation,
                             true,
                             &shape.computed,
-                            &shape.computed_origins,
+                            &shape.values,
                             &shape.targets,
                             &[],
                             builtins,
@@ -433,7 +421,7 @@ fn extract_root(
                         &root_lambda,
                         root_entry,
                         &shape.computed,
-                        &shape.computed_origins,
+                        &shape.values,
                         &shape.targets,
                         Some(operation.target_symbol),
                         symbols,
@@ -448,7 +436,7 @@ fn extract_root(
                     &root_lambda,
                     root_entry,
                     &shape.computed,
-                    &shape.computed_origins,
+                    &shape.values,
                     &shape.targets,
                     Some(operation.target_symbol),
                     symbols,
@@ -491,19 +479,17 @@ fn extract_root(
 }
 
 /// Remove ordinary administrative root bindings by substitution, while
-/// retaining computed projection aliases so stage planning can preserve their
-/// producer provenance without placing projections in SOAC input positions.
+/// retaining computed bindings for the value graph and stage planning.
 fn normalize_root_bindings(
     mut term: Term,
     builtins: &InvocationBuiltins,
     term_ids: &mut TermIdSource,
-    computed_origins: &mut ProjectionOrigins,
 ) -> Term {
     // Expose helper operation sequences without splitting ordinary compute regions.
     if matches!(&term.kind, TermKind::Let { rhs, .. } if contains_graphics_invocation(rhs, builtins)) {
         let (flattened_term, flattened) = super::bindings::flatten_nested_let(term, term_ids);
         if flattened {
-            return normalize_root_bindings(flattened_term, builtins, term_ids, computed_origins);
+            return normalize_root_bindings(flattened_term, builtins, term_ids);
         }
         term = flattened_term;
     }
@@ -521,34 +507,19 @@ fn normalize_root_bindings(
     // Inlining a raster helper can leave administrative argument bindings
     // around its result. Expose the rasterizer before classifying that result.
     let rhs = if matches!(name_ty, Type::Constructed(TypeName::Raster, _)) {
-        Box::new(normalize_root_bindings(
-            *rhs,
-            builtins,
-            term_ids,
-            computed_origins,
-        ))
+        Box::new(normalize_root_bindings(*rhs, builtins, term_ids))
     } else {
         rhs
     };
 
     let has_computed_leaves = computed_leaf_types(&name_ty).is_some();
-    let computed_origin = has_computed_leaves.then(|| projection_origin(&rhs, computed_origins)).flatten();
     let retain_for_planning = rasterizer_app(&rhs, builtins).is_some()
         || matches!(name_ty, Type::Constructed(TypeName::Raster, _))
         || shade_app(&rhs, builtins).is_some()
         || has_computed_leaves;
 
     if retain_for_planning {
-        if has_computed_leaves {
-            computed_origins.insert(
-                name,
-                computed_origin.unwrap_or_else(|| ProjectionOrigin {
-                    producer: name,
-                    path: vec![],
-                }),
-            );
-        }
-        let body = normalize_root_bindings(*body, builtins, term_ids, computed_origins);
+        let body = normalize_root_bindings(*body, builtins, term_ids);
         return Term {
             id,
             ty,
@@ -573,7 +544,7 @@ fn normalize_root_bindings(
         },
         term_ids,
     );
-    normalize_root_bindings(body, builtins, term_ids, computed_origins)
+    normalize_root_bindings(body, builtins, term_ids)
 }
 
 fn root_shape<'a>(
@@ -581,7 +552,7 @@ fn root_shape<'a>(
     root_entry: &EntryPoint<()>,
     root_name: &str,
     builtins: &InvocationBuiltins,
-    computed_origins: ProjectionOrigins,
+    mut values: ValueGraph,
     binding_ids: &mut wyn_base::IdSource<u32>,
     symbols: &mut SymbolTable,
 ) -> Option<RootShape<'a>> {
@@ -634,7 +605,8 @@ fn root_shape<'a>(
             );
             operations.push(RootOperation::Graphics(operation));
         } else if computed_leaf_types(name_ty).is_some() {
-            let origin = computed_origins.get(name)?;
+            values.name_producer(*name);
+            let origin = values.binding_origin(*name, &[])?;
             if origin.producer == *name && origin.path.is_empty() {
                 operations.push(RootOperation::Compute(ComputeOperation {
                     symbol: *name,
@@ -714,12 +686,12 @@ fn root_shape<'a>(
         target.binding = *target_bindings.get(&target.name)?;
     }
 
-    let results = source_results(current, &computed_origins, root_name, &mut operations, symbols);
+    let results = source_results(current, &values, root_name, &mut operations, symbols);
     Some(RootShape {
         results,
         operations,
         computed,
-        computed_origins,
+        values,
         targets,
     })
 }
@@ -728,18 +700,18 @@ fn root_shape<'a>(
 /// Unnamed expressions become unbound output demands in the same planner.
 fn source_results<'a>(
     term: &'a Term,
-    origins: &ProjectionOrigins,
+    origins: &ValueGraph,
     root_name: &str,
     operations: &mut Vec<RootOperation<'a>>,
     symbols: &mut SymbolTable,
-) -> Vec<(ProjectionOrigin, interface::SourceResult)> {
+) -> Vec<(Origin, interface::SourceResult)> {
     fn collect<'a>(
         term: &'a Term,
-        origins: &ProjectionOrigins,
+        origins: &ValueGraph,
         name: String,
         kind: host::ResultKind,
         index: &mut usize,
-        results: &mut Vec<(ProjectionOrigin, interface::SourceResult)>,
+        results: &mut Vec<(Origin, interface::SourceResult)>,
         operations: &mut Vec<RootOperation<'a>>,
         symbols: &mut SymbolTable,
         root_name: &str,
@@ -761,7 +733,7 @@ fn source_results<'a>(
             return;
         }
         if let Some(leaves) = computed_leaf_types(&term.ty) {
-            let origin = projection_origin(term, origins).unwrap_or_else(|| {
+            let origin = origins.term_origin(term.id).unwrap_or_else(|| {
                 // Preserve the expression as a result demand, without choosing a
                 // storage binding. Egglog plans its backing and producer work.
                 let entry_name = format!("{root_name}__result_{}", *index);
@@ -783,7 +755,7 @@ fn source_results<'a>(
                     entry_name,
                     outputs,
                 }));
-                ProjectionOrigin {
+                Origin {
                     producer: entry,
                     path: vec![],
                 }
@@ -832,12 +804,8 @@ fn graphics_operation<'a>(
 ) -> Option<GraphicsOperation<'a>> {
     let (shade_builtin, shade_args) = shade_app(shade_term, builtins)?;
     let target_index = usize::from(shade_builtin == builtins.shade_with);
-    let target_origins = known_target_origins(targets.keys().copied());
-    let TargetOrigin::Target(target_symbol) =
-        target_origin(shade_args.get(target_index)?, &target_origins)?
-    else {
-        return None;
-    };
+    let (values, target) = ValueGraph::build(shade_args.get(target_index)?);
+    let target_symbol = values.input_origin(target, &[])?;
     let raster_symbol = direct_symbol(shade_args.get(target_index + 1)?)?;
     let target = targets.get(&target_symbol)?;
     let target_name = target.name.clone();
@@ -982,28 +950,11 @@ fn projected_symbol_path(term: &Term) -> Option<(SymbolId, Vec<usize>)> {
     }
 }
 
-fn projection_origin(term: &Term, origins: &ProjectionOrigins) -> Option<ProjectionOrigin> {
-    let (symbol, suffix) = projected_symbol_path(term)?;
-    let origin = origins.get(&symbol)?;
-    let mut path = origin.path.clone();
-    path.extend(suffix);
-    Some(ProjectionOrigin {
-        producer: origin.producer,
-        path,
-    })
-}
-
-fn resolve_projection(
-    symbol: SymbolId,
-    suffix: &[usize],
-    origins: &ProjectionOrigins,
-) -> (SymbolId, Vec<usize>) {
-    let Some(origin) = origins.get(&symbol) else {
+fn resolve_projection(symbol: SymbolId, suffix: &[usize], origins: &ValueGraph) -> (SymbolId, Vec<usize>) {
+    let Some(origin) = origins.binding_origin(symbol, suffix) else {
         return (symbol, suffix.to_vec());
     };
-    let mut path = origin.path.clone();
-    path.extend_from_slice(suffix);
-    (origin.producer, path)
+    (origin.producer, origin.path)
 }
 
 fn is_render_target_type(ty: &Type) -> bool {
@@ -1230,10 +1181,10 @@ fn draw_buffer_source(
     root_lambda: &Lambda,
     root_entry: &EntryPoint<()>,
     computed: &[ComputedValue],
-    computed_origins: &ProjectionOrigins,
+    values: &ValueGraph,
 ) -> Option<interface::DrawBufferOperand> {
     let (symbol, path) = projected_symbol_path(array)?;
-    let (symbol, path) = resolve_projection(symbol, &path, computed_origins);
+    let (symbol, path) = resolve_projection(symbol, &path, values);
     if path.is_empty() {
         if let Some((index, _)) =
             root_lambda.params.iter().enumerate().find(|(_, (candidate, _))| *candidate == symbol)
@@ -1529,40 +1480,6 @@ impl TargetReads {
 }
 type ExternalSubstitutions = LookupMap<(SymbolId, Vec<usize>), (SymbolId, Type)>;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum TargetOrigin {
-    Target(SymbolId),
-    Aggregate(Vec<Option<TargetOrigin>>),
-}
-
-type TargetOrigins = LookupMap<SymbolId, TargetOrigin>;
-
-fn target_origin(term: &Term, origins: &TargetOrigins) -> Option<TargetOrigin> {
-    match &term.kind {
-        TermKind::Var(VarRef::Symbol(symbol)) => origins.get(symbol).cloned(),
-        TermKind::Tuple(values) => {
-            let fields = values.iter().map(|value| target_origin(value, origins)).collect::<Vec<_>>();
-            fields.iter().any(Option::is_some).then_some(TargetOrigin::Aggregate(fields))
-        }
-        TermKind::TupleProj { tuple, idx } => {
-            let TargetOrigin::Aggregate(fields) = target_origin(tuple, origins)? else {
-                return None;
-            };
-            fields.get(*idx)?.clone()
-        }
-        TermKind::Let { body, .. } => target_origin(body, origins),
-        TermKind::If {
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            let then_origin = target_origin(then_branch, origins)?;
-            (target_origin(else_branch, origins).as_ref() == Some(&then_origin)).then_some(then_origin)
-        }
-        _ => None,
-    }
-}
-
 /// Whether evaluating `term` only assembles or projects already-available
 /// values. This deliberately excludes applications and control flow: a dead
 /// target-containing aggregate may be discarded, but doing so must not erase
@@ -1582,26 +1499,9 @@ fn is_trivially_discardable_value(term: &Term) -> bool {
     }
 }
 
-fn collect_target_origins(term: &Term, origins: &mut TargetOrigins) {
-    if let TermKind::Let { name, rhs, body, .. } = &term.kind {
-        collect_target_origins(rhs, origins);
-        if let Some(origin) = target_origin(rhs, origins) {
-            origins.insert(*name, origin);
-        }
-        collect_target_origins(body, origins);
-        return;
-    }
-    term.for_each_child(&mut |child| collect_target_origins(child, origins));
-}
-
-fn target_origins(body: &Term, reads: &TargetReads) -> TargetOrigins {
-    let mut origins = known_target_origins(reads.by_symbol.keys().copied());
-    collect_target_origins(body, &mut origins);
-    origins
-}
-
-fn known_target_origins(symbols: impl IntoIterator<Item = SymbolId>) -> TargetOrigins {
-    symbols.into_iter().map(|symbol| (symbol, TargetOrigin::Target(symbol))).collect()
+fn target_dependent_bindings(body: &Term, reads: &TargetReads) -> LookupSet<SymbolId> {
+    let (values, _) = ValueGraph::build(body);
+    values.dependent_bindings(|symbol| reads.by_symbol.contains_key(&symbol))
 }
 
 type StageCaptures = (
@@ -1616,7 +1516,7 @@ fn stage_captures(
     root_lambda: &Lambda,
     root_entry: &EntryPoint<()>,
     computed: &[ComputedValue],
-    computed_origins: &ProjectionOrigins,
+    values: &ValueGraph,
     targets: &LookupMap<SymbolId, TargetValue>,
     output_target: Option<SymbolId>,
     symbols: &mut SymbolTable,
@@ -1643,7 +1543,7 @@ fn stage_captures(
     append_computed_captures(
         &callback.body,
         computed,
-        computed_origins,
+        values,
         symbols,
         &mut params,
         &mut declarations,
@@ -1734,7 +1634,7 @@ fn append_root_captures(
 fn append_computed_captures(
     body: &Term,
     computed: &[ComputedValue],
-    computed_origins: &ProjectionOrigins,
+    values: &ValueGraph,
     symbols: &mut SymbolTable,
     params: &mut Vec<(SymbolId, Type)>,
     declarations: &mut Vec<interface::EntryParamDecl>,
@@ -1743,7 +1643,7 @@ fn append_computed_captures(
     let mut used_sources = LookupMap::<(SymbolId, Vec<usize>), LookupSet<(SymbolId, Vec<usize>)>>::new();
     let mut visitor = |term: &Term| {
         if let Some((symbol, path)) = projected_symbol_path(term) {
-            let resolved = resolve_projection(symbol, &path, computed_origins);
+            let resolved = resolve_projection(symbol, &path, values);
             used_sources.entry(resolved).or_default().insert((symbol, path));
             return WalkDecision::Prune;
         }
@@ -1925,9 +1825,9 @@ fn build_compute_stage(
     operation: &ComputeOperation<'_>,
     buffer_demand: bool,
     computed: &[ComputedValue],
-    computed_origins: &ProjectionOrigins,
+    values: &ValueGraph,
     targets: &LookupMap<SymbolId, TargetValue>,
-    results: &[(ProjectionOrigin, interface::SourceResult)],
+    results: &[(Origin, interface::SourceResult)],
     builtins: &InvocationBuiltins,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
@@ -1949,7 +1849,7 @@ fn build_compute_stage(
     append_computed_captures(
         operation.rhs,
         computed,
-        computed_origins,
+        values,
         symbols,
         &mut params,
         &mut declarations,
@@ -1966,12 +1866,12 @@ fn build_compute_stage(
     )?;
 
     let body = clone_term_with_fresh_ids(operation.rhs, term_ids);
-    let target_origins = target_origins(&body, &target_reads);
+    let target_bindings = target_dependent_bindings(&body, &target_reads);
     let body = ExternalValueRewriter {
         term_ids,
         substitutions,
         target_reads,
-        target_origins,
+        target_bindings,
         target_load: builtins.target_load,
         target_sample: builtins.target_sample,
         texture_load: builtins.texture_load,
@@ -2126,7 +2026,7 @@ struct ExternalValueRewriter<'a> {
     term_ids: &'a mut TermIdSource,
     substitutions: ExternalSubstitutions,
     target_reads: TargetReads,
-    target_origins: TargetOrigins,
+    target_bindings: LookupSet<SymbolId>,
     target_load: builtins::BuiltinId,
     target_sample: builtins::BuiltinId,
     texture_load: builtins::BuiltinId,
@@ -2186,7 +2086,7 @@ impl TermRewriter<data::Empty, data::Empty> for ExternalValueRewriter<'_> {
             TermKind::Let { name, name_ty, rhs, body }
                 if !referenced_symbols(body).contains(name)
                     && (is_render_target_type(name_ty)
-                        || (target_origin(rhs, &self.target_origins).is_some()
+                        || (self.target_bindings.contains(name)
                             && is_trivially_discardable_value(rhs)))
         );
         if !removable {
@@ -2554,12 +2454,12 @@ fn build_vertex_stage(
     }
 
     let mut body = clone_term_with_fresh_ids(&callback.body, term_ids);
-    let target_origins = target_origins(&body, &target_reads);
+    let target_bindings = target_dependent_bindings(&body, &target_reads);
     body = ExternalValueRewriter {
         term_ids,
         substitutions,
         target_reads,
-        target_origins,
+        target_bindings,
         target_load: builtins.target_load,
         target_sample: builtins.target_sample,
         texture_load: builtins.texture_load,
@@ -2846,12 +2746,12 @@ fn build_fragment_stage(
             term_ids,
         );
     }
-    let target_origins = target_origins(&body, &target_reads);
+    let target_bindings = target_dependent_bindings(&body, &target_reads);
     body = ExternalValueRewriter {
         term_ids,
         substitutions,
         target_reads,
-        target_origins,
+        target_bindings,
         target_load: builtins.target_load,
         target_sample: builtins.target_sample,
         texture_load: builtins.texture_load,

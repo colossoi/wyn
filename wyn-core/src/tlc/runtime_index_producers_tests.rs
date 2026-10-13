@@ -98,6 +98,43 @@ entry e(dest: *[4][8]i32) ([4][8]i32, [4]u32, u32) =
     assert_eq!(bucket_lambdas, 1);
 }
 
+#[test]
+fn ranked_bucket_scatter_keeps_a_transitive_coordinate_dependency_in_the_leaf() {
+    let program = prepared(
+        "entry e(dest: *[4][8]i32) ([4][8]i32, [4]u32, u32) =
+           let items: [4][6](i32, i32) =
+             map(|bucket: i32|
+               let offset = bucket * 2 in
+               let shifted = offset + 1 in
+               map(|pair: i32| ((shifted + pair) % 4, shifted + pair), iota(6)),
+               iota(4))
+           in bucket_scatter_2d(dest, items)",
+    );
+    let program = float_runtime_index_nested_producers(program);
+    let body = entry_body(&program);
+    let mut buckets = 0;
+    walk(body, &mut |term| match &term.kind {
+        TermKind::Soac(SoacOp::Map { .. }) => panic!("rectangular producer should fuse"),
+        TermKind::Soac(SoacOp::BucketScatter { lam, .. }) => {
+            buckets += 1;
+            let bound = lam.lam.params.iter().map(|(symbol, _)| *symbol).collect();
+            let captures = tlc::defunctionalize::compute_free_vars(
+                &lam.lam.body,
+                &bound,
+                &Default::default(),
+                &Default::default(),
+                &program.symbols,
+            );
+            assert!(
+                captures.is_empty(),
+                "coordinate-dependent lets must stay with their binders"
+            );
+        }
+        _ => {}
+    });
+    assert_eq!(buckets, 1);
+}
+
 fn count_lets(term: &Term) -> usize {
     let mut count = 0;
     walk(term, &mut |term| {

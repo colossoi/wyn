@@ -206,6 +206,36 @@ fn graphics_aliases_preserve_computed_capture_identity() {
 }
 
 #[test]
+fn graphics_forwarding_preserves_evaluation_in_bindings_and_results() {
+    let prefix = "let produced = map(|v| v + @[1.0, 0.0, 0.0, 0.0], values)";
+    let forwarded = "(let ignored = loop i = 0i32 while i < 3i32 do i + 1 in produced)";
+    let binding = source(prefix, "alias", &format!("let alias = {forwarded}"), "INPUT[0]");
+    let result = source(prefix, "produced", "", "INPUT[0]")
+        .replace(
+            ") render_target<vec4f32> =",
+            ") (render_target<vec4f32>, []vec4f32) =",
+        )
+        .replace("shade(target,", "let rendered = shade(target,")
+        + &format!(" in (rendered, {forwarded})");
+    for (case, source) in [("binding", binding), ("result", result)] {
+        let program = compile_thru_stage_extraction(&source);
+        let mut loops = 0;
+        for def in &program.defs {
+            let DefMeta::EntryPoint(entry) = &def.meta else {
+                continue;
+            };
+            if entry.declaration.entry_kind == EntryKind::Compute {
+                def.body.walk(&mut |term: &Term| {
+                    loops += usize::from(matches!(term.kind, TermKind::Loop { .. }));
+                    WalkDecision::Recurse
+                });
+            }
+        }
+        assert_eq!(loops, 1, "{case} must preserve evaluation before forwarding");
+    }
+}
+
+#[test]
 fn graphics_aliases_preserve_computed_projection_identity() {
     check_aliases(
         "let produced = (map(|v| v + @[1.0, 0.0, 0.0, 0.0], values),
@@ -214,6 +244,24 @@ fn graphics_aliases_preserve_computed_projection_identity() {
         "projected",
         &[2],
     );
+}
+
+#[test]
+fn graphics_nested_projection_paths_preserve_the_selected_producer() {
+    let prefix = "let produced = (map(|v| v + @[1.0, 0.0, 0.0, 0.0], values),
+                                 (map(|v| v * 2.0, values), map(|v| v * 3.0, values)))";
+    let direct = stage_bindings(&source(prefix, "(produced.1).0", "", "INPUT[0]"));
+    let aliased = stage_bindings(&source(
+        prefix,
+        "selected",
+        "let copy = produced let pair = copy.1 let selected = pair.0",
+        "INPUT[0]",
+    ));
+    assert_eq!(aliased, direct);
+    assert_eq!(direct[0].outputs.len(), 3);
+    for stage in &direct[1..] {
+        assert_eq!(stage.reads, [direct[0].outputs[1]]);
+    }
 }
 
 #[test]

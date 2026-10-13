@@ -284,9 +284,11 @@ impl<'source> Import<'_, '_, '_, 'source> {
         &mut self,
         entry: i64,
         value: Value,
-        ty: &Type,
+        term: &Term,
+        scope: Value,
         outputs: &[crate::interface::EntryOutputDecl<crate::interface::ResolvedAttribute>],
     ) -> Result<(), OptimizeError> {
+        let ty = &term.ty;
         // A single declared aggregate output is one storage value. In
         // particular, indirect commands cannot be split into field buffers.
         if outputs.len() == 1
@@ -306,9 +308,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                     let component = self.sink.add("SourceProjected", (value, index as i64))?;
                     self.value_type(component, field)?;
                     self.use_summary(component, value, false);
-                    if !self.projection_summary(component, value, index as i64)? {
-                        self.sink.add("SourceProjection", (component, value, index as i64))?;
-                    }
+                    self.project_source(component, value, term.id, index, scope)?;
                     self.output_leaf(entry, index, component, field, outputs.get(index))?;
                 }
             }

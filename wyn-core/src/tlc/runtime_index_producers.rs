@@ -27,6 +27,7 @@ use crate::ast::TypeName;
 use crate::SymbolId;
 
 use super::data::Empty;
+use super::value_graph::{Dependencies, ValueGraph};
 use super::{
     wrap_let_bindings, ArrayExpr, Def, Lambda, LetBinding, SoacBody, SoacOp, Term, TermIdSource, TermKind,
     VarRef,
@@ -166,7 +167,7 @@ fn float_term(
             if !is_int_lit(&index)
                 && is_runtime_sized_array(&array.ty)
                 && is_liftable_array_producer(&array)
-                && !references_any(&array, blocked)
+                && !ValueGraph::evaluation_uses(&array, |symbol| blocked.contains(&symbol))
             {
                 let name = symbols.alloc("_runtime_gather".to_string());
                 let name_ty = array.ty.clone();
@@ -270,7 +271,8 @@ fn fuse_ranked_bucket_map(
         leaf: None,
     };
     let mut bound = LookupSet::new();
-    extract_ranked_map_level(rhs, 0, *domain_rank, &mut bound, &mut fusion, ids)?;
+    let (values, _) = ValueGraph::build(rhs);
+    extract_ranked_map_level(rhs, 0, *domain_rank, &mut bound, &values, &mut fusion, ids)?;
     let leaf = guard_bucket_leaf(fusion.leaf?, ids, symbols)?;
     let ret_ty = leaf.ty.clone();
     let lam = SoacBody {
@@ -378,19 +380,20 @@ fn extract_ranked_map_level(
     depth: u8,
     rank: u8,
     bound: &mut LookupSet<SymbolId>,
+    values: &ValueGraph,
     fusion: &mut RankedMapFusion,
     ids: &mut TermIdSource,
 ) -> Option<()> {
     if depth >= rank {
         return None;
     }
-    let (term, scoped) = peel_ranked_map_lets(term, bound, &mut fusion.lifted);
-    bound.extend(scoped.iter().map(|binding| binding.name));
+    let depends = values.dependencies(|symbol| bound.contains(&symbol));
+    let (term, scoped) = peel_ranked_map_lets(term, values, &depends, &mut fusion.lifted);
     let TermKind::Soac(SoacOp::Map { lam, inputs, .. }) = &term.kind else {
         return None;
     };
     if inputs.len() != lam.lam.params.len()
-        || inputs.iter().any(|input| array_expr_references_any(input, bound))
+        || inputs.iter().any(|input| values.array_depends(input, &depends))
     {
         return None;
     }
@@ -404,7 +407,7 @@ fn extract_ranked_map_level(
         fusion.leaf = Some((*lam.lam.body).clone());
         Some(())
     } else {
-        extract_ranked_map_level(&lam.lam.body, depth + 1, rank, bound, fusion, ids)
+        extract_ranked_map_level(&lam.lam.body, depth + 1, rank, bound, values, fusion, ids)
     };
     fused?;
     if !scoped.is_empty() {
@@ -421,11 +424,11 @@ fn extract_ranked_map_level(
 /// value wrapper.
 fn peel_ranked_map_lets<'a>(
     mut term: &'a Term<Empty, Empty>,
-    bound: &LookupSet<SymbolId>,
+    values: &ValueGraph,
+    depends: &Dependencies,
     lifted: &mut Vec<LetBinding<Empty, Empty>>,
 ) -> (&'a Term<Empty, Empty>, Vec<LetBinding<Empty, Empty>>) {
     let mut scoped = Vec::new();
-    let mut scope_bound = bound.clone();
     while let TermKind::Let {
         name,
         name_ty,
@@ -439,8 +442,7 @@ fn peel_ranked_map_lets<'a>(
             rhs: (**rhs).clone(),
             span: term.span,
         };
-        if references_any(rhs, &scope_bound) {
-            scope_bound.insert(*name);
+        if values.evaluation_depends(rhs.id, depends) {
             scoped.push(binding);
         } else {
             lifted.push(binding);
@@ -448,20 +450,6 @@ fn peel_ranked_map_lets<'a>(
         term = body;
     }
     (term, scoped)
-}
-
-fn array_expr_references_any(ae: &ArrayExpr<Empty, Empty>, blocked: &LookupSet<SymbolId>) -> bool {
-    match ae {
-        ArrayExpr::Var(VarRef::Symbol(symbol), _) => blocked.contains(symbol),
-        ArrayExpr::Var(VarRef::Builtin { .. }, _) => false,
-        ArrayExpr::Zip(children) => children.iter().any(|child| array_expr_references_any(child, blocked)),
-        ArrayExpr::Literal(terms) => terms.iter().any(|term| references_any(term, blocked)),
-        ArrayExpr::Range { start, len, step } => {
-            references_any(start, blocked)
-                || references_any(len, blocked)
-                || step.as_deref().is_some_and(|step| references_any(step, blocked))
-        }
-    }
 }
 
 fn float_soac(
@@ -699,16 +687,6 @@ fn is_runtime_sized_array(ty: &Type<TypeName>) -> bool {
 
 fn is_int_lit(term: &Term<Empty, Empty>) -> bool {
     matches!(term.kind, TermKind::IntLit(_))
-}
-
-fn references_any(term: &Term<Empty, Empty>, blocked: &LookupSet<SymbolId>) -> bool {
-    let mut found = false;
-    term.for_each_child(&mut |child| {
-        if !found {
-            found = references_any(child, blocked);
-        }
-    });
-    found || matches!(&term.kind, TermKind::Var(VarRef::Symbol(sym)) if blocked.contains(sym))
 }
 
 #[cfg(test)]
