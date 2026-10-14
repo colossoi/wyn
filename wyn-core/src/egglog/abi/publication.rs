@@ -481,8 +481,14 @@ fn publish_scalars(
     entries: &[EntryPoint],
     module: &mut ModuleInterface,
 ) -> Result<(), OptimizeError> {
-    let mut targets = Vec::new();
-    compiler.program.graph.constructor_enodes("HostTarget", |row| targets.push(row.children.to_vec()))?;
+    let selected_roots: crate::LookupSet<_> =
+        compiler.program.stage.host.keys().map(|(root, _)| *root).collect();
+    let mut targets = LookupMap::<_, Vec<_>>::default();
+    compiler.program.graph.constructor_enodes("HostTarget", |row| {
+        if selected_roots.contains(&row.children[0]) {
+            targets.entry(row.children[0]).or_default().push((row.children[1], row.children[3]));
+        }
+    })?;
     for entry in entries {
         let (owner, stage) = &compiler.entry_origins[&entry.id];
         if let Some(stage) = stage {
@@ -505,17 +511,17 @@ fn publish_scalars(
             }
         }
         let root = compiler.facts.entry_root(*owner, *stage)?;
-        if !compiler.program.stage.host.keys().any(|(owner, _)| *owner == root) {
+        let Some(targets) = targets.get(&root) else {
             continue;
-        }
-        for target in targets.iter().filter(|target| target[0] == root) {
-            let Some(value) = compiler.program.stage.host.get(&(root, target[1])) else {
+        };
+        for &(source, destination) in targets {
+            let Some(value) = compiler.program.stage.host.get(&(root, source)) else {
                 return Err(error("selected host computation missing"));
             };
-            let Some((binding, _, _)) = compiler.bindings.buffer(target[3])? else {
+            let Some((binding, _, _)) = compiler.bindings.buffer(destination)? else {
                 return Err(error("host destination allocation missing"));
             };
-            let Some(ty) = compiler.facts.source_type(target[1]).and_then(scalar_type) else {
+            let Some(ty) = compiler.facts.source_type(source).and_then(scalar_type) else {
                 return Err(error("selected host result type missing"));
             };
             module.scalar_tasks.push(ScalarTask {

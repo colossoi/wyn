@@ -39,15 +39,15 @@
       ((WholeValue e value)) :ruleset reuse)
 
 ; A whole input fits its own domain, or another input with the same live length.
-(rule ((InputDomain op (Length e))) ((FitsInput op e)) :ruleset reuse)
-(rule ((InputDomain op (Length first)) (FixedInputLength first n)
+(rule ((= (InputDomain op) (Length e))) ((FitsInput op e)) :ruleset reuse)
+(rule ((= (InputDomain op) (Length first)) (FixedInputLength first n)
        (Operand op "input" e) (FixedInputLength e n))
       ((FitsInput op e)) :ruleset reuse)
-(rule ((InputDomain op (Fixed n)) (Operand op "input" e) (FixedInputLength e n))
+(rule ((= (InputDomain op) (Fixed n)) (Operand op "input" e) (FixedInputLength e n))
       ((FitsInput op e)) :ruleset reuse)
-(rule ((InputDomain op n) (Operand op "input" e) (WholeValue e old) (= n (LiveLength old)))
+(rule ((= n (InputDomain op)) (Operand op "input" e) (WholeValue e old) (= n (LiveLength old)))
       ((FitsInput op e)) :ruleset reuse)
-(rule ((InputDomain op (Length first)) (WholeValue first first-value) (= n (LiveLength first-value))
+(rule ((= (InputDomain op) (Length first)) (WholeValue first first-value) (= n (LiveLength first-value))
        (Operand op "input" e) (WholeValue e old) (= n (LiveLength old)))
       ((FitsInput op e)) :ruleset reuse)
 

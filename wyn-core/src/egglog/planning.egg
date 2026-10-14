@@ -38,7 +38,7 @@
 (function ParallelBodySafe (OperationKey) bool :merge (and old new))
 (relation SplitRegion (RegionKey))
 (relation ScalarValue (OperationKey))
-(relation InputDomain (OperationKey Extent))
+(function InputDomain (OperationKey) Extent :no-merge)
 ; Output components and collective components are semantic facts, before recipes.
 (relation ArrayResult (OperationKey i64 TypeKey))
 (relation TotalCount (OperationKey i64))

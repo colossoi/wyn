@@ -38,8 +38,6 @@
 (rule ((SourceDefinition s r)) ((set (SsaDefinitionName r) s)) :ruleset ssa-access)
 (function SsaValueRef (SourceValue) ValueKey :no-merge)
 (rule ((ValueRef v b)) ((set (SsaValueRef v) b)) :ruleset ssa-access)
-(function SsaDomain (OperationKey) Extent :no-merge)
-(rule ((InputDomain o e)) ((set (SsaDomain o) e)) :ruleset ssa-access)
 (function SsaOutputBacking (i64) ValueKey :no-merge)
 (rule ((OutputBacking o b)) ((set (SsaOutputBacking o) b)) :ruleset ssa-access)
 (function SsaOutputWriter (i64) StageKey :no-merge)

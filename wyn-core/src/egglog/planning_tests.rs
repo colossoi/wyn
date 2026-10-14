@@ -283,7 +283,7 @@ fn fused_filter_postmap_retains_the_traversed_input_domain() {
             let input = query.required("SourceInput", (filter, 0i64)).unwrap();
             let extent = query.required("SourceExtent", (input,)).unwrap();
             let owner = query.required("Owner", (plan,)).unwrap();
-            assert!(query.contains("InputDomain", (owner, extent)).unwrap());
+            assert_eq!(query.required("InputDomain", (owner,)).unwrap(), extent);
         },
     );
 }
@@ -423,7 +423,7 @@ fn rectangular_maps_expand_launch_without_expanding_row_capacity() {
                         12
                     );
                     let outer = query.required("MapLaunchAxis", (keys[0], 0i64))?;
-                    assert!(query.contains("InputDomain", (keys[0], outer))?);
+                    assert_eq!(query.required("InputDomain", (keys[0],))?, outer);
                     assert_eq!(
                         graph.value_to_base::<i64>(query.required("LocalCapacity", (outer,))?),
                         4

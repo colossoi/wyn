@@ -57,17 +57,11 @@ pub(super) fn prepare(program: &mut Program<'_, Optimized>) -> Result<(), Optimi
         Ok(())
     })?;
     program.stage.captures = captures;
-    let mut roots = Vec::new();
-    program.graph.constructor_enodes("HostTarget", |row| roots.push(row.children[0]))?;
-    roots.sort();
-    roots.dedup();
-    for root in roots {
-        let mut targets = Vec::new();
-        program.graph.constructor_enodes("HostTarget", |row| {
-            if row.children[0] == root {
-                targets.push((row.children[1], row.children[2]));
-            }
-        })?;
+    let mut targets = std::collections::BTreeMap::<_, Vec<_>>::new();
+    program.graph.constructor_enodes("HostTarget", |row| {
+        targets.entry(row.children[0]).or_default().push((row.children[1], row.children[2]));
+    })?;
+    for (root, targets) in targets {
         let mut lowered = Vec::new();
         for (source, context) in targets {
             if (Facts { program }).source_type(source).and_then(lower::scalar_type).is_none() {

@@ -94,7 +94,7 @@
       ((OutputCandidate output stage) (set (OutputBlocked output stage) false)) :ruleset output-candidates)
 
 (rule ((Current group plan) (= owner (Owner plan)) (= domain (PlanDomain plan)) (= extent (SourceDomainExtent domain)))
-      ((InputDomain owner extent)) :ruleset planning-import)
+      ((set (InputDomain owner) extent)) :ruleset planning-import)
 (rule ((Current group plan) (= owner (Owner plan)) (ScremaPlan plan))
       ((set (ContainsCollective owner) true)) :ruleset planning-import)
 (rule ((Current group plan) (= owner (Owner plan)) (ScremaPlan plan) (= tree (PlanTotals plan)) (= n (ResultCount tree))) ((TotalCount owner n)) :ruleset planning-import)

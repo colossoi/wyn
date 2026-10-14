@@ -122,7 +122,7 @@ impl<'a, 'source> Facts<'a, 'source> {
         self.lookup("SameBacking", (value,))
     }
     pub fn domain(&self, value: Value) -> Option<Value> {
-        self.lookup("SsaDomain", (value,))
+        self.lookup("InputDomain", (value,))
     }
     pub fn backing(&self, value: Value) -> Option<Value> {
         self.lookup("Backing", (value,))
