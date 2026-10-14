@@ -1,7 +1,4 @@
 ; Additional facts and rules in the scheduling program. No separate egraph.
-; Independent source facts: requires device execution, duplication is legal,
-; and estimated work is within budget. A larger budget cannot authorize motion.
-(relation ExecutionSummary (OperationKey bool bool bool))
 (function Rematerialize (OperationKey) bool :merge (or old new))
 (relation ScalarResult (SourceValue OperationKey))
 (relation LengthOperation (OperationKey SourceValue))
@@ -29,13 +26,6 @@
       ((set (IsScalarGroupCandidate op) false)
        (set (ScalarJoined op) false)) :ruleset structure)
 (rule ((SourcePosition op r i)) ((set (GroupStart op) i)) :ruleset structure)
-; Only host operations can join into a generated scalar dispatch. Device-local
-; operations retain their source order inside the enclosing kernel.
-(rule ((HostRegion r) (Site (OperationId op) r)
-       (ScalarCandidate (OperationId op)) (= (ContainsCollective (OperationId op)) false)
-       (= (ParallelSafe (OperationId op)) true)
-       (ExecutionSummary (OperationId op) true legal cheap) (= (and legal cheap) false))
-      ((ScalarGroupCandidate (OperationId op)) (set (IsScalarGroupCandidate (OperationId op)) true)) :ruleset scalar-windows)
 (rule ((ScalarGroupCandidate before) (Consecutive before after))
       ((ScalarWindow before after)) :ruleset scalar-windows)
 (rule ((ScalarWindow before middle) (= (IsScalarGroupCandidate middle) false)
@@ -60,12 +50,6 @@
 (rule ((Site op r)) ((set (Rematerialize op) false)) :ruleset structure)
 (rule ((Site op r)) ((set (ReadsLength op) false)) :ruleset structure)
 (rule ((LengthOperation op array)) ((set (ReadsLength op) true)) :ruleset structure)
-; The source summary keeps mutable reads and speculation restrictions separate
-; from work. Completed effect and collective proofs must also permit duplication.
-(rule ((ScalarCandidate (OperationId op)) (= (ParallelSafe (OperationId op)) true)
-       (ExecutionSummary (OperationId op) device true true)
-       (= (ContainsCollective (OperationId op)) false))
-      ((set (Rematerialize (OperationId op)) true)) :ruleset classify)
 (rule ((ScalarResult e op) (= (Rematerialize op) false)) ((DirectResult e op 0)) :ruleset residency)
 (rule ((ScalarResult e op) (= (Rematerialize op) true))
       ((ComputedValue e)) :ruleset residency)

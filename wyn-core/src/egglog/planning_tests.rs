@@ -73,6 +73,30 @@ fn result_tree_counts_are_available_to_fusion_choices() {
 }
 
 #[test]
+fn collective_emission_requires_the_planned_group_count() {
+    let tlc = compile_thru_tlc("entry main(xs:[]i32) i32=reduce((+),0,xs)").unwrap();
+    let mut program = optimize(
+        schedule(
+            place(
+                fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                PipelineTopologyPolicy::AllowGenerated,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    program.graph.clear_function("CollectiveGroups").unwrap();
+    let Err(error) = to_ssa(program, CodegenTarget::Wgsl) else {
+        panic!("emission must not reconstruct a missing group count from the grid");
+    };
+    assert!(
+        error.to_string().contains("collective group count missing"),
+        "{error}"
+    );
+}
+
+#[test]
 fn accumulator_state_order_is_read_from_the_plan() {
     let tlc = compile_thru_tlc(
         "entry main(xs:[]i32) ([]i32,bool)=

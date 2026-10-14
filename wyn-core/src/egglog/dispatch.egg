@@ -1,5 +1,6 @@
 ; Direct producer/consumer edges suffice: do not materialize transitive closure.
-(rule ((Crossing a b value) (Phase a r) (Phase b r)) ((OrderEdge (At a) (At b))) :ruleset dispatch)
+(rule ((Produces a value) (Needs b value) (!= a b) (Phase a r) (Phase b r))
+      ((OrderEdge (At a) (At b))) :ruleset dispatch)
 ; An authored update may share backing, but readers of the old value must finish
 ; first. Join on that particular value version, never on all pairs of stages.
 ; Length-only needs do not observe the old contents and must not reverse a

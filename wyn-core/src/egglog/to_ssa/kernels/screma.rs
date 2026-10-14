@@ -90,12 +90,15 @@ pub(super) fn screma(
         let Some(key) = body.compiler.facts.constructor("Stage", (phase_owner, "chunks")) else {
             return Err(error("collective chunk schedule missing"));
         };
-        let Some((x, y, z)) = body.compiler.facts.dispatch_grid(key)? else {
+        if body.compiler.facts.dispatch_grid(key)?.is_none() {
             return Err(error("collective requires a fixed chunk grid"));
+        }
+        let Some(groups) = body.compiler.facts.lookup("CollectiveGroups", (phase_owner,)) else {
+            return Err(error("collective group count missing"));
         };
         (
             body.compiler.facts.phase_width(key)?,
-            u64::from(x) * u64::from(y) * u64::from(z),
+            u64::from(body.compiler.facts.positive(groups, "collective group count")?),
         )
     };
     let threads = groups * u64::from(chunks_width);

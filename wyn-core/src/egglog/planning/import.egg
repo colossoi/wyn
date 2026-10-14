@@ -65,14 +65,38 @@
       ((ScalarSite owner) (ScalarResult value owner)) :ruleset planning-import)
 (rule ((ScalarSite owner) (= value (SourceOperationValue owner)) (= ty (SourceType value)) (SourceScalarLayout ty))
       ((ScalarCandidate owner) (ElementType (Result owner 0) ty)) :ruleset planning-import)
-(rule ((PlannedOperation original owner plan region) (= original owner) (= value (SourceOperationValue original))
-       (= device (SourceDevice value)) (= duplicate (SourceDuplicable value)) (= cheap (SourceOperationCheap original)))
-      ((ExecutionSummary owner device duplicate cheap)) :ruleset planning-import)
+
+; Only host operations can join into a generated scalar dispatch. Device-local
+; operations retain their source order inside the enclosing kernel.
+(rule ((HostRegion r) (Site (OperationId op) r)
+       (ScalarCandidate (OperationId op)) (= (ContainsCollective (OperationId op)) false)
+       (= (ParallelSafe (OperationId op)) true)
+       (PlannedOperation (OperationId op) (OperationId op) plan r)
+       (= value (SourceOperationValue (OperationId op))) (= (SourceDevice value) true)
+       (= legal (SourceDuplicable value)) (= cheap (SourceOperationCheap (OperationId op)))
+       (= (and legal cheap) false))
+      ((ScalarGroupCandidate (OperationId op)) (set (IsScalarGroupCandidate (OperationId op)) true)) :ruleset scalar-windows)
+
+; The source summary keeps mutable reads and speculation restrictions separate
+; from work. Completed effect and collective proofs must also permit duplication.
+(rule ((ScalarCandidate (OperationId op)) (= (ParallelSafe (OperationId op)) true)
+       (PlannedOperation (OperationId op) (OperationId op) plan region)
+       (= value (SourceOperationValue (OperationId op)))
+       (= (SourceDuplicable value) true) (= (SourceOperationCheap (OperationId op)) true)
+       (= (ContainsCollective (OperationId op)) false))
+      ((set (Rematerialize (OperationId op)) true)) :ruleset classify)
+
+(rule ((CopyOutput output) (OutputExpression output e) (References e (Contents value))
+       (EpilogueValue stage value)
+       (= stage (Stage op name)) (PlannedOperation op op plan region)
+       (= source (SourceOperationValue op)) (= (SourceDevice source) true)
+       (Phase stage r) (OutputOwner output entry) (SourceEntry entry r true))
+      ((OutputCandidate output stage) (set (OutputBlocked output stage) false)) :ruleset output-candidates)
 
 (rule ((Current group plan) (= owner (Owner plan)) (= domain (PlanDomain plan)) (= extent (SourceDomainExtent domain)))
       ((InputDomain owner extent)) :ruleset planning-import)
-(rule ((Current group plan) (= owner (Owner plan)) (ScremaPlan plan) (= scans (HasScans plan)) (= totals (HasReductions plan)))
-      ((CollectiveShape owner scans totals) (set (ContainsCollective owner) true)) :ruleset planning-import)
+(rule ((Current group plan) (= owner (Owner plan)) (ScremaPlan plan))
+      ((set (ContainsCollective owner) true)) :ruleset planning-import)
 (rule ((Current group plan) (= owner (Owner plan)) (ScremaPlan plan) (= tree (PlanTotals plan)) (= n (ResultCount tree))) ((TotalCount owner n)) :ruleset planning-import)
 (rule ((Current group plan) (= owner (Owner plan)) (ScremaPlan plan) (PlanResult plan "total" i value ty))
       ((TotalResult owner i ty) (DirectResult value owner i)) :ruleset planning-import)

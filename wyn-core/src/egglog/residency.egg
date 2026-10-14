@@ -104,7 +104,7 @@
 ; Any host-region exit requires its values to survive the invocation.
 (rule ((Requires (AtExit) value)) ((Escapes value)) :ruleset residency)
 (rule ((Produces producer value) (Needs consumer value) (!= producer consumer))
-      ((Crossing producer consumer value) (Materialize value)) :ruleset residency)
+      ((Materialize value)) :ruleset residency)
 (rule ((Escapes value) (Produces producer value)) ((Materialize value)) :ruleset residency)
 (rule ((Requires (InOperation op) value) (Produces producer value))
       ((Materialize value)) :ruleset residency)

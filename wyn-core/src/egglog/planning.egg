@@ -30,6 +30,8 @@
 (relation SourceDependency (OperationKey OperationKey))
 (relation ScalarSite (OperationKey))
 (relation ScalarCandidate (OperationKey))
+; Includes plain maps and indexed updates, and propagates through entered regions.
+; This describes array work in the planner, not workgroup synchronization.
 (function ContainsCollective (OperationKey) bool :merge (or old new))
 (function ScalarBoundary (OperationKey) bool :merge (or old new))
 (function ParallelSafe (OperationKey) bool :merge (and old new))
@@ -123,7 +125,6 @@
 (relation CopyOutput (i64))
 (ruleset materialize-outputs)
 (relation OutputBacking (i64 ValueKey))
-(relation Crossing (StageKey StageKey ValueKey))
 (relation Clobbers (StageKey ValueKey))
 ; Shared gates keep effect fan-in/fan-out linear in the imported graph.
 (datatype OrderKey (At StageKey) (Start OperationKey) (End OperationKey) (Gate i64))
