@@ -6,6 +6,9 @@ use egglog_engine::EGraph;
 
 mod reachability;
 
+#[cfg(test)]
+mod tests;
+
 pub(super) fn new_graph() -> Result<EGraph, OptimizeError> {
     let mut graph = EGraph::default();
     graph.parse_and_run_program(

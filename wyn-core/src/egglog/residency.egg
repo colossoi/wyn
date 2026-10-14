@@ -53,7 +53,7 @@
 ; Request shared reference summaries only for scheduling, reuse, and output
 ; consumers. Propagate demand through scalar structure, stopping at results.
 (rule ((Demand site e)) ((ReferenceDemand e)) :ruleset residency)
-(rule ((OutputExpression output e)) ((ReferenceDemand e)) :ruleset residency)
+(rule ((PlannedOutput output owner e)) ((ReferenceDemand e)) :ruleset residency)
 (rule ((Phase (Stage op name) r) (Operand op role e)) ((ReferenceDemand e)) :ruleset residency)
 (rule ((ReferenceDemand e) (ChildValue e child)) ((ReferenceDemand child)) :ruleset residency)
 (rule ((ReferenceDemand e) (ForwardValue e child)) ((ReferenceDemand child)) :ruleset residency)

@@ -86,7 +86,7 @@
 
 (rule ((FinishEntry owner) (SourceDefinition owner region))
       ((RootUsesRegion (EntryRoot owner) region)) :ruleset publication-uses)
-(rule ((OutputWriter output root) (OutputExpression output source))
+(rule ((OutputWriter output root) (PlannedOutput output owner source))
       ((RootValueUse root source)) :ruleset publication-uses)
 
 (rule ((PhaseCallback stage region) (SourceCapture region formal actual))
