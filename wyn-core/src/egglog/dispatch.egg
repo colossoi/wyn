@@ -1,21 +1,20 @@
 ; Direct producer/consumer edges suffice: do not materialize transitive closure.
-(rule ((Crossing a b value) (Phase a r) (Phase b r)) ((Before a b)) :ruleset dispatch)
+(rule ((Crossing a b value) (Phase a r) (Phase b r)) ((OrderEdge (At a) (At b))) :ruleset dispatch)
 ; An authored update may share backing, but readers of the old value must finish
 ; first. Join on that particular value version, never on all pairs of stages.
 ; Length-only needs do not observe the old contents and must not reverse a
 ; producer/consumer dependency through an in-place update.
 (rule ((Clobbers writer old) (Requires (InStage reader) old) (Phase writer r) (Phase reader r) (!= reader writer))
-      ((Before reader writer)) :ruleset dispatch)
+      ((OrderEdge (At reader) (At writer))) :ruleset dispatch)
 (rule ((Clobbers writer old) (Needs (Stage op "scalar") old)
        (Phase writer r) (Phase (Stage op "scalar") r) (!= (Stage op "scalar") writer))
-      ((Before (Stage op "scalar") writer)) :ruleset dispatch)
+      ((OrderEdge (At (Stage op "scalar")) (At writer))) :ruleset dispatch)
 
 ; An operation has separate start/end boundaries so its internal phases remain
 ; ordered without a cycle through one source-operation node.
 (rule ((FirstPhase op stage)) ((OrderEdge (Start op) (At stage))) :ruleset dispatch)
 (rule ((LastPhase op stage)) ((OrderEdge (At stage) (End op))) :ruleset dispatch)
 (rule ((ScalarSite op)) ((OrderEdge (Start op) (End op))) :ruleset dispatch)
-(rule ((Before a b)) ((OrderEdge (At a) (At b))) :ruleset dispatch)
 (rule ((EffectInput gate op)) ((OrderEdge (End op) (Gate gate))) :ruleset dispatch)
 ; A proven scalar join executes at its leader, whose incoming gates remain.
 ; Its original gate may include the independent work it has moved ahead of.

@@ -35,7 +35,7 @@ pub(super) fn prepare(program: &mut Program<'_, Optimized>) -> Result<(), Optimi
                 if let Some(ty) =
                     (Facts { program }).ty(selected.values[fields[1]]).and_then(lower::scalar_type)
                 {
-                    match lower::selected(program, term) {
+                    match lower::selected(program, term, false) {
                         Ok(value) => {
                             captures.insert(
                                 term,

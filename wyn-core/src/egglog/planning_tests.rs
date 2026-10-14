@@ -33,6 +33,129 @@ fn operations(graph: &EGraph, kind: &str) -> Vec<Value> {
 }
 
 #[test]
+fn result_tree_counts_are_available_to_fusion_choices() {
+    for (source, expected) in [
+        (
+            "entry main(xs:[]i32) ([]i32,[]i32)=(map(|x|x+1,xs),map(|x|x*2,xs))",
+            vec![2],
+        ),
+        ("entry main(xs:[]i32) i32=reduce((+),0,map(|x|x+1,xs))", vec![0]),
+        (
+            "entry main(xs:[]i32) ([]i32,i32)=let ys=map(|x|x+1,xs) in (ys,reduce((+),0,ys))",
+            vec![1],
+        ),
+        (
+            "entry main(xs:[]i32) []i32=map(|x|x+1,filter(|x|x>0,xs))",
+            vec![1],
+        ),
+        (
+            "entry main(xs:[]i32) (i32,i32)=let ys=filter(|x|x>0,xs) in (length(ys),reduce((+),0,ys))",
+            vec![0],
+        ),
+    ] {
+        let tlc = compile_thru_tlc(source).unwrap();
+        let program = fuse(from_tlc(&tlc).unwrap()).unwrap();
+        let query = Query(&program.graph);
+        let mut counts = Vec::new();
+        query
+            .for_each("Current", |row| {
+                let plan = row[1];
+                if query.contains("ScremaPlan", (plan,))? || query.contains("FilterPlan", (plan,))? {
+                    counts
+                        .push(program.graph.value_to_base::<i64>(query.required("ArrayOutputs", (plan,))?));
+                }
+                Ok(())
+            })
+            .unwrap();
+        counts.sort();
+        assert_eq!(counts, expected, "{source}");
+    }
+}
+
+#[test]
+fn accumulator_state_order_is_read_from_the_plan() {
+    let tlc = compile_thru_tlc(
+        "entry main(xs:[]i32) ([]i32,bool)=
+         (scan((+),0,xs),reduce(|a,b|a&&b,true,map(|x|x>0,xs)))",
+    )
+    .unwrap();
+    let mut program = place(
+        fuse(from_tlc(&tlc).unwrap()).unwrap(),
+        PipelineTopologyPolicy::AllowGenerated,
+    )
+    .unwrap();
+    let mut rows = Vec::new();
+    Query(&program.graph)
+        .for_each("Accumulator", |row| {
+            rows.push(row.to_vec());
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0][0], rows[1][0], "the scan and reduction must be fused");
+    assert_ne!(
+        rows[0][2], rows[1][2],
+        "different types expose incorrect slot ordering"
+    );
+    let slot = rows[0][1];
+    rows[0][1] = rows[1][1];
+    rows[1][1] = slot;
+    program.graph.clear_function("Accumulator").unwrap();
+    program
+        .graph
+        .update(|mut sink| {
+            for row in rows {
+                sink.add("Accumulator", egglog_engine::RawValues(row))?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let ssa = to_ssa(optimize(schedule(program).unwrap()).unwrap(), CodegenTarget::Wgsl).unwrap();
+    let wgsl = crate::lower_ssa_to_wgsl(ssa).unwrap();
+    let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap();
+}
+
+#[test]
+fn fused_scan_and_filter_count_have_distinct_accumulator_slots() {
+    planned(
+        "entry main(xs:[]i32) ([]i32,i32,i32)=let ys=filter(|x|x>0,xs) in
+         (scan((+),0,xs),length(ys),reduce((+),0,ys))",
+        |graph| {
+            let query = Query(graph);
+            let mut rows = Vec::new();
+            query
+                .for_each("Accumulator", |row| {
+                    rows.push(row.to_vec());
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(rows.len(), 3);
+            assert!(
+                rows.iter().all(|row| row[0] == rows[0][0]),
+                "all components must be fused"
+            );
+            let mut slots: Vec<_> = rows.iter().map(|row| graph.value_to_base::<i64>(row[1])).collect();
+            slots.sort();
+            assert_eq!(slots, [0, 1, 2]);
+            for row in rows {
+                let slot = graph.value_to_base::<i64>(row[1]);
+                let partial = query.constructor("Temporary", (row[0], "partial", slot)).unwrap().unwrap();
+                assert!(query.contains("ElementType", (partial, row[2])).unwrap());
+                if graph.value_to_base::<S>(row[3]).as_str() == "count" {
+                    assert_eq!(slot, graph.value_to_base::<i64>(row[4]) + 1);
+                }
+            }
+        },
+    );
+}
+
+#[test]
 fn flat_and_ranked_collectives_share_dimension_metadata() {
     for (source, kind, rank, count) in [
         ("entry main(xs:[6]i32) [6]i32=map(|x|x+1,xs)", "map", 1, 6),

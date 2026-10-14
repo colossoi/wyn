@@ -127,6 +127,34 @@ fn host_calls_bind_each_invocation_separately() {
 }
 
 #[test]
+fn allocation_helpers_bind_nested_and_repeated_calls_under_both_policies() {
+    let source = "def quarter(n:i32) i32=(n+3)/4
+        def area(w:i32,h:i32) i32=quarter(w)*quarter(h)
+        entry main(resolution:vec2i32) []i32=map(|i|i+1,iota(area(resolution.x,resolution.y)))";
+    for policy in [
+        crate::egglog::ScalarOptimization::Basic,
+        crate::egglog::ScalarOptimization::Full,
+    ] {
+        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+            let ssa = crate::compile_thru_ssa_with_policy(source, crate::CodegenTarget::Portable, policy)
+                .unwrap();
+            let host = match format {
+                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+            };
+            host.to_rust_wgpu("sizes", format).unwrap();
+            let program = Program::parse(&host.to_whl("sizes", format).unwrap()).unwrap();
+            let mut backend = Trace::default();
+            let resolution =
+                backend.input(13i32.to_le_bytes().into_iter().chain(29i32.to_le_bytes()).collect());
+            let result = program.run("main", &[resolution], &mut backend).unwrap();
+            assert_eq!(backend.buffers[&result.handle().unwrap()].len(), 4 * 8 * 4);
+            assert!(backend.device_reads.is_empty());
+        }
+    }
+}
+
+#[test]
 fn i32_get_bit_reads_low_high_and_sign_bits() {
     for (bit, value, expected) in [
         (0i32, 0i32, 0),

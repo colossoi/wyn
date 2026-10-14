@@ -23,10 +23,6 @@
 (rule ((SourceOperation op r "map")) ((SourceArrayProducer op)) :ruleset source-fusion)
 (rule ((SourceOperation op r "scan")) ((SourceArrayProducer op)) :ruleset source-fusion)
 (rule ((SourceOperation op r "filter")) ((SourceArrayProducer op)) :ruleset source-fusion)
-(rule ((SourceArrayProducer op)) ((set (ArrayOutputs (FusionSource op)) 1)) :ruleset source-fusion)
-; Source kind fixes output presence even for tuple-valued scalar results.
-(rule ((SourceOperation op r kind) (!= kind "map") (!= kind "scan") (!= kind "filter"))
-      ((set (ArrayOutputs (FusionSource op)) 0)) :ruleset source-fusion)
 (rule ((= value (SourceOperationValue op)) (= safe (SourcePure value)))
       ((set (PrePure (FusionSource op)) safe) (set (PostPure (FusionSource op)) safe)
        (set (PredicatePure (FusionSource op)) safe)) :ruleset source-fusion)

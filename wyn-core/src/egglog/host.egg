@@ -10,7 +10,7 @@
        (OutputBacking output value) (= storage (Backing value)))
       ((HostTarget (KernelRoot (Stage op "scalar")) source (ScalarDispatch op) storage)) :ruleset host-targets)
 (rule ((ScalarGroup op leader) (Phase (Stage leader "scalar") region)
-       (= source (SourceOperationValue op)) (BufferSlot op "scalar" 0 value) (= storage (Backing value)))
+       (= source (SourceOperationValue op)) (= value (BufferSlot op "scalar" 0)) (= storage (Backing value)))
       ((HostTarget (KernelRoot (Stage leader "scalar")) source (ScalarDispatch leader) storage)) :ruleset host-targets)
 ; Callback roots identify the actual phase consumers of scalar host preferences.
 (relation ScalarPhaseSource (StageKey ScalarContext SourceValue))

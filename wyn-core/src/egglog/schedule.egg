@@ -121,7 +121,7 @@
 (rule ((PhaseEnds op first last) (Phase (Stage op first) r) (Phase (Stage op last) r))
       ((FirstPhase op (Stage op first)) (LastPhase op (Stage op last))) :ruleset schedule)
 (rule ((PhaseLink op a b) (Phase (Stage op a) r) (Phase (Stage op b) r))
-      ((Before (Stage op a) (Stage op b))) :ruleset schedule)
+      ((OrderEdge (At (Stage op a)) (At (Stage op b)))) :ruleset schedule)
 (rule ((FirstPhase op first)) ((PhaseInput first op "input")) :ruleset schedule)
 
 ; Record the phase that actually writes each result, not just the recipe's last phase.
@@ -152,7 +152,7 @@
 
 ; Scratch is a recipe result with ordinary producers, consumers, and capacity.
 (relation Scratch (OperationKey String i64 Extent))
-(rule ((Accumulator op i t) (= groups (CollectiveGroups op)) (Phase (Stage op "chunks") r))
+(rule ((Accumulator op i t role slot source) (= groups (CollectiveGroups op)) (Phase (Stage op "chunks") r))
       ((Scratch op "partial" i (Fixed groups))
        (ElementType (Temporary op "partial" i) t)
        (Produces (Stage op "chunks") (Temporary op "partial" i))
@@ -171,7 +171,7 @@
 (rule ((Site op r) (DeviceRegion r)) ((DeviceOperation op)) :ruleset schedule)
 (rule ((DeviceOperation op) (Enters op r)) ((DeviceRegion r)) :ruleset schedule)
 (rule ((Phase (Stage op "scalar") r)) ((DeviceOperation op)) :ruleset schedule)
-(rule ((DeviceOperation op) (= recipe (Plan op)) (BufferSlot op name i value) (ElementType value t) (= n (CapacityExtent value)))
+(rule ((DeviceOperation op) (= recipe (Plan op)) (= value (BufferSlot op name i)) (ElementType value t) (= n (CapacityExtent value)))
       ((LocalBuffer op name i t n)) :ruleset schedule)
 
 (rule ((= (Plan op) (Scatter)) (UninitializedResult op i t n)) ((PhaseEnds op "scatter" "scatter")) :ruleset schedule)

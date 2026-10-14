@@ -39,27 +39,22 @@ pub(super) fn screma(
     results: &[(String, i64, Value)],
     segment: Option<&SegmentOutput<'_>>,
 ) -> Result<(), OptimizeError> {
-    let scans: Vec<_> = results.iter().filter(|r| r.0 == "scan").map(|r| r.2).collect();
-    let totals = results.iter().filter(|r| r.0 == "total").map(|r| r.2);
+    let components = body.compiler.facts.accumulators(plan)?;
+    let has_scans = components.iter().any(|component| component.role == "scan");
     let mut accumulators = Vec::new();
-    for source in scans.iter().copied().chain(totals) {
+    for component in &components {
+        let source = component.source;
         let Some(operation) = body.compiler.facts.operation(source) else {
             return Err(error("accumulator operation missing"));
         };
-        let neutral = body.compiler.facts.neutral(operation)?;
-        let neutral = body.value(scope, neutral)?;
-        accumulators.push(Accumulator::new(body, plan, source, operation, neutral)?);
-    }
-    for (index, filter) in body.compiler.facts.counts(plan)? {
-        let index = scans.len() + usize::try_from(index).map_err(|_| error("negative count slot"))?;
-        if index > accumulators.len() {
-            return Err(error("noncontiguous count accumulator"));
-        }
-        let Some(source) = body.compiler.facts.source(filter) else {
-            return Err(error("filter accumulator source missing"));
+        let neutral = if component.role == "count" {
+            let ty = body.compiler.facts.ty(component.ty).ok_or_else(|| error("count type missing"))?;
+            body.literal("0", ty)?
+        } else {
+            let neutral = body.compiler.facts.neutral(operation)?;
+            body.value(scope, neutral)?
         };
-        let neutral = body.literal("0", &types::i32())?;
-        accumulators.insert(index, Accumulator::new(body, plan, source, filter, neutral)?);
+        accumulators.push(Accumulator::new(body, plan, source, operation, neutral)?);
     }
     let initial: Vec<_> = accumulators.iter().map(|a| a.neutral.clone()).collect();
     let Some(domain) = body.compiler.facts.domain(phase_owner) else {
@@ -80,8 +75,8 @@ pub(super) fn screma(
             write_arrays(body, scope, phase_owner, plan, results, &[index], &mut cache)?;
             Ok(next)
         })?;
-        for (i, value) in state.into_iter().skip(scans.len()).enumerate() {
-            if let Some(output) = body.slot(scope, phase_owner, "total", i as i64, 2)? {
+        for (component, value) in components.iter().zip(state).filter(|(c, _)| c.role != "scan") {
+            if let Some(output) = body.slot(scope, phase_owner, "total", component.output_slot, 2)? {
                 body.store(output, zero.clone(), value)?;
             }
         }
@@ -149,7 +144,7 @@ pub(super) fn screma(
                                 )?;
                                 values.push(value);
                             }
-                            if scans.is_empty() && segment.is_none() {
+                            if !has_scans && segment.is_none() {
                                 write_arrays(
                                     body,
                                     scope,
@@ -168,7 +163,7 @@ pub(super) fn screma(
                     let values = (0..accumulators.len())
                         .map(|i| body.field(incoming.clone(), i))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let (prefixes, totals) = if scans.is_empty() {
+                    let (prefixes, totals) = if !has_scans {
                         (
                             Vec::new(),
                             workgroup_reduce(
@@ -187,12 +182,17 @@ pub(super) fn screma(
                     };
                     body.when(valid, |body| {
                         let mut cache = LookupMap::default();
-                        for (i, prefix) in prefixes.into_iter().take(scans.len()).enumerate() {
+                        for (i, (component, prefix)) in components
+                            .iter()
+                            .zip(prefixes)
+                            .enumerate()
+                            .filter(|(_, (c, _))| c.role == "scan")
+                        {
                             let value = accumulators[i].combine(body, scope, carry[i].clone(), prefix)?;
                             if segment.is_some() {
                                 cache.insert(accumulators[i].source, value);
                             } else if let Some(output) =
-                                body.slot(scope, phase_owner, "prefix", i as i64, 2)?
+                                body.slot(scope, phase_owner, "prefix", component.output_slot, 2)?
                             {
                                 body.store(output, index.clone(), value)?;
                             }
@@ -261,7 +261,7 @@ pub(super) fn screma(
                             None,
                         )?);
                     }
-                    let (offsets, totals) = if scans.is_empty() {
+                    let (offsets, totals) = if !has_scans {
                         (
                             Vec::new(),
                             workgroup_reduce(
@@ -279,8 +279,15 @@ pub(super) fn screma(
                         (offsets, totals)
                     };
                     body.when(valid, |body| {
-                        for (i, offset) in offsets.into_iter().take(scans.len()).enumerate() {
-                            if let Some(output) = body.slot(scope, phase_owner, "offset", i as i64, 2)? {
+                        for (i, (component, offset)) in components
+                            .iter()
+                            .zip(offsets)
+                            .enumerate()
+                            .filter(|(_, (c, _))| c.role == "scan")
+                        {
+                            if let Some(output) =
+                                body.slot(scope, phase_owner, "offset", component.output_slot, 2)?
+                            {
                                 let value =
                                     accumulators[i].combine(body, scope, carry[i].clone(), offset)?;
                                 body.store(output, index.clone(), value)?;
@@ -297,8 +304,10 @@ pub(super) fn screma(
             )?;
             let first = body.binary(Equal, lane, Body::number(0))?;
             body.when(first, |body| {
-                for (i, value) in totals.into_iter().skip(scans.len()).enumerate() {
-                    if let Some(output) = body.slot(scope, phase_owner, "total", i as i64, 2)? {
+                for (component, value) in components.iter().zip(totals).filter(|(c, _)| c.role != "scan") {
+                    if let Some(output) =
+                        body.slot(scope, phase_owner, "total", component.output_slot, 2)?
+                    {
                         body.store(output, Body::number(0), value)?;
                     }
                 }
@@ -311,17 +320,19 @@ pub(super) fn screma(
             body.counted(start, n, step, vec![], |body, index, _| {
                 let chunk = body.binary(Divide, index.clone(), span)?;
                 let mut cache = LookupMap::default();
-                for (i, &source) in scans.iter().enumerate() {
-                    let Some(prefix) = body.slot(scope, phase_owner, "prefix", i as i64, 1)? else {
+                for (i, component) in components.iter().enumerate().filter(|(_, c)| c.role == "scan") {
+                    let Some(prefix) = body.slot(scope, phase_owner, "prefix", component.output_slot, 1)?
+                    else {
                         return Err(error("scan prefix is not materialized"));
                     };
-                    let Some(offset) = body.slot(scope, phase_owner, "offset", i as i64, 1)? else {
+                    let Some(offset) = body.slot(scope, phase_owner, "offset", component.output_slot, 1)?
+                    else {
                         return Err(error("scan offset is not materialized"));
                     };
                     let a = body.index(offset, chunk.clone())?;
                     let b = body.index(prefix, index.clone())?;
                     let value = accumulators[i].combine(body, scope, a, b)?;
-                    cache.insert(source, value);
+                    cache.insert(component.source, value);
                 }
                 if writes_destination {
                     let Some(output) = body.slot(scope, phase_owner, "output", 0, 2)? else {

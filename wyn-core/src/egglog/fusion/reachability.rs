@@ -95,7 +95,7 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
     )?;
     let choose = parse_program(
         "fusion candidates",
-        "(run-schedule (saturate fusion-candidates) (saturate fusion-select) fusion-choose)",
+        "(run-schedule (saturate fusion-counts) (saturate fusion-candidates) (saturate fusion-select) fusion-choose)",
     )?;
     let commit = parse_program("fusion contraction", "(run-schedule (saturate fusion-record) (saturate fusion-commit) fusion-clear-candidates fusion-union fusion-clear)")?;
     loop {

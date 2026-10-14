@@ -98,7 +98,7 @@
       ((set (SelectedAccess key) (RunCollective owner plan))) :ruleset readout)
 (rule ((= (IsLocalResult key) false) (= access (ValueRead key)))
       ((set (SelectedAccess key) (StoredRead access))) :ruleset readout)
-(rule ((LocalBuffer owner role i ty extent) (BufferSlot owner role i value))
+(rule ((LocalBuffer owner role i ty extent) (= value (BufferSlot owner role i)))
       ((set (LocalStorageOwner value) owner)) :ruleset readout)
 (rule ((Fixed n)) ((set (LocalCapacity (Fixed n)) n)) :ruleset residency)
 (rule ((= n (SourceInteger32 source)) (>= n 0))

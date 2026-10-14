@@ -19,6 +19,7 @@ fn fused_map_chain_keeps_permission_to_reuse_its_external_input() {
     };
     assert_eq!(p.stages.len(), 1);
     assert_eq!(p.bindings.len(), 1);
+    assert_eq!(p.stages[0].uses.access(0), Some(host::Access::ReadWrite));
     assert_eq!(output.program.interface.source_results[0].binding, 0);
 }
 

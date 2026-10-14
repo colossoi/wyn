@@ -6,6 +6,13 @@ use crate::{types::Type, SymbolId};
 use egglog_engine::{sort::S, Value};
 use wyn_graph::topo_sort_by_dependencies;
 
+pub struct AccumulatorComponent {
+    pub role: String,
+    pub output_slot: i64,
+    pub source: Value,
+    pub ty: Value,
+}
+
 impl<'a, 'source> Facts<'a, 'source> {
     pub fn stages(&self, owner: SymbolId) -> Result<Vec<Value>, OptimizeError> {
         let Some(owner) = self.program.identities.symbols.get(&owner) else {
@@ -136,7 +143,7 @@ impl<'a, 'source> Facts<'a, 'source> {
         self.contains("PlanMember", (plan, op))
     }
     pub fn slot(&self, op: Value, role: &str, index: i64) -> Option<Value> {
-        self.lookup("SsaSlot", (op, role, index))
+        self.lookup("BufferSlot", (op, role, index))
     }
     pub fn atomic(&self, op: Value) -> Option<AtomicOp> {
         let recipe = self.lookup("Plan", (op,))?;
@@ -177,21 +184,36 @@ impl<'a, 'source> Facts<'a, 'source> {
         results.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
         Ok(results)
     }
-    pub fn counts(&self, plan: Value) -> Result<Vec<(i64, Value)>, OptimizeError> {
-        let mut indices = Vec::new();
-        self.program.graph.constructor_enodes("PlanCountSlot", |row| {
-            if row.children[0] == plan {
-                indices.push(self.integer(row.children[2]));
+    pub fn accumulators(&self, plan: Value) -> Result<Vec<AccumulatorComponent>, OptimizeError> {
+        let owner = Query(&self.program.graph).required("Owner", (plan,))?;
+        let mut components = Vec::new();
+        self.program.graph.constructor_enodes("Accumulator", |row| {
+            if row.children[0] == owner {
+                components.push((
+                    self.integer(row.children[1]),
+                    AccumulatorComponent {
+                        ty: row.children[2],
+                        role: self.program.graph.value_to_base::<S>(row.children[3]).to_string(),
+                        output_slot: self.integer(row.children[4]),
+                        source: row.children[5],
+                    },
+                ));
             }
         })?;
-        indices.sort();
-        indices
+        components.sort_by_key(|(slot, _)| *slot);
+        components
             .into_iter()
-            .map(|index| {
-                let Some(value) = self.lookup("SsaCountAt", (plan, index)) else {
-                    return Err(error("count slot has no selected operation"));
-                };
-                Ok((index, value))
+            .enumerate()
+            .map(|(expected, (slot, component))| {
+                if slot != expected as i64 {
+                    return Err(error("noncontiguous accumulator slots"));
+                }
+                if component.output_slot < 0
+                    || !matches!(component.role.as_str(), "scan" | "total" | "count")
+                {
+                    return Err(error("invalid accumulator output slot"));
+                }
+                Ok(component)
             })
             .collect()
     }

@@ -62,8 +62,13 @@ pub(in crate::egglog) fn allocation(
     let value = lower.source(context, source)?;
     Ok(lower.finish(value))
 }
-pub(in crate::egglog) fn selected(program: &Program<'_, Optimized>, term: TermId) -> Result<ScalarExpr> {
+pub(in crate::egglog) fn selected(
+    program: &Program<'_, Optimized>,
+    term: TermId,
+    capacity_bounds: bool,
+) -> Result<ScalarExpr> {
     let mut lower = Lower::new(program);
+    lower.capacity_bounds = capacity_bounds;
     let value = lower.term(term)?;
     Ok(lower.finish(value))
 }
@@ -460,8 +465,24 @@ impl<'a, 'source> Lower<'a, 'source> {
                 yes: Box::new(self.scope(|lower| lower.term(f[3]))?),
                 no: Box::new(self.scope(|lower| lower.term(f[4]))?),
             },
-            // The host IR has no callable-function representation. Leave an
-            // extracted call on the GPU instead of changing the inline decision.
+            "ScalarCall" | "ScalarInvoke" if self.capacity_bounds => {
+                let callee = selected.values[f[f.len() - 2]];
+                let arguments = selected
+                    .arguments(f[f.len() - 1])?
+                    .into_iter()
+                    .map(|term| self.term(term))
+                    .collect::<Result<Vec<_>>>()?;
+                // Required capacities must work even when extraction retains helper calls.
+                self.scope(|lower| {
+                    for (index, argument) in arguments.into_iter().enumerate() {
+                        let Some(formal) = lower.facts.parameter(callee, index as i64) else {
+                            return Err(error("host helper parameter missing").into());
+                        };
+                        lower.values.insert(formal, argument);
+                    }
+                    lower.region(callee)
+                })?
+            }
             "ScalarCall" | "ScalarInvoke" => return Err(Error::Unsupported),
             "ScalarInstruction" => {
                 let Some(array) = self.facts.lookup("SourceLength", (selected.values[f[2]],)) else {
