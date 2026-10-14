@@ -37,20 +37,35 @@ fn result_tree_counts_are_available_to_fusion_choices() {
     for (source, expected) in [
         (
             "entry main(xs:[]i32) ([]i32,[]i32)=(map(|x|x+1,xs),map(|x|x*2,xs))",
-            vec![2],
+            vec![(2, false, false)],
         ),
-        ("entry main(xs:[]i32) i32=reduce((+),0,map(|x|x+1,xs))", vec![0]),
+        (
+            "entry main(xs:[]i32) i32=reduce((+),0,map(|x|x+1,xs))",
+            vec![(0, false, true)],
+        ),
         (
             "entry main(xs:[]i32) ([]i32,i32)=let ys=map(|x|x+1,xs) in (ys,reduce((+),0,ys))",
-            vec![1],
+            vec![(1, false, true)],
         ),
         (
             "entry main(xs:[]i32) []i32=map(|x|x+1,filter(|x|x>0,xs))",
-            vec![1],
+            vec![(1, false, false)],
         ),
         (
             "entry main(xs:[]i32) (i32,i32)=let ys=filter(|x|x>0,xs) in (length(ys),reduce((+),0,ys))",
-            vec![0],
+            vec![(0, false, true)],
+        ),
+        (
+            "entry main(xs:[]i32) i32=length(filter(|x|x>0,xs))",
+            vec![(0, false, true)],
+        ),
+        (
+            "entry main(xs:[]i32) []i32=map(|x|x+1,scan((+),0,xs))",
+            vec![(1, true, false)],
+        ),
+        (
+            "entry main(xs:[]i32) ([]i32,i32)=(scan((+),0,xs),reduce((+),0,xs))",
+            vec![(1, true, true)],
         ),
     ] {
         let tlc = compile_thru_tlc(source).unwrap();
@@ -61,8 +76,11 @@ fn result_tree_counts_are_available_to_fusion_choices() {
             .for_each("Current", |row| {
                 let plan = row[1];
                 if query.contains("ScremaPlan", (plan,))? || query.contains("FilterPlan", (plan,))? {
-                    counts
-                        .push(program.graph.value_to_base::<i64>(query.required("ArrayOutputs", (plan,))?));
+                    counts.push((
+                        program.graph.value_to_base::<i64>(query.required("ArrayOutputs", (plan,))?),
+                        program.graph.value_to_base::<bool>(query.required("HasScans", (plan,))?),
+                        program.graph.value_to_base::<bool>(query.required("HasReductions", (plan,))?),
+                    ));
                 }
                 Ok(())
             })
