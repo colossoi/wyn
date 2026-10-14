@@ -46,53 +46,40 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
     // Create I/O variables for entry point
     let mut interfaces = Vec::new();
 
-    // For compute shaders, ensure GlobalInvocationId is created and listed as interface
     if is_compute {
-        if let Some(gid_var) = constructor.global_invocation_id {
-            // Already created by a previous entry point — just add to this entry's interface
-            interfaces.push(gid_var);
-        } else {
-            let uvec3_type = constructor.get_or_create_vec_type(constructor.u32_type, 3);
-            let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Input, uvec3_type);
-            let gid_var = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Input, None);
-            constructor.builder.decorate(
-                gid_var,
-                spirv::Decoration::BuiltIn,
-                [Operand::BuiltIn(spirv::BuiltIn::GlobalInvocationId)],
-            );
-            constructor.global_invocation_id = Some(gid_var);
-            interfaces.push(gid_var);
-        }
-        if let Some(lid_var) = constructor.local_invocation_id {
-            interfaces.push(lid_var);
-        } else {
-            let uvec3_type = constructor.get_or_create_vec_type(constructor.u32_type, 3);
-            let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Input, uvec3_type);
-            let lid_var = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Input, None);
-            constructor.builder.decorate(
-                lid_var,
-                spirv::Decoration::BuiltIn,
-                [Operand::BuiltIn(spirv::BuiltIn::LocalInvocationId)],
-            );
-            constructor.local_invocation_id = Some(lid_var);
-            interfaces.push(lid_var);
-        }
-        if let Some(nwg_var) = constructor.num_workgroups {
-            interfaces.push(nwg_var);
-        } else {
-            let uvec3_type = constructor.get_or_create_vec_type(constructor.u32_type, 3);
-            let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Input, uvec3_type);
-            let nwg_var = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Input, None);
-            constructor.builder.decorate(
-                nwg_var,
-                spirv::Decoration::BuiltIn,
-                [Operand::BuiltIn(spirv::BuiltIn::NumWorkgroups)],
-            );
-            constructor.num_workgroups = Some(nwg_var);
-            interfaces.push(nwg_var);
+        for (builtin, cached) in [
+            (
+                spirv::BuiltIn::GlobalInvocationId,
+                constructor.global_invocation_id,
+            ),
+            (spirv::BuiltIn::LocalInvocationId, constructor.local_invocation_id),
+            (spirv::BuiltIn::NumWorkgroups, constructor.num_workgroups),
+            (spirv::BuiltIn::WorkgroupId, constructor.workgroup_id),
+        ] {
+            let variable = if let Some(variable) = cached {
+                variable
+            } else {
+                let ty = constructor.get_or_create_vec_type(constructor.u32_type, 3);
+                let pointer = constructor.get_or_create_ptr_type(spirv::StorageClass::Input, ty);
+                let variable =
+                    constructor.builder.variable(pointer, None, spirv::StorageClass::Input, None);
+                constructor.builder.decorate(
+                    variable,
+                    spirv::Decoration::BuiltIn,
+                    [Operand::BuiltIn(builtin)],
+                );
+                variable
+            };
+            match builtin {
+                spirv::BuiltIn::GlobalInvocationId => constructor.global_invocation_id = Some(variable),
+                spirv::BuiltIn::LocalInvocationId => constructor.local_invocation_id = Some(variable),
+                spirv::BuiltIn::NumWorkgroups => constructor.num_workgroups = Some(variable),
+                spirv::BuiltIn::WorkgroupId => constructor.workgroup_id = Some(variable),
+                _ => unreachable!(),
+            }
+            interfaces.push(variable);
         }
     }
-
     // Create push constant block for compute shader broadcast inputs
     let pc_inputs: Vec<(usize, u32)> = entry
         .inputs
@@ -189,6 +176,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
                 spirv::BuiltIn::GlobalInvocationId => constructor.global_invocation_id,
                 spirv::BuiltIn::LocalInvocationId => constructor.local_invocation_id,
                 spirv::BuiltIn::NumWorkgroups => constructor.num_workgroups,
+                spirv::BuiltIn::WorkgroupId => constructor.workgroup_id,
                 _ => None,
             };
             let var_id = if let Some(existing) = cached {
@@ -212,6 +200,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
                     spirv::BuiltIn::NumWorkgroups => {
                         constructor.num_workgroups = Some(new_var);
                     }
+                    spirv::BuiltIn::WorkgroupId => constructor.workgroup_id = Some(new_var),
                     _ => {}
                 }
                 new_var

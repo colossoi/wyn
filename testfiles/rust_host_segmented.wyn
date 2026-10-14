@@ -1,0 +1,23 @@
+entry sum0(xs:[][513]i32) []i32 = map(|row|reduce((+),0,row[0..0]),xs)
+entry sum1(xs:[][513]i32) []i32 = map(|row|reduce((+),0,row[0..1]),xs)
+entry sum255(xs:[][513]i32) []i32 = map(|row|reduce((+),0,row[0..255]),xs)
+entry sum256(xs:[][513]i32) []i32 = map(|row|reduce((+),0,row[0..256]),xs)
+entry sum257(xs:[][513]i32) []i32 = map(|row|reduce((+),0,row[0..257]),xs)
+entry sum513(xs:[][513]i32) []i32 = map(|row|reduce((+),0,row),xs)
+entry prefixes(xs:[][513]i32) [][513]i32 =
+  map(|row|map(|x|x*2,scan((+),0,map(|x|x+1,row))),xs)
+entry nested(xs:[][3][171]i32) [][3]i32 =
+  map(|rows|map(|row|reduce((+),0,row),rows),xs)
+entry nested_prefixes(xs:[][3][171]i32) [][3][171]i32 =
+  map(|rows|map(|row|scan((+),0,map(|x|x+row[0],row)),rows),xs)
+entry tuple_totals(xs:[][513]i32) [](i32,i32) =
+  map(|row|reduce(|a,b|(a.0+b.0,a.1+b.1),(0,0),map(|x|(x,x*x),row)),xs)
+
+-- Packed affine composition is associative but not commutative.
+def compose(p:i32,q:i32) i32 =
+  let a=p/251 in let b=p%251 in let c=q/251 in let d=q%251 in
+  ((a*c)%251)*251+(b*c+d)%251
+entry ordered(xs:[][513]i32) []i32 =
+  map(|row|reduce(compose,251,map(|x|((x+8)%7+1)*251+(x+8)%251,row)),xs)
+entry ordered_prefixes(xs:[][513]i32) [][513]i32 =
+  map(|row|scan(compose,251,map(|x|((x+8)%7+1)*251+(x+8)%251,row)),xs)

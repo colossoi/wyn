@@ -126,6 +126,25 @@ fn nested_maps_and_reductions_preserve_result_shapes_and_capacity() {
 }
 
 #[test]
+fn segmented_collectives_launch_per_row_without_row_scratch_allocations() {
+    let source = "entry main(xs:[][513]i32) [][513]i32=map(|row|scan((+),0,row),xs)";
+    let program = generated(source);
+    for rows in [0, 1, 3, 129] {
+        let mut backend = Trace::default();
+        let input = backend.input(vec![0; rows * 513 * 4]);
+        let result = program.run("main", &[input], &mut backend).unwrap();
+        assert!(backend.buffers[&result.handle().unwrap()].len() >= rows * 513 * 4);
+        assert_eq!(backend.dispatches.len(), 1);
+        assert_eq!(backend.dispatches[0].1, [rows as u32, 1, 1]);
+        assert_eq!(
+            backend.buffers.len(),
+            2,
+            "only the input and final result are allocated"
+        );
+    }
+}
+
+#[test]
 fn computed_dispatch_extents_preserve_parameters_wrapping_and_grid_limits() {
     let source = "entry main(dest:*[128]i32, shape:(i32,i32)) [128]i32 =
         let indices=iota(shape.0*shape.1) in scatter(dest,indices,map(|i|i+1,indices))";

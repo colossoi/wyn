@@ -154,7 +154,7 @@ pub enum InstKind<R = BindingRef> {
         result: PlaceId,
     },
 
-    /// Index into an array place and produce an addressable element place.
+    /// Index an array or a constant aggregate field to produce an element place.
     PlaceIndex {
         place: PlaceId,
         index: ValueRef,

@@ -1,6 +1,6 @@
 //! Row-major domains and input indexing; the last axis varies fastest.
 
-use super::super::{Body, OptimizeError, Typed};
+use super::super::{error, Body, OptimizeError, Typed};
 use super::element;
 use crate::op::BinaryOperator::{Divide, Multiply, Remainder};
 use crate::types;
@@ -29,6 +29,26 @@ pub fn decode(
         remainder = body.binary(Divide, remainder, dimensions[i].clone())?;
     }
     Ok(coordinates)
+}
+
+pub fn project(
+    body: &Body<'_, '_, '_>,
+    axes: Value,
+    coordinates: &[Typed],
+    inner: Option<Typed>,
+) -> Result<Vec<Typed>, OptimizeError> {
+    body.compiler
+        .facts
+        .vector(axes)?
+        .into_iter()
+        .map(|axis| {
+            let axis = body.compiler.facts.unsigned(axis, "output axis")? as usize;
+            let Some(coordinate) = coordinates.iter().chain(inner.iter()).nth(axis) else {
+                return Err(error("output axis exceeds the selected domain"));
+            };
+            Ok(coordinate.clone())
+        })
+        .collect()
 }
 
 /// Input axes are validated against the domain rank before kernel emission.

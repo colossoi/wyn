@@ -455,6 +455,12 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         gid,
                         [component],
                     )?)
+                } else if id == known.workgroup_id {
+                    let Some(variable) = self.constructor.workgroup_id else {
+                        bail_spirv!("WorkgroupId not set for compute shader");
+                    };
+                    let ty = self.constructor.get_or_create_vec_type(self.constructor.u32_type, 3);
+                    Ok(self.constructor.builder.load(ty, None, variable, None, [])?)
                 } else if id == known.local_id {
                     let lid_var = self
                         .constructor

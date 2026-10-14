@@ -555,12 +555,32 @@ fn rectangular_map_nests_reach_both_backends() {
 }
 
 #[test]
-#[ignore = "existing nested tuple-stream layout conversion is unsupported"]
 fn rectangular_map_tuple_rows_reach_both_backends() {
-    placement_shaders(
+    for source in [
         "entry main(xs:[]i32) [][3](i32,i32)=map(|x|map(|y|(x,y),iota(3)),xs)",
-        |_| {},
-    );
+        "entry main(xs:[]i32) [][3][4](i32,bool)=map(|x|map(|y|map(|z|(x+y,z>1),iota(4)),iota(3)),xs)",
+        "entry main(xs:[]i32) [][3](i32,i32)=map(|x|let t=reduce((+),0,[x,x]) in map(|y|(t,y),iota(3)),xs)",
+    ] {
+        placement_shaders(source, |_| {});
+    }
+}
+
+#[test]
+fn segmented_collectives_reach_both_backends() {
+    for source in [
+        "entry main(xs:[][513]i32) []i32=map(|row|reduce((+),0,row),xs)",
+        "entry main(xs:[][513]i32) [][513]i32=map(|row|scan((+),0,row),xs)",
+        "entry main(xs:[][3][17]i32) [][3]i32=map(|rows|map(|row|reduce((+),0,row),rows),xs)",
+        "entry main(xs:[][513]i32) [][513]i32=map(|row|map(|x|x*2,scan((+),0,map(|x|x+1,row))),xs)",
+        "entry main(xs:[][513]i32) ([]i32,[][513]i32)=(map(|row|reduce((+),0,row),xs),map(|row|scan((+),0,row),xs))",
+        "entry main(xs:[][17]i32) [](i32,i32)=map(|row|reduce(|a,b|(a.0+b.0,a.1+b.1),(0,0),map(|x|(x,x*x),row)),xs)",
+        "entry main(xs:[][17]i32) []i32=map(|row|reduce((+),0,row[0..0]),xs)",
+        "entry main(xs:[][17]i32) [][0]i32=map(|row|scan((+),0,row[0..0]),xs)",
+    ] {
+        let module = shaders(source);
+        assert!(module.entry_points.iter().any(|entry| entry.workgroup_size == [256, 1, 1]), "{source}");
+        assert!(module.global_variables.iter().any(|(_, variable)| variable.space == naga::AddressSpace::WorkGroup), "{source}");
+    }
 }
 
 #[test]

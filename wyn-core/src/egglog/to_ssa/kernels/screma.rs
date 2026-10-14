@@ -1,12 +1,33 @@
 // Expand scheduled phases straight into SSA instructions and structured loops.
 use super::super::{error, Body, OptimizeError, Typed};
-use super::{element, indexed, invocation, write_arrays};
+use super::{coordinates, element, indexed, invocation, write_arrays};
 use crate::op::BinaryOperator::{
     Add, Divide, Equal, Greater, GreaterEqual, Less, Multiply, Remainder, Subtract,
 };
 use crate::types::{self, Type, TypeName};
 use crate::LookupMap;
 use egglog_engine::Value;
+
+pub(super) struct SegmentOutput<'a> {
+    pub source: Value,
+    pub output: Typed,
+    pub indices: &'a [Typed],
+    pub axes: Value,
+    pub role: &'a str,
+    pub slot: usize,
+}
+
+impl SegmentOutput<'_> {
+    fn store(
+        &self,
+        body: &mut Body<'_, '_, '_>,
+        inner: Option<Typed>,
+        value: Typed,
+    ) -> Result<(), OptimizeError> {
+        let indices = coordinates::project(body, self.axes, self.indices, inner)?;
+        body.store_at(self.output.clone(), &indices, value)
+    }
+}
 
 pub(super) fn screma(
     body: &mut Body<'_, '_, '_>,
@@ -16,6 +37,7 @@ pub(super) fn screma(
     phase_width: u32,
     plan: Value,
     results: &[(String, i64, Value)],
+    segment: Option<&SegmentOutput<'_>>,
 ) -> Result<(), OptimizeError> {
     let scans: Vec<_> = results.iter().filter(|r| r.0 == "scan").map(|r| r.2).collect();
     let totals = results.iter().filter(|r| r.0 == "total").map(|r| r.2);
@@ -67,14 +89,20 @@ pub(super) fn screma(
     }
     let uint = Type::Constructed(TypeName::UInt(32), vec![]);
     let n = body.cast(n, &uint)?;
-    let Some(key) = body.compiler.facts.constructor("Stage", (phase_owner, "chunks")) else {
-        return Err(error("collective chunk schedule missing"));
+    let (chunks_width, groups) = if segment.is_some() {
+        (phase_width, 1)
+    } else {
+        let Some(key) = body.compiler.facts.constructor("Stage", (phase_owner, "chunks")) else {
+            return Err(error("collective chunk schedule missing"));
+        };
+        let Some((x, y, z)) = body.compiler.facts.dispatch_grid(key)? else {
+            return Err(error("collective requires a fixed chunk grid"));
+        };
+        (
+            body.compiler.facts.phase_width(key)?,
+            u64::from(x) * u64::from(y) * u64::from(z),
+        )
     };
-    let chunks_width = body.compiler.facts.phase_width(key)?;
-    let Some((x, y, z)) = body.compiler.facts.dispatch_grid(key)? else {
-        return Err(error("collective requires a fixed chunk grid"));
-    };
-    let groups = u64::from(x) * u64::from(y) * u64::from(z);
     let threads = groups * u64::from(chunks_width);
     if threads > i32::MAX as u64 {
         return Err(error("collective grid exceeds the 32-bit index range"));
@@ -86,9 +114,13 @@ pub(super) fn screma(
     let tiles = body.binary(Divide, tiles, Body::number(threads as u32))?;
     let span = body.binary(Multiply, tiles.clone(), width.clone())?;
     match phase {
-        "chunks" => {
-            let (thread, _) = invocation(body, phase_width)?;
-            let group = body.binary(Divide, thread, width.clone())?;
+        "chunks" | "segment" => {
+            let group = if segment.is_some() {
+                Body::number(0)
+            } else {
+                let (thread, _) = invocation(body, phase_width)?;
+                body.binary(Divide, thread, width.clone())?
+            };
             let base = body.binary(Multiply, group.clone(), span.clone())?;
             let state = body.counted(
                 Body::number(0),
@@ -117,7 +149,7 @@ pub(super) fn screma(
                                 )?;
                                 values.push(value);
                             }
-                            if scans.is_empty() {
+                            if scans.is_empty() && segment.is_none() {
                                 write_arrays(
                                     body,
                                     scope,
@@ -154,11 +186,28 @@ pub(super) fn screma(
                         (prefixes, totals)
                     };
                     body.when(valid, |body| {
+                        let mut cache = LookupMap::default();
                         for (i, prefix) in prefixes.into_iter().take(scans.len()).enumerate() {
-                            if let Some(output) = body.slot(scope, phase_owner, "prefix", i as i64, 2)? {
-                                let value =
-                                    accumulators[i].combine(body, scope, carry[i].clone(), prefix)?;
+                            let value = accumulators[i].combine(body, scope, carry[i].clone(), prefix)?;
+                            if segment.is_some() {
+                                cache.insert(accumulators[i].source, value);
+                            } else if let Some(output) =
+                                body.slot(scope, phase_owner, "prefix", i as i64, 2)?
+                            {
                                 body.store(output, index.clone(), value)?;
+                            }
+                        }
+                        if let Some(target) = segment {
+                            if target.role == "array" {
+                                let value = element(
+                                    body,
+                                    scope,
+                                    plan,
+                                    target.source,
+                                    std::slice::from_ref(&index),
+                                    &mut cache,
+                                )?;
+                                target.store(body, Some(index.clone()), value)?;
                             }
                         }
                         Ok(())
@@ -173,7 +222,11 @@ pub(super) fn screma(
             let first = body.binary(Equal, lane, Body::number(0))?;
             body.when(first, |body| {
                 for (i, value) in state.into_iter().enumerate() {
-                    if let Some(output) = body.slot(scope, phase_owner, "partial", i as i64, 2)? {
+                    if let Some(target) = segment {
+                        if target.role == "total" && target.slot == i {
+                            target.store(body, None, value)?;
+                        }
+                    } else if let Some(output) = body.slot(scope, phase_owner, "partial", i as i64, 2)? {
                         body.store(output, group.clone(), value)?;
                     }
                 }
@@ -301,8 +354,8 @@ fn workgroup_reduce(
         "workgroup reduction width must be a power of two: {width}"
     );
     let mut shared = Vec::new();
-    for (i, value) in values.into_iter().enumerate() {
-        let buffer = body.workgroup_array(i as u32, width, &value.ty)?;
+    for value in values {
+        let buffer = body.workgroup_array(width, &value.ty)?;
         body.store(buffer.clone(), lane.clone(), value)?;
         shared.push(buffer);
     }
@@ -348,10 +401,10 @@ pub(super) fn workgroup_scan(
         "workgroup scan width must be a power of two: {width}"
     );
     let mut shared = Vec::new();
-    for (i, value) in values.iter().enumerate() {
+    for value in &values {
         let banks = [
-            body.workgroup_array((i * 2) as u32, width, &value.ty)?,
-            body.workgroup_array((i * 2 + 1) as u32, width, &value.ty)?,
+            body.workgroup_array(width, &value.ty)?,
+            body.workgroup_array(width, &value.ty)?,
         ];
         body.store(banks[0].clone(), lane.clone(), value.clone())?;
         shared.push(banks);

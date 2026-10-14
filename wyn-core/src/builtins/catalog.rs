@@ -133,6 +133,7 @@ pub struct KnownBuiltinIds {
     pub thread_id_z: BuiltinId,
     pub local_id: BuiltinId,
     pub num_workgroups: BuiltinId,
+    pub workgroup_id: BuiltinId,
     pub storage_index: BuiltinId,
     pub storage_store: BuiltinId,
     /// Polymorphic numeric ops the `specialize` pass rewrites — `mul`
@@ -219,6 +220,7 @@ impl BuiltinCatalog {
             thread_id_z: resolve(N::INTRINSIC_THREAD_ID_Z),
             local_id: resolve(N::INTRINSIC_LOCAL_ID),
             num_workgroups: resolve(N::INTRINSIC_NUM_WORKGROUPS),
+            workgroup_id: resolve(N::INTRINSIC_WORKGROUP_ID),
             storage_index: resolve(N::INTRINSIC_STORAGE_INDEX),
             storage_store: resolve(N::INTRINSIC_STORAGE_STORE),
             mul: resolve("mul"),

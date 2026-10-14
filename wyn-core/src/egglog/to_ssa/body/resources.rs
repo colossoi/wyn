@@ -6,7 +6,9 @@ use crate::ssa::types::InstKind;
 use crate::types::{self, buffer_tag, Type, TypeExt, TypeName};
 
 impl Body<'_, '_, '_> {
-    pub fn workgroup_array(&mut self, id: u32, count: u32, element: &Type) -> Result<Typed, OptimizeError> {
+    pub fn workgroup_array(&mut self, count: u32, element: &Type) -> Result<Typed, OptimizeError> {
+        let id = self.next_workgroup_array;
+        self.next_workgroup_array += 1;
         self.op(
             OpTag::StorageView(PureViewSource::Workgroup { id, count }),
             vec![Self::number(0), Self::number(count)],

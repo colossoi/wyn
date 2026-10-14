@@ -10,7 +10,7 @@ use crate::builtins::names::{
     INTRINSIC_NUM_WORKGROUPS, INTRINSIC_OUTER, INTRINSIC_REFLECT, INTRINSIC_REFRACT, INTRINSIC_SELECT,
     INTRINSIC_SLICE, INTRINSIC_SMOOTHSTEP, INTRINSIC_STORAGE_INDEX, INTRINSIC_STORAGE_LEN,
     INTRINSIC_STORAGE_STORE, INTRINSIC_TEXTURE_LOAD, INTRINSIC_TEXTURE_SAMPLE, INTRINSIC_THREAD_ID,
-    INTRINSIC_THREAD_ID_Y, INTRINSIC_THREAD_ID_Z, INTRINSIC_UNINIT,
+    INTRINSIC_THREAD_ID_Y, INTRINSIC_THREAD_ID_Z, INTRINSIC_UNINIT, INTRINSIC_WORKGROUP_ID,
 };
 use crate::builtins::scheme::{
     array_to_i32, image_load_scheme, image_with_scheme, mat_square_to_mat, mat_square_to_scalar, mat_x_mat,
@@ -789,6 +789,7 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
     compiler_internal!(INTRINSIC_THREAD_ID_Z, Purity::Pure),
     compiler_internal!(INTRINSIC_LOCAL_ID, Purity::Pure),
     compiler_internal!(INTRINSIC_NUM_WORKGROUPS, Purity::Pure),
+    compiler_internal!(INTRINSIC_WORKGROUP_ID, Purity::Pure),
     compiler_internal!(INTRINSIC_COS, Purity::Pure),
 ];
 

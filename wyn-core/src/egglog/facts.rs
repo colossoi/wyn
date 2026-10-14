@@ -98,12 +98,6 @@ impl<'a, 'source> Facts<'a, 'source> {
         };
         Ok(self.program.graph.value_to_base::<S>(kind).to_string())
     }
-    pub fn operation_scope(&self, operation: Value) -> Result<Value, OptimizeError> {
-        let Some(scope) = self.lookup("SsaOperationScope", (operation,)) else {
-            return Err(error("operation has no source region"));
-        };
-        Ok(scope)
-    }
     pub fn neutral(&self, operation: Value) -> Result<Value, OptimizeError> {
         let Some(value) = self.lookup("SourceNeutral", (operation,)) else {
             return Err(error("accumulator has no neutral value"));

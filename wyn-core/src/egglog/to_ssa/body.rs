@@ -36,6 +36,7 @@ pub(super) struct Body<'a, 'p, 'source> {
     pub grid: Option<(u32, u32, u32)>,
     local_resources: LookupMap<Value, Typed>,
     local_arrays: LookupMap<ValueRef, PlaceId>,
+    next_workgroup_array: u32,
 }
 
 impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
@@ -81,6 +82,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
             grid: None,
             local_resources: LookupMap::default(),
             local_arrays: LookupMap::default(),
+            next_workgroup_array: 0,
         })
     }
 
@@ -369,13 +371,13 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         })
     }
 
-    pub fn in_region(
+    pub fn in_region<T>(
         &mut self,
         owner: Value,
         scope: Value,
         arguments: Vec<Typed>,
-        emit: impl FnOnce(&mut Self, Value) -> Result<Typed, OptimizeError>,
-    ) -> Result<Typed, OptimizeError> {
+        emit: impl FnOnce(&mut Self, Value) -> Result<T, OptimizeError>,
+    ) -> Result<T, OptimizeError> {
         let Some(context) = self.compiler.facts.context(scope) else {
             return Err(error("callback scalar context is missing"));
         };

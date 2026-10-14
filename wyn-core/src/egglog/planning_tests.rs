@@ -1,7 +1,10 @@
 use super::super::query::Query;
 use super::super::{from_tlc, fuse, optimize, place, schedule, to_ssa};
 use crate::{compile_thru_tlc, CodegenTarget, PipelineTopologyPolicy};
-use egglog_engine::{sort::S, EGraph, Value};
+use egglog_engine::{
+    sort::{VecContainer, S},
+    EGraph, Value, Write,
+};
 
 fn planned(source: &str, check: impl FnOnce(&EGraph)) {
     let tlc = compile_thru_tlc(source).unwrap();
@@ -196,11 +199,12 @@ fn selected_phases_declare_their_cooperation_scope() {
                 .for_each("Phase", |row| {
                     let stage = query.enode("Stage", row[0])?.unwrap();
                     let phase = graph.value_to_base::<S>(stage[1]);
-                    let expected = if matches!(phase.as_ref(), "chunks" | "combine" | "compact") {
-                        "WorkgroupScope"
-                    } else {
-                        "InvocationScope"
-                    };
+                    let expected =
+                        if matches!(phase.as_ref(), "chunks" | "combine" | "compact" | "segments") {
+                            "WorkgroupScope"
+                        } else {
+                            "InvocationScope"
+                        };
                     let execution = query.required("PhaseExecution", (row[0],))?;
                     assert!(query.enode(expected, execution)?.is_some(), "{phase:?}");
                     Ok(())
@@ -415,5 +419,178 @@ fn fused_outputs_only_share_a_rectangular_launch_when_inner_shapes_agree() {
                 .unwrap();
             assert_eq!(fused, 1, "{source}");
         });
+    }
+}
+
+#[test]
+#[ignore = "runtime inner rows require a rectangular storage layout"]
+fn rectangular_runtime_dimensions_must_be_uniform_across_outer_coordinates() {
+    for (source, expected_rank) in [
+        (
+            "entry main(xs:[]i32,n:i32) [][]i32=map(|x|map(|y|x+y,iota(n)),xs)",
+            2,
+        ),
+        (
+            "entry main(xs:[]i32,ys:[]i32) [][]i32=map(|x|map(|y|x+y,ys),xs)",
+            2,
+        ),
+        (
+            "entry main(xs:[]i32,n:i32,m:i32) [][][]i32=map(|x|map(|y|map(|z|x+y+z,iota(m)),iota(n)),xs)",
+            3,
+        ),
+        ("entry main(xs:[]i32) [][]i32=map(|x|map(|y|x+y,iota(x)),xs)", 1),
+    ] {
+        planned(source, |graph| {
+            let query = Query(graph);
+            let mut ranks = Vec::new();
+            query
+                .for_each("MapPlan", |row| {
+                    if query.flag("MapHost", (row[0],))? {
+                        ranks.push(graph.value_to_base::<i64>(query.required("MapLaunchRank", (row[1],))?));
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(ranks, vec![expected_rank], "{source}");
+        });
+    }
+}
+
+#[test]
+fn segmented_collectives_select_workgroups_for_each_outer_coordinate() {
+    for source in [
+        "entry main(xs:[][513]i32) []i32=map(|row|reduce((+),0,row),xs)",
+        "entry main(xs:[][513]i32) [][513]i32=map(|row|scan((+),0,row),xs)",
+        "entry main(xs:[][3][17]i32) [][3]i32=map(|rows|map(|row|reduce((+),0,row),rows),xs)",
+    ] {
+        planned(source, |graph| {
+            let query = Query(graph);
+            let mut groups = 0;
+            query
+                .for_function("MapCooperative", |_, enabled| {
+                    groups += usize::from(graph.value_to_base::<bool>(enabled));
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(groups, 1, "{source}");
+        });
+    }
+}
+
+#[test]
+fn segmented_collectives_do_not_cross_callback_control_flow() {
+    for source in [
+        "entry main(xs:[][17]i32) []i32=map(|row|if row[0]>0 then reduce((+),0,row) else 0,xs)",
+        "entry main(xs:[][17]i32) []i32=map(|row|loop a=0 for i<2 do a+reduce((+),0,row),xs)",
+        "entry main(xs:[]i32) []i32=map(|n|reduce((+),0,iota(n)),xs)",
+    ] {
+        planned(source, |graph| {
+            Query(graph)
+                .for_function("MapCooperative", |_, enabled| {
+                    assert!(!graph.value_to_base::<bool>(enabled), "{source}");
+                    Ok(())
+                })
+                .unwrap();
+        });
+    }
+}
+
+#[test]
+fn selected_map_bindings_replace_callback_discovery() {
+    for (source, rank, output_rank) in [
+        (
+            "def row(x:i32) [3]i32=map(|y|x+y,iota(3))
+          entry main(xs:[]i32) [][3]i32=map(row,xs)",
+            2,
+            2,
+        ),
+        (
+            "entry main(xs:[][3][17]i32) [][3]i32=
+          map(|rows|map(|row|reduce((+),0,map(|x|x+row[0],row)),rows),xs)",
+            2,
+            2,
+        ),
+        (
+            "entry main(xs:[][3][17]i32) [][3][17]i32=
+          map(|rows|map(|row|map(|x|x*2,scan((+),0,map(|x|x+1,row))),rows),xs)",
+            2,
+            3,
+        ),
+    ] {
+        let tlc = compile_thru_tlc(source).unwrap();
+        let mut program = optimize(
+            schedule(
+                place(
+                    fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                    PipelineTopologyPolicy::AllowGenerated,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let query = Query(&program.graph);
+        let mut outputs = 0;
+        query
+            .for_each("MapPlan", |row| {
+                if !query.flag("MapHost", (row[0],))? {
+                    return Ok(());
+                }
+                let mut bindings = query.required("MapOutputBindings", (row[1], 0i64))?;
+                let mut axes = Vec::new();
+                loop {
+                    if let Some(fields) = query.enode("MapIndexBinding", bindings)? {
+                        axes.push(program.graph.value_to_base::<i64>(fields[4]));
+                        bindings = fields[5];
+                    } else if let Some(fields) = query.enode("MapCallBinding", bindings)? {
+                        bindings = fields[3];
+                    } else {
+                        assert!(query.enode("MapValueBinding", bindings)?.is_some());
+                        break;
+                    }
+                }
+                assert_eq!(axes, (0..rank).collect::<Vec<_>>(), "{source}");
+                let axes = query.required("MapOutputAxes", (row[1], 0i64))?;
+                let axes = program.graph.value_to_container::<VecContainer>(axes).unwrap();
+                assert_eq!(
+                    axes.data
+                        .iter()
+                        .map(|&axis| program.graph.value_to_base::<i64>(axis))
+                        .collect::<Vec<_>>(),
+                    (0..output_rank).collect::<Vec<_>>(),
+                    "{source}"
+                );
+                outputs += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(outputs, 1, "{source}");
+        let mut collectives = Vec::new();
+        query
+            .for_function("PlanCallback", |keys, callback| {
+                if !query.flag("PlanMapping", (keys[0], keys[1]))? {
+                    collectives.push((keys[0], keys[1], callback));
+                }
+                Ok(())
+            })
+            .unwrap();
+        for table in [
+            "PlanCallback",
+            "PlanCallee",
+            "PlanCallArgument",
+            "SegmentTerminal",
+        ] {
+            program.graph.clear_function(table).unwrap();
+        }
+        program
+            .graph
+            .update(|mut sink| {
+                for (plan, op, callback) in collectives {
+                    sink.set("PlanCallback", (plan, op), callback)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        to_ssa(program, CodegenTarget::Wgsl).unwrap();
     }
 }

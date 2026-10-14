@@ -450,6 +450,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             || *id == known.thread_id_z
                             || *id == known.local_id
                             || *id == known.num_workgroups
+                            || *id == known.workgroup_id
                             || *id == known.length
                             || *id == known.uninit
                             || *id == known.array_with

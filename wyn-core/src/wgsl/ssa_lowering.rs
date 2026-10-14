@@ -733,6 +733,7 @@ struct LowerCtx<'a> {
     /// this in preference to the synthesized `_wgsl_gid`, since WGSL
     /// rejects duplicate `@builtin` declarations on the same entry.
     wgsl_gid_alias: Option<String>,
+    wgsl_workgroup_alias: Option<String>,
     int64_mode: WgslInt64Mode,
     u64_emulation: U64Emulation,
     int_pow: [bool; 2],
@@ -799,6 +800,7 @@ impl<'a> LowerCtx<'a> {
             output_struct_counter: 0,
             pc_blocks: LookupMap::new(),
             wgsl_gid_alias: None,
+            wgsl_workgroup_alias: None,
             int64_mode: options.int64_mode,
             u64_emulation: U64Emulation::default(),
             int_pow: [false; 2],
@@ -1643,6 +1645,7 @@ impl<'a> LowerCtx<'a> {
         // entry, and the intrinsic dispatch can read from the user's
         // param via the alias added below.
         self.wgsl_gid_alias = None;
+        self.wgsl_workgroup_alias = None;
         if entry.execution_model.is_compute() {
             let user_gid = entry.inputs.iter().find(|i| {
                 matches!(
@@ -1664,6 +1667,16 @@ impl<'a> LowerCtx<'a> {
             // the runtime dispatch grid width the parallelize chunk math
             // divides the input by.
             param_strs.push("@builtin(num_workgroups) _wgsl_nwg: vec3<u32>".to_string());
+            if let Some(input) = entry.inputs.iter().find(|input| {
+                matches!(
+                    input.decoration(),
+                    Some(IoDecoration::BuiltIn(spirv::BuiltIn::WorkgroupId))
+                )
+            }) {
+                self.wgsl_workgroup_alias = Some(self.mangle_tracked(&input.name)?);
+            } else {
+                param_strs.push("@builtin(workgroup_id) _wgsl_group: vec3<u32>".to_string());
+            }
         }
 
         // Entry-point names are kept verbatim so the pipeline descriptor's
@@ -2340,8 +2353,21 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                     place
                                 )
                             })?;
-                            let idx = self.get_value(*index)?;
-                            let expr = format!("{}[{}]", parent, idx);
+                            let expr = if matches!(
+                                self.body.place_elem_ty(*place),
+                                PolyType::Constructed(TypeName::Tuple(_) | TypeName::Record(_), _)
+                            ) {
+                                let Some(field) = self.resolve_const_u32(*index) else {
+                                    return Err(err_wgsl_at!(
+                                        self.blame_span(),
+                                        "aggregate place requires a constant field"
+                                    ));
+                                };
+                                format!("{parent}.f{field}")
+                            } else {
+                                let idx = self.get_value(*index)?;
+                                format!("{parent}[{idx}]")
+                            };
                             self.place_targets.insert(*result, expr);
                             continue;
                         }
@@ -3109,6 +3135,14 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     // `_w_intrinsic_num_workgroups()` → `_wgsl_nwg.x` (also u32).
                     if *id == known.num_workgroups && args.is_empty() {
                         return Ok("_wgsl_nwg.x".to_string());
+                    }
+                    if *id == known.workgroup_id && args.is_empty() {
+                        return Ok(self
+                            .ctx
+                            .wgsl_workgroup_alias
+                            .as_deref()
+                            .unwrap_or("_wgsl_group")
+                            .to_owned());
                     }
                     // texture_load(tex, coord, lod) → textureLoad. Raw texel
                     // fetch (no filtering); referentially transparent.

@@ -52,13 +52,12 @@ pub(super) fn emit(
     };
     let results = body.compiler.facts.results(plan)?;
     match phase {
-        "elements" => maps::emit(
+        "elements" | "segments" => maps::emit(
             body,
             scope,
             phase_owner,
-            phase_extent,
+            phase == "segments",
             phase_width,
-            plan,
             &results,
         ),
         "scatter" | "initialize" | "atomic" => {
@@ -70,7 +69,7 @@ pub(super) fn emit(
                 return Err(error("ordered kernel has no selected algorithm"));
             };
             match body.compiler.program.graph.value_to_base::<S>(recipe).as_ref() {
-                "screma" => screma(body, scope, phase_owner, phase, phase_width, plan, &results),
+                "screma" => screma(body, scope, phase_owner, phase, phase_width, plan, &results, None),
                 "filter" => serial_filter(body, scope, phase_owner, plan, &results),
                 "indexed" => indexed(body, scope, phase_owner, phase, phase_extent, phase_width, plan),
                 "buckets" => buckets(body, scope, phase_owner, phase, phase_width, plan),
@@ -79,48 +78,51 @@ pub(super) fn emit(
         }
         "compact" => compact(body, scope, phase_owner, phase_width, plan, &results),
         "chunks" | "combine" | "offsets" => {
-            screma(body, scope, phase_owner, phase, phase_width, plan, &results)
+            screma(body, scope, phase_owner, phase, phase_width, plan, &results, None)
         }
         _ => Err(error(format!("scheduled {} kernel is not implemented", phase))),
     }
 }
 
 pub(super) fn invocation(body: &mut Body<'_, '_, '_>, width: u32) -> Result<(Typed, Typed), OptimizeError> {
+    let (group, groups) = workgroup(body)?;
+    let width = Body::number(width);
+    let start = body.binary(BinaryOperator::Multiply, group, width.clone())?;
+    let lane = body.local_id()?;
+    let start = body.binary(BinaryOperator::Add, start, lane)?;
+    let step = body.binary(BinaryOperator::Multiply, groups, width)?;
+    Ok((start, step))
+}
+
+fn workgroup(body: &mut Body<'_, '_, '_>) -> Result<(Typed, Typed), OptimizeError> {
     let uint = Type::Constructed(TypeName::UInt(32), vec![]);
-    let start = body.op(
+    let coordinates = body.op(
         OpTag::Intrinsic {
-            id: catalog().known().thread_id,
+            id: catalog().known().workgroup_id,
             overload_idx: 0,
         },
         vec![],
-        uint.clone(),
+        types::vec(3, uint.clone()),
     )?;
-    let groups_ty = uint.clone();
-    let groups = body.op(
+    let mut start = body.field(coordinates.clone(), 0)?;
+    if let Some((x, y, z)) = body.grid {
+        for (axis, stride) in [(1, u64::from(x)), (2, u64::from(x) * u64::from(y))] {
+            let coordinate = body.field(coordinates.clone(), axis)?;
+            let stride = body.literal(&stride.to_string(), &uint)?;
+            let offset = body.binary(BinaryOperator::Multiply, coordinate, stride)?;
+            start = body.binary(BinaryOperator::Add, start, offset)?;
+        }
+        let groups = body.literal(&(u64::from(x) * u64::from(y) * u64::from(z)).to_string(), &uint)?;
+        return Ok((start, groups));
+    }
+    let step = body.op(
         OpTag::Intrinsic {
             id: catalog().known().num_workgroups,
             overload_idx: 0,
         },
         vec![],
-        groups_ty,
+        uint,
     )?;
-    let width = body.literal(&width.to_string(), &uint)?;
-    if let Some((x, y, z)) = body.grid {
-        let mut start = start;
-        for (id, stride) in [
-            (catalog().known().thread_id_y, x),
-            (catalog().known().thread_id_z, x * y),
-        ] {
-            let axis = body.op(OpTag::Intrinsic { id, overload_idx: 0 }, vec![], uint.clone())?;
-            let stride = body.literal(&stride.to_string(), &uint)?;
-            let stride = body.binary(BinaryOperator::Multiply, stride, width.clone())?;
-            let offset = body.binary(BinaryOperator::Multiply, axis, stride)?;
-            start = body.binary(BinaryOperator::Add, start, offset)?;
-        }
-        let groups = body.literal(&(u64::from(x) * u64::from(y) * u64::from(z)).to_string(), &uint)?;
-        return Ok((start, body.binary(BinaryOperator::Multiply, groups, width)?));
-    }
-    let step = body.binary(BinaryOperator::Multiply, groups, width)?;
     Ok((start, step))
 }
 
@@ -132,7 +134,7 @@ pub(super) fn element(
     indices: &[Typed],
     cache: &mut LookupMap<Value, Typed>,
 ) -> Result<Typed, OptimizeError> {
-    let Some((index, rest)) = indices.split_first() else {
+    let Some(index) = indices.first() else {
         return body.value(scope, source);
     };
     if let Some(value) = cache.get(&source) {
@@ -163,32 +165,19 @@ pub(super) fn element(
             .lookup("PlanMapping", (plan, operation))
             .is_some_and(|mapping| body.compiler.program.graph.value_to_base::<bool>(mapping))
         {
-            let Some(callback) = body.compiler.facts.callback(operation) else {
-                return Err(error("mapping component has no callback"));
+            let Some(bindings) =
+                body.compiler.facts.lookup("MapBindings", (source, 0i64, indices.len() as i64, false))
+            else {
+                return Err(error("map has no selected callback bindings"));
             };
-            let owner = body.compiler.facts.operation_scope(operation)?;
-            let inputs = body.compiler.facts.inputs(operation)?;
-            let mut arguments = Vec::new();
-            // Input elements and nested output leaves have different ranks.
-            let mut input_cache = LookupMap::default();
-            for (_, input) in inputs {
-                let cache = if rest.is_empty() { &mut *cache } else { &mut input_cache };
-                arguments.push(element(
-                    body,
-                    scope,
-                    plan,
-                    input,
-                    std::slice::from_ref(index),
-                    cache,
-                )?);
-            }
-            let value = if rest.is_empty() {
-                body.callback(owner, operation, arguments)?
-            } else {
-                body.in_region(owner, callback, arguments, |body, result| {
-                    region_element(body, callback, result, rest)
-                })?
-            };
+            let value = emit_bindings(
+                body,
+                scope,
+                bindings,
+                indices,
+                cache,
+                &mut |body, scope, source| body.value(scope, source),
+            )?;
             cache.insert(source, value.clone());
             return Ok(value);
         }
@@ -201,34 +190,51 @@ pub(super) fn element(
     Ok(value)
 }
 
-fn region_element(
+fn emit_bindings<T>(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
-    source: Value,
+    bindings: Value,
     indices: &[Typed],
-) -> Result<Typed, OptimizeError> {
-    if let Some(actual) = body.compiler.facts.alias(source) {
-        return region_element(body, scope, actual, indices);
+    cache: &mut LookupMap<Value, Typed>,
+    emit: &mut impl FnMut(&mut Body<'_, '_, '_>, Value, Value) -> Result<T, OptimizeError>,
+) -> Result<T, OptimizeError> {
+    if let Some(fields) = body.compiler.facts.enode("MapValueBinding", bindings) {
+        return emit(body, scope, fields[0]);
     }
-    if let Some(callee) = body.compiler.facts.lookup("PlanCallee", (source,)) {
-        let Some(fields) = body.compiler.facts.enode("SourceInvocation", source) else {
-            return Err(error("planned callback call has no invocation"));
+    let (owner, region, arguments, next) =
+        if let Some(fields) = body.compiler.facts.enode("MapIndexBinding", bindings) {
+            let axis = body.compiler.facts.unsigned(fields[4], "callback input axis")? as usize;
+            let Some(index) = indices.get(axis) else {
+                return Err(error("callback input axis exceeds the selected domain"));
+            };
+            let mut arguments = Vec::new();
+            // Cached leaves and input rows are evaluated at different coordinate ranks.
+            let mut input_cache = LookupMap::default();
+            let cache = if indices.len() == 1 { cache } else { &mut input_cache };
+            for input in body.compiler.facts.vector(fields[3])? {
+                arguments.push(element(
+                    body,
+                    scope,
+                    fields[2],
+                    input,
+                    std::slice::from_ref(index),
+                    cache,
+                )?);
+            }
+            (fields[0], fields[1], arguments, fields[5])
+        } else if let Some(fields) = body.compiler.facts.enode("MapCallBinding", bindings) {
+            let mut arguments = Vec::new();
+            for argument in body.compiler.facts.vector(fields[2])? {
+                arguments.push(body.value(scope, argument)?);
+            }
+            (fields[0], fields[1], arguments, fields[3])
+        } else {
+            return Err(error("unknown selected callback binding"));
         };
-        let mut arguments = Vec::new();
-        for argument in body.compiler.facts.vector(fields[2])? {
-            arguments.push(body.value(scope, argument)?);
-        }
-        return body.in_region(scope, callee, arguments, |body, result| {
-            region_element(body, callee, result, indices)
-        });
-    }
-    let Some(plan) = body.compiler.facts.operation(source).and_then(|op| body.compiler.facts.group(op))
-    else {
-        return Err(error("nested domain has no selected fusion plan"));
-    };
-    element(body, scope, plan, source, indices, &mut LookupMap::default())
+    body.in_region(owner, region, arguments, |body, _| {
+        emit_bindings(body, region, next, indices, &mut LookupMap::default(), emit)
+    })
 }
-
 pub(super) fn write_arrays(
     body: &mut Body<'_, '_, '_>,
     scope: Value,

@@ -5,6 +5,12 @@ mod collectives_spv;
 #[path = "collectives_wgsl.rs"]
 mod collectives_wgsl;
 #[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
+#[path = "segmented_spv.rs"]
+mod segmented_spv;
+#[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
+#[path = "segmented_wgsl.rs"]
+mod segmented_wgsl;
+#[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
 #[path = "resolution_sizes_spv.rs"]
 mod resolution_sizes_spv;
 #[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
@@ -62,6 +68,7 @@ mod wgsl;
 
 #[cfg(test)]
 mod tests {
+    use super::{segmented_spv, segmented_wgsl};
     use super::{
         capture_spv, capture_wgsl, collectives_spv, collectives_wgsl, epilogues_spv, epilogues_wgsl,
         filter_command_spv, filter_command_wgsl, filter_post_spv, filter_post_wgsl, filter_spv,
@@ -107,6 +114,66 @@ mod tests {
                 other => panic!("expected buffer, got {other:?}"),
             }
         };
+    }
+
+    #[test]
+    fn segmented_collectives_preserve_rows_tiles_and_operand_order() {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+        macro_rules! check {
+            ($module:ident) => {{
+                let mut context = $module::HostContext::new(&device).unwrap();
+                for rows in [1, 3, 67] {
+                    let values: Vec<i32> = (0..rows*513).map(|i| (i*17+i/513)%19-8).collect();
+                    let xs = input(&device, &values);
+                    for width in [0, 1, 255, 256, 257, 513] {
+                        let output = match width {
+                            0 => $module::host_sum0(&mut context, &queue, &xs),
+                            1 => $module::host_sum1(&mut context, &queue, &xs),
+                            255 => $module::host_sum255(&mut context, &queue, &xs),
+                            256 => $module::host_sum256(&mut context, &queue, &xs),
+                            257 => $module::host_sum257(&mut context, &queue, &xs),
+                            513 => $module::host_sum513(&mut context, &queue, &xs),
+                            _ => unreachable!(),
+                        }.unwrap();
+                        let expected: Vec<i32> = values.chunks_exact(513).map(|row|row[..width].iter().sum()).collect();
+                        assert_eq!(&read(&device, &queue, buffer!($module, output))[..rows as usize], expected, "{rows} rows of width {width}");
+                    }
+                    let output = $module::host_prefixes(&mut context, &queue, &xs).unwrap();
+                    let expected: Vec<i32> = values.chunks_exact(513).flat_map(|row|row.iter().scan(0, |sum,&x|{*sum+=x+1;Some(*sum*2)})).collect();
+                    assert_eq!(&read(&device, &queue, buffer!($module, output))[..values.len()], expected);
+                    let output = $module::host_nested(&mut context, &queue, &xs).unwrap();
+                    let expected: Vec<i32> = values.chunks_exact(171).map(|row|row.iter().sum()).collect();
+                    assert_eq!(&read(&device, &queue, buffer!($module, output))[..expected.len()], expected);
+                    let output = $module::host_nested_prefixes(&mut context, &queue, &xs).unwrap();
+                    let expected: Vec<i32> = values.chunks_exact(171).flat_map(|row|row.iter().scan(0, |sum,&x|{*sum+=x+row[0];Some(*sum)})).collect();
+                    assert_eq!(&read(&device, &queue, buffer!($module, output))[..expected.len()], expected);
+                    let output = $module::host_tuple_totals(&mut context, &queue, &xs).unwrap();
+                    for component in 0..2 {
+                        let expected: Vec<i32> = values.chunks_exact(513).map(|row|row.iter().map(|&x|if component==0 {x} else {x*x}).sum()).collect();
+                        assert_eq!(&read(&device, &queue, buffer!($module, output, component))[..expected.len()], expected);
+                    }
+                    let mut totals = Vec::new();
+                    let mut prefixes = Vec::new();
+                    for row in values.chunks_exact(513) {
+                        let (mut a, mut b) = (1, 0);
+                        for &x in row {
+                            let (c, d) = ((x+8)%7+1, (x+8)%251);
+                            (a,b)=((a*c)%251,(b*c+d)%251);
+                            prefixes.push(a*251+b);
+                        }
+                        totals.push(a*251+b);
+                    }
+                    let output = $module::host_ordered(&mut context, &queue, &xs).unwrap();
+                    assert_eq!(&read(&device, &queue, buffer!($module, output))[..totals.len()], totals);
+                    let output = $module::host_ordered_prefixes(&mut context, &queue, &xs).unwrap();
+                    assert_eq!(&read(&device, &queue, buffer!($module, output))[..prefixes.len()], prefixes);
+                }
+            }};
+        }
+        check!(segmented_spv);
+        check!(segmented_wgsl);
     }
 
     #[test]

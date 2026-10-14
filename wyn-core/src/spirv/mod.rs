@@ -142,6 +142,7 @@ struct Constructor {
 
     /// NumWorkgroups variable for compute shaders (set during entry point setup)
     num_workgroups: Option<spirv::Word>,
+    workgroup_id: Option<spirv::Word>,
 
     /// Imported SPIR-V functions keyed by compiler-internal callable identity.
     linked_functions: LookupMap<FunctionId, spirv::Word>,
@@ -200,6 +201,7 @@ impl Constructor {
             global_invocation_id: None,
             local_invocation_id: None,
             num_workgroups: None,
+            workgroup_id: None,
             linked_functions: LookupMap::new(),
             linked_functions_by_linkage: LookupMap::new(),
             int_pow_functions: LookupMap::new(),

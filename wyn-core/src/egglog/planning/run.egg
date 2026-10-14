@@ -5,6 +5,8 @@
     (saturate map-repeatability) (run map-proofs)
     (saturate map-shapes)
     (run map-blockers) (saturate map-select) (saturate map-launch)
+    (saturate segment-shapes) (run segment-select)
+    (saturate map-bindings)
     (saturate type-layouts)
     (saturate representations)
     (saturate (seq (run residency) (run representations) (run schedule) (run allocation) (run dispatch)))

@@ -251,9 +251,34 @@ impl Body<'_, '_, '_> {
         let Some((first, rest)) = indices.split_first() else {
             return Err(error("array store requires an index"));
         };
-        let (mut place, mut ty) = self.index_place(array, first.clone())?;
-        for index in rest {
-            let Some(element) = ty.elem_type().cloned() else {
+        let (place, ty) = self.index_place(array, first.clone())?;
+        self.store_place(place, &ty, rest, value)
+    }
+
+    fn store_place(
+        &mut self,
+        place: PlaceId,
+        ty: &Type,
+        indices: &[Typed],
+        value: Typed,
+    ) -> Result<(), OptimizeError> {
+        if let Some((index, rest)) = indices.split_first() {
+            if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = ty {
+                for (i, field) in fields.iter().enumerate() {
+                    let next = self.builder.new_place(field.clone());
+                    self.builder
+                        .push_void_inst(InstKind::PlaceIndex {
+                            place,
+                            index: Self::number(i as u32).value,
+                            result: next,
+                        })
+                        .map_err(builder_error)?;
+                    let value = self.field(value.clone(), i)?;
+                    self.store_place(next, field, indices, value)?;
+                }
+                return Ok(());
+            }
+            let Some(element) = ty.elem_type() else {
                 return Err(error("store index exceeds array rank"));
             };
             let next = self.builder.new_place(element.clone());
@@ -264,10 +289,22 @@ impl Body<'_, '_, '_> {
                     result: next,
                 })
                 .map_err(builder_error)?;
-            place = next;
-            ty = element;
+            return self.store_place(next, element, rest, value);
         }
-        let value = self.cast(value, &ty)?;
+        if value.ty.is_array()
+            && matches!(ty, Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), _))
+        {
+            let n = self.length(value.clone())?;
+            let zero = self.literal("0", &types::i32())?;
+            let one = self.literal("1", &types::i32())?;
+            self.counted(zero, n, one, vec![], |body, index, _| {
+                let item = body.index(value.clone(), index.clone())?;
+                body.store_place(place, ty, &[index], item)?;
+                Ok(vec![])
+            })?;
+            return Ok(());
+        }
+        let value = self.cast(value, ty)?;
         self.builder
             .push_void_inst(InstKind::Store {
                 place,
