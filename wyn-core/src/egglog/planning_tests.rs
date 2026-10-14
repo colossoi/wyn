@@ -380,31 +380,41 @@ fn selected_phases_declare_their_cooperation_scope() {
 }
 
 #[test]
-fn missing_ranked_axis_is_rejected_before_kernel_emission() {
-    let tlc = compile_thru_tlc(
+fn map_and_bucket_emission_require_selected_axes_not_source_domains() {
+    for source in [
+        "entry main(xs:[2]i32) [2][3]i32=map(|x|map(|y|x+y,iota(3)),xs)",
         "entry main(dest:*[2][2]i32) ([2][2]i32,[2]u32,u32)=
          bucket_scatter_2d(dest,[[(0,1),(0,2)],[(1,3),(1,4)]])",
-    )
-    .unwrap();
-    let mut program = optimize(
-        schedule(
-            place(
-                fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                PipelineTopologyPolicy::AllowGenerated,
+    ] {
+        let tlc = compile_thru_tlc(source).unwrap();
+        let planned = || {
+            optimize(
+                schedule(
+                    place(
+                        fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                        PipelineTopologyPolicy::AllowGenerated,
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
             )
-            .unwrap(),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    program.graph.clear_function("SourceDomainAxis").unwrap();
-    let Err(error) = to_ssa(program, CodegenTarget::Wgsl) else {
-        panic!("a missing dimension was silently accepted");
-    };
-    assert!(
-        error.to_string().contains("domain axis has no planned extent"),
-        "{error}"
-    );
+            .unwrap()
+        };
+        let mut selected_only = planned();
+        for table in ["SourceDomainAxis", "SourceDomainRank", "PlanDomain"] {
+            selected_only.graph.clear_function(table).unwrap();
+        }
+        to_ssa(selected_only, CodegenTarget::Wgsl).unwrap();
+        let mut program = planned();
+        program.graph.clear_function("IterationAxis").unwrap();
+        let Err(error) = to_ssa(program, CodegenTarget::Wgsl) else {
+            panic!("a missing dimension was silently accepted");
+        };
+        assert!(
+            error.to_string().contains("domain axis has no planned extent"),
+            "{error}"
+        );
+    }
 }
 
 #[test]
@@ -414,15 +424,15 @@ fn rectangular_maps_expand_launch_without_expanding_row_capacity() {
         let query = Query(graph);
         let mut flattened = 0;
         query
-            .for_function("MapLaunchRank", |keys, rank| {
+            .for_function("IterationRank", |keys, rank| {
                 if graph.value_to_base::<i64>(rank) == 2 {
                     flattened += 1;
-                    let launch = query.required("MapLaunch", (keys[0],))?;
+                    let launch = query.required("IterationExtent", (keys[0],))?;
                     assert_eq!(
                         graph.value_to_base::<i64>(query.required("StaticCapacityBound", (launch,))?),
                         12
                     );
-                    let outer = query.required("MapLaunchAxis", (keys[0], 0i64))?;
+                    let outer = query.required("IterationAxis", (keys[0], 0i64))?;
                     assert_eq!(query.required("InputDomain", (keys[0],))?, outer);
                     assert_eq!(
                         graph.value_to_base::<i64>(query.required("StaticCapacityBound", (outer,))?),
@@ -470,7 +480,7 @@ fn rectangular_planning_and_emission_use_fused_structure() {
     let query = Query(&graph);
     let mut ranks = Vec::new();
     query
-        .for_function("MapLaunchRank", |_, rank| {
+        .for_function("IterationRank", |_, rank| {
             ranks.push(graph.value_to_base::<i64>(rank));
             Ok(())
         })
@@ -507,7 +517,7 @@ fn rectangular_maps_ignore_scalar_recomputation_cost() {
         assert!(expensive, "fixture must exceed the old repetition budget");
         let mut flattened = false;
         query
-            .for_function("MapLaunchRank", |_, rank| {
+            .for_function("IterationRank", |_, rank| {
                 flattened |= graph.value_to_base::<i64>(rank) == 2;
                 Ok(())
             })
@@ -537,7 +547,7 @@ fn rectangular_maps_select_arbitrary_rank_and_preserve_sequential_prefixes() {
         planned(source, |graph| {
             let query = Query(graph);
             let mut ranks = Vec::new();
-            query.for_function("MapLaunchRank", |keys, rank| {
+            query.for_function("IterationRank", |keys, rank| {
                 let mut host = false;
                 query.for_each("Site", |row| {
                     if row[0] == keys[0] && query.contains("HostRegion", (row[1],))? {
@@ -576,7 +586,7 @@ fn fused_outputs_only_share_a_rectangular_launch_when_inner_shapes_agree() {
                     })?;
                     if outputs == 2 {
                         fused += 1;
-                        let rank = query.required("MapLaunchRank", (row[1],))?;
+                        let rank = query.required("IterationRank", (row[1],))?;
                         assert_eq!(graph.value_to_base::<i64>(rank), expected_rank);
                     }
                     Ok(())
@@ -610,7 +620,7 @@ fn rectangular_runtime_dimensions_must_be_uniform_across_outer_coordinates() {
             query
                 .for_each("MapPlan", |row| {
                     if query.flag("MapHost", (row[0],))? {
-                        ranks.push(graph.value_to_base::<i64>(query.required("MapLaunchRank", (row[1],))?));
+                        ranks.push(graph.value_to_base::<i64>(query.required("IterationRank", (row[1],))?));
                     }
                     Ok(())
                 })

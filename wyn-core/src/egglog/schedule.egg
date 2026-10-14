@@ -46,9 +46,10 @@
 
 ; Recipes declare logical phases before any kernel body is built. Widths match
 ; the current emitters; PhaseDomain counts invocations, not rounded workgroups.
-(function MapLaunch (OperationKey) Extent :no-merge)
-(function MapLaunchRank (OperationKey) i64 :no-merge)
-(function MapLaunchAxis (OperationKey i64) Extent :no-merge)
+; Iteration axes describe logical coordinates, before cooperative width expansion.
+(function IterationExtent (OperationKey) Extent :no-merge)
+(function IterationRank (OperationKey) i64 :no-merge)
+(function IterationAxis (OperationKey i64) Extent :no-merge)
 (function MapCooperative (OperationKey) bool :merge (or old new))
 (relation KernelPhase (OperationKey String ExecutionScope Extent i64 DispatchGrid))
 (rule ((Site op r) (OwnedRegion entry r) (= grid (EntryGrid entry)))
@@ -78,10 +79,10 @@
        (FirstPhase op (Stage leader "scalar")) (LastPhase op (Stage leader "scalar"))
        (PhaseInput (Stage leader "scalar") op "environment")) :ruleset schedule)
 (rule ((= (Plan op) (Elements)) (= (MapCooperative op) false)
-       (= n (MapLaunch op)) (= grid (OperationGrid op)))
+       (= n (IterationExtent op)) (= grid (OperationGrid op)))
       ((KernelPhase op "elements" (InvocationScope) n 64 grid) (PhaseEnds op "elements" "elements")) :ruleset schedule)
 (rule ((= (Plan op) (Elements)) (= (MapCooperative op) true)
-       (= n (MapLaunch op)) (= grid (OperationGrid op)))
+       (= n (IterationExtent op)) (= grid (OperationGrid op)))
       ((KernelPhase op "segments" (WorkgroupScope) (Product n (Fixed collective-width)) collective-width grid)
        (PhaseEnds op "segments" "segments")) :ruleset schedule)
 (rule ((ParallelCollective op) (= grid (CollectiveGrid op)) (= groups (CollectiveGroups op)))

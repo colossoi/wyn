@@ -1,0 +1,17 @@
+; Map selection and ranked indexed operations publish the same iteration domain.
+; InputDomain remains the original traversal extent, before map flattening.
+(ruleset iteration-domains)
+(rule ((BucketShape owner known) (= plan (SelectedPlan owner)) (= domain (PlanDomain plan))
+       (= rank (SourceDomainRank domain)))
+      ((set (IterationRank owner) rank)) :ruleset iteration-domains)
+(rule ((BucketShape owner known) (= plan (SelectedPlan owner)) (= domain (PlanDomain plan))
+       (= extent (SourceDomainAxis domain axis)))
+      ((set (IterationAxis owner axis) extent)) :ruleset iteration-domains)
+(relation IterationProduct (OperationKey i64 Extent))
+(rule ((= extent (IterationAxis owner 0)))
+      ((IterationProduct owner 1 extent)) :ruleset iteration-domains)
+(rule ((IterationProduct owner axis product) (= rank (IterationRank owner)) (< axis rank)
+       (= extent (IterationAxis owner axis)))
+      ((IterationProduct owner (+ axis 1) (Product product extent))) :ruleset iteration-domains)
+(rule ((= rank (IterationRank owner)) (IterationProduct owner rank extent))
+      ((set (IterationExtent owner) extent)) :ruleset iteration-domains)

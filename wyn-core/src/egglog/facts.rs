@@ -110,24 +110,23 @@ impl<'a, 'source> Facts<'a, 'source> {
         };
         Ok(initial)
     }
-    pub fn domain_shape(&self, operation: Value) -> Result<(Vec<Value>, Vec<Vec<usize>>), OptimizeError> {
-        let Some(plan) = self.group(operation) else {
-            return Err(error("operation has no fusion plan"));
-        };
-        let Some(domain) = self.lookup("PlanDomain", (plan,)) else {
-            return Err(error("plan has no iteration domain"));
-        };
-        let Some(rank) = self.lookup("SourceDomainRank", (domain,)) else {
+    pub fn iteration_dimensions(&self, operation: Value) -> Result<Vec<Value>, OptimizeError> {
+        let Some(rank) = self.lookup("IterationRank", (operation,)) else {
             return Err(error("iteration domain has no rank"));
         };
-        let rank = usize::try_from(self.integer(rank)).map_err(|_| error("invalid domain rank"))?;
+        let rank = self.positive(rank, "iteration domain rank")? as usize;
         let mut dimensions = Vec::with_capacity(rank);
         for axis in 0..rank {
-            let Some(extent) = self.lookup("SourceDomainAxis", (domain, axis as i64)) else {
+            let Some(extent) = self.lookup("IterationAxis", (operation, axis as i64)) else {
                 return Err(error("domain axis has no planned extent"));
             };
             dimensions.push(extent);
         }
+        Ok(dimensions)
+    }
+    pub fn domain_shape(&self, operation: Value) -> Result<(Vec<Value>, Vec<Vec<usize>>), OptimizeError> {
+        let dimensions = self.iteration_dimensions(operation)?;
+        let rank = dimensions.len();
         let mut inputs = Vec::new();
         for (input, _) in self.inputs(operation)? {
             let Some(input_rank) = self.lookup("SourceInputRank", (operation, input)) else {
