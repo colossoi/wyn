@@ -69,6 +69,26 @@ pub enum ResultLayout {
 }
 
 impl ResultLayout {
+    /// Replace a flat array's shape without changing its element storage stride.
+    pub fn rectangular(self, dimensions: &[u32]) -> Option<Self> {
+        let Self::Array {
+            element, mut stride, ..
+        } = self
+        else {
+            return None;
+        };
+        let mut layout = *element;
+        for &count in dimensions.iter().rev() {
+            layout = Self::Sequence {
+                element: Box::new(layout),
+                count,
+                stride,
+            };
+            stride = count.checked_mul(stride)?;
+        }
+        Some(layout)
+    }
+
     pub fn byte_size(&self) -> Option<u32> {
         match self {
             Self::Scalar(scalar) => Some(scalar.bytes()),

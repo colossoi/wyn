@@ -103,7 +103,7 @@ impl Constructor {
                             // runtime field — so the descriptor survives phis and
                             // view-preserving intrinsics where reverse-mapping a
                             // runtime constant can't recover it.
-                            self.get_or_create_struct_type(vec![self.u32_type, self.u32_type])
+                            self.get_or_create_struct_type(vec![self.u32_type; tensor.rank() + 1])
                         } else if let PolyType::Constructed(TypeName::ArrayVariantVirtual, _) = variant {
                             // Virtual variant: struct { start, step, len } for range representation
                             // Use the element type so u32 ranges get {u32, u32, u32}.

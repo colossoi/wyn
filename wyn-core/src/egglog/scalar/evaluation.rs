@@ -297,6 +297,7 @@ impl Evaluation {
         let selected = &program.stage.selected;
         graph.parse_and_run_program(None, "(run-schedule (saturate schedule-rank))")?;
         let mut pending: Vec<_> = selected.roots.values().map(|t| vec![*t]).collect();
+        pending.extend(selected.extents.values().map(|t| vec![*t]));
         pending.extend((0..selected.dag.size()).filter_map(|term| {
             matches!(selected.dag.get(term), Term::App(name, _) if name == "ScalarChoice")
                 .then_some(vec![term])

@@ -103,6 +103,8 @@ fn basic_scalar_policy_retains_calls_and_validates_both_backends() {
         include_str!("../../../testfiles/filter_then_map.wyn"),
         "entry main(xs:[4]i32,i:i32) (i32,(i32,i32)) =
          let ys=map(|x|(x,(x+1,x+2)),xs) in ys[i]",
+        "def row(n:i32,x:i32) []i32=map(|y|x+y,iota(n+1)) entry main(xs:[]i32,n:i32) [][]i32=map(|x|row(n,x),xs)",
+        "def row(ys:[]i32,x:i32) []i32=map(|y|x+y,iota(length(ys)+1)) entry main(xs:[]i32,ys:[]i32) [][]i32=map(|x|row(ys,x),xs)",
     ] {
         let tlc = crate::compile_thru_tlc(source).unwrap();
         for policy in [ScalarOptimization::Basic, ScalarOptimization::Full] {
@@ -1110,5 +1112,21 @@ fn camera_field_math_is_shared_across_indexing() {
             })
             .count();
         assert_eq!(sines, 1, "{source}");
+    }
+}
+
+#[test]
+fn runtime_rectangular_maps_reach_both_backends() {
+    for source in [
+        "def row(n:i32,x:i32) []i32=map(|y|x+y,iota(n+1)) entry main(xs:[]i32,n:i32) [][]i32=map(|x|row(n,x),xs)",
+        "def row(ys:[]i32,x:i32) []i32=map(|y|x+y,iota(length(ys)+1)) entry main(xs:[]i32,ys:[]i32) [][]i32=map(|x|row(ys,x),xs)",
+        "entry main(xs:[]i32,n:i32) [][]i32=map(|x|map(|y|x+y,iota(n)),xs)",
+        "entry main(xs:[]i32,ys:[]i32) [][]i32=map(|x|map(|y|x+y,ys),xs)",
+        "entry main(xs:[]i32,n:i32,m:i32) [][][]i32=map(|x|map(|y|map(|z|x+y+z,iota(m)),iota(n)),xs)",
+        "entry main(xs:[]i32,n:i32) []i32=map(|x|reduce((+),0,map(|y|x+y,iota(n))),xs)",
+        "entry main(xs:[]i32,n:i32) [][]i32=map(|x|scan((+),0,map(|y|x+y,iota(n))),xs)",
+        "entry main(xs:[]i32,n:i32) [][](i32,bool)=map(|x|map(|y|(x+y,y>1),iota(n)),xs)",
+    ] {
+        shaders(source);
     }
 }

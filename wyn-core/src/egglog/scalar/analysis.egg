@@ -1,6 +1,7 @@
 (rule ((ScalarActive ctx) (= e (ScalarLiteral ctx t value))) ((ScalarTotal e)) :ruleset scalar-analysis)
 (rule ((ScalarActive ctx) (= e (ScalarLeaf ctx t value))) ((ScalarTotal e)) :ruleset scalar-analysis)
 (rule ((ScalarActive ctx) (= e (ScalarParameter ctx t region i))) ((ScalarTotal e)) :ruleset scalar-analysis)
+(rule ((ScalarActive ctx) (= e (ScalarLength ctx t source))) ((ScalarTotal e)) :ruleset scalar-analysis)
 (rule ((ScalarActive ctx) (= xs (ScalarNil ctx))) ((ScalarArgsTotal xs)) :ruleset scalar-analysis)
 (rule ((ScalarActive ctx) (= xs (ScalarCons ctx x tail)) (ScalarTotal x) (ScalarArgsTotal tail)) ((ScalarArgsTotal xs)) :ruleset scalar-analysis)
 (rule ((ScalarActive ctx) (= e (ScalarOp ctx t op xs)) (ScalarOperatorSafe t op) (ScalarArgsTotal xs)) ((ScalarTotal e)) :ruleset scalar-analysis)
@@ -16,6 +17,7 @@
 ; can be read-only without being total.
 (rule ((ScalarActive ctx) (= e (ScalarLiteral ctx t value))) ((set (ScalarReadOnly e) true)) :ruleset scalar-effects)
 (rule ((ScalarActive ctx) (= e (ScalarParameter ctx t region i))) ((set (ScalarReadOnly e) true)) :ruleset scalar-effects)
+(rule ((ScalarActive ctx) (= e (ScalarLength ctx t source))) ((set (ScalarReadOnly e) true)) :ruleset scalar-effects)
 ; Loop state, iteration values, and captures are bound by their invocation.
 (rule ((ScalarActive ctx) (= e (ScalarLeaf ctx t (SourceFormal region i)))) ((set (ScalarReadOnly e) true)) :ruleset scalar-effects)
 (rule ((ScalarActive ctx) (= e (ScalarLeaf ctx t source)) (= readonly (SourceReadOnly source))) ((set (ScalarReadOnly e) readonly)) :ruleset scalar-effects)

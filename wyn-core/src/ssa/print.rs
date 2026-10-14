@@ -304,17 +304,16 @@ fn format_inst_kind(out: &mut fmt::Formatter<'_>, kind: &InstKind) -> fmt::Resul
                     PureViewSource::Storage(br) => {
                         format!("storage({}, {})", br.set, br.binding)
                     }
-                    PureViewSource::Inherited => format_ref(&operands[2]),
+                    PureViewSource::Inherited => format_ref(&operands[operands.len() - 1]),
                     PureViewSource::Workgroup { id, count } => {
                         format!("workgroup({id}, {count})")
                     }
                 };
-                write!(
-                    out,
-                    "storage_view {src_str} {} {}",
-                    format_ref(&operands[0]),
-                    format_ref(&operands[1])
-                )?;
+                let count = operands.len() - usize::from(matches!(src, PureViewSource::Inherited));
+                write!(out, "storage_view {src_str}")?;
+                for operand in &operands[..count] {
+                    write!(out, " {}", format_ref(operand))?;
+                }
             }
             OpTag::StorageViewLen => {
                 write!(out, "storage_view_len {}", format_ref(&operands[0]))?;

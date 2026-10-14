@@ -1,6 +1,6 @@
 use super::{builder_error, error, Body, OptimizeError, Typed};
 use crate::builtins::{catalog, select};
-use crate::op::{BinaryOperator, OpTag};
+use crate::op::{BinaryOperator, OpTag, PureViewSource};
 use crate::ssa::types::ConstantValue;
 use crate::ssa::types::ValueRef;
 use crate::ssa::types::{InstKind, PlaceId};
@@ -65,6 +65,38 @@ impl Body<'_, '_, '_> {
                 values.push(self.index(part, index.clone())?);
             }
             return self.tuple(values);
+        }
+        if array.ty.array_variant().is_some_and(is_array_variant_view)
+            && array.ty.array_rank().is_some_and(|rank| rank > 1)
+        {
+            let Type::Constructed(TypeName::Array, mut fields) = array.ty.clone() else {
+                return Err(error("rectangular view has no array type"));
+            };
+            let rank = fields.len() - 3;
+            let mut stride = Self::number(1);
+            let mut dimensions = Vec::new();
+            for axis in 1..rank {
+                let length = self.op(
+                    OpTag::Project {
+                        index: (axis + 1) as u32,
+                    },
+                    vec![array.clone()],
+                    Type::Constructed(TypeName::UInt(32), vec![]),
+                )?;
+                stride = self.binary(BinaryOperator::Multiply, stride, length.clone())?;
+                dimensions.push(length);
+            }
+            let index = self.cast(index, &Type::Constructed(TypeName::UInt(32), vec![]))?;
+            let offset = self.binary(BinaryOperator::Multiply, index, stride)?;
+            let mut operands = vec![offset];
+            operands.extend(dimensions);
+            operands.push(array);
+            fields.remove(2);
+            return self.op(
+                OpTag::StorageView(PureViewSource::Inherited),
+                operands,
+                Type::Constructed(TypeName::Array, fields),
+            );
         }
         if array.ty.array_variant().is_some_and(is_array_variant_view)
             || self.local_arrays.contains_key(&array.value)
@@ -226,6 +258,14 @@ impl Body<'_, '_, '_> {
             let first = self.field(array, 0)?;
             return self.length(first);
         }
+        if array.ty.array_variant().is_some_and(is_array_variant_view) {
+            let length = self.op(
+                OpTag::Project { index: 1 },
+                vec![array],
+                Type::Constructed(TypeName::UInt(32), vec![]),
+            )?;
+            return self.cast(length, &types::i32());
+        }
         self.op(
             OpTag::Intrinsic {
                 id: catalog().known().length,
@@ -249,8 +289,15 @@ impl Body<'_, '_, '_> {
 
     pub fn store_at(&mut self, array: Typed, indices: &[Typed], value: Typed) -> Result<(), OptimizeError> {
         let Some((first, rest)) = indices.split_first() else {
-            return Err(error("array store requires an index"));
+            let length = self.length(value.clone())?;
+            return self.copy_array(array, value, length, &[]);
         };
+        if array.ty.array_variant().is_some_and(is_array_variant_view)
+            && array.ty.array_rank().is_some_and(|rank| rank > 1)
+        {
+            let row = self.index(array, first.clone())?;
+            return self.store_at(row, rest, value);
+        }
         let (place, ty) = self.index_place(array, first.clone())?;
         self.store_place(place, &ty, rest, value)
     }
@@ -324,17 +371,27 @@ impl Body<'_, '_, '_> {
 }
 
 impl Body<'_, '_, '_> {
-    pub(in crate::egglog::to_ssa) fn copy_array(
+    pub fn copy_array(
         &mut self,
         destination: Typed,
         source: Typed,
         length: Typed,
+        fields: &[usize],
     ) -> Result<(), OptimizeError> {
         let zero = self.literal("0", &length.ty)?;
         let one = self.literal("1", &length.ty)?;
         self.counted(zero, length, one, vec![], |body, index, _| {
-            let value = body.index(source, index.clone())?;
-            body.store(destination, index, value)?;
+            let mut value = body.index(source.clone(), index.clone())?;
+            if !fields.is_empty() && source.ty.array_rank().is_some_and(|rank| rank > 1) {
+                let target = body.index(destination.clone(), index)?;
+                let length = body.length(value.clone())?;
+                body.copy_array(target, value, length, fields)?;
+            } else {
+                for &field in fields {
+                    value = body.field(value, field)?;
+                }
+                body.store(destination.clone(), index, value)?;
+            }
             Ok(vec![])
         })?;
         Ok(())

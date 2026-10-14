@@ -487,77 +487,42 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 }
 
                 op::OpTag::StorageView(src) => {
-                    let offset = operands[0];
-                    let len = operands[1];
-                    let offset_id = self.integer_ref_as_u32(offset)?;
-                    let len_id = self.integer_ref_as_u32(len)?;
-
+                    let inherited = matches!(src, op::PureViewSource::Inherited);
+                    let count = operands.len() - usize::from(inherited);
+                    let mut fields = operands[..count]
+                        .iter()
+                        .map(|&operand| self.integer_ref_as_u32(operand))
+                        .collect::<Result<Vec<_>>>()?;
                     match src {
-                        op::PureViewSource::Storage(br) => {
-                            let (set, binding) = (&br.set, &br.binding);
-                            // The descriptor rides in the result value's type
-                            // (`Buffer(set, binding)`); consumers recover the
-                            // buffer var from there. Validate the binding is a
-                            // declared storage buffer and build the {offset,len}
-                            // struct.
-                            if self.constructor.storage_buffer(BindingRef::new(*set, *binding)).is_some() {
-                                let u32_ty = self.constructor.u32_type;
-                                let view_struct_type =
-                                    self.constructor.get_or_create_struct_type(vec![u32_ty, u32_ty]);
-                                self.constructor.builder.composite_construct(
-                                    view_struct_type,
-                                    None,
-                                    [offset_id, len_id],
-                                )?
-                            } else {
-                                bail_spirv_at!(
-                                    self.blame_span(),
-                                    "Unknown storage buffer: set={}, binding={}",
-                                    set,
-                                    binding
-                                )
+                        op::PureViewSource::Storage(binding) => {
+                            if self.constructor.storage_buffer(*binding).is_none() {
+                                bail_spirv_at!(self.blame_span(), "Unknown storage buffer: {:?}", binding);
                             }
                         }
                         op::PureViewSource::Inherited => {
-                            let parent =
-                                operands[2].as_ssa().expect("StorageView Inherited parent must be SSA");
-                            let parent_id = self.get_value(parent)?;
-                            let u32_ty = self.constructor.u32_type;
-                            let view_struct_type =
-                                self.constructor.get_or_create_struct_type(vec![u32_ty, u32_ty]);
-
-                            // Extract parent_offset (field 0) from parent view
-                            let parent_offset =
-                                self.constructor.builder.composite_extract(u32_ty, None, parent_id, [0])?;
-
-                            // new_offset = parent_offset + offset
-                            let new_offset =
-                                self.constructor.builder.i_add(u32_ty, None, parent_offset, offset_id)?;
-
-                            self.constructor.builder.composite_construct(
-                                view_struct_type,
+                            let parent = self.get_value_ref(operands[count])?;
+                            let offset = self.constructor.builder.composite_extract(
+                                self.constructor.u32_type,
                                 None,
-                                [new_offset, len_id],
-                            )?
+                                parent,
+                                [0],
+                            )?;
+                            fields[0] = self.constructor.builder.i_add(
+                                self.constructor.u32_type,
+                                None,
+                                offset,
+                                fields[0],
+                            )?;
                         }
                         op::PureViewSource::Workgroup { id, .. } => {
-                            // The workgroup var was created in entry setup.
-                            // Record the view→id mapping so ViewIndex chains
-                            // into it; the {offset, len} struct is built the
-                            // same way as a storage view.
                             if let Some(result) = inst.result {
                                 self.workgroup_view.insert(result, *id);
                             }
-                            let u32_ty = self.constructor.u32_type;
-                            let view_struct_type =
-                                self.constructor.get_or_create_struct_type(vec![u32_ty, u32_ty]);
-                            self.constructor.builder.composite_construct(
-                                view_struct_type,
-                                None,
-                                [offset_id, len_id],
-                            )?
                         }
                     }
+                    let ty =
+                        self.constructor.get_or_create_struct_type(vec![self.constructor.u32_type; count]);
+                    self.constructor.builder.composite_construct(ty, None, fields)?
                 }
 
                 op::OpTag::StorageViewLen => {

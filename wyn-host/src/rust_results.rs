@@ -53,7 +53,21 @@ impl Program {
                         }
                         None => quote!(BufferRange::CallerProvided),
                     };
-                    quote!(OutputResource::Buffer { buffer: Buffer::clone(&#local), layout: #layout, range: #range })
+                    if descriptor.shape.is_empty() {
+                        quote!(OutputResource::Buffer { buffer: Buffer::clone(&#local), layout: #layout, range: #range })
+                    } else {
+                        let dimensions = descriptor
+                            .shape
+                            .iter()
+                            .map(|extent| self.rust_expr(extent, entry))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        quote!({
+                            let layout = (#layout).rectangular(&[#(dimension(#dimensions)?),*])
+                                .ok_or_else(|| HostError::Invalid("rectangular result size overflow".into()))?;
+                            let size = layout.byte_size().ok_or_else(|| HostError::Invalid("rectangular result has no byte size".into()))?;
+                            OutputResource::Buffer { buffer: Buffer::clone(&#local), layout, range: BufferRange::Bytes {offset: 0, size: u64::from(size)} }
+                        })
+                    }
                 }
                 FrameResourceKind::Texture | FrameResourceKind::StorageTexture => {
                     quote!(OutputResource::Texture(Texture::clone(&#local)))

@@ -19,8 +19,8 @@
 //! - `Call(function)` / `Intrinsic { .. }`: variable-arity arg list
 //! - `StorageImageLoad(resource)`: `[coord]`
 //! - `StorageImageStore(resource)`: `[coord, texel]`
-//! - `StorageView(Storage)`: `[offset, len]`
-//! - `StorageView(Inherited)`: `[offset, len, parent]`
+//! - `StorageView(Storage)`: `[offset, dimension_lengths...]`
+//! - `StorageView(Inherited)`: `[offset, dimension_lengths..., parent]`
 //! - `StorageViewLen`: `[view]`
 
 use crate::builtins;

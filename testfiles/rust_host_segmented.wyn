@@ -21,3 +21,12 @@ entry ordered(xs:[][513]i32) []i32 =
   map(|row|reduce(compose,251,map(|x|((x+8)%7+1)*251+(x+8)%251,row)),xs)
 entry ordered_prefixes(xs:[][513]i32) [][513]i32 =
   map(|row|scan(compose,251,map(|x|((x+8)%7+1)*251+(x+8)%251,row)),xs)
+
+entry runtime_map(xs:[]i32,n:i32) [][]i32 = map(|x|map(|y|x+y,iota(n)),xs)
+entry runtime_sum(xs:[]i32,n:i32) []i32 = map(|x|reduce((+),0,map(|y|x+y,iota(n))),xs)
+entry runtime_scan(xs:[]i32,n:i32) [][]i32 = map(|x|scan((+),0,map(|y|x+y,iota(n))),xs)
+entry runtime_cube(xs:[]i32,n:i32) [][][]i32 = map(|x|map(|y|map(|z|x+y+z,iota(n)),iota(3)),xs)
+def runtime_row(n:i32,x:i32) []i32 = map(|y|x+y,iota(n+1))
+def runtime_rows(xs:[]i32,n:i32) [][]i32 = map(|x|runtime_row(n-1,x),xs)
+entry runtime_helper(xs:[]i32,n:i32) [][]i32 = runtime_rows(xs,n)
+entry runtime_lengths(xs:[]i32,ys:[]i32) [][]i32 = runtime_rows(xs,length(ys))

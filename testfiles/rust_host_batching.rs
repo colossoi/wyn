@@ -120,7 +120,7 @@ mod tests {
     fn segmented_collectives_preserve_rows_tiles_and_operand_order() {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
-        let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_features: wgpu::Features::PUSH_CONSTANTS, required_limits: wgpu::Limits {max_push_constant_size: 128, ..Default::default()}, ..Default::default()})).unwrap();
         macro_rules! check {
             ($module:ident) => {{
                 let mut context = $module::HostContext::new(&device).unwrap();
@@ -174,6 +174,49 @@ mod tests {
         }
         check!(segmented_spv);
         check!(segmented_wgsl);
+        macro_rules! runtime {
+            ($module:ident, $array_parameter:expr, $sum_parameter:expr) => {{
+                let mut context = $module::HostContext::new(&device).unwrap();
+                for rows in [1, 3, 67] {
+                    let values: Vec<i32> = (0..rows).map(|i|i*3-7).collect();
+                    let xs = input(&device, &values);
+                    for n in [0i32, 1, 255, 256, 257, 513] {
+                        let parameter = ($array_parameter)(&n.to_le_bytes());
+                        let ys = input(&device, &vec![0i32; n as usize]);
+                        for (output, scan, cube) in [
+                            ($module::host_runtime_map(&mut context, &queue, &xs, &parameter).unwrap(),false,false),
+                            ($module::host_runtime_helper(&mut context, &queue, &xs, &parameter).unwrap(),false,false),
+                            ($module::host_runtime_lengths(&mut context, &queue, &xs, &ys).unwrap(),false,false),
+                            ($module::host_runtime_scan(&mut context, &queue, &xs, &parameter).unwrap(),true,false),
+                            ($module::host_runtime_cube(&mut context, &queue, &xs, &parameter).unwrap(),false,true),
+                        ] {
+                            let mut expected = Vec::new();
+                            for &x in &values {
+                                for y in 0..if cube {3} else {1} {
+                                    let mut sum = 0;
+                                    for z in 0..n { sum += x+y+z; expected.push(if scan {sum} else {x+y+z}); }
+                                }
+                            }
+                            let $module::output::OutputResource::Buffer {buffer,layout,range} = &output.values[0].resource else {panic!("buffer result required")};
+                            assert_eq!(&read(&device,&queue,buffer)[..expected.len()], expected, "rows={rows}, n={n}, scan={scan}, cube={cube}");
+                            assert_eq!(layout.byte_size(), Some(expected.len() as u32*4));
+                            assert_eq!(*range, $module::output::BufferRange::Bytes {offset:0,size:expected.len() as u64*4});
+                            let $module::output::ResultLayout::Sequence {count,element,..} = layout else {panic!("outer dimension required")};
+                            assert_eq!(*count,rows as u32);
+                            let $module::output::ResultLayout::Sequence {count,..} = element.as_ref() else {panic!("inner dimension required")};
+                            assert_eq!(*count,if cube {3} else {n as u32});
+                        }
+                        let parameter = ($sum_parameter)(n);
+                        let output = $module::host_runtime_sum(&mut context,&queue,&xs,&parameter).unwrap();
+                        let expected: Vec<i32> = values.iter().map(|&x|(0..n).map(|y|x+y).sum()).collect();
+                        assert_eq!(&read(&device,&queue,buffer!($module,output))[..values.len()], expected);
+                    }
+                }
+            }};
+        }
+        runtime!(segmented_spv, |bytes:&[u8]|bytes.to_vec(), |n:i32|n.to_le_bytes());
+        runtime!(segmented_wgsl, |bytes:&[u8]|segmented_wgsl::ParameterBuffer::new(&device,bytes).unwrap(), |n|input(&device,&[n]));
+
     }
 
     #[test]

@@ -17,7 +17,17 @@ pub(super) fn select(graph: &mut EGraph, policy: ScalarOptimization) -> Result<S
     graph.constructor_enodes("ScalarRoot", |row| {
         roots.push((row.children[0], row.children[1], row.children[2], row.children[3]));
     })?;
-    let (dag, terms) = extract::select(graph, &roots.iter().map(|r| r.3).collect::<Vec<_>>(), policy)?;
+    let mut extents = Vec::new();
+    graph.constructor_enodes("ScalarExtentRoot", |row| {
+        extents.push((row.children[0], row.children[1]))
+    })?;
+    let values = roots.iter().map(|r| r.3).chain(extents.iter().map(|r| r.1)).collect::<Vec<_>>();
+    let (dag, terms) = extract::select(graph, &values, policy)?;
+    let selected_extents = extents
+        .into_iter()
+        .zip(terms[roots.len()..].iter().copied())
+        .map(|((extent, _), term)| (extent, term))
+        .collect();
     let mut selected_roots = LookupMap::default();
     for ((context, _, source, _), term) in roots.into_iter().zip(terms) {
         selected_roots.insert((context, source), term);
@@ -63,6 +73,7 @@ pub(super) fn select(graph: &mut EGraph, policy: ScalarOptimization) -> Result<S
         dag,
         values,
         roots: selected_roots,
+        extents: selected_extents,
     })
 }
 

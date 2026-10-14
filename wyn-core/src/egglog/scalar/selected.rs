@@ -10,6 +10,7 @@ pub(in crate::egglog) struct Selected {
     pub dag: TermDag,
     pub values: Vec<Value>,
     pub roots: LookupMap<(Value, Value), TermId>,
+    pub extents: LookupMap<Value, TermId>,
 }
 
 // Borrowed decoding of egglog's extracted DAG, shared by host and SSA emission.

@@ -124,6 +124,8 @@ impl<'source> Import<'_, '_, '_, 'source> {
     fn definitions(&mut self, source: &'source OwnershipApplied) -> Result<(), OptimizeError> {
         let counter = self.ty(&Type::Constructed(TypeName::UInt(32), vec![]))?;
         self.sink.add("CounterType", counter)?;
+        let length = self.ty(&Type::Constructed(TypeName::Int(32), vec![]))?;
+        self.sink.add("LengthType", length)?;
         for (ordinal, definition) in source.defs.iter().enumerate() {
             let (body, parameters) = extract_lambda_params_ref(&definition.body);
             self.values = ValueGraph::build(body).0;

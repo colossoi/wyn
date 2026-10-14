@@ -586,7 +586,12 @@ impl TypeEmitter {
                     // this is the type of a view VALUE that flows through lets,
                     // function params, and block params.)
                     if let Some(PolyType::Constructed(TypeName::ArrayVariantView, _)) = ty.array_variant() {
-                        return Ok("vec2<u32>".to_string());
+                        let rank = ty.array_rank().unwrap_or(1);
+                        return Ok(if rank == 1 {
+                            "vec2<u32>".into()
+                        } else {
+                            format!("array<u32, {}>", rank + 1)
+                        });
                     }
                     // Bounded arrays are `{buffer: array<T, N>, len: u32}` —
                     // function-local fixed-capacity buffer plus a runtime
@@ -2987,6 +2992,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             }
                         };
                         Ok(format!("{}.{}", base_val, swizzle))
+                    } else if base_ty.array_variant().is_some_and(types::is_array_variant_view) {
+                        Ok(format!("{}[{}]", base_val, index))
                     } else if matches!(
                         types::get_array_variant(base_ty),
                         Some(TypeName::ArrayVariantComposite)
@@ -3418,8 +3425,6 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 // NOT part of the value. Workgroup views are the one exception:
                 // their name isn't in any type, so record it.
                 op::OpTag::StorageView(src) => {
-                    let offset = operands[0];
-                    let len = operands[1];
                     let result_id = inst
                         .result
                         .ok_or_else(|| err_wgsl_at!(self.blame_span(), "StorageView must have a result"))?;
@@ -3429,9 +3434,18 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         };
                         self.workgroup_view_name.insert(result_id, format!("_wg_{}_{}", entry.0, id));
                     }
-                    let offset_expr = self.get_value(offset)?;
-                    let len_expr = self.get_value(len)?;
-                    Ok(format!("vec2<u32>(u32({}), u32({}))", offset_expr, len_expr))
+                    let inherited = matches!(src, op::PureViewSource::Inherited);
+                    let count = operands.len() - usize::from(inherited);
+                    let mut fields = operands[..count]
+                        .iter()
+                        .map(|&value| self.get_value(value).map(|v| format!("u32({v})")))
+                        .collect::<Result<Vec<_>>>()?;
+                    if inherited {
+                        let parent = self.get_value(operands[count])?;
+                        fields[0] = format!("({parent}[0] + {})", fields[0]);
+                    }
+                    let ty = if count == 2 { "vec2<u32>".into() } else { format!("array<u32, {count}>") };
+                    Ok(format!("{ty}({})", fields.join(", ")))
                 }
 
                 op::OpTag::StorageViewLen => {

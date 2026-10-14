@@ -295,6 +295,14 @@ impl Program {
             entries: vec![],
             depth_targets,
         };
+        for i in 0..program.interface.source_results.len() {
+            let pipeline = program.interface.source_results[i].pipeline_index;
+            let mut shape = std::mem::take(&mut program.interface.source_results[i].shape);
+            for dimension in &mut shape {
+                program.resolve_size_sources(pipeline, dimension)?;
+            }
+            program.interface.source_results[i].shape = shape;
+        }
         let order = program
             .interface
             .frame_graph
@@ -661,6 +669,9 @@ impl Program {
             self.interface.source_results.iter().filter(|r| r.entry == entry.name).collect::<Vec<_>>();
         outputs.sort_by_key(|r| r.result);
         for output in outputs {
+            for dimension in &output.shape {
+                dimension.dependencies(&mut dependencies)?;
+            }
             pipelines.insert(output.pipeline_index);
             entry.results.push(self.slot_resource(output.pipeline_index, output.set, output.binding)?);
         }

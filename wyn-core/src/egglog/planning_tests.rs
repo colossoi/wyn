@@ -423,7 +423,6 @@ fn fused_outputs_only_share_a_rectangular_launch_when_inner_shapes_agree() {
 }
 
 #[test]
-#[ignore = "runtime inner rows require a rectangular storage layout"]
 fn rectangular_runtime_dimensions_must_be_uniform_across_outer_coordinates() {
     for (source, expected_rank) in [
         (
@@ -592,5 +591,36 @@ fn selected_map_bindings_replace_callback_discovery() {
             })
             .unwrap();
         to_ssa(program, CodegenTarget::Wgsl).unwrap();
+    }
+}
+
+#[test]
+fn runtime_segmented_collectives_require_uniform_dimensions() {
+    for (source, cooperative) in [
+        (
+            "entry main(xs:[]i32,n:i32) []i32=map(|x|reduce((+),0,map(|y|x+y,iota(n))),xs)",
+            true,
+        ),
+        (
+            "entry main(xs:[]i32,n:i32) [][]i32=map(|x|scan((+),0,map(|y|x+y,iota(n))),xs)",
+            true,
+        ),
+        (
+            "entry main(xs:[]i32) []i32=map(|x|reduce((+),0,iota(x)),xs)",
+            false,
+        ),
+    ] {
+        planned(source, |graph| {
+            let query = Query(graph);
+            query
+                .for_each("MapPlan", |row| {
+                    if query.flag("MapHost", (row[0],))? {
+                        let actual = query.flag("MapCooperative", (row[1],))?;
+                        assert_eq!(actual, cooperative, "{source}");
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        });
     }
 }

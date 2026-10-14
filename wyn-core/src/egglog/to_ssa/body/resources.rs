@@ -47,6 +47,17 @@ impl Body<'_, '_, '_> {
     }
 
     pub(super) fn local(&mut self, scope: Value, source: Value) -> Result<Typed, OptimizeError> {
+        if let Some(formal) = self.compiler.facts.enode("SourceFormal", source) {
+            if let Some(actual) = self.compiler.facts.lookup("SsaCaptureAt", (formal[0], source)) {
+                let Some(context) = self.compiler.facts.lookup("ScalarSourceContext", (actual,)) else {
+                    return Err(error("captured value has no scalar context"));
+                };
+                let old_context = std::mem::replace(&mut self.context, context);
+                let result = self.value(scope, actual);
+                self.context = old_context;
+                return result;
+            }
+        }
         self.planned_boundary(scope, source)?;
         if let Some(access) = self.compiler.facts.access(source) {
             if let Some(fields) = self.compiler.facts.enode("RunCollective", access) {
@@ -139,6 +150,28 @@ impl Body<'_, '_, '_> {
             return Err(error("slice operand has no outer dimension"));
         };
         *dimension = size;
+        if array.ty.array_variant().is_some_and(types::is_array_variant_view) && fields.len() > 4 {
+            let length = self.binary(BinaryOperator::Subtract, end, start.clone())?;
+            let mut operands = vec![start, length];
+            for axis in 1..fields.len() - 3 {
+                let length = self.op(
+                    OpTag::Project {
+                        index: (axis + 1) as u32,
+                    },
+                    vec![array.clone()],
+                    Type::Constructed(TypeName::UInt(32), vec![]),
+                )?;
+                let offset = self.cast(operands[0].clone(), &length.ty)?;
+                operands[0] = self.binary(BinaryOperator::Multiply, offset, length.clone())?;
+                operands.push(length);
+            }
+            operands.push(array);
+            return self.op(
+                OpTag::StorageView(PureViewSource::Inherited),
+                operands,
+                Type::Constructed(TypeName::Array, fields),
+            );
+        }
         self.op(
             OpTag::Intrinsic {
                 id: catalog().known().slice,
@@ -149,7 +182,7 @@ impl Body<'_, '_, '_> {
         )
     }
 
-    fn source_length(&mut self, scope: Value, source: Value) -> Result<Typed, OptimizeError> {
+    pub(super) fn source_length(&mut self, scope: Value, source: Value) -> Result<Typed, OptimizeError> {
         let Some(extent) = self.compiler.facts.view_extent(source) else {
             return Err(error(format!(
                 "array {source:?} has no planned view extent, projection {:?}, type {:?}",
@@ -257,14 +290,25 @@ impl Body<'_, '_, '_> {
         let Some(extent) = extent else {
             return Err(error("selected resource has no planned extent"));
         };
-        let length = self.extent(scope, extent)?;
-        let zero = self.literal("0", &types::i32())?;
         let element = self.compiler.facts.physical_type(element, true)?;
-        let ty = Body::view_type(&element, buffer_tag(binding));
+        let dimensions = match self.compiler.facts.lookup("StorageShape", (backing,)) {
+            Some(shape) => self.compiler.facts.vector(shape)?,
+            None => vec![extent],
+        };
+        let mut operands = vec![Self::number(0)];
+        for extent in &dimensions {
+            operands.push(self.extent(scope, *extent)?);
+        }
+        let mut fields = vec![element, types::array_variant_view()];
+        fields.extend(vec![
+            Type::Constructed(TypeName::SizePlaceholder, vec![]);
+            dimensions.len()
+        ]);
+        fields.push(buffer_tag(binding));
         self.op(
             OpTag::StorageView(PureViewSource::Storage(binding)),
-            vec![zero, length],
-            ty,
+            operands,
+            Type::Constructed(TypeName::Array, fields),
         )
     }
 
@@ -291,6 +335,9 @@ impl Body<'_, '_, '_> {
         scope: Value,
         extent: Value,
     ) -> Result<Typed, OptimizeError> {
+        if let Some(&term) = self.compiler.program.stage.selected.extents.get(&extent) {
+            return self.scalar_body(scope, term);
+        }
         let Some((name, children)) = self.compiler.facts.extent(extent) else {
             return Err(error("unknown extent"));
         };
@@ -304,7 +351,13 @@ impl Body<'_, '_, '_> {
                 if name == "Length" {
                     self.source_length(scope, source)
                 } else {
-                    self.value(scope, source)
+                    let Some(context) = self.compiler.facts.lookup("ScalarSourceContext", (source,)) else {
+                        return Err(error("extent has no scalar context"));
+                    };
+                    let old_context = std::mem::replace(&mut self.context, context);
+                    let result = self.value(scope, source);
+                    self.context = old_context;
+                    result
                 }
             }
             "Stored" => {

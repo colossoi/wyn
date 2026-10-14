@@ -43,8 +43,7 @@ impl Program {
         };
         let support = parse_file(include_str!("rust_support.rs"))?;
         let arithmetic = parse_file(include_str!("arithmetic.rs"))?;
-        let mut result_types = parse_file(include_str!("results.rs"))?;
-        result_types.items.retain(|item| !matches!(item, Item::Impl(_)));
+        let result_types = parse_file(include_str!("results.rs"))?;
         let result_types = result_types.items;
         let output_types = parse_file(include_str!("rust_output.rs"))?;
         let mut context = RustContext::default();
@@ -214,7 +213,7 @@ impl Program {
         Ok(rename_identifiers(tokens, &replacements))
     }
 
-    fn rust_expr(&self, expr: &Expr, entry: &Entry) -> Result<TokenStream, HostError> {
+    pub(crate) fn rust_expr(&self, expr: &Expr, entry: &Entry) -> Result<TokenStream, HostError> {
         Ok(match expr {
             Expr::Scalar(value) => {
                 let value = crate::scalar_emit::rust_scalar(value, &|source| {

@@ -157,6 +157,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         // evaluation still occurs at the current control/effect position.
         let value = {
             match name {
+                "ScalarLength" => self.source_length(scope, selected.values[fields[2]])?,
                 "ScalarLeaf" => {
                     let source = selected.values[fields[2]];
                     // A source boundary can have its own optimized root in this
@@ -193,6 +194,12 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                 "ScalarInstruction" => {
                     let mut arguments = self.arguments(scope, fields[4])?;
                     let tag = selected.operator(fields[3], arguments.len())?;
+                    if matches!(tag, OpTag::Intrinsic {id, ..} if id == catalog().known().length) {
+                        let [array] = arguments.as_slice() else {
+                            return Err(error("length requires one array"));
+                        };
+                        return self.length(array.clone());
+                    }
                     if matches!(tag, OpTag::Intrinsic { id, .. }
                         if id == catalog().known().array_with
                             || id == catalog().known().array_with_in_place)

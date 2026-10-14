@@ -444,6 +444,13 @@ impl Program {
             )?;
             if let Some(result) = source_result {
                 write!(out, " :value-layout {}", result.layout.to_whl())?;
+                if !result.shape.is_empty() {
+                    write!(
+                        out,
+                        " :shape ({})",
+                        result.shape.iter().map(Expr::to_whl).collect::<Result<Vec<_>, _>>()?.join(" ")
+                    )?;
+                }
             }
             if entry.inputs.contains(&id) {
                 write!(out, " :alias {}", resource(id))?;

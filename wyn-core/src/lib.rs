@@ -526,6 +526,13 @@ fn adapt_host_interface_for_wgsl(
         for value in values {
             value.reads_mut(&mut |source, offset| legalize(source, offset, None));
         }
+        for result in
+            descriptor.source_results.iter_mut().filter(|result| result.pipeline_index == pipeline_index)
+        {
+            for dimension in &mut result.shape {
+                dimension.reads_mut(&mut |source, offset| legalize(source, offset, None));
+            }
+        }
         for binding in &mut compute.bindings {
             if let Binding::StorageBuffer {
                 length: Some(length), ..

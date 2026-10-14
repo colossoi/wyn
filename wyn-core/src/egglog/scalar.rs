@@ -24,6 +24,8 @@ pub(super) use selected::Selected;
 const RULES: &str = concat!(
     include_str!("scalar/schema.egg"),
     "\n",
+    include_str!("scalar/extents.egg"),
+    "\n",
     include_str!("scalar/analysis.egg"),
     "\n",
     include_str!("scalar/inline.egg"),
@@ -82,6 +84,23 @@ pub(super) fn run(
                         | "SourceRegionReadOnly"
                         | "FusionSource"
                         | "Joined"
+                        | "LengthType"
+                        | "Fixed"
+                        | "Length"
+                        | "Scalar"
+                        | "Product"
+                        | "Difference"
+                        | "CallExtent"
+                        | "RectangularExtent"
+                        | "ExtentUniform"
+                        | "ExtentEdge"
+                        | "ExtentBinding"
+                        | "ExtentSource"
+                        | "PlanCallee"
+                        | "SourceCapture"
+                        | "SourceLength"
+                        | "SourceParameterRegion"
+                        | "SourceParameterIndex"
                 )
             {
                 scalars.clear_function(&name)?;
@@ -99,6 +118,7 @@ pub(super) fn run(
             }))
         })?
     })?;
+    scalars.parse_and_run_program(None, "(run-schedule (saturate scalar-extent-sources) (saturate scalar-extents) (saturate (seq scalar-substitute scalar-arguments)))")?;
     timing::time("egglog scalar / fixed point", || scalars.run_program(schedule))?;
     timing::time("egglog scalar / effect summaries", || {
         scalars.parse_and_run_program(None, "(run-schedule (saturate scalar-effects))")

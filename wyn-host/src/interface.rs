@@ -30,6 +30,8 @@ pub struct SourceResultBinding {
     pub name: String,
     pub kind: ResultKind,
     pub layout: ResultLayout,
+    /// Row-major dimensions for a flat rectangular allocation; empty for a static layout.
+    pub shape: Vec<Expr>,
     pub result: usize,
     pub pipeline_index: usize,
     pub set: u32,

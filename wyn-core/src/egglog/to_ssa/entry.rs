@@ -268,7 +268,7 @@ fn write_outputs(
                 Body::view_type(&element, buffer_tag(binding)),
             )?;
             if value.ty.is_array() {
-                lower.copy_array(view, value, len)?;
+                lower.copy_array(view, value, len, &[])?;
             } else {
                 let value = lower.cast(value, &element)?;
                 let (place, _) = lower.index_place(view, zero)?;
@@ -316,18 +316,9 @@ fn copy_results<'source>(
             let (source, ty, resource) = lower.compiler.facts.output(id)?;
             if ty.is_array() || types::as_soa_tuple(ty).is_some() {
                 let (array, fields) = lower.source_array(scope, source)?;
-                let length = lower.length(array.clone())?;
                 let destination = lower.resource(scope, resource, 2)?;
-                let zero = lower.literal("0", &types::i32())?;
-                let one = lower.literal("1", &types::i32())?;
-                lower.counted(zero, length, one, vec![], |lower, index, _| {
-                    let mut value = lower.index(array, index.clone())?;
-                    for field in fields {
-                        value = lower.field(value, field)?;
-                    }
-                    lower.store(destination, index, value)?;
-                    Ok(vec![])
-                })?;
+                let length = lower.length(array.clone())?;
+                lower.copy_array(destination, array, length, &fields)?;
             } else {
                 let value = lower.value(scope, source)?;
                 let destination = lower.resource(scope, resource, 2)?;

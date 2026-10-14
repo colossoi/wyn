@@ -66,7 +66,7 @@ impl Body<'_, '_, '_> {
                     return Err(error("local destination missing"));
                 };
                 let n = self.length(initial.clone())?;
-                self.copy_array(output, initial, n)?;
+                self.copy_array(output, initial, n, &[])?;
             }
         }
         kernels::emit(self, scope, owner, "ordered", domain, 1)?;

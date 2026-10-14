@@ -103,6 +103,9 @@ impl<'a, 'source> Lower<'a, 'source> {
                 return self.extent(bound);
             }
         }
+        if let Some(&term) = self.facts.program.stage.selected.extents.get(&extent) {
+            return self.term(term);
+        }
         if let Some(fields) = self.facts.enode("Fixed", extent) {
             return Ok(ScalarExpr::I32(
                 i32::try_from(self.facts.integer(fields[0]))
@@ -392,6 +395,7 @@ impl<'a, 'source> Lower<'a, 'source> {
             return Err(error("host expression type missing").into());
         };
         let value = match name {
+            "ScalarLength" => self.length(selected.values[f[2]])?,
             "ScalarLeaf" | "ScalarExecute" => self.boundary(context, selected.values[f[2]])?,
             "ScalarParameter" => {
                 let Some(source) = self.facts.parameter(selected.values[f[2]], selected.integer(f[3])?)

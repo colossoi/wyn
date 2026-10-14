@@ -19,7 +19,7 @@ use crate::interface::{DrawBufferOperand, SourceResult};
 use crate::ssa::types::EntryPoint;
 use crate::tlc::extract_lambda_params_ref;
 use crate::tlc::DefMeta;
-use crate::types::{strip_existentials, Type, TypeName};
+use crate::types::{self, strip_existentials, Type, TypeName};
 use crate::BindingRef;
 use crate::ResourceAccess;
 use crate::{EntryId, LookupMap, SymbolId};
@@ -376,12 +376,32 @@ fn publish_results(
             } else {
                 vec![SourceResult { index, name, kind }]
             };
+            let (layout, shape) = if let Some(shape) = compiler.facts.lookup("StorageShape", (backing,)) {
+                let Some((_, element, _)) = compiler.bindings.buffer(backing)? else {
+                    return Err(error("rectangular output allocation missing"));
+                };
+                let shape = compiler
+                    .facts
+                    .vector(shape)?
+                    .into_iter()
+                    .map(|extent| sizes::extent(compiler, extent))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let layout = result_layout(&types::view_array_with_size(
+                    element,
+                    Type::Constructed(TypeName::SizePlaceholder, vec![]),
+                    types::no_buffer(),
+                ));
+                (layout, shape)
+            } else {
+                (result_layout(ty), vec![])
+            };
             for result in results {
                 module.source_results.push(SourceResultBinding {
                     entry: declaration.source_entry.as_ref().map_or(&declaration.name, |s| &s.name).clone(),
                     name: result.name,
                     kind: result.kind,
-                    layout: result_layout(ty),
+                    layout: layout.clone(),
+                    shape: shape.clone(),
                     result: result.index,
                     pipeline_index,
                     set: binding.set,

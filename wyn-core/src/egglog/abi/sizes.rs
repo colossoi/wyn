@@ -119,6 +119,11 @@ pub(in crate::egglog) fn extent(compiler: &Compiler<'_, '_>, key: Value) -> Resu
     if let Some(bound) = compiler.facts.lookup("HostBound", (key,)) {
         return extent(compiler, bound);
     }
+    if let Some(&term) = compiler.program.stage.selected.extents.get(&key) {
+        return Ok(Expr::Scalar(
+            host::selected(compiler.program, term).map_err(|e| e.required("allocation extent"))?,
+        ));
+    }
     let Some((name, children)) = compiler.facts.extent(key) else {
         return Err(error("host extent missing"));
     };
