@@ -75,7 +75,7 @@
        (= value (SourceOperationValue (OperationId op))) (= (SourceDevice value) true)
        (= legal (SourceDuplicable value)) (= cheap (SourceOperationCheap (OperationId op)))
        (= (and legal cheap) false))
-      ((ScalarGroupCandidate (OperationId op)) (set (IsScalarGroupCandidate (OperationId op)) true)) :ruleset scalar-windows)
+      ((set (IsScalarGroupCandidate (OperationId op)) true)) :ruleset scalar-windows)
 
 ; The source summary keeps mutable reads and speculation restrictions separate
 ; from work. Completed effect and collective proofs must also permit duplication.

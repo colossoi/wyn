@@ -231,7 +231,7 @@ fn flat_and_ranked_collectives_share_dimension_metadata() {
             );
             let extent = query.required("SourceDomainExtent", (operation,)).unwrap();
             assert_eq!(
-                graph.value_to_base::<i64>(query.required("LocalCapacity", (extent,)).unwrap()),
+                graph.value_to_base::<i64>(query.required("StaticCapacityBound", (extent,)).unwrap()),
                 count
             );
             for axis in 0..rank {
@@ -419,13 +419,13 @@ fn rectangular_maps_expand_launch_without_expanding_row_capacity() {
                     flattened += 1;
                     let launch = query.required("MapLaunch", (keys[0],))?;
                     assert_eq!(
-                        graph.value_to_base::<i64>(query.required("LocalCapacity", (launch,))?),
+                        graph.value_to_base::<i64>(query.required("StaticCapacityBound", (launch,))?),
                         12
                     );
                     let outer = query.required("MapLaunchAxis", (keys[0], 0i64))?;
                     assert_eq!(query.required("InputDomain", (keys[0],))?, outer);
                     assert_eq!(
-                        graph.value_to_base::<i64>(query.required("LocalCapacity", (outer,))?),
+                        graph.value_to_base::<i64>(query.required("StaticCapacityBound", (outer,))?),
                         4
                     );
                 }

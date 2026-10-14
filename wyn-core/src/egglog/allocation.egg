@@ -28,7 +28,7 @@
       ((set (HostBound (Stored count)) capacity)) :ruleset allocation)
 (rule ((= grid (PhaseGrid stage)) (= grid (FixedGrid x y z)))
       ((set (LaunchGrid stage) grid)) :ruleset allocation)
-(rule ((PhaseDomain stage extent width) (= count (LocalCapacity extent)) (= (PhaseGrid stage) (AutomaticGrid)))
+(rule ((PhaseDomain stage extent width) (= count (StaticCapacityBound extent)) (= (PhaseGrid stage) (AutomaticGrid)))
       ((set (LaunchGrid stage) (FixedGrid (min 65535 (max 1 (/ (+ count (- width 1)) width))) 1 1))) :ruleset readout)
 (rule ((ScalarValue op))
       ((ResultSlot op 0)

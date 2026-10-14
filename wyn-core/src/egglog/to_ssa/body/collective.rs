@@ -22,24 +22,19 @@ impl Body<'_, '_, '_> {
         let Some(domain) = self.compiler.facts.domain(owner) else {
             return Err(error("local domain missing"));
         };
-        let mut allocations = Vec::new();
-        self.compiler.program.graph.constructor_enodes("LocalBuffer", |row| {
-            if row.children[0] == owner {
-                allocations.push(row.children.to_vec());
-            }
-        })?;
-        for fields in allocations {
-            let role = self.compiler.program.graph.value_to_base::<S>(fields[1]).to_string();
-            let index = self.compiler.facts.integer(fields[2]);
+        let allocations = self.compiler.local_buffers.get(&owner).cloned().unwrap_or_default();
+        for [role, index, element, extent] in allocations {
+            let role = self.compiler.program.graph.value_to_base::<S>(role).to_string();
+            let index = self.compiler.facts.integer(index);
             let Some(resource) = self.compiler.facts.slot(owner, &role, index) else {
                 return Err(error("local slot missing"));
             };
-            let Some(n) = self.compiler.facts.lookup("PhysicalLocalCapacity", (fields[4],)) else {
+            let Some(n) = self.compiler.facts.lookup("PhysicalLocalCapacity", (extent,)) else {
                 return Err(error(format!("local slot {role} has no planned static capacity")));
             };
             let n = usize::try_from(self.compiler.facts.integer(n))
                 .map_err(|_| error("invalid local capacity"))?;
-            let Some(element) = self.compiler.facts.ty(fields[3]) else {
+            let Some(element) = self.compiler.facts.ty(element) else {
                 return Err(error("local element missing"));
             };
             let ty = types::sized_array(n, self.compiler.facts.physical_type(element, false)?);

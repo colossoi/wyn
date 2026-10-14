@@ -7,7 +7,7 @@
        (set (DirectInputs (Group op)) (set-empty)) (set (SelfUses (Group op)) (set-empty))
        (set (InputUses (Group op)) (set-empty)) (set (GroupUsesOf (Group op)) (set-empty))
        (set (GroupLengths (Group op)) (set-empty)) (set (ValidLengths (Group op)) (set-empty))
-       (set (LengthTypes (Group op)) (set-empty)) (set (GroupInputs (Group op)) (set-empty))
+       (set (GroupInputs (Group op)) (set-empty))
        (set (InternalInputs (Group op)) (set-empty))) :ruleset source-fusion)
 (relation SourceScrema (OperationKey))
 (rule ((SourceOperation op r "map")) ((SourceScrema op)) :ruleset source-fusion)
@@ -56,7 +56,5 @@
       ((ElementPlan (FusionSource op))) :ruleset source-fusion)
 
 (rule ((= value (SourceOperationValue consumer)) (= array (SourceLength value))
-       (= (Identity array) (Identity source)) (= source (SourceOperationValue producer))
-       (= (SourceType value) (TypeId ty)))
-      ((set (ValidLengths (Group producer)) (set-of (UseAt consumer (LengthUse))))
-       (set (LengthTypes (Group producer)) (set-of ty))) :ruleset source-fusion)
+       (= (Identity array) (Identity source)) (= source (SourceOperationValue producer)))
+      ((set (ValidLengths (Group producer)) (set-of (UseAt consumer (LengthUse))))) :ruleset source-fusion)

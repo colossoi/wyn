@@ -164,8 +164,7 @@
        (= (PrePure a) true)
        (= (PredicatePure a) true)
        (= (PostPure a) true)
-       (= (set-diff (GroupLengths p) (SelfUses p)) (set-diff (ValidLengths p) (SelfUses p)))
-       (<= (set-length (LengthTypes p)) 1))
+       (= (set-diff (GroupLengths p) (SelfUses p)) (set-diff (ValidLengths p) (SelfUses p))))
       ((MaskablePlan n p)) :ruleset fusion-candidates)
 ; Mask reductions and share one count among all direct length observers.
 (rule ((Pair n p a c b)

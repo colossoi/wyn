@@ -32,12 +32,22 @@ pub(super) fn lower(
     let facts = Facts { program };
     let placements = Placement::new(program)?;
     let evaluations = Evaluation::new(program, &placements)?;
+    let mut local_buffers = LookupMap::<_, Vec<_>>::default();
+    program.graph.constructor_enodes("LocalBuffer", |row| {
+        local_buffers.entry(row.children[0]).or_default().push([
+            row.children[1],
+            row.children[2],
+            row.children[3],
+            row.children[4],
+        ]);
+    })?;
     let mut compiler = Compiler {
         program,
         facts,
         bindings: super::abi::bindings::Bindings::new(program)?,
         placements,
         evaluations,
+        local_buffers,
         entry_origins: LookupMap::default(),
         entry_names: Default::default(),
         functions: Vec::new(),
@@ -97,6 +107,7 @@ pub(super) fn lower(
 pub(super) struct Compiler<'a, 'source> {
     placements: Placement,
     evaluations: Evaluation,
+    local_buffers: LookupMap<Value, Vec<[Value; 4]>>,
     pub(super) program: &'a Program<'source, Optimized>,
     pub(super) facts: Facts<'a, 'source>,
     pub(super) bindings: super::abi::bindings::Bindings<'a, 'source>,
