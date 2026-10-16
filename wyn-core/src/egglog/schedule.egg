@@ -153,22 +153,21 @@
 (rule ((IndexedWrite op true) (Phase (Stage op "offsets") r))
       ((Produces (Stage op "offsets") (Result op 0))) :ruleset schedule)
 
-; Scratch is a recipe result with ordinary producers, consumers, and capacity.
-(relation Scratch (OperationKey String i64 Extent))
+; Temporary recipe results have ordinary producers, consumers, and capacity.
 (rule ((Accumulator op i t role slot source) (= groups (CollectiveGroups op)) (Phase (Stage op "chunks") r))
-      ((Scratch op "partial" i (Fixed groups))
+      ((set (CapacityExtent (Temporary op "partial" i)) (Fixed groups))
        (ElementType (Temporary op "partial" i) t)
        (Produces (Stage op "chunks") (Temporary op "partial" i))
        (Needs (Stage op "combine") (Temporary op "partial" i))) :ruleset schedule)
 (rule ((Accumulator op state t "scan" i source) (= n (InputDomain op)) (= groups (CollectiveGroups op)) (Phase (Stage op "offsets") r))
-      ((Scratch op "prefix" i n) (Scratch op "offset" i (Fixed groups))
+      ((set (CapacityExtent (Temporary op "prefix" i)) n) (set (CapacityExtent (Temporary op "offset" i)) (Fixed groups))
        (ElementType (Temporary op "prefix" i) t) (ElementType (Temporary op "offset" i) t)
        (Produces (Stage op "chunks") (Temporary op "prefix" i))
        (Produces (Stage op "combine") (Temporary op "offset" i))
        (Needs (Stage op "offsets") (Temporary op "prefix" i))
        (Needs (Stage op "offsets") (Temporary op "offset" i))) :ruleset schedule)
-(rule ((Scratch op name i n))
-      ((FreshValue (Temporary op name i)) (set (CapacityExtent (Temporary op name i)) n)) :ruleset schedule)
+(rule ((= value (Temporary op name i)) (= n (CapacityExtent value)))
+      ((FreshValue value)) :ruleset schedule)
 
 ; Invocation-local allocations are recipe outputs, without dispatches or shared storage.
 (rule ((Site op r) (DeviceRegion r)) ((DeviceOperation op)) :ruleset schedule)

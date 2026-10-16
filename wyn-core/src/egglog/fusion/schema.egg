@@ -17,7 +17,7 @@
 (constructor SourceDomain (OperationKey) Domain)
 (relation Current (FusionGroup FusionPlan))
 (function Owner (FusionPlan) OperationKey :no-merge)
-(function Scope (FusionPlan) RegionKey :no-merge)
+(function PlanScope (FusionPlan) RegionKey :no-merge)
 ; Eligibility uses output presence and counts; composition records result slots.
 (function HasScans (FusionPlan) bool :no-merge)
 (function HasReductions (FusionPlan) bool :no-merge)

@@ -6,7 +6,7 @@
 (ruleset map-launch)
 (function MapHost (FusionPlan) bool :merge (or old new))
 (rule ((Current group plan)) ((set (MapHost plan) false)) :ruleset map-types)
-(rule ((Current group plan) (= scope (Scope plan)) (HostRegion scope)) ((set (MapHost plan) true)) :ruleset map-types)
+(rule ((Current group plan) (= scope (PlanScope plan)) (HostRegion scope)) ((set (MapHost plan) true)) :ruleset map-types)
 (relation MapPlan (FusionPlan OperationKey Extent))
 (relation MapCandidate (SourceValue FusionPlan OperationKey RegionKey))
 (rule ((Current group plan) (ScremaPlan plan) (= (HasScans plan) false) (= (HasReductions plan) false)

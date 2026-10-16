@@ -54,7 +54,7 @@
       ((set (MapArguments plan op (+ i 1)) (vec-push args input))) :ruleset map-bindings)
 (rule ((MapBindingContinue value axis rank cooperative) (< axis rank)
        (= op (SourceValueOperation value)) (= plan (SelectedPlan op)) (= (PlanMapping op) true)
-       (= caller (Scope plan)) (= body (PlanCallback op)) (= result (SourceResult body))
+       (= caller (PlanScope plan)) (= body (PlanCallback op)) (= result (SourceResult body))
        (= count (PlanInputCount op)) (= args (MapArguments plan op count))
        (= bindings (MapBindings result (+ axis 1) rank cooperative)))
       ((set (MapBindings value axis rank cooperative) (MapIndexBinding caller body plan args axis bindings))) :ruleset map-bindings)

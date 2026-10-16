@@ -642,6 +642,53 @@ fn rectangular_runtime_dimensions_must_be_uniform_across_outer_coordinates() {
 }
 
 #[test]
+fn segment_callback_blockers_cover_every_output_of_a_fused_plan() {
+    let tlc =
+        compile_thru_tlc("entry main(xs:[17]i32) (i32,i32)=(reduce((+),0,xs),reduce((*),1,xs))").unwrap();
+    for blocked in [false, true] {
+        let mut program = place(
+            fuse(from_tlc(&tlc).unwrap()).unwrap(),
+            PipelineTopologyPolicy::AllowGenerated,
+        )
+        .unwrap();
+        let reducers = operations(&program.graph, "reduce");
+        assert_eq!(reducers.len(), 2);
+        let query = Query(&program.graph);
+        let plan = query.required("SelectedPlan", (reducers[0],)).unwrap();
+        assert_eq!(plan, query.required("SelectedPlan", (reducers[1],)).unwrap());
+        let callback = query.required("PlanCallback", (reducers[0],)).unwrap();
+        let values: Vec<_> = reducers
+            .iter()
+            .map(|&reducer| query.required("SourceOperationValue", (reducer,)).unwrap())
+            .collect();
+        program
+            .graph
+            .update(|mut sink| {
+                // Request both results independently, as outer map traversal would.
+                for &value in &values {
+                    sink.add("RectangularDemand", (value,))?;
+                    sink.add("SegmentDemand", (value, 0i64))?;
+                }
+                if blocked {
+                    sink.set("SourceRegionDuplicable", (callback,), false)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let program = schedule(program).unwrap();
+        let query = Query(&program.graph);
+        assert_eq!(query.flag("SegmentPlanBlocked", (plan,)).unwrap(), blocked);
+        for value in values {
+            assert_eq!(query.required("SegmentCandidatePlan", (value,)).unwrap(), plan);
+            assert_eq!(
+                query.lookup("SegmentTerminal", (value, 0i64)).unwrap().is_some(),
+                !blocked
+            );
+        }
+    }
+}
+
+#[test]
 fn segmented_collectives_select_workgroups_for_each_outer_coordinate() {
     for source in [
         "entry main(xs:[][513]i32) []i32=map(|row|reduce((+),0,row),xs)",

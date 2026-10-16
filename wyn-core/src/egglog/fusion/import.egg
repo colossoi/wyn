@@ -2,7 +2,7 @@
 (ruleset source-fusion)
 (rule ((SourceOperation op region kind))
       ((Current (Group op) (FusionSource op)) (Member (Group op) op)
-       (set (Owner (FusionSource op)) op) (set (Scope (FusionSource op)) region)
+       (set (Owner (FusionSource op)) op) (set (PlanScope (FusionSource op)) region)
        (set (IterationDomain (FusionSource op)) (SourceDomain op))
        (set (DirectInputs (Group op)) (set-empty)) (set (SelfUses (Group op)) (set-empty))
        (set (InputUses (Group op)) (set-empty)) (set (GroupUsesOf (Group op)) (set-empty))

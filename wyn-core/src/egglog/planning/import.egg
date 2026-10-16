@@ -4,7 +4,7 @@
 (relation AllowGeneratedTopology ())
 (relation AuthoredTopology ())
 (relation PlannedOperation (OperationKey OperationKey FusionPlan RegionKey))
-(rule ((Current group plan) (= owner (Owner plan)) (= region (Scope plan)) (PlanMember plan original))
+(rule ((Current group plan) (= owner (Owner plan)) (= region (PlanScope plan)) (PlanMember plan original))
       ((PlannedOperation original owner plan region) (Site owner region)) :ruleset planning-import)
 (rule ((SourceOriginalEntry entry region compute)) ((SourceEntry entry region compute)) :ruleset planning-import)
 (rule ((SourceOriginalEntry entry region true) (AllowGeneratedTopology)) ((HostRoot entry region)) :ruleset planning-import)

@@ -115,9 +115,9 @@
       ((set (BufferSlot op "output" 0) (Result op 0)) (set (BufferSlot op "length" 0) (Result op 1))) :ruleset allocation)
 (rule ((BucketResult op e))
       ((set (BufferSlot op "counts" 0) (Result op 1)) (set (BufferSlot op "overflow" 0) (Result op 2))) :ruleset allocation)
-(rule ((Scratch op name i n))
-      ((set (BufferSlot op name i) (Temporary op name i))
-       (set (LiveLength (Temporary op name i)) n)) :ruleset allocation)
+(rule ((= value (Temporary op name i)) (= n (CapacityExtent value)))
+      ((set (BufferSlot op name i) value)
+       (set (LiveLength value) n)) :ruleset allocation)
 
 (rule ((UninitializedResult op i t n))
       ((ElementType (Result op i) t) (set (CapacityExtent (Result op i)) n)
