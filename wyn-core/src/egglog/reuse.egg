@@ -96,7 +96,7 @@
        (Requires (InStage reader) alias) (!= reader writer))
       ((ReuseRead writer e (InStage reader))) :ruleset reuse)
 (rule ((ReuseAlias writer e alias)
-       (ScalarContentNeed (Stage op "scalar") alias) (!= (Stage op "scalar") writer))
+       (DispatchGroupContentNeed (Stage op "scalar") alias) (!= (Stage op "scalar") writer))
       ((ReuseRead writer e (InStage (Stage op "scalar")))) :ruleset reuse)
 (rule ((ReuseAlias writer e alias) (Requires (InOperation op) alias))
       ((ReuseRead writer e (InOperation op))) :ruleset reuse)

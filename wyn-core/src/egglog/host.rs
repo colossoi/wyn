@@ -12,7 +12,7 @@ pub(super) struct Capture {
 pub(super) fn prepare(program: &mut Program<'_, Optimized>) -> Result<(), OptimizeError> {
     let selected = &program.stage.selected;
     let mut captures = crate::LookupMap::<egglog_engine::TermId, Capture>::default();
-    super::query::Query(&program.stage.scalars).for_each("ScalarPhaseSource", |row| {
+    super::query::Query(&program.stage.scalars).for_each("HostEvalPhaseRoot", |row| {
         let Some(&root) = selected.roots.get(&(row[1], row[2])) else {
             return Err(OptimizeError::Output("phase scalar root missing".into()));
         };
@@ -30,7 +30,7 @@ pub(super) fn prepare(program: &mut Program<'_, Optimized>) -> Result<(), Optimi
                 continue;
             }
             if super::query::Query(&program.stage.scalars)
-                .contains("ScalarPreferHost", (selected.values[term],))?
+                .contains("HostEvalPreferred", (selected.values[term],))?
             {
                 if let Some(ty) =
                     (Facts { program }).ty(selected.values[fields[1]]).and_then(lower::scalar_type)

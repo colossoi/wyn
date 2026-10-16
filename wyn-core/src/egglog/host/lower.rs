@@ -136,7 +136,7 @@ impl<'a, 'source> Lower<'a, 'source> {
         }
         if let Some(fields) = self.facts.enode("Scalar", extent) {
             let source = fields[0];
-            let Some(context) = self.facts.lookup("ScalarSourceContext", (source,)) else {
+            let Some(context) = self.facts.lookup("ExprContextForSource", (source,)) else {
                 return Err(error("host extent has no selected scalar context").into());
             };
             return self.source(context, source);
@@ -224,7 +224,7 @@ impl<'a, 'source> Lower<'a, 'source> {
         }
         if let Some(formal) = self.facts.enode("SourceFormal", source) {
             if let Some(actual) = self.facts.lookup("SsaCaptureAt", (formal[0], source)) {
-                let Some(context) = self.facts.lookup("ScalarSourceContext", (actual,)) else {
+                let Some(context) = self.facts.lookup("ExprContextForSource", (actual,)) else {
                     return Err(error("host capture context missing").into());
                 };
                 return self.source(context, actual);
@@ -400,16 +400,16 @@ impl<'a, 'source> Lower<'a, 'source> {
             return Err(error("host expression type missing").into());
         };
         let value = match name {
-            "ScalarLength" => self.length(selected.values[f[2]])?,
-            "ScalarLeaf" | "ScalarExecute" => self.boundary(context, selected.values[f[2]])?,
-            "ScalarParameter" => {
+            "ExprLength" => self.length(selected.values[f[2]])?,
+            "ExprLeaf" | "ExprExecute" => self.boundary(context, selected.values[f[2]])?,
+            "ExprParameter" => {
                 let Some(source) = self.facts.parameter(selected.values[f[2]], selected.integer(f[3])?)
                 else {
                     return Err(error("selected host parameter missing").into());
                 };
                 self.boundary(context, source)?
             }
-            "ScalarLiteral" => {
+            "ExprLiteral" => {
                 let text = selected.text(f[2])?;
                 let malformed = || error("invalid selected host literal");
                 match scalar_type(ty) {
@@ -420,7 +420,7 @@ impl<'a, 'source> Lower<'a, 'source> {
                     None => return Err(Error::Unsupported),
                 }
             }
-            "ScalarUnary" | "ScalarBinary" | "ScalarOp" => {
+            "ExprUnary" | "ExprBinary" | "ExprOp" => {
                 let terms = selected.operation_arguments(term)?;
                 let Some(&first) = terms.first() else {
                     return Err(error("host operation has no operands").into());
@@ -439,14 +439,14 @@ impl<'a, 'source> Lower<'a, 'source> {
                     terms.into_iter().map(|term| self.term(term)).collect::<Result<_>>()?,
                 )
             }
-            "ScalarTuple" | "ScalarVector" => ScalarExpr::Tuple(
+            "ExprTuple" | "ExprVector" => ScalarExpr::Tuple(
                 selected.arguments(f[2])?.into_iter().map(|term| self.term(term)).collect::<Result<_>>()?,
             ),
-            "ScalarProject" => field(
+            "ExprProject" => field(
                 self.term(f[2])?,
                 usize::try_from(selected.integer(f[3])?).map_err(|_| error("invalid host field index"))?,
             ),
-            "ScalarCoerce" => {
+            "ExprCoerce" => {
                 let (_, operand) = selected.app(f[2])?;
                 let Some(from) = self.facts.ty(selected.values[operand[1]]) else {
                     return Err(error("host conversion type missing").into());
@@ -460,12 +460,12 @@ impl<'a, 'source> Lower<'a, 'source> {
                     apply(&format!("to-{}", to.name()), from, vec![self.term(f[2])?])
                 }
             }
-            "ScalarChoice" => ScalarExpr::If {
+            "ExprChoice" => ScalarExpr::If {
                 condition: Box::new(self.term(f[2])?),
                 yes: Box::new(self.scope(|lower| lower.term(f[3]))?),
                 no: Box::new(self.scope(|lower| lower.term(f[4]))?),
             },
-            "ScalarCall" | "ScalarInvoke" if self.capacity_bounds => {
+            "ExprCall" | "ExprInvoke" if self.capacity_bounds => {
                 let callee = selected.values[f[f.len() - 2]];
                 let arguments = selected
                     .arguments(f[f.len() - 1])?
@@ -483,8 +483,8 @@ impl<'a, 'source> Lower<'a, 'source> {
                     lower.region(callee)
                 })?
             }
-            "ScalarCall" | "ScalarInvoke" => return Err(Error::Unsupported),
-            "ScalarInstruction" => {
+            "ExprCall" | "ExprInvoke" => return Err(Error::Unsupported),
+            "ExprInstruction" => {
                 let Some(array) = self.facts.lookup("SourceLength", (selected.values[f[2]],)) else {
                     return Err(Error::Unsupported);
                 };

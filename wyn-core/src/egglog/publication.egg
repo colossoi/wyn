@@ -65,11 +65,11 @@
        (= (RootReadOnly root) false))
       ((set (RootBindingAccess root binding) flags)) :ruleset publication-access)
 
-(rule ((ScalarGroup op leader) (Phase (Stage leader "scalar") region)
+(rule ((DispatchGroupLeader op leader) (Phase (Stage leader "scalar") region)
        (= source (SourceOperationValue op)) (= readonly (SourceReadOnly source)))
       ((set (RootReadOnly (KernelRoot (Stage leader "scalar"))) readonly)
        (RootValueUse (KernelRoot (Stage leader "scalar")) source)) :ruleset publication-uses)
-(rule ((ScalarGroup op leader) (Phase (Stage leader "scalar") region) (SourceOperand op source))
+(rule ((DispatchGroupLeader op leader) (Phase (Stage leader "scalar") region) (SourceOperand op source))
       ((RootValueUse (KernelRoot (Stage leader "scalar")) source)) :ruleset publication-uses)
 (rule ((RootValueUse root value) (SourceComputedUse value child))
       ((RootValueUse root child)) :ruleset publication-uses)

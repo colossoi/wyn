@@ -46,7 +46,7 @@
 (rule ((FilterPlan plan) (PlanMember plan op) (SourceOperation op region "filter"))
       ((set (SsaFilter plan) op)) :ruleset ssa-access)
 (function SsaScalarGroup (OperationKey) SsaOperations :merge (set-union old new))
-(rule ((ScalarGroup o owner)) ((set (SsaScalarGroup owner) (set-of o))) :ruleset ssa-access)
+(rule ((DispatchGroupLeader o owner)) ((set (SsaScalarGroup owner) (set-of o))) :ruleset ssa-access)
 (function SsaDependencies (StageKey) SsaStages :merge (set-union old new))
 (rule ((DispatchDependency before after)) ((set (SsaDependencies after) (set-of before))) :ruleset ssa-access)
 (run-schedule (run ssa-access))

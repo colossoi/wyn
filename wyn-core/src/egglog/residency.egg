@@ -1,25 +1,25 @@
 ; Only host invocations create launches; scalar callbacks stay invocation-local.
 ; Classify opaque scalar subtrees before deriving host regions and phases.
 (rule ((Site op r))
-      ((set (ContainsCollective op) false) (set (ScalarBoundary op) false) (set (HostLoopCandidate op) false)) :ruleset structure)
+      ((set (ContainsCollective op) false) (set (InvocationBoundary op) false) (set (HostLoopCandidate op) false)) :ruleset structure)
 (rule ((Site child r) (= true (ContainsCollective child)) (Enters parent r))
       ((set (ContainsCollective parent) true)) :ruleset structure)
 (rule ((Site op r) (= true (ContainsCollective op))) ((SplitRegion r)) :ruleset structure)
-(rule ((ScalarCandidate op) (= false (ContainsCollective op)))
-      ((set (ScalarBoundary op) true)) :ruleset classify)
-(rule ((HostRegion r) (Site op r) (ScalarCandidate op) (= false (ContainsCollective op)) (= (Rematerialize op) false))
-      ((ScalarValue op)) :ruleset residency)
+(rule ((InvocationScalarCandidate op) (= false (ContainsCollective op)))
+      ((set (InvocationBoundary op) true)) :ruleset classify)
+(rule ((HostRegion r) (Site op r) (InvocationScalarCandidate op) (= false (ContainsCollective op)) (= (Rematerialize op) false))
+      ((InvocationValue op)) :ruleset residency)
 ; Control without a host-loop recipe remains invocation-local.
-(rule ((ScalarCandidate op) (SourceControl op) (= (HostLoopCandidate op) false))
-      ((set (ScalarBoundary op) true)) :ruleset classify)
-(rule ((HostRegion r) (Site op r) (ScalarCandidate op) (SourceControl op) (= (HostLoopCandidate op) false) (= (Rematerialize op) false))
-      ((ScalarValue op)) :ruleset residency)
+(rule ((InvocationScalarCandidate op) (SourceControl op) (= (HostLoopCandidate op) false))
+      ((set (InvocationBoundary op) true)) :ruleset classify)
+(rule ((HostRegion r) (Site op r) (InvocationScalarCandidate op) (SourceControl op) (= (HostLoopCandidate op) false) (= (Rematerialize op) false))
+      ((InvocationValue op)) :ruleset residency)
 (rule ((HostRoot entry r)) ((HostRegion r)) :ruleset host-regions)
 (rule ((HostRoot entry r)) ((OwnedRegion entry r)) :ruleset residency)
 (rule ((OwnedRegion entry r) (Site op r) (Enters op child))
       ((OwnedRegion entry child)) :ruleset residency)
 (rule ((Phase stage r) (OwnedRegion entry r)) ((PhaseOwner stage entry)) :ruleset residency)
-(rule ((HostRegion r) (Site op r) (Enters op child) (= false (ScalarBoundary op)))
+(rule ((HostRegion r) (Site op r) (Enters op child) (= false (InvocationBoundary op)))
       ((HostRegion child)) :ruleset host-regions)
 
 ; Resolve component references without merging value or execution identities.
@@ -73,10 +73,10 @@
 ; Only actual uses join those summaries; there is no stage x expression search.
 (rule ((PhaseInput stage op role) (Operand op role e)) ((Demand (InStage stage) e)) :ruleset residency)
 ; Scalar control bodies may capture earlier executions through nested regions.
-(relation ScalarContentNeed (StageKey ValueKey))
-(rule ((ScalarGroup op leader) (Phase (Stage leader "scalar") r) (SourceDependency op before) (Produces producer (Result before i)))
+(relation DispatchGroupContentNeed (StageKey ValueKey))
+(rule ((DispatchGroupLeader op leader) (Phase (Stage leader "scalar") r) (SourceDependency op before) (Produces producer (Result before i)))
       ((Needs (Stage leader "scalar") (Result before i))
-       (ScalarContentNeed (Stage leader "scalar") (Result before i))) :ruleset residency)
+       (DispatchGroupContentNeed (Stage leader "scalar") (Result before i))) :ruleset residency)
 ; Lengths follow view metadata; reading an allocation's size does not require
 ; waiting for its element writer. Compacted lengths do require the count writer.
 (rule ((PhaseDomain stage n width)) ((ExtentDemand stage n)) :ruleset residency)
@@ -91,7 +91,7 @@
 (rule ((ExtentDemand stage (Length e)) (ValueRef e value) (= source (SameBacking value))) ((ExtentDemand stage (Length source))) :ruleset residency)
 (rule ((ExtentDemand stage (Length e)) (SliceView e source start end))
       ((Demand (InStage stage) start) (Demand (InStage stage) end)) :ruleset residency)
-(rule ((HostRegion r) (Site op r) (ScalarSite op) (= (ScalarBoundary op) false)
+(rule ((HostRegion r) (Site op r) (InvocationResult value op) (= (InvocationBoundary op) false)
        (= (Rematerialize op) false) (Operand op role e))
       ((Demand (InOperation op) e)) :ruleset residency)
 (rule ((HostRegion r) (ExitValue r e)) ((Demand (AtExit) e)) :ruleset residency)

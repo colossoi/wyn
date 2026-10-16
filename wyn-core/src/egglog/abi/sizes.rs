@@ -174,7 +174,7 @@ pub(in crate::egglog) fn source_size(
     if let Some(array) = compiler.facts.lookup("SourceLength", (source,)) {
         return source_size(compiler, array, true);
     }
-    let Some(context) = compiler.facts.lookup("ScalarSourceContext", (source,)) else {
+    let Some(context) = compiler.facts.lookup("ExprContextForSource", (source,)) else {
         return Err(error("host expression has no selected context"));
     };
     Ok(

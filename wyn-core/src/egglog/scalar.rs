@@ -60,49 +60,60 @@ pub(super) fn run(
     )?;
     let facts = Query(graph);
     for &region in identities.scopes.keys() {
-        facts.required("ScalarScopeContext", (region,))?;
+        facts.required("ExprContextForScope", (region,))?;
     }
     let mut scalars = timing::time("egglog scalar / graph projection", || {
-        // Native identities are shared with planning; arithmetic optimization
-        // runs in its own graph without structural rule matches.
+        // Retain only the inputs needed by expression import, optimization, and
+        // readout. Planning and admission tables stay in the structural graph.
         let mut scalars = graph.clone();
         for name in scalars.get_function_names() {
-            if !name.starts_with("Scalar")
-                && !matches!(
-                    name.as_str(),
-                    "RegionId"
-                        | "OperationId"
-                        | "TypeId"
-                        | "SourceTerm"
-                        | "SourceFormal"
-                        | "SourceGlobal"
-                        | "SourceArrayAtom"
-                        | "SourceProjected"
-                        | "SourceInvocation"
-                        | "SourceLoop"
-                        | "SourceReadOnly"
-                        | "SourceRegionReadOnly"
-                        | "FusionSource"
-                        | "Joined"
-                        | "LengthType"
-                        | "Fixed"
-                        | "Length"
-                        | "Scalar"
-                        | "Product"
-                        | "Difference"
-                        | "CallExtent"
-                        | "RectangularExtent"
-                        | "ExtentUniform"
-                        | "ExtentEdge"
-                        | "ExtentBinding"
-                        | "ExtentSource"
-                        | "PlanCallee"
-                        | "SourceCapture"
-                        | "SourceLength"
-                        | "SourceParameterRegion"
-                        | "SourceParameterIndex"
-                )
-            {
+            if !matches!(
+                name.as_str(),
+                "ExprContextFunction"
+                    | "ExprContextKernel"
+                    | "ExprContextDispatch"
+                    | "ExprContextTemplate"
+                    | "ExprContextDimensions"
+                    | "ExprContextForScope"
+                    | "ExprContextForSource"
+                    | "ExprContextOwner"
+                    | "ExprContextHome"
+                    | "ExprContextMember"
+                    | "HostEvalPhaseRoot"
+                    | "HostEvalParameter"
+                    | "HostEvalLeaf"
+                    | "RegionId"
+                    | "OperationId"
+                    | "TypeId"
+                    | "SourceTerm"
+                    | "SourceFormal"
+                    | "SourceGlobal"
+                    | "SourceArrayAtom"
+                    | "SourceProjected"
+                    | "SourceInvocation"
+                    | "SourceLoop"
+                    | "SourceReadOnly"
+                    | "SourceRegionReadOnly"
+                    | "FusionSource"
+                    | "Joined"
+                    | "LengthType"
+                    | "Fixed"
+                    | "Length"
+                    | "Scalar"
+                    | "Product"
+                    | "Difference"
+                    | "CallExtent"
+                    | "RectangularExtent"
+                    | "ExtentUniform"
+                    | "ExtentEdge"
+                    | "ExtentBinding"
+                    | "ExtentSource"
+                    | "PlanCallee"
+                    | "SourceCapture"
+                    | "SourceLength"
+                    | "SourceParameterRegion"
+                    | "SourceParameterIndex"
+            ) {
                 scalars.clear_function(&name)?;
             }
         }
@@ -113,7 +124,7 @@ pub(super) fn run(
     timing::time("egglog scalar / admission", || {
         scalars.update(|sink| {
             let mut importer = Importer::new(sink, identities, facts, &mut cache, &mut templates, policy);
-            Ok(facts.for_each("ScalarImportRoot", |r| {
+            Ok(facts.for_each("ExprImportRoot", |r| {
                 importer.root(r[0], r[1], r[2], graph.value_to_base::<bool>(r[3]))
             }))
         })?
@@ -127,7 +138,7 @@ pub(super) fn run(
         Some("scalar host preferences".into()),
         include_str!("scalar/host.egg"),
     )?;
-    scalars.clear_function("ScalarActive")?;
+    scalars.clear_function("ExprContextActive")?;
     let selected = placement::select(&mut scalars, policy)?;
     if timing::enabled() {
         eprintln!("egglog scalar admitted values: {}", cache.len());

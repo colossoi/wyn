@@ -38,8 +38,8 @@ impl Selected {
         loop {
             let (name, fields) = self.app(term)?;
             match name {
-                "ScalarNil" => return Ok(args),
-                "ScalarCons" => {
+                "ExprNil" => return Ok(args),
+                "ExprCons" => {
                     args.push(fields[1]);
                     term = fields[2];
                 }
@@ -51,7 +51,7 @@ impl Selected {
         let mut path = Vec::new();
         loop {
             let (name, fields) = self.app(term)?;
-            if name != "ScalarProject" {
+            if name != "ExprProject" {
                 path.reverse();
                 return Ok((term, path));
             }
@@ -62,9 +62,9 @@ impl Selected {
     pub fn operation_arguments(&self, term: TermId) -> Result<Vec<TermId>, OptimizeError> {
         let (name, fields) = self.app(term)?;
         match name {
-            "ScalarUnary" => Ok(vec![fields[3]]),
-            "ScalarBinary" => Ok(fields[3..5].to_vec()),
-            "ScalarOp" => self.arguments(fields[3]),
+            "ExprUnary" => Ok(vec![fields[3]]),
+            "ExprBinary" => Ok(fields[3..5].to_vec()),
+            "ExprOp" => self.arguments(fields[3]),
             _ => Err(error("expected scalar operation")),
         }
     }

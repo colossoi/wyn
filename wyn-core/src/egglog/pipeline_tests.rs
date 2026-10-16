@@ -87,6 +87,55 @@ fn radix_scratch_initializer_has_no_array_allocation() {
 }
 
 #[test]
+fn expression_projection_retains_host_capture_inputs_without_admission_tables() {
+    use super::{from_tlc, fuse, optimize_with_policy, place, schedule, ScalarOptimization};
+    use crate::PipelineTopologyPolicy;
+
+    let tlc =
+        crate::compile_thru_tlc("entry main(xs:[]i32,bias:i32) []i32=map(|x:i32|x+bias*bias,xs)").unwrap();
+    for policy in [ScalarOptimization::Basic, ScalarOptimization::Full] {
+        let program = optimize_with_policy(
+            schedule(
+                place(
+                    fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                    PipelineTopologyPolicy::AllowGenerated,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+            policy,
+        )
+        .unwrap();
+        if policy == ScalarOptimization::Full {
+            assert!(
+                !program.stage.captures.is_empty(),
+                "expanded callback arithmetic must reach host evaluation"
+            );
+        }
+        let mut phase_roots = 0;
+        program
+            .stage
+            .scalars
+            .constructor_enodes("HostEvalPhaseRoot", |row| {
+                phase_roots += 1;
+                assert!(program.stage.selected.roots.contains_key(&(row.children[1], row.children[2])));
+            })
+            .unwrap();
+        assert!(phase_roots > 0);
+        let mut requests = 0;
+        program.graph.constructor_enodes("ExprImportRoot", |_| requests += 1).unwrap();
+        assert!(requests > 0);
+        program
+            .stage
+            .scalars
+            .constructor_enodes("ExprImportRoot", |_| {
+                panic!("admission requests must remain in the structural graph")
+            })
+            .unwrap();
+    }
+}
+
+#[test]
 fn basic_scalar_policy_retains_calls_and_validates_both_backends() {
     use super::{from_tlc, fuse, optimize_with_policy, place, schedule, to_ssa, ScalarOptimization};
     use crate::{CodegenTarget, PipelineTopologyPolicy};
@@ -122,7 +171,7 @@ fn basic_scalar_policy_retains_calls_and_validates_both_backends() {
                 )
                 .unwrap();
                 let mut templates = 0;
-                program.stage.scalars.constructor_enodes("ScalarInlineBody", |_| templates += 1).unwrap();
+                program.stage.scalars.constructor_enodes("ExprTemplateBody", |_| templates += 1).unwrap();
                 if policy == ScalarOptimization::Basic {
                     assert_eq!(templates, 0, "basic mode must not import optional templates");
                 } else if source == helper || source == small_helper {

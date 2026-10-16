@@ -157,8 +157,8 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         // evaluation still occurs at the current control/effect position.
         let value = {
             match name {
-                "ScalarLength" => self.source_length(scope, selected.values[fields[2]])?,
-                "ScalarLeaf" => {
+                "ExprLength" => self.source_length(scope, selected.values[fields[2]])?,
+                "ExprLeaf" => {
                     let source = selected.values[fields[2]];
                     // A source boundary can have its own optimized root in this
                     // context. Follow it unless it leads straight back to this leaf.
@@ -171,8 +171,8 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                         self.boundary(scope, source)?
                     }
                 }
-                "ScalarExecute" => self.local(scope, selected.values[fields[2]])?,
-                "ScalarInstruction" if selected.text(fields[3])? == "index" => {
+                "ExprExecute" => self.local(scope, selected.values[fields[2]])?,
+                "ExprInstruction" if selected.text(fields[3])? == "index" => {
                     let [array, index]: [TermId; 2] = selected
                         .arguments(fields[4])?
                         .try_into()
@@ -191,7 +191,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                     }
                     self.cast(value, &ty)?
                 }
-                "ScalarInstruction" => {
+                "ExprInstruction" => {
                     let mut arguments = self.arguments(scope, fields[4])?;
                     let tag = selected.operator(fields[3], arguments.len())?;
                     if matches!(tag, OpTag::Intrinsic {id, ..} if id == catalog().known().length) {
@@ -237,11 +237,11 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                     };
                     self.op(tag, arguments, ty)?
                 }
-                "ScalarCall" => {
+                "ExprCall" => {
                     let args = self.arguments(scope, fields[4])?;
                     self.call(selected.values[fields[3]], args)?
                 }
-                "ScalarParameter" => {
+                "ExprParameter" => {
                     let region = selected.values[fields[2]];
                     let index = selected.integer(fields[3])?;
                     let Some(source) = self.compiler.facts.parameter(region, index) else {
@@ -256,11 +256,11 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                     };
                     value
                 }
-                "ScalarLiteral" => {
+                "ExprLiteral" => {
                     let text = selected.text(fields[2])?;
                     self.literal(text, &ty)?
                 }
-                "ScalarUnary" | "ScalarBinary" | "ScalarOp" => {
+                "ExprUnary" | "ExprBinary" | "ExprOp" => {
                     let arguments = selected
                         .operation_arguments(term)?
                         .into_iter()
@@ -269,14 +269,14 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                     let tag = selected.operator(fields[2], arguments.len())?;
                     self.op_at(target, tag, arguments, ty)?
                 }
-                "ScalarInvoke" => {
+                "ExprInvoke" => {
                     let callee = selected.values[fields[2]];
                     let args = self.arguments(scope, fields[3])?;
                     self.call(callee, args)?
                 }
-                "ScalarTuple" | "ScalarVector" => {
+                "ExprTuple" | "ExprVector" => {
                     let args = self.arguments(scope, fields[2])?;
-                    let tag = if name == "ScalarTuple" {
+                    let tag = if name == "ExprTuple" {
                         OpTag::Tuple(args.len())
                     } else {
                         OpTag::Vector(args.len())
@@ -286,23 +286,23 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                             types::strip_existentials(&ty)
                         {
                             Type::Constructed(name.clone(), args.iter().map(|v| v.ty.clone()).collect())
-                        } else if name == "ScalarTuple" {
+                        } else if name == "ExprTuple" {
                             types::tuple(args.iter().map(|v| v.ty.clone()).collect())
                         } else {
                             ty
                         };
                     self.op_at(target, tag, args, ty)?
                 }
-                "ScalarProject" => {
+                "ExprProject" => {
                     let index = selected.integer(fields[3])? as usize;
                     let base = self.scalar(scope, fields[2])?;
                     self.field(base, index)?
                 }
-                "ScalarCoerce" => {
+                "ExprCoerce" => {
                     let value = self.scalar(scope, fields[2])?;
                     self.cast(value, &ty)?
                 }
-                "ScalarChoice" => self.scalar_body(scope, term)?,
+                "ExprChoice" => self.scalar_body(scope, term)?,
                 _ => return Err(error(format!("unresolved selected constructor {name}"))),
             }
         };

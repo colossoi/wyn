@@ -43,9 +43,7 @@ impl CostModel<Estimate> for Model {
     }
     fn enode_cost(&self, _graph: &EGraph, function: &Function, _enode: &Enode<'_>) -> Estimate {
         Estimate {
-            calls: u64::from(
-                self.prefer_inlining && matches!(function.name(), "ScalarInvoke" | "ScalarCall"),
-            ),
+            calls: u64::from(self.prefer_inlining && matches!(function.name(), "ExprInvoke" | "ExprCall")),
             work: work(function.name()),
         }
     }
@@ -56,9 +54,9 @@ impl CostModel<Estimate> for Model {
 
 fn work(name: &str) -> u64 {
     match name {
-        "ScalarInvoke" | "ScalarCall" => CALL_WORK,
-        "ScalarUnary" | "ScalarBinary" | "ScalarOp" | "ScalarChoice" | "ScalarTuple" | "ScalarVector"
-        | "ScalarProject" | "ScalarCoerce" | "ScalarInstruction" => 1,
+        "ExprInvoke" | "ExprCall" => CALL_WORK,
+        "ExprUnary" | "ExprBinary" | "ExprOp" | "ExprChoice" | "ExprTuple" | "ExprVector"
+        | "ExprProject" | "ExprCoerce" | "ExprInstruction" => 1,
         _ => 0,
     }
 }
@@ -70,7 +68,7 @@ pub(super) fn select(
     roots: &[Value],
     policy: ScalarOptimization,
 ) -> Result<(TermDag, Vec<TermId>), OptimizeError> {
-    let Some(sort) = graph.get_sort_by_name("ScalarOutputs").cloned() else {
+    let Some(sort) = graph.get_sort_by_name("ExprOutputs").cloned() else {
         return Err(OptimizeError::Output("missing scalar outputs sort".into()));
     };
     let value = graph.container_to_value(VecContainer {
@@ -176,13 +174,13 @@ fn dag_work(dag: &TermDag, root: TermId) -> u64 {
 
 pub(in crate::egglog) fn operands(name: &str, fields: &[TermId]) -> Vec<TermId> {
     match name {
-        "ScalarUnary" => vec![fields[3]],
-        "ScalarBinary" => fields[3..5].to_vec(),
-        "ScalarOp" | "ScalarInvoke" => vec![fields[3]],
-        "ScalarInstruction" | "ScalarCall" => vec![fields[4]],
-        "ScalarTuple" | "ScalarVector" | "ScalarProject" | "ScalarCoerce" => vec![fields[2]],
-        "ScalarChoice" => fields[2..5].to_vec(),
-        "ScalarCons" => fields[1..3].to_vec(),
+        "ExprUnary" => vec![fields[3]],
+        "ExprBinary" => fields[3..5].to_vec(),
+        "ExprOp" | "ExprInvoke" => vec![fields[3]],
+        "ExprInstruction" | "ExprCall" => vec![fields[4]],
+        "ExprTuple" | "ExprVector" | "ExprProject" | "ExprCoerce" => vec![fields[2]],
+        "ExprChoice" => fields[2..5].to_vec(),
+        "ExprCons" => fields[1..3].to_vec(),
         _ => Vec::new(),
     }
 }

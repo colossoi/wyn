@@ -62,14 +62,14 @@
        (!= kind "map") (!= kind "reduce") (!= kind "scan") (!= kind "filter")
        (!= kind "scatter") (!= kind "bucket-scatter") (!= kind "reduce-by-index")
        (= value (SourceOperationValue original)))
-      ((ScalarSite owner) (ScalarResult value owner)) :ruleset planning-import)
-(rule ((ScalarSite owner) (= value (SourceOperationValue owner)) (= ty (SourceType value)) (SourceScalarLayout ty))
-      ((ScalarCandidate owner) (ElementType (Result owner 0) ty)) :ruleset planning-import)
+      ((InvocationResult value owner)) :ruleset planning-import)
+(rule ((InvocationResult value owner) (= ty (SourceType value)) (SourceScalarLayout ty))
+      ((InvocationScalarCandidate owner) (ElementType (Result owner 0) ty)) :ruleset planning-import)
 
 ; Only host operations can join into a generated scalar dispatch. Device-local
 ; operations retain their source order inside the enclosing kernel.
 (rule ((HostRegion r) (Site (OperationId op) r)
-       (ScalarCandidate (OperationId op)) (= (ContainsCollective (OperationId op)) false)
+       (InvocationScalarCandidate (OperationId op)) (= (ContainsCollective (OperationId op)) false)
        (= (ParallelSafe (OperationId op)) true)
        (PlannedOperation (OperationId op) (OperationId op) plan r)
        (= value (SourceOperationValue (OperationId op))) (= (SourceDevice value) true)
@@ -79,7 +79,7 @@
 
 ; The source summary keeps mutable reads and speculation restrictions separate
 ; from work. Completed effect and collective proofs must also permit duplication.
-(rule ((ScalarCandidate (OperationId op)) (= (ParallelSafe (OperationId op)) true)
+(rule ((InvocationScalarCandidate (OperationId op)) (= (ParallelSafe (OperationId op)) true)
        (PlannedOperation (OperationId op) (OperationId op) plan region)
        (= value (SourceOperationValue (OperationId op)))
        (= (SourceDuplicable value) true) (= (SourceOperationCheap (OperationId op)) true)

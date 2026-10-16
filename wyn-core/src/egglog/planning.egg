@@ -28,16 +28,15 @@
 (relation EffectInput (i64 OperationKey))
 (relation EffectWait (OperationKey i64))
 (relation SourceDependency (OperationKey OperationKey))
-(relation ScalarSite (OperationKey))
-(relation ScalarCandidate (OperationKey))
+(relation InvocationScalarCandidate (OperationKey))
 ; Includes plain maps and indexed updates, and propagates through entered regions.
 ; This describes array work in the planner, not workgroup synchronization.
 (function ContainsCollective (OperationKey) bool :merge (or old new))
-(function ScalarBoundary (OperationKey) bool :merge (or old new))
+(function InvocationBoundary (OperationKey) bool :merge (or old new))
 (function ParallelSafe (OperationKey) bool :merge (and old new))
 (function ParallelBodySafe (OperationKey) bool :merge (and old new))
 (relation SplitRegion (RegionKey))
-(relation ScalarValue (OperationKey))
+(relation InvocationValue (OperationKey))
 (function InputDomain (OperationKey) Extent :no-merge)
 ; Output components and collective components are semantic facts, before recipes.
 (relation ArrayResult (OperationKey i64 TypeKey))

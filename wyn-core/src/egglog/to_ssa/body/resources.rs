@@ -49,7 +49,7 @@ impl Body<'_, '_, '_> {
     pub(super) fn local(&mut self, scope: Value, source: Value) -> Result<Typed, OptimizeError> {
         if let Some(formal) = self.compiler.facts.enode("SourceFormal", source) {
             if let Some(actual) = self.compiler.facts.lookup("SsaCaptureAt", (formal[0], source)) {
-                let Some(context) = self.compiler.facts.lookup("ScalarSourceContext", (actual,)) else {
+                let Some(context) = self.compiler.facts.lookup("ExprContextForSource", (actual,)) else {
                     return Err(error("captured value has no scalar context"));
                 };
                 let old_context = std::mem::replace(&mut self.context, context);
@@ -351,7 +351,8 @@ impl Body<'_, '_, '_> {
                 if name == "Length" {
                     self.source_length(scope, source)
                 } else {
-                    let Some(context) = self.compiler.facts.lookup("ScalarSourceContext", (source,)) else {
+                    let Some(context) = self.compiler.facts.lookup("ExprContextForSource", (source,))
+                    else {
                         return Err(error("extent has no scalar context"));
                     };
                     let old_context = std::mem::replace(&mut self.context, context);

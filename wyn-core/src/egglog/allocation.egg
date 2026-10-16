@@ -30,7 +30,7 @@
       ((set (LaunchGrid stage) grid)) :ruleset allocation)
 (rule ((PhaseDomain stage extent width) (= count (StaticCapacityBound extent)) (= (PhaseGrid stage) (AutomaticGrid)))
       ((set (LaunchGrid stage) (FixedGrid (min 65535 (max 1 (/ (+ count (- width 1)) width))) 1 1))) :ruleset readout)
-(rule ((ScalarValue op))
+(rule ((InvocationValue op))
       ((ResultSlot op 0)
        (set (CapacityExtent (Result op 0)) (Fixed 1)) (FreshValue (Result op 0))
        (set (LiveLength (Result op 0)) (Fixed 1))

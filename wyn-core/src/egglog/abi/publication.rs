@@ -569,7 +569,7 @@ fn publish_loops(
             return Err(error("host loop has no count recipe"));
         };
         let context = crate::egglog::query::Query(&compiler.program.graph)
-            .required("ScalarSourceContext", (form[0],))?;
+            .required("ExprContextForSource", (form[0],))?;
         let count = host::expression(compiler.program, context, form[0])
             .map_err(|error| error.required("loop count"))?;
         let initial = compiler.facts.loop_initial(header)?;

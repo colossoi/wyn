@@ -38,7 +38,7 @@ impl Body<'_, '_, '_> {
                 continue;
             }
             let (name, fields) = selected.app(term)?;
-            if name == "ScalarChoice" {
+            if name == "ExprChoice" {
                 if terms
                     .iter()
                     .map(|&term| self.available_scalar(term))

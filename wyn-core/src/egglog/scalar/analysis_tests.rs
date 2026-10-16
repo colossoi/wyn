@@ -16,12 +16,12 @@ fn graph() -> EGraph {
                 include_str!("schema.egg"),
                 include_str!("analysis.egg"),
                 r#"
-                (let $ctx (ScalarFunction (RegionId 0)))
+                (let $ctx (ExprContextFunction (RegionId 0)))
                 (let $ty (TypeId 0))
-                (let $x (ScalarParameter $ctx $ty (RegionId 0) 0))
-                (let $zero (ScalarLiteral $ctx $ty "0"))
-                (let $nil (ScalarNil $ctx))
-                (ScalarActive $ctx)
+                (let $x (ExprParameter $ctx $ty (RegionId 0) 0))
+                (let $zero (ExprLiteral $ctx $ty "0"))
+                (let $nil (ExprNil $ctx))
+                (ExprContextActive $ctx)
                 (set (SourceReadOnly (SourceGlobal 0)) true)
                 (set (SourceReadOnly (SourceGlobal 1)) false)
                 (set (SourceRegionReadOnly (RegionId 1)) false)
@@ -38,30 +38,30 @@ fn readonly_proofs_do_not_authorize_speculation_or_ignore_argument_effects() {
         .parse_and_run_program(
             None,
             r#"
-            (let $partial (ScalarBinary $ctx $ty "/" $x $zero))
-            (let $loop (ScalarExecute $ctx $ty (SourceGlobal 0)))
-            (let $write (ScalarExecute $ctx $ty (SourceGlobal 1)))
-            (let $leaf (ScalarLeaf $ctx $ty (SourceGlobal 1)))
-            (let $args (ScalarCons $ctx $write $nil))
-            (let $call (ScalarCall $ctx $ty (SourceGlobal 0) (RegionId 0) $args))
-            (let $invoke (ScalarInvoke $ctx $ty (RegionId 1) $nil))
-            (let $choice (ScalarChoice $ctx $ty $x $loop $write))
-            (let $unknown (ScalarExecute $ctx $ty (SourceGlobal 99)))
-            (let $state (ScalarLeaf $ctx $ty (SourceFormal (RegionId 0) 1)))
-            (ScalarRoot $ctx (RegionId 0) (SourceFormal (RegionId 0) 1) $state)
+            (let $partial (ExprBinary $ctx $ty "/" $x $zero))
+            (let $loop (ExprExecute $ctx $ty (SourceGlobal 0)))
+            (let $write (ExprExecute $ctx $ty (SourceGlobal 1)))
+            (let $leaf (ExprLeaf $ctx $ty (SourceGlobal 1)))
+            (let $args (ExprCons $ctx $write $nil))
+            (let $call (ExprCall $ctx $ty (SourceGlobal 0) (RegionId 0) $args))
+            (let $invoke (ExprInvoke $ctx $ty (RegionId 1) $nil))
+            (let $choice (ExprChoice $ctx $ty $x $loop $write))
+            (let $unknown (ExprExecute $ctx $ty (SourceGlobal 99)))
+            (let $state (ExprLeaf $ctx $ty (SourceFormal (RegionId 0) 1)))
+            (ExprRoot $ctx (RegionId 0) (SourceFormal (RegionId 0) 1) $state)
             (run-schedule (saturate scalar-analysis) (saturate scalar-effects))
-            (check (= (ScalarReadOnly $partial) true))
-            (check (= (ScalarReadOnly $loop) true))
-            (check (= (ScalarReadOnly $state) true))
-            (fail (check (ScalarTotal $partial)))
-            (fail (check (ScalarTotal $loop)))
-            (check (ScalarTotal $leaf))
-            (check (= (ScalarReadOnly $leaf) false))
-            (check (= (ScalarArgsReadOnly $args) false))
-            (check (= (ScalarReadOnly $call) false))
-            (check (= (ScalarReadOnly $invoke) false))
-            (check (= (ScalarReadOnly $choice) false))
-            (fail (check (= (ScalarReadOnly $unknown) true)))
+            (check (= (ExprReadOnly $partial) true))
+            (check (= (ExprReadOnly $loop) true))
+            (check (= (ExprReadOnly $state) true))
+            (fail (check (ExprTotal $partial)))
+            (fail (check (ExprTotal $loop)))
+            (check (ExprTotal $leaf))
+            (check (= (ExprReadOnly $leaf) false))
+            (check (= (ExprArgsReadOnly $args) false))
+            (check (= (ExprReadOnly $call) false))
+            (check (= (ExprReadOnly $invoke) false))
+            (check (= (ExprReadOnly $choice) false))
+            (fail (check (= (ExprReadOnly $unknown) true)))
             "#,
         )
         .unwrap();
@@ -74,13 +74,13 @@ fn leaf_materialization_includes_effects_of_other_selected_roots() {
             None,
             r#"
             (set (SourceReadOnly (SourceGlobal 2)) true)
-            (let $leaf (ScalarLeaf $ctx $ty (SourceGlobal 0)))
-            (let $other (ScalarLeaf $ctx $ty (SourceGlobal 2)))
-            (let $write (ScalarInstruction $ctx $ty (SourceGlobal 1) "write" $nil))
-            (ScalarRoot $ctx (RegionId 0) (SourceGlobal 0) $other)
-            (ScalarRoot $ctx (RegionId 0) (SourceGlobal 2) $write)
+            (let $leaf (ExprLeaf $ctx $ty (SourceGlobal 0)))
+            (let $other (ExprLeaf $ctx $ty (SourceGlobal 2)))
+            (let $write (ExprInstruction $ctx $ty (SourceGlobal 1) "write" $nil))
+            (ExprRoot $ctx (RegionId 0) (SourceGlobal 0) $other)
+            (ExprRoot $ctx (RegionId 0) (SourceGlobal 2) $write)
             (run-schedule (saturate scalar-analysis) (saturate scalar-effects))
-            (check (= (ScalarReadOnly $leaf) false))
+            (check (= (ExprReadOnly $leaf) false))
             "#,
         )
         .unwrap();
@@ -92,11 +92,11 @@ fn eclass_merging_cannot_hide_an_effectful_alternative() {
         .parse_and_run_program(
             None,
             r#"
-            (let $write (ScalarExecute $ctx $ty (SourceGlobal 1)))
+            (let $write (ExprExecute $ctx $ty (SourceGlobal 1)))
             (run-schedule (saturate scalar-analysis) (saturate scalar-effects))
             (union $write $zero)
             (run-schedule (saturate scalar-analysis) (saturate scalar-effects))
-            (check (= (ScalarReadOnly $zero) false))
+            (check (= (ExprReadOnly $zero) false))
             "#,
         )
         .unwrap();

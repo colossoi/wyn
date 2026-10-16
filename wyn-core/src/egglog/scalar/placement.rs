@@ -14,11 +14,11 @@ pub(super) fn select(graph: &mut EGraph, policy: ScalarOptimization) -> Result<S
     let _timing = timing::span("egglog scalar / exit placement");
     let extraction = timing::span("egglog scalar / extraction");
     let mut roots = Vec::new();
-    graph.constructor_enodes("ScalarRoot", |row| {
+    graph.constructor_enodes("ExprRoot", |row| {
         roots.push((row.children[0], row.children[1], row.children[2], row.children[3]));
     })?;
     let mut extents = Vec::new();
-    graph.constructor_enodes("ScalarExtentRoot", |row| {
+    graph.constructor_enodes("ExtentExprRoot", |row| {
         extents.push((row.children[0], row.children[1]))
     })?;
     let values = roots.iter().map(|r| r.3).chain(extents.iter().map(|r| r.1)).collect::<Vec<_>>();
@@ -92,7 +92,7 @@ impl Placement {
         let dag = &selected.dag;
         let values = &selected.values;
         let parent = |scope| {
-            if facts.flag("ScalarRegionBoundary", (scope,))? {
+            if facts.flag("ExprContextBoundary", (scope,))? {
                 Ok(None)
             } else {
                 Ok(identities.scopes.get(&scope).and_then(|s| s.0))
@@ -100,7 +100,7 @@ impl Placement {
         };
         let definitions = Forest::new(identities.scopes.keys().copied(), parent)?;
         let mut members = LookupMap::<Value, Vec<Value>>::default();
-        graph.constructor_enodes("ScalarContextScope", |row| {
+        graph.constructor_enodes("ExprContextMember", |row| {
             members.entry(row.children[0]).or_default().push(row.children[1]);
         })?;
         let contexts = members
@@ -119,15 +119,15 @@ impl Placement {
             let mut required = Vec::new();
             if let Term::App(name, fields) = dag.get(id) {
                 match name.as_str() {
-                    "ScalarLeaf" | "ScalarExecute" | "ScalarInstruction" | "ScalarCall" => {
+                    "ExprLeaf" | "ExprExecute" | "ExprInstruction" | "ExprCall" => {
                         if let Some(owner) = facts
-                            .lookup("ScalarOwner", (values[fields[2]],))?
+                            .lookup("ExprContextOwner", (values[fields[2]],))?
                             .and_then(|v| scopes.definition(v))
                         {
                             scopes.require(&mut required, owner);
                         }
                     }
-                    "ScalarParameter" => {
+                    "ExprParameter" => {
                         if let Some(owner) = scopes.definition(values[fields[2]]) {
                             scopes.require(&mut required, owner);
                         }

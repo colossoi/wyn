@@ -49,9 +49,9 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
         source: Value,
         expand: bool,
     ) -> Result<(), OptimizeError> {
-        self.sink.add("ScalarActive", context)?;
+        self.sink.add("ExprContextActive", context)?;
         let value = self.value(context, source, expand)?;
-        self.sink.add("ScalarRoot", (context, region, source, value))?;
+        self.sink.add("ExprRoot", (context, region, source, value))?;
         Ok(())
     }
 
@@ -79,13 +79,13 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
             ));
         }
         let value = if let Some((owner, index)) = self.facts.parameter(source)? {
-            let value = self.sink.add("ScalarParameter", (context, ty, owner, index))?;
+            let value = self.sink.add("ExprParameter", (context, ty, owner, index))?;
             value
         } else if let Some(actual) = self.facts.alias(source)? {
             self.value(
                 context,
                 actual,
-                expand && !self.facts.flag("ScalarSourceDispatched", (actual,))?,
+                expand && !self.facts.flag("ExprImportDispatchedSource", (actual,))?,
             )?
         } else if let Some((callee, arguments)) = self.facts.call(source)? {
             let arguments = arguments
@@ -94,7 +94,7 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
                 .collect::<Result<Vec<_>, _>>()?;
             let arguments = self.args(context, &arguments)?;
             self.template(callee)?;
-            self.sink.add("ScalarCall", (context, ty, source, callee, arguments))?
+            self.sink.add("ExprCall", (context, ty, source, callee, arguments))?
         } else if self.facts.operation(source)?.is_some() && !expand {
             self.opaque(source, ty, context, false)?
         } else if let Some(&(array, scope)) =
@@ -119,7 +119,7 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
         context: Value,
         execute: bool,
     ) -> Result<Value, OptimizeError> {
-        let name = if execute { "ScalarExecute" } else { "ScalarLeaf" };
+        let name = if execute { "ExprExecute" } else { "ExprLeaf" };
         let value = self.sink.add(name, (context, ty, source))?;
         Ok(value)
     }
@@ -136,16 +136,16 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
         // An admitted helper is a substitution template. Its own reproducible calls
         // may expand; stored results outside that helper remain opaque inputs.
         let expand = match self.template_region(context) {
-            Some(region) => self.facts.contains("ScalarTemplateExpands", (region, source))?,
+            Some(region) => self.facts.contains("ExprImportTemplateExpansion", (region, source))?,
             None => false,
         };
         self.value(context, source, expand)
     }
 
     fn args(&mut self, context: Value, values: &[Value]) -> Result<Value, OptimizeError> {
-        let mut args = self.sink.add("ScalarNil", context)?;
+        let mut args = self.sink.add("ExprNil", context)?;
         for &value in values.iter().rev() {
-            args = self.sink.add("ScalarCons", (context, value, args))?;
+            args = self.sink.add("ExprCons", (context, value, args))?;
         }
         Ok(args)
     }
@@ -153,18 +153,18 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
     fn type_facts(&mut self, key: Value, ty: &Type) -> Result<(), OptimizeError> {
         let name = match ty {
             Type::Constructed(TypeName::Int(bits), _) => {
-                self.sink.add("ScalarInteger", key)?;
+                self.sink.add("ExprIntegerType", key)?;
                 format!("i{bits}")
             }
             Type::Constructed(TypeName::UInt(bits), _) => {
-                self.sink.add("ScalarInteger", key)?;
+                self.sink.add("ExprIntegerType", key)?;
                 format!("u{bits}")
             }
             Type::Constructed(TypeName::Float(32), _) => "f32".into(),
             Type::Constructed(TypeName::Bool, _) => "bool".into(),
             _ => return Ok(()),
         };
-        self.sink.add("ScalarType", (key, name.as_str()))?;
+        self.sink.add("ExprPrimitiveType", (key, name.as_str()))?;
         Ok(())
     }
 
@@ -181,11 +181,11 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
         };
         // Templates must not reuse cached stored results from the separately
         // scheduled function body. Only explicit substitution activates them.
-        let context = self.sink.add("ScalarTemplate", region)?;
+        let context = self.sink.add("ExprContextTemplate", region)?;
         self.templates.insert(region, context);
-        self.sink.set("ScalarTemplateSafe", region, true)?;
+        self.sink.set("ExprTemplateSafe", region, true)?;
         let body = self.value(context, source, true)?;
-        self.sink.add("ScalarInlineBody", (region, body))?;
+        self.sink.add("ExprTemplateBody", (region, body))?;
         Ok(())
     }
 
@@ -198,19 +198,18 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
         ty: Value,
     ) -> Result<Value, OptimizeError> {
         match &term.kind {
-            TermKind::IntLit(text) => Ok(self.sink.add("ScalarLiteral", (context, ty, text.as_str()))?),
-            TermKind::FloatLit(value) => Ok(self.sink.add(
-                "ScalarLiteral",
-                (context, ty, value.to_bits().to_string().as_str()),
-            )?),
+            TermKind::IntLit(text) => Ok(self.sink.add("ExprLiteral", (context, ty, text.as_str()))?),
+            TermKind::FloatLit(value) => {
+                Ok(self.sink.add("ExprLiteral", (context, ty, value.to_bits().to_string().as_str()))?)
+            }
             TermKind::BoolLit(value) => Ok(self.sink.add(
-                "ScalarLiteral",
+                "ExprLiteral",
                 (context, ty, if *value { "true" } else { "false" }),
             )?),
             TermKind::UnitLit => {
                 let args = self.args(context, &[])?;
-                self.sink.add("ScalarOperatorSafe", (ty, "unit"))?;
-                Ok(self.sink.add("ScalarOp", (context, ty, "unit", args))?)
+                self.sink.add("ExprOperatorTotal", (ty, "unit"))?;
+                Ok(self.sink.add("ExprOp", (context, ty, "unit", args))?)
             }
             TermKind::ArrayExpr(_) => {
                 let Some(array) = self.facts.alias(source)? else {
@@ -222,7 +221,7 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
                 let array = self.child(context, scope, array)?;
                 let index = self.child(context, scope, index)?;
                 let args = self.args(context, &[array, index])?;
-                Ok(self.sink.add("ScalarInstruction", (context, ty, source, "index", args))?)
+                Ok(self.sink.add("ExprInstruction", (context, ty, source, "index", args))?)
             }
             TermKind::App { func, args } => {
                 if matches!(&func.kind, TermKind::Var(VarRef::Builtin { id, .. }) if *id == catalog().known().length || *id == catalog().known().slice)
@@ -262,17 +261,17 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
                         let arguments = self.args(context, &values)?;
                         return Ok(self
                             .sink
-                            .add("ScalarInstruction", (context, ty, source, op.as_str(), arguments))?);
+                            .add("ExprInstruction", (context, ty, source, op.as_str(), arguments))?);
                     }
                     if safe {
-                        self.sink.add("ScalarOperatorSafe", (ty, op.as_str()))?;
+                        self.sink.add("ExprOperatorTotal", (ty, op.as_str()))?;
                     }
                     return Ok(match values.as_slice() {
-                        &[x] => self.sink.add("ScalarUnary", (context, ty, op.as_str(), x))?,
-                        &[x, y] => self.sink.add("ScalarBinary", (context, ty, op.as_str(), x, y))?,
+                        &[x] => self.sink.add("ExprUnary", (context, ty, op.as_str(), x))?,
+                        &[x, y] => self.sink.add("ExprBinary", (context, ty, op.as_str(), x, y))?,
                         _ => {
                             let arguments = self.args(context, &values)?;
-                            self.sink.add("ScalarOp", (context, ty, op.as_str(), arguments))?
+                            self.sink.add("ExprOp", (context, ty, op.as_str(), arguments))?
                         }
                     });
                 }
@@ -281,10 +280,10 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
                 };
                 let arguments = self.args(context, &values)?;
                 if !self.facts.duplicable(source)? {
-                    return Ok(self.sink.add("ScalarCall", (context, ty, source, callee, arguments))?);
+                    return Ok(self.sink.add("ExprCall", (context, ty, source, callee, arguments))?);
                 }
                 self.template(callee)?;
-                Ok(self.sink.add("ScalarInvoke", (context, ty, callee, arguments))?)
+                Ok(self.sink.add("ExprInvoke", (context, ty, callee, arguments))?)
             }
             TermKind::Tuple(fields) | TermKind::VecLit(fields) => {
                 let mut values = Vec::with_capacity(fields.len());
@@ -292,17 +291,16 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
                     values.push(self.child(context, scope, field)?);
                 }
                 let args = self.args(context, &values)?;
-                let name =
-                    if matches!(term.kind, TermKind::Tuple(_)) { "ScalarTuple" } else { "ScalarVector" };
+                let name = if matches!(term.kind, TermKind::Tuple(_)) { "ExprTuple" } else { "ExprVector" };
                 Ok(self.sink.add(name, (context, ty, args))?)
             }
             TermKind::TupleProj { tuple, idx } => {
                 let tuple = self.child(context, scope, tuple)?;
-                Ok(self.sink.add("ScalarProject", (context, ty, tuple, *idx as i64))?)
+                Ok(self.sink.add("ExprProject", (context, ty, tuple, *idx as i64))?)
             }
             TermKind::Coerce { inner, .. } => {
                 let inner = self.child(context, scope, inner)?;
-                Ok(self.sink.add("ScalarCoerce", (context, ty, inner))?)
+                Ok(self.sink.add("ExprCoerce", (context, ty, inner))?)
             }
             TermKind::If { cond, .. }
                 if !self.facts.operation(source)?.is_some() || self.facts.duplicable(source)? =>
@@ -319,7 +317,7 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
                 let c = self.child(context, scope, cond)?;
                 let a = self.value(context, yes_result, self.template_region(context).is_some())?;
                 let b = self.value(context, no_result, self.template_region(context).is_some())?;
-                Ok(self.sink.add("ScalarChoice", (context, ty, c, a, b))?)
+                Ok(self.sink.add("ExprChoice", (context, ty, c, a, b))?)
             }
             TermKind::Var(_)
             | TermKind::BinOp(_)
@@ -372,12 +370,12 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
                     values.push(self.value(context, part, false)?);
                 }
                 let args = self.args(context, &values)?;
-                return Ok(self.sink.add("ScalarTuple", (context, ty, args))?);
+                return Ok(self.sink.add("ExprTuple", (context, ty, args))?);
             }
             ArrayExpr::Var(_, _) => return self.opaque(source, ty, context, false),
         };
         let args = self.args(context, &values)?;
-        self.sink.add("ScalarOperatorSafe", (ty, operator))?;
-        Ok(self.sink.add("ScalarOp", (context, ty, operator, args))?)
+        self.sink.add("ExprOperatorTotal", (ty, operator))?;
+        Ok(self.sink.add("ExprOp", (context, ty, operator, args))?)
     }
 }

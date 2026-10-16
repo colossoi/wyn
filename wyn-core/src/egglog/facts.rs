@@ -75,7 +75,7 @@ impl<'a, 'source> Facts<'a, 'source> {
         self.lookup("SourceAlias", (value,))
     }
     pub fn context(&self, value: Value) -> Option<Value> {
-        self.lookup("ScalarScopeContext", (value,))
+        self.lookup("ExprContextForScope", (value,))
     }
     pub fn result(&self, value: Value) -> Option<Value> {
         self.lookup("SourceResult", (value,))
@@ -346,7 +346,7 @@ impl<'a, 'source> Facts<'a, 'source> {
             .collect()
     }
     pub fn dispatch_context(&self, operation: Value) -> Option<Value> {
-        self.constructor("ScalarDispatch", (operation,))
+        self.constructor("ExprContextDispatch", (operation,))
     }
 }
 

@@ -51,23 +51,43 @@ impl Evaluation {
             let Term::App(name, fields) = selected.dag.get(term) else {
                 continue;
             };
-            if !name.starts_with("Scalar") {
+            if !matches!(
+                name.as_str(),
+                "ExprLeaf"
+                    | "ExprExecute"
+                    | "ExprInstruction"
+                    | "ExprCall"
+                    | "ExprParameter"
+                    | "ExprLength"
+                    | "ExprLiteral"
+                    | "ExprUnary"
+                    | "ExprBinary"
+                    | "ExprOp"
+                    | "ExprInvoke"
+                    | "ExprChoice"
+                    | "ExprTuple"
+                    | "ExprVector"
+                    | "ExprProject"
+                    | "ExprCoerce"
+                    | "ExprNil"
+                    | "ExprCons"
+            ) {
                 continue;
             }
             let value = selected.values[term];
-            let table = if matches!(name.as_str(), "ScalarCons" | "ScalarNil") {
-                "ScalarArgsReadOnly"
+            let table = if matches!(name.as_str(), "ExprCons" | "ExprNil") {
+                "ExprArgsReadOnly"
             } else {
-                "ScalarReadOnly"
+                "ExprReadOnly"
             };
             plan.readonly[term] =
                 scalars.read(|r| r.lookup(table, value))?.is_some_and(|v| scalars.value_to_base::<bool>(v));
-            plan.total[term] = scalars.read(|r| r.contains("ScalarTotal", value))?;
+            plan.total[term] = scalars.read(|r| r.contains("ExprTotal", value))?;
             let mut deps = operands(name, fields);
-            if name == "ScalarLeaf" {
+            if name == "ExprLeaf" {
                 let source = selected.values[fields[2]];
                 leaves.insert(term);
-                plan.owners[term] = facts.lookup("ScalarOwner", (source,));
+                plan.owners[term] = facts.lookup("ExprContextOwner", (source,));
                 plan.ordinals[term] =
                     facts.lookup("SourceEvaluationPosition", (source,)).map(|v| facts.integer(v));
                 if let Some(&root) = selected.roots.get(&(selected.values[fields[0]], source)) {
@@ -76,13 +96,13 @@ impl Evaluation {
                     }
                 }
             }
-            if name == "ScalarChoice" {
+            if name == "ExprChoice" {
                 deps = vec![fields[2]];
                 let arms = choices.entry(fields[2]).or_default();
                 arms.0.push(fields[3]);
                 arms.1.push(fields[4]);
             }
-            if name == "ScalarInstruction" && matches!(selected.text(fields[3]), Ok("index")) {
+            if name == "ExprInstruction" && matches!(selected.text(fields[3]), Ok("index")) {
                 if let Ok(args) = selected.arguments(fields[4]) {
                     if let [array, index] = args.as_slice() {
                         if let Ok((base, _)) = selected.projected_array(*array) {
@@ -92,10 +112,10 @@ impl Evaluation {
                 }
             }
             plan.dependencies[term] = deps.clone();
-            if name == "ScalarChoice" {
+            if name == "ExprChoice" {
                 deps.extend_from_slice(&fields[3..5]);
             }
-            if name == "ScalarExecute" {
+            if name == "ExprExecute" {
                 let context = selected.values[fields[0]];
                 let source = selected.values[fields[2]];
                 let mut sources = Vec::new();
@@ -122,7 +142,7 @@ impl Evaluation {
                             }
                         }
                     }
-                    if let Some(owner) = facts.lookup("ScalarOwner", (source,)) {
+                    if let Some(owner) = facts.lookup("ExprContextOwner", (source,)) {
                         boundaries.push((context, source, owner, term));
                     }
                 }
@@ -145,13 +165,13 @@ impl Evaluation {
                     sink.add("EvaluationEdge", (term as i64, child as i64))?;
                 }
                 if let Term::App(name, fields) = selected.dag.get(term) {
-                    sink.add("ScheduleNode", (term as i64, i64::from(name == "ScalarChoice")))?;
-                    if name != "ScalarLeaf" {
+                    sink.add("ScheduleNode", (term as i64, i64::from(name == "ExprChoice")))?;
+                    if name != "ExprLeaf" {
                         for &child in &plan.dependencies[term] {
                             sink.add("ScheduleOperand", (term as i64, child as i64))?;
                         }
                     }
-                    if name == "ScalarChoice" {
+                    if name == "ExprChoice" {
                         sink.add("ScheduleChoice", (term as i64, fields[2] as i64))?;
                     }
                 }
@@ -223,7 +243,7 @@ impl Evaluation {
         })?;
         let mut queries = LookupSet::default();
         let mut pending = Vec::new();
-        scalars.constructor_enodes("ScalarRoot", |row| {
+        scalars.constructor_enodes("ExprRoot", |row| {
             if let Some(&term) = selected.roots.get(&(row.children[0], row.children[2])) {
                 pending.push((row.children[1], term));
             }
@@ -234,7 +254,7 @@ impl Evaluation {
             }
             pending.extend(plan.dependencies[term].iter().map(|t| (scope, *t)));
             if let Term::App(name, fields) = selected.dag.get(term) {
-                if name == "ScalarChoice" {
+                if name == "ExprChoice" {
                     pending.extend(fields[3..5].iter().map(|t| (scope, *t)));
                 }
             }
@@ -299,7 +319,7 @@ impl Evaluation {
         let mut pending: Vec<_> = selected.roots.values().map(|t| vec![*t]).collect();
         pending.extend(selected.extents.values().map(|t| vec![*t]));
         pending.extend((0..selected.dag.size()).filter_map(|term| {
-            matches!(selected.dag.get(term), Term::App(name, _) if name == "ScalarChoice")
+            matches!(selected.dag.get(term), Term::App(name, _) if name == "ExprChoice")
                 .then_some(vec![term])
         }));
         pending.extend(self.shared.values().flatten().map(|(t, _)| vec![*t]));
@@ -316,7 +336,7 @@ impl Evaluation {
                     roots.iter().copied(),
                     |_| false,
                     |term, out| {
-                        if !matches!(selected.dag.get(term), Term::App(name, _) if name == "ScalarLeaf") {
+                        if !matches!(selected.dag.get(term), Term::App(name, _) if name == "ExprLeaf") {
                             out.extend(self.dependencies[term].iter().copied());
                         }
                     },
@@ -348,7 +368,7 @@ impl Evaluation {
                 let mut schedule = Vec::new();
                 for term in order {
                     let (name, _) = selected.app(term)?;
-                    if matches!(name, "ScalarCons" | "ScalarNil") {
+                    if matches!(name, "ExprCons" | "ExprNil") {
                         continue;
                     }
                     let terms =
