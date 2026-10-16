@@ -11,7 +11,6 @@
 (relation FitsInput (OperationKey SourceValue))
 (function ReuseWriter (OperationKey) StageKey :no-merge)
 (relation ReuseBoundary (StageKey StageKey))
-(relation ReuseCandidate (StageKey SourceValue ValueKey))
 (relation ReuseResult (OperationKey i64 TypeKey))
 (relation ReuseOperand (OperationKey SourceValue))
 (relation ReuseType (OperationKey TypeKey))
@@ -72,16 +71,15 @@
 (rule ((= writer (ReuseWriter op)) (Phase writer region)
        (ReuseType op t) (ReuseOperand op e) (WholeValue e old)
        (FreshValue old) (ElementType old t) (Produces producer old) (Phase producer region))
-      ((ReuseCandidate writer e old) (OwnedInput op t e)) :ruleset reuse)
+      ((ReuseAlias writer e old) (set (ReuseBlocked writer e) false)
+       (ReuseBoundary writer writer) (OwnedInput op t e)) :ruleset reuse)
 (rule ((= writer (ReuseWriter op)) (Phase writer region) (ReuseType op t)
        (ReuseOperand op e) (WholeValue e (Source source))
        (ReusableSource source t region))
-      ((ReuseCandidate writer e (Source source)) (OwnedInput op t e)) :ruleset reuse)
-(rule ((ReuseCandidate writer e old))
-      ((ReuseAlias writer e old) (set (ReuseBlocked writer e) false)) :ruleset reuse)
+      ((ReuseAlias writer e (Source source)) (set (ReuseBlocked writer e) false)
+       (ReuseBoundary writer writer) (OwnedInput op t e)) :ruleset reuse)
 ; Walk only this recipe's bounded phase graph, not the whole dispatch graph.
 ; Finishing before any of these boundaries also finishes before the writer.
-(rule ((ReuseCandidate writer e old)) ((ReuseBoundary writer writer)) :ruleset reuse)
 (rule ((ReuseBoundary (Stage op writer) (Stage op after)) (PhaseLink op before after))
       ((ReuseBoundary (Stage op writer) (Stage op before))) :ruleset reuse)
 

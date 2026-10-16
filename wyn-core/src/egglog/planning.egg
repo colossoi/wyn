@@ -71,7 +71,6 @@
 (relation PhaseInput (StageKey OperationKey String))
 (relation PhaseDomain (StageKey Extent i64))
 (datatype ExecutionScope (InvocationScope) (WorkgroupScope))
-(function PhaseExecution (StageKey) ExecutionScope :no-merge)
 (relation ExtentDemand (StageKey Extent))
 (relation Produces (StageKey ValueKey))
 (relation Needs (StageKey ValueKey))

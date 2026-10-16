@@ -91,6 +91,45 @@ fn result_tree_counts_are_available_to_fusion_choices() {
 }
 
 #[test]
+fn indexed_phase_domains_preserve_validation() {
+    let tlc = compile_thru_tlc("entry main(xs:[]i32) []i32=map(|x|x+1,xs)").unwrap();
+    for (mode, expected) in [
+        ("missing", "stage domain missing"),
+        ("ambiguous", "ambiguous PhaseDomain"),
+        ("zero-width", "stage width must be positive"),
+    ] {
+        let mut program = optimize(
+            schedule(
+                place(
+                    fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                    PipelineTopologyPolicy::AllowGenerated,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let domain = Query(&program.graph).row("PhaseDomain", |_| true).unwrap().unwrap();
+        if mode != "ambiguous" {
+            program.graph.clear_function("PhaseDomain").unwrap();
+        }
+        if mode != "missing" {
+            program
+                .graph
+                .update(|mut sink| {
+                    sink.add("PhaseDomain", (domain[0], domain[1], 0i64))?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let Err(error) = to_ssa(program, CodegenTarget::Wgsl) else {
+            panic!("invalid {mode} phase domain was accepted");
+        };
+        assert!(error.to_string().contains(expected), "{mode}: {error}");
+    }
+}
+
+#[test]
 fn collective_emission_requires_the_planned_group_count() {
     let tlc = compile_thru_tlc("entry main(xs:[]i32) i32=reduce((+),0,xs)").unwrap();
     let mut program = optimize(
@@ -349,34 +388,6 @@ fn ranked_inputs_keep_their_independent_coordinate_mappings() {
             }
         },
     );
-}
-
-#[test]
-fn selected_phases_declare_their_cooperation_scope() {
-    for source in [
-        "entry main(xs:[]i32) [][5]i32=map(|x|scan(|a,b|a+b,0,[x,x,x,x,x]),xs)",
-        "entry main(xs:[]i32) []i32=scan(|a,b|a+b,0,xs)",
-        "entry main(xs:[]i32) []i32=filter(|x|x>0,xs)",
-    ] {
-        planned(source, |graph| {
-            let query = Query(graph);
-            query
-                .for_each("Phase", |row| {
-                    let stage = query.enode("Stage", row[0])?.unwrap();
-                    let phase = graph.value_to_base::<S>(stage[1]);
-                    let expected =
-                        if matches!(phase.as_ref(), "chunks" | "combine" | "compact" | "segments") {
-                            "WorkgroupScope"
-                        } else {
-                            "InvocationScope"
-                        };
-                    let execution = query.required("PhaseExecution", (row[0],))?;
-                    assert!(query.enode(expected, execution)?.is_some(), "{phase:?}");
-                    Ok(())
-                })
-                .unwrap();
-        });
-    }
 }
 
 #[test]
@@ -742,8 +753,8 @@ fn selected_map_bindings_replace_callback_discovery() {
         let mut collectives = Vec::new();
         query
             .for_function("PlanCallback", |keys, callback| {
-                if !query.flag("PlanMapping", (keys[0], keys[1]))? {
-                    collectives.push((keys[0], keys[1], callback));
+                if !query.flag("PlanMapping", (keys[0],))? {
+                    collectives.push((keys[0], callback));
                 }
                 Ok(())
             })
@@ -759,8 +770,8 @@ fn selected_map_bindings_replace_callback_discovery() {
         program
             .graph
             .update(|mut sink| {
-                for (plan, op, callback) in collectives {
-                    sink.set("PlanCallback", (plan, op), callback)?;
+                for (op, callback) in collectives {
+                    sink.set("PlanCallback", (op,), callback)?;
                 }
                 Ok(())
             })

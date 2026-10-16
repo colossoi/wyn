@@ -4,7 +4,6 @@ use crate::egglog::query::Query;
 use crate::ssa::types::AtomicOp;
 use crate::{types::Type, SymbolId};
 use egglog_engine::{sort::S, Value};
-use wyn_graph::topo_sort_by_dependencies;
 
 pub struct AccumulatorComponent {
     pub role: String,
@@ -14,21 +13,6 @@ pub struct AccumulatorComponent {
 }
 
 impl<'a, 'source> Facts<'a, 'source> {
-    pub fn stages(&self, owner: SymbolId) -> Result<Vec<Value>, OptimizeError> {
-        let Some(owner) = self.program.identities.symbols.get(&owner) else {
-            return Err(error("entry identity missing"));
-        };
-        let mut stages = Vec::new();
-        self.program.graph.constructor_enodes("PhaseOwner", |row| {
-            if self.integer(row.children[1]) == owner {
-                stages.push(row.children[0]);
-            }
-        })?;
-        stages.sort();
-        topo_sort_by_dependencies(stages, |key, out| out.extend(self.dependencies(key)))
-            .map_err(|_| error("dispatch plan contains a cycle"))
-    }
-
     pub fn phase_operation(&self, stage: Value) -> Result<Value, OptimizeError> {
         let fields = self.enode("Stage", stage).ok_or_else(|| error("stage identity missing"))?;
         Ok(fields[0])
@@ -37,20 +21,6 @@ impl<'a, 'source> Facts<'a, 'source> {
     pub fn phase_name(&self, stage: Value) -> Result<String, OptimizeError> {
         let fields = self.enode("Stage", stage).ok_or_else(|| error("stage identity missing"))?;
         Ok(self.program.graph.value_to_base::<S>(fields[1]).to_string())
-    }
-
-    pub fn phase_extent(&self, stage: Value) -> Result<Value, OptimizeError> {
-        let row = Query(&self.program.graph)
-            .row("PhaseDomain", |r| r[0] == stage)?
-            .ok_or_else(|| error("stage domain missing"))?;
-        Ok(row[1])
-    }
-
-    pub fn phase_width(&self, stage: Value) -> Result<u32, OptimizeError> {
-        let row = Query(&self.program.graph)
-            .row("PhaseDomain", |r| r[0] == stage)?
-            .ok_or_else(|| error("stage domain missing"))?;
-        self.positive(row[2], "stage width")
     }
 
     pub fn dispatch_grid(&self, key: Value) -> Result<Option<(u32, u32, u32)>, OptimizeError> {

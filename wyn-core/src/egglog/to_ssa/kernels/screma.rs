@@ -97,7 +97,7 @@ pub(super) fn screma(
             return Err(error("collective group count missing"));
         };
         (
-            body.compiler.facts.phase_width(key)?,
+            body.compiler.phase_width(key)?,
             u64::from(body.compiler.facts.positive(groups, "collective group count")?),
         )
     };

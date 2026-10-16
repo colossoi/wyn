@@ -40,8 +40,6 @@
 (rule ((ValueRef v b)) ((set (SsaValueRef v) b)) :ruleset ssa-access)
 (function SsaOutputBacking (i64) ValueKey :no-merge)
 (rule ((OutputBacking o b)) ((set (SsaOutputBacking o) b)) :ruleset ssa-access)
-(function SsaOutputWriter (i64) StageKey :no-merge)
-(rule ((OutputWriter o (KernelRoot k))) ((set (SsaOutputWriter o) k)) :ruleset ssa-access)
 (sort SsaOperations (Set OperationKey))
 (sort SsaStages (Set StageKey))
 (function SsaFilter (FusionPlan) OperationKey :no-merge)

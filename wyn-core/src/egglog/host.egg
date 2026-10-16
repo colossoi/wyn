@@ -1,11 +1,11 @@
 ; Candidate host targets; final readout resolves which computations are supported.
 (ruleset host-targets)
 (relation HostTarget (RootKey SourceValue ScalarContext ValueKey))
-(rule ((OutputWriter output (EntryRoot entry)) (SourceDefinition entry scope)
+(rule ((= (OutputWriter output) (EntryRoot entry)) (SourceDefinition entry scope)
        (SourceOutput output entry source ty array) (= context (ScalarScopeContext scope))
        (OutputBacking output value) (= storage (Backing value)))
       ((HostTarget (EntryRoot entry) source context storage)) :ruleset host-targets)
-(rule ((OutputWriter output (KernelRoot (Stage op "scalar")))
+(rule ((= (OutputWriter output) (KernelRoot (Stage op "scalar")))
        (SourceOutput output entry source ty array)
        (OutputBacking output value) (= storage (Backing value)))
       ((HostTarget (KernelRoot (Stage op "scalar")) source (ScalarDispatch op) storage)) :ruleset host-targets)

@@ -151,7 +151,8 @@ impl<'a, 'source> Facts<'a, 'source> {
         Ok((dimensions, inputs))
     }
     pub fn callback(&self, value: Value) -> Option<Value> {
-        self.lookup("PlanCallback", (self.group(value)?, value))
+        self.group(value)?;
+        self.lookup("PlanCallback", (value,))
     }
     pub fn definition_name(&self, scope: Value) -> Option<SymbolId> {
         let token = self.lookup("SsaDefinitionName", (scope,))?;
@@ -310,13 +311,14 @@ impl<'a, 'source> Facts<'a, 'source> {
         ))
     }
     pub fn input(&self, operation: Value, index: i64) -> Option<Value> {
-        self.lookup("PlanRoute", (self.group(operation)?, operation, index))
+        self.group(operation)?;
+        self.lookup("PlanRoute", (operation, index))
     }
     pub fn inputs(&self, operation: Value) -> Result<Vec<(i64, Value)>, OptimizeError> {
-        let Some(plan) = self.group(operation) else {
+        let Some(_) = self.group(operation) else {
             return Err(error("operation has no fusion plan"));
         };
-        let Some(count) = self.lookup("PlanInputCount", (plan, operation)) else {
+        let Some(count) = self.lookup("PlanInputCount", (operation,)) else {
             return Err(error("operation has no input count"));
         };
         let count = self.integer(count);

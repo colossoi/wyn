@@ -31,7 +31,7 @@
       ((PublicationProduced (EntryRoot owner) resource)) :ruleset publication-access)
 (rule ((SourceDrawRead owner resource))
       ((set (PublicationAccess (EntryRoot owner) resource) 1)) :ruleset publication-access)
-(rule ((OutputWriter output root) (AbiOutputBinding output set binding)
+(rule ((= root (OutputWriter output)) (AbiOutputBinding output set binding)
        (RootOwner root owner) (SourceInterfaceBinding owner (InputBinding set binding) resource))
       ((set (PublicationAccess root resource) 2) (PublicationProduced root resource)) :ruleset publication-access)
 (rule ((DispatchDependency before after))
@@ -86,7 +86,7 @@
 
 (rule ((FinishEntry owner) (SourceDefinition owner region))
       ((RootUsesRegion (EntryRoot owner) region)) :ruleset publication-uses)
-(rule ((OutputWriter output root) (PlannedOutput output owner source))
+(rule ((= root (OutputWriter output)) (PlannedOutput output owner source))
       ((RootValueUse root source)) :ruleset publication-uses)
 
 (rule ((PhaseCallback stage region) (SourceCapture region formal actual))
@@ -94,7 +94,7 @@
 
 ; The draw waits for the writer chosen by the ordinary buffer planner. An
 ; existing backing can have its own writer; a copied value has an OutputWriter.
-(rule ((DrawOutputRead draw output) (OutputWriter output writer))
+(rule ((DrawOutputRead draw output) (= writer (OutputWriter output)))
       ((PublicationDependency writer (EntryRoot draw))) :ruleset publication-order)
 (rule ((DrawOutputRead draw output) (OutputBacking output storage)
        (Produces stage value) (= (Backing value) storage))

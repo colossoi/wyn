@@ -55,8 +55,8 @@
       ((set (ViewExtent value) (Length first))) :ruleset planning-import)
 
 (rule ((PlannedOperation original owner plan region) (= value (SourceOperationValue original)) (SourceEnters value child)) ((Enters owner child)) :ruleset planning-import)
-(rule ((PlannedOperation original owner plan region) (= child (PlanCallback plan original))) ((Callback owner child) (DeviceRegion child)) :ruleset planning-import)
-(rule ((PlannedOperation original owner plan region) (= value (SourceOperationValue original)) (= (SourceReadOnly value) false)) ((ParallelEffect owner)) :ruleset planning-import)
+(rule ((PlannedOperation original owner plan region) (= child (PlanCallback original))) ((Callback owner child) (DeviceRegion child)) :ruleset planning-import)
+(rule ((PlannedOperation original owner plan region) (= value (SourceOperationValue original)) (= (SourceReadOnly value) false)) ((set (ParallelSafe owner) false)) :ruleset planning-import)
 (rule ((PlannedOperation original owner plan region) (= original owner) (SourceOperation original source "control")) ((SourceControl owner)) :ruleset planning-import)
 (rule ((PlannedOperation original owner plan region) (= original owner) (SourceOperation original source kind)
        (!= kind "map") (!= kind "reduce") (!= kind "scan") (!= kind "filter")
@@ -126,7 +126,7 @@
        (SourceOperation original r kind) (!= kind "bucket-scatter")
        (= value (SourceOperationValue original))) ((DirectResult value owner 0)) :ruleset planning-import)
 
-(rule ((Current group plan) (= owner (Owner plan)) (= value (PlanRoute plan original i)) (= (PlanInternal plan value) false))
+(rule ((Current group plan) (= owner (Owner plan)) (PlanMember plan original) (= value (PlanRoute original i)) (= (PlanInternal plan value) false))
       ((Operand owner "input" value)) :ruleset planning-import)
 (rule ((PlannedOperation original owner plan region) (SourceOperand original child) (= (PlanInternal plan child) false))
       ((Operand owner "environment" child)) :ruleset planning-import)
@@ -148,7 +148,7 @@
        (= destination (SourceDestination original)) (= (SourceStorage destination) false) (= (SourceScratchValue destination) false)
        (= ty (SourceType destination)) (SourceArrayElement ty element))
       ((InitializedResult owner 0 element (Length destination)) (set (ContainsCollective owner) true)) :ruleset planning-import)
-(rule ((PlannedOperation original owner plan region) (= value (PlanRoute plan original i))
+(rule ((PlannedOperation original owner plan region) (= value (PlanRoute original i))
        (= (PlanInternal plan value) false) (= result (SourceOperationValue original))
        (PlanResult plan "array" slot result ty))
       ((PreferredReuse (Result owner slot) value)) :ruleset planning-import)
@@ -181,7 +181,7 @@
        (PlanCountObserver count original) (= value (SourceOperationValue original)))
       ((DirectResult value owner i)) :ruleset planning-import)
 
-(rule ((PlannedOperation original owner plan region) (= wrapper (PlanCallback plan original))
+(rule ((PlannedOperation original owner plan region) (= wrapper (PlanCallback original))
        (= value (SourceResult wrapper)) (= actual (PlanCallee value)))
       ((Callback owner actual) (DeviceRegion actual)) :ruleset planning-import)
 
@@ -199,12 +199,12 @@
 
 ; Combination consumes reducer callbacks, not the producer maps' environments.
 (rule ((Phase (Stage leader phase) r) (PlannedOperation op leader plan r)
-       (= callback (PlanCallback plan op)) (SourceOperation op origin kind)
+       (= callback (PlanCallback op)) (SourceOperation op origin kind)
        (!= phase "initialize") (!= phase "clear") (!= phase "loop_enter") (!= phase "loop_exit")
        (!= phase "combine"))
       ((PhaseCallback (Stage leader phase) callback)) :ruleset schedule)
 (rule ((Phase (Stage leader "combine") r) (PlannedOperation op leader plan r)
-       (= callback (PlanCallback plan op)) (SourceOperation op origin kind)
+       (= callback (PlanCallback op)) (SourceOperation op origin kind)
        (!= kind "map") (!= kind "filter") (!= kind "scatter") (!= kind "bucket-scatter"))
       ((PhaseCallback (Stage leader "combine") callback)) :ruleset schedule)
 (rule ((PhaseCallback stage region) (SourceRegionEnters region child))

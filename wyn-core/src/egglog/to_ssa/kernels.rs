@@ -159,11 +159,12 @@ pub(super) fn element(
         return Ok(value);
     }
     if let Some(operation) = body.compiler.facts.operation(source) {
-        if body
-            .compiler
-            .facts
-            .lookup("PlanMapping", (plan, operation))
-            .is_some_and(|mapping| body.compiler.program.graph.value_to_base::<bool>(mapping))
+        if body.compiler.facts.contains("PlanMember", (plan, operation))
+            && body
+                .compiler
+                .facts
+                .lookup("PlanMapping", (operation,))
+                .is_some_and(|mapping| body.compiler.program.graph.value_to_base::<bool>(mapping))
         {
             let Some(bindings) =
                 body.compiler.facts.lookup("MapBindings", (source, 0i64, indices.len() as i64, false))

@@ -848,7 +848,10 @@ fn reduction_publication_has_scratch_writers_readers_and_a_source_result() {
 
 #[test]
 fn independent_entries_keep_their_own_dispatches_and_results() {
-    let output = pipeline("entry first(xs:[5]i32) [5]i32 = map(|x:i32|x+1,xs)\nentry second(xs:[9]i32) [9]i32 = map(|x:i32|x*2,xs)");
+    let output = pipeline(
+        "entry first(xs:[5]i32) [5]i32 = map(|x|x*3,map(|x:i32|x+1,xs))\n\
+         entry second(ys:[9]i32) [9]i32 = map(|x|x-1,map(|x:i32|x*2,ys))",
+    );
     assert_eq!(output.program.interface.pipelines.len(), 2);
     assert_eq!(output.program.interface.source_results.len(), 2);
     assert_ne!(
@@ -859,6 +862,22 @@ fn independent_entries_keep_their_own_dispatches_and_results() {
         output.program.interface.source_results[0].binding,
         output.program.interface.source_results[1].binding
     );
+    for (pipeline, other_input) in output.program.interface.pipelines.iter().zip(["ys", "xs"]) {
+        let Pipeline::Compute(pipeline) = pipeline else {
+            panic!("compute")
+        };
+        assert_eq!(
+            pipeline.stages.len(),
+            1,
+            "each map chain should fuse independently"
+        );
+        assert!(
+            !pipeline.bindings.iter().any(|binding| matches!(
+                binding, host::Binding::StorageBuffer { name, .. } if name == other_input
+            )),
+            "a plan must not import another entry's operand"
+        );
+    }
 }
 
 #[test]

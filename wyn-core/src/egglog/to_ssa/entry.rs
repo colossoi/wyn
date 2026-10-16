@@ -224,8 +224,8 @@ fn emit_body(
     let result = if let Some(stage) = stage {
         let operation = lower.compiler.facts.phase_operation(stage)?;
         let phase = lower.compiler.facts.phase_name(stage)?;
-        let extent = lower.compiler.facts.phase_extent(stage)?;
-        let width = lower.compiler.facts.phase_width(stage)?;
+        let extent = lower.compiler.phase_extent(stage)?;
+        let width = lower.compiler.phase_width(stage)?;
         kernels::emit(lower, scope, operation, &phase, extent, width)?;
         lower.op(OpTag::Unit, vec![], types::unit())?
     } else if compute && !original {
@@ -306,10 +306,11 @@ fn copy_results<'source>(
     stage: Option<Value>,
 ) -> Result<(), OptimizeError> {
     let planned = lower.compiler.facts.outputs(symbol)?;
+    let root = lower.compiler.facts.entry_root(symbol, stage)?;
     let write = |lower: &mut Body<'_, '_, 'source>| -> Result<(), OptimizeError> {
         for id in planned {
             if !lower.compiler.facts.contains("CopyOutput", (id,))
-                || lower.compiler.facts.lookup("SsaOutputWriter", (id,)) != stage
+                || lower.compiler.facts.lookup("OutputWriter", (id,)) != Some(root)
             {
                 continue;
             }
@@ -337,7 +338,7 @@ fn copy_results<'source>(
         Ok(())
     };
     if stage
-        .map(|key| lower.compiler.facts.phase_width(key).map(|width| width > 1))
+        .map(|key| lower.compiler.phase_width(key).map(|width| width > 1))
         .transpose()?
         .unwrap_or(false)
     {
