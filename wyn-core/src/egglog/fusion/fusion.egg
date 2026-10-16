@@ -35,7 +35,7 @@
 (rule ((GroupEdge a b)) ((GroupBefore a b)) :ruleset fusion-dependencies)
 (rule ((Member p scan)
        (Member c collective)
-       (ScanFeeds scan collective))
+       (SourceScanDependency scan collective))
       ((set (BarrierBlocked p c) true)) :ruleset fusion-dependencies)
 
 ; Each round reads the current quotient graph. Candidate facts carry the round

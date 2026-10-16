@@ -165,14 +165,14 @@ impl Evaluation {
                     sink.add("EvaluationEdge", (term as i64, child as i64))?;
                 }
                 if let Term::App(name, fields) = selected.dag.get(term) {
-                    sink.add("ScheduleNode", (term as i64, i64::from(name == "ExprChoice")))?;
+                    sink.set("ExprScheduleWeight", term as i64, i64::from(name == "ExprChoice"))?;
                     if name != "ExprLeaf" {
                         for &child in &plan.dependencies[term] {
-                            sink.add("ScheduleOperand", (term as i64, child as i64))?;
+                            sink.add("ExprScheduleOperand", (term as i64, child as i64))?;
                         }
                     }
                     if name == "ExprChoice" {
-                        sink.add("ScheduleChoice", (term as i64, fields[2] as i64))?;
+                        sink.set("ExprScheduleCondition", term as i64, fields[2] as i64)?;
                     }
                 }
                 if plan.readonly[term] {
@@ -346,50 +346,54 @@ impl Evaluation {
             }
             graph.update(|mut sink| {
                 for (id, roots, order) in &requests {
-                    sink.add("ScheduleRequest", (*id, roots.iter().all(|t| self.readonly[*t])))?;
+                    sink.set(
+                        "ExprScheduleReorderable",
+                        *id,
+                        roots.iter().all(|t| self.readonly[*t]),
+                    )?;
                     for &term in order {
-                        sink.add("ScheduleMember", (*id, term as i64))?;
+                        sink.set("ExprSchedulePriority", (*id, term as i64), 0i64)?;
                     }
                 }
                 Ok::<_, egglog_engine::Error>(())
             })?;
             graph.parse_and_run_program(None, "(run-schedule (saturate schedule-anchors))")?;
             for (id, roots, mut order) in requests {
-                let mut ranks = LookupMap::default();
+                let mut ordering = LookupMap::default();
                 let mut groups = LookupMap::<_, Vec<_>>::default();
                 for &term in &order {
-                    let rank = Query(graph).required("ScheduleOrder", (id, term as i64))?;
-                    ranks.insert(term, graph.value_to_base::<i64>(rank));
-                    if let Some(group) = Query(graph).lookup("ScheduleGroup", (id, term as i64))? {
+                    let rank = Query(graph).required("ExprSchedulePriority", (id, term as i64))?;
+                    let group = Query(graph).lookup("ExprScheduleGroup", (id, term as i64))?;
+                    ordering.insert(term, (graph.value_to_base::<i64>(rank), group));
+                    if let Some(group) = group {
                         groups.entry(group).or_default().push(term);
                     }
                 }
-                order.sort_by_key(|t| ranks[t]);
+                order.sort_by_key(|t| ordering[t].0);
                 let mut schedule = Vec::new();
                 for term in order {
                     let (name, _) = selected.app(term)?;
                     if matches!(name, "ExprCons" | "ExprNil") {
                         continue;
                     }
-                    let terms =
-                        if let Some(group) = Query(graph).lookup("ScheduleGroup", (id, term as i64))? {
-                            let Some(terms) = groups.remove(&group) else {
-                                continue;
-                            };
-                            let arms = [3, 4].map(|arm| {
-                                terms
-                                    .iter()
-                                    .map(|t| selected.app(*t).map(|(_, f)| f[arm]))
-                                    .collect::<Result<Vec<_>, _>>()
-                            });
-                            let [yes, no] = arms;
-                            let (yes, no) = (yes?, no?);
-                            self.plan_common(yes.clone(), no.clone());
-                            pending.extend([yes, no]);
-                            terms
-                        } else {
-                            vec![term]
+                    let terms = if let Some(group) = ordering[&term].1 {
+                        let Some(terms) = groups.remove(&group) else {
+                            continue;
                         };
+                        let arms = [3, 4].map(|arm| {
+                            terms
+                                .iter()
+                                .map(|t| selected.app(*t).map(|(_, f)| f[arm]))
+                                .collect::<Result<Vec<_>, _>>()
+                        });
+                        let [yes, no] = arms;
+                        let (yes, no) = (yes?, no?);
+                        self.plan_common(yes.clone(), no.clone());
+                        pending.extend([yes, no]);
+                        terms
+                    } else {
+                        vec![term]
+                    };
                     schedule.push(terms);
                 }
                 self.schedules.insert(roots, schedule);

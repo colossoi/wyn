@@ -51,7 +51,7 @@
       ((union (SourceDomain op) (FixedDomain n))) :ruleset source-fusion)
 ; Scan-derived inputs remain barrier-bearing through field-sensitive uses.
 (rule ((SourceDepends consumer producer role) (SourceOperation producer r "scan"))
-      ((ScanFeeds producer consumer)) :ruleset source-fusion)
+      ((SourceScanDependency producer consumer)) :ruleset source-fusion)
 
 (rule ((SourceOperation op r kind) (= body (SourceOperatorBody op)) (= (SourceRegionPure body) true)
        (!= kind "map") (!= kind "reduce") (!= kind "scan") (!= kind "filter"))

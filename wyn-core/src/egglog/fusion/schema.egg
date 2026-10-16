@@ -47,7 +47,7 @@
 (function StreamBlocked (FusionGroup FusionGroup) bool :merge (or old new))
 (relation WholeStream (FusionGroup FusionGroup))
 (function BarrierBlocked (FusionGroup FusionGroup) bool :merge (or old new))
-(relation ScanFeeds (OperationKey OperationKey))
+(relation SourceScanDependency (OperationKey OperationKey))
 (relation GroupUseFact (FusionGroup GroupUse))
 (constructor DomainValue (i64) Domain)
 (constructor FixedDomain (i64) Domain)

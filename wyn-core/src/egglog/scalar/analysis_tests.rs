@@ -1,5 +1,55 @@
 use egglog_engine::EGraph;
 
+#[test]
+fn expression_schedules_preserve_request_boundaries_and_settled_priorities() {
+    let mut graph = EGraph::default();
+    graph.parse_and_run_program(None, include_str!("evaluation.egg")).unwrap();
+    graph
+        .parse_and_run_program(
+            None,
+            r#"
+            (set (ExprScheduleWeight 0) 0)
+            (set (ExprScheduleWeight 1) 1)
+            (set (ExprScheduleWeight 2) 1)
+            (set (ExprScheduleWeight 3) 1)
+            (ExprScheduleOperand 1 0)
+            (ExprScheduleOperand 2 0)
+            (ExprScheduleOperand 3 1)
+            (set (ExprScheduleCondition 1) 0)
+            (set (ExprScheduleCondition 2) 0)
+            (set (ExprScheduleCondition 3) 1)
+            (run-schedule (saturate schedule-rank))
+
+            (set (ExprScheduleReorderable 100) true)
+            (set (ExprScheduleReorderable 101) false)
+            (set (ExprSchedulePriority 100 1) 0)
+            (set (ExprSchedulePriority 100 2) 0)
+            (set (ExprSchedulePriority 100 3) 0)
+            (set (ExprSchedulePriority 101 1) 0)
+            (set (ExprSchedulePriority 101 2) 0)
+            (run-schedule (saturate schedule-anchors))
+            (check (= (ExprSchedulePriority 100 1) 1))
+            (check (= (ExprSchedulePriority 100 3) 2))
+            (check (= (ExprScheduleGroup 100 1) (ExprScheduleGroup 100 2)))
+            (check (= (ExprScheduleGroup 100 3) 1))
+            (check (= (ExprSchedulePriority 101 1) 0))
+            (check (= (ExprSchedulePriority 101 2) 0))
+            (check (= (ExprScheduleGroup 101 1) 1))
+            (check (= (ExprScheduleGroup 101 2) 2))
+            (fail (check (= priority (ExprSchedulePriority 101 3))))
+
+            (set (ExprScheduleReorderable 102) true)
+            (set (ExprSchedulePriority 102 3) 0)
+            (set (ExprSchedulePriority 100 3) 0)
+            (run-schedule (saturate schedule-anchors))
+            (check (= (ExprSchedulePriority 102 3) 2))
+            (check (= (ExprSchedulePriority 100 3) 2))
+            (fail (check (= group (ExprScheduleGroup 102 1))))
+            "#,
+        )
+        .unwrap();
+}
+
 fn graph() -> EGraph {
     let mut graph = EGraph::default();
     graph

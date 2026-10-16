@@ -103,7 +103,7 @@
 (rule ((Current group plan) (= owner (Owner plan)) (ScremaPlan plan) (PlanResult plan "array" i value ty))
       ((ArrayResult owner i ty) (DirectResult value owner i)) :ruleset planning-import)
 (rule ((Current group plan) (= owner (Owner plan)) (PlanResult plan "scan" i value ty))
-      ((ScanComponent owner i ty) (Accumulator owner i ty "scan" i value)) :ruleset planning-import)
+      ((Accumulator owner i ty "scan" i value)) :ruleset planning-import)
 (rule ((Current group plan) (= owner (Owner plan)) (PlanResult plan "total" i value ty) (= scans (PlanScans plan)) (= count (ResultCount scans)))
       ((Accumulator owner (+ count i) ty "total" i value)) :ruleset planning-import)
 (rule ((Current group plan) (= owner (Owner plan)) (FilterPlan plan) (PlanResult plan "array" i value ty))
@@ -157,7 +157,7 @@
 (rule ((PlannedOperation original owner plan region) (SourceOperation original r "scatter")
        (= destination (SourceDestination original)) (= (SourceStorage destination) true)
        (SourceReadCandidate original read) (= (BackingIdentity read) (BackingIdentity destination)))
-      ((ScatterReadConflict owner)) :ruleset planning-import)
+      ((set (ParallelBodySafe owner) false)) :ruleset planning-import)
 ; The destination itself is expected; inputs and captures must not reread it.
 (rule ((PlannedOperation original owner plan region) (SourceReadCandidate original read)
        (ReuseAlias (Stage owner name) e alias) (ValueRef read alias))
