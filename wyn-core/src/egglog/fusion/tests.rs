@@ -6,7 +6,7 @@ fn source_use_sets_survive_group_initialization_and_merging() {
     let mut facts = String::new();
     for id in 1000..1258 {
         facts.push_str(&format!(
-            "(SourceOperation (OperationId {id}) (RegionId 1000) \"control\")\n\
+            "(set (SourceOperation (OperationId {id})) (OperationInfo (RegionId 1000) \"control\"))\n\
              (set (SourceInput (OperationId {id}) 0) (SourceGlobal 1000))\n"
         ));
     }

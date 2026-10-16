@@ -23,9 +23,9 @@ impl Import<'_, '_, '_, '_> {
                 for (index, field) in fields.iter().enumerate() {
                     let component = self.sink.add("SourceProjected", (value, index as i64))?;
                     self.register_source(component)?;
-                    self.sink.add("SourceProjection", (component, value, index as i64))?;
+                    let info = self.sink.add("ProjectionInfo", (value, index as i64))?;
+                    self.sink.set("SourceProjection", component, info)?;
                     self.sink.add("SourceField", (value, index as i64, component))?;
-                    self.sink.add("SourceStorageField", component)?;
                     self.storage_binding(
                         component,
                         field.binding.set,

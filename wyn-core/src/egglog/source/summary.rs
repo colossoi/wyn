@@ -148,7 +148,8 @@ impl Import<'_, '_, '_, '_> {
         scope: Value,
     ) -> Result<(), OptimizeError> {
         let Some(field) = self.graph_source(term, &[index], scope)? else {
-            self.sink.add("SourceProjection", (value, tuple, index as i64))?;
+            let info = self.sink.add("ProjectionInfo", (tuple, index as i64))?;
+            self.sink.set("SourceProjection", value, info)?;
             return Ok(());
         };
         self.alias_summary(value, field)?;
@@ -251,8 +252,8 @@ impl Import<'_, '_, '_, '_> {
     fn write_summary(&mut self, key: Value, summary: &Summary, region: bool) -> Result<(), OptimizeError> {
         let names = if region {
             [
-                "SourceRegionDevice",
-                "SourceRegionPure",
+                "SourceRegionRequiresDevice",
+                "SourceRegionSpeculatable",
                 "SourceRegionReadOnly",
                 "SourceRegionDuplicable",
                 "SourceRegionWork",
@@ -263,8 +264,8 @@ impl Import<'_, '_, '_, '_> {
             ]
         } else {
             [
-                "SourceDevice",
-                "SourcePure",
+                "SourceRequiresDevice",
+                "SourceSpeculatable",
                 "SourceReadOnly",
                 "SourceDuplicable",
                 "SourceWork",

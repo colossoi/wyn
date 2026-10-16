@@ -22,8 +22,9 @@ fn planned(source: &str, check: impl FnOnce(&EGraph)) {
 fn operations(graph: &EGraph, kind: &str) -> Vec<Value> {
     let mut operations = Vec::new();
     Query(graph)
-        .for_each("SourceOperation", |row| {
-            if graph.value_to_base::<S>(row[2]).as_str() == kind {
+        .for_function("SourceOperation", |row, info| {
+            let fields = Query(graph).enode("OperationInfo", info)?.unwrap();
+            if graph.value_to_base::<S>(fields[1]).as_str() == kind {
                 operations.push(row[0]);
             }
             Ok(())
@@ -483,10 +484,9 @@ fn rectangular_planning_and_emission_use_fused_structure() {
     )
     .unwrap();
     let mut graph = program.graph.clone();
-    // Leave scalar bodies and identities intact, but remove original SOAC structure.
-    for table in ["SourceOperation", "SourceInput", "SourceOperatorBody"] {
-        graph.clear_function(table).unwrap();
-    }
+    // Remove source operation classification; immutable inputs and callbacks remain
+    // shared by source analysis and the fused plan.
+    graph.clear_function("SourceOperation").unwrap();
     super::schedule(&mut graph).unwrap();
     let query = Query(&graph);
     let mut ranks = Vec::new();
@@ -499,9 +499,7 @@ fn rectangular_planning_and_emission_use_fused_structure() {
     assert!(ranks.contains(&2));
 
     let mut program = optimize(schedule(program).unwrap()).unwrap();
-    for table in ["SourceOperation", "SourceInput", "SourceOperatorBody"] {
-        program.graph.clear_function(table).unwrap();
-    }
+    program.graph.clear_function("SourceOperation").unwrap();
     to_ssa(program, CodegenTarget::Wgsl).unwrap();
 }
 
@@ -559,13 +557,8 @@ fn rectangular_maps_select_arbitrary_rank_and_preserve_sequential_prefixes() {
             let query = Query(graph);
             let mut ranks = Vec::new();
             query.for_function("IterationRank", |keys, rank| {
-                let mut host = false;
-                query.for_each("Site", |row| {
-                    if row[0] == keys[0] && query.contains("HostRegion", (row[1],))? {
-                        host = true;
-                    }
-                    Ok(())
-                })?;
+                let region = query.required("OperationRegion", (keys[0],))?;
+                let host = query.contains("HostRegion", (region,))?;
                 if host { ranks.push(graph.value_to_base::<i64>(rank)); }
                 Ok(())
             }).unwrap();
@@ -656,7 +649,7 @@ fn segment_callback_blockers_cover_every_output_of_a_fused_plan() {
         let query = Query(&program.graph);
         let plan = query.required("SelectedPlan", (reducers[0],)).unwrap();
         assert_eq!(plan, query.required("SelectedPlan", (reducers[1],)).unwrap());
-        let callback = query.required("PlanCallback", (reducers[0],)).unwrap();
+        let callback = query.required("SourceOperatorBody", (reducers[0],)).unwrap();
         let values: Vec<_> = reducers
             .iter()
             .map(|&reducer| query.required("SourceOperationValue", (reducer,)).unwrap())
@@ -799,7 +792,7 @@ fn selected_map_bindings_replace_callback_discovery() {
         assert_eq!(outputs, 1, "{source}");
         let mut collectives = Vec::new();
         query
-            .for_function("PlanCallback", |keys, callback| {
+            .for_function("SourceOperatorBody", |keys, callback| {
                 if !query.flag("PlanMapping", (keys[0],))? {
                     collectives.push((keys[0], callback));
                 }
@@ -807,7 +800,7 @@ fn selected_map_bindings_replace_callback_discovery() {
             })
             .unwrap();
         for table in [
-            "PlanCallback",
+            "SourceOperatorBody",
             "PlanCallee",
             "PlanCallArgument",
             "SegmentTerminal",
@@ -818,7 +811,7 @@ fn selected_map_bindings_replace_callback_discovery() {
             .graph
             .update(|mut sink| {
                 for (op, callback) in collectives {
-                    sink.set("PlanCallback", (op,), callback)?;
+                    sink.set("SourceOperatorBody", (op,), callback)?;
                 }
                 Ok(())
             })

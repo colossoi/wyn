@@ -123,7 +123,7 @@ fn a_return_without_an_operand_use_blocks_the_graph_proof() {
         crate::PipelineTopologyPolicy::AllowGenerated,
     )
     .unwrap();
-    let scope = Query(&program.graph).row("SourceEntryPoint", |_| true).unwrap().unwrap()[1];
+    let scope = Query(&program.graph).row("SourceOriginalEntry", |_| true).unwrap().unwrap()[1];
     let input = Query(&program.graph).required("SourceParameter", (scope, 0i64)).unwrap();
     assert!(Query(&program.graph).lookup("MaxInputPrefix", (input,)).unwrap().is_some());
 

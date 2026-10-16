@@ -21,7 +21,7 @@ impl Query<'_> {
     }
 
     pub(super) fn callable(&self, source: Value) -> Result<Option<Value>, OptimizeError> {
-        Ok(self.row("SourceCallable", |r| r[0] == source)?.map(|r| r[1]))
+        self.lookup("SourceCallable", (source,))
     }
 
     pub(super) fn call(&self, source: Value) -> Result<Option<(Value, Vec<Value>)>, OptimizeError> {

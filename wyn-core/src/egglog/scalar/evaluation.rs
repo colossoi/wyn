@@ -120,7 +120,7 @@ impl Evaluation {
                 let source = selected.values[fields[2]];
                 let mut sources = Vec::new();
                 if let Some((yes, no)) = facts.branches(source) {
-                    sources.extend(facts.lookup("SsaBranchCondition", (source,)));
+                    sources.extend(facts.branch_condition(source));
                     sources.extend(facts.result(yes));
                     sources.extend(facts.result(no));
                     if let (Some(a), Some(b)) = (facts.result(yes), facts.result(no)) {
@@ -134,7 +134,9 @@ impl Evaluation {
                 }
                 if let Some((header, iteration)) = facts.loops(source) {
                     sources.extend(facts.result(iteration));
-                    sources.extend(facts.lookup("SsaLoopInitial", (header,)));
+                    sources.extend(
+                        facts.record("SourceLoopInitial", "LoopInitialInfo", (header,)).map(|info| info[1]),
+                    );
                     if let Some(form) = facts.lookup("SourceLoopForm", (source,)) {
                         for name in ["WhileCondition", "ForCount", "ForEach"] {
                             if let Some(fields) = facts.enode(name, form) {

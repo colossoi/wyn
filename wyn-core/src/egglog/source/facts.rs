@@ -91,12 +91,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
         if semantic.array_variant().is_some_and(is_array_variant_view) {
             self.sink.add("SourceViewType", key)?;
         }
-        // Booleans are local scalar values even though their storage form is u32.
-        // Classify aggregates using that form so boolean loop state remains a
-        // device-local control boundary rather than exposing its inner SOACs.
-        if byte_size.is_some_and(|size| size > 0) {
-            self.sink.add("SourceScalarLayout", key)?;
-        }
         fn element(ty: &Type) -> Option<Type> {
             if let Some(fields) = crate::types::as_soa_tuple(ty) {
                 return Some(crate::types::tuple(
@@ -250,8 +244,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             (TermKind::Var(VarRef::Builtin { id, .. }), &[array, _, _])
                 if *id == catalog().known().array_with || *id == catalog().known().array_with_in_place =>
             {
-                self.sink.add("SourceSameShape", (value, array))?;
-                self.sink.add("SourceResultOperand", (value, 0i64))?;
+                self.sink.add("SourceResultOperand", (value, 0i64, array))?;
             }
             (TermKind::Var(VarRef::Builtin { id, .. }), &[array]) if *id == catalog().known().length => {
                 self.sink.set("SourceLength", value, array)?;
@@ -260,7 +253,8 @@ impl<'source> Import<'_, '_, '_, 'source> {
             (TermKind::Var(VarRef::Builtin { id, .. }), &[array, start, end])
                 if *id == catalog().known().slice =>
             {
-                self.sink.add("SourceSlice", (value, array, start, end))?;
+                let info = self.sink.add("SliceInfo", (array, start, end))?;
+                self.sink.set("SourceSlice", value, info)?;
             }
             (TermKind::Var(VarRef::Builtin { id, .. }), &[length])
                 if *id == catalog().known().scratch_alloc =>
@@ -337,7 +331,8 @@ impl<'source> Import<'_, '_, '_, 'source> {
         }
         let ty_key = self.ty(ty)?;
         let array = ty.is_array() || crate::types::as_soa_tuple(ty).is_some();
-        self.sink.add("SourceOutput", (id, entry, value, ty_key, array))?;
+        let info = self.sink.add("OutputInfo", (entry, value, ty_key, array))?;
+        self.sink.set("SourceOutput", id, info)?;
         self.sink.add("SourceResultSlot", (entry, slot as i64, id))?;
         Ok(())
     }

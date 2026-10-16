@@ -131,12 +131,11 @@ impl<'source> Import<'_, '_, '_, 'source> {
             self.values = ValueGraph::build(body).0;
             let mut scope = self.scope(Some(body), None)?;
             let symbol = self.identities.symbols.intern(&definition.name);
-            self.sink.add("SourceDefinition", (symbol, scope.key))?;
+            self.sink.set("SourceDefinition", symbol, scope.key)?;
             let global = self.sink.add("SourceGlobal", symbol)?;
             self.value_type(global, &definition.ty)?;
             self.flags(global, false, true, true, true, 0)?;
             if let DefMeta::EntryPoint(entry) = &definition.meta {
-                self.sink.add("SourceEntryPoint", (symbol, scope.key))?;
                 self.sink.add("SourceEntryOrder", (symbol, ordinal as i64))?;
                 let compute = entry.declaration.entry_kind == EntryKind::Compute;
                 self.sink.add("SourceOriginalEntry", (symbol, scope.key, compute))?;
@@ -184,9 +183,9 @@ impl<'source> Import<'_, '_, '_, 'source> {
                             StorageAccess::WriteOnly => 2,
                             StorageAccess::ReadWrite => 3,
                         };
-                        self.sink.add("SourceParameterStorageAccess", (scope.key, index as i64, access))?;
+                        self.sink.set("SourceParameterStorageAccess", (scope.key, index as i64), access)?;
                     } else {
-                        self.sink.add("SourceImmutableParameter", (scope.key, index as i64))?;
+                        self.sink.set("SourceParameterStorageAccess", (scope.key, index as i64), 1i64)?;
                     }
                     if matches!(
                         extract_storage_access(param),
@@ -307,7 +306,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         owner: Value,
     ) -> Result<Value, OptimizeError> {
         let mut scope = self.scope(Some(body), Some(parent.key))?;
-        self.sink.add("SourceEnteredBy", (scope.key, owner))?;
+        self.sink.add("SourceEnters", (owner, scope.key))?;
         let checkpoint = self.bindings.checkpoint();
         self.finish_body(body, &mut scope)?;
         self.bindings.restore(checkpoint);
@@ -329,7 +328,8 @@ impl<'source> Import<'_, '_, '_, 'source> {
 
     fn operation(&mut self, value: Value, kind: &str, scope: &Scope) -> Result<Value, OptimizeError> {
         let operation = self.sink.add("OperationId", self.operations.next_id())?;
-        self.sink.add("SourceOperation", (operation, scope.key, kind))?;
+        let info = self.sink.add("OperationInfo", (scope.key, kind))?;
+        self.sink.set("SourceOperation", operation, info)?;
         self.sink.set("SourceOperationValue", operation, value)?;
         self.summaries.operations.insert(value, operation);
         self.summaries.regions_with_operations.insert(scope.key);
@@ -415,7 +415,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             }
             TermKind::Lambda(lambda) => {
                 let mut inner = self.scope(Some(&lambda.body), Some(scope.key))?;
-                self.sink.add("SourceCallable", (value, inner.key))?;
+                self.sink.set("SourceCallable", value, inner.key)?;
                 let checkpoint = self.bindings.checkpoint();
                 self.parameters(&lambda.params, &inner)?;
                 self.finish_body(&lambda.body, &mut inner)?;
@@ -429,7 +429,8 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 let condition = self.operand(cond, value, scope)?;
                 let yes = self.nested(then_branch, scope, value)?;
                 let no = self.nested(else_branch, scope, value)?;
-                self.sink.add("SourceBranch", (value, condition, yes, no))?;
+                let info = self.sink.add("BranchInfo", (condition, yes, no))?;
+                self.sink.set("SourceBranch", value, info)?;
                 if self.summaries.regions_with_operations.contains(&yes)
                     || self.summaries.regions_with_operations.contains(&no)
                 {
@@ -547,9 +548,10 @@ impl<'source> Import<'_, '_, '_, 'source> {
         }
         let mut header = self.scope(None, Some(parent.key))?;
         let mut iteration = self.scope(Some(body), Some(header.key))?;
-        self.sink.add("SourceEnteredBy", (header.key, owner))?;
-        self.sink.add("SourceEnteredBy", (iteration.key, owner))?;
-        self.sink.add("SourceLoop", (owner, header.key, iteration.key))?;
+        self.sink.add("SourceEnters", (owner, header.key))?;
+        self.sink.add("SourceEnters", (owner, iteration.key))?;
+        let info = self.sink.add("LoopInfo", (header.key, iteration.key))?;
+        self.sink.set("SourceLoop", owner, info)?;
         if matches!(kind, LoopKind::ForRange { .. })
             && (variable_ty.is_array() || crate::types::as_soa_tuple(variable_ty).is_some())
         {
@@ -557,7 +559,8 @@ impl<'source> Import<'_, '_, '_, 'source> {
         }
         let checkpoint = self.bindings.checkpoint();
         let accumulator = self.formal(variable, variable_ty, &header)?;
-        self.sink.add("SourceLoopInitial", (header.key, accumulator, initial))?;
+        let info = self.sink.add("LoopInitialInfo", (accumulator, initial))?;
+        self.sink.set("SourceLoopInitial", header.key, info)?;
         for (symbol, _, extraction) in bindings {
             let (value, _) = self.visit(extraction, &mut header)?;
             self.bind(*symbol, value, &header)?;
@@ -565,7 +568,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
         match kind {
             LoopKind::While { cond } => {
                 let (condition, _) = self.visit(cond, &mut header)?;
-                self.sink.add("SourceLoopCondition", (header.key, condition))?;
                 let form = self.sink.add("WhileCondition", condition)?;
                 self.sink.set("SourceLoopForm", owner, form)?;
             }
@@ -599,7 +601,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         let Lambda { params, body, ret_ty } = &body.lam;
         let mut scope = self.scope(Some(body), Some(parent.key))?;
         self.sink.set("SourceOperatorBody", operation, scope.key)?;
-        self.sink.add("SourceEnteredBy", (scope.key, owner))?;
+        self.sink.add("SourceEnters", (owner, scope.key))?;
         let checkpoint = self.bindings.checkpoint();
         let mut captured = Vec::new();
         for (symbol, ty, argument) in captures {

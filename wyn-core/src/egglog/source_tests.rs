@@ -33,18 +33,24 @@ fn repeated_free_references_keep_dependencies_in_sibling_and_nested_regions() {
         let program = compile_thru_tlc(&source).unwrap();
         let (graph, identities) = import(&program).unwrap();
         let query = Query(&graph);
-        let entry = query.row("SourceEntryPoint", |_| true).unwrap().unwrap()[1];
-        let producer = query
-            .row("SourceOperation", |row| {
-                row[1] == entry && graph.value_to_base::<S>(row[2]).as_str() == kind
+        let entry = query.row("SourceOriginalEntry", |_| true).unwrap().unwrap()[1];
+        let mut producer = None;
+        query
+            .for_function("SourceOperation", |keys, info| {
+                let fields = query.enode("OperationInfo", info)?.unwrap();
+                if fields[0] == entry && graph.value_to_base::<S>(fields[1]).as_str() == kind {
+                    assert!(producer.replace(keys[0]).is_none());
+                }
+                Ok(())
             })
-            .unwrap()
-            .expect("outer producer")[0];
+            .unwrap();
+        let producer = producer.expect("outer producer");
         let mut nested = Vec::new();
-        for table in ["SourceBranch", "SourceLoop"] {
+        for (table, constructor) in [("SourceBranch", "BranchInfo"), ("SourceLoop", "LoopInfo")] {
             query
-                .for_each(table, |row| {
-                    nested.extend_from_slice(&row[row.len() - 2..]);
+                .for_function(table, |_, info| {
+                    let fields = query.enode(constructor, info)?.unwrap();
+                    nested.extend_from_slice(&fields[fields.len() - 2..]);
                     Ok(())
                 })
                 .unwrap();
@@ -81,17 +87,29 @@ fn scatter_reads_include_branch_dependencies_without_turning_them_into_operand_u
     let (mut graph, _) = import(&program).unwrap();
     graph.parse_and_run_program(None, "(run-schedule (saturate source-summary))").unwrap();
     let query = Query(&graph);
-    let entry = query.row("SourceEntryPoint", |_| true).unwrap().unwrap()[1];
-    let scatter = query
-        .row("SourceOperation", |row| {
-            graph.value_to_base::<S>(row[2]).as_str() == "scatter"
+    let entry = query.row("SourceOriginalEntry", |_| true).unwrap().unwrap()[1];
+    let mut scatter = None;
+    query
+        .for_function("SourceOperation", |keys, info| {
+            let fields = query.enode("OperationInfo", info)?.unwrap();
+            if graph.value_to_base::<S>(fields[1]).as_str() == "scatter" {
+                assert!(scatter.replace(keys[0]).is_none());
+            }
+            Ok(())
         })
-        .unwrap()
-        .unwrap()[0];
-    let branch = query.row("SourceBranch", |_| true).unwrap().unwrap()[0];
+        .unwrap();
+    let scatter = scatter.unwrap();
+    let mut branch = None;
+    query
+        .for_function("SourceBranch", |keys, _| {
+            assert!(branch.replace(keys[0]).is_none());
+            Ok(())
+        })
+        .unwrap();
+    let branch = branch.unwrap();
     for index in [0i64, 1] {
         let input = query.required("SourceParameter", (entry, index)).unwrap();
-        assert!(query.contains("SourceReadCandidate", (scatter, input)).unwrap());
+        assert!(query.contains("ScatterReadValue", (scatter, input)).unwrap());
         assert!(query.contains("SourceNestedUse", (branch, input)).unwrap());
         assert!(!query.contains("SourceDirectUse", (branch, input)).unwrap());
     }

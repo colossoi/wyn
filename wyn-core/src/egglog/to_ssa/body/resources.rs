@@ -68,7 +68,7 @@ impl Body<'_, '_, '_> {
             return self.loop_(scope, source);
         }
         if let Some((yes, no)) = self.compiler.facts.branches(source) {
-            let Some(condition) = self.compiler.facts.lookup("SsaBranchCondition", (source,)) else {
+            let Some(condition) = self.compiler.facts.branch_condition(source) else {
                 return Err(error("branch has no condition"));
             };
             let (Some(a), Some(b)) = (self.compiler.facts.result(yes), self.compiler.facts.result(no))

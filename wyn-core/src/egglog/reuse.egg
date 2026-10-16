@@ -32,7 +32,7 @@
 (rule ((DirectResult e op i)) ((WholeValue e (Result op i))) :ruleset reuse)
 (rule ((Projection e tuple i) (ResultTuple tuple op) (ResultSlot op i))
       ((WholeValue e (Result op i))) :ruleset reuse)
-(rule ((Projection e tuple i) (FieldValue tuple i field) (WholeValue field value))
+(rule ((Projection e tuple i) (SourceField tuple i field) (WholeValue field value))
       ((WholeValue e value)) :ruleset reuse)
 (rule ((ForwardValue e source) (WholeValue source value))
       ((WholeValue e value)) :ruleset reuse)
@@ -126,7 +126,7 @@
 (rule ((ReuseAlias writer e alias) (Escapes alias))
       ((set (ReuseBlocked writer e) true)) :ruleset reuse)
 ; Authored updates may return slices even when the result is a whole value.
-(rule ((ReuseAlias writer e alias) (= source (SameBacking alias)) (SliceView source base start end))
+(rule ((ReuseAlias writer e alias) (= source (SameBacking alias)) (= (SourceSlice source) (SliceInfo base start end)))
       ((set (ReuseBlocked writer e) true)) :ruleset reuse)
 ; Captures and shifted input aliases may read elements already overwritten.
 (rule ((ReuseAlias (Stage op name) e alias)

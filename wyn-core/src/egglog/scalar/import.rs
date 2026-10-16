@@ -172,8 +172,7 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
         if self.policy == ScalarOptimization::Basic {
             return Ok(());
         }
-        if !self.facts.contains("SourceInlineEligible", (region,))? || self.templates.contains_key(&region)
-        {
+        if !self.facts.contains("WorkInlineEligible", (region,))? || self.templates.contains_key(&region) {
             return Ok(());
         }
         let Some(source) = self.facts.lookup("SourceResult", (region,))? else {
@@ -305,13 +304,13 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
             TermKind::If { cond, .. }
                 if !self.facts.operation(source)?.is_some() || self.facts.duplicable(source)? =>
             {
-                let Some(branch) = self.facts.row("SourceBranch", |r| r[0] == source)? else {
+                let Some(branch) = self.facts.record("SourceBranch", "BranchInfo", (source,))? else {
                     return Err(OptimizeError::Output("scalar conditional has no branches".into()));
                 };
-                let Some(yes_result) = self.facts.lookup("SourceResult", (branch[2],))? else {
+                let Some(yes_result) = self.facts.lookup("SourceResult", (branch[1],))? else {
                     return Err(OptimizeError::Output("missing then result".into()));
                 };
-                let Some(no_result) = self.facts.lookup("SourceResult", (branch[3],))? else {
+                let Some(no_result) = self.facts.lookup("SourceResult", (branch[2],))? else {
                     return Err(OptimizeError::Output("missing else result".into()));
                 };
                 let c = self.child(context, scope, cond)?;

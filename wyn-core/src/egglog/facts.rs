@@ -37,6 +37,14 @@ impl<'a, 'source> Facts<'a, 'source> {
             .enode(name, value)
             .unwrap_or_else(|error| panic!("invalid native enode accessor {name}: {error}"))
     }
+    pub fn record(&self, table: &str, constructor: &str, keys: impl IntoValues) -> Option<Vec<Value>> {
+        Query(&self.program.graph)
+            .record(table, constructor, keys)
+            .unwrap_or_else(|error| panic!("invalid native record accessor {table}: {error}"))
+    }
+    pub fn branch_condition(&self, value: Value) -> Option<Value> {
+        Some(self.record("SourceBranch", "BranchInfo", (value,))?[0])
+    }
     pub fn integer(&self, value: Value) -> i64 {
         self.program.graph.value_to_base::<i64>(value)
     }
@@ -81,7 +89,7 @@ impl<'a, 'source> Facts<'a, 'source> {
         self.lookup("SourceResult", (value,))
     }
     pub fn loop_state(&self, value: Value) -> Option<Value> {
-        self.lookup("SsaLoopState", (value,))
+        Some(self.record("SourceLoopInitial", "LoopInitialInfo", (value,))?[0])
     }
     pub fn iteration(&self, value: Value) -> Option<Value> {
         self.lookup("SourceIterationValue", (value,))
@@ -93,10 +101,10 @@ impl<'a, 'source> Facts<'a, 'source> {
         self.lookup("SourceValueOperation", (value,))
     }
     pub fn operation_kind(&self, operation: Value) -> Result<String, OptimizeError> {
-        let Some(kind) = self.lookup("SsaOperationKind", (operation,)) else {
+        let Some(info) = self.record("SourceOperation", "OperationInfo", (operation,)) else {
             return Err(error("operation has no source kind"));
         };
-        Ok(self.program.graph.value_to_base::<S>(kind).to_string())
+        Ok(self.program.graph.value_to_base::<S>(info[1]).to_string())
     }
     pub fn neutral(&self, operation: Value) -> Result<Value, OptimizeError> {
         let Some(value) = self.lookup("SourceNeutral", (operation,)) else {
@@ -105,10 +113,10 @@ impl<'a, 'source> Facts<'a, 'source> {
         Ok(value)
     }
     pub fn loop_initial(&self, region: Value) -> Result<Value, OptimizeError> {
-        let Some(initial) = self.lookup("SsaLoopInitial", (region,)) else {
+        let Some(info) = self.record("SourceLoopInitial", "LoopInitialInfo", (region,)) else {
             return Err(error("loop region has no initial state"));
         };
-        Ok(initial)
+        Ok(info[1])
     }
     pub fn iteration_dimensions(&self, operation: Value) -> Result<Vec<Value>, OptimizeError> {
         let Some(rank) = self.lookup("IterationRank", (operation,)) else {
@@ -152,18 +160,23 @@ impl<'a, 'source> Facts<'a, 'source> {
     }
     pub fn callback(&self, value: Value) -> Option<Value> {
         self.group(value)?;
-        self.lookup("PlanCallback", (value,))
+        self.lookup("SourceOperatorBody", (value,))
     }
     pub fn definition_name(&self, scope: Value) -> Option<SymbolId> {
         let token = self.lookup("SsaDefinitionName", (scope,))?;
         Some(*self.program.identities.symbols.resolve(self.program.graph.value_to_base::<i64>(token)))
     }
     pub fn definition(&self, symbol: SymbolId) -> Option<Value> {
-        self.lookup("SsaDefinition", (self.program.identities.symbols.get(&symbol)?,))
+        self.lookup(
+            "SourceDefinition",
+            (self.program.identities.symbols.get(&symbol)?,),
+        )
     }
     pub fn entry_region(&self, scope: Value) -> bool {
-        self.lookup("SsaDefinitionName", (scope,))
-            .is_some_and(|symbol| self.contains("SourceEntryPoint", (symbol, scope)))
+        self.lookup("SsaDefinitionName", (scope,)).is_some_and(|symbol| {
+            self.contains("SourceOriginalEntry", (symbol, scope, false))
+                || self.contains("SourceOriginalEntry", (symbol, scope, true))
+        })
     }
     pub fn entry_root(&self, owner: SymbolId, stage: Option<Value>) -> Result<Value, OptimizeError> {
         let root = if let Some(stage) = stage {
@@ -286,39 +299,30 @@ impl<'a, 'source> Facts<'a, 'source> {
         self.lookup("SourceParameter", (scope, index))
     }
     pub fn branches(&self, value: Value) -> Option<(Value, Value)> {
-        Some((
-            self.lookup("SsaBranchYes", (value,))?,
-            self.lookup("SsaBranchNo", (value,))?,
-        ))
+        let info = self.record("SourceBranch", "BranchInfo", (value,))?;
+        Some((info[1], info[2]))
     }
     pub fn loops(&self, value: Value) -> Option<(Value, Value)> {
-        Some((
-            self.lookup("SsaLoopHeader", (value,))?,
-            self.lookup("SsaLoopIteration", (value,))?,
-        ))
+        let info = self.record("SourceLoop", "LoopInfo", (value,))?;
+        Some((info[0], info[1]))
     }
     pub fn projection(&self, value: Value) -> Option<(Value, usize)> {
-        Some((
-            self.lookup("SsaProjectionBase", (value,))?,
-            self.lookup("SsaProjectionIndex", (value,)).map(|v| self.integer(v))? as usize,
-        ))
+        let info = self.record("SourceProjection", "ProjectionInfo", (value,))?;
+        Some((info[0], self.integer(info[1]) as usize))
     }
     pub fn slice(&self, value: Value) -> Option<(Value, Value, Value)> {
-        Some((
-            self.lookup("SsaSliceBase", (value,))?,
-            self.lookup("SsaSliceStart", (value,))?,
-            self.lookup("SsaSliceEnd", (value,))?,
-        ))
+        let info = self.record("SourceSlice", "SliceInfo", (value,))?;
+        Some((info[0], info[1], info[2]))
     }
     pub fn input(&self, operation: Value, index: i64) -> Option<Value> {
         self.group(operation)?;
-        self.lookup("PlanRoute", (operation, index))
+        self.lookup("SourceInput", (operation, index))
     }
     pub fn inputs(&self, operation: Value) -> Result<Vec<(i64, Value)>, OptimizeError> {
         let Some(_) = self.group(operation) else {
             return Err(error("operation has no fusion plan"));
         };
-        let Some(count) = self.lookup("PlanInputCount", (operation,)) else {
+        let Some(count) = self.lookup("SourceInputCount", (operation,)) else {
             return Err(error("operation has no input count"));
         };
         let count = self.integer(count);

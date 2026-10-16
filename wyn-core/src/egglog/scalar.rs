@@ -92,6 +92,7 @@ pub(super) fn run(
                     | "SourceProjected"
                     | "SourceInvocation"
                     | "SourceLoop"
+                    | "LoopInfo"
                     | "SourceReadOnly"
                     | "SourceRegionReadOnly"
                     | "FusionSource"

@@ -108,8 +108,12 @@ impl Placement {
             .map(|(context, members)| Ok((context, Forest::new(members, parent)?)))
             .collect::<Result<_, OptimizeError>>()?;
         let mut loops = LookupSet::default();
-        program.graph.constructor_enodes("SourceLoop", |row| {
-            loops.insert(row.children[1]);
+        facts.for_function("SourceLoop", |_, info| {
+            let fields = facts
+                .enode("LoopInfo", info)?
+                .ok_or_else(|| crate::egglog::output_error("missing loop info"))?;
+            loops.insert(fields[0]);
+            Ok(())
         })?;
         let scopes = Scopes::new(definitions, contexts, loops);
         // Requirements summarize definitions used by the selected DAG. This is a

@@ -40,26 +40,25 @@ impl<'a, 'source> Facts<'a, 'source> {
         let Some(owner) = self.program.identities.symbols.get(&owner) else {
             return Err(error("output owner missing"));
         };
-        let mut outputs = Vec::new();
-        self.program.graph.constructor_enodes("SourceOutput", |row| {
-            let id = self.integer(row.children[0]);
-            if self.integer(row.children[1]) == owner && self.lookup("SsaOutputBacking", (id,)).is_some() {
-                outputs.push(id);
-            }
-        })?;
+        let mut outputs: Vec<_> = self
+            .set("SourceOutputsForEntry", (owner,))
+            .into_iter()
+            .map(|id| self.integer(id))
+            .filter(|id| self.lookup("SsaOutputBacking", (*id,)).is_some())
+            .collect();
         outputs.sort();
         Ok(outputs)
     }
 
     pub fn output(&self, id: i64) -> Result<(Value, &'a Type, Value), OptimizeError> {
         let query = Query(&self.program.graph);
-        let Some(row) = query.row("SourceOutput", |r| self.integer(r[0]) == id)? else {
+        let Some(row) = query.record("SourceOutput", "OutputInfo", (id,))? else {
             return Err(error("output declaration missing"));
         };
-        let Some(ty) = self.ty(row[3]) else {
+        let Some(ty) = self.ty(row[2]) else {
             return Err(error("output type missing"));
         };
-        Ok((row[2], ty, query.required("SsaOutputBacking", (id,))?))
+        Ok((row[1], ty, query.required("SsaOutputBacking", (id,))?))
     }
     pub fn group(&self, value: Value) -> Option<Value> {
         self.lookup("SelectedPlan", (value,))

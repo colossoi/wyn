@@ -1,5 +1,5 @@
 ; Scheduling inputs describe source structure, not allocation decisions.
-; Stage identities name static launch sites. Site/Enters retain the
+; Stage identities name static launch sites. OperationRegion/Enters retain the
 ; invocation boundaries; a repeated launch is not a cycle in the dispatch DAG.
 (datatype StageKey (Stage OperationKey String))
 (datatype DispatchGrid (AutomaticGrid) (FixedGrid i64 i64 i64))
@@ -19,7 +19,11 @@
   (Difference Extent Extent)
   (Stored ValueKey)
   (CallExtent SourceValue Extent))
-(relation Site (OperationKey RegionKey))
+(function OperationRegion (OperationKey) RegionKey :no-merge)
+; Shared source structure must be declared before the structural rules load.
+(relation SourceField (SourceValue i64 SourceValue))
+(datatype SourceSliceData (SliceInfo SourceValue SourceValue SourceValue))
+(function SourceSlice (SourceValue) SourceSliceData :no-merge)
 (relation HostRoot (i64 RegionKey))
 (relation Enters (OperationKey RegionKey))
 (relation ExitValue (RegionKey SourceValue))
@@ -27,7 +31,7 @@
 (relation Operand (OperationKey String SourceValue))
 (relation EffectInput (i64 OperationKey))
 (relation EffectWait (OperationKey i64))
-(relation SourceDependency (OperationKey OperationKey))
+(relation OperationDependency (OperationKey OperationKey))
 (relation InvocationScalarCandidate (OperationKey))
 ; Includes plain maps and indexed updates, and propagates through entered regions.
 ; This describes array work in the planner, not workgroup synchronization.
@@ -53,13 +57,11 @@
 (relation ParameterValue (SourceValue))
 (relation ResultTuple (SourceValue OperationKey))
 (relation DirectResult (SourceValue OperationKey i64))
-(relation FieldValue (SourceValue i64 SourceValue))
+
 (relation Projection (SourceValue SourceValue i64))
 (relation ForwardValue (SourceValue SourceValue))
 (relation ChildValue (SourceValue SourceValue))
 (relation ComputedValue (SourceValue))
-; Views retain the source value version, rather than equating executions.
-(relation SliceView (SourceValue SourceValue SourceValue SourceValue))
 
 (relation HostRegion (RegionKey))
 (ruleset host-regions)
@@ -137,8 +139,8 @@
 (relation DeviceRegion (RegionKey))
 (relation DeviceOperation (OperationKey))
 (relation LocalBuffer (OperationKey String i64 TypeKey Extent))
-(relation SourceEntry (i64 RegionKey bool))
-(relation SourceControl (OperationKey))
+
+(relation OperationControl (OperationKey))
 (ruleset readout)
 (rule ((Allocation value n) (ElementType value (TypeId ty)) (= (HasStorageShape value) false))
       ((PlannedBuffer value ty n)) :ruleset readout)

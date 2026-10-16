@@ -20,7 +20,7 @@
 (rule ((ValueRef source buffer) (= shape (StorageShape buffer))
        (= leaf (StorageElement buffer)) (= count (StorageExtent buffer)))
       ((RectangularView source leaf shape count)) :ruleset residency)
-(rule ((RectangularView source leaf shape count) (SourceProjection value source i)
+(rule ((RectangularView source leaf shape count) (= (SourceProjection value) (ProjectionInfo source i))
        (= fields (SourceTypeFields leaf)))
       ((RectangularView value (vec-get fields i) shape count)) :ruleset residency)
 (rule ((RectangularView source leaf shape count) (= source (SourceAlias value)))

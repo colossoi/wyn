@@ -182,7 +182,7 @@ pub(super) fn parameter_inputs(
     };
     let binding = entry.data.param_bindings.get(index as usize).and_then(Option::as_ref);
     let abi = Query(&program.graph).required("ParameterAbi", (scope, index))?;
-    let access = Query(&program.graph).required("ParameterStorageAccess", (scope, index))?;
+    let access = Query(&program.graph).required("SourceParameterStorageAccess", (scope, index))?;
     let access = facts
         .storage_access(access)?
         .ok_or_else(|| OptimizeError::Output("empty parameter storage access".into()))?;
@@ -296,13 +296,8 @@ pub(super) fn outputs(
     let (body, _) = extract_lambda_params_ref(&definition.body);
     let mut capacities = Vec::new();
     if entry.declaration.entry_kind == EntryKind::Compute {
-        let mut outputs = Vec::new();
-        Query(&program.graph).for_each("SourceOutput", |row| {
-            if facts.integer(row[1]) == token {
-                outputs.push(facts.integer(row[0]));
-            }
-            Ok(())
-        })?;
+        let mut outputs: Vec<_> =
+            facts.set("SourceOutputsForEntry", (token,)).into_iter().map(|id| facts.integer(id)).collect();
         outputs.sort_unstable();
         for output in outputs {
             let capacity = Query(&program.graph).required("SelectedOutputCapacity", (output,))?;

@@ -9,10 +9,10 @@
 (function Plan (OperationKey) Recipe :no-merge)
 ; Parallel callbacks may read arrays and contain control flow. They must not
 ; write shared state or call unknown effects. This is weaker than movability.
-(rule ((Site op r)) ((set (ParallelSafe op) true) (set (ParallelBodySafe op) true)) :ruleset structure)
-(rule ((Enters op r) (Site child r) (= (ParallelSafe child) false))
+(rule ((= r (OperationRegion op))) ((set (ParallelSafe op) true) (set (ParallelBodySafe op) true)) :ruleset structure)
+(rule ((Enters op r) (= r (OperationRegion child)) (= (ParallelSafe child) false))
       ((set (ParallelSafe op) false) (set (ParallelBodySafe op) false)) :ruleset structure)
-(rule ((Callback op r) (Site child r) (= (ParallelSafe child) false))
+(rule ((Callback op r) (= r (OperationRegion child)) (= (ParallelSafe child) false))
       ((set (ParallelSafe op) false) (set (ParallelBodySafe op) false)) :ruleset structure)
 (ruleset schedule)
 ; Read the selected fusion plan's flags after callback effects have settled.
@@ -48,7 +48,7 @@
 (function IterationAxis (OperationKey i64) Extent :no-merge)
 (function MapCooperative (OperationKey) bool :merge (or old new))
 (relation KernelPhase (OperationKey String Extent i64 DispatchGrid))
-(rule ((Site op r) (OwnedRegion entry r) (= grid (EntryGrid entry)))
+(rule ((= r (OperationRegion op)) (OwnedRegion entry r) (= grid (EntryGrid entry)))
       ((set (OperationGrid op) grid)) :ruleset schedule)
 ; One choice supplies the chunk launch, scratch capacity, and carry count.
 ; The default bounds the carry scan to one workgroup.
@@ -68,7 +68,7 @@
 (relation PhaseLink (OperationKey String String))
 ; A scalar execution crossing dispatches runs once and publishes its value.
 ; Its called regions belong to that invocation, not the host launch graph.
-(rule ((InvocationValue op) (DispatchGroupLeader op leader) (Site leader r) (SplitRegion r))
+(rule ((InvocationValue op) (DispatchGroupLeader op leader) (= r (OperationRegion leader)) (SplitRegion r))
       ((KernelPhase leader "scalar" (Fixed 1) 1 (FixedGrid 1 1 1)) (PhaseEnds leader "scalar" "scalar")) :ruleset schedule)
 (rule ((InvocationValue op) (DispatchGroupLeader op leader) (Phase (Stage leader "scalar") r))
       ((Produces (Stage leader "scalar") (Result op 0))
@@ -116,7 +116,7 @@
 (rule ((= (Plan op) (Buckets)) (Phase (Stage op "buckets") r))
       ((PhaseInput (Stage op "buckets") op "input")
        (Materialize (Result op 1)) (Materialize (Result op 2))) :ruleset schedule)
-(rule ((KernelPhase op name n width grid) (Site op r) (HostRegion r))
+(rule ((KernelPhase op name n width grid) (= r (OperationRegion op)) (HostRegion r))
       ((Phase (Stage op name) r) (PhaseDomain (Stage op name) n width)
        (set (PhaseGrid (Stage op name)) grid)) :ruleset schedule)
 (rule ((Phase (Stage op name) r) (!= name "combine"))
@@ -170,7 +170,7 @@
       ((FreshValue value)) :ruleset schedule)
 
 ; Invocation-local allocations are recipe outputs, without dispatches or shared storage.
-(rule ((Site op r) (DeviceRegion r)) ((DeviceOperation op)) :ruleset schedule)
+(rule ((= r (OperationRegion op)) (DeviceRegion r)) ((DeviceOperation op)) :ruleset schedule)
 (rule ((DeviceOperation op) (Enters op r)) ((DeviceRegion r)) :ruleset schedule)
 (rule ((Phase (Stage op "scalar") r)) ((DeviceOperation op)) :ruleset schedule)
 (rule ((DeviceOperation op) (= recipe (Plan op)) (= value (BufferSlot op name i)) (ElementType value t) (= n (CapacityExtent value)))

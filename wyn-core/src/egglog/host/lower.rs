@@ -242,7 +242,7 @@ impl<'a, 'source> Lower<'a, 'source> {
             return self.parameter(region, index, source);
         }
         if let Some((yes, no)) = self.facts.branches(source) {
-            let Some(condition) = self.facts.lookup("SsaBranchCondition", (source,)) else {
+            let Some(condition) = self.facts.branch_condition(source) else {
                 return Err(error("host branch condition missing").into());
             };
             return Ok(ScalarExpr::If {

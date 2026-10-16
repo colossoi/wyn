@@ -9,7 +9,7 @@
 (datatype GroupUse (To FusionGroup OperandRole) (Returned))
 (datatype OriginalUse (UseAt OperationKey OperandRole) (Observed))
 (sort GroupUses (Set OriginalUse))
-(function SelfUses (FusionGroup) GroupUses :merge (set-union old new))
+(function GroupInternalUseMask (FusionGroup) GroupUses :merge (set-union old new))
 (function InputUses (FusionGroup) GroupUses :merge (set-union old new))
 (datatype InputSite (Direct OperationKey) (External i64))
 (sort InputSites (Set InputSite))

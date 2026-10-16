@@ -68,6 +68,20 @@ impl Query<'_> {
         Ok(fields)
     }
 
+    pub fn record(
+        &self,
+        table: &str,
+        constructor: &str,
+        keys: impl IntoValues,
+    ) -> Result<Option<Vec<Value>>, OptimizeError> {
+        let Some(value) = self.lookup(table, keys)? else {
+            return Ok(None);
+        };
+        self.enode(constructor, value)?
+            .map(Some)
+            .ok_or_else(|| OptimizeError::Output(format!("invalid {constructor} in {table}")))
+    }
+
     pub fn row(
         &self,
         name: &str,
