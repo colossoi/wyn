@@ -21,7 +21,7 @@
        (= ty (SourceType value)) (= array-size (SourceArraySize ty)) (= body (SourceOperatorBody op)))
       ((MapCandidate value plan op body)) :ruleset rectangular-discover)
 (rule ((MapCandidate value plan op body) (= result (SourceResult body))) ((RectangularDemand result)) :ruleset rectangular-discover)
-(rule ((MapCandidate value plan op body) (SourceCapture body formal actual))
+(rule ((MapCandidate value plan op body) (= (SourceCapture body formal) actual))
       ((RectangularRequirement value (OutsidePlan) actual)) :ruleset rectangular-discover)
 (rule ((MapCandidate value plan op body) (= input (SourceInput op i)))
       ((RectangularRequirement value (InsidePlan plan) input)) :ruleset rectangular-discover)

@@ -68,7 +68,7 @@
 ; Only scatter's in-place safety check needs transitive input/capture reads.
 (rule ((= (SourceOperation op) (OperationInfo region "scatter")) (= input (SourceInput op i)))
       ((ScatterReadValue op input)) :ruleset source-summary)
-(rule ((= (SourceOperation op) (OperationInfo region "scatter")) (= body (SourceOperatorBody op)) (SourceCapture body formal actual))
+(rule ((= (SourceOperation op) (OperationInfo region "scatter")) (= body (SourceOperatorBody op)) (= (SourceCapture body formal) actual))
       ((ScatterReadValue op actual)) :ruleset source-summary)
 (rule ((ScatterReadValue op value) (SourceDirectUse value child))
       ((ScatterReadValue op child)) :ruleset source-summary)

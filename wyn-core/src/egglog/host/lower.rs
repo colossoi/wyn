@@ -223,7 +223,7 @@ impl<'a, 'source> Lower<'a, 'source> {
             return Ok(field(self.source(context, base)?, index));
         }
         if let Some(formal) = self.facts.enode("SourceFormal", source) {
-            if let Some(actual) = self.facts.lookup("SsaCaptureAt", (formal[0], source)) {
+            if let Some(actual) = self.facts.lookup("SourceCapture", (formal[0], source)) {
                 let Some(context) = self.facts.lookup("ExprContextForSource", (actual,)) else {
                     return Err(error("host capture context missing").into());
                 };

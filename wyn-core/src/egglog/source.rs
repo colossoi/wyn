@@ -607,7 +607,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         for (symbol, ty, argument) in captures {
             let parameter = self.formal(symbol, ty, &scope)?;
             captured.push(parameter);
-            self.sink.add("SourceCapture", (scope.key, parameter, argument))?;
+            self.sink.set("SourceCapture", (scope.key, parameter), argument)?;
             self.summaries.captures.insert((operation, argument));
         }
         self.parameters(params, &scope)?;

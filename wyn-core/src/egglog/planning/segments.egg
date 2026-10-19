@@ -16,7 +16,7 @@
        (= (SourceRegionDuplicable body) false))
       ((set (SegmentPlanBlocked plan) true)) :ruleset rectangular-discover)
 (rule ((= plan (SegmentCandidatePlan value)) (PlanMember plan op) (= body (SourceOperatorBody op))
-       (SourceCapture body formal actual))
+       (= (SourceCapture body formal) actual))
       ((RectangularRequirement value (OutsidePlan) actual)) :ruleset rectangular-discover)
 (rule ((= plan (SegmentCandidatePlan value)) (PlanMember plan op) (= input (SourceInput op i)) (= (PlanInternal plan input) false))
       ((RectangularRequirement value (OutsidePlan) input)) :ruleset rectangular-discover)

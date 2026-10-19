@@ -39,7 +39,7 @@
 (function InvocationBoundary (OperationKey) bool :merge (or old new))
 (function ParallelSafe (OperationKey) bool :merge (and old new))
 (function ParallelBodySafe (OperationKey) bool :merge (and old new))
-(relation SplitRegion (RegionKey))
+(relation RegionContainsCollective (RegionKey))
 (relation InvocationValue (OperationKey))
 (function InputDomain (OperationKey) Extent :no-merge)
 ; Output components and collective components are semantic facts, before recipes.
@@ -93,7 +93,7 @@
 (relation ReusableSource (SourceValue TypeKey RegionKey))
 (relation FixedInputLength (SourceValue i64))
 (function SameBacking (ValueKey) SourceValue :no-merge)
-(relation ValueRef (SourceValue ValueKey))
+(function ValueRef (SourceValue) ValueKey :no-merge)
 ; A value crossing a storage boundary is either a descriptor or an element load.
 ; Forwarded values preserve this choice; slices retain their own descriptor bounds.
 (datatype StorageRead (ReadView ValueKey) (ReadElement ValueKey))
@@ -122,7 +122,7 @@
 (function OutputHasBacking (i64) bool :merge (or old new))
 (relation CopyOutput (i64))
 (ruleset materialize-outputs)
-(relation OutputBacking (i64 ValueKey))
+(function OutputBacking (i64) ValueKey :no-merge)
 (relation Clobbers (StageKey ValueKey))
 ; Shared gates keep effect fan-in/fan-out linear in the imported graph.
 (datatype OrderKey (At StageKey) (Start OperationKey) (End OperationKey) (Gate i64))

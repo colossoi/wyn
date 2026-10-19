@@ -48,7 +48,7 @@ impl Body<'_, '_, '_> {
 
     pub(super) fn local(&mut self, scope: Value, source: Value) -> Result<Typed, OptimizeError> {
         if let Some(formal) = self.compiler.facts.enode("SourceFormal", source) {
-            if let Some(actual) = self.compiler.facts.lookup("SsaCaptureAt", (formal[0], source)) {
+            if let Some(actual) = self.compiler.facts.lookup("SourceCapture", (formal[0], source)) {
                 let Some(context) = self.compiler.facts.lookup("ExprContextForSource", (actual,)) else {
                     return Err(error("captured value has no scalar context"));
                 };

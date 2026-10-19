@@ -85,9 +85,9 @@
 
 ; Follow authored aliases in both directions, scoped to actual candidates.
 ; Every alias and read inherits candidacy, so consumers need no candidate join.
-(rule ((ReuseAlias writer e old) (= source (SameBacking alias)) (ValueRef source old))
+(rule ((ReuseAlias writer e old) (= source (SameBacking alias)) (= (ValueRef source) old))
       ((ReuseAlias writer e alias)) :ruleset reuse)
-(rule ((ReuseAlias writer e alias) (= source (SameBacking alias)) (ValueRef source old))
+(rule ((ReuseAlias writer e alias) (= source (SameBacking alias)) (= (ValueRef source) old))
       ((ReuseAlias writer e old)) :ruleset reuse)
 
 ; Length-only demands do not observe contents. Keep hidden scalar content
@@ -140,7 +140,7 @@
 ; original input is a preference only; eliminated producers cannot lose permission.
 (rule ((FreshValue value))
       ((set (PinnedResult value) false) (set (HasPreferredReuse value) false)) :ruleset reuse)
-(rule ((AbiOutputBinding output set binding) (ReturnArray output result) (ValueRef result value))
+(rule ((AbiOutputBinding output set binding) (ReturnArray output result) (= (ValueRef result) value))
       ((set (PinnedResult value) true)) :ruleset reuse)
 
 ; Choose one safe owned input per element type before joining output slots.

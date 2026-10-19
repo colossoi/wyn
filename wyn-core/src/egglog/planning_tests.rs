@@ -346,9 +346,9 @@ fn nested_domains_retain_distinct_axes_and_capture_origins() {
             assert_ne!(bodies[0], bodies[1]);
             let mut capture_origins = Vec::new();
             query
-                .for_each("SourceCapture", |row| {
+                .for_function("SourceCapture", |row, actual| {
                     if bodies.contains(&row[0]) {
-                        if let Some(origin) = query.enode("SourceFormal", row[2])? {
+                        if let Some(origin) = query.enode("SourceFormal", actual)? {
                             capture_origins.push((row[0], origin[0]));
                         }
                     }

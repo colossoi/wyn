@@ -44,7 +44,7 @@ impl<'a, 'source> Facts<'a, 'source> {
             .set("SourceOutputsForEntry", (owner,))
             .into_iter()
             .map(|id| self.integer(id))
-            .filter(|id| self.lookup("SsaOutputBacking", (*id,)).is_some())
+            .filter(|id| self.lookup("OutputBacking", (*id,)).is_some())
             .collect();
         outputs.sort();
         Ok(outputs)
@@ -58,7 +58,7 @@ impl<'a, 'source> Facts<'a, 'source> {
         let Some(ty) = self.ty(row[2]) else {
             return Err(error("output type missing"));
         };
-        Ok((row[1], ty, query.required("SsaOutputBacking", (id,))?))
+        Ok((row[1], ty, query.required("OutputBacking", (id,))?))
     }
     pub fn group(&self, value: Value) -> Option<Value> {
         self.lookup("SelectedPlan", (value,))
@@ -67,7 +67,7 @@ impl<'a, 'source> Facts<'a, 'source> {
         self.lookup("SourceOperationValue", (value,))
     }
     pub fn value_ref(&self, value: Value) -> Option<Value> {
-        self.lookup("SsaValueRef", (value,))
+        self.lookup("ValueRef", (value,))
     }
     pub fn value_read(&self, source: Value) -> Option<Value> {
         self.lookup("ValueRead", (source,))
@@ -97,16 +97,16 @@ impl<'a, 'source> Facts<'a, 'source> {
         self.lookup("Backing", (value,))
     }
     pub fn filter(&self, plan: Value) -> Result<Value, OptimizeError> {
-        let Some(operation) = self.lookup("SsaFilter", (plan,)) else {
+        let Some(operation) = self.lookup("PlanFilterOperation", (plan,)) else {
             return Err(error("filter plan has no filter operation"));
         };
         Ok(operation)
     }
     pub fn scalar_group(&self, value: Value) -> Vec<Value> {
-        self.set("SsaScalarGroup", (value,))
+        self.set("DispatchGroupMembers", (value,))
     }
     pub fn dependencies(&self, value: Value) -> Vec<Value> {
-        self.set("SsaDependencies", (value,))
+        self.set("DispatchPredecessors", (value,))
     }
     pub fn member(&self, plan: Value, op: Value) -> bool {
         self.contains("PlanMember", (plan, op))

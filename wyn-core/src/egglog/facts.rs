@@ -163,7 +163,7 @@ impl<'a, 'source> Facts<'a, 'source> {
         self.lookup("SourceOperatorBody", (value,))
     }
     pub fn definition_name(&self, scope: Value) -> Option<SymbolId> {
-        let token = self.lookup("SsaDefinitionName", (scope,))?;
+        let token = self.lookup("SourceDefinitionSymbol", (scope,))?;
         Some(*self.program.identities.symbols.resolve(self.program.graph.value_to_base::<i64>(token)))
     }
     pub fn definition(&self, symbol: SymbolId) -> Option<Value> {
@@ -173,7 +173,7 @@ impl<'a, 'source> Facts<'a, 'source> {
         )
     }
     pub fn entry_region(&self, scope: Value) -> bool {
-        self.lookup("SsaDefinitionName", (scope,)).is_some_and(|symbol| {
+        self.lookup("SourceDefinitionSymbol", (scope,)).is_some_and(|symbol| {
             self.contains("SourceOriginalEntry", (symbol, scope, false))
                 || self.contains("SourceOriginalEntry", (symbol, scope, true))
         })
@@ -339,10 +339,10 @@ impl<'a, 'source> Facts<'a, 'source> {
             .collect()
     }
     pub fn captures(&self, scope: Value) -> Result<Vec<(Value, Value)>, OptimizeError> {
-        self.set("SsaCaptures", (scope,))
+        self.set("SourceCapturedFormals", (scope,))
             .into_iter()
             .map(|formal| {
-                let Some(actual) = self.lookup("SsaCaptureAt", (scope, formal)) else {
+                let Some(actual) = self.lookup("SourceCapture", (scope, formal)) else {
                     return Err(error("capture has no selected actual value"));
                 };
                 Ok((formal, actual))

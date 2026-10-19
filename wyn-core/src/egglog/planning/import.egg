@@ -159,7 +159,7 @@
       ((set (ParallelBodySafe owner) false)) :ruleset planning-import)
 ; The destination itself is expected; inputs and captures must not reread it.
 (rule ((PlannedOperation original owner plan region) (ScatterReadValue original read)
-       (ReuseAlias (Stage owner name) e alias) (ValueRef read alias))
+       (ReuseAlias (Stage owner name) e alias) (= (ValueRef read) alias))
       ((set (ReuseBlocked (Stage owner name) e) true)) :ruleset reuse)
 (rule ((PlannedOperation original owner plan region) (= (SourceOperation original) (OperationInfo r "scatter"))
        (= destination (SourceDestination original)) (= (SourceStorage destination) false)
@@ -210,7 +210,7 @@
       ((PhaseCallback stage child)) :ruleset schedule)
 
 ; Only the combination callbacks and neutrals are evaluated by a combine phase.
-(rule ((PhaseCallback stage region) (SourceCapture region formal source))
+(rule ((PhaseCallback stage region) (= (SourceCapture region formal) source))
       ((Demand (InStage stage) source)) :ruleset schedule)
 (rule ((Phase (Stage leader "combine") region) (PlannedOperation op leader plan region)
        (= neutral (SourceNeutral op)))

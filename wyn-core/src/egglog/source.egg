@@ -36,7 +36,7 @@
 
 (function SourceIterationValue (RegionKey) SourceValue :no-merge)
 (function SourceOperatorBody (OperationKey) RegionKey :no-merge)
-(relation SourceCapture (RegionKey SourceValue SourceValue))
+(function SourceCapture (RegionKey SourceValue) SourceValue :no-merge)
 (function SourceCallable (SourceValue) RegionKey :no-merge)
 
 ; Finite source summaries. Arithmetic remains outside equality saturation.

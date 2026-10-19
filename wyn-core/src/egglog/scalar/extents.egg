@@ -7,7 +7,7 @@
 (function ExtentExprValue (Extent) Expr :no-merge)
 (function ExtentExprCapture (SourceValue) bool :merge (or old new))
 (rule ((ExprLeaf ctx t source)) ((set (ExtentExprCapture source) false)) :ruleset scalar-extent-sources)
-(rule ((SourceCapture region formal actual)) ((set (ExtentExprCapture formal) true)) :ruleset scalar-extent-sources)
+(rule ((= (SourceCapture region formal) actual)) ((set (ExtentExprCapture formal) true)) :ruleset scalar-extent-sources)
 (rule ((= extent (CallExtent call inner)) (= (ExtentUniform extent) true))
       ((ExtentExprDemand extent) (ExprContextActive (ExprContextDimensions))) :ruleset scalar-extents)
 (rule ((ExtentExprDemand extent) (ExtentEdge extent child)) ((ExtentExprDemand child)) :ruleset scalar-extents)
@@ -35,7 +35,7 @@
 ; Captures and length queries resolve before the common parameter substitution.
 (rewrite (ExprSub (ExprContextDimensions) (ExprLeaf old t formal) region args)
          (ExprSub (ExprContextDimensions) value region args)
-         :when ((SourceCapture owner formal actual) (= ctx (ExprContextForSource actual)) (ExprRoot ctx scope actual value))
+         :when ((= (SourceCapture owner formal) actual) (= ctx (ExprContextForSource actual)) (ExprRoot ctx scope actual value))
          :subsume :ruleset scalar-substitute)
 (rewrite (ExprSub (ExprContextDimensions) (ExprExecute old t source) region args)
          (ExprSub (ExprContextDimensions) value region args)

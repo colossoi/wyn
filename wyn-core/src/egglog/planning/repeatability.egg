@@ -64,7 +64,7 @@
        (= body (SourceOperatorBody op)) (= result (SourceResult body)))
       ((RepeatEdge (InsidePlan plan) value result)) :ruleset repeatability)
 (rule ((= (RepeatMapping (InsidePlan plan) value) true) (= op (SourceValueOperation value))
-       (= body (SourceOperatorBody op)) (SourceCapture body formal actual))
+       (= body (SourceOperatorBody op)) (= (SourceCapture body formal) actual))
       ((RepeatEdge (InsidePlan plan) value actual)) :ruleset repeatability)
 (rule ((= (RepeatMapping (InsidePlan plan) value) true) (= op (SourceValueOperation value)) (= input (SourceInput op i)))
       ((RepeatEdge (InsidePlan plan) value input)) :ruleset repeatability)

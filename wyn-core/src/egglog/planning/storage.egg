@@ -17,7 +17,7 @@
 
 ; Projected result fields retain the same rectangular domain and a leaf field type.
 (relation RectangularView (SourceValue TypeKey RectangularShape Extent))
-(rule ((ValueRef source buffer) (= shape (StorageShape buffer))
+(rule ((= (ValueRef source) buffer) (= shape (StorageShape buffer))
        (= leaf (StorageElement buffer)) (= count (StorageExtent buffer)))
       ((RectangularView source leaf shape count)) :ruleset residency)
 (rule ((RectangularView source leaf shape count) (= (SourceProjection value) (ProjectionInfo source i))
