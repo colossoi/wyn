@@ -109,8 +109,6 @@
 (rule ((ReturnArray output e) (= (OutputPinned output) false) (= (ValueRef e) (Source source)))
       ((set (Backing (Source source)) (Source source)) (set (OutputBacking output) (Source source))) :ruleset allocation)
 (rule ((TotalResult op i t)) ((set (BufferSlot op "total" i) (Result op i))) :ruleset allocation)
-(rule ((ArrayResult op i t) (TotalCount op n))
-      ((set (BufferSlot op "output" (- i n)) (Result op i))) :ruleset allocation)
 (rule ((FilterResult op t))
       ((set (BufferSlot op "output" 0) (Result op 0)) (set (BufferSlot op "length" 0) (Result op 1))) :ruleset allocation)
 (rule ((BucketResult op e))

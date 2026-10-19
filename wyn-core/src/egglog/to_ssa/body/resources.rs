@@ -291,7 +291,7 @@ impl Body<'_, '_, '_> {
             return Err(error("selected resource has no planned extent"));
         };
         let element = self.compiler.facts.physical_type(element, true)?;
-        let dimensions = match self.compiler.facts.lookup("StorageShape", (backing,)) {
+        let dimensions = match self.compiler.facts.storage_shape(backing)? {
             Some(shape) => self.compiler.facts.vector(shape)?,
             None => vec![extent],
         };

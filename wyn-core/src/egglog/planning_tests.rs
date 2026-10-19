@@ -518,7 +518,7 @@ fn rectangular_maps_ignore_scalar_recomputation_cost() {
         let query = Query(graph);
         let mut expensive = false;
         query
-            .for_function("WorkCost", |_, cost| {
+            .for_function("WorkInlineCost", |_, cost| {
                 expensive |= graph.value_to_base::<i64>(cost) >= 65;
                 Ok(())
             })

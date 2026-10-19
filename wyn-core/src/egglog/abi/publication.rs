@@ -376,7 +376,7 @@ fn publish_results(
             } else {
                 vec![SourceResult { index, name, kind }]
             };
-            let (layout, shape) = if let Some(shape) = compiler.facts.lookup("StorageShape", (backing,)) {
+            let (layout, shape) = if let Some(shape) = compiler.facts.storage_shape(backing)? {
                 let Some((_, element, _)) = compiler.bindings.buffer(backing)? else {
                     return Err(error("rectangular output allocation missing"));
                 };

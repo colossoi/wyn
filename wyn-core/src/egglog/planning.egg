@@ -44,7 +44,6 @@
 (function InputDomain (OperationKey) Extent :no-merge)
 ; Output components and collective components are semantic facts, before recipes.
 (relation ArrayResult (OperationKey i64 TypeKey))
-(relation TotalCount (OperationKey i64))
 (relation TotalResult (OperationKey i64 TypeKey))
 ; State slot, type, result role/slot, and source are shared by scheduling and emission.
 (relation Accumulator (OperationKey i64 TypeKey String i64 SourceValue))
@@ -80,9 +79,8 @@
 (function HostBound (Extent) Extent :no-merge)
 (function StaticCapacityBound (Extent) i64 :merge (max old new))
 (sort RectangularShape (Vec Extent))
-(function StorageShape (ValueKey) RectangularShape :no-merge)
-(function StorageElement (ValueKey) TypeKey :no-merge)
-(function StorageExtent (ValueKey) Extent :no-merge)
+(datatype StorageLayoutInfo (FlatStorage TypeKey RectangularShape Extent))
+(function StorageLayout (ValueKey) StorageLayoutInfo :no-merge)
 (function HasStorageShape (ValueKey) bool :merge (or old new))
 (function LaunchGrid (StageKey) DispatchGrid :no-merge)
 (relation FreshValue (ValueKey))
@@ -128,7 +126,7 @@
 (datatype OrderKey (At StageKey) (Start OperationKey) (End OperationKey) (Gate i64))
 (relation OrderEdge (OrderKey OrderKey))
 ; Dispatch order is complete before assigning sidecar IDs or building kernels.
-(relation Waits (StageKey OrderKey))
+(relation DispatchWaitsFor (StageKey OrderKey))
 (relation DispatchDependency (StageKey StageKey))
 
 ; Final readout joins; Rust assigns arena IDs without reconstructing these joins.
@@ -144,7 +142,7 @@
 (ruleset readout)
 (rule ((Allocation value n) (ElementType value (TypeId ty)) (= (HasStorageShape value) false))
       ((PlannedBuffer value ty n)) :ruleset readout)
-(rule ((Allocation value logical) (= (StorageElement value) (TypeId ty)) (= n (StorageExtent value)))
+(rule ((Allocation value logical) (= (StorageLayout value) (FlatStorage (TypeId ty) shape n)))
       ((PlannedBuffer value ty n)) :ruleset readout)
 
 (ruleset residency)
@@ -152,7 +150,7 @@
 (ruleset classify)
 (ruleset allocation)
 (rule ((ElementType value ty)) ((set (HasStorageShape value) false)) :ruleset allocation)
-(rule ((= shape (StorageShape value))) ((set (HasStorageShape value) true)) :ruleset allocation)
+(rule ((= layout (StorageLayout value))) ((set (HasStorageShape value) true)) :ruleset allocation)
 (ruleset dispatch)
 ; Binding facts consumed by final interface publication.
 (datatype InputStorage (StorageInput BindingKey i64))

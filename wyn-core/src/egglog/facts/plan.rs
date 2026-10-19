@@ -84,6 +84,11 @@ impl<'a, 'source> Facts<'a, 'source> {
     pub fn live_length(&self, value: Value) -> Option<Value> {
         self.lookup("LiveLength", (value,))
     }
+    pub fn storage_shape(&self, value: Value) -> Result<Option<Value>, OptimizeError> {
+        Ok(Query(&self.program.graph)
+            .record("StorageLayout", "FlatStorage", (value,))?
+            .map(|fields| fields[1]))
+    }
     pub fn capacity(&self, value: Value) -> Option<Value> {
         self.lookup("CapacityExtent", (value,))
     }

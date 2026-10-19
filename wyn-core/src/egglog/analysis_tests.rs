@@ -48,7 +48,7 @@ fn work_proofs_distinguish_shared_regions_from_repeated_inline_work() {
         (set (SourceCallable (SourceGlobal 1)) (RegionId 4))
         (run-schedule (saturate work-summaries) (saturate work-costs) (saturate work-select))
         (check (= (WorkOperationCheap (OperationId 0)) true))
-        (check (= (WorkCost (RegionId 0)) 65))
+        (check (= (WorkInlineCost (RegionId 0)) 65))
         (fail (check (WorkInlineEligible (RegionId 0))))
         (check (= (WorkOperationCheap (OperationId 1)) false))
         (fail (check (WorkInlineEligible (RegionId 4))))

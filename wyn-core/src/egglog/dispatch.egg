@@ -32,11 +32,11 @@
 
 ; Read out immediate dispatch predecessors, traversing only non-launch nodes.
 ; Stop at a launch, so a chain remains linear instead of becoming its closure.
-(rule ((Phase stage r) (OrderEdge before (At stage))) ((Waits stage before)) :ruleset dispatch)
-(rule ((Waits after (Start op)) (OrderEdge before (Start op))) ((Waits after before)) :ruleset dispatch)
-(rule ((Waits after (End op)) (OrderEdge before (End op))) ((Waits after before)) :ruleset dispatch)
-(rule ((Waits after (Gate gate)) (OrderEdge before (Gate gate))) ((Waits after before)) :ruleset dispatch)
-(rule ((Waits after (At before)) (Phase before r) (Phase after r) (!= before after))
+(rule ((Phase stage r) (OrderEdge before (At stage))) ((DispatchWaitsFor stage before)) :ruleset dispatch)
+(rule ((DispatchWaitsFor after (Start op)) (OrderEdge before (Start op))) ((DispatchWaitsFor after before)) :ruleset dispatch)
+(rule ((DispatchWaitsFor after (End op)) (OrderEdge before (End op))) ((DispatchWaitsFor after before)) :ruleset dispatch)
+(rule ((DispatchWaitsFor after (Gate gate)) (OrderEdge before (Gate gate))) ((DispatchWaitsFor after before)) :ruleset dispatch)
+(rule ((DispatchWaitsFor after (At before)) (Phase before r) (Phase after r) (!= before after))
       ((DispatchDependency before after)) :ruleset dispatch)
 
 (rule ((HostLoop op r a s i n) (Phase stage r))

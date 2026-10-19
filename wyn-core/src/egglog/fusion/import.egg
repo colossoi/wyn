@@ -6,7 +6,7 @@
        (set (IterationDomain (FusionSource op)) (SourceDomain op))
        (set (DirectInputs (Group op)) (set-empty)) (set (GroupInternalUseMask (Group op)) (set-empty))
        (set (InputUses (Group op)) (set-empty)) (set (GroupUsesOf (Group op)) (set-empty))
-       (set (GroupLengths (Group op)) (set-empty)) (set (ValidLengths (Group op)) (set-empty))
+       (set (GroupLengths (Group op)) (set-empty)) (set (GroupDirectLengthUses (Group op)) (set-empty))
        (set (GroupInputs (Group op)) (set-empty))
        (set (InternalInputs (Group op)) (set-empty))) :ruleset source-fusion)
 (relation SourceScrema (OperationKey))
@@ -42,7 +42,7 @@
 (rule ((SourceObserved op)) ((GroupUseFact (Group op) (Returned))) :ruleset source-fusion)
 (rule ((= input (SourceInput consumer i)) (= (Identity input) (Identity source)) (= source (SourceOperationValue producer)))
       ((InputFact (Group consumer) (Direct producer))
-       (WholeStream (Group producer) (Group consumer))) :ruleset source-fusion)
+       (WholeStreamUse (Group producer) (Group consumer))) :ruleset source-fusion)
 (rule ((= input (SourceInput consumer i)) (= (SourceHasOrigin input) false) (= token (SourceOrdinal input)))
       ((InputFact (Group consumer) (External token))) :ruleset source-fusion)
 (rule ((= input (SourceInput op 0)) (= token (SourceIdentityToken (Identity input))))
@@ -59,4 +59,4 @@
 
 (rule ((= value (SourceOperationValue consumer)) (= array (SourceLength value))
        (= (Identity array) (Identity source)) (= source (SourceOperationValue producer)))
-      ((set (ValidLengths (Group producer)) (set-of (UseAt consumer (LengthUse))))) :ruleset source-fusion)
+      ((set (GroupDirectLengthUses (Group producer)) (set-of (UseAt consumer (LengthUse))))) :ruleset source-fusion)
