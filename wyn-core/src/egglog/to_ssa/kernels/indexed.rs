@@ -54,7 +54,11 @@ pub(super) fn indexed(
             body.literal("1", &types::i32())?,
         )
     } else {
-        invocation(body, phase_width)?
+        if phase == "local" {
+            (body.local_id()?, Body::number(phase_width))
+        } else {
+            invocation(body, phase_width)?
+        }
     };
     body.counted(start, n, step, vec![], |body, index, _| {
         if phase == "initialize" {

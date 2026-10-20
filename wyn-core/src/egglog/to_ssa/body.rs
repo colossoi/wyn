@@ -11,7 +11,7 @@ use crate::types::{self, Type, TypeExt, TypeName};
 use crate::BindingRef;
 use crate::FunctionId;
 use crate::{LookupMap, LookupSet};
-use egglog_engine::{TermId, Value};
+use egglog_engine::{RawValues, TermId, Value};
 use std::cell::RefCell;
 use wyn_graph::DominatorTree;
 
@@ -37,6 +37,9 @@ pub(super) struct Body<'a, 'p, 'source> {
     local_resources: LookupMap<Value, Typed>,
     local_arrays: LookupMap<ValueRef, PlaceId>,
     next_workgroup_array: u32,
+    // Kernel storage ownership survives invocation-local element callbacks.
+    pub workgroup_width: Option<u32>,
+    pub invocation_execution: bool,
 }
 
 impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
@@ -83,6 +86,8 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
             local_resources: LookupMap::default(),
             local_arrays: LookupMap::default(),
             next_workgroup_array: 0,
+            workgroup_width: None,
+            invocation_execution: true,
         })
     }
 
@@ -369,13 +374,25 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         let Some(scope) = self.compiler.facts.callback(operation) else {
             return Err(error("collective callback is missing"));
         };
-        self.in_region(owner, scope, arguments, |body, source| {
-            let Some(&term) = body.compiler.program.stage.selected.roots.get(&(body.context, source))
-            else {
-                return Err(error("callback has no selected scalar body"));
-            };
-            body.scalar_body(scope, term)
+        self.invocation_local(|body| {
+            body.in_region(owner, scope, arguments, |body, source| {
+                let Some(&term) = body.compiler.program.stage.selected.roots.get(&(body.context, source))
+                else {
+                    return Err(error("callback has no selected scalar body"));
+                };
+                body.scalar_body(scope, term)
+            })
         })
+    }
+
+    pub fn invocation_local<T>(
+        &mut self,
+        emit: impl FnOnce(&mut Self) -> Result<T, OptimizeError>,
+    ) -> Result<T, OptimizeError> {
+        let invocation = std::mem::replace(&mut self.invocation_execution, true);
+        let result = emit(self);
+        self.invocation_execution = invocation;
+        result
     }
 
     pub fn in_region<T>(
@@ -427,7 +444,33 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         result
     }
 
+    pub fn execution_scope(&self) -> Result<Value, OptimizeError> {
+        let name = if self.invocation_execution { "InvocationScope" } else { "WorkgroupScope" };
+        let Some(scope) = self.compiler.facts.constructor(name, RawValues(Vec::new())) else {
+            return Err(error("execution scope is missing"));
+        };
+        Ok(scope)
+    }
+
+    /// Read a selected execution scope; the active width belongs to its kernel.
+    pub fn has_workgroup_scope(&self, fact: &str, owner: Value) -> bool {
+        self.compiler
+            .facts
+            .lookup(fact, (owner,))
+            .is_some_and(|scope| self.compiler.facts.enode("WorkgroupScope", scope).is_some())
+    }
+
     pub fn call(&mut self, scope: Value, args: Vec<Typed>) -> Result<Typed, OptimizeError> {
+        let domain = if self.workgroup_width.is_some() { "WorkgroupScope" } else { "InvocationScope" };
+        let Some(enclosing) = self.compiler.facts.constructor(domain, RawValues(Vec::new())) else {
+            return Err(error("call storage domain missing"));
+        };
+        let Some(inline) = self.compiler.facts.lookup("InlineCall", (scope, enclosing)) else {
+            return Err(error("call has no selected execution context"));
+        };
+        if self.compiler.program.graph.value_to_base::<bool>(inline) {
+            return self.in_region(scope, scope, args, |body, source| body.value(scope, source));
+        }
         let id = self.compiler.function(scope, &args)?;
         let Some(function) = self.compiler.functions.iter().find(|function| function.id == id) else {
             return Err(error(

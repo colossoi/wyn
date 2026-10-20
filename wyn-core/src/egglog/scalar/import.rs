@@ -317,7 +317,7 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
                 let c = self.child(context, scope, cond)?;
                 let a = self.value(context, yes_result, self.template_region(context).is_some())?;
                 let b = self.value(context, no_result, self.template_region(context).is_some())?;
-                Ok(self.sink.add("ExprChoice", (context, ty, c, a, b))?)
+                Ok(self.sink.add("ExprChoice", (context, ty, c, a, b, source))?)
             }
             TermKind::Var(_)
             | TermKind::BinOp(_)

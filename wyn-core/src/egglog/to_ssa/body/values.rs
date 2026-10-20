@@ -1,6 +1,7 @@
 use super::{builder_error, error, Body, OptimizeError, Typed};
 use crate::builtins::{catalog, select};
 use crate::op::{BinaryOperator, OpTag, PureViewSource};
+use crate::ssa::ir::ValueDef;
 use crate::ssa::types::ConstantValue;
 use crate::ssa::types::ValueRef;
 use crate::ssa::types::{InstKind, PlaceId};
@@ -23,6 +24,25 @@ impl Body<'_, '_, '_> {
         }) else {
             return Err(error(format!("invalid projection {index} of {:?}", value.ty)));
         };
+        // Keep physical resource identity when projecting an emitted aggregate.
+        // A shared descriptor's storage is not encoded in its source-level type.
+        if let ValueRef::Ssa(id) = value.value {
+            let function = self.builder.func();
+            if let ValueDef::Inst { inst } = function.values[id].def {
+                if let InstKind::Op {
+                    tag: OpTag::Tuple(_),
+                    operands,
+                } = &function.insts[inst].data
+                {
+                    if let Some(value) = operands.get(index) {
+                        return Ok(Typed {
+                            value: value.clone(),
+                            ty,
+                        });
+                    }
+                }
+            }
+        }
         self.op(OpTag::Project { index: index as u32 }, vec![value], ty)
     }
     pub(in crate::egglog::to_ssa) fn index_place(
@@ -383,7 +403,19 @@ impl Body<'_, '_, '_> {
     ) -> Result<(), OptimizeError> {
         let zero = self.literal("0", &length.ty)?;
         let one = self.literal("1", &length.ty)?;
-        self.counted(zero, length, one, vec![], |body, index, _| {
+        self.copy_array_strided(destination, source, length, fields, zero, one)
+    }
+
+    pub fn copy_array_strided(
+        &mut self,
+        destination: Typed,
+        source: Typed,
+        length: Typed,
+        fields: &[usize],
+        start: Typed,
+        step: Typed,
+    ) -> Result<(), OptimizeError> {
+        self.counted(start, length, step, vec![], |body, index, _| {
             let mut value = body.index(source.clone(), index.clone())?;
             if !fields.is_empty() && source.ty.array_rank().is_some_and(|rank| rank > 1) {
                 let target = body.index(destination.clone(), index)?;

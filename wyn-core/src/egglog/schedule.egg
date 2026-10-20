@@ -46,13 +46,18 @@
 (function IterationExtent (OperationKey) Extent :no-merge)
 (function IterationRank (OperationKey) i64 :no-merge)
 (function IterationAxis (OperationKey i64) Extent :no-merge)
-(function MapCooperative (OperationKey) bool :merge (or old new))
+(function MapSegmented (OperationKey) bool :merge (or old new))
 (relation KernelPhase (OperationKey String Extent i64 DispatchGrid))
 (rule ((= r (OperationRegion op)) (OwnedRegion entry r) (= grid (EntryGrid entry)))
       ((set (OperationGrid op) grid)) :ruleset schedule)
 ; One choice supplies the chunk launch, scratch capacity, and carry count.
 ; The default bounds the carry scan to one workgroup.
 (let collective-width 256)
+; Default execution widths: segment collectives retain collective-width;
+; ordinary maps select a width by the scope owning each logical coordinate.
+(function MapScopeWidth (ExecutionScope) i64 :no-merge)
+(set (MapScopeWidth (InvocationScope)) 64)
+(set (MapScopeWidth (WorkgroupScope)) 32)
 (relation ParallelCollective (OperationKey))
 (rule ((= (Plan op) (Totals))) ((ParallelCollective op)) :ruleset schedule)
 (rule ((= (Plan op) (Prefixes))) ((ParallelCollective op)) :ruleset schedule)
@@ -74,10 +79,16 @@
       ((Produces (Stage leader "scalar") (Result op 0))
        (FirstPhase op (Stage leader "scalar")) (LastPhase op (Stage leader "scalar"))
        (PhaseInput (Stage leader "scalar") op "environment")) :ruleset schedule)
-(rule ((= (Plan op) (Elements)) (= (MapCooperative op) false)
+(rule ((= (Plan op) (Elements)) (= (MapSegmented op) false)
+       (= (MapExecution op) (InvocationScope)) (= width (MapScopeWidth (InvocationScope)))
        (= n (IterationExtent op)) (= grid (OperationGrid op)))
-      ((KernelPhase op "elements" n 64 grid) (PhaseEnds op "elements" "elements")) :ruleset schedule)
-(rule ((= (Plan op) (Elements)) (= (MapCooperative op) true)
+      ((KernelPhase op "elements" n width grid) (PhaseEnds op "elements" "elements")) :ruleset schedule)
+(rule ((= (Plan op) (Elements)) (= (MapSegmented op) false)
+       (= (MapExecution op) (WorkgroupScope)) (= width (MapScopeWidth (WorkgroupScope)))
+       (= n (IterationExtent op)) (= grid (OperationGrid op)))
+      ((KernelPhase op "elements" (Product n (Fixed width)) width grid)
+       (PhaseEnds op "elements" "elements")) :ruleset schedule)
+(rule ((= (Plan op) (Elements)) (= (MapSegmented op) true)
        (= n (IterationExtent op)) (= grid (OperationGrid op)))
       ((KernelPhase op "segments" (Product n (Fixed collective-width)) collective-width grid)
        (PhaseEnds op "segments" "segments")) :ruleset schedule)
@@ -132,6 +143,7 @@
       ((Produces (Stage op "elements") (Result op i))) :ruleset schedule)
 (rule ((= (Plan op) (Elements)) (ArrayResult op i t) (Phase (Stage op "segments") r))
       ((Produces (Stage op "segments") (Result op i))) :ruleset schedule)
+
 (rule ((= (Plan op) (Totals)) (ArrayResult op i t) (Phase (Stage op "chunks") r))
       ((Produces (Stage op "chunks") (Result op i))) :ruleset schedule)
 (rule ((= (Plan op) (Prefixes)) (ArrayResult op i t) (Phase (Stage op "offsets") r))
@@ -169,12 +181,17 @@
 (rule ((= value (Temporary op name i)) (= n (CapacityExtent value)))
       ((FreshValue value)) :ruleset schedule)
 
-; Invocation-local allocations are recipe outputs, without dispatches or shared storage.
+; Device-local recipes retain only observed outputs; fused intermediates stream
+; through the recipe without requiring a local allocation.
+(relation LocalObservedBuffer (ValueKey))
 (rule ((= r (OperationRegion op)) (DeviceRegion r)) ((DeviceOperation op)) :ruleset schedule)
 (rule ((DeviceOperation op) (Enters op r)) ((DeviceRegion r)) :ruleset schedule)
 (rule ((Phase (Stage op "scalar") r)) ((DeviceOperation op)) :ruleset schedule)
-(rule ((DeviceOperation op) (= recipe (Plan op)) (= value (BufferSlot op name i)) (ElementType value t) (= n (CapacityExtent value)))
+(rule ((DeviceOperation op) (= recipe (Plan op)) (= value (BufferSlot op name i)) (!= name "output") (ElementType value t) (= n (CapacityExtent value)))
       ((LocalBuffer op name i t n)) :ruleset schedule)
+(rule ((DeviceOperation op) (= recipe (Plan op)) (= value (BufferSlot op "output" i))
+       (LocalObservedBuffer value) (ElementType value t) (= n (CapacityExtent value)))
+      ((LocalBuffer op "output" i t n)) :ruleset schedule)
 
 (rule ((= (Plan op) (Scatter)) (UninitializedResult op i t n)) ((PhaseEnds op "scatter" "scatter")) :ruleset schedule)
 

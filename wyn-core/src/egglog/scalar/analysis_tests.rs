@@ -95,7 +95,7 @@ fn readonly_proofs_do_not_authorize_speculation_or_ignore_argument_effects() {
             (let $args (ExprCons $ctx $write $nil))
             (let $call (ExprCall $ctx $ty (SourceGlobal 0) (RegionId 0) $args))
             (let $invoke (ExprInvoke $ctx $ty (RegionId 1) $nil))
-            (let $choice (ExprChoice $ctx $ty $x $loop $write))
+            (let $choice (ExprChoice $ctx $ty $x $loop $write (SourceTerm (RegionId 0) 0)))
             (let $unknown (ExprExecute $ctx $ty (SourceGlobal 99)))
             (let $state (ExprLeaf $ctx $ty (SourceFormal (RegionId 0) 1)))
             (ExprRoot $ctx (RegionId 0) (SourceFormal (RegionId 0) 1) $state)

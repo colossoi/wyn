@@ -222,6 +222,7 @@ impl Import<'_, '_, '_, '_> {
     pub(super) fn finish_summary(&mut self, value: Value, scope: &mut Scope) -> Result<(), OptimizeError> {
         self.summaries.owners.insert(value, scope.key);
         let summary = self.summaries.values.get(&value).cloned().unwrap_or_default();
+        self.sink.set("SourceReadOnly", value, summary.readonly)?;
         // Region-local properties were accumulated from each node once. Device
         // requirements additionally follow references to already evaluated values.
         scope.summary.device |= summary.device;

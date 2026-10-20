@@ -1,0 +1,36 @@
+-- Cooperative traversal acceptance probe: two-level octree, BFS order.
+-- Expected: all 76 queries match the BFS oracle on SPIR-V and WGSL.
+-- Former failure: GPU execution timed out while repeating traversal per output
+-- element and scans per child. The compiler must also select cooperative work.
+-- Each row supplies 73 intersection flags: root, eight internal children,
+-- then 64 leaves. A rejected ancestor prunes its entire subtree.
+-- Output per query: 64 leaf indices (-1 padding), followed by hit count.
+-- Numeric correctness is necessary but not sufficient: inspect whether scans
+-- and scatters within the loop execute cooperatively and retain shared state.
+-- No loop iteration may introduce a barrier reached by only some group lanes.
+-- CWD: /home/jonah/wyn
+-- wyn build fluid-simulation/test/batched_traversal.wyn -o /tmp/batched-traversal.spv
+-- python3 fluid-simulation/test/check_batched_traversal.py
+entry traverse(intersections: [][73]i32) [][65]i32 =
+  map(|hits|
+    let initial = replicate(64,-1i32) with [0] = 0i32 in
+    let (_frontier,_live,results,count) =
+      loop (frontier,live,results,count) = (initial,1i32,replicate(64,-1i32),0i32)
+      while live > 0 do
+        let nodes = map(|i| if i < live then frontier[i] else 0i32,0i32..<64) in
+        let accepted = map(|i| i < live && hits[nodes[i]] != 0,0i32..<64) in
+        let splits = map(|i| if accepted[i] && nodes[i] < 9 then 1i32 else 0i32,0i32..<64) in
+        let leaves = map(|i| if accepted[i] && nodes[i] >= 9 then 1i32 else 0i32,0i32..<64) in
+        let split_ends = scan((+),0i32,splits) in
+        let leaf_ends = scan((+),0i32,leaves) in
+        let result_slots = map(|i| if leaves[i] != 0 then count+leaf_ends[i]-1 else -1i32,0i32..<64) in
+        let next_results = scatter(results,result_slots,nodes) in
+        let child_slots = map(|i|
+          let parent = i/8 in
+          if splits[parent] != 0 then (split_ends[parent]-1)*8+i%8 else -1i32,0i32..<512) in
+        let child_nodes = map(|i|
+          let node = nodes[i/8] in
+          (if node == 0 then 1i32 else 9+(node-1)*8)+i%8,0i32..<512) in
+        let next_frontier = scatter(replicate(64,-1i32),child_slots,child_nodes) in
+        (next_frontier,split_ends[63]*8,next_results,count+leaf_ends[63]) in
+    map(|i| if i == 64 then count else results[i],0i32..<65),intersections)

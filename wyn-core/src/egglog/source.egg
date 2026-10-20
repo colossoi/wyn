@@ -41,6 +41,7 @@
 
 ; Finite source summaries. Arithmetic remains outside equality saturation.
 (function SourceType (SourceValue) TypeKey :no-merge)
+(function SourceBuiltin (SourceValue) String :no-merge)
 
 (relation SourceArrayElement (TypeKey TypeKey))
 (relation SourceArrayType (TypeKey))

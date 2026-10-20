@@ -454,12 +454,15 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 if arg_ids.len() != 1 {
                     bail_spirv!("float bound requires one precision witness");
                 }
+                // Keep nonfinite values out of the constant-expression section:
+                // SPIR-V consumers such as Naga reject infinite float literals.
+                let value = if *negative { f32::NEG_INFINITY } else { f32::INFINITY };
+                let bits = self.constructor.const_u32(value.to_bits());
+                let bound = self.constructor.builder.bitcast(self.constructor.f32_type, None, bits)?;
                 if result_ty == self.constructor.f32_type {
-                    let value = if *negative { f32::NEG_INFINITY } else { f32::INFINITY };
-                    Ok(self.constructor.const_f32(value))
+                    Ok(bound)
                 } else if result_ty == *self.constructor.builder.type_float(16) {
-                    let value = if *negative { half::f16::NEG_INFINITY } else { half::f16::INFINITY };
-                    Ok(*self.constructor.builder.const_f16_bits(value.to_bits()))
+                    Ok(self.constructor.builder.f_convert(result_ty, None, bound)?)
                 } else {
                     bail_spirv!("float bound requires an f16 or f32 result");
                 }

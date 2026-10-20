@@ -1,0 +1,12 @@
+-- Expected counts [2,2,1], no overflow; neighbors are [0,1], [0,1], [2].
+-- Covers a root-only tree, inactive sibling lanes, and cooperative leaf bounds.
+-- Failure indicates incorrect queue masks, range mapping, or shared-loop state.
+module S = import "pkg:spatial"
+entry neighbors() [3][98]i32 =
+  let positions = [@[1.0,1.0,1.0,0.35],@[1.5,1.0,1.0,0.35],@[8.0,8.0,8.0,0.35]] in
+  let offsets = [0i32,3i32] in
+  let children = [0i32] in
+  let boxes = [@[0.0,0.0,0.0,16.0]] in
+  let ranges = [@[0i32,3i32]] in
+  let candidates = map(|leaf| S.Neighbors.linked_leaf_neighbors(leaf,positions,offsets,children,boxes,ranges,1,1.7),[0i32]) in
+  map(|i| S.Neighbors.linked_particle_neighbors(i,positions,ranges,candidates[0],1.7),iota(3))

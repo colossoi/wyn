@@ -1,0 +1,9 @@
+-- Expected nine active nodes: root first-child=1, followed by eight leaves.
+-- Root bounds are [0,0,0,16]; leaf boxes cover the eight 8-unit octants once.
+-- Leaf ranges are [0,1] through [7,1]; padding has zero range and child link.
+-- Failure indicates node generation, sorting, placeholder decoding, or linking.
+module S = import "pkg:spatial"
+entry linked() ([17]i32,[17]vec4f32,[17]vec2i32,i32) =
+  let corners = map(|i| if i<8 then u32(i)*134217728u32 else 1073741824u32,iota(16)) in
+  let offsets = map(|i| min(i,8),iota(16)) in
+  S.Linked.build(corners,offsets,iota(17),16.0)

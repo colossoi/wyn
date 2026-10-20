@@ -5,6 +5,28 @@ use crate::{compile_thru_tlc, types};
 use egglog_engine::sort::S;
 
 #[test]
+fn indexed_write_effects_distinguish_owned_arrays_from_views() {
+    for (ty, readonly) in [("[4]i32", true), ("[]i32", false)] {
+        let source = format!("entry main(xs:{ty}) {ty} = scatter(xs,[0i32],[7i32])");
+        let program = compile_thru_tlc(&source).unwrap();
+        let (mut graph, _) = import(&program).unwrap();
+        graph.parse_and_run_program(None, "(run-schedule (saturate source-summary))").unwrap();
+        let query = Query(&graph);
+        let entry = query.row("SourceOriginalEntry", |_| true).unwrap().unwrap()[1];
+        let result = query.required("SourceResult", (entry,)).unwrap();
+        for (table, key, expected) in [
+            ("SourceReadOnly", result, readonly),
+            ("SourceRegionReadOnly", entry, readonly),
+            ("SourceSpeculatable", result, false),
+            ("SourceRegionSpeculatable", entry, false),
+        ] {
+            let value = query.required(table, (key,)).unwrap();
+            assert_eq!(graph.value_to_base::<bool>(value), expected, "{ty}: {table}");
+        }
+    }
+}
+
+#[test]
 fn repeated_free_references_keep_dependencies_in_sibling_and_nested_regions() {
     for (ty, producer, yes, no, step, kind) in [
         (

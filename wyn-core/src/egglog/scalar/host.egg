@@ -19,6 +19,6 @@
 (rule ((= e (ExprCoerce ctx t x)) (HostEvalValue x)) ((HostEvalValue e)) :ruleset scalar-host)
 (rule ((= e (ExprTuple ctx t args)) (HostEvalArgs args)) ((HostEvalValue e)) :ruleset scalar-host)
 (rule ((= e (ExprVector ctx t args)) (HostEvalArgs args)) ((HostEvalValue e)) :ruleset scalar-host)
-(rule ((= e (ExprChoice ctx t c a b)) (HostEvalValue c) (HostEvalValue a) (HostEvalValue b) (ExprTotal e))
+(rule ((= e (ExprChoice ctx t c a b source)) (HostEvalValue c) (HostEvalValue a) (HostEvalValue b) (ExprTotal e))
       ((HostEvalValue e) (HostEvalPreferred e)) :ruleset scalar-host)
 (run-schedule (saturate scalar-host))

@@ -1,0 +1,10 @@
+-- Expected [6,10] on both GPU backends. Compilation must preserve the inferred
+-- four-element queue layout across the loop's conditional tuple result.
+-- Former failure: "type ... has no selected control-boundary layout".
+entry branch_layout() [2]i32 =
+  map(|x|
+    let initial = replicate(4,0i32) in
+    let (queue,j,total) = loop (queue,j,total) = (initial,0i32,0i32) while j<4 do
+      let next = scatter(queue,[j],[x+j]) in
+      if j%2==0 then (next,j+1,total+x+j) else (next,j+1,total+next[j]) in
+    total,[0i32,1i32])

@@ -4,7 +4,7 @@ use crate::builtins::lowering::PrimOp;
 use crate::builtins::{by_id, catalog, BuiltinLowering, Purity};
 use crate::egglog::OptimizeError;
 use crate::ssa::layout::{std430_type_layout, storage_elem_stride, storage_value_type, type_byte_size};
-use crate::tlc::{SoacOp, TermKind, VarRef};
+use crate::tlc::{TermKind, VarRef};
 use crate::types::{
     array_view_buffer, as_soa_tuple, is_array_variant_composite, is_array_variant_view, is_copy,
     strip_existentials, Type, TypeExt, TypeName,
@@ -135,6 +135,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 TermKind::UnOp(_) => (false, true, true, true, 1),
                 TermKind::Var(VarRef::Builtin { id, overload_idx }) => {
                     let builtin = by_id(*id);
+                    self.sink.set("SourceBuiltin", value, builtin.raw.surface_name)?;
                     let Some(overload) = builtin.overloads().get(*overload_idx) else {
                         return Err(OptimizeError::Output("invalid TLC builtin overload".into()));
                     };
@@ -170,16 +171,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                     || array.ty.array_variant().is_some_and(is_array_variant_composite),
                 1,
             ),
-            TermKind::Soac(soac) => {
-                let readonly = matches!(
-                    soac,
-                    SoacOp::Map { .. }
-                        | SoacOp::Reduce { .. }
-                        | SoacOp::Scan { .. }
-                        | SoacOp::Filter { .. }
-                );
-                (true, readonly, readonly, false, 65)
-            }
+            TermKind::Soac(_) => (true, true, true, false, 65),
             TermKind::Loop { .. } => (false, true, true, false, 65),
             TermKind::Extern(_) => (true, false, false, false, 65),
             TermKind::Var(_)

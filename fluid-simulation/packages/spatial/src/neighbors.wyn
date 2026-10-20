@@ -11,6 +11,61 @@ def cube(key: u32, span: u32, world_size: f32) (vec3f32,vec3f32) =
 def intersects(a: vec3f32,b: vec3f32,c: vec3f32,d: vec3f32) bool =
   a.x <= d.x && a.y <= d.y && a.z <= d.z && b.x >= c.x && b.y >= c.y && b.z >= c.z
 
+-- Upstream's 32-lane BFS: four queued first-child pointers expand to 32
+-- sibling tests per batch. Scans express ballot counts and exclusive ranks;
+-- the compiler supplies shared storage and workgroup synchronization.
+def linked_leaf_neighbors<[n],[m],[k]>(leaf: i32, positions: [n]vec4f32, offsets: [m]i32,
+    children: [k]i32, boxes: [k]vec4f32, ranges: [k]vec2i32, node_count: i32, radius: f32) [258]i32 =
+  let empty = replicate(258,-1i32) in
+  if leaf+1 >= length(offsets) then (empty with [256] = 0) with [257] = 0 else
+  if offsets[leaf] == offsets[leaf+1] then
+    (empty with [256] = 0) with [257] = 0 else
+  let first = offsets[leaf] in let last = offsets[leaf+1] in
+  let points = map(|p| p.xyz,positions[first..last]) in
+  let lo = reduce(|a,b| min(a,b),@[f32.highest,f32.highest,f32.highest],points)-radius in
+  let hi = reduce(|a,b| max(a,b),@[f32.lowest,f32.lowest,f32.lowest],points)+radius in
+  let initial = replicate(128,0i32) with [0] = (if children[0] != 0 then children[0] else 0i32) in
+  let (_queue,_old,_nodes,_offset,_new,result,count,overflow) =
+    loop (queue,old,nodes,offset,new,result,count,overflow) = (initial,0i32,1i32,0i32,0i32,empty,0i32,false)
+    while nodes > 0 && !overflow do
+      let raw_indices = map(|lane| queue[(old+offset+lane/8)%128]+lane%8,iota(32)) in
+      let indices = map(|lane| if raw_indices[lane] < node_count then raw_indices[lane] else 0i32,iota(32)) in
+      let accepted = map(|lane|
+        if offset+lane/8 >= nodes || raw_indices[lane] >= node_count then false else
+        let box = boxes[indices[lane]] in intersects(box.xyz,box.xyz+box.w,lo,hi),iota(32)) in
+      let splits = map(|lane| if accepted[lane] && children[indices[lane]] != 0 then 1i32 else 0i32,iota(32)) in
+      let leaves = map(|lane| if accepted[lane] && children[indices[lane]] == 0 && ranges[indices[lane]].y > 0
+                              then 1i32 else 0i32,iota(32)) in
+      let split_ends = scan((+),0i32,splits) in
+      let leaf_ends = scan((+),0i32,leaves) in
+      let destinations = map(|lane| if leaves[lane] != 0 && count+leaf_ends[lane] <= 256
+                                  then count+leaf_ends[lane]-1 else -1i32,iota(32)) in
+      let output = scatter(result,destinations,indices) in
+      let queue_destinations = map(|lane| if splits[lane] != 0 && nodes+new+split_ends[lane] <= 128
+          then (old+nodes+new+split_ends[lane]-1)%128 else -1i32,iota(32)) in
+      let child_indices = map(|lane| if splits[lane] != 0 then children[indices[lane]] else 0i32,iota(32)) in
+      let next_queue = scatter(queue,queue_destinations,child_indices) in
+      let next_new = new+split_ends[31] in
+      let next_count = count+leaf_ends[31] in
+      let next_overflow = nodes+next_new > 128 || next_count > 256 in
+      if offset+4 >= nodes then (next_queue,old+nodes,next_new,0i32,0i32,output,min(next_count,256),next_overflow)
+      else (next_queue,old,nodes,offset+4,next_new,output,min(next_count,256),next_overflow) in
+  (result with [256] = count) with [257] = if overflow then 1 else 0
+
+-- Candidate node ranges are already linked to the spatially sorted particles.
+def linked_particle_neighbors<[n],[k]>(i: i32, positions: [n]vec4f32, ranges: [k]vec2i32,
+                                     candidates: [258]i32, radius: f32) [98]i32 =
+  let (result,count,li,j) = loop (result,count,li,j) = (replicate(98,-1i32),0i32,0i32,0i32)
+    while li < candidates[256] && count < 96 do
+      let range = ranges[candidates[li]] in
+      if j >= range.y then (result,count,li+1,0i32) else
+      let index = range.x+j in
+      let r = positions[i].xyz-positions[index].xyz in
+      let hit = dot(r,r) < radius*radius in
+      (if hit then result with [count] = index else result,
+       if hit then count+1 else count,li,j+1) in
+  (result with [96] = count) with [97] = candidates[257]
+
 -- One BFS per occupied leaf. Queue stores parent Hilbert intervals, equivalent
 -- to upstream's first-child-node queue; children are visited in Hilbert order.
 -- Result: 256 candidate leaf indices, count, overflow flag.

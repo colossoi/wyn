@@ -10,6 +10,29 @@
 (function SourceRegionReadOnly (RegionKey) bool :merge (and old new))
 (function SourceRegionRequiresDevice (RegionKey) bool :merge (or old new))
 (function SourceRegionDuplicable (RegionKey) bool :merge (and old new))
+; Synthetic tuple projections and formal bindings carry the same read effects
+; as their values, including loop-result fields used by later callbacks.
+(rule ((= value (SourceFormal region i)))
+      ((set (SourceReadOnly value) true)) :ruleset source-summary)
+(rule ((= (SourceProjection value) (ProjectionInfo parent i)) (= readonly (SourceReadOnly parent)))
+      ((set (SourceReadOnly value) readonly)) :ruleset source-summary)
+(rule ((SourceComputedUse value child) (= (SourceReadOnly child) false))
+      ((set (SourceReadOnly value) false)) :ruleset source-summary)
+; Indexed writes into owned values are private to the invocation. Only view
+; destinations introduce shared-storage effects. Neither form is speculative.
+(rule ((= destination (SourceDestination op)) (= value (SourceOperationValue op)))
+      ((set (SourceSpeculatable value) false)) :ruleset source-summary)
+(rule ((= destination (SourceDestination op)) (= ty (SourceType destination))
+       (SourceViewType ty) (= value (SourceOperationValue op)))
+      ((set (SourceReadOnly value) false)) :ruleset source-summary)
+; Destination effects are classified after import, so their containing regions
+; must receive the settled flags rather than only the import-time summaries.
+(rule ((= (SourceOperation op) (OperationInfo region kind))
+       (= value (SourceOperationValue op)) (= (SourceReadOnly value) false))
+      ((set (SourceRegionReadOnly region) false)) :ruleset source-summary)
+(rule ((= (SourceOperation op) (OperationInfo region kind))
+       (= value (SourceOperationValue op)) (= (SourceSpeculatable value) false))
+      ((set (SourceRegionSpeculatable region) false)) :ruleset source-summary)
 (relation SourceEnters (SourceValue RegionKey))
 ; Value-preserving coercions and projections share identity without equating
 ; their execution occurrences. Lexical bindings are resolved during import.

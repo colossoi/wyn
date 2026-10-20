@@ -21,7 +21,8 @@
 (constructor ExprBinary (ExprContext TypeKey String Expr Expr) Expr)
 (constructor ExprOp (ExprContext TypeKey String ExprArgs) Expr)
 (constructor ExprInvoke (ExprContext TypeKey RegionKey ExprArgs) Expr)
-(constructor ExprChoice (ExprContext TypeKey Expr Expr Expr) Expr)
+; Retain the source boundary for value-specific layouts of inferred arrays.
+(constructor ExprChoice (ExprContext TypeKey Expr Expr Expr SourceValue) Expr)
 (constructor ExprTuple (ExprContext TypeKey ExprArgs) Expr)
 (constructor ExprVector (ExprContext TypeKey ExprArgs) Expr)
 (constructor ExprProject (ExprContext TypeKey Expr i64) Expr)

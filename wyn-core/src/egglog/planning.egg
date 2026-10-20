@@ -70,6 +70,8 @@
 (relation PhaseInput (StageKey OperationKey String))
 (relation PhaseDomain (StageKey Extent i64))
 (datatype ExecutionScope (InvocationScope) (WorkgroupScope))
+(function MapExecution (OperationKey) ExecutionScope :no-merge)
+(function LocalSupportsWorkgroup (OperationKey) bool :merge (or old new))
 (relation ExtentDemand (StageKey Extent))
 (relation Produces (StageKey ValueKey))
 (relation Needs (StageKey ValueKey))

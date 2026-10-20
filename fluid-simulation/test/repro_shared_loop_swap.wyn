@@ -1,0 +1,8 @@
+-- Expected [[1,2,11,21],[3,4,11,21]] on both GPU backends.
+-- Cooperative loop arrays must preserve parallel assignment: copying one
+-- field must not overwrite another field's still-live source.
+entry swaps() [2][4]i32 =
+  map(|row|
+    let (a,b,_i) = loop (a,b,i) = (row,[10i32,20i32],0i32) while i<2 do
+      let c = map(|x| x+1i32,a) in (b,c,i+1) in
+    [a[0],a[1],b[0],b[1]],[[0i32,1i32],[2i32,3i32]])

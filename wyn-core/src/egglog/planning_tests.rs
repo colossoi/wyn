@@ -779,7 +779,7 @@ fn segmented_collectives_select_workgroups_for_each_outer_coordinate() {
             let query = Query(graph);
             let mut groups = 0;
             query
-                .for_function("MapCooperative", |_, enabled| {
+                .for_function("MapSegmented", |_, enabled| {
                     groups += usize::from(graph.value_to_base::<bool>(enabled));
                     Ok(())
                 })
@@ -798,7 +798,7 @@ fn segmented_collectives_do_not_cross_callback_control_flow() {
     ] {
         planned(source, |graph| {
             Query(graph)
-                .for_function("MapCooperative", |_, enabled| {
+                .for_function("MapSegmented", |_, enabled| {
                     assert!(!graph.value_to_base::<bool>(enabled), "{source}");
                     Ok(())
                 })
@@ -928,7 +928,7 @@ fn runtime_segmented_collectives_require_uniform_dimensions() {
             query
                 .for_each("MapPlan", |row| {
                     if query.flag("MapHost", (row[0],))? {
-                        let actual = query.flag("MapCooperative", (row[1],))?;
+                        let actual = query.flag("MapSegmented", (row[1],))?;
                         assert_eq!(actual, cooperative, "{source}");
                     }
                     Ok(())

@@ -106,7 +106,8 @@ impl Body<'_, '_, '_> {
         let layout = self.compiler.facts.value_layout(state)?;
         let initial = self.compiler.facts.loop_initial(header_scope)?;
         let initial = self.value(scope, initial)?;
-        let initial = self.materialize(initial, layout)?;
+        let target = self.boundary_target(source)?;
+        let initial = self.materialize_boundary(initial, layout, target.as_ref())?;
         if let Some(fields) = self.compiler.facts.enode("WhileCondition", form) {
             let values = self.values.checkpoint();
             let scopes = self.scopes.checkpoint();
@@ -137,13 +138,14 @@ impl Body<'_, '_, '_> {
             .map_err(builder_error)?;
             self.builder.switch_to_block_unchecked(test);
             self.scopes.insert(header_scope, test);
-            self.values.insert(
-                state,
+            let carried = self.rebind_boundary(
                 Typed {
                     value: parameters[0].into(),
                     ty: initial.ty.clone(),
                 },
-            );
+                target.as_ref(),
+            )?;
+            self.values.insert(state, carried);
             let condition = self.value(header_scope, fields[0])?;
             self.terminate(Terminator::CondBranch {
                 cond: condition.value,
@@ -156,7 +158,7 @@ impl Body<'_, '_, '_> {
             self.builder.switch_to_block_unchecked(iteration);
             self.scopes.insert(iteration_scope, iteration);
             let next = self.value(iteration_scope, next)?;
-            let next = self.materialize(next, layout)?;
+            let next = self.materialize_boundary(next, layout, target.as_ref())?;
             self.terminate(Terminator::Branch {
                 target: continuing,
                 args: vec![],
@@ -172,10 +174,13 @@ impl Body<'_, '_, '_> {
             self.scopes.restore(scopes);
             self.builder.switch_to_block_unchecked(end);
             self.scopes.insert(scope, end);
-            return Ok(Typed {
-                value: results[0].into(),
-                ty: initial.ty,
-            });
+            return self.rebind_boundary(
+                Typed {
+                    value: results[0].into(),
+                    ty: initial.ty,
+                },
+                target.as_ref(),
+            );
         }
         let (bound, array, index_ty) = if let Some(fields) = self.compiler.facts.enode("ForCount", form) {
             let Some(ty) = self.compiler.facts.ty(fields[1]).cloned() else {
@@ -200,6 +205,7 @@ impl Body<'_, '_, '_> {
             let block = body.current()?;
             body.scopes.insert(header_scope, block);
             body.scopes.insert(iteration_scope, block);
+            let value = body.rebind_boundary(value, target.as_ref())?;
             body.values.insert(state, value);
             let value = if let Some(array) = array { body.index(array, index)? } else { index };
             let Some(ty) = body.compiler.facts.source_type(parameter).cloned() else {
@@ -208,13 +214,13 @@ impl Body<'_, '_, '_> {
             let value = body.cast(value, &ty)?;
             body.values.insert(parameter, value);
             let next = body.value(iteration_scope, next)?;
-            Ok(vec![body.materialize(next, layout)?])
+            Ok(vec![body.materialize_boundary(next, layout, target.as_ref())?])
         })?;
         self.scopes.insert(scope, self.current()?);
         let Some(result) = results.into_iter().next() else {
             return Err(error("loop result is missing"));
         };
-        Ok(result)
+        self.rebind_boundary(result, target.as_ref())
     }
 }
 

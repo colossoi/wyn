@@ -84,7 +84,7 @@ pub(super) fn screma(
     }
     let uint = Type::Constructed(TypeName::UInt(32), vec![]);
     let n = body.cast(n, &uint)?;
-    let (chunks_width, groups) = if segment.is_some() {
+    let (chunks_width, groups) = if segment.is_some() || phase == "local" {
         (phase_width, 1)
     } else {
         let Some(key) = body.compiler.facts.constructor("Stage", (phase_owner, "chunks")) else {
@@ -112,8 +112,8 @@ pub(super) fn screma(
     let tiles = body.binary(Divide, tiles, Body::number(threads as u32))?;
     let span = body.binary(Multiply, tiles.clone(), width.clone())?;
     match phase {
-        "chunks" | "segment" => {
-            let group = if segment.is_some() {
+        "chunks" | "segment" | "local" => {
+            let group = if segment.is_some() || phase == "local" {
                 Body::number(0)
             } else {
                 let (thread, _) = invocation(body, phase_width)?;
@@ -192,7 +192,7 @@ pub(super) fn screma(
                             .filter(|(_, (c, _))| c.role == "scan")
                         {
                             let value = accumulators[i].combine(body, scope, carry[i].clone(), prefix)?;
-                            if segment.is_some() {
+                            if segment.is_some() || phase == "local" {
                                 cache.insert(accumulators[i].source, value);
                             } else if let Some(output) =
                                 body.slot(scope, phase_owner, "prefix", component.output_slot, 2)?
@@ -212,6 +212,16 @@ pub(super) fn screma(
                                 )?;
                                 target.store(body, Some(index.clone()), value)?;
                             }
+                        } else if phase == "local" && has_scans {
+                            write_arrays(
+                                body,
+                                scope,
+                                phase_owner,
+                                plan,
+                                results,
+                                &[index.clone()],
+                                &mut cache,
+                            )?;
                         }
                         Ok(())
                     })?;
@@ -228,6 +238,15 @@ pub(super) fn screma(
                     if let Some(target) = segment {
                         if target.role == "total" && target.slot == i {
                             target.store(body, None, value)?;
+                        }
+                    } else if phase == "local" {
+                        let component = &components[i];
+                        if component.role != "scan" {
+                            if let Some(output) =
+                                body.slot(scope, phase_owner, "total", component.output_slot, 2)?
+                            {
+                                body.store(output, Body::number(0), value)?;
+                            }
                         }
                     } else if let Some(output) = body.slot(scope, phase_owner, "partial", i as i64, 2)? {
                         body.store(output, group.clone(), value)?;
@@ -363,6 +382,9 @@ fn workgroup_reduce(
     lane: Typed,
     width: u32,
 ) -> Result<Vec<Typed>, OptimizeError> {
+    if accumulators.is_empty() {
+        return Ok(Vec::new());
+    }
     assert!(
         width.is_power_of_two(),
         "workgroup reduction width must be a power of two: {width}"

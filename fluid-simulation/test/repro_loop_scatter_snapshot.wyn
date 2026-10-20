@@ -1,0 +1,7 @@
+-- Failure: both GPU backends returned [[0,11,0,0],[0,21,0,0]].
+-- Expected: [[10,11,12,0],[20,21,22,0]]. Each iteration must preserve
+-- prior writes and return the array after the current scatter completes.
+-- Inspect generated code for a result snapshot loaded before scatter writes.
+-- python3 fluid-simulation/test/check_batched_traversal.py
+entry main() [2][4]i32 =
+  map(|x| loop a=replicate(4,0i32) for i<3 do scatter(a,[i],[x+i]),[10i32,20i32])

@@ -9,7 +9,7 @@
 (rule ((ExprContextActive ctx) (= e (ExprVector ctx t xs)) (ExprArgsTotal xs)) ((ExprTotal e)) :ruleset scalar-analysis)
 (rule ((ExprContextActive ctx) (= e (ExprProject ctx t x i)) (ExprTotal x)) ((ExprTotal e)) :ruleset scalar-analysis)
 (rule ((ExprContextActive ctx) (= e (ExprCoerce ctx t x)) (ExprTotal x)) ((ExprTotal e)) :ruleset scalar-analysis)
-(rule ((ExprContextActive ctx) (= e (ExprChoice ctx t c a b)) (ExprTotal c) (ExprTotal a) (ExprTotal b)) ((ExprTotal e)) :ruleset scalar-analysis)
+(rule ((ExprContextActive ctx) (= e (ExprChoice ctx t c a b source)) (ExprTotal c) (ExprTotal a) (ExprTotal b)) ((ExprTotal e)) :ruleset scalar-analysis)
 (rule ((ExprContextActive ctx) (= e (ExprUnary ctx t op x)) (ExprOperatorTotal t op) (ExprTotal x)) ((ExprTotal e)) :ruleset scalar-analysis)
 (rule ((ExprContextActive ctx) (= e (ExprBinary ctx t op x y)) (ExprOperatorTotal t op) (ExprTotal x) (ExprTotal y)) ((ExprTotal e)) :ruleset scalar-analysis)
 
@@ -38,7 +38,7 @@
 (rule ((ExprContextActive ctx) (= e (ExprVector ctx t xs)) (= readonly (ExprArgsReadOnly xs))) ((set (ExprReadOnly e) readonly)) :ruleset scalar-effects)
 (rule ((ExprContextActive ctx) (= e (ExprProject ctx t x i)) (= readonly (ExprReadOnly x))) ((set (ExprReadOnly e) readonly)) :ruleset scalar-effects)
 (rule ((ExprContextActive ctx) (= e (ExprCoerce ctx t x)) (= readonly (ExprReadOnly x))) ((set (ExprReadOnly e) readonly)) :ruleset scalar-effects)
-(rule ((ExprContextActive ctx) (= e (ExprChoice ctx t c a b)) (= cr (ExprReadOnly c)) (= ar (ExprReadOnly a)) (= br (ExprReadOnly b))) ((set (ExprReadOnly e) (and cr (and ar br)))) :ruleset scalar-effects)
+(rule ((ExprContextActive ctx) (= e (ExprChoice ctx t c a b source)) (= cr (ExprReadOnly c)) (= ar (ExprReadOnly a)) (= br (ExprReadOnly b))) ((set (ExprReadOnly e) (and cr (and ar br)))) :ruleset scalar-effects)
 
 ; A helper retaining an execution boundary from its own body is not a scalar
 ; substitution template. Caller-supplied stored values remain ordinary inputs.

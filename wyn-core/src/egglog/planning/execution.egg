@@ -1,0 +1,98 @@
+; Execution mapping for nested array programs. A selected map coordinate is
+; uniform within its workgroup. Lexical control flow and direct calls inherit
+; that scope; element callbacks introduce a new invocation scope.
+; Dispatch builtins conservatively block group-uniform execution, as do
+; recursive calls (region lowering requires a finite expansion).
+; Uniformity here is conservative: every source term in an approved callback
+; is uniform at its selected scope. Nested element callbacks are excluded from
+; propagation. More precise value analysis can admit lane-dependent regions
+; without changing the execution or storage representation.
+; Eligibility is separate from selection: nested parallelism is the current
+; profitability heuristic, not a new source operation or lowering recipe.
+(ruleset execution-discover)
+(ruleset execution-select)
+(ruleset execution-finalize)
+(function MapUsesWorkgroup (OperationKey) bool :merge (or old new))
+(function RegionRecursive (RegionKey) bool :merge (or old new))
+(function RegionLaneDependent (RegionKey) bool :merge (or old new))
+(rule ((= region (RegionId i))) ((set (RegionLaneDependent region) false) (set (RegionRecursive region) false)) :ruleset execution-discover)
+(relation DispatchBuiltin (String))
+(DispatchBuiltin "_w_intrinsic_thread_id")
+(DispatchBuiltin "_w_intrinsic_thread_id_y")
+(DispatchBuiltin "_w_intrinsic_thread_id_z")
+(DispatchBuiltin "_w_intrinsic_local_id")
+(DispatchBuiltin "_w_intrinsic_num_workgroups")
+(DispatchBuiltin "_w_intrinsic_workgroup_id")
+(function ValueLaneDependent (SourceValue) bool :merge (or old new))
+(rule ((= ty (SourceType value))) ((set (ValueLaneDependent value) false)) :ruleset execution-discover)
+(rule ((= name (SourceBuiltin value)) (DispatchBuiltin name))
+      ((set (ValueLaneDependent value) true)) :ruleset execution-discover)
+(rule ((SourceDirectUse value child) (= (ValueLaneDependent child) true))
+      ((set (ValueLaneDependent value) true)) :ruleset execution-discover)
+(rule ((SourceNestedUse value child) (= (ValueLaneDependent child) true))
+      ((set (ValueLaneDependent value) true)) :ruleset execution-discover)
+(rule ((= (SourceCapture region formal) actual) (= (ValueLaneDependent actual) true))
+      ((set (ValueLaneDependent formal) true) (set (RegionLaneDependent region) true)) :ruleset execution-discover)
+(rule ((= value (SourceTerm region i)) (= (ValueLaneDependent value) true))
+      ((set (RegionLaneDependent region) true)) :ruleset execution-discover)
+(rule ((SourceRegionEnters region child) (= (RegionLaneDependent child) true))
+      ((set (RegionLaneDependent region) true)) :ruleset execution-discover)
+; Workgroup calls are expanded into the owning kernel, so recursive call
+; graphs must retain invocation execution rather than recursively expanding.
+(relation RegionCallReach (RegionKey RegionKey))
+(rule ((SourceRegionEnters region child)) ((RegionCallReach region child)) :ruleset execution-discover)
+(rule ((RegionCallReach region child) (SourceRegionEnters child descendant))
+      ((RegionCallReach region descendant)) :ruleset execution-discover)
+(rule ((RegionCallReach region region)) ((set (RegionRecursive region) true)) :ruleset execution-discover)
+(rule ((SourceRegionEnters region child) (= (RegionRecursive child) true))
+      ((set (RegionRecursive region) true)) :ruleset execution-discover)
+(relation RegionHasParallelWork (RegionKey))
+(rule ((RegionContainsCollective region)) ((RegionHasParallelWork region)) :ruleset execution-discover)
+(rule ((SourceRegionEnters region child) (RegionHasParallelWork child))
+      ((RegionHasParallelWork region)) :ruleset execution-discover)
+; Prefer persistent group execution when a loop reuses parallel work. Simple
+; nested collectives retain the existing segmented/serial scheduling choices.
+(relation RegionReusesParallelWork (RegionKey))
+(rule ((= value (SourceTerm region i)) (= (SourceLoop value) (LoopInfo header iteration))
+       (RegionHasParallelWork iteration))
+      ((RegionReusesParallelWork region)) :ruleset execution-discover)
+(rule ((SourceRegionEnters region child) (RegionReusesParallelWork child))
+      ((RegionReusesParallelWork region)) :ruleset execution-discover)
+(rule ((MapPlan plan owner extent)) ((set (MapUsesWorkgroup owner) false)) :ruleset execution-discover)
+(function GroupApprovedOutputs (FusionPlan) SegmentOutputs :merge (set-union old new))
+(rule ((MapPlan plan owner extent)) ((set (GroupApprovedOutputs plan) (set-empty))) :ruleset execution-discover)
+(rule ((MapPlan plan owner extent) (= (MapHost plan) true) (= (IterationRank owner) 1)
+       (= (MapSegmented owner) false) (PlanResult plan "array" i value element)
+       (= op (SourceValueOperation value)) (= body (SourceOperatorBody op))
+       (RegionReusesParallelWork body) (= (SourceRegionReadOnly body) true)
+       (= (RegionLaneDependent body) false) (= (RegionRecursive body) false))
+      ((set (GroupApprovedOutputs plan) (set-of value))) :ruleset execution-select)
+(rule ((MapPlan plan owner extent) (= (MapHost plan) true)
+       (= (SegmentRequiredOutputs plan) (GroupApprovedOutputs plan)))
+      ((set (MapUsesWorkgroup owner) true)) :ruleset execution-select)
+(rule ((MapPlan plan owner extent) (= (MapSegmented owner) true))
+      ((set (MapUsesWorkgroup owner) true)) :ruleset execution-select)
+; Map scope is frozen after eligibility and selection reach a fixed point.
+(rule ((= (MapUsesWorkgroup owner) true))
+      ((set (MapExecution owner) (WorkgroupScope))) :ruleset execution-finalize)
+(rule ((= (MapUsesWorkgroup owner) false))
+      ((set (MapExecution owner) (InvocationScope))) :ruleset execution-finalize)
+
+; These recipes have both invocation and workgroup implementations. Unsupported
+; local recipes retain invocation execution even inside a workgroup region.
+(rule ((PlannedOperation original owner plan region))
+      ((set (LocalSupportsWorkgroup owner) false)) :ruleset execution-discover)
+(rule ((PlannedOperation original owner plan region) (ScremaPlan plan))
+      ((set (LocalSupportsWorkgroup owner) true)) :ruleset execution-discover)
+(rule ((IndexedWrite owner false))
+      ((set (LocalSupportsWorkgroup owner) true)) :ruleset execution-discover)
+
+; Calls made inside a workgroup kernel retain lexical access to its shared
+; resources, including calls from invocation-local element callbacks. Calls in
+; ordinary invocation kernels use the function ABI. This storage domain is
+; independent of the scope selected for a local collective's execution.
+(function InlineCall (RegionKey ExecutionScope) bool :no-merge)
+(rule ((= region (RegionId i)) (= (RegionRecursive region) false))
+      ((set (InlineCall region (WorkgroupScope)) true)) :ruleset execution-finalize)
+(rule ((= region (RegionId i)))
+      ((set (InlineCall region (InvocationScope)) false)) :ruleset execution-finalize)

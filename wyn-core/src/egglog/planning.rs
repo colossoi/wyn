@@ -43,6 +43,8 @@ pub(super) fn place(graph: &mut EGraph, topology: PipelineTopologyPolicy) -> Res
             "\n",
             include_str!("planning/representation.egg"),
             "\n",
+            include_str!("planning/boundaries.egg"),
+            "\n",
             include_str!("planning/repeatability.egg"),
             "\n",
             include_str!("planning/shapes.egg"),
@@ -54,6 +56,7 @@ pub(super) fn place(graph: &mut EGraph, topology: PipelineTopologyPolicy) -> Res
             include_str!("planning/domains.egg"),
             "\n",
             include_str!("planning/segments.egg"),
+            include_str!("planning/execution.egg"),
             "\n",
             include_str!("planning/bindings.egg")
         ),

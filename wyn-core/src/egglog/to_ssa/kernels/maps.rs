@@ -1,6 +1,7 @@
 //! Lower the selected map traversal, retaining nested output storage.
 use super::super::{error, Body, OptimizeError};
 use super::{coordinates, emit_bindings, invocation, screma, workgroup};
+use crate::op::BinaryOperator;
 use crate::LookupMap;
 use egglog_engine::sort::S;
 use egglog_engine::Value;
@@ -9,10 +10,11 @@ pub(super) fn emit(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
     owner: Value,
-    cooperative: bool,
+    segmented: bool,
     width: u32,
     results: &[(String, i64, Value)],
 ) -> Result<(), OptimizeError> {
+    let group = body.has_workgroup_scope("MapExecution", owner);
     let extents = body.compiler.facts.iteration_dimensions(owner)?;
     let mut dimensions = Vec::new();
     if extents.len() > 1 {
@@ -24,7 +26,7 @@ pub(super) fn emit(
         return Err(error("map launch domain missing"));
     };
     let n = body.extent(scope, extent)?;
-    let (start, step) = if cooperative { workgroup(body)? } else { invocation(body, width)? };
+    let (start, step) = if group { workgroup(body)? } else { invocation(body, width)? };
     body.counted(start, n, step, vec![], |body, index, _| {
         let mut cache = LookupMap::default();
         let indices = if dimensions.is_empty() {
@@ -49,7 +51,7 @@ pub(super) fn emit(
                 &indices,
                 &mut cache,
                 &mut |body, scope, source| {
-                    if cooperative {
+                    if segmented {
                         let Some(result) = body.compiler.facts.lookup("SegmentOutput", (owner, *slot))
                         else {
                             return Err(error("segmented output has no selected result"));
@@ -82,9 +84,25 @@ pub(super) fn emit(
                             Some(&target),
                         )
                     } else {
-                        let value = body.value(scope, source)?;
+                        let previous = body.workgroup_width;
+                        let previous_execution = body.invocation_execution;
+                        if group {
+                            body.workgroup_width = Some(width);
+                            body.invocation_execution = false;
+                        }
+                        let value = body.value(scope, source);
+                        body.workgroup_width = previous;
+                        body.invocation_execution = previous_execution;
+                        let value = value?;
                         let indices = coordinates::project(body, axes, &indices, None)?;
-                        body.store_at(output.clone(), &indices, value)
+                        if group {
+                            let lane = body.local_id()?;
+                            let first = body.binary(BinaryOperator::Equal, lane, Body::number(0))?;
+                            body.when(first, |body| body.store_at(output.clone(), &indices, value))?;
+                            body.workgroup_barrier()
+                        } else {
+                            body.store_at(output.clone(), &indices, value)
+                        }
                     }
                 },
             )?;

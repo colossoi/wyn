@@ -1,6 +1,7 @@
-//! Expand invocation-local recipes using the same fused kernel algorithms.
+//! Lower local recipes at their selected execution scope using fused kernel algorithms.
 use super::{builder_error, error, Body, OptimizeError, Typed, Value};
 use crate::egglog::to_ssa::kernels;
+use crate::op::BinaryOperator;
 use crate::ssa::types::InstKind;
 use crate::types;
 use egglog_engine::sort::S;
@@ -13,11 +14,26 @@ impl Body<'_, '_, '_> {
         owner: Value,
         plan: Value,
     ) -> Result<Typed, OptimizeError> {
-        let Some(execution) = self.compiler.facts.lookup("LocalExecution", (owner,)) else {
+        let Some(execution) =
+            self.compiler.facts.lookup("LocalExecution", (owner, self.execution_scope()?))
+        else {
             return Err(error("local collective has not been selected"));
         };
-        if self.compiler.facts.enode("InvocationScope", execution).is_none() {
-            return Err(error("local collective requires an invocation recipe"));
+        let width = if self.compiler.facts.enode("WorkgroupScope", execution).is_some() {
+            let Some(width) = self.workgroup_width else {
+                return Err(error("workgroup recipe requires a workgroup calling context"));
+            };
+            Some(width)
+        } else if self.compiler.facts.enode("InvocationScope", execution).is_some() {
+            None
+        } else {
+            return Err(error("invalid local execution scope"));
+        };
+        for prerequisite in self.compiler.facts.set("LocalPrerequisites", (owner,)) {
+            self.value(scope, prerequisite)?;
+        }
+        if width.is_some() {
+            self.workgroup_barrier()?;
         }
         let Some(domain) = self.compiler.facts.domain(owner) else {
             return Err(error("local domain missing"));
@@ -37,6 +53,13 @@ impl Body<'_, '_, '_> {
             let Some(layout) = self.compiler.facts.lookup("LocalElementLayout", (resource,)) else {
                 return Err(error(format!("local slot {role} has no planned element layout")));
             };
+            if width.is_some() {
+                let count = u32::try_from(n).map_err(|_| error("invalid workgroup capacity"))?;
+                let element = self.compiler.facts.layout_type(layout)?;
+                let array = self.workgroup_array(count, &element)?;
+                self.local_resources.insert(resource, array);
+                continue;
+            }
             let ty = types::sized_array(n, self.compiler.facts.layout_type(layout)?);
             let place = self.builder.new_place(ty.clone());
             self.builder
@@ -61,10 +84,27 @@ impl Body<'_, '_, '_> {
                     return Err(error("local destination missing"));
                 };
                 let n = self.length(initial.clone())?;
-                self.copy_array(output, initial, n, &[])?;
+                if width.is_some() {
+                    let lane = self.local_id()?;
+                    let first = self.binary(BinaryOperator::Equal, lane, Self::number(0))?;
+                    self.when(first, |body| body.copy_array(output, initial, n, &[]))?;
+                    self.workgroup_barrier()?;
+                } else {
+                    self.copy_array(output, initial, n, &[])?;
+                }
             }
         }
-        kernels::emit(self, scope, owner, "ordered", domain, 1)?;
+        kernels::emit(
+            self,
+            scope,
+            owner,
+            if width.is_some() { "local" } else { "ordered" },
+            domain,
+            width.unwrap_or(1),
+        )?;
+        if width.is_some() {
+            self.workgroup_barrier()?;
+        }
         let mut output_index = 0;
         for (role, index, result) in self.compiler.facts.results(plan)? {
             if role == "scan" {
@@ -87,17 +127,7 @@ impl Body<'_, '_, '_> {
                 let zero = self.literal("0", &types::i32())?;
                 self.index(array, zero)?
             } else {
-                let Some(&place) = self.local_arrays.get(&array.value) else {
-                    return Err(error("local result is not addressable"));
-                };
-                let value = self
-                    .builder
-                    .push_inst(InstKind::Load { place }, array.ty.clone())
-                    .map_err(builder_error)?;
-                Typed {
-                    value: value.into(),
-                    ty: array.ty,
-                }
+                self.local_array_result(array, result)?
             };
             self.values.insert(result, value);
         }
@@ -111,9 +141,27 @@ impl Body<'_, '_, '_> {
                 return self.index(array, zero);
             }
             if let Some(fields) = self.compiler.facts.enode("ReadView", access) {
-                return self.resource(scope, fields[0], 1);
+                let array = self.resource(scope, fields[0], 1)?;
+                return self.local_array_result(array, source);
             }
         }
         Err(error(format!("local recipe did not produce {source:?}")))
+    }
+
+    /// Snapshot the local buffer after its recipe has finished writing.
+    fn local_array_result(&mut self, array: Typed, source: Value) -> Result<Typed, OptimizeError> {
+        let Some(&place) = self.local_arrays.get(&array.value) else {
+            if self.workgroup_width.is_some() && self.has_shared_storage(source) {
+                return Ok(array);
+            }
+            let layout = self.compiler.facts.value_layout(source)?;
+            return self.materialize(array, layout);
+        };
+        let value =
+            self.builder.push_inst(InstKind::Load { place }, array.ty.clone()).map_err(builder_error)?;
+        Ok(Typed {
+            value: value.into(),
+            ty: array.ty,
+        })
     }
 }

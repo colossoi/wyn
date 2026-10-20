@@ -12,9 +12,9 @@
 (rewrite (ExprBinary ctx t "*" x (ExprLiteral ctx t "1")) x :when ((ExprContextActive ctx) (ExprIntegerType t)) :subsume :ruleset scalar-micro)
 (rewrite (ExprBinary ctx t "*" (ExprLiteral ctx t "1") x) x :when ((ExprContextActive ctx) (ExprIntegerType t)) :subsume :ruleset scalar-micro)
 (rewrite (ExprBinary ctx t "*" x (ExprLiteral ctx t "0")) (ExprLiteral ctx t "0") :when ((ExprContextActive ctx) (ExprIntegerType t) (ExprTotal x)) :subsume :ruleset scalar-micro)
-(rewrite (ExprChoice ctx t (ExprLiteral ctx ct "true") a b) a :when ((ExprContextActive ctx)) :subsume :ruleset scalar-micro)
-(rewrite (ExprChoice ctx t (ExprLiteral ctx ct "false") a b) b :when ((ExprContextActive ctx)) :subsume :ruleset scalar-micro)
-(rewrite (ExprChoice ctx t c x x) x :when ((ExprContextActive ctx) (ExprTotal c)) :subsume :ruleset scalar-micro)
+(rewrite (ExprChoice ctx t (ExprLiteral ctx ct "true") a b source) a :when ((ExprContextActive ctx)) :subsume :ruleset scalar-micro)
+(rewrite (ExprChoice ctx t (ExprLiteral ctx ct "false") a b source) b :when ((ExprContextActive ctx)) :subsume :ruleset scalar-micro)
+(rewrite (ExprChoice ctx t c x x source) x :when ((ExprContextActive ctx) (ExprTotal c)) :subsume :ruleset scalar-micro)
 (rule ((ExprContextActive ctx) (= e (ExprProject ctx t (ExprTuple ctx tt xs) i)) (= field (ExprArgumentAt xs i))) ((union e field) (subsume (ExprProject ctx t (ExprTuple ctx tt xs) i))) :ruleset scalar-micro)
 (rule ((ExprContextActive ctx) (= e (ExprProject ctx t (ExprVector ctx tt xs) i)) (= field (ExprArgumentAt xs i))) ((union e field) (subsume (ExprProject ctx t (ExprVector ctx tt xs) i))) :ruleset scalar-micro)
 ; Project through a pure update without expanding the record. Total operands

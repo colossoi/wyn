@@ -10,7 +10,10 @@ impl Body<'_, '_, '_> {
         let id = self.next_workgroup_array;
         self.next_workgroup_array += 1;
         self.op(
-            OpTag::StorageView(PureViewSource::Workgroup { id, count }),
+            OpTag::StorageView(PureViewSource::Workgroup {
+                id,
+                count: count.max(1),
+            }),
             vec![Self::number(0), Self::number(count)],
             Self::view_type(
                 &crate::ssa::layout::storage_value_type(element),
@@ -79,6 +82,7 @@ impl Body<'_, '_, '_> {
                 return Err(error("branch has incomplete result facts"));
             };
             let layout = self.compiler.facts.value_layout(source)?;
+            let target = self.boundary_target(source)?;
             let condition = self.value(scope, condition)?;
             let selected = &self.compiler.program.stage.selected;
             let (Some(&a_root), Some(&b_root)) = (
@@ -91,19 +95,20 @@ impl Body<'_, '_, '_> {
             for term in shared {
                 self.scalar_roots(scope, &[term], &mut crate::LookupSet::default())?;
             }
-            return self.branch(
+            let result = self.branch(
                 scope,
                 condition,
                 |body| {
                     let value = body.value(yes, a)?;
-                    body.materialize(value, layout)
+                    body.materialize_boundary(value, layout, target.as_ref())
                 },
                 |body| {
                     let value = body.value(no, b)?;
-                    body.materialize(value, layout)
+                    body.materialize_boundary(value, layout, target.as_ref())
                 },
                 Some((yes, no)),
-            );
+            )?;
+            return self.rebind_boundary(result, target.as_ref());
         }
         if let Some(array) = self.compiler.facts.lookup("SourceLength", (source,)) {
             let value = self.source_length(scope, array)?;

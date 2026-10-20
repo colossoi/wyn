@@ -1,0 +1,66 @@
+module Tree = import "octree"
+module Hilbert = import "hilbert"
+module Sort = import "pkg:sort"
+
+-- Integer first-bit-high, used by upstream's Warren-Salmon node keys.
+def high_bit(x: u32) i32 =
+  let (x,a) = if x >= 65536u32 then (x >> 16u32,16i32) else (x,0i32) in
+  let (x,b) = if x >= 256u32 then (x >> 8u32,8i32) else (x,0i32) in
+  let (x,c) = if x >= 16u32 then (x >> 4u32,4i32) else (x,0i32) in
+  let (x,d) = if x >= 4u32 then (x >> 2u32,2i32) else (x,0i32) in
+  a+b+c+d+(if x >= 2u32 then 1i32 else 0i32)
+
+def placeholder(key: u32, level: i32) u32 =
+  (1u32 << u32(3*level)) | (key >> u32(30-3*level))
+
+def internal_index(key: u32, level: i32, leaf: i32) i32 =
+  let mu = [0i32,-1i32,-2i32,-3i32,3i32,2i32,1i32,0i32] in
+  let correction = loop correction=0i32 for i<level do
+    correction+mu[i32((key >> u32(30-3*(i+1))) & 7u32)] in
+  (leaf+correction)/7
+
+-- Node bounds are decoded once, rather than during every leaf traversal.
+def bounds(key: u32, world_size: f32) vec4f32 =
+  let level = high_bit(key)/3 in
+  let path = key ^ (1u32 << u32(3*level)) in
+  let p = Hilbert.decode(path << u32(3*(10-level))) in
+  let side = 1u32 << u32(10-level) in
+  let lo = @[f32((p.x/side)*side),f32((p.y/side)*side),f32((p.z/side)*side)]*(world_size/1024.0) in
+  @[lo.x,lo.y,lo.z,f32(side)*(world_size/1024.0)]
+
+-- Upstream generates internal and leaf placeholder keys, sorts by key, then
+-- links adjacent sibling octants. slots must hold at least 8*(leaves-1)/7+1.
+-- Returns first-child links, physical bounds, particle ranges, and node count.
+def build<[m],[k]>(corners: [m]u32, offsets: [m]i32, slots: [k]i32, world_size: f32)
+    ([k]i32,[k]vec4f32,[k]vec2i32,i32) =
+  let leaves = Tree.lower_bound(corners,Tree.sentinel) in
+  let internals = (leaves-1)/7 in
+  let count = leaves+internals in
+  let leaf_slots = iota(length(corners)) in
+  let leaf_dest = map(|i| if i < leaves then internals+i else -1i32,leaf_slots) in
+  let leaf_keys = map(|i|
+    if i < leaves then @[placeholder(corners[i],10-high_bit(corners[i+1]-corners[i])/3),u32(i)]
+    else @[4294967295u32,4294967295u32],leaf_slots) in
+  let initial = scatter(map(|_| @[4294967295u32,4294967295u32],slots),leaf_dest,leaf_keys) in
+  let internal = map(|i|
+    if i+1 >= leaves then (-1i32,0u32) else
+    let divergence = 29-high_bit(corners[i] ^ corners[i+1]) in
+    if divergence % 3 != 0 then (-1i32,0u32) else
+    let level = divergence/3 in
+    (internal_index(corners[i],level,i),placeholder(corners[i],level)),leaf_slots) in
+  let unsorted = scatter(initial,map(|(i,_)| i,internal),map(|(_,key)| @[key,4294967295u32],internal)) in
+  -- Placeholder keys use 31 bits; the final digit also orders padding last.
+  let ordered = Sort.radix_digit(Sort.radix_sort(unsorted,slots),30u32) in
+  let keys = map(|node| node.x,ordered) in
+  let children = map(|i|
+    if i >= count || high_bit(keys[i])/3 >= 10 then 0i32 else
+    let child_key = keys[i] << 3u32 in
+    let child = Tree.lower_bound(keys,child_key) in
+    if child < count && keys[child] == child_key then child else 0i32,slots) in
+  let boxes = map(|i| if i < count then bounds(keys[i],world_size) else @[0.0,0.0,0.0,0.0],slots) in
+  let ranges = map(|i|
+    let leaf = ordered[i].y in
+    if i < count && leaf != 4294967295u32 then
+      @[offsets[i32(leaf)],offsets[i32(leaf)+1]-offsets[i32(leaf)]]
+    else @[0i32,0i32],slots) in
+  (children,boxes,ranges,count)

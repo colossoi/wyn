@@ -1,4 +1,5 @@
 //! Place selected scalar terms while emitting SSA; no temporary control-flow tree.
+use super::materialize::BoundaryTarget;
 use super::{Body, OptimizeError, TermId, Typed, Value};
 use crate::LookupSet;
 
@@ -61,16 +62,23 @@ impl Body<'_, '_, '_> {
                 for term in common {
                     self.scalar_roots(scope, &[term], available)?;
                 }
+                let mut targets = Vec::new();
+                for &term in &terms {
+                    let (_, fields) = selected.app(term)?;
+                    let source = selected.values[fields[5]];
+                    targets.push(self.boundary_target(source)?);
+                }
                 let values = self.branch(
                     scope,
                     condition,
-                    |body| body.choice_results(scope, &terms, &yes, &mut available.clone(), 3),
-                    |body| body.choice_results(scope, &terms, &no, &mut available.clone(), 4),
+                    |body| body.choice_results(scope, &terms, &yes, &mut available.clone(), 3, &targets),
+                    |body| body.choice_results(scope, &terms, &no, &mut available.clone(), 4, &targets),
                     None,
                 )?;
                 for (index, &term) in terms.iter().enumerate() {
                     let value =
                         if terms.len() == 1 { values.clone() } else { self.field(values.clone(), index)? };
+                    let value = self.rebind_boundary(value, targets[index].as_ref())?;
                     let block = self.current()?;
                     self.scalar_values.entry(term).or_default().push((block, value));
                 }
@@ -92,15 +100,16 @@ impl Body<'_, '_, '_> {
         roots: &[TermId],
         available: &mut LookupSet<TermId>,
         arm: usize,
+        targets: &[Option<BoundaryTarget>],
     ) -> Result<Typed, OptimizeError> {
         self.scalar_roots(scope, roots, available)?;
         let mut values = Vec::new();
-        for &term in terms {
+        for (i, &term) in terms.iter().enumerate() {
             let selected = &self.compiler.program.stage.selected;
             let (_, fields) = selected.app(term)?;
-            let layout = self.compiler.facts.layout(selected.values[fields[1]])?;
+            let layout = self.compiler.facts.value_layout(selected.values[fields[5]])?;
             let value = self.scalar(scope, fields[arm])?;
-            let value = self.materialize(value, layout)?;
+            let value = self.materialize_boundary(value, layout, targets[i].as_ref())?;
             if terms.len() == 1 {
                 return Ok(value);
             }

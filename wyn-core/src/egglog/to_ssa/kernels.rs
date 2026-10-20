@@ -64,7 +64,7 @@ pub(super) fn emit(
             indexed(body, scope, phase_owner, phase, phase_extent, phase_width, plan)
         }
         "clear" | "buckets" => buckets(body, scope, phase_owner, phase, phase_width, plan),
-        "ordered" => {
+        "ordered" | "local" => {
             let Some(recipe) = body.compiler.facts.lookup("OrderedRecipe", (phase_owner,)) else {
                 return Err(error("ordered kernel has no selected algorithm"));
             };
@@ -134,6 +134,17 @@ pub(super) fn element(
     indices: &[Typed],
     cache: &mut LookupMap<Value, Typed>,
 ) -> Result<Typed, OptimizeError> {
+    body.invocation_local(|body| element_local(body, scope, plan, source, indices, cache))
+}
+
+fn element_local(
+    body: &mut Body<'_, '_, '_>,
+    scope: Value,
+    plan: Value,
+    source: Value,
+    indices: &[Typed],
+    cache: &mut LookupMap<Value, Typed>,
+) -> Result<Typed, OptimizeError> {
     let Some(index) = indices.first() else {
         return body.value(scope, source);
     };
@@ -143,7 +154,10 @@ pub(super) fn element(
     if let Some(actual) = body.compiler.facts.alias(source) {
         return element(body, scope, plan, actual, indices, cache);
     }
-    if let Some((parent, field)) = body.compiler.facts.projection(source) {
+    if body.compiler.facts.contains("ArrayStreamProjection", (source,)) {
+        let Some((parent, field)) = body.compiler.facts.projection(source) else {
+            return Err(error("array stream projection has no parent"));
+        };
         let value = element(body, scope, plan, parent, indices, cache)?;
         return body.field(value, field);
     }

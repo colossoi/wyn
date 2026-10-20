@@ -588,34 +588,36 @@ fn float_bounds_do_not_legalize_authored_infinities_or_nan() {
 }
 
 #[test]
-fn float_bounds_keep_infinity_constants_in_spirv() {
+fn float_bounds_preserve_infinity_bits_without_nonfinite_spirv_literals() {
     use wspirv::dr::Operand;
-    for (ty, width, positive, negative) in [
-        ("f32", 32, f32::INFINITY.to_bits(), f32::NEG_INFINITY.to_bits()),
-        ("f16", 16, 0x7c00, 0xfc00),
-    ] {
+    for ty in ["f32", "f16"] {
         let source = format!("entry bounds() ({ty}, {ty}) = ({ty}.highest, {ty}.lowest)");
-        let lowered = crate::compile_thru_spirv(&source).expect("SPIR-V bounds must still compile");
+        let lowered = crate::compile_thru_spirv(&source).expect("SPIR-V bounds must compile");
         let module = wspirv::dr::load_words(&lowered.spirv).unwrap();
-        let float_type = module
+        let uint_type = module
             .types_global_values
             .iter()
             .find(|inst| {
-                inst.class.opcode == spirv::Op::TypeFloat
-                    && inst.operands == vec![Operand::LiteralBit32(width)]
+                inst.class.opcode == spirv::Op::TypeInt
+                    && inst.operands == vec![Operand::LiteralBit32(32), Operand::LiteralBit32(0)]
             })
             .unwrap()
             .result_id;
-        for bits in [positive, negative] {
-            assert!(
-                module.types_global_values.iter().any(|inst| {
-                    inst.class.opcode == spirv::Op::Constant
-                        && inst.result_type == float_type
-                        && inst.operands == vec![Operand::LiteralBit32(bits)]
-                }),
-                "missing {ty} infinity {bits:#x}"
-            );
+        for bits in [f32::INFINITY.to_bits(), f32::NEG_INFINITY.to_bits()] {
+            assert!(module.types_global_values.iter().any(|inst| {
+                inst.class.opcode == spirv::Op::Constant
+                    && inst.result_type == uint_type
+                    && inst.operands == vec![Operand::LiteralBit32(bits)]
+            }));
         }
+        let bytes: Vec<u8> = lowered.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
     }
 }
 

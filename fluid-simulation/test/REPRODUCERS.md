@@ -1,3 +1,103 @@
+# Batched traversal acceptance probes: 2026-10-20
+
+`batched_traversal.wyn` expresses a breadth-first search using nested maps,
+prefix scans, and scatters inside a loop. It uses a fixed 73-node octree and
+returns ordered leaf IDs plus a count for each independent query.
+`check_batched_traversal.py` compiles the Wyn and compares GPU results against
+an independent Python BFS for 76 pruning patterns. Python is only the test
+harness and reference; the GPU algorithm is entirely Wyn.
+
+Run from `/home/jonah/wyn`:
+
+```sh
+python3 fluid-simulation/test/check_batched_traversal.py
+```
+
+The harness defaults to `target/release/wyn`; set `WYN` to compare another
+compiler. Its first check is `repro_loop_scatter_snapshot.wyn`. The installed
+compiler returned `[0,11,0,0]` instead of `[10,11,12,0]` for its first row,
+on both GPU backends. Local scatter results were loaded before the writes.
+The checkout fix loads the completed buffer, and this small numerical check
+passes on both SPIR-V and WGSL on NVIDIA GTX 1660 Ti.
+
+The planner selects map execution through `MapExecution`. Local recipes use
+`LocalExecution(operation, calling_scope)`, so the same helper can execute in
+an invocation callback or in a workgroup without a lowering-time fallback.
+Ordinary maps share the `elements` launch path; segmented output streaming
+remains a distinct recipe. Default widths live in `schedule.egg`.
+
+`planning/execution.egg` separates eligibility from scope selection. Lane
+dependence follows value uses and captures; direct calls inherit the caller's
+scope and element callbacks execute at invocation scope. Recursive expansion
+is excluded separately. `InlineCall` selects lexical emission for workgroup
+calls, including their invocation-local callbacks, preserving physical buffer identity.
+
+`planning/boundaries.egg` propagates storage demand by tuple field through
+projections, captures, and loop backedges. It selects each boundary field's
+representation and transfer strategy. Reused loop destinations use staging to
+preserve simultaneous assignment; fresh branch destinations copy directly.
+The materializer consumes that plan through one recursive conversion path,
+using the common array-copy primitive and barriers around whole transfers.
+
+`check_linked_neighbors.py` covers the actual Wyn linked-node implementation:
+root-only and mixed-depth trees, leaf bounds, inactive siblings, and narrow
+phase results compared with an all-pairs geometric oracle. The implementation
+generates and sorts Warren–Salmon keys, precomputes bounds and first-child links,
+and traverses with upstream's 128-entry parent queue and 32-child batches.
+`Spatial.prepare` uses that path.
+
+Before the scope consolidation, the 76-query traversal and linked-neighbor
+checks passed on both backends. The simulator completed eight frames with
+finite positions and velocities for 4,320 particles; keeping loop state in
+shared storage brought the broad neighbor pass to about 10.8 ms. These results
+predate the consolidation. After the scope and boundary-plan cleanup, the
+scatter, array-swap, inferred-layout, 76-query traversal, and linked-neighbor
+GPU checks pass on both SPIR-V and WGSL. An eight-frame headless run at
+640×480 on GTX 1660 Ti completed with finite outputs. Averaging frames 2–7,
+leaf traversal took 3.63 ms, particle-neighbor construction 9.61 ms, rendering
+12.92 ms, and all GPU passes together 29.93 ms. These are short-run GPU
+timestamps, not end-to-end desktop frame times. The core suite passed 1,496
+tests with 14 ignored.
+This is not a claim of 100k-particle readiness or complete upstream parity.
+
+Commit validation on 2026-10-20: workspace all-target build and formatting
+checks passed; workspace tests passed 1,645 with 16 ignored. The Bash
+testfile gates passed 124 SPIR-V cases and 123 WGSL cases (one linked-SPIR-V
+helper case skipped by the script). These counts include the local untracked
+`kogepan.wyn` playground shader. The `viz` tests passed 10, native `wyn-wasm`
+tests passed 3, and `scripts/check_wasm.sh` passed. The generated simulator
+also passed `spirv-val`.
+
+Useful checks (checkout compiler; NVIDIA access required for GPU tests):
+
+```sh
+RUST_MIN_STACK=16777216 cargo test -p wyn-core --lib
+python3 fluid-simulation/test/check_batched_traversal.py
+python3 fluid-simulation/test/check_linked_neighbors.py
+```
+
+`repro_branch_array_layout.wyn` isolates an inferred queue array crossing a
+conditional loop-state boundary. Its expected output is `[6,10]`; the failure
+was a missing selected control-boundary layout.
+
+# Retest: installed compiler 2026-10-20 17:08 EDT
+
+`repro_cooperative_leaf.wyn` builds and returns [496,1520,2544,3568] on
+NVIDIA GTX 1660 Ti. SPIR-V still contains a serial sum per map invocation,
+with no Workgroup storage, control barriers, or subgroup operations. This
+is a scheduling observation rather than a numerical failure.
+
+`nested_candidate_ranks.wyn` translates the discussed nested map/scan/reduce
+example into Wyn. Compilation fails with `SSA lowering: local slot output
+has no planned static capacity` (function `_w_lambda_3`, 2 arguments).
+The source and expected result description are retained without a workaround.
+
+The current full simulator builds in 3.12 seconds and completes eight headless
+NVIDIA frames. All 4,320 positions and velocities are finite. Summed GPU pass
+times average 46.449 ms over frames 2–7; this is not end-to-end desktop FPS
+or a controlled comparison against earlier source/compiler revisions.
+Raw timings: `../profiles/2026-10-20-retest.json`.
+
 # Compiler reproducer: loop-carried replicate
 
 Using the installed `/home/jonah/.cargo/bin/wyn` on 2026-09-18:

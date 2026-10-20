@@ -10,6 +10,7 @@
     (saturate segment-shapes)
     (saturate extent-dependencies) (run extent-uniformity)
     (run segment-approve) (run segment-select)
+    (saturate execution-discover) (saturate execution-select) (run execution-finalize)
     (saturate map-bindings)
     (saturate storage-shapes)
     (saturate type-layouts)
@@ -24,4 +25,5 @@
     (saturate (run output-candidates)) (run output-blockers)
     (run output-select) (run output-fallback)
     (saturate (seq (run residency) (run representations) (run allocation) (run dispatch)))
+    (saturate local-storage) (run boundary-select) (saturate boundary-fields)
     (run readout)))

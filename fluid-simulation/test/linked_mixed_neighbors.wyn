@@ -1,0 +1,18 @@
+-- Every particle must find exactly the particles within radius 5, including
+-- itself, without overflow. The mixed-depth tree has 15 leaves and 17 nodes.
+-- Failure indicates incorrect internal-node links, BFS levels, or leaf ranges.
+module S = import "pkg:spatial"
+entry mixed() ([64]vec4f32,[64][98]i32,i32) =
+  let ids = iota(64) in
+  let positions = map(|i| @[1.0+4.0*f32(i%4),1.0+4.0*f32((i/4)%4),1.0+4.0*f32(i/16),0.35],ids) in
+  let pairs = S.Sort.radix_sort(map(|i| @[S.Hilbert.encode(positions[i].xyz,16.0),u32(i)],ids),ids) in
+  let p = map(|pair| positions[i32(pair.y)],pairs) in
+  let keys = map(|pair| pair.x,pairs) in
+  let corners = map(|i| if i<8 then u32(i)*16777216u32 else if i<15 then u32(i-7)*134217728u32 else 1073741824u32,iota(16)) in
+  let offsets = map(|key| S.Octree.lower_bound(keys,key),corners) in
+  let (children,boxes,ranges,count) = S.Linked.build(corners,offsets,iota(17),16.0) in
+  let leaves = map(|leaf| S.Neighbors.linked_leaf_neighbors(leaf,p,offsets,children,boxes,ranges,count,5.0),iota(16)) in
+  let neighbors = map(|i|
+    let leaf = S.Octree.lower_bound(corners,keys[i]+1u32)-1 in
+    S.Neighbors.linked_particle_neighbors(i,p,ranges,leaves[leaf],5.0),ids) in
+  (p,neighbors,count)

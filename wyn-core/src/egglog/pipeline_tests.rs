@@ -986,6 +986,93 @@ fn nested_reduction_stays_inside_the_map_invocation() {
 }
 
 #[test]
+fn local_map_captures_are_computed_before_the_element_loop() {
+    let module = shaders(
+        "entry main(xs:[][8]i32) [][16]i32 =
+          map(|row|let prefixes=scan((+),0i32,row) in
+            let offset=reduce((+),0i32,row)+1i32 in
+            map(|j|prefixes[j%8]+offset,iota(16)),xs)",
+    );
+    let mut loops = 0;
+    for (_, function) in module.functions.iter() {
+        visit_loop_depths(&function.body, 0, &mut |statement, depth| {
+            if matches!(statement, Statement::Loop { .. }) {
+                loops += 1;
+                assert_eq!(depth, 0, "captured scan must not repeat for every output element");
+            }
+        });
+    }
+    assert!(loops >= 2, "fixture must retain the scan and output traversal");
+}
+
+#[test]
+fn fused_local_slice_reductions_do_not_allocate_unused_producer_arrays() {
+    shaders(
+        "entry bounds(xs:[][8]f32) []f32 = map(|row|
+      let values=map(|x|x+1.0,row[1..i32(row[0])]) in
+      reduce(|a,b|min(a,b),f32.highest,values)+reduce(|a,b|max(a,b),f32.lowest,values),xs)",
+    );
+}
+
+#[test]
+fn owned_scatter_inside_map_keeps_queries_parallel() {
+    for source in [
+        "entry main(xs:[]i32) [][4]i32 = map(|x|scatter(replicate(4,0i32),[x%4],[x]),xs)",
+        "entry main(xs:[]i32) [][4]i32 = map(|x|loop a=replicate(4,0i32) for i<3 do scatter(a,[i],[x+i]),xs)",
+    ] {
+        let module = shaders(source);
+        assert!(
+            module.entry_points.iter().any(|entry| entry.workgroup_size[0] > 1),
+            "independent owned scatter must not serialize the outer map: {source}"
+        );
+    }
+}
+
+#[test]
+fn batched_traversal_has_shared_state_and_no_partial_lane_barriers() {
+    fn inspect(block: &naga::Block, conditional: bool) -> usize {
+        let mut barriers = 0;
+        for statement in block.iter() {
+            match statement {
+                Statement::ControlBarrier(_) => {
+                    assert!(!conditional, "traversal barrier inside a partial-lane branch");
+                    barriers += 1;
+                }
+                Statement::If { accept, reject, .. } => {
+                    barriers += inspect(accept, true) + inspect(reject, true);
+                }
+                Statement::Loop { body, continuing, .. } => {
+                    barriers += inspect(body, conditional) + inspect(continuing, conditional);
+                }
+                Statement::Block(block) => barriers += inspect(block, conditional),
+                _ => {}
+            }
+        }
+        barriers
+    }
+    let module = shaders(include_str!(
+        "../../../fluid-simulation/test/batched_traversal.wyn"
+    ));
+    assert!(module.global_variables.iter().any(|(_, v)| v.space == naga::AddressSpace::WorkGroup));
+    let mut barriers = 0;
+    for function in
+        module.functions.iter().map(|(_, f)| f).chain(module.entry_points.iter().map(|e| &e.function))
+    {
+        barriers += inspect(&function.body, false);
+    }
+    assert!(barriers > 2, "traversal must execute cooperative collectives");
+    assert_eq!(
+        module.entry_points.len(),
+        1,
+        "traversal should stay in one kernel"
+    );
+    assert!(
+        module.entry_points[0].workgroup_size[0] > 1,
+        "queries need a parallel workgroup"
+    );
+}
+
+#[test]
 fn ranked_buckets_preserve_nested_storage_and_atomic_counters() {
     shaders("entry bins(dest:*[2][2]i32) ([2][2]i32,[2]u32,u32)=bucket_scatter_2d(dest,[[(-1,9),(0,10),(0,11)],[(0,12),(1,20),(2,9)]])");
 }
@@ -1370,4 +1457,18 @@ fn runtime_rectangular_maps_reach_both_backends() {
     ] {
         shaders(source);
     }
+}
+
+#[test]
+fn branch_loop_state_keeps_inferred_array_layout() {
+    shaders(include_str!(
+        "../../../fluid-simulation/test/repro_branch_array_layout.wyn"
+    ));
+}
+
+#[test]
+fn cooperative_loop_parallel_assignment_preserves_array_sources() {
+    shaders(include_str!(
+        "../../../fluid-simulation/test/repro_shared_loop_swap.wyn"
+    ));
 }
