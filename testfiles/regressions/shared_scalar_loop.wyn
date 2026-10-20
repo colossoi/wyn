@@ -1,0 +1,5 @@
+entry check(xs: []f32, x: f32) f32 =
+  let initial = x * 2.0 in
+  let can_stop = reduce(|a: bool, b: bool| a && b, true, map(|v: f32| v > initial, xs)) in
+  if can_stop then initial else
+    loop p = initial for iteration < 2 do p * 0.5

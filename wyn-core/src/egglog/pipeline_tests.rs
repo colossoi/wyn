@@ -269,6 +269,33 @@ fn compiler_repro_matrix_reduce_loop() {
 }
 
 #[test]
+fn compiler_repro_shared_scalar_loop() {
+    let source = include_str!("../../../testfiles/regressions/shared_scalar_loop.wyn");
+    placement_shaders(source, |_| {});
+    let while_loop = source.replace(
+        "loop p = initial for iteration < 2 do p * 0.5",
+        "let (p, iteration) = loop (p, iteration) = (initial, 0i32)\n\
+         while iteration < 2 do (p * 0.5, iteration + 1) in p",
+    );
+    placement_shaders(&while_loop, |_| {});
+}
+
+#[test]
+fn compiler_repro_nested_replicate() {
+    for source in [
+        include_str!("../../../testfiles/regressions/nested_replicate.wyn"),
+        "entry check(x: f32) [2][5]f32 = replicate(2, replicate(5, x))",
+        "entry check(x: f32) [2][3][4]f32 = replicate(2, replicate(3, replicate(4, x)))",
+        "entry check(x: i32) [2][3]bool = replicate(2, map(|i: i32| i > x, iota(3)))",
+        "entry check(x: f32) [2][3]f32 =
+         let values = map(|i: i32| x + f32.i32(i), iota(5)) in
+         let row: [3]f32 = values[1..4] in replicate(2, row)",
+    ] {
+        placement_shaders(source, |_| {});
+    }
+}
+
+#[test]
 fn local_array_layouts_support_rectangles_and_higher_rank() {
     for source in [
         "entry check(xs: []f32) []f32 =

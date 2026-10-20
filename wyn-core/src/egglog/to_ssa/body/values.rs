@@ -338,8 +338,11 @@ impl Body<'_, '_, '_> {
                 .map_err(builder_error)?;
             return self.store_place(next, element, rest, value);
         }
+        // A view carries a descriptor; an owned destination needs its elements.
+        let copy_array =
+            value.ty != *ty && ty.array_variant().is_some_and(types::is_array_variant_composite);
         if value.ty.is_array()
-            && matches!(ty, Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), _))
+            && (copy_array || matches!(ty, Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), _)))
         {
             let n = self.length(value.clone())?;
             let zero = self.literal("0", &types::i32())?;
