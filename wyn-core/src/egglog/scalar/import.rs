@@ -239,10 +239,11 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
                         if builtin.raw.purity != Purity::Pure || !overload.lowering.is_reusable() {
                             retained = true;
                         }
-                        Some((
-                            format!("builtin:{}:{overload_idx}", builtin.dispatch_name()),
-                            overload.lowering.is_speculatable(),
-                        ))
+                        let operator = format!("builtin:{}:{overload_idx}", builtin.dispatch_name());
+                        if *id == catalog().known().record_with {
+                            self.sink.add("ExprRecordUpdateOperator", operator.as_str())?;
+                        }
+                        Some((operator, overload.lowering.is_speculatable()))
                     }
                     _ => None,
                 };

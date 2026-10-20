@@ -35,6 +35,7 @@
 (relation ExprPrimitiveType (TypeKey String))
 (relation ExprIntegerType (TypeKey))
 (relation ExprOperatorTotal (TypeKey String))
+(relation ExprRecordUpdateOperator (String))
 (relation ExprTemplateBody (RegionKey Expr))
 (relation ExprRoot (ExprContext RegionKey SourceValue Expr))
 ; Expression identities already carry their optimization context.

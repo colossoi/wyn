@@ -1724,11 +1724,7 @@ impl<'a> Transformer<'a> {
         )
     }
 
-    /// Lower `r with field = e` (single-level) and `r with a.x = e`
-    /// (nested) by binding the record to a fresh symbol and rebuilding
-    /// it via `_w_tuple` with the path target replaced. Each level of
-    /// the path produces its own bind-and-rebuild; nested paths chain
-    /// inside the outer rebuild's replacement slot.
+    /// Keep updates compact until backend lowering; bind each path prefix once.
     fn transform_record_with(
         &mut self,
         record: &ast::Expression<ast::HolesResolvedTree>,
@@ -1798,17 +1794,17 @@ impl<'a> Transformer<'a> {
             )
         };
 
-        let field_terms: Vec<Term> = (0..fields.len())
-            .map(|i| {
-                if i == idx {
-                    replacement.clone()
-                } else {
-                    self.build_proj(target, i, &field_types[i], span)
-                }
-            })
-            .collect();
-
-        self.mk_tuple(field_terms, record_ty.clone(), span)
+        let index = self.mk_term(
+            Type::Constructed(TypeName::Int(32), vec![]),
+            span,
+            TermKind::IntLit(idx.to_string()),
+        );
+        self.build_call_by_id(
+            catalog().known().record_with,
+            &[target.clone(), index, replacement],
+            record_ty.clone(),
+            span,
+        )
     }
 
     /// Build a swizzle read on a Var term: emits per-letter

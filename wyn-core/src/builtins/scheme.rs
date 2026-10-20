@@ -279,6 +279,13 @@ pub fn array_index_value_to_array(ctx: &mut dyn TypeVarGenerator) -> TypeScheme 
     quantify(arrow_chain(&[arr.clone(), i32_ty(), a], arr))
 }
 
+/// Internal `∀r a. r -> i32 -> a -> r`; typed record syntax verifies the field.
+pub fn record_index_value_to_record(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    let record = ctx.new_variable();
+    let value = ctx.new_variable();
+    quantify(arrow_chain(&[record.clone(), i32_ty(), value], record))
+}
+
 /// `∀a n s. i32 -> a -> Array[a, s, n]` — replicate.
 pub fn replicate_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let (a, n, s, r) = (

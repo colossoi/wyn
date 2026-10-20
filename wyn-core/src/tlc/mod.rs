@@ -656,6 +656,27 @@ pub fn var_term_builtin_id<C: Payload, S: Payload>(
     }
 }
 
+/// Decode the internal update emitted from type-checked record syntax.
+pub(crate) fn record_update_parts<C: Payload, S: Payload>(
+    term: &Term<C, S>,
+) -> Option<(&Term<C, S>, usize, &Term<C, S>)> {
+    let TermKind::App { func, args } = &term.kind else {
+        return None;
+    };
+    if !matches!(func.kind, TermKind::Var(VarRef::Builtin { id, .. })
+        if id == crate::builtins::catalog().known().record_with)
+    {
+        return None;
+    }
+    let [record, index, replacement] = args.as_slice() else {
+        panic!("record update requires three operands");
+    };
+    let TermKind::IntLit(index) = &index.kind else {
+        panic!("record update requires a constant field index");
+    };
+    Some((record, index.parse().expect("record field index"), replacement))
+}
+
 /// The kind of term.
 #[derive(Debug, Clone)]
 pub enum TermKind<C: Payload = data::Empty, S: Payload = data::Empty> {

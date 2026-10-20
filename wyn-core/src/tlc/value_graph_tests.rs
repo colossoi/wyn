@@ -54,6 +54,28 @@ fn projecting_a_component_does_not_inherit_other_components_dependencies() {
 }
 
 #[test]
+fn record_update_forwards_fields_but_keeps_operand_evaluation() {
+    let (values, result, parameters, symbols) = graph(
+        "entry main(x: i32, y: i32, z: i32) i32 =
+          let old = { a = x, b = y } in
+          let updated = old with a = z in
+          let selected = updated.b in selected",
+    );
+    assert_eq!(values.input_origin(result, &[]), Some(parameters[1]));
+    let updated = binding(&values, &symbols, "updated");
+    assert_eq!(
+        values.input_origin(values.bindings[&updated].value, &[0]),
+        Some(parameters[2])
+    );
+    let selected = binding(&values, &symbols, "selected");
+    for parameter in [parameters[0], parameters[2]] {
+        assert!(!values.dependent_bindings(|symbol| symbol == parameter).contains(&selected));
+        let depends = values.dependencies(|symbol| symbol == parameter);
+        assert!(depends.0[values.bindings[&selected].evaluation.0]);
+    }
+}
+
+#[test]
 fn branch_projections_require_the_same_forwarded_input() {
     let (values, result, parameters, _) = graph(
         "entry main(x: i32, y: i32, choose: bool) (i32, i32) =

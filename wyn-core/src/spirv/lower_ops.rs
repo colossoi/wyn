@@ -408,6 +408,37 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         let operands: Vec<Operand> = arg_ids.iter().map(|&id| Operand::IdRef(id)).collect();
 
         match prim_op {
+            PrimOp::RecordUpdate => {
+                let &[record, _, replacement] = arg_ids else {
+                    bail_spirv!("record update requires three operands");
+                };
+                let Some(ConstantValue::I32(index)) = value_refs[1].as_const() else {
+                    bail_spirv!("record update requires a constant field index");
+                };
+                let base_ty = self.get_value_type_ref(value_refs[0]);
+                if self.constructor.polytype_to_spirv(&base_ty)? != result_ty {
+                    let PolyType::Constructed(TypeName::Record(_), fields) = base_ty else {
+                        bail_spirv!("record update requires a record");
+                    };
+                    let mut values = Vec::with_capacity(fields.len());
+                    for (i, ty) in fields.iter().enumerate() {
+                        values.push(if i == index as usize {
+                            replacement
+                        } else {
+                            let ty = self.constructor.polytype_to_spirv(ty)?;
+                            self.constructor.builder.composite_extract(ty, None, record, [i as u32])?
+                        });
+                    }
+                    return Ok(self.constructor.builder.composite_construct(result_ty, None, values)?);
+                }
+                Ok(self.constructor.builder.composite_insert(
+                    result_ty,
+                    None,
+                    replacement,
+                    record,
+                    [index as u32],
+                )?)
+            }
             PrimOp::Select => {
                 let &[no, yes, condition] = arg_ids else {
                     bail_spirv!("select requires false value, true value, and condition");

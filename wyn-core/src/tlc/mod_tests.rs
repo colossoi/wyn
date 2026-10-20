@@ -47,6 +47,40 @@ fn compile_to_tlc_raw(source: &str) -> stage::Transformed {
     lower_from_ast(program).expect("lower_from_ast")
 }
 
+#[test]
+fn record_update_stays_compact_through_helper_normalization() {
+    let source = "type state = { x: i32, y: i32, z: i32 }
+        def advance(s: state) state =
+        let s = s with x = (if s.x < s.y then s.z else s.y) in
+        let s = s with y = s.x + s.z in
+        s with z = s.x + s.y
+        entry main(s: state) state = advance(s)";
+    let raw = compile_to_tlc_raw(source);
+    fn counts<C: Payload, S: Payload>(term: &Term<C, S>) -> (usize, usize) {
+        let mut updates = usize::from(matches!(&term.kind,
+            TermKind::App { func, .. }
+                if matches!(func.kind, TermKind::Var(VarRef::Builtin { id, .. })
+                    if id == crate::builtins::catalog().known().record_with)));
+        let mut tuples = usize::from(matches!(term.kind, TermKind::Tuple(_)));
+        term.for_each_child(&mut |child| {
+            let (u, t) = counts(child);
+            updates += u;
+            tuples += t;
+        });
+        (updates, tuples)
+    }
+    assert_eq!(counts(find_def_body(&raw, "advance")), (3, 0));
+    let program = super::partial_eval(super::validate_ownership(raw).unwrap());
+    let program = super::inline_unified_helpers(super::specialize_types(program).unwrap());
+    let retained: (usize, usize) =
+        program.defs.iter().map(|def| counts(&def.body)).fold((0, 0), |(u, t), (v, w)| (u + v, t + w));
+    assert_eq!(
+        retained,
+        (3, 0),
+        "normalization must retain updates, not rebuild records"
+    );
+}
+
 /// Check the Map interface before partial evaluation, specialization, or SoA
 /// lowering has an opportunity to repair it.
 fn assert_map_input_parameters(term: &Term) -> usize {

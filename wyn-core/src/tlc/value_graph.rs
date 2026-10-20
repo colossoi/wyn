@@ -26,6 +26,11 @@ enum Node {
     Binding(Value),
     Aggregate(Vec<Value>),
     Projection(Value, usize),
+    RecordUpdate {
+        record: Value,
+        index: usize,
+        replacement: Value,
+    },
     Choice {
         condition: Value,
         yes: Value,
@@ -103,6 +108,9 @@ impl ValueGraph {
                     debug_assert!(projected.0 < index);
                     depends[projected.0]
                 }
+                Node::RecordUpdate {
+                    record, replacement, ..
+                } => depends[record.0] || depends[replacement.0],
                 Node::Choice { condition, yes, no } => {
                     depends[condition.0] || depends[yes.0] || depends[no.0]
                 }
@@ -164,6 +172,17 @@ impl ValueGraph {
             Node::Aggregate(values) if !fields.is_empty() => {
                 self.project(*values.get(fields[0])?, &fields[1..])
             }
+            Node::RecordUpdate {
+                record,
+                index,
+                replacement,
+            } if !fields.is_empty() => {
+                if fields[0] == *index {
+                    self.project(*replacement, &fields[1..])
+                } else {
+                    self.project(*record, fields)
+                }
+            }
             _ if fields.is_empty() => Some(value),
             _ => None,
         }
@@ -185,6 +204,17 @@ impl ValueGraph {
             Node::Binding(value) => self.input_origin(*value, fields),
             Node::Aggregate(values) if !fields.is_empty() => {
                 self.input_origin(*values.get(fields[0])?, &fields[1..])
+            }
+            Node::RecordUpdate {
+                record,
+                index,
+                replacement,
+            } if !fields.is_empty() => {
+                if fields[0] == *index {
+                    self.input_origin(*replacement, &fields[1..])
+                } else {
+                    self.input_origin(*record, fields)
+                }
             }
             Node::Projection(input, index) => {
                 let mut path = vec![*index];
@@ -297,6 +327,7 @@ impl ValueGraph {
             _ => {}
         }
         let source = Source::Term(term.id);
+        let update = super::record_update_parts(term);
         let expr = match &term.kind {
             TermKind::Var(VarRef::Symbol(symbol))
             | TermKind::ArrayExpr(ArrayExpr::Var(VarRef::Symbol(symbol), _)) => {
@@ -308,6 +339,20 @@ impl ValueGraph {
                 self.symbol(*symbol)
             }
             TermKind::Coerce { inner, .. } => self.import(inner),
+            TermKind::App { .. } if update.is_some() => {
+                let (record, index, replacement) = update.unwrap();
+                let record = self.import(record);
+                let replacement = self.import(replacement);
+                let value = self.push(
+                    Node::RecordUpdate {
+                        record: record.value,
+                        index,
+                        replacement: replacement.value,
+                    },
+                    source,
+                );
+                self.evaluated(value, &[record, replacement], source)
+            }
             TermKind::Let { name, rhs, body, .. } => {
                 let rhs = self.import(rhs);
                 // Keep the binding boundary without copying its computation.

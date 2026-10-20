@@ -40,6 +40,20 @@ fn select_intrinsic_has_a_durable_typed_identity() {
 }
 
 #[test]
+fn record_update_intrinsic_has_a_durable_typed_identity() {
+    assert_eq!(intrinsic_arity(names::INTRINSIC_RECORD_WITH), Some(3));
+    let def = by_id(catalog().known().record_with);
+    assert_eq!(def.raw.purity, Purity::Pure);
+    assert!(def.intrinsic_source_names().is_empty());
+    assert!(matches!(
+        def.overloads()[0].lowering,
+        BuiltinLowering::PrimOp(lowering::PrimOp::RecordUpdate)
+    ));
+    assert!(def.overloads()[0].lowering.is_speculatable());
+    assert!(def.overloads()[0].lowering.is_reusable());
+}
+
+#[test]
 fn intrinsic_arity_for_length_is_one() {
     // length: [n]A -> i32
     assert_eq!(intrinsic_arity(INTRINSIC_LENGTH), Some(1));

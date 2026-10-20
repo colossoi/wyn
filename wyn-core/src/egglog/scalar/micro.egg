@@ -17,3 +17,13 @@
 (rewrite (ExprChoice ctx t c x x) x :when ((ExprContextActive ctx) (ExprTotal c)) :subsume :ruleset scalar-micro)
 (rule ((ExprContextActive ctx) (= e (ExprProject ctx t (ExprTuple ctx tt xs) i)) (= field (ExprArgumentAt xs i))) ((union e field) (subsume (ExprProject ctx t (ExprTuple ctx tt xs) i))) :ruleset scalar-micro)
 (rule ((ExprContextActive ctx) (= e (ExprProject ctx t (ExprVector ctx tt xs) i)) (= field (ExprArgumentAt xs i))) ((union e field) (subsume (ExprProject ctx t (ExprVector ctx tt xs) i))) :ruleset scalar-micro)
+; Project through a pure update without expanding the record. Total operands
+; ensure these identities cannot discard an evaluation that must be retained.
+(rule ((ExprContextActive ctx) (= e (ExprProject ctx t update i))
+       (= update (ExprOp ctx rt op (ExprCons ctx record (ExprCons ctx (ExprLiteral ctx it index) (ExprCons ctx replacement (ExprNil ctx))))))
+       (ExprRecordUpdateOperator op) (ExprTotal update) (= index (to-string i)))
+      ((union e replacement) (subsume (ExprProject ctx t update i))) :ruleset scalar-micro)
+(rule ((ExprContextActive ctx) (= e (ExprProject ctx t update i))
+       (= update (ExprOp ctx rt op (ExprCons ctx record (ExprCons ctx (ExprLiteral ctx it index) (ExprCons ctx replacement (ExprNil ctx))))))
+       (ExprRecordUpdateOperator op) (ExprTotal update) (!= index (to-string i)))
+      ((union e (ExprProject ctx t record i)) (subsume (ExprProject ctx t update i))) :ruleset scalar-micro)

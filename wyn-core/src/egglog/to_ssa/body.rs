@@ -450,9 +450,41 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         &mut self,
         block: BlockId,
         tag: OpTag<BindingRef, FunctionId>,
-        args: Vec<Typed>,
-        ty: Type,
+        mut args: Vec<Typed>,
+        mut ty: Type,
     ) -> Result<Typed, OptimizeError> {
+        if matches!(tag, OpTag::Intrinsic { id, .. } if id == catalog().known().record_with) {
+            let [record, index, replacement] = args.as_slice() else {
+                return Err(error("record update requires three operands"));
+            };
+            let index =
+                match index.value {
+                    ValueRef::Const(crate::ssa::types::ConstantValue::I32(index)) => Some(index),
+                    ValueRef::Ssa(value) => self.builder.func().inst_of_value(value).and_then(|inst| {
+                        match &self.builder.func().insts[inst].data {
+                            InstKind::Op {
+                                tag: OpTag::Int(text),
+                                ..
+                            } => text.parse().ok(),
+                            _ => None,
+                        }
+                    }),
+                    _ => None,
+                }
+                .ok_or_else(|| error("record update requires a constant field index"))?;
+            let Type::Constructed(name @ TypeName::Record(_), fields) = &record.ty else {
+                return Err(error("record update requires a record"));
+            };
+            let mut fields = fields.clone();
+            let field = usize::try_from(index)
+                .ok()
+                .and_then(|index| fields.get_mut(index))
+                .ok_or_else(|| error("record update field index out of range"))?;
+            // Preserve concrete field representations, including bound array views.
+            *field = replacement.ty.clone();
+            ty = Type::Constructed(name.clone(), fields);
+            args[1].value = ValueRef::Const(crate::ssa::types::ConstantValue::I32(index));
+        }
         if matches!(tag,OpTag::Intrinsic{id,..} if id==catalog().known().scratch_annotation) {
             let [array] = args.as_slice() else {
                 return Err(error("scratch annotation needs one array"));

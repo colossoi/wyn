@@ -27,7 +27,7 @@ use crate::builtins::{
 };
 use crate::error::{CompilerError, Result};
 use crate::op::OpTag;
-use crate::ssa::types::{FuncBody, InstKind, Program};
+use crate::ssa::types::{ConstantValue, FuncBody, InstKind, Program};
 use crate::types;
 use polytype::Type;
 
@@ -56,6 +56,43 @@ fn check_body(scope: &str, body: &FuncBody) -> Result<()> {
             operands,
         } = &node.data
         {
+            if *id == catalog().known().record_with {
+                let valid = match (operands.as_slice(), node.result) {
+                    ([record, index, replacement], Some(result)) if *overload_idx == 0 => {
+                        let ty = body.get_value_type(result);
+                        match (ty, index.as_const()) {
+                            (
+                                Type::Constructed(name @ TypeName::Record(_), fields),
+                                Some(ConstantValue::I32(index)),
+                            ) => {
+                                if let (Type::Constructed(base_name, base_fields), Ok(index)) =
+                                    (body.value_ref_type(*record), usize::try_from(index))
+                                {
+                                    base_name == *name
+                                        && base_fields.len() == fields.len()
+                                        && fields.get(index) == Some(&body.value_ref_type(*replacement))
+                                        && fields
+                                            .iter()
+                                            .zip(&base_fields)
+                                            .enumerate()
+                                            .all(|(i, (a, b))| i == index || a == b)
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => false,
+                        }
+                    }
+                    _ => false,
+                };
+                if !valid {
+                    return Err(CompilerError::TypeError(
+                        format!("invalid record update in {scope}: expected a record, constant field index, and matching replacement"),
+                        node.span,
+                    ));
+                }
+                continue;
+            }
             if *id != catalog().known().select {
                 continue;
             }

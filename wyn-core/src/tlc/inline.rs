@@ -579,8 +579,6 @@ impl TermRewriter<Empty, Empty> for ValueNormalizer<'_> {
                     },
                     self.term_ids,
                 );
-                // Fold exposed projections before an enclosing record binding duplicates them.
-                let (body, _) = normalize_values(body, self.term_ids);
                 (body, RewriteDecision::Changed)
             }
             TermKind::TupleProj { tuple, idx } if matches!(&tuple.kind, TermKind::Tuple(values) if values.iter().all(is_structural_value)) =>
@@ -589,6 +587,28 @@ impl TermRewriter<Empty, Empty> for ValueNormalizer<'_> {
                     unreachable!()
                 };
                 (values.remove(idx), RewriteDecision::Changed)
+            }
+            TermKind::TupleProj { tuple, idx }
+                if is_structural_value(&tuple) && super::record_update_parts(&tuple).is_some() =>
+            {
+                let (_, updated, _) = super::record_update_parts(&tuple).unwrap();
+                let TermKind::App { mut args, .. } = tuple.kind else {
+                    unreachable!()
+                };
+                if idx == updated {
+                    (args.remove(2), RewriteDecision::Changed)
+                } else {
+                    (
+                        Term {
+                            kind: TermKind::TupleProj {
+                                tuple: Box::new(args.remove(0)),
+                                idx,
+                            },
+                            ..term
+                        },
+                        RewriteDecision::Changed,
+                    )
+                }
             }
             kind => (Term { kind, ..term }, RewriteDecision::Unchanged),
         }
@@ -617,7 +637,7 @@ fn contains_static_resource_type(ty: &Type<TypeName>) -> bool {
 }
 
 /// Whether evaluating a term only assembles or projects an already-existing
-/// value. This deliberately excludes applications, indexing, control flow,
+/// value. This deliberately excludes ordinary calls, indexing, control flow,
 /// array work, and loops: dropping any of those merely because their result is
 /// unused could discard an effect.
 fn is_structural_value(term: &Term) -> bool {
@@ -632,6 +652,9 @@ fn is_structural_value(term: &Term) -> bool {
         TermKind::Tuple(values) | TermKind::VecLit(values) => values.iter().all(is_structural_value),
         TermKind::TupleProj { tuple, .. } => is_structural_value(tuple),
         TermKind::Let { rhs, body, .. } => is_structural_value(rhs) && is_structural_value(body),
+        TermKind::App { .. } => super::record_update_parts(term).is_some_and(|(record, _, replacement)| {
+            is_structural_value(record) && is_structural_value(replacement)
+        }),
         _ => false,
     }
 }

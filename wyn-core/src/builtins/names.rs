@@ -16,6 +16,9 @@ pub const INTRINSIC_SELECT: &str = "_w_intrinsic_select";
 /// Functional `with` intrinsic emitted for `arr with [i] = v`.
 pub const INTRINSIC_ARRAY_WITH: &str = "_w_intrinsic_array_with";
 
+/// Pure record update: `[record, constant field index, replacement]`.
+pub const INTRINSIC_RECORD_WITH: &str = "_w_intrinsic_record_with";
+
 /// In-place variant produced by the TLC promotion pass when the source
 /// array is dead-after-call and its owner is mutable.
 pub const INTRINSIC_ARRAY_WITH_INPLACE: &str = "_w_intrinsic_array_with_inplace";

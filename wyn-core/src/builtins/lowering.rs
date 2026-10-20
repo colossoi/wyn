@@ -107,7 +107,7 @@ impl BuiltinLowering {
                 | FOrdGreaterThanEqual | IEqual | INotEqual | SLessThan | ULessThan | SGreaterThan
                 | UGreaterThan | SLessThanEqual | ULessThanEqual | SGreaterThanEqual | UGreaterThanEqual
                 | BitwiseAnd | BitwiseOr | BitwiseXor | Not | IsNan | IsInf | Bitcast | SIToFP | UIToFP
-                | SConvert | UConvert | FPConvert | Select,
+                | SConvert | UConvert | FPConvert | Select | RecordUpdate,
             ) => true,
             _ => false,
         }
@@ -119,6 +119,8 @@ impl BuiltinLowering {
 pub enum PrimOp {
     /// Eager choice between same-typed values: `[false_value, true_value, bool]`.
     Select,
+    /// Pure `[record, constant field index, replacement]`; preserves the input.
+    RecordUpdate,
     // GLSL.std.450 extended instructions
     GlslExt(u32),
 

@@ -652,6 +652,36 @@ def main(x: [4]i32, y: *[4]i32) i32 =
 }
 
 #[test]
+fn record_update_preserves_field_aliases() {
+    let prefix = "type state = { a: [4]i32, b: [4]i32 }
+        def consume(xs: *[4]i32) i32 = xs[0]
+        def main(x: *[4]i32, y: *[4]i32, z: *[4]i32) i32 =
+          let original = { a = x, b = y } in
+          let next = original with a = z in
+          let n = consume(next.a) in ";
+    let allowed = format!("{prefix} original.a[0] + next.b[0] + n");
+    let typed = ast_type_holes::reject_type_holes(compile_thru_frontend(&allowed).unwrap()).unwrap();
+    let program = tlc::lower_from_ast(typed).unwrap();
+    super::check(&program).expect("replacing a field must detach the old field's owner");
+    assert!(
+        !has_use_after_move(&format!(
+            "{} original.a[0] + next.b[0] + n",
+            prefix.replace("with a = z", "with a = [1, 2, 3, 4]")
+        )),
+        "a newly allocated replacement field must retain fresh ownership"
+    );
+    assert!(
+        has_use_after_move(&format!("{prefix} z[0] + n")),
+        "the replacement retains its owner's identity"
+    );
+    let source = prefix.replace("consume(next.a)", "consume(next.b)");
+    assert!(
+        has_use_after_move(&format!("{source} original.b[0] + n")),
+        "unchanged fields still alias the original"
+    );
+}
+
+#[test]
 fn allocating_expressions_may_feed_consuming_parameters() {
     let map_result = r#"
 def consume(a: *[4]i32) i32 = a[0]

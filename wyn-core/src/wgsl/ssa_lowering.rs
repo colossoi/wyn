@@ -35,7 +35,7 @@ use crate::error::Result;
 use crate::interface::IoDecoration;
 use crate::ssa::storage_function_variants::StorageFunctionVariants;
 use crate::ssa::types::{
-    EntryPoint, ExecutionModel, FuncBody, Function, InstKind, ValueId, ValueRef, WynInstNode,
+    ConstantValue, EntryPoint, ExecutionModel, FuncBody, Function, InstKind, ValueId, ValueRef, WynInstNode,
 };
 use crate::types::as_soa_tuple;
 use crate::types::TypeExt;
@@ -2525,6 +2525,65 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             let ty =
                                 self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result_id))?;
                             self.emit_mutable_binding(output, result_id, &ty, &format!("{ty}()"))?;
+                            continue;
+                        }
+
+                        InstKind::Op {
+                            tag: op::OpTag::Intrinsic { id, .. },
+                            operands,
+                        } if *id == catalog().known().record_with => {
+                            let &[record, index, replacement] = operands.as_slice() else {
+                                return Err(err_wgsl_at!(
+                                    self.blame_span(),
+                                    "record update requires three operands"
+                                ));
+                            };
+                            let Some(ConstantValue::I32(index)) = index.as_const() else {
+                                return Err(err_wgsl_at!(
+                                    self.blame_span(),
+                                    "record update requires a constant field index"
+                                ));
+                            };
+                            let original = self.get_value(record)?;
+                            let replacement = self.get_value(replacement)?;
+                            let result_id = inst.result.ok_or_else(|| {
+                                err_wgsl_at!(self.blame_span(), "record update must have a result")
+                            })?;
+                            let result_ty = self.body.get_value_type(result_id);
+                            let ty = self.ctx.type_emitter.type_to_wgsl(result_ty)?;
+                            if self.body.value_ref_type(record) != *result_ty {
+                                let PolyType::Constructed(TypeName::Record(_), fields) = result_ty else {
+                                    return Err(err_wgsl_at!(
+                                        self.blame_span(),
+                                        "record update requires a record"
+                                    ));
+                                };
+                                let fields: Vec<_> = (0..fields.len())
+                                    .map(|i| {
+                                        if i == index as usize {
+                                            replacement.clone()
+                                        } else {
+                                            format!("{original}.f{i}")
+                                        }
+                                    })
+                                    .collect();
+                                self.emit_ssa_binding(
+                                    output,
+                                    result_id,
+                                    &ty,
+                                    &format!("{ty}({})", fields.join(", ")),
+                                )?;
+                                continue;
+                            }
+                            let result = self.emit_mutable_binding(output, result_id, &ty, &original)?;
+                            writeln!(
+                                output,
+                                "{}{}.f{} = {};",
+                                self.ctx.indent_str(),
+                                result,
+                                index,
+                                replacement
+                            )?;
                             continue;
                         }
 

@@ -282,6 +282,77 @@ fn compiler_repro_record_update() {
 }
 
 #[test]
+fn record_update_survives_to_ssa_and_lowers_in_both_backends() {
+    let source = include_str!("../../../testfiles/regressions/record_update.wyn");
+    let program = compile_thru_ssa(source).unwrap();
+    let count = program
+        .functions
+        .iter()
+        .map(|f| &f.body)
+        .chain(program.entry_points.iter().map(|e| &e.body))
+        .flat_map(|body| body.inner.insts.values())
+        .filter(|inst| {
+            matches!(&inst.data,
+            crate::ssa::types::InstKind::Op {
+                tag: crate::op::OpTag::Intrinsic { id, .. }, ..
+            } if *id == crate::builtins::catalog().known().record_with)
+        })
+        .count();
+    assert!(count >= 7, "dependent field updates must survive to SSA");
+    let binary = lower_ssa_to_spirv(program).unwrap();
+    let module = wspirv::dr::load_words(&binary.spirv).unwrap();
+    assert!(module.all_inst_iter().any(|inst| inst.class.opcode == wspirv::spirv::Op::CompositeInsert));
+    shaders(include_str!(
+        "../../../testfiles/regressions/record_update_values.wyn"
+    ));
+}
+
+#[test]
+fn record_update_handles_loop_state_and_record_fields() {
+    shaders(
+        "type state = { x: i32, pair: { y: i32, z: i32 } }
+        entry main(x: i32) state =
+        loop s = { x = x, pair = { y = 1, z = 2 } } for i < 4 do
+          (s with pair.y = s.pair.y + s.x) with x = s.x + 1",
+    );
+    shaders(
+        "entry main(xs: [3]i32, ys: [3]i32, n: i32) []i32 =
+        let original = { count = n, data = xs } in
+        let next = original with count = n + 1 in
+        let last = next with data = ys in
+        map(|x: i32| x + next.count + last.count, last.data)",
+    );
+}
+
+#[test]
+fn record_update_fields_can_size_host_allocations() {
+    for update in ["offset = c.offset + 1", "size = c.size + 1"] {
+        placement_shaders(
+            &format!(
+                "type config = {{ size: i32, offset: i32 }}
+                 entry check(c: config) []i32 =
+                   let next = c with {update} in iota(next.size)"
+            ),
+            |_| {},
+        );
+    }
+}
+
+#[test]
+fn record_update_resource_fields_resolve_before_shader_emission() {
+    placement_shaders(
+        "type textures = { image: texture2d, filtering: sampler }
+         def sample(maps: textures, uv: vec2f32) vec4f32 =
+           texture_sample(maps.image, maps.filtering, uv, 0.0)
+         entry main(image: texture2d, old_filtering: sampler, filtering: sampler, pixels: []vec2f32) []vec4f32 =
+           let maps = { image = image, filtering = old_filtering } in
+           let maps = maps with filtering = filtering in
+           map(|uv| sample(maps, uv), pixels)",
+        |_| {},
+    );
+}
+
+#[test]
 fn scalar_entry_reaches_both_backends() {
     let module = shaders("entry scalar(x:i32) i32=x+1");
     assert_eq!(module.entry_points.len(), 1);

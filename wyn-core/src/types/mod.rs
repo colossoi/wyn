@@ -1402,7 +1402,7 @@ pub fn is_copy(ty: &Type) -> bool {
             | TypeName::Mat
             | TypeName::Arrow => true,
             TypeName::Array => false,
-            TypeName::Tuple(_) => args.iter().all(is_copy),
+            TypeName::Tuple(_) | TypeName::Record(_) => args.iter().all(is_copy),
             // Opaque GPU resource handles are not copyable values — they
             // must reach the backend as the original binding, not be
             // duplicated by ownership/move analysis.

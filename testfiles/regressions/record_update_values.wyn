@@ -1,0 +1,11 @@
+type inner = { flag: bool, values: [3]i32 }
+type state = { count: i32, inner: inner }
+
+entry check(xs: []i32) []i32 =
+  map(|x: i32|
+    let old = { count = x, inner = { flag = false, values = [x, x+1, x+2] } } in
+    let next = (old with inner.flag = true) with count = x+10 in
+    let last = next with inner.values = [x+20, x+21, x+22] in
+    old.count + old.inner.values[1] + next.count + next.inner.values[2]
+      + last.inner.values[2] + (if old.inner.flag then 1000 else 0)
+      + (if next.inner.flag && last.inner.flag then 100 else 0), xs)

@@ -1032,6 +1032,23 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
             TermKind::Let { body, .. } => self.alias_value(body),
             TermKind::App { func, args } => {
                 let known = catalog().known();
+                if let Some((record, index, replacement)) = crate::tlc::record_update_parts(term) {
+                    let Type::Constructed(TypeName::Record(_), fields) = &record.ty else {
+                        panic!("record update requires a record");
+                    };
+                    let original = self.alias_value(record);
+                    return AliasValue::aggregate(
+                        (0..fields.len())
+                            .map(|field| {
+                                if field == index {
+                                    self.alias_value(replacement)
+                                } else {
+                                    original.project(field)
+                                }
+                            })
+                            .collect(),
+                    );
+                }
                 if var_term_builtin_id(func, self.symbols) == Some(known.array_with_in_place) {
                     return args
                         .first()
@@ -1125,6 +1142,13 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
         diet: &Diet,
         term: &Term<C, S>,
     ) {
+        // Let-bound record updates still expose fresh replacement components.
+        // Their bindings have already been visited and retain their own owners.
+        match &term.kind {
+            TermKind::Let { body, .. } => return self.materialize_term_value(value, ty, diet, body),
+            TermKind::Coerce { inner, .. } => return self.materialize_term_value(value, ty, diet, inner),
+            _ => {}
+        }
         // A `*` at this node means the whole value is freshly owned.
         if diet.is_consuming_at_root() {
             self.materialize_all_missing(value, ty, Origin::Fresh);
@@ -1144,7 +1168,14 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
                         _ => None,
                     };
                     for (index, (component, component_ty)) in components.iter_mut().zip(args).enumerate() {
-                        let component_term = term_parts.and_then(|parts| parts.get(index)).unwrap_or(term);
+                        let component_term = term_parts
+                            .and_then(|parts| parts.get(index))
+                            .or_else(|| {
+                                crate::tlc::record_update_parts(term)
+                                    .filter(|(_, field, _)| *field == index)
+                                    .map(|(_, _, replacement)| replacement)
+                            })
+                            .unwrap_or(term);
                         self.materialize_term_value(
                             component,
                             component_ty,

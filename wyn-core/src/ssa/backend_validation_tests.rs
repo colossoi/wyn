@@ -87,6 +87,54 @@ fn select_validation_rejects_wrong_condition_value_types_arity_and_aggregates() 
     }
 }
 
+#[test]
+fn record_update_validation_checks_field_index_and_types() {
+    use crate::ssa::types::{ConstantValue, InstKind, ValueRef};
+    let record = Type::Constructed(
+        TypeName::Record(crate::ast::RecordFields::new(vec!["x".into(), "y".into()])),
+        vec![types::i32(), types::bool_type()],
+    );
+    for case in 0..7 {
+        let mut builder = FuncBuilder::new(
+            vec![(record.clone(), "r".into()), (types::i32(), "index".into())],
+            record.clone(),
+        );
+        let original = builder.get_param(0).into();
+        let mut operands = vec![
+            original,
+            ValueRef::Const(ConstantValue::I32(0)),
+            ValueRef::Const(ConstantValue::I32(7)),
+        ];
+        match case {
+            1 => operands[1] = ValueRef::Const(ConstantValue::I32(-1)),
+            2 => operands[1] = ValueRef::Const(ConstantValue::I32(2)),
+            3 => operands[1] = builder.get_param(1).into(),
+            4 => operands[2] = ValueRef::Const(ConstantValue::Bool(true)),
+            5 => {
+                operands.pop();
+            }
+            _ => {}
+        }
+        let result = builder
+            .push_inst(
+                InstKind::Op {
+                    tag: crate::op::OpTag::Intrinsic {
+                        id: crate::builtins::catalog().known().record_with,
+                        overload_idx: usize::from(case == 6),
+                    },
+                    operands,
+                },
+                record.clone(),
+            )
+            .unwrap();
+        builder.terminate(ssa::types::Terminator::Return(Some(result.into()))).unwrap();
+        assert_eq!(
+            super::check_body("record update test", &builder.finish_unchecked()).is_ok(),
+            case == 0
+        );
+    }
+}
+
 fn function_with(params: Vec<(Type<TypeName>, String)>, return_ty: Type<TypeName>) -> Function {
     let builder = FuncBuilder::new(params, return_ty);
     Function {
