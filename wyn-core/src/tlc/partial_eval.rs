@@ -964,6 +964,18 @@ fn remove_bound_symbols(bound: &mut LookupSet<SymbolId>, symbols: Vec<SymbolId>)
 /// Constant folding is a node-local residual-tree rewrite. The generic
 /// rewriter supplies the bottom-up traversal, preserves unchanged storage,
 /// and refreshes IDs only along changed paths.
+pub(super) fn fold_residual_constants(
+    mut term: Term<Empty, Empty>,
+    term_ids: &mut TermIdSource,
+) -> (Term<Empty, Empty>, bool) {
+    let mut evaluator = PartialEvaluator::new(LookupMap::default(), term_ids);
+    let changed = ResidualConstantFolder {
+        evaluator: &mut evaluator,
+    }
+    .rewrite_tracked(&mut term);
+    (term, changed)
+}
+
 struct ResidualConstantFolder<'e, 'ids> {
     evaluator: &'e mut PartialEvaluator<'ids>,
 }

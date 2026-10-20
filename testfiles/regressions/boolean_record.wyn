@@ -1,0 +1,4 @@
+type config = { enabled: bool, scale: f32 }
+
+entry check(config: config, xs: []f32) []f32 =
+  map(|x: f32| if config.enabled then x * config.scale else x, xs)

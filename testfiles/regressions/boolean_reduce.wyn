@@ -1,0 +1,4 @@
+entry check(x: f32) []i32 =
+  let positive = reduce(|a: bool, b: bool| a && b, true,
+    map(|v: f32| v > 0.0, [x])) in
+  [if positive then 1 else 0]

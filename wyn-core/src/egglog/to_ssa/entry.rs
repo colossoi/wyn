@@ -151,8 +151,10 @@ fn bind_parameters(
                     buffer_tag(binding),
                 )
             } else {
-                lower.compiler.facts.physical_type(&input.ty, false)?
+                lower.compiler.facts.physical_type(&input.ty, true)?
             };
+            // Resolve semantic layouts before replacing booleans in the ABI type.
+            input.ty = crate::ssa::layout::storage_value_type(&input.ty);
             let parameter =
                 lower.builder.func_mut().add_function_param(physical.clone(), input.name.clone());
             let mut value = Typed {

@@ -231,6 +231,57 @@ fn shaders(source: &str) -> naga::Module {
 }
 
 #[test]
+fn compiler_repro_local_array_capacity() {
+    shaders(include_str!(
+        "../../../testfiles/regressions/local_array_capacity.wyn"
+    ));
+    shaders(
+        "entry check(xs: []f32) [3]f32 =
+         reduce(|a: [3]f32, b: [3]f32| map(|(x,y)| x+y, zip(a,b)),
+                [0.0,0.0,0.0], map(|x| [x,x+1.0,x+2.0], xs))",
+    );
+}
+
+#[test]
+fn compiler_repro_boolean_record() {
+    shaders(include_str!("../../../testfiles/regressions/boolean_record.wyn"));
+    shaders(
+        "type config = { flags: { enabled: bool }, scale: f32 }
+         entry check(config: config, xs: []f32) []f32 =
+           map(|x| if config.flags.enabled then x*config.scale else x, xs)",
+    );
+}
+
+#[test]
+fn compiler_repro_boolean_reduce() {
+    let module = shaders(include_str!("../../../testfiles/regressions/boolean_reduce.wyn"));
+    let mut workgroup_arrays = 0;
+    for (_, global) in module.global_variables.iter() {
+        if global.space == naga::AddressSpace::WorkGroup {
+            let naga::TypeInner::Array { base, .. } = module.types[global.ty].inner else {
+                panic!("expected workgroup array");
+            };
+            assert_eq!(
+                module.types[base].inner,
+                naga::TypeInner::Scalar(naga::Scalar::U32)
+            );
+            workgroup_arrays += 1;
+        }
+    }
+    assert!(workgroup_arrays > 0);
+    shaders("entry check(xs: []bool) []bool = scan(|a: bool,b: bool| a && b, true, xs)");
+    shaders(
+        "entry check(xs: []i32) (bool,i32) =
+         reduce(|(a,n),(b,m)| (a && b,n+m), (true,0), map(|x| (x>0,1),xs))",
+    );
+}
+
+#[test]
+fn compiler_repro_record_update() {
+    shaders(include_str!("../../../testfiles/regressions/record_update.wyn"));
+}
+
+#[test]
 fn scalar_entry_reaches_both_backends() {
     let module = shaders("entry scalar(x:i32) i32=x+1");
     assert_eq!(module.entry_points.len(), 1);

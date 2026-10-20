@@ -267,7 +267,7 @@ pub(super) fn parameter_inputs(
         };
         inputs.push(EntryInput {
             name: param.name.clone(),
-            ty: storage_value_type(&canonical_storage_buffer_ty(ty)),
+            ty: canonical_storage_buffer_ty(ty),
             size_hint: extract_size_hint(param),
             kind,
         });

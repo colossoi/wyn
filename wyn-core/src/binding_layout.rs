@@ -45,7 +45,7 @@ pub fn runtime_sized_array_elem(ty: &Type<TypeName>) -> Option<(&Type<TypeName>,
         return None;
     }
     let elem = ty.elem_type()?;
-    let elem_bytes = ssa::layout::storage_elem_stride(elem)?;
+    let elem_bytes = ssa::layout::storage_elem_stride(&ssa::layout::storage_value_type(elem))?;
     Some((elem, elem_bytes))
 }
 
@@ -59,9 +59,11 @@ fn storage_array_elem(ty: &Type<TypeName>, consuming: bool) -> Option<(&Type<Typ
     }
     const PORTABLE_PUSH_CONSTANT_BYTES: u32 = 128;
     let elem = ty.elem_type()?;
-    let total_bytes = ssa::layout::type_byte_size(ty)?;
-    (consuming || total_bytes > PORTABLE_PUSH_CONSTANT_BYTES)
-        .then(|| ssa::layout::storage_elem_stride(elem).map(|stride| (elem, stride)))?
+    let total_bytes = ssa::layout::type_byte_size(&ssa::layout::storage_value_type(ty))?;
+    (consuming || total_bytes > PORTABLE_PUSH_CONSTANT_BYTES).then(|| {
+        ssa::layout::storage_elem_stride(&ssa::layout::storage_value_type(elem))
+            .map(|stride| (elem, stride))
+    })?
 }
 
 /// Walk an entry's params and produce the auto-storage binding layout.

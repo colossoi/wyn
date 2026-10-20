@@ -1,0 +1,4 @@
+entry check(xs: []f32) []f32 =
+  map(|x: f32|
+    let values = map(|i: i32| x + f32.i32(i), iota(3)) in
+    values[0], xs)

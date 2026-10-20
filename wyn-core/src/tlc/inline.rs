@@ -128,9 +128,11 @@ where
                 expand_values: unified,
             };
             let (body, inlined) = inliner.rewrite_owned_tracked(def.body);
+            // Helper expansion exposes constant dimensions needed by storage planning.
+            let (body, folded) = super::partial_eval::fold_residual_constants(body, &mut program.term_ids);
             let (body, normalized) =
                 if unified { normalize_values(body, &mut program.term_ids) } else { (body, false) };
-            changed |= inlined || normalized;
+            changed |= inlined || folded || normalized;
             Def { body, ..def }
         });
         super::dce::eliminate_unreachable_defs(&mut program.defs);
@@ -577,6 +579,8 @@ impl TermRewriter<Empty, Empty> for ValueNormalizer<'_> {
                     },
                     self.term_ids,
                 );
+                // Fold exposed projections before an enclosing record binding duplicates them.
+                let (body, _) = normalize_values(body, self.term_ids);
                 (body, RewriteDecision::Changed)
             }
             TermKind::TupleProj { tuple, idx } if matches!(&tuple.kind, TermKind::Tuple(values) if values.iter().all(is_structural_value)) =>

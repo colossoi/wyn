@@ -12,7 +12,10 @@ impl Body<'_, '_, '_> {
         self.op(
             OpTag::StorageView(PureViewSource::Workgroup { id, count }),
             vec![Self::number(0), Self::number(count)],
-            Self::view_type(element, types::no_buffer()),
+            Self::view_type(
+                &crate::ssa::layout::storage_value_type(element),
+                types::no_buffer(),
+            ),
         )
     }
 

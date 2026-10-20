@@ -34,6 +34,26 @@ fn operations(graph: &EGraph, kind: &str) -> Vec<Value> {
 }
 
 #[test]
+fn compiler_repro_local_capacity_plan() {
+    planned(
+        include_str!("../../../testfiles/regressions/local_array_capacity.wyn"),
+        |graph| {
+            let query = Query(graph);
+            let mut buffers = 0;
+            query
+                .for_each("LocalBuffer", |row| {
+                    let capacity = query.required("PhysicalLocalCapacity", (row[4],))?;
+                    assert_eq!(graph.value_to_base::<i64>(capacity), 3);
+                    buffers += 1;
+                    Ok(())
+                })
+                .unwrap();
+            assert!(buffers > 0);
+        },
+    );
+}
+
+#[test]
 fn result_tree_counts_are_available_to_fusion_choices() {
     for (source, expected) in [
         (
