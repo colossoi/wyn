@@ -1,0 +1,8 @@
+entry check(xs: []f32) f32 =
+  loop value = 0.0 for step < 2 do
+    let total = reduce(
+      |a: [3][3]f32, b: [3][3]f32|
+        map(|i: i32| map(|j: i32| a[i][j] + b[i][j], iota(3)), iota(3)),
+      replicate(3, replicate(3, 0.0)),
+      map(|x: f32| replicate(3, replicate(3, x + value)), xs)) in
+    total[0][0]

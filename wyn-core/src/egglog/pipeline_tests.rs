@@ -243,6 +243,49 @@ fn compiler_repro_local_array_capacity() {
 }
 
 #[test]
+fn compiler_repro_array_loop() {
+    shaders(include_str!("../../../testfiles/regressions/array_loop.wyn"));
+}
+
+#[test]
+fn compiler_repro_array_reduce() {
+    shaders(include_str!("../../../testfiles/regressions/array_reduce.wyn"));
+}
+
+#[test]
+fn compiler_repro_matrix_map() {
+    placement_shaders(
+        include_str!("../../../testfiles/regressions/matrix_map.wyn"),
+        |_| {},
+    );
+}
+
+#[test]
+fn compiler_repro_matrix_reduce_loop() {
+    placement_shaders(
+        include_str!("../../../testfiles/regressions/matrix_reduce_loop.wyn"),
+        |_| {},
+    );
+}
+
+#[test]
+fn local_array_layouts_support_rectangles_and_higher_rank() {
+    for source in [
+        "entry check(xs: []f32) []f32 =
+         map(|x: f32|
+           let a = map(|i: i32| map(|j: i32| x + f32.i32(i+j), iota(5)), iota(2)) in
+           a[1][4], xs)",
+        "entry check(xs: []f32) []f32 =
+         map(|x: f32|
+           let a = map(|i: i32| map(|j: i32|
+             map(|k: i32| x + f32.i32(i+j+k), iota(4)), iota(3)), iota(2)) in
+           a[1][2][3], xs)",
+    ] {
+        placement_shaders(source, |_| {});
+    }
+}
+
+#[test]
 fn compiler_repro_boolean_record() {
     shaders(include_str!("../../../testfiles/regressions/boolean_record.wyn"));
     shaders(

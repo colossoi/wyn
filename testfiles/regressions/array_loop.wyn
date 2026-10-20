@@ -1,0 +1,5 @@
+entry check(xs: []f32) []f32 =
+  map(|x: f32|
+    let result = loop values = replicate(3, x) for step < 2 do
+      map(|v: f32| v * 0.5, values) in
+    result[0], xs)

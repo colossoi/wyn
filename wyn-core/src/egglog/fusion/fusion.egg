@@ -6,7 +6,7 @@
 ; scan projection requires pure callbacks; composition records invocation routing.
 (ruleset fusion-dependencies)
 (rule ((SafePlan plan) (ScremaPlan plan))
-      ((FilterPostMapPlan plan)) :ruleset fusion-dependencies)
+      ((ReadOnlyScremaPlan plan)) :ruleset fusion-dependencies)
 (rule ((FilterPlan plan) (SafePlan plan))
       ((ReadOnlyFilterPlan plan)) :ruleset fusion-dependencies)
 ; Initialize only connected operations or operations sharing an iteration domain.
@@ -73,7 +73,7 @@
       ((Pair n p a c b)) :ruleset fusion-candidates)
 (rule ((Pair n p a c b) (FilterPlan a) (SafePlan b) (ScremaPlan b))
       ((FilterPostMapCompatible n p c)) :ruleset fusion-candidates)
-(rule ((Pair n p a c b) (ReadOnlyFilterPlan a) (FilterPostMapPlan b))
+(rule ((Pair n p a c b) (ReadOnlyFilterPlan a) (ReadOnlyScremaPlan b))
       ((FilterPostMapCompatible n p c)) :ruleset fusion-candidates)
 (relation ClearStream (i64 FusionGroup FusionGroup))
 (rule ((Pair n p a c b)
@@ -113,7 +113,9 @@
        (ClearStream n p c)
        (BarrierAllowed n p c))
       ((PlanCandidate n 0 p c)) :ruleset fusion-candidates)
-(rule ((Pair n p a c b) (ScremaPlan a) (ScremaPlan b) (StreamPlan a) (StreamPlan b)
+; Whole-domain streaming runs both callbacks once. Read-only callbacks may
+; contain local collectives; ClearStream and BarrierAllowed preserve effect order.
+(rule ((Pair n p a c b) (ScremaPlan a) (ScremaPlan b) (ReadOnlyScremaPlan a) (ReadOnlyScremaPlan b)
        (ClearStream n p c) (BarrierAllowed n p c))
       ((PlanCandidate n 0 p c)) :ruleset fusion-candidates)
 ; Independent operations over one domain share a traversal. Ignore obsolete
@@ -287,7 +289,7 @@
        (ElementPlan a) (SafePlan b) (ScremaPlan b))
       ((ElementPlan next)) :ruleset fusion-commit)
 (rule ((NewPlan n p c a b next) (Chosen n 6 p c)
-       (ReadOnlyFilterPlan a) (FilterPostMapPlan b))
+       (ReadOnlyFilterPlan a) (ReadOnlyScremaPlan b))
       ((ReadOnlyFilterPlan next)) :ruleset fusion-commit)
 (relation HasLengthObservers (i64 bool))
 (rule ((Chosen n family p c)
@@ -310,6 +312,9 @@
 (rule ((NewPlan n p c a b next) (Chosen n family p c) (<= family 1)
        (StreamPlan a) (StreamPlan b))
       ((StreamPlan next)) :ruleset fusion-commit)
+(rule ((NewPlan n p c a b next) (Chosen n family p c) (<= family 1)
+       (ReadOnlyScremaPlan a) (ReadOnlyScremaPlan b))
+      ((ReadOnlyScremaPlan next)) :ruleset fusion-commit)
 
 ; Apply only after the new plan and its composition records exist.
 (ruleset fusion-union)

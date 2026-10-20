@@ -23,7 +23,7 @@ impl Body<'_, '_, '_> {
             return Err(error("local domain missing"));
         };
         let allocations = self.compiler.local_buffers.get(&owner).cloned().unwrap_or_default();
-        for [role, index, element, extent] in allocations {
+        for [role, index, _element, extent] in allocations {
             let role = self.compiler.program.graph.value_to_base::<S>(role).to_string();
             let index = self.compiler.facts.integer(index);
             let Some(resource) = self.compiler.facts.slot(owner, &role, index) else {
@@ -34,10 +34,10 @@ impl Body<'_, '_, '_> {
             };
             let n = usize::try_from(self.compiler.facts.integer(n))
                 .map_err(|_| error("invalid local capacity"))?;
-            let Some(element) = self.compiler.facts.ty(element) else {
-                return Err(error("local element missing"));
+            let Some(layout) = self.compiler.facts.lookup("LocalElementLayout", (resource,)) else {
+                return Err(error(format!("local slot {role} has no planned element layout")));
             };
-            let ty = types::sized_array(n, self.compiler.facts.physical_type(element, false)?);
+            let ty = types::sized_array(n, self.compiler.facts.layout_type(layout)?);
             let place = self.builder.new_place(ty.clone());
             self.builder
                 .push_void_inst(InstKind::Alloca {

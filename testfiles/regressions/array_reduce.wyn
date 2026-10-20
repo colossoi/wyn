@@ -1,0 +1,6 @@
+entry check(xs: []f32) []f32 =
+  map(|x: f32|
+    let total = reduce(
+      |a: [3]f32, b: [3]f32| map(|i: i32| a[i] + b[i], iota(3)),
+      [0.0, 0.0, 0.0], map(|y: f32| [x * y, y, y * y], xs)) in
+    total[0], xs)

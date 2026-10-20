@@ -29,7 +29,7 @@
        (= value (SourceOperationValue op)) (= (SourceReadOnly value) true))
       ((StreamPlan (FusionSource op))) :ruleset source-fusion)
 (rule ((= (SourceOperation op) (OperationInfo r "filter")) (SafePlan (FusionSource op))) ((ElementPlan (FusionSource op))) :ruleset source-fusion)
-(rule ((SourceScrema op) (= value (SourceOperationValue op)) (= (SourceReadOnly value) true)) ((FilterPostMapPlan (FusionSource op))) :ruleset source-fusion)
+(rule ((SourceScrema op) (= value (SourceOperationValue op)) (= (SourceReadOnly value) true)) ((ReadOnlyScremaPlan (FusionSource op))) :ruleset source-fusion)
 (rule ((= (SourceOperation op) (OperationInfo r "filter")) (= value (SourceOperationValue op)) (= (SourceReadOnly value) true)) ((ReadOnlyFilterPlan (FusionSource op))) :ruleset source-fusion)
 ; Initialize group sets before merging uses into them during import.
 (rule ((SourceDepends consumer producer role) (= uses (GroupUsesOf (Group producer))))

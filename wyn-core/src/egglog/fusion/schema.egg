@@ -31,7 +31,7 @@
 (relation ElementPlan (FusionPlan))
 (relation SafePlan (FusionPlan))
 (relation StreamPlan (FusionPlan))
-(relation FilterPostMapPlan (FusionPlan))
+(relation ReadOnlyScremaPlan (FusionPlan))
 (relation ReadOnlyFilterPlan (FusionPlan))
 (relation FilterPostMapCompatible (i64 FusionGroup FusionGroup))
 (relation Member (FusionGroup OperationKey))

@@ -54,6 +54,73 @@ fn compiler_repro_local_capacity_plan() {
 }
 
 #[test]
+fn compiler_repro_nested_capacity_plan() {
+    for source in [
+        include_str!("../../../testfiles/regressions/array_loop.wyn"),
+        include_str!("../../../testfiles/regressions/array_reduce.wyn"),
+        include_str!("../../../testfiles/regressions/matrix_map.wyn"),
+        include_str!("../../../testfiles/regressions/matrix_reduce_loop.wyn"),
+    ] {
+        planned(source, |graph| {
+            let query = Query(graph);
+            let mut capacities = Vec::new();
+            query
+                .for_each("LocalBuffer", |row| {
+                    let capacity = query.required("PhysicalLocalCapacity", (row[4],))?;
+                    capacities.push(graph.value_to_base::<i64>(capacity));
+                    let slot = query.required("BufferSlot", (row[0], row[1], row[2]))?;
+                    query.required("LocalElementLayout", (slot,))?;
+                    Ok(())
+                })
+                .unwrap();
+            assert!(capacities.contains(&3));
+            assert!(capacities.iter().all(|&capacity| capacity == 1 || capacity == 3));
+        });
+    }
+}
+
+#[test]
+fn compiler_repro_array_reduce_preserves_effect_barrier() {
+    for source in [
+        include_str!("../../../testfiles/regressions/array_reduce.wyn"),
+        include_str!("../../../testfiles/regressions/matrix_reduce_loop.wyn"),
+    ] {
+        let tlc = compile_thru_tlc(source).unwrap();
+        for writer in [None, Some("producer"), Some("consumer")] {
+            let mut program = from_tlc(&tlc).unwrap();
+            let query = Query(&program.graph);
+            let reducer = operations(&program.graph, "reduce")[0];
+            let producer = query
+                .row("SourceDepends", |row| {
+                    row[0] == reducer && query.enode("Input", row[2]).unwrap().is_some()
+                })
+                .unwrap()
+                .unwrap()[1];
+            let value = query.required("SourceOperationValue", (reducer,)).unwrap();
+            if let Some(writer) = writer {
+                let operation = if writer == "producer" { producer } else { reducer };
+                let written = query.required("SourceOperationValue", (operation,)).unwrap();
+                program
+                    .graph
+                    .update(|mut sink| {
+                        sink.set("SourceReadOnly", (written,), false)?;
+                        sink.set("SourceSpeculatable", (written,), false)
+                    })
+                    .unwrap();
+            }
+            let program = fuse(program).unwrap();
+            let query = Query(&program.graph);
+            assert!(!query.flag("SourceSpeculatable", (value,)).unwrap());
+            assert_eq!(
+                query.required("SelectedPlan", (producer,)).unwrap()
+                    == query.required("SelectedPlan", (reducer,)).unwrap(),
+                writer.is_none()
+            );
+        }
+    }
+}
+
+#[test]
 fn result_tree_counts_are_available_to_fusion_choices() {
     for (source, expected) in [
         (
