@@ -52,7 +52,10 @@ pub(super) fn screma(
             body.literal("0", ty)?
         } else {
             let neutral = body.compiler.facts.neutral(operation)?;
-            body.value(scope, neutral)?
+            // Carry the selected value layout, not the seed's storage-view representation.
+            let layout = body.compiler.facts.value_layout(neutral)?;
+            let neutral = body.value(scope, neutral)?;
+            body.materialize(neutral, layout)?
         };
         accumulators.push(Accumulator::new(body, plan, source, operation, neutral)?);
     }
@@ -552,7 +555,7 @@ impl Accumulator {
             let increment = body.cast(keep, &state.ty)?;
             return body.binary(Add, state, increment);
         }
-        body.callback(scope, self.operation, vec![state, incoming])
+        self.combine(body, scope, state, incoming)
     }
 
     fn combine(
@@ -565,7 +568,10 @@ impl Accumulator {
         if self.count {
             body.binary(Add, a, b)
         } else {
-            body.callback(scope, self.operation, vec![a, b])
+            let neutral = body.compiler.facts.neutral(self.operation)?;
+            let layout = body.compiler.facts.value_layout(neutral)?;
+            let value = body.callback(scope, self.operation, vec![a, b])?;
+            body.materialize(value, layout)
         }
     }
 }

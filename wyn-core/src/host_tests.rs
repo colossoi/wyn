@@ -666,7 +666,8 @@ fn rust_buffer_arguments_keep_source_names_in_bindings_sizes_and_results() {
     let rust = program.to_rust_wgpu("map.wgsl", ShaderFormat::Wgsl).unwrap();
     assert!(rust.contains("buffer: &Buffer"), "{rust}");
     assert!(rust.contains("buffer.size()"));
-    assert!(rust.contains("resource: buffer.as_entire_binding()"));
+    assert!(rust.contains("buffer: &buffer,"));
+    assert!(rust.contains("size: wgpu::BufferSize::new(buffer.size())"));
 
     let program = compile("entry echo(samples:[]i32) []i32 = samples");
     let rust = program.to_rust_wgpu("echo.wgsl", ShaderFormat::Wgsl).unwrap();
@@ -759,7 +760,8 @@ fn rust_graphics_arguments_keep_buffer_texture_and_sampler_source_names() {
     ] {
         assert!(rust.contains(parameter), "missing {parameter} in {rust}");
     }
-    assert!(rust.contains("positions.as_entire_binding()"));
+    assert!(rust.contains("buffer: &positions,"));
+    assert!(rust.contains("size: wgpu::BufferSize::new(positions.size())"));
     let compact: String = rust.split_whitespace().collect();
     assert!(compact.contains("tex.create_view("));
     assert!(rust.contains("BindingResource::Sampler(&samp)"));
@@ -788,10 +790,7 @@ fn rust_argument_names_handle_keywords_and_generated_binding_collisions() {
         let rust = program.to_rust_wgpu("names.wgsl", ShaderFormat::Wgsl).unwrap();
         assert!(rust.contains(&format!("{parameter}: &Buffer")), "{rust}");
         assert!(rust.contains(&format!("{parameter}.size()")), "{rust}");
-        assert!(
-            rust.contains(&format!("resource: {parameter}.as_entire_binding()")),
-            "{rust}"
-        );
+        assert!(rust.contains(&format!("buffer: &{parameter},")), "{rust}");
     }
 }
 

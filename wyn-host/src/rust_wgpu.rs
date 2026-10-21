@@ -620,7 +620,13 @@ impl Program {
                 ));
             };
             let value = match binding {
-                Binding::StorageBuffer { .. } | Binding::Uniform { .. } => quote!(#id.as_entire_binding()),
+                Binding::StorageBuffer { .. } | Binding::Uniform { .. } => quote!(
+                    wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &#id,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(#id.size()),
+                    })
+                ),
                 Binding::Texture { view_dimension, .. } => {
                     let name = format_ident!("view_{}", b);
                     let d = match view_dimension {

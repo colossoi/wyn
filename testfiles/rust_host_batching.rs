@@ -82,7 +82,9 @@ mod tests {
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
             contents: &bytes,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_SRC,
+            // Vertex buffers have hidden Vulkan padding; storage bindings must exclude it.
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::UNIFORM
+                | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::VERTEX,
         })
     }
 
