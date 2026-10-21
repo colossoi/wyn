@@ -101,3 +101,39 @@ fn shader_writes_cannot_invalidate_cpu_parameters() {
     let error = backend.bind_groups(declaration, &[input], &[]).unwrap_err();
     assert!(error.to_string().contains("cannot be written by shaders"));
 }
+
+#[test]
+fn storage_array_length_excludes_vertex_buffer_padding() {
+    let source = r#"
+        (define-host-program :version 1)
+        (define-gpu-module 'shaders :format :wgsl :path "length.wgsl")
+        (define-gpu-kernel 'length :module 'shaders :entry "length"
+          :workgroup-size '(1 1 1)
+          :parameters '((input :buffer :read) (output :buffer :write :min-bytes 4))
+          :abi '((input :storage 0 0) (output :storage 0 1)))
+        (define-host-entry 'length :source-name "length" :function 'host-length
+          :parameters '((input :buffer :read))
+          :results '((output :buffer :write)))
+        (defun host-length (input)
+          (let ((output (gpu-alloc (i64 4))))
+            (gpu-dispatch 'length :groups (list (i64 1) (i64 1) (i64 1))
+              :args (list input output))
+            output))
+    "#;
+    let program = Program::parse(source).unwrap();
+    let (_, backend) = backend("(define-host-program :version 1)");
+    let shader = br#"
+        @group(0) @binding(0) var<storage, read> input: array<u32>;
+        @group(0) @binding(1) var<storage, read_write> output: array<u32>;
+        @compute @workgroup_size(1) fn length() { output[0] = arrayLength(&input); }
+    "#;
+    let sources = BTreeMap::from([("shaders".into(), shader.to_vec())]);
+    let mut backend = WgpuBackend::with_sources(backend.device, backend.queue, &program, &sources).unwrap();
+    for length in [1, 2, 3, 257] {
+        let input = backend.allocate_buffer(length * 4).unwrap();
+        assert!(backend.buffer(&input).unwrap().usage().contains(BufferUsages::VERTEX));
+        let output = program.run("length", &[input], &mut backend).unwrap();
+        let bytes = backend.read_buffer(&output, 0, 4).unwrap();
+        assert_eq!(u32::from_le_bytes(bytes.try_into().unwrap()), length as u32);
+    }
+}

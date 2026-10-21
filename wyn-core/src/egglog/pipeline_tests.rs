@@ -296,6 +296,29 @@ fn compiler_repro_nested_replicate() {
 }
 
 #[test]
+fn compiler_repro_tuple_reduce_seed() {
+    let source = include_str!("../../../testfiles/regressions/tuple_reduce_seed.wyn");
+    placement_shaders(source, |_| {});
+    for variant in [
+        source.replace("loop value = 0.0 for step < 2 do", "let value = 0.0 in"),
+        source.replace("map(|i: i32| a[i] + b[i], iota(3))", "zero"),
+        source.replace(
+            "let zero = replicate(3, 0.0) in",
+            "let values = replicate(5, 0.0) in let zero: [3]f32 = values[1..4] in",
+        ),
+        source
+            .replace("loop value = 0.0 for step < 2 do", "let value = 0.0 in")
+            .replace("let (total, _) = reduce(", "let scanned = scan(")
+            .replace(
+                "    total[0]",
+                "    let (total, _) = scanned[length(xs) - 1] in total[0]",
+            ),
+    ] {
+        placement_shaders(&variant, |_| {});
+    }
+}
+
+#[test]
 fn local_array_layouts_support_rectangles_and_higher_rank() {
     for source in [
         "entry check(xs: []f32) []f32 =

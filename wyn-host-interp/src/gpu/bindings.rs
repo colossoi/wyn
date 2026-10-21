@@ -196,7 +196,12 @@ impl WgpuBackend {
             }
             let resource = match self.resource(value)? {
                 Resource::Buffer(buffer, _) | Resource::ParameterBuffer { buffer, .. } => {
-                    buffer.as_entire_binding()
+                    // Vulkan vertex-buffer padding must not become shader-visible array elements.
+                    BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(buffer.size()),
+                    })
                 }
                 Resource::View { view, .. } => BindingResource::TextureView(view),
                 Resource::Sampler(sampler) => BindingResource::Sampler(sampler),

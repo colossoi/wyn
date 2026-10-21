@@ -19,7 +19,11 @@ pub(super) struct BoundaryTarget {
 }
 
 impl Body<'_, '_, '_> {
-    pub(super) fn materialize(&mut self, value: Typed, layout: Value) -> Result<Typed, OptimizeError> {
+    pub(in crate::egglog::to_ssa) fn materialize(
+        &mut self,
+        value: Typed,
+        layout: Value,
+    ) -> Result<Typed, OptimizeError> {
         self.materialize_component(value, layout, &[], None)
     }
 
