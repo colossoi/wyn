@@ -77,6 +77,18 @@
 (rule ((Projection e array i) (= (ValueRead array) (ReadView value))
        (= ty (SourceType e)) (SourceArrayElement ty element) (= n (ViewExtent array)))
       ((set (ViewExtent e) n)) :ruleset residency)
+; Element updates preserve their operand's length. A scalar loop retains its
+; initial extent only when its backedge preserves the state descriptor's length.
+(rule ((SourceResultOperand value index original) (= ty (SourceType value))
+       (= (SourceArraySize ty) (DynamicSize)) (= n (ViewExtent original)))
+      ((set (ViewExtent value) n)) :ruleset residency)
+(rule ((= (SourceLoop value) (LoopInfo header iteration))
+       (= ty (SourceType value)) (= (SourceArraySize ty) (DynamicSize))
+       (= op (SourceValueOperation value)) (= (ContainsCollective op) false)
+       (= (SourceLoopInitial header) (LoopInitialInfo state initial))
+       (SourceLoopBackedge header state next) (= n (ViewExtent state)) (= n (ViewExtent next))
+       (= extent (ViewExtent initial)))
+      ((set (ViewExtent value) extent)) :ruleset residency)
 ; A fixed logical dimension comes from its type. A dynamic dimension comes
 ; from the selected view, including slices and compacted live counts.
 (function LogicalExtent (SourceValue) Extent :no-merge)

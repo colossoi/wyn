@@ -12,6 +12,25 @@ fn generated(source: &str) -> Program {
 }
 
 #[test]
+fn runtime_array_loop_output_keeps_input_length() {
+    let source = include_str!("../../testfiles/regressions/triangulation_runtime_array_loop.wyn");
+    for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+        let ssa = compile_thru_ssa(source).unwrap();
+        let host = match format {
+            ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+            ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+        };
+        let program = Program::parse(&host.to_whl("loop", format).unwrap()).unwrap();
+        for length in [0, 1, 3, 65] {
+            let mut backend = Trace::default();
+            let input = backend.input(vec![0; length * 4]);
+            let result = program.run("main", &[input], &mut backend).unwrap();
+            assert_eq!(backend.buffers[&result.handle().unwrap()].len(), length * 4);
+        }
+    }
+}
+
+#[test]
 fn interprets_emitted_size_calculation_before_allocating_and_dispatching() {
     let program = generated("entry main(n:i32) []i32 = iota(n*2+3)");
     let mut backend = Trace::default();

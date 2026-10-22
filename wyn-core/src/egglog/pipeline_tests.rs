@@ -248,6 +248,23 @@ fn compiler_repro_array_loop() {
 }
 
 #[test]
+fn compiler_repro_runtime_array_loop() {
+    for source in [
+        include_str!("../../../testfiles/regressions/triangulation_runtime_array_loop.wyn"),
+        "entry main(xs:[]i32) []i32 = xs with [0] = xs[0]+1",
+        "entry main(xs:[]i32) []i32 =
+         loop out=xs while length(out)>0 && out[0]<4 do out with [0]=out[0]+1",
+        "entry main(xs:[]i32) []i32 =
+         loop out=xs for i<length(xs) do
+           loop inner=out for j<2 do inner with [i]=inner[i]+1",
+        "entry main(xs:[]i32) []i32 =
+         loop out=xs[1..length(xs)] for i<length(xs)-1 do out with [i]=out[i]+1",
+    ] {
+        shaders(source);
+    }
+}
+
+#[test]
 fn compiler_repro_array_reduce() {
     shaders(include_str!("../../../testfiles/regressions/array_reduce.wyn"));
 }

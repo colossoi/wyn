@@ -1,0 +1,4 @@
+-- Runtime array state retains its input extent across element updates.
+-- Expected main([3, 7, -2]) = [4, 8, -1], and main([]) = [].
+entry main(xs: []i32) []i32 =
+  loop out = xs for i < length(xs) do out with [i] = xs[i] + 1

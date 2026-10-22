@@ -34,6 +34,26 @@ fn operations(graph: &EGraph, kind: &str) -> Vec<Value> {
 }
 
 #[test]
+fn shrinking_loop_does_not_inherit_its_initial_extent() {
+    planned(
+        "entry main(xs:[]i32) []i32 =
+         loop out=xs for i<2 do out[0..length(out)-1]",
+        |graph| {
+            let query = Query(graph);
+            let mut loops = 0;
+            query
+                .for_function("SourceLoop", |row, _| {
+                    assert!(query.lookup("LogicalExtent", (row[0],))?.is_none());
+                    loops += 1;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(loops, 1);
+        },
+    );
+}
+
+#[test]
 fn compiler_repro_local_capacity_plan() {
     planned(
         include_str!("../../../testfiles/regressions/local_array_capacity.wyn"),
