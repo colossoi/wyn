@@ -2,7 +2,8 @@
 use crate::egglog::facts::Facts;
 use crate::egglog::query::Query;
 use crate::egglog::{output_error as error, OptimizeError, Optimized, Program};
-use crate::interface::{EntryOutput, EntryParamBindingKind};
+use crate::interface::publish::EntryOutput;
+use crate::interface::EntryParamBindingKind;
 use crate::tlc::extract_lambda_params_ref;
 use crate::tlc::DefMeta;
 use crate::types::{strip_existentials, Type, TypeName};

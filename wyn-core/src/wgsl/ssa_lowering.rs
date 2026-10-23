@@ -141,17 +141,6 @@ pub fn wgsl_mangle(name: &str) -> String {
     out
 }
 
-fn uniquify_parameter_name(base: String, used: &mut LookupSet<String>) -> String {
-    let mut candidate = base.clone();
-    let mut suffix = 1usize;
-    while used.contains(&candidate) {
-        candidate = format!("{}__p{}", base, suffix);
-        suffix += 1;
-    }
-    used.insert(candidate.clone());
-    candidate
-}
-
 /// Validate that a host-contract name is a legal WGSL identifier.
 pub fn validate_wgsl_identifier(name: &str) -> core::result::Result<(), String> {
     if name.is_empty() {
@@ -523,10 +512,8 @@ impl TypeEmitter {
                     err_wgsl!("WGSL does not support {}-bit scalars (found {:?})", bits, ty),
                 ),
                 TypeName::Unit => Ok("/* unit */".to_string()),
-                // Records are tuples with named fields by this point:
-                // construction and projection are index-based, so both
-                // share the positional struct lowering.
-                TypeName::Tuple(_) | TypeName::Record(_) => {
+                // Record labels have been erased at the SSA boundary.
+                TypeName::Tuple(_) => {
                     let elem_types: Result<Vec<String>> =
                         args.iter().map(|a| self.type_to_wgsl(a)).collect();
                     let elem_types = elem_types?;
@@ -941,13 +928,11 @@ impl<'a> LowerCtx<'a> {
         // Emit storage-dependent helpers once per distinct entry access
         // signature; ordinary helpers still have exactly one emission.
         for emission in self.function_variants.emissions().to_vec() {
-            self.current_entry = emission.entry_context;
+            self.current_entry = Some(emission.entry_context);
             self.current_storage_accesses =
-                self.function_variants.accesses_for(self.program, emission.entry_context);
-            self.current_function_names = emission
-                .entry_context
-                .map(|entry| self.function_variants.names_for_entry(entry).clone())
-                .unwrap_or_default();
+                self.function_variants.accesses_for(emission.entry_context).clone();
+            self.current_function_names =
+                self.function_variants.names_for_entry(emission.entry_context).clone();
             let function = self
                 .program
                 .functions
@@ -1318,7 +1303,7 @@ impl<'a> LowerCtx<'a> {
         let mut storage_images: LookupMap<BindingRef, String> = LookupMap::new();
         for entry in &self.program.entry_points {
             for input in &entry.inputs {
-                let Some((br, format, access, _size)) = input.storage_image_binding() else {
+                let Some((br, format, access)) = input.storage_image_binding() else {
                     continue;
                 };
                 let ty_str = format!(
@@ -1375,24 +1360,16 @@ impl<'a> LowerCtx<'a> {
         // trailing region argument, so indexing resolves the module-scope
         // buffer from the parameter type.
         let mut params = Vec::with_capacity(body.params().len());
-        let mut param_names = Vec::with_capacity(body.params().len());
-        let mut used_param_names = LookupSet::new();
-        for (value_id, ty, pname) in body.params() {
+        for (value_id, ty) in body.params() {
             let ty_str = self.type_emitter.type_to_wgsl(ty)?;
-            let base_name = self.mangle_tracked(pname)?;
-            let emitted_name = uniquify_parameter_name(base_name, &mut used_param_names);
+            let emitted_name = wgsl_var(value_id);
             params.push(format!("{}: {}", emitted_name, ty_str));
-            param_names.push((value_id, emitted_name));
         }
 
         writeln!(output, "fn {}({}) -> {} {{", name, params.join(", "), ret_ty)?;
         self.indent += 1;
 
         let mut body_ctx = BodyLowerCtx::new(self, body, func.span);
-        for (value_id, emitted_name) in param_names {
-            body_ctx.addressable.insert(emitted_name.clone());
-            body_ctx.value_map.insert(value_id, ValueBinding::Alias(emitted_name));
-        }
         let result = body_ctx.lower(output)?;
         writeln!(output, "{}return {};", self.indent_str(), result)?;
 
@@ -1419,8 +1396,8 @@ impl<'a> LowerCtx<'a> {
         let stage_is_fragment = matches!(entry.execution_model, ExecutionModel::Fragment);
 
         // Parameters: one per entry input. Each gets an attribute based on
-        // its decoration (@builtin(...) or @location(N)). The SSA body's
-        // params[i] shares the user-written name; we mangle for WGSL.
+        // its decoration (@builtin(...) or @location(N)). Interface names
+        // are mapped to the corresponding SSA parameter identities.
         //
         // When a builtin's WGSL-mandated type differs from Wyn's declared
         // type (e.g. vertex_index must be `u32`, but Wyn may declare it
@@ -1454,12 +1431,10 @@ impl<'a> LowerCtx<'a> {
             })?;
             let mut fields = Vec::new();
             for ((i, inp), &offset) in pc_inputs.iter().zip(&layout.member_offsets) {
-                let raw_name =
-                    body.param(*i).map(|(_, _, name)| name.to_owned()).unwrap_or_else(|| inp.name.clone());
                 // Mangle through the same pass the rest of the backend
                 // uses — raw user names may collide with WGSL reserved
                 // words like `target` or `loop`.
-                let field_name = self.mangle_tracked(&raw_name)?;
+                let field_name = self.mangle_tracked(&inp.name)?;
                 let ty_str = self.type_emitter.type_to_wgsl(&inp.ty)?;
                 let Some(slot) = inp.push_constant() else {
                     return Err(err_wgsl!(
@@ -1490,7 +1465,7 @@ impl<'a> LowerCtx<'a> {
             None
         };
 
-        for (i, input) in entry.inputs.iter().enumerate() {
+        for input in &entry.inputs {
             // Storage-backed inputs (compute shader runtime-sized array
             // params) become module-scope bindings, not function params.
             if input.storage_binding().is_some() {
@@ -1517,8 +1492,7 @@ impl<'a> LowerCtx<'a> {
             {
                 continue;
             }
-            let param_name =
-                body.param(i).map(|(_, _, name)| name.to_owned()).unwrap_or_else(|| input.name.clone());
+            let param_name = &input.name;
             let mangled_name = self.mangle_tracked(&param_name)?;
             let user_ty_str = self.type_emitter.type_to_wgsl(&input.ty)?;
             let (attr, param_ty_str, internal_name) = match input.decoration() {
@@ -1581,7 +1555,7 @@ impl<'a> LowerCtx<'a> {
                     ));
                 }
                 if non_storage_outputs.len() == 1 {
-                    let (out_index, out) = non_storage_outputs[0];
+                    let (_, out) = non_storage_outputs[0];
                     let ty_str = self.type_emitter.type_to_wgsl(&out.ty)?;
                     let attr = match out.decoration() {
                         Some(IoDecoration::BuiltIn(b)) => {
@@ -1593,7 +1567,6 @@ impl<'a> LowerCtx<'a> {
                         Some(IoDecoration::Location(n)) => format!("@location({}) ", n),
                         // A `#[target(name)]` render output takes its color
                         // attachment slot from its position in the return tuple.
-                        None if out.target().is_some() => format!("@location({}) ", out_index),
                         None => String::new(),
                     };
                     (format!("{}{}", attr, ty_str), false)
@@ -1615,7 +1588,6 @@ impl<'a> LowerCtx<'a> {
                                 format!("@builtin({}) ", wgsl_b)
                             }
                             Some(IoDecoration::Location(n)) => format!("@location({}) ", n),
-                            None if out.target().is_some() => format!("@location({}) ", orig_index),
                             None => {
                                 return Err(err_wgsl!(
                                     "entry '{}' output #{} has no decoration; multi-output \
@@ -1764,6 +1736,11 @@ impl<'a> LowerCtx<'a> {
         }
 
         let mut body_ctx = BodyLowerCtx::new(self, body, entry.span);
+        for ((value_id, _), input) in body.params().zip(&entry.inputs) {
+            let name = body_ctx.ctx.mangle_tracked(&input.name)?;
+            body_ctx.addressable.insert(name.clone());
+            body_ctx.value_map.insert(value_id, ValueBinding::Alias(name));
+        }
         if let Some((_, index_to_field)) = &multi_output_struct {
             body_ctx.output_target_names = index_to_field.clone();
         }
@@ -1772,7 +1749,7 @@ impl<'a> LowerCtx<'a> {
         // WGSL; the body refers to them as `<pc_var>.<field>` instead.
         if let Some(pc) = &pc_block {
             for field in &pc.fields {
-                if let Some((value_id, _, _)) = body.param(field.input_index) {
+                if let Some((value_id, _)) = body.param(field.input_index) {
                     let expr = format!("{}.{}", pc.var_name, field.wgsl_name);
                     body_ctx.addressable.insert(expr.clone());
                     body_ctx.value_map.insert(value_id, ValueBinding::Alias(expr));
@@ -2035,10 +2012,9 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 InstKind::Op {
                     tag: op::OpTag::BinOp(_)
                         | op::OpTag::UnaryOp(_)
-                        | op::OpTag::Tuple(_)
-                        | op::OpTag::Vector(_)
-                        | op::OpTag::Matrix { .. }
-                        | op::OpTag::ArrayLit(_)
+                        | op::OpTag::Tuple
+                        | op::OpTag::Vector
+                        | op::OpTag::ArrayLit
                         | op::OpTag::Project { .. }
                         | op::OpTag::Intrinsic { .. },
                     ..
@@ -2250,16 +2226,13 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     }
 
     fn lower(&mut self, output: &mut String) -> Result<String> {
-        // Seed parameter names into value_map. Callers (entry-point
-        // lowering) may have pre-inserted entries for params routed
-        // through module-scope bindings (e.g. push-constant inputs →
-        // `<block_var>.<field>`); skip those so the mangled name
-        // doesn't clobber the override.
-        for (value_id, _, name) in self.body.params() {
+        // Parameters use SSA identifiers unless entry lowering has assigned
+        // an interface alias, such as a push-constant block member.
+        for (value_id, _) in self.body.params() {
             if self.value_map.contains_key(&value_id) {
                 continue;
             }
-            let mangled = self.ctx.mangle_tracked(name)?;
+            let mangled = wgsl_var(value_id);
             self.value_map.insert(value_id, ValueBinding::Alias(mangled.clone()));
             self.addressable.insert(mangled);
         }
@@ -2267,7 +2240,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             let ssa::types::PlaceOrigin::Parameter { index } = info.origin else {
                 continue;
             };
-            let (parameter, _, _) = self.body.param(index).ok_or_else(|| {
+            let (parameter, _) = self.body.param(index).ok_or_else(|| {
                 err_wgsl_at!(
                     self.func_span,
                     "place parameter {:?} names missing physical parameter {}",
@@ -2322,8 +2295,9 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     match &inst.data {
                         // Alloca: `var<function> x: T;` — register the
                         // local var's name as the place expression.
-                        InstKind::Alloca { elem_ty, result } => {
-                            let ty = self.ctx.type_emitter.type_to_wgsl(elem_ty)?;
+                        InstKind::Alloca { result } => {
+                            let ty =
+                                self.ctx.type_emitter.type_to_wgsl(self.body.place_elem_ty(*result))?;
                             let var = wgsl_place(*result);
                             writeln!(output, "{}var {}: {};", self.ctx.indent_str(), var, ty)?;
                             self.addressable.insert(var.clone());
@@ -2360,7 +2334,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             })?;
                             let expr = if matches!(
                                 self.body.place_elem_ty(*place),
-                                PolyType::Constructed(TypeName::Tuple(_) | TypeName::Record(_), _)
+                                PolyType::Constructed(TypeName::Tuple(_), _)
                             ) {
                                 let Some(field) = self.resolve_const_u32(*index) else {
                                     return Err(err_wgsl_at!(
@@ -2552,7 +2526,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             let result_ty = self.body.get_value_type(result_id);
                             let ty = self.ctx.type_emitter.type_to_wgsl(result_ty)?;
                             if self.body.value_ref_type(record) != *result_ty {
-                                let PolyType::Constructed(TypeName::Record(_), fields) = result_ty else {
+                                let PolyType::Constructed(TypeName::Tuple(_), fields) = result_ty else {
                                     return Err(err_wgsl_at!(
                                         self.blame_span(),
                                         "record update requires a record"
@@ -2994,7 +2968,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     Ok(format!("({}{})", op, inner))
                 }
 
-                op::OpTag::Tuple(_) => {
+                op::OpTag::Tuple => {
                     if operands.is_empty() {
                         return Err(err_wgsl_at!(
                             self.blame_span(),
@@ -3009,7 +2983,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     Ok(format!("{}({})", struct_name, parts?.join(", ")))
                 }
 
-                op::OpTag::Vector(_) => {
+                op::OpTag::Vector => {
                     let parts: Result<Vec<_>> = operands.iter().map(|e| self.get_value(*e)).collect();
                     let ty = result_ty
                         .as_ref()
@@ -3018,7 +2992,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     Ok(format!("{}({})", wgsl_ty, parts?.join(", ")))
                 }
 
-                op::OpTag::ArrayLit(_) => {
+                op::OpTag::ArrayLit => {
                     let parts: Result<Vec<_>> = operands.iter().map(|e| self.get_value(*e)).collect();
                     let ty = result_ty.as_ref().ok_or_else(|| {
                         err_wgsl_at!(self.blame_span(), "ArrayLit must have a result type")
@@ -3099,19 +3073,6 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         }
                     }
                     Ok(format!("{}[{}]", base_val, index_val))
-                }
-
-                op::OpTag::Global(global_id) => {
-                    let constant = self
-                        .ctx
-                        .program
-                        .constants
-                        .iter()
-                        .find(|constant| constant.id == *global_id)
-                        .ok_or_else(|| {
-                            err_wgsl_at!(self.blame_span(), "unknown global constant {}", global_id)
-                        })?;
-                    self.ctx.mangle_tracked(&constant.name)
                 }
 
                 op::OpTag::Call(function_id) => {
@@ -3442,11 +3403,6 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     let _ = elem_str;
                     Ok(format!("{}({}, {}, {})", struct_name, start_s, step_s, len_s))
                 }
-
-                op::OpTag::Matrix { .. } => Err(err_wgsl_at!(
-                    self.blame_span(),
-                    "Matrix literals are not yet implemented in WGSL lowering"
-                )),
 
                 // Materialize is handled in emit_nodes so it becomes a
                 // `var<function>` (subscriptable) instead of a `let`.

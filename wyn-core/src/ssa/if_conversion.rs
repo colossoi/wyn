@@ -216,7 +216,7 @@ fn cheap_cost(body: &FuncBody, instruction: InstId) -> Option<usize> {
         return None;
     }
     match tag {
-        OpTag::Int(_) | OpTag::Uint(_) | OpTag::Float(_) | OpTag::Bool(_) | OpTag::Vector(_) => {
+        OpTag::Int(_) | OpTag::Uint(_) | OpTag::Float(_) | OpTag::Bool(_) | OpTag::Vector => {
             return Some(0)
         }
         OpTag::BinOp(_) | OpTag::UnaryOp(_) => {}

@@ -84,26 +84,6 @@ impl std::fmt::Display for FunctionId {
     }
 }
 
-/// Stable compiler-internal identity of a program-level constant.
-///
-/// Constants have their own realm because their source semantics are values;
-/// a backend may choose to implement one as a zero-argument function without
-/// turning it into a function identity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct GlobalId(u32);
-
-impl From<u32> for GlobalId {
-    fn from(index: u32) -> Self {
-        Self(index)
-    }
-}
-
-impl std::fmt::Display for GlobalId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "global#{}", self.0)
-    }
-}
-
 /// Stable compiler-internal identity of an entry point.
 ///
 /// The entry's source/emitted name remains host-facing ABI metadata. Internal

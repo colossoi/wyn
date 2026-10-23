@@ -52,10 +52,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         let Some(context) = compiler.facts.context(scope) else {
             return Err(error("function has no scalar context"));
         };
-        let builder = FuncBuilder::new(
-            parameters.iter().enumerate().map(|(i, ty)| (ty.clone(), format!("arg{i}"))).collect(),
-            result,
-        );
+        let builder = FuncBuilder::new(parameters.clone(), result);
         let mut values = Bindings::default();
         for (i, ty) in parameters.into_iter().enumerate() {
             let Some(source) = compiler.facts.parameter(scope, i as i64) else {
@@ -281,11 +278,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                 }
                 "ExprTuple" | "ExprVector" => {
                     let args = self.arguments(scope, fields[2])?;
-                    let tag = if name == "ExprTuple" {
-                        OpTag::Tuple(args.len())
-                    } else {
-                        OpTag::Vector(args.len())
-                    };
+                    let tag = if name == "ExprTuple" { OpTag::Tuple } else { OpTag::Vector };
                     let ty =
                         if let Type::Constructed(name @ (TypeName::Tuple(_) | TypeName::Record(_)), _) =
                             types::strip_existentials(&ty)

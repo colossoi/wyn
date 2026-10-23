@@ -40,7 +40,7 @@ fn composite_array_ty() -> Type<TypeName> {
 }
 
 fn empty_program() -> ssa::stage::Bare {
-    Program::bare(Vec::new(), Vec::new(), Vec::new())
+    Program::bare(Vec::new(), Vec::new())
 }
 
 #[test]
@@ -49,10 +49,10 @@ fn select_validation_rejects_wrong_condition_value_types_arity_and_aggregates() 
     for case in 0..6 {
         let mut builder = FuncBuilder::new(
             vec![
-                (types::bool_type(), "c".into()),
-                (types::i32(), "x".into()),
-                (types::f32(), "y".into()),
-                (types::sized_array(3, types::i32()), "a".into()),
+                types::bool_type(),
+                types::i32(),
+                types::f32(),
+                types::sized_array(3, types::i32()),
             ],
             types::i32(),
         );
@@ -90,15 +90,9 @@ fn select_validation_rejects_wrong_condition_value_types_arity_and_aggregates() 
 #[test]
 fn record_update_validation_checks_field_index_and_types() {
     use crate::ssa::types::{ConstantValue, InstKind, ValueRef};
-    let record = Type::Constructed(
-        TypeName::Record(crate::ast::RecordFields::new(vec!["x".into(), "y".into()])),
-        vec![types::i32(), types::bool_type()],
-    );
+    let record = Type::Constructed(TypeName::Tuple(2), vec![types::i32(), types::bool_type()]);
     for case in 0..7 {
-        let mut builder = FuncBuilder::new(
-            vec![(record.clone(), "r".into()), (types::i32(), "index".into())],
-            record.clone(),
-        );
+        let mut builder = FuncBuilder::new(vec![record.clone(), types::i32()], record.clone());
         let original = builder.get_param(0).into();
         let mut operands = vec![
             original,
@@ -135,7 +129,7 @@ fn record_update_validation_checks_field_index_and_types() {
     }
 }
 
-fn function_with(params: Vec<(Type<TypeName>, String)>, return_ty: Type<TypeName>) -> Function {
+fn function_with(params: Vec<Type<TypeName>>, return_ty: Type<TypeName>) -> Function {
     let builder = FuncBuilder::new(params, return_ty);
     Function {
         id: FunctionId::from_index(0),
@@ -146,7 +140,7 @@ fn function_with(params: Vec<(Type<TypeName>, String)>, return_ty: Type<TypeName
     }
 }
 
-fn entry_with(params: Vec<(Type<TypeName>, String)>, return_ty: Type<TypeName>) -> EntryPoint {
+fn entry_with(params: Vec<Type<TypeName>>, return_ty: Type<TypeName>) -> EntryPoint {
     let builder = FuncBuilder::new(params, return_ty);
     EntryPoint {
         id: EntryId::from_index(0),
@@ -171,7 +165,7 @@ fn entry_with(params: Vec<(Type<TypeName>, String)>, return_ty: Type<TypeName>) 
 #[test]
 fn rejects_abstract_on_function_param() {
     let mut program = empty_program();
-    program.functions.push(function_with(vec![(abstract_array_ty(), "xs".into())], i32_ty()));
+    program.functions.push(function_with(vec![abstract_array_ty()], i32_ty()));
 
     let err = verify_no_abstract_types(&program).expect_err("Abstract param must be rejected");
     match err {
@@ -190,7 +184,7 @@ fn rejects_abstract_on_function_param() {
 #[test]
 fn rejects_abstract_on_entry_param() {
     let mut program = empty_program();
-    program.entry_points.push(entry_with(vec![(abstract_array_ty(), "xs".into())], i32_ty()));
+    program.entry_points.push(entry_with(vec![abstract_array_ty()], i32_ty()));
 
     let err = verify_no_abstract_types(&program).expect_err("Abstract entry param must be rejected");
     assert!(matches!(err, CompilerError::TypeError(_, _)));
@@ -203,7 +197,7 @@ fn rejects_abstract_nested_in_tuple() {
     let tuple_with_abstract = Type::Constructed(TypeName::Tuple(2), vec![i32_ty(), abstract_array_ty()]);
 
     let mut program = empty_program();
-    program.functions.push(function_with(vec![(tuple_with_abstract, "t".into())], i32_ty()));
+    program.functions.push(function_with(vec![tuple_with_abstract], i32_ty()));
 
     let err = verify_no_abstract_types(&program).expect_err("nested Abstract must be rejected");
     assert!(matches!(err, CompilerError::TypeError(_, _)));
@@ -233,9 +227,9 @@ fn accepts_concrete_variants() {
     );
 
     let mut program = empty_program();
-    program.functions.push(function_with(vec![(composite_array_ty(), "c".into())], i32_ty()));
-    program.functions.push(function_with(vec![(view_arr, "v".into())], i32_ty()));
-    program.functions.push(function_with(vec![(bounded_arr, "b".into())], i32_ty()));
+    program.functions.push(function_with(vec![composite_array_ty()], i32_ty()));
+    program.functions.push(function_with(vec![view_arr], i32_ty()));
+    program.functions.push(function_with(vec![bounded_arr], i32_ty()));
 
     verify_no_abstract_types(&program).expect("concrete variants must pass the verifier");
 }
@@ -244,4 +238,59 @@ fn accepts_concrete_variants() {
 #[test]
 fn accepts_empty_program() {
     verify_no_abstract_types(&empty_program()).expect("empty program passes");
+}
+
+#[test]
+fn program_boundary_normalizes_nested_body_and_interface_types() {
+    use crate::interface::{
+        BindingExposure, EntryInput, EntryInputKind, EntryOutput, EntryOutputKind, StorageAccess,
+        StorageBindingDecl, StorageRole,
+    };
+    use crate::ssa::types::{PlaceInfo, PlaceOrigin};
+    let wrapped = Type::Constructed(
+        TypeName::Existential(vec!["n".into()]),
+        vec![Type::Constructed(
+            TypeName::Record(ast::RecordFields::new(vec!["field".into()])),
+            vec![i32_ty()],
+        )],
+    );
+    let mut entry = entry_with(vec![wrapped.clone()], wrapped.clone());
+    let place = entry.body.places.insert(PlaceInfo {
+        elem_ty: wrapped.clone(),
+        origin: PlaceOrigin::Instruction,
+    });
+    let binding = crate::BindingRef::new(0, 0);
+    entry.inputs.push(EntryInput {
+        name: "input".into(),
+        ty: wrapped.clone(),
+        host: (),
+        kind: EntryInputKind::Storage {
+            exposure: BindingExposure::Host(binding),
+            access: StorageAccess::ReadOnly,
+        },
+    });
+    entry.outputs.push(EntryOutput {
+        ty: wrapped.clone(),
+        host: (),
+        kind: EntryOutputKind::Storage {
+            exposure: BindingExposure::Host(binding),
+        },
+    });
+    entry.storage_bindings.push(StorageBindingDecl {
+        binding,
+        role: StorageRole::Input,
+        elem_ty: wrapped.clone(),
+        host: (),
+    });
+    let program = Program::bare(vec![function_with(vec![wrapped.clone()], wrapped)], vec![entry]);
+    let expected = types::tuple(vec![i32_ty()]);
+    let entry = &program.entry_points[0];
+    for body in [&entry.body, &program.functions[0].body] {
+        assert_eq!(body.return_ty, expected);
+        assert_eq!(body.get_value_type(body.param(0).unwrap().0), &expected);
+    }
+    assert_eq!(entry.body.place_elem_ty(place), &expected);
+    assert_eq!(entry.inputs[0].ty, expected);
+    assert_eq!(entry.outputs[0].ty, expected);
+    assert_eq!(entry.storage_bindings[0].elem_ty, expected);
 }

@@ -4,7 +4,7 @@ use super::*;
 fn constant_selections_preserve_chosen_arguments_and_remove_only_unreachable_definitions() {
     for condition in [Some(false), Some(true), None] {
         let mut f = Function::new();
-        let input = f.add_function_param((), "condition".into());
+        let input = f.add_function_param(());
         let yes = f.create_block();
         let no = f.create_block();
         let merge = f.create_block();

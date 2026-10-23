@@ -20,9 +20,6 @@ pub fn promote_addressable_constants<Tag, GlobalContext>(program: &mut Program<T
     for entry in &mut program.entry_points {
         promote_body(&mut entry.body, table);
     }
-    for constant in &mut program.constants {
-        promote_body(&mut constant.body, table);
-    }
 }
 
 fn promote_body(body: &mut FuncBody, table: &mut Vec<AddressableConstant>) {
@@ -82,14 +79,12 @@ fn constant_tree(body: &FuncBody, value: ValueRef) -> Option<AddressableConstant
                 OpTag::Uint(value) => AddressableConstantKind::Unsigned(value.clone()),
                 OpTag::Float(value) => AddressableConstantKind::Float(value.clone()),
                 OpTag::Bool(value) => AddressableConstantKind::Bool(*value),
-                OpTag::Tuple(_) | OpTag::Vector(_) | OpTag::ArrayLit(_) | OpTag::Matrix { .. } => {
-                    AddressableConstantKind::Composite(
-                        operands
-                            .iter()
-                            .map(|operand| constant_tree(body, *operand))
-                            .collect::<Option<Vec<_>>>()?,
-                    )
-                }
+                OpTag::Tuple | OpTag::Vector | OpTag::ArrayLit => AddressableConstantKind::Composite(
+                    operands
+                        .iter()
+                        .map(|operand| constant_tree(body, *operand))
+                        .collect::<Option<Vec<_>>>()?,
+                ),
                 _ => return None,
             };
             Some(AddressableConstantValue { ty, kind })

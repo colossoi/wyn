@@ -22,7 +22,7 @@ fn number(value: i32) -> ValueRef {
 #[test]
 fn forwarding_chains_rewrite_instructions_returns_and_edges_in_dominator_order() {
     let mut f = Function::new();
-    let input = f.add_function_param((), "input".into());
+    let input = f.add_function_param(());
     // Deliberately create the consumer before its predecessor.
     let last = f.create_block();
     let first = f.create_block();
@@ -64,7 +64,7 @@ fn forwarding_chains_rewrite_instructions_returns_and_edges_in_dominator_order()
 #[test]
 fn single_input_continue_and_exit_params_disappear_but_loop_carried_values_remain() {
     let mut f = Function::new();
-    let condition = f.add_function_param((), "condition".into());
+    let condition = f.add_function_param(());
     let header = f.create_block();
     let body = f.create_block();
     let continuing = f.create_block();
@@ -122,7 +122,7 @@ fn single_input_continue_and_exit_params_disappear_but_loop_carried_values_remai
 #[test]
 fn distinct_merge_inputs_remain_while_branch_parameters_are_substituted() {
     let mut f = Function::<Instruction, ()>::new();
-    let condition = f.add_function_param((), "condition".into());
+    let condition = f.add_function_param(());
     let left = f.create_block();
     let right = f.create_block();
     let merge = f.create_block();
@@ -166,7 +166,7 @@ fn distinct_merge_inputs_remain_while_branch_parameters_are_substituted() {
 #[test]
 fn two_edges_from_one_predecessor_do_not_count_as_one_input() {
     let mut f = Function::<Instruction, ()>::new();
-    let condition = f.add_function_param((), "condition".into());
+    let condition = f.add_function_param(());
     let merge = f.create_block();
     let result = f.add_block_param(merge, ());
     f.blocks[f.entry].term = Terminator::CondBranch {

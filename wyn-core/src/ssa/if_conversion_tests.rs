@@ -6,15 +6,8 @@ use crate::ssa::types::ConstantValue;
 use crate::types::{self, Type};
 
 fn diamond(ty: Type) -> (FuncBody, BlockId, BlockId, BlockId) {
-    let mut body = FuncBuilder::new(
-        vec![
-            (bool_type(), "c".into()),
-            (ty.clone(), "x".into()),
-            (ty.clone(), "y".into()),
-        ],
-        ty.clone(),
-    )
-    .finish_unchecked();
+    let mut body =
+        FuncBuilder::new(vec![bool_type(), ty.clone(), ty.clone()], ty.clone()).finish_unchecked();
     let h = body.inner.entry;
     let yes = body.inner.create_block();
     let no = body.inner.create_block();
@@ -187,7 +180,7 @@ fn select_conversion_rejects_memory_partial_math_derivatives_and_expensive_math(
 
 #[test]
 fn select_folding_keeps_eager_nondiscardable_producers() {
-    let mut body = FuncBuilder::new(vec![(types::i32(), "x".into())], types::i32()).finish_unchecked();
+    let mut body = FuncBuilder::new(vec![types::i32()], types::i32()).finish_unchecked();
     let h = body.inner.entry;
     let called = body.inner.append_inst(
         h,

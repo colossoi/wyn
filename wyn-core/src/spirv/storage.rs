@@ -97,7 +97,7 @@ impl Constructor {
         self.polytype_to_spirv(ty)?;
 
         let result = match ty {
-            PolyType::Constructed(TypeName::Tuple(_) | TypeName::Record(_), members) => {
+            PolyType::Constructed(TypeName::Tuple(_), members) => {
                 let Some(layout) = ssa::layout::block_layout(ty, interface::StorageLayout::Std430) else {
                     return Err(err_spirv!(
                         "storage buffer element {:?} has no supported std430 struct layout",
@@ -170,7 +170,7 @@ impl Constructor {
         let (source_ty, destination_ty) =
             if add_decorations { (logical_ty, storage_ty) } else { (storage_ty, logical_ty) };
         match ty {
-            PolyType::Constructed(TypeName::Tuple(_) | TypeName::Record(_), members) => {
+            PolyType::Constructed(TypeName::Tuple(_), members) => {
                 let mut converted_members = Vec::with_capacity(members.len());
                 for (index, member) in members.iter().enumerate() {
                     let source_member_ty = if add_decorations {

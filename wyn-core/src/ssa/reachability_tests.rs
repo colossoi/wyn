@@ -1,29 +1,25 @@
-use super::{retain_reachable, Definition};
+use super::retain_reachable;
 use crate::ssa;
 
 use crate::ast::{Span, TypeName};
 use crate::flow::ExecutionModel;
 use crate::op::OpTag;
 use crate::ssa::builder::FuncBuilder;
-use crate::ssa::types::{Constant, EntryPoint, Function, InstKind, Program, Terminator};
-use crate::{EntryId, FunctionId, GlobalId, LookupMap};
+use crate::ssa::types::{EntryPoint, Function, InstKind, Program, Terminator};
+use crate::{EntryId, FunctionId, LookupMap};
 use polytype::Type;
 
 fn unit_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Unit, vec![])
 }
 
-fn body(references: &[Definition]) -> ssa::types::FuncBody {
+fn body(references: &[FunctionId]) -> ssa::types::FuncBody {
     let mut builder = FuncBuilder::new(vec![], unit_ty());
     for reference in references {
-        let tag = match reference {
-            Definition::Function(id) => OpTag::Call(*id),
-            Definition::Constant(id) => OpTag::Global(*id),
-        };
         builder
             .push_inst(
                 InstKind::Op {
-                    tag,
+                    tag: OpTag::Call(*reference),
                     operands: vec![],
                 },
                 unit_ty(),
@@ -34,7 +30,7 @@ fn body(references: &[Definition]) -> ssa::types::FuncBody {
     builder.finish().unwrap()
 }
 
-fn function(id: FunctionId, name: &str, references: &[Definition]) -> Function {
+fn function(id: FunctionId, name: &str, references: &[FunctionId]) -> Function {
     Function {
         id,
         name: name.into(),
@@ -44,15 +40,7 @@ fn function(id: FunctionId, name: &str, references: &[Definition]) -> Function {
     }
 }
 
-fn constant(id: GlobalId, name: &str, references: &[Definition]) -> Constant {
-    Constant {
-        id,
-        name: name.into(),
-        body: body(references),
-    }
-}
-
-fn entry(references: &[Definition]) -> EntryPoint {
+fn entry(references: &[FunctionId]) -> EntryPoint {
     EntryPoint {
         id: EntryId::from_index(0),
         name: "main".into(),
@@ -71,49 +59,25 @@ fn entry(references: &[Definition]) -> EntryPoint {
 }
 
 #[test]
-fn follows_calls_and_globals_to_a_fixpoint_while_preserving_order() {
+fn follows_calls_to_a_fixpoint_while_preserving_order() {
     let dead = FunctionId::from_index(0);
     let leaf = FunctionId::from_index(1);
     let root = FunctionId::from_index(2);
-    let from_constant = FunctionId::from_index(3);
-    let dead_constant = GlobalId::from(0);
-    let nested_constant = GlobalId::from(1);
-    let live_constant = GlobalId::from(2);
-
+    let other = FunctionId::from_index(3);
     let program = Program::bare(
         vec![
             function(dead, "dead", &[]),
             // Mutual recursion also terminates at the visited set.
-            function(leaf, "leaf", &[Definition::Function(root)]),
-            function(root, "root", &[Definition::Function(leaf)]),
-            function(from_constant, "from_constant", &[]),
+            function(leaf, "leaf", &[root, other]),
+            function(root, "root", &[leaf]),
+            function(other, "other", &[]),
         ],
-        vec![entry(&[
-            Definition::Function(root),
-            Definition::Constant(live_constant),
-        ])],
-        vec![
-            constant(dead_constant, "dead_constant", &[Definition::Function(dead)]),
-            constant(nested_constant, "nested_constant", &[Definition::Function(leaf)]),
-            constant(
-                live_constant,
-                "live_constant",
-                &[
-                    Definition::Function(from_constant),
-                    Definition::Constant(nested_constant),
-                ],
-            ),
-        ],
+        vec![entry(&[root])],
     );
-
     let reachable = retain_reachable(program);
     assert_eq!(
         reachable.functions.iter().map(|function| function.name.as_str()).collect::<Vec<_>>(),
-        ["leaf", "root", "from_constant"]
-    );
-    assert_eq!(
-        reachable.constants.iter().map(|constant| constant.name.as_str()).collect::<Vec<_>>(),
-        ["nested_constant", "live_constant"]
+        ["leaf", "root", "other"]
     );
 }
 
@@ -137,7 +101,7 @@ fn ignores_definition_references_in_disconnected_blocks() {
 
     let mut main = entry(&[]);
     main.body = builder.finish().unwrap();
-    let program = Program::bare(vec![function(dead, "dead", &[])], vec![main], vec![]);
+    let program = Program::bare(vec![function(dead, "dead", &[])], vec![main]);
 
     let reachable = retain_reachable(program);
     assert!(reachable.functions.is_empty());

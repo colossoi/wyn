@@ -51,13 +51,11 @@ fn is_discardable(instruction: &InstKind) -> bool {
                 | OpTag::Float(_)
                 | OpTag::Bool(_)
                 | OpTag::Unit
-                | OpTag::Global(_)
                 | OpTag::BinOp(_)
                 | OpTag::UnaryOp(_)
-                | OpTag::Tuple(_)
-                | OpTag::Vector(_)
-                | OpTag::Matrix { .. }
-                | OpTag::ArrayLit(_)
+                | OpTag::Tuple
+                | OpTag::Vector
+                | OpTag::ArrayLit
                 | OpTag::ArrayRange { .. }
                 | OpTag::Project { .. }
                 | OpTag::Index

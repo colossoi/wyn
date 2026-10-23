@@ -13,10 +13,9 @@ use crate::host::{
     ModuleInterface, Pipeline, ShaderStage,
 };
 use crate::host::{DispatchLoop, ScalarExpr, ScalarSource, ScalarTask, ScalarType};
-use crate::interface::publish::{reconcile_storage_binding_access, ModuleInterfacePublish};
+use crate::interface::publish::{reconcile_storage_binding_access, EntryPoint, ModuleInterfacePublish};
 use crate::interface::results::result_layout;
 use crate::interface::{DrawBufferOperand, SourceResult};
-use crate::ssa::types::EntryPoint;
 use crate::tlc::extract_lambda_params_ref;
 use crate::tlc::DefMeta;
 use crate::types::{self, strip_existentials, Type, TypeExt, TypeName};

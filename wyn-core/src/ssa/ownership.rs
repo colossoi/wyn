@@ -15,7 +15,6 @@ pub(super) fn apply(program: &mut super::stage::Reachable) {
         .iter_mut()
         .map(|f| &mut f.body)
         .chain(program.entry_points.iter_mut().map(|e| &mut e.body))
-        .chain(program.constants.iter_mut().map(|c| &mut c.body))
     {
         promote_updates(body);
     }

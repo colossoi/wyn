@@ -24,7 +24,7 @@ fn representation_lowering_makes_view_updates_explicit_without_selecting_local_r
         (composite, crate::builtins::catalog().known().array_with),
         (view, crate::builtins::catalog().known().array_with_in_place),
     ] {
-        let mut builder = FuncBuilder::new(vec![(ty.clone(), "xs".into())], ty.clone());
+        let mut builder = FuncBuilder::new(vec![ty.clone()], ty.clone());
         let source = builder.get_param(0);
         let result = builder
             .push_inst(
@@ -191,7 +191,7 @@ fn assert_division_sites(source: &str, expected: usize) -> crate::ssa::stage::Pl
 
 #[test]
 fn dynamic_array_materialization_is_shared_outside_the_loop() {
-    let mut body = FuncBuilder::new(vec![(sized_array(128, i32()), "xs".into())], i32()).finish_unchecked();
+    let mut body = FuncBuilder::new(vec![sized_array(128, i32())], i32()).finish_unchecked();
     let entry = body.inner.entry;
     let array = body.inner.params[0];
     let loop_body = body.inner.create_block();
@@ -412,7 +412,7 @@ fn partial_intrinsic_reuse_respects_dominance_and_loop_carried_operands() {
 
 #[test]
 fn dead_instruction_worklist_removes_long_chains() {
-    let mut body = FuncBuilder::new(vec![(i32(), "x".into())], i32()).finish_unchecked();
+    let mut body = FuncBuilder::new(vec![i32()], i32()).finish_unchecked();
     let x = body.inner.params[0].into();
     let mut value = x;
     for _ in 0..4096 {

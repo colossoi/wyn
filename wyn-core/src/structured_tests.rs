@@ -6,7 +6,7 @@ use crate::types::{bool_type, unit};
 
 #[test]
 fn sibling_selections_do_not_accumulate_recursion_depth() {
-    let mut builder = FuncBuilder::new(vec![(bool_type(), "condition".into())], unit());
+    let mut builder = FuncBuilder::new(vec![bool_type()], unit());
     let condition = builder.get_param(0);
     for _ in 0..128 {
         let header = builder.current_block().unwrap();

@@ -76,12 +76,7 @@ impl Body<'_, '_, '_> {
             let n = self.compiler.facts.integer(fields[0]);
             let element = self.compiler.facts.layout_type(fields[1])?;
             let place = self.builder.new_place(ty.clone());
-            self.builder
-                .push_void_inst(InstKind::Alloca {
-                    elem_ty: ty.clone(),
-                    result: place,
-                })
-                .map_err(builder_error)?;
+            self.builder.push_void_inst(InstKind::Alloca { result: place }).map_err(builder_error)?;
             let zero = self.literal("0", &types::i32())?;
             let length = self.literal(&n.to_string(), &types::i32())?;
             let one = self.literal("1", &types::i32())?;
@@ -134,7 +129,7 @@ impl Body<'_, '_, '_> {
                 return Err(error("tuple layout has no aggregate type"));
             };
             let ty = types::Type::Constructed(name, values.iter().map(|v| v.ty.clone()).collect());
-            return self.op(OpTag::Tuple(values.len()), values, ty);
+            return self.op(OpTag::Tuple, values, ty);
         }
         if !path.is_empty() {
             return Err(error("component view requires an array layout"));
@@ -254,7 +249,7 @@ impl Body<'_, '_, '_> {
                     return Err(error("boundary result is not an aggregate"));
                 };
                 let ty = types::Type::Constructed(name, fields.iter().map(|v| v.ty.clone()).collect());
-                self.op(OpTag::Tuple(fields.len()), fields, ty)
+                self.op(OpTag::Tuple, fields, ty)
             }
         }
     }

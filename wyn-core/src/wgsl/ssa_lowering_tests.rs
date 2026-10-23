@@ -4,7 +4,7 @@
 // retains the parent module's unwrap/expect bans.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use super::{uniquify_parameter_name, validate_wgsl_identifier, wgsl_mangle, TypeEmitter};
+use super::{validate_wgsl_identifier, wgsl_mangle, TypeEmitter};
 use crate::ast::TypeName;
 use crate::compile_thru_ssa;
 use crate::err_spirv;
@@ -15,7 +15,6 @@ use crate::ssa;
 use crate::types;
 use crate::wgsl;
 use crate::CodegenTarget;
-use crate::LookupSet;
 use polytype::Type as PolyType;
 
 // ---------- wgsl_mangle: per-char cases ----------
@@ -296,7 +295,6 @@ fn lower_empty_program_succeeds() {
     let program = ssa::types::Program::<ssa::stage::WgslReadyTag, _>::from_parts(
         Vec::new(),
         Vec::new(),
-        Vec::new(),
         ssa::context::BackendGlobal {
             pipeline: Default::default(),
             target: CodegenTarget::Wgsl,
@@ -345,13 +343,7 @@ fn wgsl_scope_tree_owns_loop_exports_and_preserves_state_swaps() {
         tag: OpTag::BinOp(op),
         operands: vec![a, b],
     };
-    let mut builder = FuncBuilder::new(
-        vec![
-            (types::bool_type(), "condition".into()),
-            (int.clone(), "limit".into()),
-        ],
-        int.clone(),
-    );
+    let mut builder = FuncBuilder::new(vec![types::bool_type(), int.clone()], int.clone());
     let yes = builder.create_block();
     let no = builder.create_block();
     let merge = builder.create_block();
@@ -476,7 +468,6 @@ fn wgsl_scope_tree_owns_loop_exports_and_preserves_state_swaps() {
     let program = ssa::types::Program::<ssa::stage::WgslReadyTag, _>::from_parts(
         vec![],
         vec![],
-        vec![],
         ssa::context::BackendGlobal {
             pipeline: Default::default(),
             target: CodegenTarget::Wgsl,
@@ -484,7 +475,11 @@ fn wgsl_scope_tree_owns_loop_exports_and_preserves_state_swaps() {
     );
     let mut ctx = super::LowerCtx::new(&program, Default::default());
     let mut emitter = super::BodyLowerCtx::new(&mut ctx, &body, Span::generated());
-    let mut wgsl = "fn test(w_condition: bool, w_limit: i32) -> i32 {\n".to_owned();
+    let mut wgsl = format!(
+        "fn test({}: bool, {}: i32) -> i32 {{\n",
+        super::wgsl_var(body.param(0).unwrap().0),
+        super::wgsl_var(body.param(1).unwrap().0)
+    );
     let returned = emitter.lower(&mut wgsl).unwrap();
     wgsl.push_str(&format!("return {returned};\n}}\n"));
     validate_wgsl(&wgsl);
@@ -1036,26 +1031,6 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
     );
 }
 #[test]
-fn size_hint_large_bumps_workgroup_to_256() {
-    // size_hint > 64K should pick a workgroup of 256 (per
-    // `pick_workgroup_size`); the choice has to land on the shader's
-    // `@workgroup_size` directive, not just the host descriptor.
-    let wgsl = compile_to_wgsl(
-        r#"
-entry sum_array(#[size_hint(100000)] data: []f32) f32 =
-    reduce(|a: f32, b: f32| a + b, 0.0, data)
-"#,
-    )
-    .expect("compile");
-    assert!(
-        wgsl.contains("@workgroup_size(256, 1, 1)"),
-        "size_hint(100000) should select workgroup_size=256 in the emitted WGSL, \
-         got:\n{}",
-        wgsl
-    );
-}
-
-#[test]
 fn reductions_default_to_a_cooperative_workgroup() {
     let wgsl = compile_to_wgsl(
         r#"
@@ -1342,13 +1317,6 @@ entry frame(c: block,
         wgsl.contains("var<uniform>"),
         "expected a compiler-assigned structural uniform capture, got:\n{wgsl}"
     );
-}
-#[test]
-fn duplicate_emitted_parameter_names_are_uniquified() {
-    let mut used = LookupSet::new();
-    assert_eq!(uniquify_parameter_name("w_i".into(), &mut used), "w_i");
-    assert_eq!(uniquify_parameter_name("w_i".into(), &mut used), "w_i__p1");
-    assert_eq!(uniquify_parameter_name("w_i".into(), &mut used), "w_i__p2");
 }
 
 fn stores_binding(module: &naga::Module, group: u32, binding: u32) -> bool {

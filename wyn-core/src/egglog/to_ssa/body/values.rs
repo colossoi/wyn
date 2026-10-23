@@ -30,7 +30,7 @@ impl Body<'_, '_, '_> {
             let function = self.builder.func();
             if let ValueDef::Inst { inst } = function.values[id].def {
                 if let InstKind::Op {
-                    tag: OpTag::Tuple(_),
+                    tag: OpTag::Tuple,
                     operands,
                 } = &function.insts[inst].data
                 {
@@ -165,7 +165,7 @@ impl Body<'_, '_, '_> {
                     fields.push(self.cast(field, target)?);
                 }
                 let ty = Type::Constructed(name.clone(), fields.iter().map(|f| f.ty.clone()).collect());
-                return self.op(OpTag::Tuple(fields.len()), fields, ty);
+                return self.op(OpTag::Tuple, fields, ty);
             }
         }
         if *ty == bool_type() {
@@ -213,7 +213,7 @@ impl Body<'_, '_, '_> {
     }
     pub(in crate::egglog::to_ssa) fn tuple(&mut self, values: Vec<Typed>) -> Result<Typed, OptimizeError> {
         let ty = types::tuple(values.iter().map(|value| value.ty.clone()).collect());
-        self.op(OpTag::Tuple(values.len()), values, ty)
+        self.op(OpTag::Tuple, values, ty)
     }
     pub fn number(n: u32) -> Typed {
         Typed {

@@ -10,7 +10,6 @@ use crate::interface;
 use crate::ssa;
 use crate::EntryId;
 use crate::FunctionId;
-use crate::GlobalId;
 use crate::ResourceAccess;
 use wspirv as builder;
 mod entry;
@@ -126,7 +125,6 @@ struct Constructor {
     current_functions: LookupMap<FunctionId, spirv::Word>,
     emitted_functions: LookupMap<FunctionEmissionId, spirv::Word>,
     entry_functions: LookupMap<EntryId, spirv::Word>,
-    globals: LookupMap<GlobalId, spirv::Word>,
 
     /// Storage-image globals: (set, binding) -> (image `OpVariable`, image type).
     /// Predeclared from entry resource metadata before function bodies are
@@ -196,7 +194,6 @@ impl Constructor {
             current_functions: LookupMap::new(),
             emitted_functions: LookupMap::new(),
             entry_functions: LookupMap::new(),
-            globals: LookupMap::new(),
             storage_images: LookupMap::new(),
             global_invocation_id: None,
             local_invocation_id: None,
@@ -368,15 +365,6 @@ impl Constructor {
 // SSA to SPIR-V Lowering
 // =============================================================================
 
-/// Lower a constant definition body to module-level SPIR-V constants.
-///
-/// Walks instructions in order, emitting OpConstant/OpConstantComposite.
-/// Lower an SSA function body to SPIR-V.
-///
-/// This creates a SPIR-V function from the SSA representation:
-/// - SSA blocks become SPIR-V blocks
-/// - Block parameters become OpPhi nodes
-/// - Terminators become branch instructions
 /// Map a `StorageImageFormat` from the descriptor to the matching
 /// SPIR-V `ImageFormat` literal used in `OpTypeImage`. Kept in lock-step
 /// with the wgpu side: every format we emit here must also be allocated
@@ -446,25 +434,13 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
         constructor.emitted_functions.insert(emission.id, id);
     }
 
-    // Forward-declare program-level constants too. Each is a zero-arg
-    // function whose body returns the folded literal; consumer bodies
-    // reach them via `InstKind::Global(name)`, which looks up
-    // `Constructor.functions`. Without this step the SPIR-V emit
-    // fails with "Unknown global: <name>" whenever a non-constant
-    // initializer (function call etc.) references a hoisted pure
-    // constant.
-    for constant in &program.constants {
-        let id = constructor.reserve_function();
-        constructor.globals.insert(constant.id, id);
-    }
-
     // Forward-declare extern (linked) functions with Import linkage
     for func in &program.functions {
         if let Some(linkage_name) = &func.linkage_name {
             let body = &func.body;
             let param_types = body
                 .params()
-                .map(|(_, ty, _)| constructor.polytype_to_spirv(ty))
+                .map(|(_, ty)| constructor.polytype_to_spirv(ty))
                 .collect::<Result<Vec<_>>>()?;
             let return_type = constructor.polytype_to_spirv(&body.return_ty)?;
             let func_id =
@@ -533,14 +509,14 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
     let mut image_access: LookupMap<BindingRef, interface::StorageAccess> = LookupMap::new();
     for entry in &program.entry_points {
         for input in &entry.inputs {
-            if let Some((br, _format, access, _size)) = input.storage_image_binding() {
+            if let Some((br, _format, access)) = input.storage_image_binding() {
                 image_access.entry(br).and_modify(|acc| *acc = acc.merge(access)).or_insert(access);
             }
         }
     }
     for entry in &program.entry_points {
         for input in &entry.inputs {
-            if let Some((br, format, _access, _size)) = input.storage_image_binding() {
+            if let Some((br, format, _access)) = input.storage_image_binding() {
                 constructor.create_storage_image(br, format, image_access[&br]);
             }
         }
@@ -562,36 +538,11 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
         }
 
         constructor.select_storage_accesses(
-            &function_variants.accesses_for(program, emission.entry_context),
-            emission.entry_context,
+            function_variants.accesses_for(emission.entry_context),
+            Some(emission.entry_context),
         );
-        constructor.select_functions(function_variants.emissions_for_context(emission.entry_context));
+        constructor.select_functions(function_variants.emissions_for_entry(emission.entry_context));
         lower_ssa_function(&mut constructor, func, emission.id)?;
-    }
-
-    // Lower program-level constants as zero-arg functions. Their
-    // forward-declared IDs are already in `Constructor.functions`
-    // (the loop above ran before any body lowering); now emit the
-    // body so calls to `Global(name)` from other functions resolve.
-    constructor.select_storage_accesses(&function_variants.accesses_for(program, None), None);
-    constructor.select_functions(function_variants.emissions_for_context(None));
-    for constant in &program.constants {
-        let return_type = constructor.polytype_to_spirv(&constant.body.return_ty)?;
-        let (_, param_ids, first_code_block) =
-            constructor.begin_function(Some(constructor.globals[&constant.id]), &[], return_type)?;
-        lower::LowerCtx::new(
-            &mut constructor,
-            &constant.body,
-            false,
-            None,
-            Span::generated(),
-            param_ids,
-            LookupMap::new(),
-            first_code_block,
-        )
-        .lower()
-        .map_err(|e| err_spirv!("in constant '{}': {}", constant.name, e))?;
-        constructor.end_function()?;
     }
 
     // Lower each entry under its own storage-access map. When entries use the
@@ -718,7 +669,7 @@ fn lower_ssa_function(
 
     // Convert function parameter types to their SPIR-V representations.
     let param_types =
-        body.params().map(|(_, ty, _)| constructor.polytype_to_spirv(ty)).collect::<Result<Vec<_>>>()?;
+        body.params().map(|(_, ty)| constructor.polytype_to_spirv(ty)).collect::<Result<Vec<_>>>()?;
 
     let return_type = constructor.polytype_to_spirv(&body.return_ty)?;
 

@@ -18,7 +18,7 @@ impl VisitValues for TestInstruction {
 fn schedules_reachable_dependencies_once_and_discards_unreachable_values() {
     let mut function = Function::<TestInstruction, ()>::new();
     let entry = function.entry;
-    let parameter = function.add_function_param((), "x".into());
+    let parameter = function.add_function_param(());
     let loop_body = function.create_block();
     let loop_parameter = function.add_block_param(loop_body, ());
     function.blocks[entry].term = Terminator::Branch {

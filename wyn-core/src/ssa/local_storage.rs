@@ -24,7 +24,6 @@ pub(super) fn apply(program: &mut Reachable) -> Result<()> {
         .iter_mut()
         .map(|f| &mut f.body)
         .chain(program.entry_points.iter_mut().map(|e| &mut e.body))
-        .chain(program.constants.iter_mut().map(|c| &mut c.body))
     {
         bufferize(body)?;
     }
@@ -34,7 +33,7 @@ pub(super) fn apply(program: &mut Reachable) -> Result<()> {
 
 fn fields(ty: &Type) -> Option<&[Type]> {
     match ty {
-        Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), xs) => Some(xs),
+        Type::Constructed(TypeName::Tuple(_), xs) => Some(xs),
         _ => None,
     }
 }
@@ -59,7 +58,7 @@ fn op(
 fn project(body: &mut FuncBody, block: BlockId, value: ValueRef, index: usize, ty: Type) -> ValueRef {
     if let Some(inst) = value.as_ssa().and_then(|v| body.inner.inst_of_value(v)) {
         if let InstKind::Op {
-            tag: OpTag::Tuple(_),
+            tag: OpTag::Tuple,
             operands,
         } = &body.inner.insts[inst].data
         {
@@ -87,7 +86,7 @@ fn flatten_arg(body: &mut FuncBody, block: BlockId, value: ValueRef, ty: &Type, 
 fn flatten_param(body: &mut FuncBody, block: BlockId, ty: &Type) -> ValueRef {
     if let Some(xs) = fields(ty).filter(|_| contains_local_array(ty)) {
         let values = xs.iter().map(|ty| flatten_param(body, block, ty)).collect();
-        op(body, block, OpTag::Tuple(xs.len()), values, ty.clone())
+        op(body, block, OpTag::Tuple, values, ty.clone())
     } else {
         body.inner.add_block_param(block, ty.clone()).into()
     }
@@ -179,7 +178,7 @@ fn split_parameters(body: &mut FuncBody) {
             {
                 if let Some(base) = operands[0].as_ssa().and_then(|v| body.inner.inst_of_value(v)) {
                     if let InstKind::Op {
-                        tag: OpTag::Tuple(_),
+                        tag: OpTag::Tuple,
                         operands,
                     } = &body.inner.insts[base].data
                     {
@@ -426,22 +425,15 @@ fn allocate(
         let Some(sources) = origins.get(&root).filter(|xs| !xs.is_empty()) else {
             continue;
         };
-        let ty = body.get_value_type(root).clone();
         let existing = existing.get(&root).copied();
         let place = existing.unwrap_or_else(|| {
             let place = body.places.insert(PlaceInfo {
-                elem_ty: ty.clone(),
+                elem_ty: body.get_value_type(root).clone(),
                 origin: PlaceOrigin::Instruction,
             });
             let entry = body.inner.entry;
             let tail = std::mem::take(&mut body.inner.blocks[entry].insts);
-            body.inner.append_void_inst(
-                entry,
-                InstKind::Alloca {
-                    elem_ty: ty,
-                    result: place,
-                },
-            );
+            body.inner.append_void_inst(entry, InstKind::Alloca { result: place });
             body.inner.blocks[entry].insts.extend(tail);
             place
         });

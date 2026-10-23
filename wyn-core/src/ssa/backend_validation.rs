@@ -31,10 +31,9 @@ use crate::ssa::types::{ConstantValue, FuncBody, InstKind, Program};
 use crate::types;
 use polytype::Type;
 
-/// Walk every value type in every function body, every entry body, and
-/// every program-level constant body. Reject any `Array[_, Abstract,
+/// Walk every value type in every function and entry body. Reject any `Array[_, Abstract,
 /// _, _]`. The first offending value is returned as a `TypeError`; the
-/// message names the function/entry/constant and the value index so the
+/// message names the function/entry and the value index so the
 /// user can locate the source span via `--output-mir`.
 pub fn verify_no_abstract_types<Tag, GlobalContext>(program: &Program<Tag, GlobalContext>) -> Result<()> {
     for func in &program.functions {
@@ -42,9 +41,6 @@ pub fn verify_no_abstract_types<Tag, GlobalContext>(program: &Program<Tag, Globa
     }
     for entry in &program.entry_points {
         check_body(&format!("entry `{}`", entry.name), &entry.body)?;
-    }
-    for constant in &program.constants {
-        check_body(&format!("constant `{}`", constant.name), &constant.body)?;
     }
     Ok(())
 }
@@ -62,7 +58,7 @@ fn check_body(scope: &str, body: &FuncBody) -> Result<()> {
                         let ty = body.get_value_type(result);
                         match (ty, index.as_const()) {
                             (
-                                Type::Constructed(name @ TypeName::Record(_), fields),
+                                Type::Constructed(name @ TypeName::Tuple(_), fields),
                                 Some(ConstantValue::I32(index)),
                             ) => {
                                 if let (Type::Constructed(base_name, base_fields), Ok(index)) =
@@ -113,8 +109,8 @@ fn check_body(scope: &str, body: &FuncBody) -> Result<()> {
     }
     // Params first — the most common failure surface (a non-inlined
     // size-poly helper carrying an Abstract param).
-    for (i, (_, ty, name)) in body.params().enumerate() {
-        check_ty(ty, &format!("{} param #{} `{}`", scope, i, name))?;
+    for (i, (_, ty)) in body.params().enumerate() {
+        check_ty(ty, &format!("{} param #{}", scope, i))?;
     }
     check_ty(&body.return_ty, &format!("{} return type", scope))?;
     // Every SSA value's type.

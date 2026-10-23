@@ -13,7 +13,7 @@ fn promotion_precedes_dce_and_detaches_the_constructor_tree() {
     let vector = builder
         .push_inst(
             InstKind::Op {
-                tag: OpTag::Vector(2),
+                tag: OpTag::Vector,
                 operands: vec![
                     ValueRef::Const(ConstantValue::from_f32(1.0)),
                     ValueRef::Const(ConstantValue::from_f32(2.0)),

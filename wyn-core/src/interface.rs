@@ -30,7 +30,7 @@ use crate::{host::Access as DescriptorAccess, BindingRef, ResourceAccess, Symbol
 ///
 /// Covers shader-stage markers (`Vertex`/`Fragment`/`Compute`), resource
 /// bindings (`Storage`/`Uniform`), IO decorations (`BuiltIn`/`Location`),
-/// and compiler hints (`SizeHint`/`Linked`).
+/// compiler hints (`SizeHint`), and external linkage (`Linked`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Attribute<V = ViewAttribute> {
     BuiltIn(spirv::BuiltIn),
@@ -103,10 +103,8 @@ pub enum Attribute<V = ViewAttribute> {
     /// attribute (with the resource's derived `(set, binding)` and
     /// `format`/`size`) before type checking, so later passes never see it.
     View(V),
-    /// Hint for the expected size of a dynamic array (in elements).
-    /// Used for parallelization decisions. Ignored on non-arrays or
-    /// statically sized arrays. `NonZeroU32` encodes that
-    /// `#[size_hint(0)]` is meaningless and rejected by the parser.
+    /// Expected dynamic-array length in elements. Retained through egglog as
+    /// source metadata; currently unused by planning and omitted from SSA.
     SizeHint(std::num::NonZeroU32),
     /// Linked SPIR-V function - the string is the linkage name for spirv-link
     Linked(String),
@@ -342,23 +340,12 @@ pub enum BindingExposure {
     Internal,
 }
 
-/// Where a sampled texture gets its backing allocation.
+/// Shader input. `Host` carries allocation metadata only until publication.
 #[derive(Debug, Clone)]
-pub enum TextureSource {
-    External,
-    Backing(BindingRef),
-    Resource {
-        name: String,
-        backing: Option<BindingRef>,
-    },
-}
-
-/// Lowered input metadata shared by compiler IRs.
-#[derive(Debug, Clone)]
-pub struct EntryInput<Ty = Type> {
+pub struct EntryInput<Host = ()> {
     pub name: String,
-    pub ty: Ty,
-    pub size_hint: Option<std::num::NonZeroU32>,
+    pub ty: Type,
+    pub host: Host,
     pub kind: EntryInputKind,
 }
 
@@ -370,7 +357,6 @@ pub enum EntryInputKind {
     Storage {
         exposure: BindingExposure,
         access: StorageAccess,
-        length: Option<host::BufferLen>,
     },
     Uniform {
         binding: BindingRef,
@@ -380,7 +366,6 @@ pub enum EntryInputKind {
     },
     Texture {
         binding: BindingRef,
-        source: TextureSource,
     },
     Sampler {
         binding: BindingRef,
@@ -389,12 +374,10 @@ pub enum EntryInputKind {
         binding: BindingRef,
         format: host::StorageImageFormat,
         access: StorageAccess,
-        size: host::StorageTextureSize,
-        resource: Option<String>,
     },
 }
 
-impl<Ty> EntryInput<Ty> {
+impl<Host> EntryInput<Host> {
     /// Descriptor slot occupied by this input, if it has one. Push constants
     /// and shader I/O values do not consume descriptor bindings.
     pub fn descriptor_binding(&self) -> Option<BindingRef> {
@@ -440,13 +423,6 @@ impl<Ty> EntryInput<Ty> {
         }
     }
 
-    pub fn storage_length(&self) -> Option<&host::BufferLen> {
-        match &self.kind {
-            EntryInputKind::Storage { length, .. } => length.as_ref(),
-            _ => None,
-        }
-    }
-
     pub fn make_storage_internal(&mut self) {
         if let EntryInputKind::Storage { exposure, .. } = &mut self.kind {
             *exposure = BindingExposure::Internal;
@@ -474,13 +450,6 @@ impl<Ty> EntryInput<Ty> {
         }
     }
 
-    pub fn texture_source(&self) -> Option<&TextureSource> {
-        match &self.kind {
-            EntryInputKind::Texture { source, .. } => Some(source),
-            _ => None,
-        }
-    }
-
     pub fn sampler_binding(&self) -> Option<BindingRef> {
         match self.kind {
             EntryInputKind::Sampler { binding } => Some(binding),
@@ -488,38 +457,23 @@ impl<Ty> EntryInput<Ty> {
         }
     }
 
-    pub fn storage_image_binding(
-        &self,
-    ) -> Option<(
-        BindingRef,
-        host::StorageImageFormat,
-        StorageAccess,
-        host::StorageTextureSize,
-    )> {
+    pub fn storage_image_binding(&self) -> Option<(BindingRef, host::StorageImageFormat, StorageAccess)> {
         match self.kind {
             EntryInputKind::StorageImage {
                 binding,
                 format,
                 access,
-                size,
-                ..
-            } => Some((binding, format, access, size)),
-            _ => None,
-        }
-    }
-
-    pub fn storage_image_resource(&self) -> Option<&str> {
-        match &self.kind {
-            EntryInputKind::StorageImage { resource, .. } => resource.as_deref(),
+            } => Some((binding, format, access)),
             _ => None,
         }
     }
 }
 
-/// Lowered output metadata shared by compiler IRs.
+/// Shader output. `Host` carries allocation metadata only until publication.
 #[derive(Debug, Clone)]
-pub struct EntryOutput<Ty = Type> {
-    pub ty: Ty,
+pub struct EntryOutput<Host = ()> {
+    pub ty: Type,
+    pub host: Host,
     pub kind: EntryOutputKind,
 }
 
@@ -530,7 +484,6 @@ pub enum EntryOutputKind {
     },
     Storage {
         exposure: BindingExposure,
-        length: Option<host::BufferLen>,
     },
 }
 
@@ -539,10 +492,9 @@ pub enum EntryOutputDestination {
     Plain,
     BuiltIn(spirv::BuiltIn),
     Location(u32),
-    Target(String),
 }
 
-impl<Ty> EntryOutput<Ty> {
+impl<Host> EntryOutput<Host> {
     pub fn decoration(&self) -> Option<IoDecoration> {
         match self.kind {
             EntryOutputKind::Value {
@@ -555,35 +507,12 @@ impl<Ty> EntryOutput<Ty> {
         }
     }
 
-    pub fn target(&self) -> Option<&str> {
-        match &self.kind {
-            EntryOutputKind::Value {
-                destination: EntryOutputDestination::Target(target),
-            } => Some(target),
-            _ => None,
-        }
-    }
-
     pub fn storage_binding(&self) -> Option<BindingRef> {
         match self.kind {
             EntryOutputKind::Storage {
                 exposure: BindingExposure::Host(binding),
                 ..
             } => Some(binding),
-            _ => None,
-        }
-    }
-
-    pub fn storage_length(&self) -> Option<&host::BufferLen> {
-        match &self.kind {
-            EntryOutputKind::Storage { length, .. } => length.as_ref(),
-            _ => None,
-        }
-    }
-
-    pub fn storage_length_mut(&mut self) -> Option<&mut Option<host::BufferLen>> {
-        match &mut self.kind {
-            EntryOutputKind::Storage { length, .. } => Some(length),
             _ => None,
         }
     }
@@ -872,16 +801,10 @@ impl StorageRole {
 /// interface metadata. Populated by compiler passes that introduce
 /// bindings the source program didn't (e.g. `parallelize`).
 #[derive(Debug, Clone, PartialEq)]
-pub struct StorageBindingDecl {
+pub struct StorageBindingDecl<Host = ()> {
     pub binding: BindingRef,
     pub role: StorageRole,
-    /// Stable identity of a compiler-managed logical resource. Entry-local
-    /// binding names and descriptor slots are access paths, not identity.
-    pub logical_resource: Option<String>,
     /// The element type stored at each index of the buffer.
     pub elem_ty: Type,
-    /// Sizing policy for a compiler-managed buffer whose length isn't a
-    /// host-supplied input (e.g. a gather intermediate). `None` for ordinary
-    /// inputs/outputs, which the runtime sizes from host data or dispatch.
-    pub length: Option<host::BufferLen>,
+    pub host: Host,
 }

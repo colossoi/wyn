@@ -62,12 +62,7 @@ impl Body<'_, '_, '_> {
             }
             let ty = types::sized_array(n, self.compiler.facts.layout_type(layout)?);
             let place = self.builder.new_place(ty.clone());
-            self.builder
-                .push_void_inst(InstKind::Alloca {
-                    elem_ty: ty.clone(),
-                    result: place,
-                })
-                .map_err(builder_error)?;
+            self.builder.push_void_inst(InstKind::Alloca { result: place }).map_err(builder_error)?;
             let value =
                 self.builder.push_inst(InstKind::Load { place }, ty.clone()).map_err(builder_error)?;
             let value = Typed {

@@ -10,7 +10,7 @@
 //! - `types`: Wyn-specific `InstKind`, `Program`, and the
 //!   concrete `FuncBody = Function<InstKind, Type>` instantiation.
 //! - `builder`: `FuncBuilder` used by `egglog::to_ssa`.
-//! - `reachability`: whole-module function and constant definition pruning.
+//! - `reachability`: whole-module function definition pruning.
 //! - `backend_validation`: Concrete type representation checks for backend emission.
 //! - `layout`: Type byte-size helpers for SPIR-V memory operations.
 //! - `print`: Debug formatter for SSA bodies.
@@ -50,7 +50,6 @@ pub fn place_floating(mut program: stage::Optimized) -> error::Result<stage::Pla
         .iter_mut()
         .map(|function| &mut function.body)
         .chain(program.entry_points.iter_mut().map(|entry| &mut entry.body))
-        .chain(program.constants.iter_mut().map(|constant| &mut constant.body))
     {
         ir::schedule_floating(&mut body.inner)
             .map_err(|error| error::CompilerError::Internal(error.to_string()))?;
@@ -64,7 +63,6 @@ fn simplify_values(program: &mut stage::Reachable) {
         .iter_mut()
         .map(|function| &mut function.body)
         .chain(program.entry_points.iter_mut().map(|entry| &mut entry.body))
-        .chain(program.constants.iter_mut().map(|constant| &mut constant.body))
     {
         eliminate_dead_pure_instructions(body);
         if_conversion::run(body);

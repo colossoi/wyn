@@ -151,7 +151,7 @@ pub(super) fn update(
             };
             let state_ty = types::tuple(vec![ty.clone(), types::bool_type()]);
             let done = body.op(OpTag::Bool(false), vec![], types::bool_type())?;
-            let initial = body.op(OpTag::Tuple(2), vec![old, done], state_ty.clone())?;
+            let initial = body.op(OpTag::Tuple, vec![old, done], state_ty.clone())?;
             body.retry(initial, |body, state| {
                 let old = body.field(state, 0)?;
                 let next = body.callback(scope, phase_owner, vec![old.clone(), value.clone()])?;

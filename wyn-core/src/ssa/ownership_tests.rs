@@ -26,7 +26,7 @@ fn array(builder: &mut FuncBuilder) -> ValueId {
     builder
         .push_inst(
             InstKind::Op {
-                tag: OpTag::ArrayLit(4),
+                tag: OpTag::ArrayLit,
                 operands: vec![int(1), int(2), int(3), int(4)],
             },
             sized_array(4, i32()),
@@ -151,12 +151,7 @@ fn an_escaping_local_is_not_overwritten() {
     let mut builder = FuncBuilder::new(vec![], sized_array(4, i32()));
     let xs = array(&mut builder);
     let place = builder.new_place(sized_array(4, i32()));
-    builder
-        .push_void_inst(InstKind::Alloca {
-            elem_ty: sized_array(4, i32()),
-            result: place,
-        })
-        .unwrap();
+    builder.push_void_inst(InstKind::Alloca { result: place }).unwrap();
     builder
         .push_void_inst(InstKind::Store {
             place,
@@ -334,7 +329,7 @@ fn forwarded_arrays_keep_their_backing_storage_live() {
     let tuple = builder
         .push_inst(
             InstKind::Op {
-                tag: OpTag::Tuple(1),
+                tag: OpTag::Tuple,
                 operands: vec![xs.into()],
             },
             crate::types::tuple(vec![sized_array(4, i32())]),
@@ -359,7 +354,7 @@ fn forwarded_arrays_keep_their_backing_storage_live() {
 
 #[test]
 fn function_parameters_are_invariant_even_when_entry_is_a_loop_header() {
-    let mut builder = FuncBuilder::new(vec![(sized_array(4, i32()), "xs".into())], i32());
+    let mut builder = FuncBuilder::new(vec![sized_array(4, i32())], i32());
     let xs = builder.get_param(0);
     let header = builder.entry();
     let inner = builder.create_block();

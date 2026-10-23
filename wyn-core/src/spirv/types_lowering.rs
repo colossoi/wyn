@@ -158,13 +158,6 @@ impl Constructor {
                         let col_vec_type = self.get_or_create_vec_type(elem_type, rows);
                         *self.builder.type_matrix(builder::TypeId::new(col_vec_type), cols)
                     }
-                    TypeName::Record(_fields) => {
-                        let field_types = args
-                            .iter()
-                            .map(|arg| self.polytype_to_spirv(arg))
-                            .collect::<Result<Vec<_>>>()?;
-                        self.get_or_create_struct_type(field_types)
-                    }
                     TypeName::Pointer => {
                         // Pointer type: args[0] is pointee type, args[1] is address space
                         let Some(pointee) = args.first() else {
@@ -176,14 +169,6 @@ impl Constructor {
                             .map(Constructor::resolve_storage_class)
                             .unwrap_or(StorageClass::Function);
                         self.get_or_create_ptr_type(sc, pointee_type)
-                    }
-                    TypeName::Existential(_) => {
-                        // Existential type: unwrap and convert the inner type (in args[0])
-                        // The size variable is runtime-determined, handled by Slice representation
-                        let Some(inner) = args.first() else {
-                            return Err(err_spirv!("existential type is missing its inner type: {:?}", ty));
-                        };
-                        self.polytype_to_spirv(inner)?
                     }
                     TypeName::Arrow => {
                         // Arrow types (function types) come from closures that have been defunctionalized.

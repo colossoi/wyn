@@ -295,7 +295,7 @@ pub struct EntryInterface {
 pub struct EntryBinding {
     pub name: String,
     pub ty: String,
-    /// `"builtin(<name>)"`, `"slot(<n>)"`, `"target(<name>)"`,
+    /// `"builtin(<name>)"`, `"slot(<n>)"`,
     /// `"storage(<set>,<binding>)"`, `"uniform(<set>,<binding>)"`,
     /// `"texture(<set>,<binding>)"`, `"sampler(<set>,<binding>)"`,
     /// `"push_constant(<offset>)"`, or `"unknown"`.
@@ -350,8 +350,6 @@ fn entry_binding_from_output(idx: usize, output: &wyn_core::interface::EntryOutp
     use wyn_core::BindingRef;
     let decoration = if let Some(BindingRef { set, binding }) = output.storage_binding() {
         format!("storage({},{})", set, binding)
-    } else if let Some(name) = output.target() {
-        format!("target({})", name)
     } else {
         match output.decoration() {
             Some(IoDecoration::BuiltIn(b)) => format!("builtin({:?})", b),

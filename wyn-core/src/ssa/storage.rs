@@ -41,8 +41,8 @@ impl InstKind {
         match self {
             Self::Load { .. } => ResultStorage::Fresh,
             Self::Op { tag, .. } => match tag {
-                OpTag::ArrayLit(_) => ResultStorage::Fresh,
-                OpTag::Tuple(_) => ResultStorage::AliasAll,
+                OpTag::ArrayLit => ResultStorage::Fresh,
+                OpTag::Tuple => ResultStorage::AliasAll,
                 OpTag::Materialize | OpTag::Project { .. } | OpTag::Index | OpTag::DynamicExtract => {
                     ResultStorage::Alias(0)
                 }
@@ -60,9 +60,9 @@ impl InstKind {
     pub(super) fn storage_use(&self, operand: usize) -> StorageUse {
         match self {
             Self::Op { tag, .. } => match tag {
-                OpTag::Materialize | OpTag::Tuple(_) => StorageUse::Forward,
+                OpTag::Materialize | OpTag::Tuple => StorageUse::Forward,
                 OpTag::StorageViewLen => StorageUse::Metadata,
-                OpTag::Index | OpTag::DynamicExtract | OpTag::Project { .. } | OpTag::ArrayLit(_) => {
+                OpTag::Index | OpTag::DynamicExtract | OpTag::Project { .. } | OpTag::ArrayLit => {
                     StorageUse::Read
                 }
                 OpTag::Intrinsic { id, .. }
@@ -98,7 +98,7 @@ pub(super) fn lower_array_update<R, C>(tag: &mut OpTag<R, C>, source: &Type) {
 pub(super) fn contains_array(ty: &Type) -> bool {
     ty.is_array()
         || matches!(ty,
-            Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields)
+            Type::Constructed(TypeName::Tuple(_), fields)
                 if fields.iter().any(contains_array))
 }
 
@@ -110,9 +110,7 @@ pub(super) fn is_local_value(ty: &Type) -> bool {
             && ty.elem_type().is_some_and(is_local_value);
     }
     match ty {
-        Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) => {
-            fields.iter().all(is_local_value)
-        }
+        Type::Constructed(TypeName::Tuple(_), fields) => fields.iter().all(is_local_value),
         _ => true,
     }
 }

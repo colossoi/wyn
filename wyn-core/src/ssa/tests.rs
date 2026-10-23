@@ -11,10 +11,7 @@ use polytype::Type;
 #[test]
 fn test_func_body_params() {
     let i32_ty = || Type::Constructed(TypeName::Int(32), vec![]);
-    let mut builder = FuncBuilder::new(
-        vec![(i32_ty(), "x".to_string()), (i32_ty(), "y".to_string())],
-        i32_ty(),
-    );
+    let mut builder = FuncBuilder::new(vec![i32_ty(), i32_ty()], i32_ty());
 
     let x = builder.get_param(0);
     let y = builder.get_param(1);
@@ -40,7 +37,7 @@ fn test_func_body_params() {
 #[test]
 fn value_uses_counts_instruction_and_terminator_operands() {
     let i32_ty = || Type::Constructed(TypeName::Int(32), vec![]);
-    let mut builder = FuncBuilder::new(vec![(i32_ty(), "x".to_string())], i32_ty());
+    let mut builder = FuncBuilder::new(vec![i32_ty()], i32_ty());
     let x = builder.get_param(0);
     let sum = builder
         .push_inst(
@@ -63,7 +60,7 @@ fn value_uses_counts_instruction_and_terminator_operands() {
 #[test]
 fn dead_pure_elimination_removes_an_entire_unused_expression_tree() {
     let i32_ty = || Type::Constructed(TypeName::Int(32), vec![]);
-    let mut builder = FuncBuilder::new(vec![(i32_ty(), "x".to_string())], i32_ty());
+    let mut builder = FuncBuilder::new(vec![i32_ty()], i32_ty());
     let x = builder.get_param(0);
     let dead_sum = builder
         .push_inst(
@@ -101,7 +98,7 @@ fn dead_pure_elimination_removes_an_entire_unused_expression_tree() {
 fn dead_pure_elimination_removes_unused_intrinsic_chains() {
     use crate::types::{f32, i32};
 
-    let mut builder = FuncBuilder::new(vec![(f32(), "x".into())], f32());
+    let mut builder = FuncBuilder::new(vec![f32()], f32());
     let x = builder.get_param(0);
     let mut operand = x;
     // Neither sqrt nor float-to-int conversion is safe to speculate, but an
@@ -133,9 +130,9 @@ fn dead_pure_elimination_removes_unused_texture_samples() {
 
     let mut builder = FuncBuilder::new(
         vec![
-            (Type::Constructed(TypeName::Texture2D, vec![]), "texture".into()),
-            (Type::Constructed(TypeName::Sampler, vec![]), "sampler".into()),
-            (vec(2, f32()), "uv".into()),
+            Type::Constructed(TypeName::Texture2D, vec![]),
+            Type::Constructed(TypeName::Sampler, vec![]),
+            vec(2, f32()),
         ],
         f32(),
     );
@@ -186,7 +183,7 @@ fn dead_pure_elimination_preserves_storage_updates_and_opaque_calls() {
         Type::Constructed(TypeName::Size(4), vec![]),
         buffer_tag(BindingRef::new(0, 0)),
     );
-    let mut builder = FuncBuilder::new(vec![(view_ty.clone(), "dest".into()), (i32(), "x".into())], i32());
+    let mut builder = FuncBuilder::new(vec![view_ty.clone(), i32()], i32());
     let dest = builder.get_param(0);
     let x = builder.get_param(1);
     let value = builder
@@ -312,11 +309,8 @@ fn value_remap_preserves_place_identity() {
     let remapped = slot.remap(&rv);
     assert!(matches!(remapped, InstKind::OutputSlot { result, .. } if result == place_a));
 
-    // Alloca { elem_ty, result }: place stays.
-    let alloca: InstKind = InstKind::Alloca {
-        elem_ty: Type::Constructed(TypeName::Int(32), vec![]),
-        result: place_a,
-    };
+    // Alloca { result }: place stays.
+    let alloca: InstKind = InstKind::Alloca { result: place_a };
     let remapped = alloca.remap(&rv);
     assert!(matches!(remapped, InstKind::Alloca { result, .. } if result == place_a));
 }

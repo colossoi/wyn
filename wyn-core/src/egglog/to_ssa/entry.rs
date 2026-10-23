@@ -4,10 +4,11 @@ use super::kernels;
 use super::{builder_error, error, Body, Compiler, OptimizeError, Typed};
 use crate::builtins::catalog;
 use crate::flow::ExecutionModel;
+use crate::interface::publish::EntryPoint;
 use crate::interface::EntryKind;
 use crate::op::BinaryOperator;
 use crate::op::{OpTag, PureViewSource};
-use crate::ssa::types::{EntryPoint, InstKind};
+use crate::ssa::types::InstKind;
 use crate::types::{self, buffer_tag, Type, TypeExt, TypeName};
 use crate::SymbolId;
 use egglog_engine::Value;
@@ -139,7 +140,7 @@ fn bind_parameters(
     scope: Value,
     root: Value,
     parameters: &[(SymbolId, Type)],
-    inputs: &mut Vec<crate::interface::EntryInput>,
+    inputs: &mut Vec<crate::interface::publish::EntryInput>,
     parameter_inputs: &mut Vec<Vec<usize>>,
 ) -> Result<(), OptimizeError> {
     for (index, (_, ty)) in parameters.iter().enumerate() {
@@ -163,8 +164,7 @@ fn bind_parameters(
             };
             // Resolve semantic layouts before replacing booleans in the ABI type.
             input.ty = crate::ssa::layout::storage_value_type(&input.ty);
-            let parameter =
-                lower.builder.func_mut().add_function_param(physical.clone(), input.name.clone());
+            let parameter = lower.builder.func_mut().add_function_param(physical.clone());
             let mut value = Typed {
                 value: parameter.into(),
                 ty: physical,
@@ -229,7 +229,7 @@ fn bind_parameters(
             values.remove(0)
         } else {
             lower.op(
-                OpTag::Tuple(values.len()),
+                OpTag::Tuple,
                 values.clone(),
                 types::tuple(values.iter().map(|value| value.ty.clone()).collect()),
             )?
@@ -272,7 +272,7 @@ fn emit_body(
 fn write_outputs(
     lower: &mut Body<'_, '_, '_>,
     result: Typed,
-    outputs: &[crate::interface::EntryOutput],
+    outputs: &[crate::interface::publish::EntryOutput],
 ) -> Result<(), OptimizeError> {
     for (index, output) in outputs.iter().enumerate() {
         let value = if outputs.len() == 1 { result.clone() } else { lower.field(result.clone(), index)? };

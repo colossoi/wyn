@@ -123,11 +123,11 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         // name collisions when two params share a string name.
         // For entry points (no param_ids), use the structural SSA parameter id.
         if self.param_ids.len() == self.body.params().len() && !self.param_ids.is_empty() {
-            for (i, (value_id, _, _)) in self.body.params().enumerate() {
+            for (i, (value_id, _)) in self.body.params().enumerate() {
                 self.value_map.insert(value_id, self.param_ids[i]);
             }
         } else {
-            for (value_id, _, _) in self.body.params() {
+            for (value_id, _) in self.body.params() {
                 if let Some(&spirv_id) = self.constructor.env.get(&value_id) {
                     self.value_map.insert(value_id, spirv_id);
                 }
@@ -329,13 +329,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     self.lower_unaryop(op, operand_id, &operand_ty, result_ty)?
                 }
 
-                op::OpTag::Tuple(_) => {
-                    let elem_ids: Vec<_> =
-                        operands.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
-                    self.constructor.composite_or_constant(result_ty, elem_ids)?
-                }
-
-                op::OpTag::ArrayLit(_) => {
+                op::OpTag::Tuple | op::OpTag::ArrayLit | op::OpTag::Vector => {
                     let elem_ids: Vec<_> =
                         operands.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
                     self.constructor.composite_or_constant(result_ty, elem_ids)?
@@ -364,20 +358,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         None,
                         vec![start_id, step_id, len_id],
                     )?
-                }
-
-                op::OpTag::Vector(_) => {
-                    let elem_ids: Vec<_> =
-                        operands.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
-                    self.constructor.composite_or_constant(result_ty, elem_ids)?
-                }
-
-                op::OpTag::Matrix { .. } => {
-                    // Matrix is constructed as an array of vectors (columns)
-                    // For now, flatten and construct
-                    let all_elems: Vec<_> =
-                        operands.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
-                    self.constructor.composite_or_constant(result_ty, all_elems)?
                 }
 
                 op::OpTag::Project { index } => {
@@ -417,14 +397,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     } else {
                         bail_spirv_at!(self.blame_span(), "Unknown function id: {:?}", func)
                     }
-                }
-
-                op::OpTag::Global(id) => {
-                    let func_id =
-                        self.constructor.globals.get(id).copied().ok_or_else(|| {
-                            err_spirv_at!(self.blame_span(), "Unknown global id: {:?}", id)
-                        })?;
-                    self.constructor.builder.function_call(result_ty, None, func_id, [])?
                 }
 
                 op::OpTag::Intrinsic { id, overload_idx } => {
@@ -607,8 +579,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 }
             },
 
-            InstKind::Alloca { elem_ty, result } => {
-                let elem_spirv_ty = self.constructor.polytype_to_spirv(elem_ty)?;
+            InstKind::Alloca { result } => {
+                let elem_spirv_ty = self.constructor.polytype_to_spirv(self.body.place_elem_ty(*result))?;
                 let ptr = self.constructor.declare_variable("_alloca", elem_spirv_ty)?;
                 self.place_ptr_id.insert(*result, ptr);
                 self.place_storage_class.insert(*result, spirv::StorageClass::Function);

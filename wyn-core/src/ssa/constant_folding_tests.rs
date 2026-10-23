@@ -193,7 +193,7 @@ fn late_vector_conversions_preserve_unsigned_lane_values() {
     let mut value = body.inner.append_inst(
         body.inner.entry,
         InstKind::Op {
-            tag: OpTag::Vector(2),
+            tag: OpTag::Vector,
             operands: vec![ValueRef::Const(ConstantValue::I32(-1)); 2],
         },
         signed,
@@ -218,7 +218,7 @@ fn late_vector_conversions_preserve_unsigned_lane_values() {
     fold(&mut body);
     let result = body.inner.inst_of_value(value).unwrap();
     assert!(matches!(&body.inner.insts[result].data,
-        InstKind::Op { tag: OpTag::Vector(2), operands }
+        InstKind::Op { tag: OpTag::Vector, operands }
         if operands == &[ValueRef::Const(ConstantValue::from_f32(u32::MAX as f32)); 2]));
 }
 

@@ -35,7 +35,6 @@ use crate::ssa;
 use crate::BindingRef;
 use crate::EntryId;
 use crate::FunctionId;
-use crate::GlobalId;
 use crate::{LookupMap, ResourceAccess};
 use polytype::Type;
 use slotmap::SlotMap;
@@ -121,7 +120,6 @@ pub enum InstKind<R = BindingRef> {
     // =========================================================================
     /// Allocate a local place (function-scope variable).
     Alloca {
-        elem_ty: Type<TypeName>,
         result: PlaceId,
     },
 
@@ -299,7 +297,7 @@ impl<R> InstKind<R> {
                 tag: tag.try_map_resource(map)?,
                 operands,
             },
-            InstKind::Alloca { elem_ty, result } => InstKind::Alloca { elem_ty, result },
+            InstKind::Alloca { result } => InstKind::Alloca { result },
             InstKind::Load { place } => InstKind::Load { place },
             InstKind::Store { place, value } => InstKind::Store { place, value },
             InstKind::Atomic { place, op, values } => InstKind::Atomic { place, op, values },
@@ -404,26 +402,14 @@ impl FuncBody {
     }
 
     /// Function parameters in signature order.
-    pub fn params(&self) -> impl ExactSizeIterator<Item = (ValueId, &Type<TypeName>, &str)> {
-        self.inner.params.iter().copied().map(|value| {
-            let info = &self.inner.values[value];
-            (
-                value,
-                &info.ty,
-                info.name.as_deref().expect("function parameter is missing its name"),
-            )
-        })
+    pub fn params(&self) -> impl ExactSizeIterator<Item = (ValueId, &Type<TypeName>)> {
+        self.inner.params.iter().copied().map(|value| (value, self.inner.value_type(value)))
     }
 
     /// Function parameter at `index`, if present.
-    pub fn param(&self, index: usize) -> Option<(ValueId, &Type<TypeName>, &str)> {
+    pub fn param(&self, index: usize) -> Option<(ValueId, &Type<TypeName>)> {
         let value = *self.inner.params.get(index)?;
-        let info = &self.inner.values[value];
-        Some((
-            value,
-            &info.ty,
-            info.name.as_deref().expect("function parameter is missing its name"),
-        ))
+        Some((value, self.inner.value_type(value)))
     }
 
     /// Element type of the place (what `Load` returns / `Store` writes).
@@ -490,7 +476,7 @@ pub mod stage {
     pub enum PlacedTag {}
     pub type Placed = Program<PlacedTag, BackendGlobal>;
 
-    /// SSA whose top-level function and constant definitions are reachable
+    /// SSA whose top-level function definitions are reachable
     /// from at least one entry point.
     #[derive(Clone, Copy, Debug)]
     pub enum ReachableTag {}
@@ -514,9 +500,6 @@ pub struct Program<Tag, GlobalContext> {
     pub functions: Vec<Function>,
     /// Entry point definitions.
     pub entry_points: Vec<EntryPoint>,
-    /// Program-level constant definitions (zero-arg defs with purely constant bodies).
-    /// Emitted once at module scope; functions reference them via `InstKind::Global`.
-    pub constants: Vec<Constant>,
     /// Constant values promoted to module-level addressable storage by an
     /// optional target preparation pass.
     pub addressable_constants: Vec<AddressableConstant>,
@@ -527,15 +510,34 @@ pub struct Program<Tag, GlobalContext> {
 
 impl<Tag, GlobalContext> Program<Tag, GlobalContext> {
     pub(crate) fn from_parts(
-        functions: Vec<Function>,
-        entry_points: Vec<EntryPoint>,
-        constants: Vec<Constant>,
+        mut functions: Vec<Function>,
+        mut entry_points: Vec<EntryPoint>,
         global_context: GlobalContext,
     ) -> Self {
+        for body in
+            functions.iter_mut().map(|f| &mut f.body).chain(entry_points.iter_mut().map(|e| &mut e.body))
+        {
+            for ty in std::iter::once(&mut body.return_ty)
+                .chain(body.inner.values.values_mut().map(|v| &mut v.ty))
+                .chain(body.places.values_mut().map(|p| &mut p.elem_ty))
+            {
+                normalize_type(ty);
+            }
+        }
+        for entry in &mut entry_points {
+            for ty in entry
+                .inputs
+                .iter_mut()
+                .map(|i| &mut i.ty)
+                .chain(entry.outputs.iter_mut().map(|o| &mut o.ty))
+                .chain(entry.storage_bindings.iter_mut().map(|s| &mut s.elem_ty))
+            {
+                normalize_type(ty);
+            }
+        }
         Self {
             functions,
             entry_points,
-            constants,
             addressable_constants: Vec::new(),
             global_context,
             state: std::marker::PhantomData,
@@ -545,30 +547,38 @@ impl<Tag, GlobalContext> Program<Tag, GlobalContext> {
     /// Change only the top-level proof state while preserving the SSA tree and
     /// its program-wide context.
     pub(crate) fn retag<NewTag>(self) -> Program<NewTag, GlobalContext> {
-        let mut result = Program::from_parts(
-            self.functions,
-            self.entry_points,
-            self.constants,
-            self.global_context,
-        );
-        result.addressable_constants = self.addressable_constants;
-        result
+        Program {
+            functions: self.functions,
+            entry_points: self.entry_points,
+            addressable_constants: self.addressable_constants,
+            global_context: self.global_context,
+            state: std::marker::PhantomData,
+        }
+    }
+}
+
+/// Shader layout is positional; source names survive only in the published host ABI.
+fn normalize_type(ty: &mut Type<TypeName>) {
+    if let Type::Constructed(TypeName::Existential(_), args) = ty {
+        if args.len() == 1 {
+            *ty = args.remove(0);
+            return normalize_type(ty);
+        }
+    }
+    if let Type::Constructed(name, args) = ty {
+        if matches!(name, TypeName::Record(_)) {
+            *name = TypeName::Tuple(args.len());
+        }
+        for arg in args {
+            normalize_type(arg);
+        }
     }
 }
 
 impl Program<stage::BareTag, ()> {
-    pub fn bare(functions: Vec<Function>, entry_points: Vec<EntryPoint>, constants: Vec<Constant>) -> Self {
-        Self::from_parts(functions, entry_points, constants, ())
+    pub fn bare(functions: Vec<Function>, entry_points: Vec<EntryPoint>) -> Self {
+        Self::from_parts(functions, entry_points, ())
     }
-}
-
-/// A program-level constant definition.
-#[derive(Debug, Clone)]
-pub struct Constant {
-    pub id: GlobalId,
-    /// Diagnostic and emitted-symbol metadata.
-    pub name: String,
-    pub body: FuncBody,
 }
 
 /// A function definition.
@@ -585,21 +595,21 @@ pub struct Function {
 
 /// An entry point definition.
 #[derive(Debug, Clone)]
-pub struct EntryPoint {
+pub struct EntryPoint<InputHost = (), OutputHost = (), StorageHost = ()> {
     pub id: EntryId,
     /// Host-facing entry symbol and diagnostic metadata.
     pub name: String,
     pub body: FuncBody,
     pub execution_model: ExecutionModel,
-    pub inputs: Vec<interface::EntryInput<Type<TypeName>>>,
+    pub inputs: Vec<interface::EntryInput<InputHost>>,
     /// Structural source-parameter to ABI-input-slot association.
     pub parameter_inputs: Vec<Vec<usize>>,
-    pub outputs: Vec<interface::EntryOutput<Type<TypeName>>>,
+    pub outputs: Vec<interface::EntryOutput<OutputHost>>,
     /// Compiler-introduced storage bindings the entry touches beyond its
     /// declared inputs/outputs (e.g. partials/intermediate buffers emitted
     /// by `parallelize`). Carried end-to-end so SPIR-V generation has a
     /// single source of truth for each entry's buffer interface.
-    pub storage_bindings: Vec<interface::StorageBindingDecl>,
+    pub storage_bindings: Vec<interface::StorageBindingDecl<StorageHost>>,
     /// Exact storage-buffer access published for this physical stage. This is
     /// authoritative over the broader `StorageRole::Intermediate`, which says
     /// who owns an allocation but intentionally does not distinguish a stage
@@ -612,7 +622,7 @@ pub struct EntryPoint {
     pub span: Span,
 }
 
-impl EntryPoint {
+impl<I, O, S> EntryPoint<I, O, S> {
     /// Access each storage-buffer slot has in this entry alone. This folds
     /// existing interface metadata; it does not inspect the SSA body.
     pub(crate) fn stage_storage_accesses(&self) -> LookupMap<BindingRef, ResourceAccess> {

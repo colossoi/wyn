@@ -134,7 +134,7 @@ impl<Tag, GlobalContext> fmt::Display for ProgramDisplay<'_, Tag, GlobalContext>
 
 fn format_function(out: &mut fmt::Formatter<'_>, name: &str, body: &FuncBody) -> fmt::Result {
     let params: Vec<String> =
-        body.params().map(|(val, ty, _name)| format!("{}: {}", fmt_val(val), format_type(ty))).collect();
+        body.params().map(|(val, ty)| format!("{}: {}", fmt_val(val), format_type(ty))).collect();
     let ret = format_type(&body.return_ty);
     writeln!(out, "func @{name}({}) -> {ret} {{", params.join(", "))?;
 
@@ -227,10 +227,10 @@ fn format_inst_kind(out: &mut fmt::Formatter<'_>, kind: &InstKind) -> fmt::Resul
             OpTag::UnaryOp(op) => {
                 write!(out, "unaryop {op} {}", format_ref(&operands[0]))?;
             }
-            OpTag::Tuple(_) => {
+            OpTag::Tuple => {
                 write!(out, "tuple ({})", format_refs(operands))?;
             }
-            OpTag::ArrayLit(_) => {
+            OpTag::ArrayLit => {
                 write!(out, "array [{}]", format_refs(operands))?;
             }
             OpTag::ArrayRange { has_step } => {
@@ -244,19 +244,8 @@ fn format_inst_kind(out: &mut fmt::Formatter<'_>, kind: &InstKind) -> fmt::Resul
                     write!(out, " step {}", format_ref(&operands[2]))?;
                 }
             }
-            OpTag::Vector(_) => {
+            OpTag::Vector => {
                 write!(out, "vector @[{}]", format_refs(operands))?;
-            }
-            OpTag::Matrix { rows, cols } => {
-                write!(out, "matrix @[")?;
-                for r in 0..*rows {
-                    if r > 0 {
-                        write!(out, ", ")?;
-                    }
-                    let row = &operands[r * cols..(r + 1) * cols];
-                    write!(out, "[{}]", format_refs(row))?;
-                }
-                write!(out, "]")?;
             }
             OpTag::Project { index } => {
                 write!(out, "project {}.{index}", format_ref(&operands[0]))?;
@@ -271,9 +260,6 @@ fn format_inst_kind(out: &mut fmt::Formatter<'_>, kind: &InstKind) -> fmt::Resul
             }
             OpTag::Call(function) => {
                 write!(out, "call @{function}({})", format_refs(operands))?;
-            }
-            OpTag::Global(global) => {
-                write!(out, "global @{global}")?;
             }
 
             OpTag::Intrinsic { id, overload_idx } => {
@@ -333,8 +319,8 @@ fn format_inst_kind(out: &mut fmt::Formatter<'_>, kind: &InstKind) -> fmt::Resul
                 )?;
             }
         },
-        InstKind::Alloca { elem_ty, result } => {
-            write!(out, "alloca {} -> {}", format_type(elem_ty), fmt_place(*result))?;
+        InstKind::Alloca { result } => {
+            write!(out, "alloca {}", fmt_place(*result))?;
         }
         InstKind::Load { place } => {
             write!(out, "load {}", fmt_place(*place))?;

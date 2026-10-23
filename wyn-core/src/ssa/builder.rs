@@ -23,12 +23,11 @@ pub struct FuncBuilder {
 
 impl FuncBuilder {
     /// Create a new function builder with the given parameters and return type.
-    pub fn new(params: Vec<(Type<TypeName>, String)>, return_ty: Type<TypeName>) -> Self {
+    pub fn new(params: Vec<Type<TypeName>>, return_ty: Type<TypeName>) -> Self {
         let mut inner = ssa::ir::FuncBuilder::new();
-        let _entry = inner.entry();
 
-        for (ty, name) in params {
-            inner.func_mut().add_function_param(ty, name);
+        for ty in params {
+            inner.func_mut().add_function_param(ty);
         }
 
         FuncBuilder {
@@ -69,19 +68,6 @@ impl FuncBuilder {
     /// Add a parameter to an existing block.
     pub fn add_block_param(&mut self, block: BlockId, ty: Type<TypeName>) -> ValueId {
         self.inner.add_block_param(block, ty)
-    }
-
-    /// Create a new block with named parameters.
-    pub fn create_block_with_named_params(
-        &mut self,
-        params: Vec<(Type<TypeName>, String)>,
-    ) -> (BlockId, Vec<ValueId>) {
-        let block = self.inner.create_block();
-        let values = params
-            .into_iter()
-            .map(|(ty, name)| self.inner.func_mut().add_named_block_param(block, ty, Some(name)))
-            .collect();
-        (block, values)
     }
 
     /// Switch to building in the specified block.

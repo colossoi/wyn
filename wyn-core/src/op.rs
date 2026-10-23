@@ -6,11 +6,10 @@
 //!
 //! ## Operand layout per tag
 //!
-//! - `Int` / `Uint` / `Float` / `Bool` / `Unit` / `Global`: 0
+//! - `Int` / `Uint` / `Float` / `Bool` / `Unit` / `AddressableConstant`: 0
 //! - `BinOp(_)`: `[lhs, rhs]`
 //! - `UnaryOp(_)`: `[operand]`
-//! - `Tuple(n)` / `Vector(n)` / `ArrayLit(n)`: `n` operands
-//! - `Matrix { rows, cols }`: `rows * cols` operands, row-major
+//! - `Tuple` / `Vector` / `ArrayLit`: element operands in order
 //! - `ArrayRange { has_step }`: `[start, len]` or `[start, len, step]`
 //! - `Project { index }`: `[base]`
 //! - `Index`: `[base, index]`
@@ -25,7 +24,6 @@
 
 use crate::builtins;
 use crate::BindingRef;
-use crate::GlobalId;
 
 /// Index into the SSA program's table of promoted addressable constants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -200,16 +198,11 @@ pub enum OpTag<R, C> {
     Float(String),
     Bool(bool),
     Unit,
-    Global(GlobalId),
     BinOp(BinaryOperator),
     UnaryOp(UnaryOperator),
-    Tuple(usize),
-    Vector(usize),
-    Matrix {
-        rows: usize,
-        cols: usize,
-    },
-    ArrayLit(usize),
+    Tuple,
+    Vector,
+    ArrayLit,
     ArrayRange {
         has_step: bool,
     },
@@ -289,13 +282,11 @@ impl<R, C> OpTag<R, C> {
             OpTag::Float(value) => OpTag::Float(value),
             OpTag::Bool(value) => OpTag::Bool(value),
             OpTag::Unit => OpTag::Unit,
-            OpTag::Global(value) => OpTag::Global(value),
             OpTag::BinOp(value) => OpTag::BinOp(value),
             OpTag::UnaryOp(value) => OpTag::UnaryOp(value),
-            OpTag::Tuple(value) => OpTag::Tuple(value),
-            OpTag::Vector(value) => OpTag::Vector(value),
-            OpTag::Matrix { rows, cols } => OpTag::Matrix { rows, cols },
-            OpTag::ArrayLit(value) => OpTag::ArrayLit(value),
+            OpTag::Tuple => OpTag::Tuple,
+            OpTag::Vector => OpTag::Vector,
+            OpTag::ArrayLit => OpTag::ArrayLit,
             OpTag::ArrayRange { has_step } => OpTag::ArrayRange { has_step },
             OpTag::Project { index } => OpTag::Project { index },
             OpTag::Index => OpTag::Index,
@@ -318,13 +309,11 @@ impl<R, C> OpTag<R, C> {
             OpTag::Float(value) => OpTag::Float(value),
             OpTag::Bool(value) => OpTag::Bool(value),
             OpTag::Unit => OpTag::Unit,
-            OpTag::Global(value) => OpTag::Global(value),
             OpTag::BinOp(value) => OpTag::BinOp(value),
             OpTag::UnaryOp(value) => OpTag::UnaryOp(value),
-            OpTag::Tuple(value) => OpTag::Tuple(value),
-            OpTag::Vector(value) => OpTag::Vector(value),
-            OpTag::Matrix { rows, cols } => OpTag::Matrix { rows, cols },
-            OpTag::ArrayLit(value) => OpTag::ArrayLit(value),
+            OpTag::Tuple => OpTag::Tuple,
+            OpTag::Vector => OpTag::Vector,
+            OpTag::ArrayLit => OpTag::ArrayLit,
             OpTag::ArrayRange { has_step } => OpTag::ArrayRange { has_step },
             OpTag::Project { index } => OpTag::Project { index },
             OpTag::Index => OpTag::Index,

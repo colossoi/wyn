@@ -29,7 +29,7 @@ fn clean(function: &mut Function<Instruction, ()>) {
 #[test]
 fn removes_dead_loop_carried_cycles_without_removing_loop_control() {
     let mut f = Function::new();
-    let input = f.add_function_param((), "input".into());
+    let input = f.add_function_param(());
     let header = f.create_block();
     let body = f.create_block();
     let merge = f.create_block();
@@ -81,7 +81,7 @@ fn removes_dead_loop_carried_cycles_without_removing_loop_control() {
 
 fn selection(effect: bool, returned: bool) -> Function<Instruction, ()> {
     let mut f = Function::new();
-    let input = f.add_function_param((), "input".into());
+    let input = f.add_function_param(());
     let yes = f.create_block();
     let no = f.create_block();
     let merge = f.create_block();

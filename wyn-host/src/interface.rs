@@ -391,8 +391,8 @@ pub struct ComputePipeline {
     pub bindings: Vec<Binding>,
     /// Stages to execute in order. Length ≥ 1.
     pub stages: Vec<ComputeStage>,
-    /// Host-runtime default for the total work size, sourced from
-    /// `#[size_hint(N)]` on an input parameter. When the application
+    /// Host-runtime default for the total work size, selected by the compiler.
+    /// When the application
     /// doesn't supply an explicit dispatch count, a thin host can
     /// dispatch `ceil(default_total_threads / workgroup_size.0)`
     /// workgroups without inspecting buffer length. The compiled

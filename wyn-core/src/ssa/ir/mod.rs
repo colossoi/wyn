@@ -135,8 +135,6 @@ impl InstPlacement {
 pub struct ValueInfo<T> {
     pub def: ValueDef,
     pub ty: T,
-    /// Source/debug name for function and named block parameters.
-    pub name: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -185,27 +183,21 @@ impl<I, T> Function<I, T> {
         })
     }
 
-    pub fn add_function_param(&mut self, ty: T, name: String) -> ValueId {
+    pub fn add_function_param(&mut self, ty: T) -> ValueId {
         let index = self.params.len();
         let value = self.values.insert(ValueInfo {
             def: ValueDef::FunctionParam { index },
             ty,
-            name: Some(name),
         });
         self.params.push(value);
         value
     }
 
     pub fn add_block_param(&mut self, block: BlockId, ty: T) -> ValueId {
-        self.add_named_block_param(block, ty, None)
-    }
-
-    pub fn add_named_block_param(&mut self, block: BlockId, ty: T, name: Option<String>) -> ValueId {
         let index = self.blocks[block].params.len();
         let value = self.values.insert(ValueInfo {
             def: ValueDef::Param { block, index },
             ty,
-            name,
         });
         self.blocks[block].params.push(value);
         value
@@ -258,7 +250,6 @@ impl<I, T> Function<I, T> {
             let value = values.insert(ValueInfo {
                 def: ValueDef::Inst { inst },
                 ty,
-                name: None,
             });
             InstNode {
                 data,

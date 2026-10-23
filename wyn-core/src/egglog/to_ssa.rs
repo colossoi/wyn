@@ -116,8 +116,7 @@ pub(super) fn lower(
     });
     Ok(Elaborated::from_parts(
         compiler.functions,
-        entries,
-        Vec::new(),
+        entries.into_iter().map(crate::interface::publish::EntryPoint::into_shader).collect(),
         BackendGlobal { pipeline, target },
     ))
 }
@@ -189,10 +188,7 @@ impl Compiler<'_, '_> {
                 };
                 result = next;
             }
-            let mut builder = FuncBuilder::new(
-                signature.into_iter().enumerate().map(|(i, ty)| (ty, format!("arg{i}"))).collect(),
-                result.clone(),
-            );
+            let mut builder = FuncBuilder::new(signature, result.clone());
             builder.terminate(Terminator::Unreachable).map_err(builder_error)?;
             self.functions.push(Function {
                 id,

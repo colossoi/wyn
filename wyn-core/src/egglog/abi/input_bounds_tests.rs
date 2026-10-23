@@ -1,13 +1,23 @@
 //! Check inferred bounds at the interface that consumes them.
 
+use crate::host::Binding;
 use crate::host::BufferLen;
-use crate::interface::EntryInputKind;
 
 fn input_length(source: &str, name: &str) -> Option<BufferLen> {
     let program = crate::compile_thru_ssa(source).expect("compile entry interface");
-    let mut lengths =
-        program.entry_points.iter().flat_map(|entry| &entry.inputs).filter_map(|input| match &input.kind {
-            EntryInputKind::Storage { length, .. } if input.name == name => Some(length.clone()),
+    let mut lengths = program
+        .global_context
+        .pipeline
+        .pipelines
+        .iter()
+        .flat_map(|pipeline| match pipeline {
+            crate::host::Pipeline::Compute(p) => &p.bindings,
+            crate::host::Pipeline::Graphics(p) => &p.bindings,
+        })
+        .filter_map(|binding| match binding {
+            Binding::StorageBuffer {
+                name: input, length, ..
+            } if input == name => Some(length.clone()),
             _ => None,
         });
     let first = lengths.next().expect("storage input must be published");

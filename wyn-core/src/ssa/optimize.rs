@@ -21,7 +21,6 @@ pub fn optimize(mut program: Elaborated) -> Optimized {
         .iter_mut()
         .map(|f| &mut f.body)
         .chain(program.entry_points.iter_mut().map(|e| &mut e.body))
-        .chain(program.constants.iter_mut().map(|c| &mut c.body))
     {
         prepare_values(body);
     }
@@ -63,10 +62,9 @@ pub(crate) fn is_speculatable(data: &InstKind) -> bool {
                 | OpTag::Bool(_)
                 | OpTag::Unit
                 | OpTag::UnaryOp(_)
-                | OpTag::Tuple(_)
-                | OpTag::Vector(_)
-                | OpTag::Matrix { .. }
-                | OpTag::ArrayLit(_)
+                | OpTag::Tuple
+                | OpTag::Vector
+                | OpTag::ArrayLit
                 | OpTag::Project { .. }
                 | OpTag::Materialize,
             ..

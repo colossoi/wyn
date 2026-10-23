@@ -76,7 +76,7 @@ impl Selected {
         let name = self.text(term)?;
         match name {
             "unit" => return Ok(OpTag::Unit),
-            "array" => return Ok(OpTag::ArrayLit(arity)),
+            "array" => return Ok(OpTag::ArrayLit),
             "range" => return Ok(OpTag::ArrayRange { has_step: arity == 3 }),
             "index" => return Ok(OpTag::Index),
             _ => {}

@@ -2,9 +2,10 @@
 
 use crate::ast::TypeName;
 use crate::host::BufferLen;
+use crate::interface::publish::{EntryOutput, OutputHost};
 use crate::interface::{
-    Attribute, BindingExposure, EntryDecl, EntryOutput, EntryOutputDestination, EntryOutputKind,
-    EntryParamDecl, IoDecoration, ResolvedAttribute,
+    Attribute, BindingExposure, EntryDecl, EntryOutputDestination, EntryOutputKind, IoDecoration,
+    ResolvedAttribute,
 };
 use crate::types::{canonical_storage_buffer_ty, strip_existentials};
 use crate::BindingRef;
@@ -23,14 +24,6 @@ pub(crate) struct InterfaceError(pub(crate) String);
 /// "Descriptor Set Layout" for the rationale.
 pub const AUTO_STORAGE_SET: u32 = 0;
 
-/// Extract a `#[size_hint(N)]` attribute from a lowered entry parameter.
-pub fn extract_size_hint(param: &EntryParamDecl) -> Option<std::num::NonZeroU32> {
-    param.attributes.iter().find_map(|attribute| match attribute {
-        Attribute::SizeHint(n) => Some(*n),
-        _ => None,
-    })
-}
-
 /// Convert an AST attribute to an IO decoration.
 fn convert_to_io_decoration(attr: &ResolvedAttribute) -> Option<IoDecoration> {
     match attr {
@@ -41,9 +34,9 @@ fn convert_to_io_decoration(attr: &ResolvedAttribute) -> Option<IoDecoration> {
 }
 
 /// The render-target resource name of a `#[target(name)]` output attribute.
-fn target_of(attr: Option<&ResolvedAttribute>) -> Option<String> {
+fn target_of(attr: Option<&ResolvedAttribute>) -> Option<&str> {
     match attr {
-        Some(Attribute::Target(name)) => Some(name.clone()),
+        Some(Attribute::Target(name)) => Some(name),
         _ => None,
     }
 }
@@ -127,7 +120,8 @@ pub(crate) fn build_entry_outputs(
             let length = length_for(0, storage_binding)?;
             Ok(vec![EntryOutput {
                 ty,
-                kind: entry_output_kind(storage_binding, length, None, None),
+                kind: entry_output_kind(storage_binding, None, false, 0),
+                host: OutputHost { length, target: None },
             }])
         } else {
             Ok(vec![])
@@ -147,10 +141,14 @@ pub(crate) fn build_entry_outputs(
                     ty,
                     kind: entry_output_kind(
                         storage_binding,
-                        length,
                         attribute.and_then(convert_to_io_decoration),
-                        target_of(attribute),
+                        target_of(attribute).is_some(),
+                        slot as u32,
                     ),
+                    host: OutputHost {
+                        length,
+                        target: target_of(attribute).map(str::to_owned),
+                    },
                 })
             })
             .collect()
@@ -163,32 +161,35 @@ pub(crate) fn build_entry_outputs(
             ty,
             kind: entry_output_kind(
                 storage_binding,
-                length,
                 first_attr.and_then(convert_to_io_decoration),
-                target_of(first_attr),
+                target_of(first_attr).is_some(),
+                0,
             ),
+            host: OutputHost {
+                length,
+                target: target_of(first_attr).map(str::to_owned),
+            },
         }])
     }
 }
 
 fn entry_output_kind(
     storage_binding: Option<BindingRef>,
-    length: Option<BufferLen>,
     decoration: Option<IoDecoration>,
-    target: Option<String>,
+    target: bool,
+    location: u32,
 ) -> EntryOutputKind {
     if let Some(binding) = storage_binding {
         return EntryOutputKind::Storage {
             exposure: BindingExposure::Host(binding),
-            length,
         };
     }
     let destination = match (decoration, target) {
-        (Some(IoDecoration::BuiltIn(builtin)), None) => EntryOutputDestination::BuiltIn(builtin),
-        (Some(IoDecoration::Location(location)), None) => EntryOutputDestination::Location(location),
-        (None, Some(target)) => EntryOutputDestination::Target(target),
-        (None, None) => EntryOutputDestination::Plain,
-        (Some(_), Some(_)) => unreachable!("entry output cannot have both a decoration and target"),
+        (Some(IoDecoration::BuiltIn(builtin)), false) => EntryOutputDestination::BuiltIn(builtin),
+        (Some(IoDecoration::Location(location)), false) => EntryOutputDestination::Location(location),
+        (None, true) => EntryOutputDestination::Location(location),
+        (None, false) => EntryOutputDestination::Plain,
+        (Some(_), true) => unreachable!("entry output cannot have both a decoration and target"),
     };
     EntryOutputKind::Value { destination }
 }

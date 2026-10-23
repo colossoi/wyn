@@ -16,8 +16,75 @@ use crate::host::{
     SamplerBindingType, SourceResultBinding, StageBindingUses, TextureSampleType, TextureViewDimension,
     VertexAttribute,
 };
-use crate::interface::{IoDecoration, StorageAccess, TextureSource};
-use crate::ssa::types::EntryPoint;
+use crate::interface::{IoDecoration, StorageAccess};
+pub(crate) type EntryPoint = crate::ssa::types::EntryPoint<InputHost, OutputHost, StorageHost>;
+pub(crate) type EntryInput = crate::interface::EntryInput<InputHost>;
+pub(crate) type EntryOutput = crate::interface::EntryOutput<OutputHost>;
+pub(crate) type StorageBindingDecl = crate::interface::StorageBindingDecl<StorageHost>;
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct InputHost {
+    pub length: Option<crate::host::BufferLen>,
+    pub backing: Option<BindingRef>,
+    pub image_size: crate::host::StorageTextureSize,
+    pub resource: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct OutputHost {
+    pub length: Option<crate::host::BufferLen>,
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct StorageHost {
+    pub logical_resource: String,
+    pub length: crate::host::BufferLen,
+}
+
+impl EntryPoint {
+    pub(crate) fn into_shader(self) -> crate::ssa::types::EntryPoint {
+        crate::ssa::types::EntryPoint {
+            id: self.id,
+            name: self.name,
+            body: self.body,
+            execution_model: self.execution_model,
+            parameter_inputs: self.parameter_inputs,
+            inputs: self
+                .inputs
+                .into_iter()
+                .map(|i| crate::interface::EntryInput {
+                    name: i.name,
+                    ty: i.ty,
+                    kind: i.kind,
+                    host: (),
+                })
+                .collect(),
+            outputs: self
+                .outputs
+                .into_iter()
+                .map(|o| crate::interface::EntryOutput {
+                    ty: o.ty,
+                    kind: o.kind,
+                    host: (),
+                })
+                .collect(),
+            storage_bindings: self
+                .storage_bindings
+                .into_iter()
+                .map(|s| crate::interface::StorageBindingDecl {
+                    binding: s.binding,
+                    role: s.role,
+                    elem_ty: s.elem_ty,
+                    host: (),
+                })
+                .collect(),
+            stage_descriptor_storage_accesses: self.stage_descriptor_storage_accesses,
+            pipeline_storage_accesses: self.pipeline_storage_accesses,
+            span: self.span,
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -31,7 +98,7 @@ fn entries_by_id<'a>(entries: &[&'a EntryPoint]) -> LookupMap<EntryId, &'a Entry
     entries.iter().map(|entry| (entry.id, *entry)).collect()
 }
 
-pub trait ModuleInterfacePublish {
+pub(crate) trait ModuleInterfacePublish {
     /// Append `Binding::StorageBuffer` / `Uniform` / `PushConstant` /
     /// `Texture` / `Sampler` entries to the descriptor's per-pipeline
     /// bindings list for each `(set, binding)` recorded on the entry's
@@ -49,9 +116,6 @@ pub trait ModuleInterfacePublish {
     /// pipelines from a vertex entry's `#[vertex_slot(n)]` inputs and a
     /// fragment entry's `#[target(name)]` outputs.
     fn publish_graphics_io(&mut self, entries: &[&EntryPoint], associations: &StageEntryAssociations);
-
-    /// Apply authored input names to their final descriptor slots.
-    fn relabel_input_storage_names(&mut self, names: &LookupMap<(u32, u32), String>);
 }
 
 pub(crate) fn reconcile_storage_binding_access<'a>(
@@ -110,22 +174,15 @@ impl ModuleInterfacePublish for ModuleInterface {
 
             let entry_source = source(entry);
             let storage = |slot: BindingRef| {
-                let mut selected: Option<&crate::interface::StorageBindingDecl> = None;
+                let mut selected: Option<&StorageBindingDecl> = None;
                 for declaration in entries
                     .iter()
                     .filter(|candidate| source(candidate) == entry_source)
                     .flat_map(|entry| &entry.storage_bindings)
                     .filter(|declaration| declaration.binding == slot)
                 {
-                    if declaration.logical_resource.is_none() || declaration.length.is_none() {
-                        return Err(DescriptorError(
-                            "generated storage has no resource identity or capacity".into(),
-                        ));
-                    }
                     if let Some(previous) = selected {
-                        if previous.logical_resource != declaration.logical_resource
-                            || previous.length != declaration.length
-                        {
+                        if previous.host != declaration.host {
                             return Err(DescriptorError(format!(
                                 "generated resource identities disagree for {}: {slot}",
                                 entry_source
@@ -167,10 +224,10 @@ impl ModuleInterfacePublish for ModuleInterface {
                             BufferUsage::Input
                         },
                         name: input.name.clone(),
-                        resource: generated.and_then(|decl| decl.logical_resource.clone()),
+                        resource: generated.map(|decl| decl.host.logical_resource.clone()),
                         length: generated
-                            .and_then(|decl| decl.length.clone())
-                            .or_else(|| input.storage_length().cloned()),
+                            .map(|decl| decl.host.length.clone())
+                            .or_else(|| input.host.length.clone()),
                         members: Vec::new(),
                     };
                     let Some(slot) = binding_slot(&binding) else {
@@ -191,23 +248,6 @@ impl ModuleInterfacePublish for ModuleInterface {
                         name: input.name.clone(),
                     });
                 } else if let Some(br) = input.texture_binding() {
-                    let (backing, resource) = match input.texture_source() {
-                        Some(TextureSource::Backing(binding)) => (
-                            Some(BackingRef {
-                                set: binding.set,
-                                binding: binding.binding,
-                            }),
-                            None,
-                        ),
-                        Some(TextureSource::Resource { name, backing }) => (
-                            backing.map(|binding| BackingRef {
-                                set: binding.set,
-                                binding: binding.binding,
-                            }),
-                            Some(name.clone()),
-                        ),
-                        Some(TextureSource::External) | None => (None, None),
-                    };
                     let binding = Binding::Texture {
                         set: br.set,
                         binding: br.binding,
@@ -216,8 +256,11 @@ impl ModuleInterfacePublish for ModuleInterface {
                         sample_type: TextureSampleType::Float { filterable: true },
                         view_dimension: TextureViewDimension::D2,
                         multisampled: false,
-                        backing,
-                        resource,
+                        backing: input.host.backing.map(|b| BackingRef {
+                            set: b.set,
+                            binding: b.binding,
+                        }),
+                        resource: input.host.resource.clone(),
                     };
                     let Some(slot) = binding_slot(&binding) else {
                         continue;
@@ -242,15 +285,15 @@ impl ModuleInterfacePublish for ModuleInterface {
                         continue;
                     }
                     bindings.push(binding);
-                } else if let Some((br, format, access, size)) = input.storage_image_binding() {
+                } else if let Some((br, format, access)) = input.storage_image_binding() {
                     let binding = Binding::StorageTexture {
                         set: br.set,
                         binding: br.binding,
                         name: input.name.clone(),
                         format,
                         access: access.into(),
-                        size,
-                        resource: input.storage_image_resource().map(str::to_owned),
+                        size: input.host.image_size,
+                        resource: input.host.resource.clone(),
                     };
                     let Some(slot) = binding_slot(&binding) else {
                         continue;
@@ -278,13 +321,9 @@ impl ModuleInterfacePublish for ModuleInterface {
                     binding: decl.binding.binding,
                     access,
                     usage: BufferUsage::Intermediate,
-                    name: if decl.length.is_some() {
-                        format!("{}_gather_b{}", entry.name, decl.binding.binding)
-                    } else {
-                        format!("{}_intermediate_b{}", entry.name, decl.binding.binding)
-                    },
-                    resource: decl.logical_resource.clone(),
-                    length: decl.length.clone(),
+                    name: format!("{}_gather_b{}", entry.name, decl.binding.binding),
+                    resource: Some(decl.host.logical_resource.clone()),
+                    length: Some(decl.host.length.clone()),
                     members: Vec::new(),
                 };
                 let Some(slot) = binding_slot(&binding) else {
@@ -304,7 +343,7 @@ impl ModuleInterfacePublish for ModuleInterface {
                 let source_result = SourceResultBinding {
                     entry: entry.name.clone(),
                     kind: if entry.outputs.len() == 1 { ResultKind::Value } else { ResultKind::TupleField },
-                    name: output.target().map(str::to_owned).unwrap_or_else(|| {
+                    name: output.host.target.clone().unwrap_or_else(|| {
                         if entry.outputs.len() == 1 {
                             entry.name.clone()
                         } else {
@@ -327,7 +366,7 @@ impl ModuleInterfacePublish for ModuleInterface {
                 // `#[target(name)]` sets it. Otherwise it is derived from the
                 // entry, with the position omitted when there is only one
                 // output.
-                let name = output.target().map(str::to_owned).unwrap_or_else(|| {
+                let name = output.host.target.clone().unwrap_or_else(|| {
                     if entry.outputs.len() == 1 {
                         format!("{}_output", entry.name)
                     } else {
@@ -341,10 +380,10 @@ impl ModuleInterfacePublish for ModuleInterface {
                     access: Access::WriteOnly,
                     usage: BufferUsage::Output,
                     name,
-                    resource: generated.and_then(|decl| decl.logical_resource.clone()),
+                    resource: generated.map(|decl| decl.host.logical_resource.clone()),
                     length: generated
-                        .and_then(|decl| decl.length.clone())
-                        .or_else(|| output.storage_length().cloned()),
+                        .map(|decl| decl.host.length.clone())
+                        .or_else(|| output.host.length.clone()),
                     members: Vec::new(),
                 };
                 let Some(slot) = binding_slot(&binding) else {
@@ -377,32 +416,6 @@ impl ModuleInterfacePublish for ModuleInterface {
                         append_fragment_outputs(&mut graphics.fragment_outputs, entry)
                     }
                     _ => {}
-                }
-            }
-        }
-    }
-
-    fn relabel_input_storage_names(&mut self, names: &LookupMap<(u32, u32), String>) {
-        if names.is_empty() {
-            return;
-        }
-        for pipeline in self.pipelines.iter_mut() {
-            let bindings: &mut Vec<Binding> = match pipeline {
-                Pipeline::Compute(cp) => &mut cp.bindings,
-                Pipeline::Graphics(gp) => &mut gp.bindings,
-            };
-            for b in bindings.iter_mut() {
-                if let Binding::StorageBuffer {
-                    set,
-                    binding,
-                    usage: BufferUsage::Input,
-                    name,
-                    ..
-                } = b
-                {
-                    if let Some(real) = names.get(&(*set, *binding)) {
-                        *name = real.clone();
-                    }
                 }
             }
         }
@@ -536,7 +549,7 @@ fn append_vertex_inputs(vertex_inputs: &mut Vec<VertexAttribute>, entry: &EntryP
 
 fn append_fragment_outputs(fragment_outputs: &mut Vec<FragmentOutput>, entry: &EntryPoint) {
     for (i, output) in entry.outputs.iter().enumerate() {
-        if let Some(name) = output.target().map(str::to_owned) {
+        if let Some(name) = output.host.target.clone() {
             fragment_outputs.push(FragmentOutput {
                 location: i as u32,
                 name,

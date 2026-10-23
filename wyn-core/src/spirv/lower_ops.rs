@@ -417,7 +417,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 };
                 let base_ty = self.get_value_type_ref(value_refs[0]);
                 if self.constructor.polytype_to_spirv(&base_ty)? != result_ty {
-                    let PolyType::Constructed(TypeName::Record(_), fields) = base_ty else {
+                    let PolyType::Constructed(TypeName::Tuple(_), fields) = base_ty else {
                         bail_spirv!("record update requires a record");
                     };
                     let mut values = Vec::with_capacity(fields.len());

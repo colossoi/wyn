@@ -22,7 +22,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
     let uses = ssa::ValueUses::analyze(&body.inner);
     let used_places: LookupSet<_> =
         body.inner.insts.values().flat_map(|node| node.data.place_uses()).collect();
-    let params: Vec<ValueId> = body.params().map(|(id, _, _)| id).collect();
+    let params: Vec<ValueId> = body.params().map(|(id, _)| id).collect();
     // A parameter can expand to multiple physical inputs (for example, a tuple
     // of storage views). Only one-to-one parameter/input associations enter the
     // value environment; multi-slot storage views are lowered from their pinned
@@ -138,7 +138,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
             continue;
         }
 
-        if let Some((br, format, access, _size)) = input.storage_image_binding() {
+        if let Some((br, format, access)) = input.storage_image_binding() {
             // Storage images are module-scope resources, never SSA values.
             // Binding-qualified image operations load this exact global.
             let var_id = constructor.create_storage_image(br, format, access);
@@ -227,8 +227,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
             // shared bindings across entries don't double-decorate
             // (spirv-val rejects member-Offset applied twice).
             let record_fields: Option<&[PolyType<TypeName>]> = match &input.ty {
-                PolyType::Constructed(TypeName::Record(_), args)
-                | PolyType::Constructed(TypeName::Tuple(_), args) => Some(args.as_slice()),
+                PolyType::Constructed(TypeName::Tuple(_), args) => Some(args.as_slice()),
                 _ => None,
             };
             let (block_struct, member_types) = if let Some(args) = record_fields {
@@ -597,7 +596,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
         // above) — the polytype-derived placeholder has Format=Unknown
         // and doesn't match the variable's pointee type. Rebuild with
         // the binding's format for the load result type.
-        let input_type = if let Some((_, format, _, _)) = input.storage_image_binding() {
+        let input_type = if let Some((_, format, _)) = input.storage_image_binding() {
             *constructor.builder.type_image(
                 wspirv::TypeId::new(constructor.f32_type),
                 spirv::Dim::Dim2D,

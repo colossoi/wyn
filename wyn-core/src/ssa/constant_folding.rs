@@ -79,7 +79,7 @@ pub(super) fn fold(body: &mut FuncBody) {
                     continue;
                 };
                 function.insts[id].data = InstKind::Op {
-                    tag: OpTag::Vector(lanes.len()),
+                    tag: OpTag::Vector,
                     operands,
                 };
                 value = Constant::Vector(normalized);
@@ -143,7 +143,7 @@ fn evaluate(
             Some(Constant::Float(text.parse::<f32>().ok()? as f64))
         }
         OpTag::Bool(value) => Some(Constant::Bool(*value)),
-        OpTag::Vector(_) => operands
+        OpTag::Vector => operands
             .iter()
             .map(|v| operand(*v, constants)?.as_scalar())
             .collect::<Option<Vec<_>>>()

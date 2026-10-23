@@ -25,18 +25,14 @@ pub(crate) struct FunctionEmission {
     pub(crate) id: FunctionEmissionId,
     pub(crate) function: FunctionId,
     pub(crate) name: String,
-    pub(crate) entry_context: Option<EntryId>,
+    pub(crate) entry_context: EntryId,
 }
 
 pub(crate) struct StorageFunctionVariants {
     emissions: Vec<FunctionEmission>,
-    /// Deterministic fallback emission for every local function. Entry-specific
-    /// selections override it before lowering an entry or its helper variants.
-    fallback_emissions: LookupMap<FunctionId, FunctionEmissionId>,
     entry_emissions: LookupMap<EntryId, LookupMap<FunctionId, FunctionEmissionId>>,
     entry_names: LookupMap<EntryId, LookupMap<FunctionId, String>>,
     entry_accesses: LookupMap<EntryId, LookupMap<BindingRef, ResourceAccess>>,
-    module_accesses: LookupMap<BindingRef, ResourceAccess>,
 }
 
 impl StorageFunctionVariants {
@@ -88,16 +84,6 @@ impl StorageFunctionVariants {
             .iter()
             .map(|entry| (entry.id, accesses_for_entry(entry)))
             .collect::<LookupMap<_, _>>();
-        let mut module_accesses = LookupMap::new();
-        for accesses in entry_accesses.values() {
-            for (&binding, &access) in accesses {
-                module_accesses
-                    .entry(binding)
-                    .and_modify(|current: &mut ResourceAccess| *current = current.merge(access))
-                    .or_insert(access);
-            }
-        }
-
         let reachable = program
             .entry_points
             .iter()
@@ -109,7 +95,6 @@ impl StorageFunctionVariants {
             })
             .collect::<Vec<_>>();
         let mut emissions = Vec::new();
-        let mut fallback_emissions = LookupMap::new();
         let mut entry_names = program
             .entry_points
             .iter()
@@ -137,18 +122,6 @@ impl StorageFunctionVariants {
                 }
             }
 
-            if contexts.is_empty() {
-                let id = FunctionEmissionId(emissions.len());
-                fallback_emissions.insert(function.id, id);
-                emissions.push(FunctionEmission {
-                    id,
-                    function: function.id,
-                    name: function.name.clone(),
-                    entry_context: None,
-                });
-                continue;
-            }
-
             let needs_variants = contexts.len() > 1;
             for (variant_index, entries) in contexts.values().enumerate() {
                 let name = if needs_variants {
@@ -170,26 +143,16 @@ impl StorageFunctionVariants {
                     id: FunctionEmissionId(emissions.len()),
                     function: function.id,
                     name,
-                    entry_context: entries.first().copied(),
+                    entry_context: entries[0],
                 });
             }
         }
 
-        // Every direct `OpTag::Call` must remain resolvable while lowering
-        // helpers reached through module-level constant bodies. The selected
-        // entry map below overrides this deterministic fallback for every
-        // direct live entry path.
-        for emission in &emissions {
-            fallback_emissions.entry(emission.function).or_insert(emission.id);
-        }
-
         Self {
             emissions,
-            fallback_emissions,
             entry_emissions,
             entry_names,
             entry_accesses,
-            module_accesses,
         }
     }
 
@@ -201,28 +164,12 @@ impl StorageFunctionVariants {
         &self.entry_names[&entry]
     }
 
-    pub(crate) fn emissions_for_context(
-        &self,
-        entry: Option<EntryId>,
-    ) -> &LookupMap<FunctionId, FunctionEmissionId> {
-        match entry {
-            Some(entry) => &self.entry_emissions[&entry],
-            None => &self.fallback_emissions,
-        }
-    }
-
     pub(crate) fn emissions_for_entry(&self, entry: EntryId) -> &LookupMap<FunctionId, FunctionEmissionId> {
-        self.emissions_for_context(Some(entry))
+        &self.entry_emissions[&entry]
     }
 
-    pub(crate) fn accesses_for<'a, Tag, GlobalContext>(
-        &'a self,
-        _program: &'a Program<Tag, GlobalContext>,
-        entry: Option<EntryId>,
-    ) -> LookupMap<BindingRef, ResourceAccess> {
-        entry
-            .map(|entry_id| self.entry_accesses[&entry_id].clone())
-            .unwrap_or_else(|| self.module_accesses.clone())
+    pub(crate) fn accesses_for(&self, entry: EntryId) -> &LookupMap<BindingRef, ResourceAccess> {
+        &self.entry_accesses[&entry]
     }
 }
 

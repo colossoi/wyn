@@ -2,6 +2,51 @@
 use crate::{compile_thru_ssa, lower_ssa_to_spirv, lower_ssa_to_wgsl};
 use naga::{BinaryOperator, Expression, Statement};
 
+#[test]
+fn size_hint_survives_egglog_optimization() {
+    use super::{from_tlc, fuse, optimize, place, schedule, to_ssa};
+    use crate::interface::Attribute;
+    use crate::tlc::DefMeta;
+    use crate::{CodegenTarget, PipelineTopologyPolicy};
+
+    for source in [
+        include_str!("../../../testfiles/reduce_compute.wyn"),
+        include_str!("../../../testfiles/scan_compute.wyn"),
+        "entry frame(#[size_hint(1024)] data: []vec4f32,
+                     target: render_target<vec4f32>) render_target<vec4f32> =
+           let fragments = rasterize_triangles(direct_draw(3u32, 1u32),
+             |_, _, _| vertex_output(data[0], ())) in
+           shade(target, fragments, |_, _, _, _, _| data[0])",
+    ] {
+        let tlc = crate::compile_thru_tlc(source).unwrap();
+        let program = optimize(
+            schedule(
+                place(
+                    fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                    PipelineTopologyPolicy::AllowGenerated,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut entries = 0;
+        for definition in &program.source.defs {
+            if let DefMeta::EntryPoint(entry) = &definition.meta {
+                entries += 1;
+                let data = entry.declaration.params.iter().find(|param| param.name == "data").unwrap();
+                assert!(data
+                    .attributes
+                    .contains(&Attribute::SizeHint(std::num::NonZeroU32::new(1024).unwrap())));
+            }
+        }
+        assert!(entries > 0);
+        let ssa = to_ssa(program, CodegenTarget::Portable).unwrap();
+        lower_ssa_to_wgsl(ssa.clone()).unwrap();
+        lower_ssa_to_spirv(ssa).unwrap();
+    }
+}
+
 fn storage_loads(function: &naga::Function, global: naga::Handle<naga::GlobalVariable>) -> usize {
     function
         .expressions

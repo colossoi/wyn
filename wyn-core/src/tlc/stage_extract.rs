@@ -282,7 +282,7 @@ fn extract_root(
     let mut root_entry = root_entry.clone();
     for param in &mut root_entry.declaration.params {
         let binding = binding_ids.next_id();
-        if !is_render_target_type(&param.ty) && param.attributes.is_empty() {
+        if !is_render_target_type(&param.ty) && root_parameter_binding(param).is_none() {
             param.attributes.extend(external_binding_attribute(&param.ty, binding));
         }
     }
@@ -1616,7 +1616,7 @@ fn append_root_captures(
         params.push((new_symbol, external_ty.clone()));
         let mut declaration = declaration.clone();
         declaration.ty = external_ty.clone();
-        if declaration.attributes.is_empty() {
+        if root_parameter_binding(&declaration).is_none() {
             declaration.attributes.extend(external_binding_attribute(&external_ty, binding));
         }
         declarations.push(declaration);

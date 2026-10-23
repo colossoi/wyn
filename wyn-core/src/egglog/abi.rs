@@ -8,12 +8,14 @@ use crate::binding_layout::{
 };
 use crate::egglog::to_ssa::Compiler;
 use crate::host::BufferLen;
-use crate::interface::lowering::{build_entry_outputs, extract_size_hint};
-use crate::interface::{
-    BindingExposure, EntryInput, EntryInputKind, EntryParamBindingKind, PushConstantSlot, StorageAccess,
-    TextureSource,
+use crate::interface::lowering::build_entry_outputs;
+use crate::interface::publish::{
+    EntryInput, EntryOutput, EntryPoint, InputHost, StorageBindingDecl, StorageHost,
 };
-use crate::interface::{EntryKind, StorageBindingDecl, StorageRole};
+use crate::interface::{
+    BindingExposure, EntryInputKind, EntryParamBindingKind, PushConstantSlot, StorageAccess,
+};
+use crate::interface::{EntryKind, StorageRole};
 use crate::ssa::layout::{storage_value_type, type_byte_size};
 use crate::tlc::{extract_lambda_params_ref, DefMeta};
 use crate::types::{canonical_storage_buffer_ty, strip_existentials, Type, TypeExt, TypeName};
@@ -53,7 +55,7 @@ pub(super) fn storage_bindings(
     compiler: &Compiler<'_, '_>,
     root: Value,
     stage: Option<Value>,
-    published: &[crate::ssa::types::EntryPoint],
+    published: &[EntryPoint],
     inputs: &mut [EntryInput],
     accesses: &mut LookupMap<BindingRef, ResourceAccess>,
 ) -> Result<Vec<StorageBindingDecl>, OptimizeError> {
@@ -74,7 +76,7 @@ pub(super) fn storage_bindings(
             published
                 .iter()
                 .flat_map(|entry| entry.storage_bindings.iter())
-                .filter_map(|storage| storage.logical_resource.clone()),
+                .map(|storage| storage.host.logical_resource.clone()),
         )
         .collect();
     for value in compiler.facts.set("RootResourceSet", (root,)) {
@@ -88,7 +90,7 @@ pub(super) fn storage_bindings(
                 .iter()
                 .flat_map(|entry| &entry.storage_bindings)
                 .find(|storage| storage.binding == binding)
-                .and_then(|storage| storage.logical_resource.clone())
+                .map(|storage| storage.host.logical_resource.clone())
             {
                 name
             } else {
@@ -107,9 +109,11 @@ pub(super) fn storage_bindings(
                     Some(StorageAccess::WriteOnly) => StorageRole::Output,
                     Some(StorageAccess::ReadWrite) => StorageRole::InputOutput,
                 },
-                logical_resource: Some(name),
                 elem_ty: compiler.facts.physical_type(element, true)?,
-                length: Some(sizes::capacity(compiler, value)?),
+                host: StorageHost {
+                    logical_resource: name,
+                    length: sizes::capacity(compiler, value)?,
+                },
             });
         } else {
             let Some(access) = access else {
@@ -149,9 +153,11 @@ pub(super) fn storage_bindings(
             storage_bindings.push(StorageBindingDecl {
                 binding,
                 role: StorageRole::Input,
-                logical_resource: Some(format!("host_capture_{}_{}", binding.set, binding.binding)),
                 elem_ty: storage_value_type(ty),
-                length: Some(BufferLen::Fixed { bytes: 4 }),
+                host: StorageHost {
+                    logical_resource: format!("host_capture_{}_{}", binding.set, binding.binding),
+                    length: BufferLen::Fixed { bytes: 4 },
+                },
             });
         }
     }
@@ -198,11 +204,10 @@ pub(super) fn parameter_inputs(
             inputs.push(EntryInput {
                 name: format!("{}_{}", param.name, i),
                 ty: canonical_storage_buffer_ty(ty),
-                size_hint: extract_size_hint(param),
+                host: InputHost::default(),
                 kind: EntryInputKind::Storage {
                     exposure: BindingExposure::Host(field.binding),
                     access,
-                    length: None,
                 },
             });
         }
@@ -217,37 +222,35 @@ pub(super) fn parameter_inputs(
             }
         }
         let storage = inferred.or(declared);
+        let mut host = InputHost::default();
         let kind = if let Some(binding) = storage {
+            host.length = Query(&program.graph)
+                .lookup("ParameterPrefixElements", (scope, index))?
+                .and_then(|count| {
+                    type_byte_size(ty.elem_type()?).map(|bytes| BufferLen::Fixed {
+                        bytes: (facts.integer(count) as u64).saturating_mul(bytes.into()),
+                    })
+                })
+                .or_else(|| type_byte_size(ty).map(|bytes| BufferLen::Fixed { bytes: bytes.into() }));
             EntryInputKind::Storage {
                 exposure: BindingExposure::Host(binding),
                 access,
-                length: Query(&program.graph)
-                    .lookup("ParameterPrefixElements", (scope, index))?
-                    .and_then(|count| {
-                        type_byte_size(ty.elem_type()?).map(|bytes| BufferLen::Fixed {
-                            bytes: (facts.integer(count) as u64).saturating_mul(bytes.into()),
-                        })
-                    })
-                    .or_else(|| type_byte_size(ty).map(|bytes| BufferLen::Fixed { bytes: bytes.into() })),
             }
         } else if let Some(binding) = extract_uniform_binding(param) {
             EntryInputKind::Uniform { binding }
         } else if let Some(binding) = extract_texture_binding(param) {
-            let source = match (extract_texture_backing(param), extract_texture_resource(param)) {
-                (backing, Some(name)) => TextureSource::Resource { name, backing },
-                (Some(binding), None) => TextureSource::Backing(binding),
-                (None, None) => TextureSource::External,
-            };
-            EntryInputKind::Texture { binding, source }
+            host.backing = extract_texture_backing(param);
+            host.resource = extract_texture_resource(param);
+            EntryInputKind::Texture { binding }
         } else if let Some(binding) = extract_sampler_binding(param) {
             EntryInputKind::Sampler { binding }
         } else if let Some((binding, format, access, size)) = extract_storage_image_binding(param) {
+            host.image_size = size;
+            host.resource = extract_storage_image_resource(param);
             EntryInputKind::StorageImage {
                 binding,
                 format,
                 access,
-                size,
-                resource: extract_storage_image_resource(param),
             }
         } else if Query(&program.graph).enode("ShaderInput", abi)?.is_some() {
             EntryInputKind::Value {
@@ -268,7 +271,7 @@ pub(super) fn parameter_inputs(
         inputs.push(EntryInput {
             name: param.name.clone(),
             ty: canonical_storage_buffer_ty(ty),
-            size_hint: extract_size_hint(param),
+            host,
             kind,
         });
     }
@@ -279,7 +282,7 @@ pub(super) fn outputs(
     program: &Program<'_, super::Optimized>,
     symbol: SymbolId,
     bindings: &mut IdSource<u32>,
-) -> Result<Vec<crate::interface::EntryOutput>, OptimizeError> {
+) -> Result<Vec<EntryOutput>, OptimizeError> {
     let facts = super::facts::Facts { program };
     let Some(token) = program.identities.symbols.get(&symbol) else {
         return Err(OptimizeError::Output("entry identity missing".into()));
