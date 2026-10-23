@@ -1,6 +1,5 @@
-//! Backend-created aggregate cleanup. Reuse is strictly block-local, and dead
-//! instruction removal is restricted to construction/extraction: operand
-//! evaluation, memory operations, calls and control flow are left intact.
+//! Forward aggregate fields and exact reconstructions, then reuse block-local
+//! duplicates and discard dead aggregates. Operand evaluation stays intact.
 use crate::{dr, spirv};
 use std::collections::{HashMap, HashSet};
 
@@ -35,7 +34,35 @@ pub(super) fn run(module: &mut dr::Module) {
         })
         .collect();
     loop {
+        let vector_widths: HashMap<_, _> = module
+            .types_global_values
+            .iter()
+            .filter_map(|i| match (i.class.opcode, i.result_id, i.operands.as_slice()) {
+                (spirv::Op::TypeVector, Some(id), [_, dr::Operand::LiteralBit32(n)]) => {
+                    Some((id, *n as usize))
+                }
+                _ => None,
+            })
+            .collect();
+        let value_types: HashMap<_, _> =
+            module.all_inst_iter().filter_map(|i| Some((i.result_id?, i.result_type?))).collect();
+        let definitions: HashMap<_, _> = module
+            .all_inst_iter()
+            .filter_map(|i| {
+                if !is_aggregate(i)
+                    || protected.contains(&i.result_id?)
+                    || i.class.opcode == spirv::Op::CompositeConstruct
+                        && i.result_type
+                            .and_then(|ty| vector_widths.get(&ty))
+                            .is_some_and(|&n| n != i.operands.len())
+                {
+                    return None;
+                }
+                Some((i.result_id?, i.clone()))
+            })
+            .collect();
         let mut replacements = HashMap::new();
+        let mut changed = false;
         for function in &mut module.functions {
             for block in &mut function.blocks {
                 let mut available = HashMap::new();
@@ -46,6 +73,55 @@ pub(super) fn run(module: &mut dr::Module) {
                     };
                     if !is_aggregate(instruction) || protected.contains(&result) {
                         return true;
+                    }
+                    if instruction.class.opcode == spirv::Op::CompositeExtract {
+                        while let [dr::Operand::IdRef(source), dr::Operand::LiteralBit32(index), ..] =
+                            instruction.operands.as_slice()
+                        {
+                            let Some(base) = definitions
+                                .get(source)
+                                .filter(|i| i.class.opcode == spirv::Op::CompositeConstruct)
+                            else {
+                                break;
+                            };
+                            let Some(field) = base.operands.get(*index as usize) else {
+                                break;
+                            };
+                            instruction.operands[0] = field.clone();
+                            instruction.operands.remove(1);
+                            changed = true;
+                        }
+                        if let [dr::Operand::IdRef(value)] = instruction.operands.as_slice() {
+                            replacements.insert(result, *value);
+                            return false;
+                        }
+                    } else if definitions.contains_key(&result) {
+                        let source = instruction
+                            .operands
+                            .iter()
+                            .enumerate()
+                            .try_fold(None, |source, (index, operand)| {
+                                let dr::Operand::IdRef(id) = operand else {
+                                    return None;
+                                };
+                                let projection = definitions
+                                    .get(id)
+                                    .filter(|i| i.class.opcode == spirv::Op::CompositeExtract)?;
+                                let [dr::Operand::IdRef(original), dr::Operand::LiteralBit32(field)] =
+                                    projection.operands.as_slice()
+                                else {
+                                    return None;
+                                };
+                                (*field as usize == index && source.is_none_or(|s| s == *original))
+                                    .then_some(Some(*original))
+                            })
+                            .flatten();
+                        if let Some(source) = source
+                            .filter(|source| value_types.get(source) == instruction.result_type.as_ref())
+                        {
+                            replacements.insert(result, source);
+                            return false;
+                        }
                     }
                     let key = (
                         instruction.class.opcode,
@@ -75,7 +151,7 @@ pub(super) fn run(module: &mut dr::Module) {
         for instruction in module.all_inst_iter_mut() {
             replace(instruction, &replacements);
         }
-        if replacements.is_empty() {
+        if replacements.is_empty() && !changed {
             break;
         }
     }

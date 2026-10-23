@@ -67,7 +67,8 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
     }
 
     fn value(&mut self, context: Value, source: Value, expand: bool) -> Result<Value, OptimizeError> {
-        let expand = expand || self.facts.rematerialized(source)?;
+        let expand = expand
+            || (self.facts.rematerialized(source)? && !self.facts.flag("HasViewStage", (source,))?);
         let key = (context, source, expand);
         if let Some(&value) = self.cache.get(&key) {
             return Ok(value);

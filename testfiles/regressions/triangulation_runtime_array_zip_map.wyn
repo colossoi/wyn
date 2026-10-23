@@ -1,0 +1,4 @@
+-- Mapping zipped runtime views must preserve the branch's selected length.
+entry main(xs: []i32) []i32 =
+  let out = if length(xs)>10 then replicate(0,0i32) else xs
+  in map(|(x,y)| x+y, zip(out,out))

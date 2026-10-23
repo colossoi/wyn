@@ -9,12 +9,16 @@
 (datatype ValueKey
   (Output i64)
   (Source SourceValue)
+  (Metadata i64)
+  (ViewLength SourceValue)
+  (LoopStorage SourceValue)
   (Result OperationKey i64)
   (Temporary OperationKey String i64))
 (datatype Extent
   (Fixed i64)
   (Length SourceValue)
   (Scalar SourceValue)
+  (Sum Extent Extent)
   (Product Extent Extent)
   (Difference Extent Extent)
   (Stored ValueKey)
@@ -99,6 +103,23 @@
 (datatype StorageRead (ReadView ValueKey) (ReadElement ValueKey))
 (function ResultRead (OperationKey i64) StorageRead :no-merge)
 (function ValueRead (SourceValue) StorageRead :no-merge)
+; A view's storage identity and logical length are independent of its capacity.
+(function DerivedView (SourceValue) bool :merge (or old new))
+(function HasArrayStorage (SourceValue) bool :merge (or old new))
+(function ArrayStorage (SourceValue) ValueKey :no-merge)
+(datatype ArrayViewInfo (ViewInfo ValueKey Extent Extent))
+(function ArrayView (SourceValue) ArrayViewInfo :no-merge)
+(constructor SourceShape (SourceValue) SourceValue)
+(constructor SourceOffset (SourceValue) SourceValue)
+(function RuntimeArrayJoin (SourceValue) bool :merge (or old new))
+(function HasViewStage (SourceValue) bool :merge (or old new))
+(function MetadataIndex (ValueKey) i64 :no-merge)
+(function MetadataCount (i64) i64 :merge (max old new))
+(function LoopPreservesLength (SourceValue) bool :merge (or old new))
+(function StoredLoopState (SourceValue) bool :merge (or old new))
+; Allocation bounds are separate from the scalar length carried by a view.
+(sort CapacityBounds (Set Extent))
+(function AllocationBounds (ValueKey) CapacityBounds :merge (set-union old new))
 ; All dependencies share one expression propagation path. A descriptor use
 ; requires the input binding without observing its mutable element contents.
 (datatype ValueReference (Contents ValueKey) (Descriptor SourceValue))

@@ -342,7 +342,10 @@ fn dispatch_sized_allocations_keep_the_unrounded_expression() {
     let [crate::Allocation::Buffer { bytes, .. }] = entry.allocations.as_slice() else {
         panic!("one output allocation");
     };
-    assert_eq!(bytes, &elements.multiply(Expr::Integer(4)));
+    assert_eq!(
+        bytes,
+        &Expr::Max(Box::new(Expr::Integer(1)), Box::new(elements)).multiply(Expr::Integer(4))
+    );
     assert_eq!(
         entry.scalar_inputs,
         ["columns".into(), "rows".into()].into_iter().collect()

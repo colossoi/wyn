@@ -25,6 +25,14 @@ impl Backend for Trace {
         Ok(match name {
             "gpu-alloc" => self.input(vec![0; args[0].u64()? as usize]),
             "gpu-buffer-size" => Value::Number(Number::U64(self.buffers[&args[0].handle()?].len() as u64)),
+            "gpu-buffer-view" => {
+                let bytes = args[1].u64()? as usize;
+                let data = self.buffers[&args[0].handle()?]
+                    .get(..bytes)
+                    .ok_or_else(|| Error::Gpu("view exceeds logical buffer size".into()))?
+                    .to_vec();
+                self.input(data)
+            }
             "gpu-free" => {
                 let id = args[0].handle()?;
                 self.freed.push(id);

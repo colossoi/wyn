@@ -428,8 +428,8 @@ impl Program {
                         context.scratch = true;
                         let slot = r.0;
                         scratch.push(quote! {
-                            if let Some(buffer) = context.scratch.get(&#slot) {
-                                encoder.clear_buffer(buffer, 0, None);
+                            if let Some(cached_buffer) = context.scratch.get(&#slot) {
+                                encoder.clear_buffer(cached_buffer, 0, None);
                             }
                         });
                         quote!(support::scratch_buffer(device, &mut context.scratch, #slot, &descriptor))

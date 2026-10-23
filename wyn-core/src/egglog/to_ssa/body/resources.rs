@@ -36,7 +36,20 @@ impl Body<'_, '_, '_> {
             };
             let access = fields[0];
             if let Some(fields) = self.compiler.facts.enode("ReadView", access) {
-                return self.resource(scope, fields[0], 1);
+                let view = self.resource(scope, fields[0], 1)?;
+                // Scalar transport buffers have no semantic array descriptor.
+                let Some(fields) = self.compiler.facts.record("ArrayView", "ViewInfo", (source,)) else {
+                    return Ok(view);
+                };
+                let start = self.extent(scope, fields[1])?;
+                let length = self.extent(scope, fields[2])?;
+                let end = self.binary(BinaryOperator::Add, start.clone(), length)?;
+                return self.slice(
+                    view,
+                    start,
+                    end,
+                    Type::Constructed(TypeName::SizePlaceholder, vec![]),
+                );
             }
             if let Some(fields) = self.compiler.facts.enode("ReadElement", access) {
                 let view = self.resource(scope, fields[0], 1)?;
@@ -52,7 +65,11 @@ impl Body<'_, '_, '_> {
         self.local(scope, source)
     }
 
-    pub(super) fn local(&mut self, scope: Value, source: Value) -> Result<Typed, OptimizeError> {
+    pub(in crate::egglog::to_ssa) fn local(
+        &mut self,
+        scope: Value,
+        source: Value,
+    ) -> Result<Typed, OptimizeError> {
         if let Some(formal) = self.compiler.facts.enode("SourceFormal", source) {
             if let Some(actual) = self.compiler.facts.lookup("SourceCapture", (formal[0], source)) {
                 let Some(context) = self.compiler.facts.lookup("ExprContextForSource", (actual,)) else {
@@ -62,6 +79,20 @@ impl Body<'_, '_, '_> {
                 let result = self.value(scope, actual);
                 self.context = old_context;
                 return result;
+            }
+        }
+        for (constructor, index) in [("SourceShape", 1), ("SourceOffset", 0)] {
+            if let Some(fields) = self.compiler.facts.enode(constructor, source) {
+                let view = self.value(scope, fields[0])?;
+                if index == 1 {
+                    return self.length(view);
+                }
+                let offset = self.op(
+                    OpTag::Project { index },
+                    vec![view],
+                    Type::Constructed(TypeName::UInt(32), vec![]),
+                )?;
+                return self.cast(offset, &types::i32());
             }
         }
         self.planned_boundary(scope, source)?;
@@ -110,15 +141,15 @@ impl Body<'_, '_, '_> {
             )?;
             return self.rebind_boundary(result, target.as_ref());
         }
+        if let Some(actual) = self.compiler.facts.alias(source) {
+            return self.value(scope, actual);
+        }
         if let Some(array) = self.compiler.facts.lookup("SourceLength", (source,)) {
             let value = self.source_length(scope, array)?;
             let Some(ty) = self.compiler.facts.source_type(source).cloned() else {
                 return Err(error("length expression has no type"));
             };
             return self.cast(value, &ty);
-        }
-        if let Some(actual) = self.compiler.facts.alias(source) {
-            return self.value(scope, actual);
         }
         if let Some((parent, index)) = self.compiler.facts.projection(source) {
             let parent = self.value(scope, parent)?;
@@ -191,6 +222,9 @@ impl Body<'_, '_, '_> {
     }
 
     pub(super) fn source_length(&mut self, scope: Value, source: Value) -> Result<Typed, OptimizeError> {
+        if let Some(value) = self.values.get(&source) {
+            return self.length(value.clone());
+        }
         let Some(extent) = self.compiler.facts.view_extent(source) else {
             return Err(error(format!(
                 "array {source:?} has no planned view extent, projection {:?}, type {:?}",
@@ -303,7 +337,15 @@ impl Body<'_, '_, '_> {
             Some(shape) => self.compiler.facts.vector(shape)?,
             None => vec![extent],
         };
-        let mut operands = vec![Self::number(0)];
+        let offset = self
+            .compiler
+            .facts
+            .lookup("MetadataIndex", (resource,))
+            .map(|index| self.compiler.facts.integer(index))
+            .unwrap_or(0);
+        let mut operands = vec![Self::number(
+            u32::try_from(offset).map_err(|_| error("metadata offset overflow"))?,
+        )];
         for extent in &dimensions {
             operands.push(self.extent(scope, *extent)?);
         }
@@ -374,11 +416,14 @@ impl Body<'_, '_, '_> {
                 let zero = self.literal("0", &types::i32())?;
                 self.index(view, zero)
             }
-            "Product" | "Difference" => {
+            "Sum" | "Product" | "Difference" => {
                 let a = self.extent(scope, children[0])?;
                 let b = self.extent(scope, children[1])?;
-                let op =
-                    if name == "Product" { BinaryOperator::Multiply } else { BinaryOperator::Subtract };
+                let op = match name {
+                    "Sum" => BinaryOperator::Add,
+                    "Product" => BinaryOperator::Multiply,
+                    _ => BinaryOperator::Subtract,
+                };
                 self.binary(op, a, b)
             }
             _ => Err(error("invalid extent constructor")),

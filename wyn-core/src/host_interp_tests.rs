@@ -31,6 +31,44 @@ fn runtime_array_loop_output_keeps_input_length() {
 }
 
 #[test]
+fn allocated_array_loop_output_keeps_logical_length() {
+    let source = include_str!("../../testfiles/regressions/triangulation_allocated_array_loop.wyn");
+    let program = generated(source);
+    for length in [0i32, 1, 3, 65] {
+        let mut backend = Trace::default();
+        let inputs = program
+            .entry("main")
+            .unwrap()
+            .parameters
+            .iter()
+            .map(|_| backend.input(length.to_le_bytes().to_vec()))
+            .collect::<Vec<_>>();
+        let result = program.run("main", &inputs, &mut backend).unwrap();
+        assert_eq!(
+            backend.buffers[&result.handle().unwrap()].len(),
+            length as usize * 4
+        );
+    }
+}
+
+#[test]
+fn branch_output_shape_is_read_before_temporary_storage_is_freed() {
+    for source in [
+        include_str!("../../testfiles/regressions/triangulation_runtime_array_branch.wyn"),
+        include_str!("../../testfiles/regressions/triangulation_runtime_array_zip_map.wyn"),
+    ] {
+        let program = generated(source);
+        let mut backend = Trace::default();
+        let input = backend.input(vec![0; 48]);
+        let result = program.run("main", &[input], &mut backend).unwrap();
+        // Trace leaves GPU-written words zero: exercise the empty logical result.
+        assert!(backend.buffers[&result.handle().unwrap()].is_empty());
+        assert_eq!(backend.device_reads.len(), 1);
+        assert!(backend.freed.contains(&backend.device_reads[0].0));
+    }
+}
+
+#[test]
 fn interprets_emitted_size_calculation_before_allocating_and_dispatching() {
     let program = generated("entry main(n:i32) []i32 = iota(n*2+3)");
     let mut backend = Trace::default();
@@ -71,6 +109,16 @@ fn sliced_range_count_arithmetic_reaches_host_allocations() {
         );
         assert!(!backend.dispatches.is_empty());
     }
+}
+
+#[test]
+fn empty_maps_launch_no_work_despite_nonzero_storage_capacity() {
+    let program = generated("entry main(xs:[]i32) []i32=map(|x|x+1,xs)");
+    let mut backend = Trace::default();
+    let input = backend.input(vec![]);
+    let result = program.run("main", &[input], &mut backend).unwrap();
+    assert!(backend.buffers[&result.handle().unwrap()].is_empty());
+    assert!(backend.dispatches.iter().all(|(_, groups)| groups.contains(&0)));
 }
 
 #[test]
@@ -249,7 +297,7 @@ fn uniform_sized_launches_allocate_capacity_and_clamp_the_grid() {
         };
         let program = Program::parse(&program.to_whl("runtime_dispatch", format).unwrap()).unwrap();
         for (elements, groups) in [
-            (0, 1),
+            (0, 0),
             (64, 1),
             (65, 2),
             (64_000, 1_000),
@@ -298,7 +346,7 @@ fn allocation_expressions_preserve_casts_branches_and_wrapping() {
             (
                 "entry main(n:f32) []i32 = iota(i32(n))",
                 (-2.0f32).to_le_bytes(),
-                4,
+                0,
             ),
             (
                 "entry main(n:i32) []i32 = iota(if n>0 then n*2 else 3)",

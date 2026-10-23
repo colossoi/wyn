@@ -2,7 +2,7 @@ use super::super::query::Query;
 use super::super::{from_tlc, fuse, optimize, place, schedule, to_ssa};
 use crate::{compile_thru_tlc, CodegenTarget, PipelineTopologyPolicy};
 use egglog_engine::{
-    sort::{VecContainer, S},
+    sort::{SetContainer, VecContainer, S},
     EGraph, Value, Write,
 };
 
@@ -34,6 +34,116 @@ fn operations(graph: &EGraph, kind: &str) -> Vec<Value> {
 }
 
 #[test]
+fn incomplete_descriptors_fail_before_ssa_emission() {
+    let tlc = compile_thru_tlc(include_str!(
+        "../../../testfiles/regressions/triangulation_runtime_array_branch.wyn"
+    ))
+    .unwrap();
+    for (missing, expected) in [
+        ("ArrayView", "no complete descriptor"),
+        ("ArrayStorage", "array read disagrees with planned storage"),
+        ("SourceType", "descriptor scalar has no type"),
+        ("ExprContextOwner", "descriptor scalar has no lexical context"),
+        ("SourceBranch", "context field has no control-flow binder"),
+    ] {
+        let mut program = optimize(
+            schedule(
+                place(
+                    fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                    PipelineTopologyPolicy::AllowGenerated,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let query = Query(&program.graph);
+        let output = query.row("ReturnArray", |_| true).unwrap().unwrap()[1];
+        let view = query.record("ArrayView", "ViewInfo", (output,)).unwrap().unwrap();
+        let scalar = query.enode("Scalar", view[2]).unwrap().unwrap()[0];
+        let value =
+            if matches!(missing, "ArrayView" | "ArrayStorage" | "SourceBranch") { output } else { scalar };
+        program.graph.update(|mut sink| sink.remove(missing, (value,))).unwrap();
+        let error =
+            to_ssa(program, CodegenTarget::Wgsl).err().expect("invalid descriptor accepted").to_string();
+        assert!(error.contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn updated_slice_preserves_its_descriptor() {
+    planned(
+        include_str!("../../../testfiles/regressions/runtime_array_updated_slice.wyn"),
+        |graph| {
+            let query = Query(graph);
+            let mut updates = 0;
+            query
+                .for_each("SourceResultOperand", |row| {
+                    let view = query.required("ArrayView", (row[0],))?;
+                    assert_eq!(view, query.required("ArrayView", (row[2],))?);
+                    updates += 1;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(updates, 1);
+        },
+    );
+}
+
+#[test]
+fn returned_array_lengths_share_storage() {
+    planned(
+        include_str!("../../../testfiles/regressions/runtime_array_three_outputs.wyn"),
+        |graph| {
+            let query = Query(graph);
+            let mut slots = Vec::new();
+            query
+                .for_function("MetadataIndex", |keys, _| {
+                    slots.push(query.required("Backing", (keys[0],))?);
+                    Ok(())
+                })
+                .unwrap();
+            assert!(!slots.is_empty());
+            assert!(slots.iter().all(|slot| *slot == slots[0]));
+            query
+                .for_function("InputShapeBuffer", |_, storage| {
+                    assert_eq!(storage, slots[0]);
+                    Ok(())
+                })
+                .unwrap();
+        },
+    );
+}
+
+#[test]
+fn copied_runtime_slices_do_not_overwrite_other_outputs() {
+    planned(
+        include_str!("../../../testfiles/regressions/triangulation_runtime_array_return_alias.wyn"),
+        |graph| {
+            let query = Query(graph);
+            let mut backings = Vec::new();
+            query
+                .for_each("ReturnArray", |row| {
+                    let backing = query.required("OutputBacking", (row[0],))?;
+                    let view = query.record("ArrayView", "ViewInfo", (row[1],))?.unwrap();
+                    let source = query.required("Backing", (view[0],))?;
+                    if query.lookup("SourceSlice", (row[1],))?.is_some() {
+                        assert_ne!(backing, source, "copying a slice must not overwrite its source");
+                    }
+                    assert!(
+                        !backings.contains(&backing),
+                        "returned arrays need separate destinations"
+                    );
+                    backings.push(backing);
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(backings.len(), 2);
+        },
+    );
+}
+
+#[test]
 fn shrinking_loop_does_not_inherit_its_initial_extent() {
     planned(
         "entry main(xs:[]i32) []i32 =
@@ -43,7 +153,8 @@ fn shrinking_loop_does_not_inherit_its_initial_extent() {
             let mut loops = 0;
             query
                 .for_function("SourceLoop", |row, _| {
-                    assert!(query.lookup("LogicalExtent", (row[0],))?.is_none());
+                    let shape = query.record("LogicalExtent", "Scalar", (row[0],))?.unwrap();
+                    assert_eq!(query.enode("SourceShape", shape[0])?, Some(vec![row[0]]));
                     loops += 1;
                     Ok(())
                 })
@@ -51,6 +162,47 @@ fn shrinking_loop_does_not_inherit_its_initial_extent() {
             assert_eq!(loops, 1);
         },
     );
+}
+
+#[test]
+fn loop_capacity_obligations_use_the_length_preservation_proof() {
+    for (source, preserves) in [
+        (
+            include_str!("../../../testfiles/regressions/triangulation_allocated_array_loop.wyn"),
+            true,
+        ),
+        (
+            "entry main(n:i32) []i32 = loop out=iota(n) for i<2 do out[1..length(out)]",
+            false,
+        ),
+    ] {
+        planned(source, |graph| {
+            let query = Query(graph);
+            let mut loops = 0;
+            query
+                .for_function("SourceLoop", |row, info| {
+                    let value = row[0];
+                    assert_eq!(query.flag("LoopPreservesLength", (value,))?, preserves);
+                    let regions = query.enode("LoopInfo", info)?.unwrap();
+                    let initial =
+                        query.record("SourceLoopInitial", "LoopInitialInfo", (regions[0],))?.unwrap();
+                    let next = query.required("SourceResult", (regions[1],))?;
+                    let storage = query.constructor("LoopStorage", (value,))?.unwrap();
+                    let bounds = graph
+                        .value_to_container::<SetContainer>(query.required("AllocationBounds", (storage,))?)
+                        .unwrap();
+                    assert!(bounds.data.contains(&query.constructor("Length", (initial[1],))?.unwrap()));
+                    assert_eq!(
+                        bounds.data.contains(&query.constructor("Length", (next,))?.unwrap()),
+                        !preserves
+                    );
+                    loops += 1;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(loops, 1);
+        });
+    }
 }
 
 #[test]

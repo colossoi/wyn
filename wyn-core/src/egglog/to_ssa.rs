@@ -14,6 +14,7 @@ use wyn_base::IdSource;
 use wyn_graph::topo_sort_by_dependencies;
 
 mod body;
+mod descriptors;
 mod entry;
 mod kernels;
 use super::facts::Facts;
@@ -31,6 +32,7 @@ pub(super) fn lower(
 ) -> Result<Elaborated, OptimizeError> {
     let _timing = timing::span("egglog to SSA");
     let facts = Facts { program };
+    descriptors::validate(&facts)?;
     let placements = Placement::new(program)?;
     let evaluations = Evaluation::new(program, &placements)?;
     let mut local_buffers = LookupMap::<_, Vec<_>>::default();
@@ -148,7 +150,7 @@ impl Compiler<'_, '_> {
             .map_err(|_| error("dispatch plan contains a cycle"))
     }
 
-    fn phase_extent(&self, stage: Value) -> Result<Value, OptimizeError> {
+    pub(in crate::egglog) fn phase_extent(&self, stage: Value) -> Result<Value, OptimizeError> {
         let row = self.phase_domains.get(&stage).ok_or_else(|| error("stage domain missing"))?;
         Ok(row[0])
     }

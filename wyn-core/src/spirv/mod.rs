@@ -41,7 +41,7 @@ use crate::types::TypeExt;
 use crate::{bail_spirv, bail_spirv_at, err_spirv, err_spirv_at, types, BindingRef};
 use polytype::Type as PolyType;
 use wspirv::binary::Assemble;
-use wspirv::dr::{InsertPoint, Operand};
+use wspirv::dr::Operand;
 use wspirv::spirv::{self, StorageClass};
 
 // =============================================================================

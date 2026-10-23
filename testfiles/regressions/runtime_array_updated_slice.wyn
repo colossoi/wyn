@@ -1,0 +1,4 @@
+entry main(xs: []i32) []i32 =
+  let out = if length(xs)>10 then replicate(0,0i32) else xs
+  let start = if length(out)>0 then 1 else 0
+  in out[start..length(out)] with [0] = 99i32

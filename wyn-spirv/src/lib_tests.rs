@@ -128,41 +128,47 @@ fn builder_emits_minimal_valid_module() {
 
 #[test]
 fn aggregate_forwarding_preserves_types_and_nested_paths() {
-    let mut b = SpirvBuilder::new();
-    let scalar = b.f32_type();
-    let pair = b.type_struct(vec![scalar, scalar]);
-    let wide = b.type_struct(vec![pair, scalar, scalar]);
-    let narrow = b.type_struct(vec![pair, scalar]);
-    let (_, p, _) = b.begin_function(None, &[wide], scalar).unwrap();
-    let fields = [
-        b.composite_extract(*pair, None, p[0], [0]).unwrap(),
-        b.composite_extract(*scalar, None, p[0], [1]).unwrap(),
-        b.composite_extract(*scalar, None, p[0], [2]).unwrap(),
-    ];
-    assert_eq!(b.composite_construct(*wide, None, fields).unwrap(), p[0]);
-    // Camera-style field subset: its type differs from the original record.
-    let subset = b.composite_construct(*narrow, None, [fields[0], fields[1]]).unwrap();
-    assert_ne!(subset, p[0]);
-    assert_eq!(
-        b.composite_extract(*scalar, None, subset, [1]).unwrap(),
-        fields[1]
-    );
-    let nested = b.composite_extract(*scalar, None, subset, [0, 1]).unwrap();
-    let inst = b.module_ref().functions.last().unwrap().blocks.last().unwrap().instructions.last().unwrap();
-    assert_eq!(inst.result_id, Some(nested));
-    assert_eq!(
-        inst.operands,
-        vec![dr::Operand::IdRef(fields[0]), dr::Operand::LiteralBit32(1)]
-    );
-    let changed = b.composite_construct(*wide, None, [fields[0], fields[2], fields[1]]).unwrap();
-    assert_ne!(changed, p[0]);
-    let requested = b.id();
-    assert_eq!(
-        b.composite_extract(*scalar, Some(requested), subset, [1]).unwrap(),
-        requested
-    );
-    b.ret_value(nested).unwrap();
-    b.end_function().unwrap();
+    for case in 0..3 {
+        let mut b = SpirvBuilder::new();
+        let scalar = b.f32_type();
+        let pair = b.type_struct(vec![scalar, scalar]);
+        let wide = b.type_struct(vec![pair, scalar, scalar]);
+        let narrow = b.type_struct(vec![pair, scalar]);
+        let result_type = if case == 1 { scalar } else { wide };
+        let (_, p, _) = b.begin_function(None, &[wide], result_type).unwrap();
+        let fields = [
+            b.composite_extract(*pair, None, p[0], [0]).unwrap(),
+            b.composite_extract(*scalar, None, p[0], [1]).unwrap(),
+            b.composite_extract(*scalar, None, p[0], [2]).unwrap(),
+        ];
+        let result = match case {
+            0 => b.composite_construct(*wide, None, fields).unwrap(),
+            1 => {
+                let subset = b.composite_construct(*narrow, None, [fields[0], fields[1]]).unwrap();
+                b.composite_extract(*scalar, None, subset, [0, 1]).unwrap()
+            }
+            _ => b.composite_construct(*wide, None, [fields[0], fields[2], fields[1]]).unwrap(),
+        };
+        b.ret_value(result).unwrap();
+        b.end_function().unwrap();
+        let module = b.into_module();
+        let instructions: Vec<_> = module.all_inst_iter().collect();
+        if case == 0 {
+            assert_eq!(instructions.last().unwrap().class.opcode, spirv::Op::FunctionEnd);
+            assert!(instructions
+                .iter()
+                .any(|i| i.class.opcode == spirv::Op::ReturnValue
+                    && i.operands == [dr::Operand::IdRef(p[0])]));
+        } else {
+            let definition = instructions.iter().find(|i| i.result_id == Some(result)).unwrap();
+            let expected = if case == 1 {
+                vec![dr::Operand::IdRef(fields[0]), dr::Operand::LiteralBit32(1)]
+            } else {
+                [fields[0], fields[2], fields[1]].into_iter().map(dr::Operand::IdRef).collect()
+            };
+            assert_eq!(definition.operands, expected);
+        }
+    }
 }
 
 #[test]
@@ -176,10 +182,12 @@ fn aggregate_forwarding_keeps_storage_layout_conversions() {
     let x = b.composite_extract(*scalar, None, p[0], [0]).unwrap();
     let y = b.composite_extract(*scalar, None, p[0], [1]).unwrap();
     let converted = b.composite_construct(*logical, None, [x, y]).unwrap();
-    assert_ne!(converted, p[0]);
-    assert_eq!(b.composite_extract(*scalar, None, converted, [0]).unwrap(), x);
     b.ret_value(converted).unwrap();
     b.end_function().unwrap();
+    let module = b.into_module();
+    let definition = module.all_inst_iter().find(|i| i.result_id == Some(converted)).unwrap();
+    assert_eq!(definition.class.opcode, spirv::Op::CompositeConstruct);
+    assert_eq!(definition.result_type, Some(*logical));
 }
 
 #[test]
@@ -192,21 +200,28 @@ fn aggregate_forwarding_handles_scalar_vectors_arrays_and_matrices() {
     let matrix = b.type_matrix(vector, 2);
     let (_, p, _) = b.begin_function(None, &[scalar, scalar, vector], scalar).unwrap();
     let v = b.composite_construct(*vector, None, [p[0], p[1]]).unwrap();
+    let mut sum = p[0];
     for ty in [*array, *matrix] {
         let aggregate = b.composite_construct(ty, None, [v, p[2]]).unwrap();
-        assert_eq!(
-            b.composite_extract(*scalar, None, aggregate, [0, 1]).unwrap(),
-            p[1]
-        );
+        let extracted = b.composite_extract(*scalar, None, aggregate, [0, 1]).unwrap();
+        sum = b.f_add(*scalar, None, sum, extracted).unwrap();
     }
     let large = b.type_vec(scalar, 4);
     let packed = b.composite_construct(*large, None, [v, p[2]]).unwrap();
     let lane = b.composite_extract(*scalar, None, packed, [1]).unwrap();
     // A vector constituent is not a scalar lane; packed vectors fall back.
-    assert_ne!(lane, p[2]);
-    assert_ne!(lane, p[1]);
-    b.ret_value(lane).unwrap();
+    let result = b.f_add(*scalar, None, sum, lane).unwrap();
+    b.ret_value(result).unwrap();
     b.end_function().unwrap();
+    let module = b.into_module();
+    let additions: Vec<_> = module.all_inst_iter().filter(|i| i.class.opcode == spirv::Op::FAdd).collect();
+    assert_eq!(additions.len(), 3);
+    assert!(additions[..2].iter().all(|i| i.operands.last() == Some(&dr::Operand::IdRef(p[1]))));
+    let projection = module.all_inst_iter().find(|i| i.result_id == Some(lane)).unwrap();
+    assert_eq!(
+        projection.operands,
+        [dr::Operand::IdRef(packed), dr::Operand::LiteralBit32(1)]
+    );
 }
 
 #[test]
@@ -223,17 +238,13 @@ fn aggregate_forwarding_does_not_reuse_sibling_branch_definitions() {
     b.branch_conditional(p[0], yes, no, []).unwrap();
     b.begin_block(Some(yes)).unwrap();
     let a = b.composite_construct(*pair, None, [p[1], p[2]]).unwrap();
-    assert_eq!(b.composite_extract(*scalar, None, a, [0]).unwrap(), p[1]);
     b.branch(merge).unwrap();
     b.begin_block(Some(no)).unwrap();
     let c = b.composite_construct(*pair, None, [p[1], p[2]]).unwrap();
-    assert_ne!(a, c);
-    assert_eq!(b.composite_extract(*scalar, None, c, [1]).unwrap(), p[2]);
     b.branch(merge).unwrap();
     b.begin_block(Some(merge)).unwrap();
     let phi = b.phi(*pair, None, [(a, yes), (c, no)]).unwrap();
     let projected = b.composite_extract(*scalar, None, phi, [0]).unwrap();
-    assert_ne!(projected, p[1]);
     b.ret_value(projected).unwrap();
     b.end_function().unwrap();
     let module = b.into_module();
@@ -247,33 +258,90 @@ fn aggregate_forwarding_does_not_reuse_sibling_branch_definitions() {
 fn aggregate_forwarding_reconstructs_a_deferred_loop_phi() {
     let mut b = SpirvBuilder::new();
     let scalar = b.f32_type();
-    let pair = b.type_struct(vec![scalar, scalar]);
-    let (_, p, entry) = b.begin_function(None, &[pair], pair).unwrap();
+    let vector = b.type_vec(scalar, 2);
+    let pair = b.type_struct(vec![scalar, vector]);
+    let two = b.const_u32(2);
+    let array = b.type_array(pair, *two);
+    let condition = b.bool_type();
+    let (_, p, entry) = b.begin_function(None, &[array, condition], array).unwrap();
     let header = b.id();
     let merge = b.id();
     let continuing = b.id();
-    let phi = *b.reserve_value(pair);
+    let phi = b.id();
     b.branch(header).unwrap();
     b.begin_block(Some(header)).unwrap();
     let header_index = b.selected_block().unwrap();
-    let x = b.composite_extract(*scalar, None, phi, [0]).unwrap();
-    let y = b.composite_extract(*scalar, None, phi, [1]).unwrap();
-    assert_eq!(b.composite_construct(*pair, None, [x, y]).unwrap(), phi);
+    let x = b.composite_extract(*pair, None, phi, [0]).unwrap();
+    let y = b.composite_extract(*pair, None, phi, [1]).unwrap();
+    let reconstructed = b.composite_construct(*array, None, [x, y]).unwrap();
     b.loop_merge(merge, continuing, spirv::LoopControl::NONE, []).unwrap();
-    b.branch(merge).unwrap();
+    b.branch_conditional(p[1], continuing, merge, []).unwrap();
     b.begin_block(Some(continuing)).unwrap();
     b.branch(header).unwrap();
     b.begin_block(Some(merge)).unwrap();
-    b.ret_value(phi).unwrap();
+    b.ret_value(reconstructed).unwrap();
     b.select_block(Some(header_index)).unwrap();
-    b.insert_phi(
-        dr::InsertPoint::Begin,
-        *pair,
-        Some(phi),
-        [(p[0], *entry), (phi, continuing)],
-    )
-    .unwrap();
+    b.insert_value_phi(*array, phi, &[(p[0], *entry), (phi, continuing)]).unwrap();
     b.end_function().unwrap();
+    let module = b.into_module();
+    let blocks = &module.functions[0].blocks;
+    let header = &blocks[header_index];
+    let phis: Vec<_> =
+        header.instructions.iter().take_while(|i| i.class.opcode == spirv::Op::Phi).collect();
+    assert_eq!(phis.len(), 4);
+    assert!(phis.iter().all(|i| i.result_type == Some(*scalar) || i.result_type == Some(*vector)));
+    // Every use in the header follows its definition, including nested reconstruction.
+    let mut available: std::collections::HashSet<_> = phis.iter().filter_map(|i| i.result_id).collect();
+    for instruction in header.instructions.iter().skip(phis.len()) {
+        if instruction.class.opcode == spirv::Op::CompositeConstruct {
+            for operand in &instruction.operands {
+                let dr::Operand::IdRef(id) = operand else {
+                    panic!("constituent")
+                };
+                assert!(available.contains(id));
+            }
+        }
+        available.extend(instruction.result_id);
+    }
+    assert!(available.contains(&phi));
+}
+
+#[test]
+fn aggregate_phis_preserve_merge_adjacency_and_phi_order() {
+    let mut b = SpirvBuilder::new();
+    let scalar = b.f32_type();
+    let pair = b.type_struct(vec![scalar, scalar]);
+    let condition = b.bool_type();
+    let (_, p, entry) = b.begin_function(None, &[condition, pair, pair, scalar], pair).unwrap();
+    let other = b.id();
+    let merge = b.id();
+    b.selection_merge(merge, spirv::SelectionControl::NONE).unwrap();
+    b.branch_conditional(p[0], merge, other, []).unwrap();
+    b.begin_block(Some(other)).unwrap();
+    b.branch(merge).unwrap();
+    b.begin_block(Some(merge)).unwrap();
+    let merge_index = b.selected_block().unwrap();
+    let phi = b.id();
+    b.ret_value(phi).unwrap();
+    b.select_block(Some(merge_index)).unwrap();
+    b.insert_value_phi(*pair, phi, &[(p[1], *entry), (p[2], other)]).unwrap();
+    let scalar_phi = b.id();
+    b.insert_value_phi(*scalar, scalar_phi, &[(p[3], *entry), (p[3], other)]).unwrap();
+    b.end_function().unwrap();
+    let module = b.into_module();
+    let blocks = &module.functions[0].blocks;
+    let entry_instructions = &blocks.iter().find(|b| b.label_id() == Some(*entry)).unwrap().instructions;
+    assert_eq!(
+        entry_instructions[entry_instructions.len() - 2].class.opcode,
+        spirv::Op::SelectionMerge
+    );
+    let merge = &blocks.iter().find(|b| b.label_id() == Some(merge)).unwrap().instructions;
+    assert_eq!(
+        merge.iter().take_while(|i| i.class.opcode == spirv::Op::Phi).count(),
+        3
+    );
+    assert_eq!(merge[3].result_id, Some(phi));
+    assert!(merge[..3].iter().all(|i| i.result_type == Some(*scalar)));
 }
 
 #[test]

@@ -29,6 +29,30 @@ fn assert_dependency(graph: &FrameGraph, before: usize, after: usize) {
 }
 
 #[test]
+fn runtime_array_joins_wait_for_producers_in_branch_arms() {
+    for source in [
+        "entry main(xs:[]i32) []i32 = if xs[0]>0 then replicate(2,7i32) else xs",
+        "entry main(xs:[]i32) []i32 = if length(xs)>10 then replicate(0,0i32)
+         else if length(xs)>5 then replicate(2,7i32) else xs",
+    ] {
+        let program = compile(source);
+        let graph = &program.interface.frame_graph;
+        let join = graph.passes.iter().position(|pass| pass.name == "main_view").unwrap();
+        let producers: Vec<_> = graph
+            .passes
+            .iter()
+            .enumerate()
+            .filter(|(_, pass)| pass.name.starts_with("main_compute"))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(!producers.is_empty());
+        for producer in producers {
+            assert_dependency(graph, producer, join);
+        }
+    }
+}
+
+#[test]
 fn independent_work_and_successive_loops_reach_host_backends() {
     let source = "entry main(xs:[8]i32, ys:[8]i32, k:i32) ([8]i32,i32) =
         let first=loop values=xs for i<k do map(|x|x+i,values) in
@@ -220,7 +244,11 @@ fn graphics_result_demands_reuse_inputs_or_materialize_virtual_arrays() {
             assert_eq!(entry.inputs.contains(&entry.results[0]), borrowed, "{expression}");
             let allocations =
                 entry.allocations.iter().filter(|a| matches!(a, Allocation::Buffer { .. })).count();
-            assert_eq!(allocations, usize::from(!borrowed), "{expression}");
+            assert_eq!(
+                allocations,
+                usize::from(!borrowed) + usize::from(expression.starts_with("map(")),
+                "element storage and input length: {expression}"
+            );
             assert_eq!(
                 entry.operations.iter().any(|op| matches!(op, Operation::Dispatch { .. })),
                 !borrowed,
@@ -339,9 +367,15 @@ fn host_program_preserves_compute_phases_and_returns_source_results() {
             Pipeline::Graphics(_) => 0,
         })
         .sum::<usize>();
-    assert_eq!(entry.operations.len(), stages);
+    assert_eq!(
+        entry.operations.iter().filter(|op| matches!(op, Operation::Dispatch { .. })).count(),
+        stages
+    );
     assert_eq!(entry.results.len(), 1);
-    assert!(entry.operations.iter().all(|o| matches!(o, Operation::Dispatch { .. })));
+    assert!(entry
+        .operations
+        .iter()
+        .all(|o| matches!(o, Operation::Dispatch { .. } | Operation::Scalar { .. })));
     let whl = program.to_whl("scan.wgsl", ShaderFormat::Wgsl).unwrap();
     check_whl(&whl);
     assert_eq!(whl.matches("(gpu-dispatch ").count(), stages);
@@ -536,7 +570,7 @@ fn record_output_descriptors_preserve_authored_field_names() {
 }
 
 #[test]
-fn array_output_descriptors_publish_padding_and_unknown_view_ranges() {
+fn array_output_descriptors_publish_padding_and_logical_view_ranges() {
     let program =
         compile("entry positions(xs: []vec3f32) []vec3f32 = map(|x:vec3f32| x + @[1.0,2.0,3.0],xs)");
     let ResultLayout::Array { element, stride, .. } = &program.interface.source_results[0].layout else {
@@ -552,8 +586,8 @@ fn array_output_descriptors_publish_padding_and_unknown_view_ranges() {
         }
     ));
     let rust = program.to_rust_wgpu("vectors.wgsl", ShaderFormat::Wgsl).unwrap();
-    assert!(rust.contains("range: BufferRange::CallerProvided"), "{rust}");
-    assert!(rust.contains("layout: ResultLayout::Array"));
+    assert!(rust.contains("range: BufferRange::Bytes"), "{rust}");
+    assert!(rust.contains("ResultLayout::Array {"));
     assert!(rust.contains("stride: 16u32"));
     assert!(rust.contains("length: None"));
     assert!(!rust.contains("map_async"));
@@ -901,7 +935,8 @@ fn graphics_aliases_preserve_host_buffer_identity() {
         assert_eq!(entry.inputs.len(), 2, "generated buffers must remain internal");
         assert_eq!(entry.results.len(), 1, "only the render target is returned");
         assert!(entry.inputs.contains(&entry.results[0]), "borrowed render target");
-        assert_eq!(entry.allocations.len(), usize::from(computed));
+        // Computed captures allocate element storage and an explicit input length.
+        assert_eq!(entry.allocations.len(), 2 * usize::from(computed));
         let captured = if computed {
             let Allocation::Buffer { resource, .. } = entry.allocations[0] else {
                 panic!("computed capture needs one buffer")
@@ -1094,7 +1129,7 @@ fn filter_phase_layout_matches_the_selected_shader_storage_access() {
 }
 
 #[test]
-fn uniform_sized_maps_launch_from_their_domain_capacity() {
+fn uniform_sized_maps_launch_from_their_logical_domain() {
     let source = include_str!("../../testfiles/rust_host_runtime_dispatch.wyn");
     for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
         let ssa = compile_thru_ssa(source).unwrap();
@@ -1114,21 +1149,15 @@ fn uniform_sized_maps_launch_from_their_domain_capacity() {
         else {
             panic!("one map followed by its consuming draw");
         };
-        let expected = Expr::Min(
-            Box::new(Expr::Max(
-                Box::new(
-                    Expr::BufferLength {
-                        source: crate::host::ScalarSource::Resource(pixels),
-                        stride: 16,
-                    }
-                    .ceiling(64)
-                    .unwrap(),
-                ),
-                Box::new(Expr::Integer(0)),
-            )),
-            Box::new(Expr::Integer(65_535)),
+        let mut domain = groups[0].clone();
+        let mut sources = Vec::new();
+        domain.reads_mut(&mut |source, _| sources.push(source.clone()));
+        assert!(!sources.is_empty(), "launch reads the source dimensions");
+        assert!(
+            !sources.contains(&crate::host::ScalarSource::Resource(pixels)),
+            "allocation capacity must not determine the logical launch domain"
         );
-        assert_eq!(groups, &[expected, Expr::Integer(1), Expr::Integer(1)]);
+        assert_eq!(&groups[1..], &[Expr::Integer(1), Expr::Integer(1)]);
         let rust = program.to_rust_wgpu("runtime_dispatch", format).unwrap();
         let call = rust.split_once("pub fn host_reproduce(").unwrap().1;
         assert!(call.contains("_bytes"), "{call}");

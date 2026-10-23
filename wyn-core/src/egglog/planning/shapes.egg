@@ -119,3 +119,5 @@
       ((set (RectangularAxis value axis) (CallExtent value extent))) :ruleset extent-shapes)
 (rule ((= n (RectangularPrefix value)) (= extent (RectangularAxis value n)))
       ((set (RectangularPrefix value) (+ n 1))) :ruleset extent-shapes)
+
+(rule ((Sum a b)) ((ExtentEdge (Sum a b) a) (ExtentEdge (Sum a b) b)) :ruleset extent-dependencies)

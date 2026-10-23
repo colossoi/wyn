@@ -9,6 +9,69 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
 }
 
 #[test]
+fn runtime_array_control_flow_survives_naga_spirv_round_trip() {
+    use std::collections::HashSet;
+    use wspirv::dr::Operand;
+    use wspirv::spirv::{Decoration, Op, StorageClass};
+
+    for source in [
+        include_str!("../../../testfiles/regressions/triangulation_runtime_array_loop.wyn"),
+        include_str!("../../../testfiles/regressions/triangulation_runtime_array_branch.wyn"),
+        include_str!("../../../testfiles/regressions/triangulation_allocated_array_loop.wyn"),
+        include_str!("../../../testfiles/regressions/runtime_array_shrinking_loop.wyn"),
+    ] {
+        let bytes: Vec<_> =
+            compile_to_spirv(source).unwrap().iter().flat_map(|w| w.to_le_bytes()).collect();
+        let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
+        let info = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+        for entry in &module.entry_points {
+            let options = naga::back::spv::Options {
+                lang_version: (1, 6),
+                ..Default::default()
+            };
+            let pipeline = naga::back::spv::PipelineOptions {
+                shader_stage: entry.stage,
+                entry_point: entry.name.clone(),
+            };
+            let words = naga::back::spv::write_vec(&module, &info, &options, Some(&pipeline)).unwrap();
+            let output = wspirv::dr::load_words(&words).unwrap();
+            // Vulkan VUID-StandaloneSpirv-None-10684 forbids explicit layouts on function locals.
+            let layouts: HashSet<_> = output
+                .annotations
+                .iter()
+                .filter_map(|i| match i.operands.as_slice() {
+                    [Operand::IdRef(ty), Operand::Decoration(Decoration::ArrayStride), ..]
+                    | [Operand::IdRef(ty), _, Operand::Decoration(Decoration::Offset), ..] => Some(*ty),
+                    _ => None,
+                })
+                .collect();
+            let invalid_pointers: HashSet<_> = output
+                .types_global_values
+                .iter()
+                .filter_map(|i| match (i.class.opcode, i.operands.as_slice()) {
+                    (
+                        Op::TypePointer,
+                        [Operand::StorageClass(StorageClass::Function), Operand::IdRef(ty)],
+                    ) if layouts.contains(ty) => i.result_id,
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                !output.all_inst_iter().any(|i| i.class.opcode == Op::Variable
+                    && i.result_type.is_some_and(|ty| invalid_pointers.contains(&ty))),
+                "{}: {source}",
+                entry.name
+            );
+        }
+    }
+}
+
+#[test]
 fn integer_bool_scalar_and_capture_regressions_compile() {
     for source in [
         include_str!("../../../testfiles/regressions/integer_bool_scalar.wyn"),
@@ -62,8 +125,8 @@ fn generated_map_length_reuses_the_storage_view_length() {
         module.all_inst_iter().filter(|i| i.class.opcode == spirv::Op::ArrayLength).collect();
     assert_eq!(
         lengths.len(),
-        1,
-        "the loop and output view share one input length query"
+        0,
+        "the logical input length is supplied explicitly"
     );
     assert!(
         module.all_inst_iter().any(|i| i.class.opcode == spirv::Op::Store),
@@ -176,13 +239,8 @@ fn literal_composite_indices_do_not_emit_unused_constant_ids() {
          entry at(x:f32) f32 = values(x)[38]"
     );
     let module = wspirv::dr::load_words(compile_to_spirv(&source).unwrap()).unwrap();
-    assert!(
-        module.functions.iter().flat_map(|f| &f.blocks).flat_map(|b| &b.instructions).any(|i| i
-            .class
-            .opcode
-            == spirv::Op::CompositeExtract
-            && i.operands.last() == Some(&wspirv::dr::Operand::LiteralBit32(38)))
-    );
+    // Field forwarding can remove the extraction; its literal index must not
+    // leave an unused scalar constant in either representation.
     assert!(!module
         .types_global_values
         .iter()
@@ -208,14 +266,16 @@ fn storage_length_descriptors_do_not_emit_unused_constant_ids() {
         module.functions.iter().flat_map(|f| &f.blocks).flat_map(|b| &b.instructions).any(|i| i
             .class
             .opcode
-            == spirv::Op::ArrayLength
+            == spirv::Op::AccessChain
             && matches!(i.operands.first(), Some(wspirv::dr::Operand::IdRef(id)) if buffers.contains(id)))
     );
-    assert!(!module
-        .types_global_values
-        .iter()
-        .any(|i| i.class.opcode == spirv::Op::Constant
-            && i.operands == [wspirv::dr::Operand::LiteralBit32(38)]));
+    for constant in module.types_global_values.iter().filter(|i| {
+        i.class.opcode == spirv::Op::Constant && i.operands == [wspirv::dr::Operand::LiteralBit32(38)]
+    }) {
+        // The packed length table can use index 38; it must not emit an unused ID.
+        let id = constant.result_id.unwrap();
+        assert!(module.all_inst_iter().any(|inst| inst.operands.contains(&wspirv::dr::Operand::IdRef(id))));
+    }
 }
 
 #[test]

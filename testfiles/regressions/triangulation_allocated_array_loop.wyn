@@ -1,0 +1,4 @@
+-- Compiler handoff: runtime-sized loop state allocated by replicate.
+-- For n >= 0, expected main(3) = [0,1,2] and main(0) = [].
+entry main(n: i32) []i32 =
+  loop out = replicate(n,0i32) for i < n do out with [i] = i

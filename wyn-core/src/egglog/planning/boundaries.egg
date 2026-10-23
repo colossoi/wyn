@@ -91,6 +91,8 @@
       ((set (AppendStorageField path i) (StorageField j child))) :ruleset local-storage)
 (rule ((BoundaryShape source path (ValueLayout ty)))
       ((set (BoundaryFieldPlan source path) (BoundaryValue (ValueLayout ty)))) :ruleset boundary-select)
+(rule ((BoundaryShape source path layout) (= layout (ViewLayout resource element)))
+      ((set (BoundaryFieldPlan source path) (BoundaryValue layout))) :ruleset boundary-select)
 (rule ((BoundaryShape source path layout) (= layout (ArrayLayout n element))
        (= (BoundaryFieldShared source path) false))
       ((set (BoundaryFieldPlan source path) (BoundaryValue layout))) :ruleset boundary-select)

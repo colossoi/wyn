@@ -270,6 +270,64 @@ fn compiler_repro_array_reduce() {
 }
 
 #[test]
+fn compiler_repro_runtime_array_branch() {
+    for source in [
+        include_str!("../../../testfiles/regressions/triangulation_runtime_array_branch.wyn"),
+        include_str!("../../../testfiles/regressions/runtime_array_updated_slice.wyn"),
+        include_str!("../../../testfiles/regressions/runtime_array_three_outputs.wyn"),
+        include_str!("../../../testfiles/regressions/triangulation_runtime_array_zip_map.wyn"),
+        "entry main(xs:[]i32) []i32 =
+         let out=if length(xs)>10 then replicate(0,0i32) else xs in
+         map(|(x,(y,z))|x+y+z,zip(out,zip(out,out)))",
+        "entry main(xs:[]i32) []i32 =
+         let out=if length(xs)>10 then replicate(0,0i32) else xs in
+         let half=out[0..length(out)/2] in map(|(x,y)|x+y,zip(half,half))",
+        "entry main(xs:[]i32) []i32 = if xs[0]>0 then replicate(2,7i32) else xs",
+        "entry main(xs:[]i32) []i32 =
+         if length(xs)>10 then replicate(0,0i32)
+         else if length(xs)>5 then replicate(2,7i32) else xs",
+        "entry main(xs:[]i32) []i32 =
+         let out = if length(xs)>10 then replicate(0,0i32) else xs
+         in out[0..length(out)/2]",
+        "entry main(xs:[]i32) []i32 =
+         let out = if length(xs)>10 then replicate(0,0i32) else xs
+         in map(|x| x+1, out)",
+        "entry main(xs:[]i32) []i32 =
+         let initial=if length(xs)>10 then replicate(0,0i32) else xs in
+         loop out=initial for i<length(initial) do out with [i]=out[i]+1",
+        "entry main(n:i32) []i32 =
+         let a=replicate(n,1i32) let b=replicate(n+1,2i32)
+         in if n>2 then a else b",
+    ] {
+        shaders(source);
+    }
+}
+
+#[test]
+fn compiler_repro_allocated_array_loop() {
+    for source in [
+        include_str!("../../../testfiles/regressions/runtime_array_shrinking_loop.wyn"),
+        include_str!("../../../testfiles/regressions/triangulation_allocated_array_loop.wyn"),
+        "entry main(n:i32) []i32 =
+         loop out=replicate(n,0i32) while n>0 && out[0]<3 do out with [0]=out[0]+1",
+        "entry main(n:i32) []i32 =
+         loop out=replicate(n,0i32) for i<n do
+           loop inner=out for j<2 do inner with [i]=inner[i]+1",
+        "entry main(n:i32) ([]i32,[]i32) =
+         let initial=replicate(n,0i32)
+         let output=loop out=initial for i<n do out with [i]=i+1
+         in (initial,output)",
+        "entry main(n:i32) []i32 =
+         loop out=iota(n) for i<2 do out[1..length(out)]",
+        "entry main(n:i32) []i32 =
+         let out=loop out=iota(n) for i<2 do out[1..length(out)]
+         in map(|x|x+1,out)",
+    ] {
+        shaders(source);
+    }
+}
+
+#[test]
 fn compiler_repro_matrix_map() {
     placement_shaders(
         include_str!("../../../testfiles/regressions/matrix_map.wyn"),
@@ -1419,6 +1477,58 @@ fn guarded_partial_arithmetic_keeps_its_control_dependency_inside_loops() {
 }
 
 #[test]
+fn runtime_array_metadata_shares_storage_and_fits_binding_limits() {
+    for (source, limit, inputs) in [
+        (
+            include_str!("../../../testfiles/regressions/runtime_array_three_outputs.wyn"),
+            8,
+            1,
+        ),
+        (
+            include_str!("../../../testfiles/regressions/runtime_array_four_inputs.wyn"),
+            6,
+            4,
+        ),
+    ] {
+        let output = crate::lower_ssa_to_wgsl_with_program(compile_thru_ssa(source).unwrap()).unwrap();
+        let [crate::host::Pipeline::Compute(pipeline)] = output.program.interface.pipelines.as_slice()
+        else {
+            panic!("compute pipeline");
+        };
+        for stage in &pipeline.stages {
+            let storage_bindings = pipeline
+                .bindings
+                .iter()
+                .enumerate()
+                .filter(|(index, binding)| {
+                    matches!(binding, crate::host::Binding::StorageBuffer { .. })
+                        && stage.uses.access(*index).is_some()
+                })
+                .count();
+            assert!(
+                storage_bindings <= limit,
+                "binding limit exceeded: {storage_bindings} > {limit}"
+            );
+        }
+        let lengths: Vec<_> = output
+            .program
+            .interface
+            .scalar_tasks
+            .iter()
+            .filter(|task| matches!(task.value, crate::host::ScalarExpr::BufferLength { .. }))
+            .collect();
+        assert!(
+            lengths.len() >= inputs,
+            "each dynamic input needs its logical length"
+        );
+        for task in &lengths {
+            assert_eq!(task.destination, lengths[0].destination);
+            assert_eq!(task.offset % 4, 0);
+        }
+    }
+}
+
+#[test]
 fn guarded_division_is_shared_across_control_indexing_and_composed_callbacks() {
     for source in [
         "entry main(xs:[]i32) []i32 = map(|n|
@@ -1486,6 +1596,7 @@ fn camera_field_math_is_shared_across_indexing() {
 #[test]
 fn runtime_rectangular_maps_reach_both_backends() {
     for source in [
+        include_str!("../../../testfiles/regressions/runtime_array_rectangular_slice.wyn"),
         "def row(n:i32,x:i32) []i32=map(|y|x+y,iota(n+1)) entry main(xs:[]i32,n:i32) [][]i32=map(|x|row(n,x),xs)",
         "def row(ys:[]i32,x:i32) []i32=map(|y|x+y,iota(length(ys)+1)) entry main(xs:[]i32,ys:[]i32) [][]i32=map(|x|row(ys,x),xs)",
         "entry main(xs:[]i32,n:i32) [][]i32=map(|x|map(|y|x+y,iota(n)),xs)",

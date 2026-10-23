@@ -151,8 +151,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             }
 
             for &param in &block.params {
-                let ty = self.constructor.polytype_to_spirv(self.body.inner.value_type(param))?;
-                let phi_id = *self.constructor.builder.reserve_value(super::builder::TypeId::new(ty));
+                let phi_id = self.constructor.builder.id();
                 self.value_map.insert(param, phi_id);
             }
         }
@@ -995,12 +994,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             // Get block index for insertion
             if let Some(&block_idx) = self.block_indices.get(&block_id) {
                 self.constructor.builder.select_block(Some(block_idx))?;
-                self.constructor.builder.insert_phi(
-                    InsertPoint::Begin,
-                    param_ty,
-                    Some(phi_id),
-                    incoming,
-                )?;
+                self.constructor.builder.insert_value_phi(param_ty, phi_id, &incoming)?;
                 self.constructor.builder.select_block(None)?;
             }
         }

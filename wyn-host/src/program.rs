@@ -772,14 +772,20 @@ impl Program {
                                 HostError::Invalid("buffer size exceeds supported literal range".into())
                             })?)
                         }
+                        // Empty arrays still need one physical element for shader binding.
                         BufferLen::LikeInput {
                             set,
                             binding,
                             elem_bytes,
                             src_elem_bytes,
-                        } => Expr::BufferSize(self.slot_resource(r.pipeline_index, *set, *binding)?)
-                            .floor(*src_elem_bytes)?
-                            .multiply(Expr::Integer((*elem_bytes).into())),
+                        } => Expr::Max(
+                            Box::new(Expr::Integer(1)),
+                            Box::new(
+                                Expr::BufferSize(self.slot_resource(r.pipeline_index, *set, *binding)?)
+                                    .floor(*src_elem_bytes)?,
+                            ),
+                        )
+                        .multiply(Expr::Integer((*elem_bytes).into())),
                         BufferLen::SameAsDispatch { elem_bytes } => {
                             let Pipeline::Compute(p) = &self.interface.pipelines[r.pipeline_index] else {
                                 return Ok(None);
@@ -793,7 +799,8 @@ impl Program {
                             };
                             let mut domain = domain.clone();
                             self.resolve_size_sources(r.pipeline_index, &mut domain)?;
-                            domain.multiply(Expr::Integer((*elem_bytes).into()))
+                            Expr::Max(Box::new(Expr::Integer(1)), Box::new(domain))
+                                .multiply(Expr::Integer((*elem_bytes).into()))
                         }
                         BufferLen::Computed { bytes } => {
                             let mut bytes = bytes.clone();

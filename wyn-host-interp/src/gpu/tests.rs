@@ -11,6 +11,123 @@ fn backend(source: &str) -> (Program, WgpuBackend) {
 }
 
 #[test]
+fn buffer_views_keep_storage_and_logical_size_separate() {
+    let (program, mut backend) = backend("(define-host-program :version 1)");
+    let storage = backend.allocate_buffer(16).unwrap();
+    let view = backend
+        .call(
+            &program,
+            "gpu-buffer-view",
+            &[storage.clone(), Value::Number(Number::U64(4))],
+        )
+        .unwrap();
+    assert_eq!(backend.buffer_size(&view).unwrap(), 4);
+    assert_eq!(backend.buffer_size(&storage).unwrap(), 16);
+    backend.write_buffer(&view, 0, &7i32.to_le_bytes()).unwrap();
+    assert_eq!(backend.read_buffer(&storage, 0, 4).unwrap(), 7i32.to_le_bytes());
+    let empty = backend
+        .call(
+            &program,
+            "gpu-buffer-view",
+            &[storage.clone(), Value::Number(Number::U64(0))],
+        )
+        .unwrap();
+    assert!(backend.read_buffer(&empty, 0, 0).unwrap().is_empty());
+    assert!(backend
+        .call(
+            &program,
+            "gpu-buffer-view",
+            &[storage, Value::Number(Number::U64(17))]
+        )
+        .is_err());
+}
+
+#[test]
+fn buffer_views_reject_cpu_parameter_storage() {
+    let (program, mut backend) = backend("(define-host-program :version 1)");
+    let parameter = backend.upload_parameter_buffer(1i32.to_le_bytes().to_vec()).unwrap();
+    let error = backend
+        .call(
+            &program,
+            "gpu-buffer-view",
+            &[parameter.clone(), Value::Number(Number::U32(4))],
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("CPU parameter"), "{error}");
+    assert_eq!(backend.parameter_bytes(&parameter).unwrap(), 1i32.to_le_bytes());
+    assert_eq!(backend.read_buffer(&parameter, 0, 4).unwrap(), 1i32.to_le_bytes());
+}
+
+#[test]
+fn copies_between_buffer_views_use_backing_identity() {
+    let (program, mut backend) = backend("(define-host-program :version 1)");
+    let storage = backend.allocate_buffer(16).unwrap();
+    backend.write_buffer(&storage, 0, &7i32.to_le_bytes()).unwrap();
+    let view = backend
+        .call(
+            &program,
+            "gpu-buffer-view",
+            &[storage.clone(), Value::Number(Number::U32(16))],
+        )
+        .unwrap();
+    let nested = backend
+        .call(
+            &program,
+            "gpu-buffer-view",
+            &[view.clone(), Value::Number(Number::U32(12))],
+        )
+        .unwrap();
+    for destination in [&storage, &view, &nested] {
+        backend
+            .call(
+                &program,
+                "gpu-copy",
+                &[
+                    destination.clone(),
+                    Value::Number(Number::U32(8)),
+                    storage.clone(),
+                    Value::Number(Number::U32(0)),
+                    Value::Number(Number::U32(4)),
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            backend.read_buffer(destination, 8, 4).unwrap(),
+            7i32.to_le_bytes()
+        );
+        let error = backend
+            .call(
+                &program,
+                "gpu-copy",
+                &[
+                    destination.clone(),
+                    Value::Number(Number::U32(0)),
+                    storage.clone(),
+                    Value::Number(Number::U32(0)),
+                    Value::Number(Number::U32(4)),
+                ],
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("overlapping buffer copy"), "{error}");
+    }
+    assert!(backend
+        .call(
+            &program,
+            "gpu-copy",
+            &[
+                nested,
+                Value::Number(Number::U32(12)),
+                storage,
+                Value::Number(Number::U32(0)),
+                Value::Number(Number::U32(4)),
+            ]
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("logical capacity"));
+}
+
+#[test]
 fn cpu_parameter_sizes_never_fall_back_to_device_reads() {
     let (program, mut backend) = backend(
         "(define-host-program :version 1)

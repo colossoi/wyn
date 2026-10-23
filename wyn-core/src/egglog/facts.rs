@@ -242,6 +242,16 @@ impl<'a, 'source> Facts<'a, 'source> {
     }
     pub fn layout_type(&self, layout: Value) -> Result<Type, OptimizeError> {
         let facts = self;
+        if let Some(fields) = facts.enode("ViewLayout", layout) {
+            let Some(element) = facts.ty(fields[1]) else {
+                return Err(error("view layout has no element type"));
+            };
+            return Ok(types::view_array_with_size(
+                element,
+                Type::Constructed(types::TypeName::SizePlaceholder, vec![]),
+                types::no_buffer(),
+            ));
+        }
         if let Some(fields) = facts.enode("ValueLayout", layout) {
             let Some(ty) = facts.ty(fields[0]) else {
                 return Err(error("boundary layout has no value type"));

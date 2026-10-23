@@ -2,7 +2,7 @@
 
 use super::{error, Body, OptimizeError, Typed};
 use crate::builtins::catalog;
-use crate::op::{BinaryOperator, OpTag};
+use crate::op::{BinaryOperator, OpTag, PureViewSource};
 use crate::types::{self, Type, TypeName};
 use crate::LookupMap;
 use egglog_engine::sort::S;
@@ -28,6 +28,35 @@ pub(super) fn emit(
 ) -> Result<(), OptimizeError> {
     if matches!(phase, "loop_enter" | "loop_exit") {
         return loops::emit(body, scope, phase_owner, phase, phase_width);
+    }
+    if phase == "view" {
+        let source = body.compiler.facts.source(phase_owner).ok_or_else(|| error("view source missing"))?;
+        let value = body.local(scope, source)?;
+        let length = body.length(value.clone())?;
+        if body.compiler.facts.loops(source).is_some() {
+            // Published views start at zero even when the loop finishes with a slice.
+            let storage = body
+                .compiler
+                .facts
+                .lookup("ArrayStorage", (source,))
+                .ok_or_else(|| error("loop storage missing"))?;
+            let (binding, element, _) =
+                body.compiler.bindings.buffer(storage)?.ok_or_else(|| error("loop allocation missing"))?;
+            let element = body.compiler.facts.physical_type(element, true)?;
+            let output = body.op(
+                OpTag::StorageView(PureViewSource::Storage(binding)),
+                vec![Body::number(0), length.clone()],
+                Body::view_type(&element, crate::types::buffer_tag(binding)),
+            )?;
+            body.copy_array(output, value, length.clone(), &[])?;
+        }
+        let slot = body
+            .compiler
+            .facts
+            .constructor("ViewLength", (source,))
+            .ok_or_else(|| error("view length slot missing"))?;
+        let slot = body.resource(scope, slot, 2)?;
+        return body.store(slot, Body::number(0), length);
     }
     if phase == "scalar" {
         let operations = body.compiler.facts.scalar_group(phase_owner);

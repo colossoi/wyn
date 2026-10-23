@@ -1,6 +1,6 @@
 //! Expand a selected boundary layout into representation conversions and copies.
 use super::{builder_error, error, Body, OptimizeError, Typed};
-use crate::op::OpTag;
+use crate::op::{OpTag, PureViewSource};
 use crate::ssa::types::InstKind;
 use crate::types::{self, TypeExt};
 use egglog_engine::{RawValues, Value};
@@ -48,6 +48,25 @@ impl Body<'_, '_, '_> {
             let n = self.length(output.clone())?;
             self.copy_array_strided(output.clone(), value, n, path, start, Self::number(width))?;
             return Ok(output.clone());
+        }
+        if let Some(fields) = self.compiler.facts.enode("ViewLayout", layout) {
+            let storage =
+                self.compiler.facts.backing(fields[0]).ok_or_else(|| error("view storage missing"))?;
+            let Some((binding, element, _)) = self.compiler.bindings.buffer(storage)? else {
+                return Err(error("view storage allocation missing"));
+            };
+            let element = self.compiler.facts.physical_type(element, true)?;
+            let length = self.length(value.clone())?;
+            if path.is_empty() && types::array_view_buffer(&value.ty) == Some(binding) {
+                return Ok(value);
+            }
+            let output = self.op(
+                OpTag::StorageView(PureViewSource::Storage(binding)),
+                vec![Self::number(0), length.clone()],
+                Self::view_type(&element, types::buffer_tag(binding)),
+            )?;
+            self.copy_array(output.clone(), value, length, path)?;
+            return Ok(output);
         }
         let ty = self.compiler.facts.layout_type(layout)?;
         if target.is_none() && path.is_empty() && value.ty == ty {

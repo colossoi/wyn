@@ -1,0 +1,4 @@
+entry main(n: i32) []i32 =
+  loop out = iota(n) for _i < 2 do
+    let start = if length(out)>0 then 1 else 0
+    in out[start..length(out)]

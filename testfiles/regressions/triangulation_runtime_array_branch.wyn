@@ -1,0 +1,4 @@
+-- Compiler handoff: returning branches with different runtime array extents.
+-- Expected: inputs of length <= 10 are unchanged; longer inputs return [].
+entry main(xs: []i32) []i32 =
+  if length(xs)>10 then replicate(0,0i32) else xs

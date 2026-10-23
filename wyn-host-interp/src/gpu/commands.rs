@@ -58,6 +58,18 @@ impl WgpuBackend {
                 arity(args, 1)?;
                 Ok(Value::Number(Number::U64(self.buffer_size(&args[0])?)))
             }
+            "gpu-buffer-view" => {
+                arity(args, 2)?;
+                if matches!(self.resource(&args[0])?, Resource::ParameterBuffer { .. }) {
+                    return Err(gpu_error("CPU parameter buffers cannot have device-only views"));
+                }
+                let bytes = args[1].u64()?;
+                if bytes > self.buffer_size(&args[0])? {
+                    return Err(gpu_error("view exceeds logical buffer size"));
+                }
+                let buffer = self.buffer(&args[0])?.clone();
+                Ok(self.insert(Resource::Buffer(buffer, bytes), false))
+            }
             "gpu-read-scalar" | "host-read-scalar" => {
                 arity(args, 3)?;
                 let ty = args[2].text()?;
@@ -179,12 +191,20 @@ impl WgpuBackend {
                 if matches!(self.resource(destination)?, Resource::ParameterBuffer { .. }) {
                     return Err(gpu_error("CPU parameter buffers must be updated with CPU bytes"));
                 }
-                if source == destination && src < dst_end && dst < src_end {
+                let same_buffer = source == destination
+                    || (matches!(
+                        self.resource(source)?,
+                        Resource::Buffer(..) | Resource::ParameterBuffer { .. }
+                    ) && matches!(
+                        self.resource(destination)?,
+                        Resource::Buffer(..) | Resource::ParameterBuffer { .. }
+                    ) && self.buffer(source)? == self.buffer(destination)?);
+                if same_buffer && src < dst_end && dst < src_end {
                     return Err(gpu_error("overlapping buffer copy"));
                 }
                 if matches!(self.resource(source)?, Resource::HostBuffer(_))
                     || matches!(self.resource(destination)?, Resource::HostBuffer(_))
-                    || source == destination
+                    || same_buffer
                     || src % 4 != 0
                     || dst % 4 != 0
                     || size % 4 != 0

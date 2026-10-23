@@ -46,3 +46,6 @@
          :subsume :ruleset scalar-substitute)
 (rewrite (ExprSub ctx (ExprLength old t source) region args) (ExprLength ctx t source)
          :when ((= other (SourceParameterRegion source)) (!= other region)) :subsume :ruleset scalar-substitute)
+
+(rule ((ExtentExprDemand (Sum a b)) (LengthType t) (= x (ExtentExprValue a)) (= y (ExtentExprValue b)))
+      ((set (ExtentExprValue (Sum a b)) (ExprBinary (ExprContextDimensions) t "+" x y))) :ruleset scalar-extents)

@@ -18,7 +18,7 @@ fn fused_map_chain_keeps_permission_to_reuse_its_external_input() {
         panic!("compute")
     };
     assert_eq!(p.stages.len(), 1);
-    assert_eq!(p.bindings.len(), 1);
+    assert_eq!(p.bindings.len(), 2, "reused array and explicit input length");
     assert_eq!(p.stages[0].uses.access(0), Some(host::Access::ReadWrite));
     assert_eq!(output.program.interface.source_results[0].binding, 0);
 }
@@ -31,7 +31,11 @@ fn length_observers_do_not_block_content_reuse() {
     let Pipeline::Compute(p) = &output.program.interface.pipelines[0] else {
         panic!("compute")
     };
-    assert_eq!(p.bindings.len(), 2, "input/result array and scalar length output");
+    assert_eq!(
+        p.bindings.len(),
+        3,
+        "input/result array, scalar result, and input length"
+    );
 }
 
 #[test]
@@ -59,7 +63,7 @@ fn fused_intermediate_element_types_do_not_restrict_final_reuse() {
         panic!("compute")
     };
     assert_eq!(p.stages.len(), 1);
-    assert_eq!(p.bindings.len(), 1);
+    assert_eq!(p.bindings.len(), 2, "reused array and explicit input length");
 }
 
 #[test]
@@ -97,8 +101,8 @@ fn scatter_preserves_observed_and_captured_destination_contents() {
         };
         assert_eq!(
             p.bindings.len(),
-            3,
-            "input, map result, and separate scatter result: {body}"
+            4,
+            "input, map result, separate scatter result, and input length: {body}"
         );
         let results = &output.program.interface.source_results;
         assert_ne!(results[0].binding, results[1].binding, "{body}");
@@ -758,11 +762,20 @@ fn runtime_input_lengths_and_output_allocations_share_the_published_bindings() {
     )
     .validate(&module)
     .unwrap();
-    assert!(module.entry_points.iter().any(|e| e
+    assert!(!module.entry_points.iter().any(|e| e
         .function
         .expressions
         .iter()
         .any(|(_, x)| matches!(x, naga::Expression::ArrayLength(_)))));
+    assert!(
+        output
+            .program
+            .interface
+            .scalar_tasks
+            .iter()
+            .any(|task| matches!(task.value, host::ScalarExpr::BufferLength { stride: 4, .. })),
+        "logical input length is supplied by the host"
+    );
     let [Pipeline::Compute(p)] = output.program.interface.pipelines.as_slice() else {
         panic!("compute pipeline")
     };
@@ -927,7 +940,7 @@ fn consuming_maps_and_scans_publish_the_input_as_their_read_write_result() {
         let Pipeline::Compute(p) = &output.program.interface.pipelines[0] else {
             panic!("compute")
         };
-        assert_eq!(p.bindings.len(), buffers);
+        assert_eq!(p.bindings.len(), buffers + 1, "array storage plus input length");
         assert_eq!(p.stages.len(), stages);
         assert!(matches!(
             p.bindings[0],

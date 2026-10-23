@@ -433,6 +433,11 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 self.sink.set("SourceBranch", value, info)?;
                 if self.summaries.regions_with_operations.contains(&yes)
                     || self.summaries.regions_with_operations.contains(&no)
+                    || (term.ty.is_array()
+                        && !matches!(
+                            term.ty.array_size(),
+                            Some(Type::Constructed(TypeName::Size(_), _))
+                        ))
                 {
                     self.operation(value, "control", scope)?;
                 }

@@ -444,13 +444,6 @@ impl Program {
             )?;
             if let Some(result) = source_result {
                 write!(out, " :value-layout {}", result.layout.to_whl())?;
-                if !result.shape.is_empty() {
-                    write!(
-                        out,
-                        " :shape ({})",
-                        result.shape.iter().map(Expr::to_whl).collect::<Result<Vec<_>, _>>()?.join(" ")
-                    )?;
-                }
             }
             if entry.inputs.contains(&id) {
                 write!(out, " :alias {}", resource(id))?;
@@ -541,16 +534,52 @@ impl Program {
         }
         writeln!(out, "  )")?;
         self.write_operations(out, &entry.operations)?;
+        writeln!(out, "    (let* (")?;
+        let mut results = Vec::new();
+        for (i, &id) in entry.results.iter().enumerate() {
+            let value = if let Some(result) = source_results.get(i).filter(|r| !r.shape.is_empty()) {
+                let ResultLayout::Array { stride, .. } = &result.layout else {
+                    return Err(HostError::Invalid("shaped result must be an array".into()));
+                };
+                let bytes =
+                    result.shape.iter().cloned().fold(Expr::Integer(i64::from(*stride)), Expr::multiply);
+                writeln!(out, "      (result-bytes-{i} (u64 {}))", bytes.to_whl()?)?;
+                format!("(if (= result-bytes-{i} (gpu-buffer-size {0})) {0} (gpu-buffer-view {0} result-bytes-{i}))", resource(id))
+            } else {
+                resource(id)
+            };
+            let name = format!("result-{i}");
+            writeln!(out, "      ({name} {value})")?;
+            results.push(name);
+        }
+        writeln!(out, "    )")?;
         for a in &entry.allocations {
             let id = a.resource();
-            if !entry.results.contains(&id) {
-                writeln!(out, "    (gpu-free {})", resource(id))?;
+            if !entry.results.iter().enumerate().any(|(i, result)| {
+                *result == id && source_results.get(i).is_none_or(|r| r.shape.is_empty())
+            }) {
+                let views: Vec<_> = entry
+                    .results
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, result)| **result == id)
+                    .map(|(i, _)| format!("(/= result-bytes-{i} (gpu-buffer-size {}))", resource(id)))
+                    .collect();
+                if views.is_empty() {
+                    writeln!(out, "    (gpu-free {})", resource(id))?;
+                } else {
+                    writeln!(
+                        out,
+                        "    (if (and {}) (gpu-free {}))",
+                        views.join(" "),
+                        resource(id)
+                    )?;
+                }
             }
         }
-        let results = entry.results.iter().map(|r| resource(*r)).collect::<Vec<_>>();
         writeln!(
             out,
-            "    {}))\n",
+            "    {})))\n",
             match results.as_slice() {
                 [] => "nil".into(),
                 [one] => one.clone(),

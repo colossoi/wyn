@@ -32,6 +32,7 @@ impl Error {
     }
 }
 type Result<T> = std::result::Result<T, Error>;
+type DeviceRead<'a> = dyn Fn(Value) -> Result<Option<ScalarExpr>> + 'a;
 
 pub(in crate::egglog) fn scalar_type(ty: &Type) -> Option<ScalarType> {
     match ty {
@@ -52,29 +53,40 @@ pub(in crate::egglog) fn expression(
     Ok(lower.finish(value))
 }
 /// Allocation capacities may use proven bounds for device-produced logical lengths.
-pub(in crate::egglog) fn allocation(
-    program: &Program<'_, Optimized>,
-    context: Value,
-    source: Value,
-) -> Result<ScalarExpr> {
+pub(in crate::egglog) fn allocation(program: &Program<'_, Optimized>, extent: Value) -> Result<ScalarExpr> {
     let mut lower = Lower::new(program);
     lower.capacity_bounds = true;
-    let value = lower.source(context, source)?;
+    let value = lower.extent(extent)?;
     Ok(lower.finish(value))
 }
-pub(in crate::egglog) fn selected(
-    program: &Program<'_, Optimized>,
-    term: TermId,
-    capacity_bounds: bool,
-) -> Result<ScalarExpr> {
+pub(in crate::egglog) fn selected(program: &Program<'_, Optimized>, term: TermId) -> Result<ScalarExpr> {
     let mut lower = Lower::new(program);
-    lower.capacity_bounds = capacity_bounds;
     let value = lower.term(term)?;
     Ok(lower.finish(value))
 }
 pub(in crate::egglog) fn length(program: &Program<'_, Optimized>, source: Value) -> Result<ScalarExpr> {
     let mut lower = Lower::new(program);
     let value = lower.length(source)?;
+    Ok(lower.finish(value))
+}
+pub(in crate::egglog) fn published_length(
+    program: &Program<'_, Optimized>,
+    source: Value,
+    device_read: &DeviceRead<'_>,
+) -> Result<ScalarExpr> {
+    let mut lower = Lower::new(program);
+    lower.device_read = Some(device_read);
+    let value = lower.length(source)?;
+    Ok(lower.finish(value))
+}
+pub(in crate::egglog) fn launch_extent(
+    program: &Program<'_, Optimized>,
+    extent: Value,
+) -> Result<ScalarExpr> {
+    let mut lower = Lower::new(program);
+    let no_reads = |_| Ok(None);
+    lower.device_read = Some(&no_reads);
+    let value = lower.extent(extent)?;
     Ok(lower.finish(value))
 }
 struct Lower<'a, 'source> {
@@ -84,6 +96,7 @@ struct Lower<'a, 'source> {
     bindings: Vec<(String, ScalarExpr)>,
     next: usize,
     capacity_bounds: bool,
+    device_read: Option<&'a DeviceRead<'a>>,
 }
 impl<'a, 'source> Lower<'a, 'source> {
     fn new(program: &'a Program<'source, Optimized>) -> Self {
@@ -94,6 +107,7 @@ impl<'a, 'source> Lower<'a, 'source> {
             bindings: vec![],
             next: 0,
             capacity_bounds: false,
+            device_read: None,
         }
     }
     fn length(&mut self, source: Value) -> Result<ScalarExpr> {
@@ -119,6 +133,9 @@ impl<'a, 'source> Lower<'a, 'source> {
         }
         if let Some(fields) = self.facts.enode("Length", extent) {
             let source = fields[0];
+            if self.facts.lookup("LogicalExtent", (source,)) != Some(extent) {
+                return self.length(source);
+            }
             if let Some((binding, stride)) = self.facts.input_storage(source)? {
                 return Ok(ScalarExpr::BufferLength {
                     source: ScalarSource::Binding {
@@ -128,11 +145,15 @@ impl<'a, 'source> Lower<'a, 'source> {
                     stride,
                 });
             }
-            if self.facts.lookup("LogicalExtent", (source,)) == Some(extent) {
-                // Invocation-local views have no host-readable descriptor.
-                return Err(Error::Unsupported);
+            if self
+                .facts
+                .lookup("SourceParameterRegion", (source,))
+                .is_some_and(|region| self.facts.entry_region(region))
+            {
+                return Err(error(format!("array {source:?} has no host length input")).into());
             }
-            return self.length(source);
+            // Invocation-local views have no host-readable descriptor.
+            return Err(Error::Unsupported);
         }
         if let Some(fields) = self.facts.enode("Scalar", extent) {
             let source = fields[0];
@@ -141,7 +162,7 @@ impl<'a, 'source> Lower<'a, 'source> {
             };
             return self.source(context, source);
         }
-        for (name, op) in [("Difference", "sub"), ("Product", "mul")] {
+        for (name, op) in [("Sum", "add"), ("Difference", "sub"), ("Product", "mul")] {
             if let Some(fields) = self.facts.enode(name, extent) {
                 return Ok(apply(
                     op,
@@ -151,8 +172,9 @@ impl<'a, 'source> Lower<'a, 'source> {
             }
         }
         // Device counts require readback. Capacity bounds are not logical lengths.
-        if self.facts.enode("Stored", extent).is_some() {
-            return Err(Error::Unsupported);
+        if let Some(fields) = self.facts.enode("Stored", extent) {
+            let read = self.device_read.ok_or(Error::Unsupported)?;
+            return read(fields[0])?.ok_or(Error::Unsupported);
         }
         Err(error("unsupported selected logical extent").into())
     }
@@ -209,12 +231,22 @@ impl<'a, 'source> Lower<'a, 'source> {
         if let Some(value) = self.values.get(&source) {
             return Ok(value.clone());
         }
+        if let Some(fields) = self.facts.record("ValueRead", "ReadElement", (source,)) {
+            if let Some(read) = self.device_read {
+                if let Some(value) = read(fields[0])? {
+                    return Ok(value);
+                }
+            }
+        }
         if let Some(actual) = self.facts.alias(source) {
             return self.source(context, actual);
         }
         if let Some(array) = self.facts.lookup("SourceLength", (source,)) {
+            if self.facts.lookup("LogicalExtent", (array,)) == self.facts.constructor("Scalar", (source,)) {
+                return Err(Error::Unsupported);
+            }
             // Fusion may replace the query with a count-reduction result.
-            if !self.capacity_bounds && self.stored(source) {
+            if !self.capacity_bounds && self.device_read.is_none() && self.stored(source) {
                 return Err(Error::Unsupported);
             }
             return self.length(array);
@@ -465,14 +497,14 @@ impl<'a, 'source> Lower<'a, 'source> {
                 yes: Box::new(self.scope(|lower| lower.term(f[3]))?),
                 no: Box::new(self.scope(|lower| lower.term(f[4]))?),
             },
-            "ExprCall" | "ExprInvoke" if self.capacity_bounds => {
+            "ExprCall" | "ExprInvoke" if self.capacity_bounds || self.device_read.is_some() => {
                 let callee = selected.values[f[f.len() - 2]];
                 let arguments = selected
                     .arguments(f[f.len() - 1])?
                     .into_iter()
                     .map(|term| self.term(term))
                     .collect::<Result<Vec<_>>>()?;
-                // Required capacities must work even when extraction retains helper calls.
+                // Required size expressions also support retained helper calls.
                 self.scope(|lower| {
                     for (index, argument) in arguments.into_iter().enumerate() {
                         let Some(formal) = lower.facts.parameter(callee, index as i64) else {

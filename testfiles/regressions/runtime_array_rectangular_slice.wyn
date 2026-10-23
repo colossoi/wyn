@@ -1,0 +1,4 @@
+entry main(xs: []i32) [][3]i32 =
+  let rows = map(|x| map(|j| x+j, iota(3)), xs)
+  let start = if length(rows)>0 then 1 else 0
+  in rows[start..length(rows)]

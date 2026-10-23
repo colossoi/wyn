@@ -106,7 +106,6 @@ type ImageTypeKey = (
 
 pub struct SpirvBuilder {
     inner: Builder,
-    aggregates: aggregates::Definitions,
     // Well-known types eagerly created at construction so call sites
     // can look them up by name instead of asking rspirv each time.
     void_type: TypeId,
@@ -219,7 +218,6 @@ impl SpirvBuilder {
         let glsl_ext_inst_id = inner.ext_inst_import("GLSL.std.450");
         SpirvBuilder {
             inner,
-            aggregates: aggregates::Definitions::default(),
             void_type,
             bool_type,
             i32_type,

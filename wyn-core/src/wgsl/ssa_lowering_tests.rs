@@ -1149,11 +1149,17 @@ entry draw(fb: *[]vec4f32) *[]vec4f32 =
         "updates must store into the input binding: {wgsl}"
     );
     assert!(
-        !module
+        !stores_binding(&module, 0, 1),
+        "the additional binding contains read-only length metadata"
+    );
+    assert_eq!(
+        module
             .global_variables
             .iter()
-            .any(|(_, v)| v.binding.as_ref().is_some_and(|b| b.group == 0 && b.binding == 1)),
-        "no replacement allocation"
+            .filter(|(_, v)| v.binding.as_ref().is_some_and(|b| b.group == 0))
+            .count(),
+        2,
+        "array storage and length metadata"
     );
 }
 

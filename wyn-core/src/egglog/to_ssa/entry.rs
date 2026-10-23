@@ -94,7 +94,14 @@ pub(super) fn entry<'source>(
     }
     let mut inputs = Vec::new();
     let mut parameter_inputs = Vec::new();
-    bind_parameters(&mut lower, scope, &parameters, &mut inputs, &mut parameter_inputs)?;
+    bind_parameters(
+        &mut lower,
+        scope,
+        root,
+        &parameters,
+        &mut inputs,
+        &mut parameter_inputs,
+    )?;
     let mut accesses = crate::egglog::abi::entry_accesses(lower.compiler, root)?;
     let storage_bindings = crate::egglog::abi::storage_bindings(
         lower.compiler,
@@ -130,6 +137,7 @@ pub(super) fn entry<'source>(
 fn bind_parameters(
     lower: &mut Body<'_, '_, '_>,
     scope: Value,
+    root: Value,
     parameters: &[(SymbolId, Type)],
     inputs: &mut Vec<crate::interface::EntryInput>,
     parameter_inputs: &mut Vec<Vec<usize>>,
@@ -164,6 +172,26 @@ fn bind_parameters(
             if let Some(binding) = input.storage_binding() {
                 let len = if let Some(Type::Constructed(TypeName::Size(n), _)) = input.ty.array_size() {
                     lower.literal(&n.to_string(), &Type::Constructed(TypeName::UInt(32), vec![]))?
+                } else if let Some(shape) = lower
+                    .compiler
+                    .facts
+                    .constructor(
+                        "InputBinding",
+                        (i64::from(binding.set), i64::from(binding.binding)),
+                    )
+                    .and_then(|binding| lower.compiler.facts.lookup("InputShapeBuffer", (scope, binding)))
+                    .filter(|shape| lower.compiler.facts.lookup("RootResource", (root, *shape)).is_some())
+                {
+                    let slot = lower
+                        .compiler
+                        .facts
+                        .lookup("InputShapeIndex", (scope, index as i64))
+                        .ok_or_else(|| error("input length slot missing"))?;
+                    let index =
+                        lower.literal(&lower.compiler.facts.integer(slot).to_string(), &types::i32())?;
+                    let shape = lower.resource(scope, shape, 1)?;
+                    let length = lower.index(shape, index)?;
+                    lower.cast(length, &Type::Constructed(TypeName::UInt(32), vec![]))?
                 } else {
                     let set = lower.literal(
                         &binding.set.to_string(),

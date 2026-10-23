@@ -136,7 +136,15 @@ impl<'a, 'source> Facts<'a, 'source> {
         None
     }
     pub fn extent(&self, value: Value) -> Option<(&'static str, Vec<Value>)> {
-        for name in ["Fixed", "Length", "Scalar", "Product", "Difference", "Stored"] {
+        for name in [
+            "Fixed",
+            "Length",
+            "Scalar",
+            "Sum",
+            "Product",
+            "Difference",
+            "Stored",
+        ] {
             if let Some(fields) = self.enode(name, value) {
                 return Some((name, fields));
             }

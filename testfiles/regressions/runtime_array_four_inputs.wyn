@@ -1,0 +1,2 @@
+entry main(xs: []i32, ys: []i32, zs: []i32, ws: []i32) []i32 =
+  map(|(x, (y, (z, w)))| x + y + z + w, zip(xs, zip(ys, zip(zs, ws))))

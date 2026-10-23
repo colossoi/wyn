@@ -55,16 +55,21 @@ pub(in crate::egglog) fn dispatch(
         let Some(elem_bytes) = storage_elem_stride(&compiler.facts.physical_type(element, true)?) else {
             return Err(error("launch element stride missing"));
         };
-        (
-            Expr::BufferLength {
-                source: ScalarSource::Binding {
-                    set: binding.set,
-                    binding: binding.binding,
-                },
-                stride: elem_bytes,
+        let bound = Expr::BufferLength {
+            source: ScalarSource::Binding {
+                set: binding.set,
+                binding: binding.binding,
             },
-            compiler.facts.positive(fields[1], "launch divisor")?,
-        )
+            stride: elem_bytes,
+        };
+        let domain = compiler.phase_extent(stage)?;
+        let elements = match host::launch_extent(compiler.program, domain) {
+            Ok(ScalarExpr::BufferLength { source, stride }) => Expr::BufferLength { source, stride },
+            Ok(value) => Expr::Scalar(value),
+            Err(host::Error::Unsupported) => bound,
+            Err(host::Error::Invalid(error)) => return Err(error),
+        };
+        (elements, compiler.facts.positive(fields[1], "launch divisor")?)
     } else if let Some(fields) = compiler.facts.enode("ExtentLaunch", selected) {
         (
             extent(compiler, fields[0])?,
@@ -92,7 +97,7 @@ pub(in crate::egglog) fn capacity(
     let minimum = crate::egglog::query::Query(&compiler.program.graph)
         .required("MinimumArrayCapacity", RawValues(vec![]))?;
     let minimum = compiler.facts.integer(minimum);
-    match extent(compiler, extent_value)? {
+    match allocation_bound(compiler, buffer, extent_value, &mut Vec::new())? {
         Expr::Integer(n) => Ok(BufferLen::Fixed {
             bytes: u64::try_from(n.max(minimum))
                 .ok()
@@ -119,9 +124,9 @@ pub(in crate::egglog) fn extent(compiler: &Compiler<'_, '_>, key: Value) -> Resu
     if let Some(bound) = compiler.facts.lookup("HostBound", (key,)) {
         return extent(compiler, bound);
     }
-    if let Some(&term) = compiler.program.stage.selected.extents.get(&key) {
+    if compiler.program.stage.selected.extents.contains_key(&key) {
         return Ok(Expr::Scalar(
-            host::selected(compiler.program, term, true).map_err(|e| e.required("allocation extent"))?,
+            host::allocation(compiler.program, key).map_err(|e| e.required("allocation extent"))?,
         ));
     }
     let Some((name, children)) = compiler.facts.extent(key) else {
@@ -131,10 +136,14 @@ pub(in crate::egglog) fn extent(compiler: &Compiler<'_, '_>, key: Value) -> Resu
         "Fixed" => Ok(Expr::Integer(
             compiler.program.graph.value_to_base::<i64>(children[0]),
         )),
-        "Length" | "Scalar" => {
-            let source = children[0];
-            source_size(compiler, source, name == "Length")
-        }
+        "Length" | "Scalar" => Ok(
+            match host::allocation(compiler.program, key).map_err(|e| e.required("allocation extent"))? {
+                ScalarExpr::I32(value) => Expr::Integer(value.into()),
+                ScalarExpr::U32(value) => Expr::Integer(value.into()),
+                ScalarExpr::BufferLength { source, stride } => Expr::BufferLength { source, stride },
+                value => Expr::Scalar(value),
+            },
+        ),
         "Product" => Ok(extent(compiler, children[0])?.multiply(extent(compiler, children[1])?)),
         "Difference" => Ok(Expr::Subtract(
             Box::new(extent(compiler, children[0])?),
@@ -143,48 +152,86 @@ pub(in crate::egglog) fn extent(compiler: &Compiler<'_, '_>, key: Value) -> Resu
         _ => Err(error("unsupported host extent")),
     }
 }
-pub(in crate::egglog) fn source_size(
+fn allocation_bound(
+    compiler: &Compiler<'_, '_>,
+    buffer: Value,
+    fallback: Value,
+    active: &mut Vec<Value>,
+) -> Result<Expr, OptimizeError> {
+    if active.contains(&buffer) {
+        // Alias cycles add no capacity beyond their initial storage.
+        return Ok(Expr::Integer(0));
+    }
+    active.push(buffer);
+    let result = (|| {
+        let mut bounds = compiler.facts.set("AllocationBounds", (buffer,));
+        let explicit = !bounds.is_empty();
+        if !explicit {
+            bounds.push(fallback);
+        }
+        let mut size = Expr::Integer(0);
+        for bound in bounds {
+            let backing = compiler
+                .facts
+                .extent(bound)
+                .filter(|(name, _)| *name == "Length")
+                .and_then(|(_, fields)| compiler.facts.lookup("ArrayStorage", (fields[0],)))
+                .map(|storage| compiler.facts.backing(storage).unwrap_or(storage));
+            let value = match backing {
+                Some(backing) if backing != buffer => allocation_bound(
+                    compiler,
+                    backing,
+                    compiler.facts.capacity(backing).unwrap_or(bound),
+                    active,
+                )?,
+                Some(_) if explicit => continue,
+                _ => extent(compiler, bound)?,
+            };
+            // Keep direct input lengths eligible for LikeInput allocation.
+            if !explicit {
+                return Ok(value);
+            }
+            size = Expr::Max(Box::new(size), Box::new(value));
+        }
+        Ok(size)
+    })();
+    active.pop();
+    result
+}
+
+pub(in crate::egglog) fn published_shape(
     compiler: &Compiler<'_, '_>,
     source: Value,
-    length: bool,
 ) -> Result<Expr, OptimizeError> {
-    if length {
-        let Some(bound) = compiler.facts.view_extent(source) else {
-            return Err(error(format!("array {source:?} has no host extent")));
+    let read = |resource| {
+        let Some(backing) = compiler.facts.backing(resource) else {
+            return Ok(None);
         };
-        if let Some(("Length", fields)) = compiler.facts.extent(bound) {
-            if fields[0] == source {
-                let Some((binding, stride)) = compiler.facts.input_storage(source)? else {
-                    return Err(error(format!("array {source:?} has no host length input")));
-                };
-                return Ok(Expr::BufferLength {
-                    source: ScalarSource::Binding {
-                        set: binding.set,
-                        binding: binding.binding,
-                    },
-                    stride,
-                });
-            }
-        }
-        return extent(compiler, bound);
-    }
-    if let Some(actual) = compiler.facts.alias(source) {
-        return source_size(compiler, actual, false);
-    }
-    if let Some(array) = compiler.facts.lookup("SourceLength", (source,)) {
-        return source_size(compiler, array, true);
-    }
-    let Some(context) = compiler.facts.lookup("ExprContextForSource", (source,)) else {
-        return Err(error("host expression has no selected context"));
+        let Some((binding, element, _)) = compiler.bindings.buffer(backing)? else {
+            return Ok(None);
+        };
+        let Some(ty) = host::scalar_type(element) else {
+            return Ok(None);
+        };
+        let index = compiler
+            .facts
+            .lookup("MetadataIndex", (resource,))
+            .map(|value| compiler.facts.integer(value))
+            .unwrap_or(0);
+        let offset = u32::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_mul(4))
+            .ok_or_else(|| error("shape offset overflow"))?;
+        Ok(Some(ScalarExpr::Read {
+            source: ScalarSource::Binding {
+                set: binding.set,
+                binding: binding.binding,
+            },
+            offset,
+            ty,
+        }))
     };
-    Ok(
-        match host::allocation(compiler.program, context, source)
-            .map_err(|e| e.required("allocation extent"))?
-        {
-            ScalarExpr::I32(value) => Expr::Integer(value.into()),
-            ScalarExpr::U32(value) => Expr::Integer(value.into()),
-            ScalarExpr::BufferLength { source, stride } => Expr::BufferLength { source, stride },
-            value => Expr::Scalar(value),
-        },
-    )
+    host::published_length(compiler.program, source, &read)
+        .map(|length| Expr::Max(Box::new(Expr::Scalar(length)), Box::new(Expr::Integer(0))))
+        .map_err(|e| e.required("published array shape"))
 }

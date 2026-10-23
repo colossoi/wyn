@@ -165,7 +165,11 @@ fn filtered_indirect_draw_keeps_generated_outputs_internal() {
             let parameters = entry.split(":parameters '(").nth(1).expect("entry parameters");
             let parameters = parameters.split(":results '(").next().unwrap();
             assert_eq!(parameters.matches(":source-name ").count(), 2, "{host}");
-            assert_eq!(host.matches("(gpu-alloc ").count(), 3, "{host}");
+            assert_eq!(
+                host.matches("(gpu-alloc ").count(),
+                4,
+                "outputs and input length: {host}"
+            );
         }
     }
 }

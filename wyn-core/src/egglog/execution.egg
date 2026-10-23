@@ -48,7 +48,7 @@
 (rule ((= r (OperationRegion op))) ((set (Rematerialize op) false)) :ruleset structure)
 (rule ((= r (OperationRegion op))) ((set (ReadsLength op) false)) :ruleset structure)
 (rule ((LengthOperation op array)) ((set (ReadsLength op) true)) :ruleset structure)
-(rule ((InvocationResult e op) (= (Rematerialize op) false)) ((DirectResult e op 0)) :ruleset residency)
+(rule ((InvocationResult e op) (= (Rematerialize op) false) (= (RuntimeArrayJoin e) false) (= (HasViewStage e) false)) ((DirectResult e op 0)) :ruleset residency)
 (rule ((InvocationResult e op) (= (Rematerialize op) true))
       ((ComputedValue e)) :ruleset residency)
 (rule ((InvocationResult e op) (= (Rematerialize op) true) (= (ReadsLength op) false) (Operand op role child))
@@ -94,3 +94,5 @@
 (rule ((ForwardValue e source) (= n (ViewExtent source))) ((set (ViewExtent e) n)) :ruleset residency)
 (rule ((= (SourceSlice e) (SliceInfo source start end))) ((set (ViewExtent e) (Difference (Scalar end) (Scalar start)))) :ruleset residency)
 (rule ((= (Rematerialize op) true) (Enters op r)) ((DeviceRegion r)) :ruleset residency)
+
+(rule ((ReferencedExtent e (Sum a b))) ((ReferencedExtent e a) (ReferencedExtent e b)) :ruleset residency)

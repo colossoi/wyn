@@ -90,6 +90,8 @@ pub(super) fn run(
                     | "SourceGlobal"
                     | "SourceArrayAtom"
                     | "SourceProjected"
+                    | "SourceShape"
+                    | "SourceOffset"
                     | "SourceInvocation"
                     | "SourceLoop"
                     | "LoopInfo"

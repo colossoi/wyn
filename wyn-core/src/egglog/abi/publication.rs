@@ -12,14 +12,14 @@ use crate::host::{
     ComputePipeline, ComputeStage, DispatchSize, FrameGraph, GraphicsPipeline, GraphicsStage,
     ModuleInterface, Pipeline, ShaderStage,
 };
-use crate::host::{DispatchLoop, ScalarExpr, ScalarSource, ScalarTask};
+use crate::host::{DispatchLoop, ScalarExpr, ScalarSource, ScalarTask, ScalarType};
 use crate::interface::publish::{reconcile_storage_binding_access, ModuleInterfacePublish};
 use crate::interface::results::result_layout;
 use crate::interface::{DrawBufferOperand, SourceResult};
 use crate::ssa::types::EntryPoint;
 use crate::tlc::extract_lambda_params_ref;
 use crate::tlc::DefMeta;
-use crate::types::{self, strip_existentials, Type, TypeName};
+use crate::types::{self, strip_existentials, Type, TypeExt, TypeName};
 use crate::BindingRef;
 use crate::ResourceAccess;
 use crate::{EntryId, LookupMap, SymbolId};
@@ -344,7 +344,7 @@ fn publish_results(
         let (body, _) = extract_lambda_params_ref(&definition.body);
         let result_type = strip_existentials(&body.ty);
         for (index, id) in compiler.facts.outputs(owner)?.into_iter().enumerate() {
-            let (_, ty, resource) = compiler.facts.output(id)?;
+            let (value, ty, resource) = compiler.facts.output(id)?;
             let Some(backing) = compiler.facts.backing(resource) else {
                 return Err(error("output backing missing"));
             };
@@ -392,6 +392,8 @@ fn publish_results(
                     types::no_buffer(),
                 ));
                 (layout, shape)
+            } else if ty.is_array() {
+                (result_layout(ty), vec![sizes::published_shape(compiler, value)?])
             } else {
                 (result_layout(ty), vec![])
             };
@@ -489,6 +491,16 @@ fn publish_scalars(
             targets.entry(row.children[0]).or_default().push((row.children[1], row.children[3]));
         }
     })?;
+    let mut input_shapes = LookupMap::<_, Vec<_>>::default();
+    compiler.program.graph.constructor_enodes("InputShapeSource", |row| {
+        input_shapes
+            .entry(row.children[0])
+            .or_default()
+            .push((compiler.facts.integer(row.children[1]), row.children[2]));
+    })?;
+    for slots in input_shapes.values_mut() {
+        slots.sort_by_key(|(index, _)| *index);
+    }
     for entry in entries {
         let (owner, stage) = &compiler.entry_origins[&entry.id];
         if let Some(stage) = stage {
@@ -511,6 +523,44 @@ fn publish_scalars(
             }
         }
         let root = compiler.facts.entry_root(*owner, *stage)?;
+        for resource in compiler.facts.set("RootResourceSet", (root,)) {
+            let Some(slots) = input_shapes.get(&resource) else {
+                continue;
+            };
+            let Some((binding, _, _)) = compiler.bindings.buffer(resource)? else {
+                return Err(error("input shape allocation missing"));
+            };
+            for &(index, source) in slots {
+                let fields = compiler
+                    .facts
+                    .enode("StorageInput", source)
+                    .ok_or_else(|| error("input shape source missing"))?;
+                if compiler.facts.lookup("RootBindingAccess", (root, fields[0])).is_none() {
+                    continue;
+                }
+                let input = compiler.facts.binding(fields[0])?;
+                module.scalar_tasks.push(ScalarTask {
+                    stage: entry.name.clone(),
+                    destination: ScalarSource::Binding {
+                        set: binding.set,
+                        binding: binding.binding,
+                    },
+                    offset: u32::try_from(index)
+                        .ok()
+                        .and_then(|index| index.checked_mul(4))
+                        .ok_or_else(|| error("input shape offset overflow"))?,
+                    ty: ScalarType::I32,
+                    value: ScalarExpr::BufferLength {
+                        source: ScalarSource::Binding {
+                            set: input.set,
+                            binding: input.binding,
+                        },
+                        stride: compiler.facts.positive(fields[1], "input shape stride")?,
+                    },
+                    replaces_dispatch: false,
+                });
+            }
+        }
         let Some(targets) = targets.get(&root) else {
             continue;
         };
