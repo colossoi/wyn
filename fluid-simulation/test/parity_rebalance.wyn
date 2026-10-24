@@ -1,0 +1,9 @@
+-- Expected: split root into eight octants, then merge them into the root.
+-- Overflow flags must be false; change flags must be true.
+module Tree = import "../packages/spatial/src/octree"
+entry rebalance() ([]u32,bool,bool,[]u32,bool,bool) =
+  let slots=iota(17) in
+  let root=map(|i| if i == 0 then 0u32 else Tree.sentinel,slots) in
+  let (split,e1,c1)=Tree.rebalance([0u32,268435456u32,536870912u32,805306368u32],root,slots,2,false) in
+  let (merged,e2,c2)=Tree.rebalance([0u32],split,slots,2,true) in
+  (split,e1,c1,merged,e2,c2)

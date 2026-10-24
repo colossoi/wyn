@@ -55,15 +55,29 @@ def linked_leaf_neighbors<[n],[m],[k]>(leaf: i32, positions: [n]vec4f32, offsets
 -- Candidate node ranges are already linked to the spatially sorted particles.
 def linked_particle_neighbors<[n],[k]>(i: i32, positions: [n]vec4f32, ranges: [k]vec2i32,
                                      candidates: [258]i32, radius: f32) [98]i32 =
-  let (result,count,li,j) = loop (result,count,li,j) = (replicate(98,-1i32),0i32,0i32,0i32)
-    while li < candidates[256] && count < 96 do
-      let range = ranges[candidates[li]] in
-      if j >= range.y then (result,count,li+1,0i32) else
-      let index = range.x+j in
+  let (result,count) = loop (result,count) = (replicate(98,-1i32),0i32) for li<candidates[256] do
+    let range = ranges[candidates[li]] in
+    let (result,count) = loop (result,count) = (result,count) for batch<range.y/4 do
+      let first = range.x+batch*4 in
+      -- Fetch all four independent positions before testing or appending.
+      let r0 = positions[i].xyz-positions[first].xyz in
+      let r1 = positions[i].xyz-positions[first+1].xyz in
+      let r2 = positions[i].xyz-positions[first+2].xyz in
+      let r3 = positions[i].xyz-positions[first+3].xyz in
+      let a0 = if dot(r0,r0) < radius*radius then 1i32 else 0i32 in
+      let a1 = if dot(r1,r1) < radius*radius then 1i32 else 0i32 in
+      let a2 = if dot(r2,r2) < radius*radius then 1i32 else 0i32 in
+      let a3 = if dot(r3,r3) < radius*radius then 1i32 else 0i32 in
+      let result = if a0 != 0 && count < 96 then result with [count] = first else result in
+      let result = if a1 != 0 && count+a0 < 96 then result with [count+a0] = first+1 else result in
+      let result = if a2 != 0 && count+a0+a1 < 96 then result with [count+a0+a1] = first+2 else result in
+      let result = if a3 != 0 && count+a0+a1+a2 < 96 then result with [count+a0+a1+a2] = first+3 else result in
+      (result,min(96,count+a0+a1+a2+a3)) in
+    loop (result,count) = (result,count) for tail<range.y%4 do
+      let index = range.x+(range.y/4)*4+tail in
       let r = positions[i].xyz-positions[index].xyz in
-      let hit = dot(r,r) < radius*radius in
-      (if hit then result with [count] = index else result,
-       if hit then count+1 else count,li,j+1) in
+      let hit = dot(r,r) < radius*radius && count < 96 in
+      (if hit then result with [count] = index else result,if hit then count+1 else count) in
   (result with [96] = count) with [97] = candidates[257]
 
 -- One BFS per occupied leaf. Queue stores parent Hilbert intervals, equivalent

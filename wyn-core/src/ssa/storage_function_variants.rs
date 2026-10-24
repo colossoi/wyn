@@ -48,6 +48,10 @@ impl StorageFunctionVariants {
         program: &Program<Tag, GlobalContext>,
         accesses_for_entry: impl Fn(&crate::ssa::types::EntryPoint) -> LookupMap<BindingRef, ResourceAccess>,
     ) -> Self {
+        let mut name_counts = LookupMap::new();
+        for function in &program.functions {
+            *name_counts.entry(&function.name).or_insert(0) += 1;
+        }
         let function_indices = program
             .functions
             .iter()
@@ -106,6 +110,12 @@ impl StorageFunctionVariants {
             .map(|entry| (entry.id, LookupMap::new()))
             .collect::<LookupMap<_, _>>();
         for (function_index, function) in program.functions.iter().enumerate() {
+            // Display names need not be unique across array-layout specializations.
+            let name = if name_counts[&function.name] > 1 {
+                format!("_w_function_{}_{}", function.id, function.name)
+            } else {
+                function.name.clone()
+            };
             let mut contexts = BTreeMap::<Vec<(u32, u32, bool)>, Vec<EntryId>>::new();
             for (entry_id, functions) in &reachable {
                 if functions.contains(&function_index) {
@@ -125,9 +135,9 @@ impl StorageFunctionVariants {
             let needs_variants = contexts.len() > 1;
             for (variant_index, entries) in contexts.values().enumerate() {
                 let name = if needs_variants {
-                    format!("_w_storage_{}_{}_{}", function.id, variant_index, function.name)
+                    format!("_w_storage_{}_{}_{}", function.id, variant_index, name)
                 } else {
-                    function.name.clone()
+                    name.clone()
                 };
                 for &entry in entries {
                     entry_emissions

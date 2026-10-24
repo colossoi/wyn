@@ -4,6 +4,7 @@ use crate::egglog::to_ssa::{error, Compiler};
 use crate::egglog::OptimizeError;
 use crate::egglog::{facts::Facts, host::lower as host};
 use crate::host::{BufferLen, DispatchSize, Expr, ScalarExpr, ScalarSource};
+use crate::interface::StorageLayout;
 use crate::ssa::layout::storage_elem_stride;
 use egglog_engine::{RawValues, Value};
 
@@ -49,10 +50,10 @@ pub(in crate::egglog) fn dispatch(
         });
     }
     let (elements, divisor) = if let Some(fields) = compiler.facts.enode("BufferLaunch", selected) {
-        let Some((binding, element, _)) = compiler.bindings.buffer(fields[0])? else {
+        let Some((binding, _element, _)) = compiler.bindings.buffer(fields[0])? else {
             return Err(error("launch buffer missing"));
         };
-        let Some(elem_bytes) = storage_elem_stride(&compiler.facts.physical_type(element, true)?) else {
+        let Some(elem_bytes) = storage_elem_stride(&compiler.bindings.buffer_element(fields[0])?) else {
             return Err(error("launch element stride missing"));
         };
         let bound = Expr::BufferLength {
@@ -88,10 +89,10 @@ pub(in crate::egglog) fn capacity(
     compiler: &Compiler<'_, '_>,
     buffer: Value,
 ) -> Result<BufferLen, OptimizeError> {
-    let Some((_, element, extent_value)) = compiler.bindings.buffer(buffer)? else {
+    let Some((_, _element, extent_value)) = compiler.bindings.buffer(buffer)? else {
         return Err(error("allocation missing"));
     };
-    let Some(stride) = storage_elem_stride(&compiler.facts.physical_type(element, true)?) else {
+    let Some(stride) = storage_elem_stride(&compiler.bindings.buffer_element(buffer)?) else {
         return Err(error("allocation stride missing"));
     };
     let minimum = crate::egglog::query::Query(&compiler.program.graph)
@@ -123,6 +124,9 @@ pub(in crate::egglog) fn capacity(
 pub(in crate::egglog) fn extent(compiler: &Compiler<'_, '_>, key: Value) -> Result<Expr, OptimizeError> {
     if let Some(bound) = compiler.facts.lookup("HostBound", (key,)) {
         return extent(compiler, bound);
+    }
+    if let Some(count) = compiler.facts.lookup("StaticCapacityBound", (key,)) {
+        return Ok(Expr::Integer(compiler.facts.integer(count)));
     }
     if compiler.program.stage.selected.extents.contains_key(&key) {
         return Ok(Expr::Scalar(
@@ -207,12 +211,10 @@ pub(in crate::egglog) fn published_shape(
         let Some(backing) = compiler.facts.backing(resource) else {
             return Ok(None);
         };
-        let Some((binding, element, _)) = compiler.bindings.buffer(backing)? else {
+        let Some((binding, _, _)) = compiler.bindings.buffer(backing)? else {
             return Ok(None);
         };
-        let Some(ty) = host::scalar_type(element) else {
-            return Ok(None);
-        };
+        let ty = compiler.bindings.buffer_element(backing)?;
         let index = compiler
             .facts
             .lookup("MetadataIndex", (resource,))
@@ -222,14 +224,20 @@ pub(in crate::egglog) fn published_shape(
             .ok()
             .and_then(|index| index.checked_mul(4))
             .ok_or_else(|| error("shape offset overflow"))?;
-        Ok(Some(ScalarExpr::Read {
-            source: ScalarSource::Binding {
+        match host::read(
+            ScalarSource::Binding {
                 set: binding.set,
                 binding: binding.binding,
             },
             offset,
-            ty,
-        }))
+            &ty,
+            StorageLayout::Std430,
+            false,
+        ) {
+            Ok(value) => Ok(Some(value)),
+            Err(host::Error::Unsupported) => Ok(None),
+            Err(host::Error::Invalid(error)) => Err(error.into()),
+        }
     };
     host::published_length(compiler.program, source, &read)
         .map(|length| Expr::Max(Box::new(Expr::Scalar(length)), Box::new(Expr::Integer(0))))

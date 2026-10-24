@@ -122,12 +122,7 @@ impl Body<'_, '_, '_> {
             || self.local_arrays.contains_key(&array.value)
         {
             let (place, ty) = self.index_place(array, index)?;
-            let value =
-                self.builder.push_inst(InstKind::Load { place }, ty.clone()).map_err(builder_error)?;
-            return Ok(Typed {
-                value: value.into(),
-                ty,
-            });
+            return self.load_place(place, &ty);
         }
         let Some(ty) = array.ty.elem_type().cloned() else {
             return Err(error(format!("index of non-array {:?}", array.ty)));
@@ -298,6 +293,67 @@ impl Body<'_, '_, '_> {
 }
 
 impl Body<'_, '_, '_> {
+    fn child_place(&mut self, place: PlaceId, index: Typed, ty: &Type) -> Result<PlaceId, OptimizeError> {
+        let result = self.builder.new_place(ty.clone());
+        self.builder
+            .push_void_inst(InstKind::PlaceIndex {
+                place,
+                index: index.value,
+                result,
+            })
+            .map_err(builder_error)?;
+        Ok(result)
+    }
+
+    // Transfer aggregates through element pointers so buffer layout conversion
+    // does not expand fixed arrays into one instruction per element.
+    fn load_place(&mut self, place: PlaceId, ty: &Type) -> Result<Typed, OptimizeError> {
+        if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = ty {
+            let mut values = Vec::new();
+            for (i, field) in fields.iter().enumerate() {
+                let child = self.child_place(place, Self::number(i as u32), field)?;
+                values.push(self.load_place(child, field)?);
+            }
+            return self.op(OpTag::Tuple, values, ty.clone());
+        }
+        if ty.array_variant().is_some_and(types::is_array_variant_composite) {
+            let Some(Type::Constructed(TypeName::Size(n), _)) = ty.array_size() else {
+                return Err(error("aggregate load requires a concrete array dimension"));
+            };
+            let Some(element) = ty.elem_type() else {
+                return Err(error("aggregate load requires an array element type"));
+            };
+            let output = self.builder.new_place(ty.clone());
+            self.builder.push_void_inst(InstKind::Alloca { result: output }).map_err(builder_error)?;
+            let count = self.literal(&n.to_string(), &types::i32())?;
+            self.counted(
+                Self::number(0),
+                count,
+                Self::number(1),
+                vec![],
+                |body, index, _| {
+                    let source = body.child_place(place, index.clone(), element)?;
+                    let item = body.load_place(source, element)?;
+                    body.store_place(output, ty, &[index], item)?;
+                    Ok(vec![])
+                },
+            )?;
+            let value = self
+                .builder
+                .push_inst(InstKind::Load { place: output }, ty.clone())
+                .map_err(builder_error)?;
+            return Ok(Typed {
+                value: value.into(),
+                ty: ty.clone(),
+            });
+        }
+        let value = self.builder.push_inst(InstKind::Load { place }, ty.clone()).map_err(builder_error)?;
+        Ok(Typed {
+            value: value.into(),
+            ty: ty.clone(),
+        })
+    }
+
     pub(in crate::egglog::to_ssa) fn store(
         &mut self,
         array: Typed,
@@ -359,8 +415,7 @@ impl Body<'_, '_, '_> {
             return self.store_place(next, element, rest, value);
         }
         // A view carries a descriptor; an owned destination needs its elements.
-        let copy_array =
-            value.ty != *ty && ty.array_variant().is_some_and(types::is_array_variant_composite);
+        let copy_array = ty.array_variant().is_some_and(types::is_array_variant_composite);
         if value.ty.is_array()
             && (copy_array || matches!(ty, Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), _)))
         {
@@ -372,6 +427,14 @@ impl Body<'_, '_, '_> {
                 body.store_place(place, ty, &[index], item)?;
                 Ok(vec![])
             })?;
+            return Ok(());
+        }
+        if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = ty {
+            for (i, field) in fields.iter().enumerate() {
+                let child = self.child_place(place, Self::number(i as u32), field)?;
+                let item = self.field(value.clone(), i)?;
+                self.store_place(child, field, &[], item)?;
+            }
             return Ok(());
         }
         let value = self.cast(value, ty)?;

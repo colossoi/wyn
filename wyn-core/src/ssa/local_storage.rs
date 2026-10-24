@@ -223,10 +223,7 @@ fn update(data: &InstKind) -> Option<&[ValueRef]> {
 }
 
 fn bufferize(body: &mut FuncBody) -> Result<()> {
-    if !body.inner.insts.values().any(|n| {
-        update(&n.data)
-            .is_some_and(|xs| xs[0].as_ssa().is_some_and(|v| local_array(body.get_value_type(v))))
-    }) {
+    if !body.inner.values.values().any(|value| contains_local_array(&value.ty)) {
         return Ok(());
     }
     split_parameters(body);
@@ -351,7 +348,11 @@ fn analyze(body: &FuncBody) -> Result<Analysis> {
                 let before = entry + offset as i64;
                 let after = before + 1;
                 let node = &body.inner.insts[inst];
-                sink.add("Flow", (before, after))?;
+                if let InstKind::Alloca { result, .. } = node.data {
+                    sink.add("AllocationStep", (place_ids[&result], before, after))?;
+                } else {
+                    sink.add("Flow", (before, after))?;
+                }
                 if let Some(&v) = node.result.and_then(|v| indices.get(&v)) {
                     sink.add("Define", (before, after, v as i64))?;
                     if !matches!(node.data, InstKind::Op { tag: OpTag::Materialize, .. }) {
@@ -364,7 +365,11 @@ fn analyze(body: &FuncBody) -> Result<Analysis> {
                 for (i, value) in node.data.value_uses().into_iter().enumerate() {
                     let Some(&v) = value.as_ssa().and_then(|v| indices.get(&v)) else { continue; };
                     sink.add("Use", (before, v as i64))?;
-                    let modeled = matches!(&node.data,
+                    if i == 0 && matches!(&node.data, InstKind::Op { tag: OpTag::Index | OpTag::DynamicExtract, .. }) {
+                        sink.add("Indexed", (v as i64,))?;
+                    }
+                    let modeled = matches!(&node.data, InstKind::Op { tag: OpTag::Tuple, .. })
+                        || matches!(&node.data,
                         InstKind::Op { tag: OpTag::Index | OpTag::DynamicExtract | OpTag::Materialize, .. } if i == 0)
                         || update(&node.data).is_some_and(|_| i == 0)
                         || matches!(&node.data, InstKind::Op { tag: OpTag::Intrinsic { id, .. }, .. }
@@ -390,6 +395,7 @@ fn analyze(body: &FuncBody) -> Result<Analysis> {
             return Err(invalid("array has no planned version web"));
         };
         roots.insert(v, values[graph.value_to_base::<i64>(root) as usize]);
+
         if graph.read(|r| r.contains("Reuse", (id as i64,))).map_err(map_error)? {
             candidates.push(v);
         }
@@ -562,6 +568,23 @@ fn rewrite(
                         continue;
                     }
                 }
+            }
+            if let InstKind::Op {
+                tag: OpTag::Tuple,
+                operands,
+            } = &node.data
+            {
+                let mut snapshots = operands.clone();
+                for operand in &mut snapshots {
+                    if let Some(&place) = operand.as_ssa().and_then(|v| promoted.get(&v)) {
+                        let ty = body.places[place].elem_ty.clone();
+                        *operand = body.inner.append_inst(block, InstKind::Load { place }, ty).into();
+                    }
+                }
+                body.inner.insts[inst].data = InstKind::Op {
+                    tag: OpTag::Tuple,
+                    operands: snapshots,
+                };
             }
             body.inner.blocks[block].insts.push(inst);
         }

@@ -109,6 +109,48 @@ fn fluid_queue_reproducer_has_no_whole_array_traffic() {
 }
 
 #[test]
+fn mapped_loop_state_uses_storage_without_array_phis() {
+    let source = include_str!("../../../fluid-simulation/test/repro_map_loop_storage.wyn");
+    shaders(source, |module| {
+        let arrays: LookupSet<_> = module
+            .types_global_values
+            .iter()
+            .filter(|i| i.class.opcode == Op::TypeArray)
+            .filter_map(|i| i.result_id)
+            .collect();
+        assert!(!module
+            .all_inst_iter()
+            .any(|i| i.class.opcode == Op::Phi && i.result_type.is_some_and(|ty| arrays.contains(&ty))));
+    });
+}
+
+#[test]
+fn large_loop_results_use_compact_buffer_transfers() {
+    let source = include_str!("../../../fluid-simulation/test/repro_map_loop_storage.wyn")
+        .replace("257", "4097")
+        .replace("256", "4096");
+    shaders(&source, |module| {
+        let extracts = module.all_inst_iter().filter(|i| i.class.opcode == Op::CompositeExtract).count();
+        assert!(
+            extracts < 100,
+            "buffer transfer expanded into {extracts} fixed element extracts"
+        );
+    });
+}
+
+#[test]
+fn mapped_temporaries_reuse_their_allocation_each_iteration() {
+    shaders(
+        include_str!("../../../fluid-simulation/test/repro_temporary_lifetime.wyn"),
+        |module| {
+            let (allocations, loads, _) = array_traffic(module);
+            assert!(allocations > 0, "fixture must retain a local array temporary");
+            assert_eq!(loads, 0, "dead temporary must not require an array snapshot");
+        },
+    );
+}
+
+#[test]
 fn queue_versions_share_one_allocation_without_array_round_trips() {
     for (size, ty, zero, one) in [
         (4, "i32", "0i32", "1i32"),

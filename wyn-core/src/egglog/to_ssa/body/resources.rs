@@ -326,13 +326,13 @@ impl Body<'_, '_, '_> {
                 return self.value(scope, source);
             }
         }
-        let Some((binding, element, _)) = self.compiler.bindings.buffer(backing)? else {
+        let Some((binding, _element, _)) = self.compiler.bindings.buffer(backing)? else {
             return Err(error("selected resource has no allocation"));
         };
         let Some(extent) = extent else {
             return Err(error("selected resource has no planned extent"));
         };
-        let element = self.compiler.facts.physical_type(element, true)?;
+        let element = self.compiler.bindings.buffer_element(backing)?;
         let dimensions = match self.compiler.facts.storage_shape(backing)? {
             Some(shape) => self.compiler.facts.vector(shape)?,
             None => vec![extent],

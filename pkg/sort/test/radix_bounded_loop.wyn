@@ -1,0 +1,12 @@
+-- Expected for needle=16: keys 1..18 with payloads 17..0; needle=0 returns empty.
+-- Conservative search bounds exceed the backing array's capacity by one pair.
+-- Both swapped radix buffers must satisfy the larger kernel binding bound.
+module Sort = import "../src/lib"
+entry main(needle:i32) []vec2u32 =
+  let keys=iota(17) in
+  let (lo,_hi)=loop (lo,hi)=(0i32,length(keys)) while lo < hi do
+    let mid=lo+(hi-lo)/2 in
+    if keys[mid] < needle then (mid+1,hi) else (lo,mid) in
+  let count=lo+(lo-1)/7 in
+  let pairs=map(|i| @[u32(18-i),u32(i)],iota(18)) in
+  Sort.radix_sort(pairs[0..count],iota(count))

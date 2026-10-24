@@ -621,9 +621,6 @@ fn publish_loops(
             .required("ExprContextForSource", (form[0],))?;
         let count = host::expression(compiler.program, context, form[0])
             .map_err(|error| error.required("loop count"))?;
-        let initial = compiler.facts.loop_initial(header)?;
-        let initial_length = host::length(compiler.program, initial)
-            .map_err(|error| error.required("loop initial length"))?;
         let slot = |value: Option<Value>| -> Result<ScalarSource, OptimizeError> {
             let Some(backing) =
                 value.and_then(|v| compiler.facts.value_ref(v)).and_then(|v| compiler.facts.backing(v))
@@ -666,7 +663,6 @@ fn publish_loops(
             return Err(error("loop stage boundary missing"));
         };
         module.dispatch_loops.push(DispatchLoop {
-            initial_length,
             pipeline,
             setup,
             completion,

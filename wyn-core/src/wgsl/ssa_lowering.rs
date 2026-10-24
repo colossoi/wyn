@@ -2740,6 +2740,14 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                 }
                             )
                         {
+                            if let InstKind::Op { operands, .. } = &inst.data {
+                                let base = self.get_value(operands[0])?;
+                                if self.addressable.contains(&base) {
+                                    // Subscripts and fields of an addressable array remain
+                                    // addressable when retained as lexical aliases.
+                                    self.addressable.insert(expr.clone());
+                                }
+                            }
                             self.emit_alias_or_binding(output, result, expr)?;
                             continue;
                         }

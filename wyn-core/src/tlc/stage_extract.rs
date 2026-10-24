@@ -12,7 +12,7 @@ use super::run::UnpinnedPolymorphic;
 use super::value_graph::{Origin, ValueGraph};
 use super::{
     clone_term_with_fresh_ids, curried_function_type, Def, DefMeta, EntryPoint, Lambda, Program,
-    ProgramParts, RewriteDecision, Term, TermIdSource, TermKind, TermRewriter, TermVisitor, VarRef,
+    ProgramParts, RewriteDecision, SoacOp, Term, TermIdSource, TermKind, TermRewriter, TermVisitor, VarRef,
     WalkDecision,
 };
 use crate::ast;
@@ -1634,6 +1634,16 @@ fn append_computed_captures(
 ) {
     let mut used_sources = LookupMap::<(SymbolId, Vec<usize>), LookupSet<(SymbolId, Vec<usize>)>>::new();
     let mut visitor = |term: &Term| {
+        // Indexed destinations are symbol references outside the child-term tree.
+        if let TermKind::Soac(
+            SoacOp::Scatter { dest, .. }
+            | SoacOp::BucketScatter { dest, .. }
+            | SoacOp::ReduceByIndex { dest, .. },
+        ) = &term.kind
+        {
+            let resolved = resolve_projection(dest.id, &[], values);
+            used_sources.entry(resolved).or_default().insert((dest.id, vec![]));
+        }
         if let Some((symbol, path)) = projected_symbol_path(term) {
             let resolved = resolve_projection(symbol, &path, values);
             used_sources.entry(resolved).or_default().insert((symbol, path));
@@ -2033,6 +2043,17 @@ impl TermRewriter<data::Empty, data::Empty> for ExternalValueRewriter<'_> {
     }
 
     fn rewrite_owned_node_before_children(&mut self, mut term: Term) -> (Term, RewriteDecision) {
+        if let TermKind::Soac(
+            SoacOp::Scatter { dest, .. }
+            | SoacOp::BucketScatter { dest, .. }
+            | SoacOp::ReduceByIndex { dest, .. },
+        ) = &mut term.kind
+        {
+            if let Some((replacement, _)) = self.substitutions.get(&(dest.id, vec![])) {
+                dest.id = *replacement;
+                return (term, RewriteDecision::Changed);
+            }
+        }
         if let Some(key) = projected_symbol_path(&term) {
             if let Some((replacement, ty)) = self.substitutions.get(&key) {
                 term.ty = ty.clone();

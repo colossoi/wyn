@@ -66,6 +66,17 @@
 (rule ((InvocationResult value owner) (= ty (SourceType value)) (= source-layout-bytes (SourceByteSize ty)) (> source-layout-bytes 0))
       ((InvocationScalarCandidate owner) (ElementType (Result owner 0) ty)) :ruleset planning-import)
 
+; Owned array results are values even when their dimensions are inferred.
+; Their physical element layout is selected after shape propagation.
+(rule ((InvocationResult value owner) (OperationControl owner)
+       (= ty (SourceType value)) (SourceOwnedArrayType ty))
+      ((InvocationScalarCandidate owner) (ElementType (Result owner 0) ty)) :ruleset planning-import)
+
+; Aggregate control results can contain arrays whose dimensions are inferred.
+(rule ((InvocationResult value owner) (OperationControl owner)
+       (= ty (SourceType value)) (= fields (SourceTypeFields ty)))
+      ((InvocationScalarCandidate owner) (ElementType (Result owner 0) ty)) :ruleset planning-import)
+
 ; Only host operations can join into a generated scalar dispatch. Device-local
 ; operations retain their source order inside the enclosing kernel.
 (rule ((HostRegion r) (= r (OperationRegion (OperationId op)))
@@ -224,3 +235,8 @@
       ((set (OutputPinned output) true)) :ruleset planning-import)
 (rule ((SourceDrawValue draw owner slot) (SourceResultSlot owner slot output))
       ((DrawOutputRead draw output)) :ruleset planning-import)
+
+; The combine kernel derives chunk bounds from the original live domain even
+; though its own launch is a single workgroup.
+(rule ((Phase (Stage leader "combine") region) (= extent (InputDomain leader)))
+      ((ExtentDemand (Stage leader "combine") extent)) :ruleset residency)

@@ -288,3 +288,13 @@ fn polymorphic_graphics_helpers_keep_ordered_target_versions() {
         assert_eq!(host.matches("(gpu-alloc ").count(), 0, "{host}");
     }
 }
+
+#[test]
+fn render_helper_preserves_scatter_capture() {
+    let source = include_str!("../../testfiles/regressions/scatter_draw_helper.wyn");
+    for target in ["spirv", "wgsl"] {
+        for optimize in [false, true] {
+            compile(source, target, optimize).unwrap();
+        }
+    }
+}

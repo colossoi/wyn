@@ -399,6 +399,7 @@ impl<'a, 'source> Lower<'a, 'source> {
                 0,
                 &ty,
                 StorageLayout::Std140,
+                true,
             );
         }
         if let Some(fields) = self.facts.enode("PushInput", abi) {
@@ -411,6 +412,7 @@ impl<'a, 'source> Lower<'a, 'source> {
                 0,
                 &ty,
                 StorageLayout::Std430,
+                true,
             );
         }
         Err(Error::Unsupported)
@@ -539,9 +541,19 @@ impl<'a, 'source> Lower<'a, 'source> {
         Ok(value)
     }
 }
-fn read(source: ScalarSource, offset: u32, ty: &Type, rules: StorageLayout) -> Result<ScalarExpr> {
+pub(in crate::egglog) fn read(
+    source: ScalarSource,
+    offset: u32,
+    ty: &Type,
+    rules: StorageLayout,
+    parameter: bool,
+) -> Result<ScalarExpr> {
     if let Some(ty) = scalar_type(ty) {
-        return Ok(ScalarExpr::Parameter { source, offset, ty });
+        return Ok(if parameter {
+            ScalarExpr::Parameter { source, offset, ty }
+        } else {
+            ScalarExpr::Read { source, offset, ty }
+        });
     }
     if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = ty {
         let Some(layout) = block_layout(ty, rules) else {
@@ -551,7 +563,15 @@ fn read(source: ScalarSource, offset: u32, ty: &Type, rules: StorageLayout) -> R
             fields
                 .iter()
                 .enumerate()
-                .map(|(index, ty)| read(source.clone(), offset + layout.member_offsets[index], ty, rules))
+                .map(|(index, ty)| {
+                    read(
+                        source.clone(),
+                        offset + layout.member_offsets[index],
+                        ty,
+                        rules,
+                        parameter,
+                    )
+                })
                 .collect::<Result<_>>()?,
         ));
     }
@@ -564,7 +584,15 @@ fn read(source: ScalarSource, offset: u32, ty: &Type, rules: StorageLayout) -> R
         };
         return Ok(ScalarExpr::Tuple(
             (0..count)
-                .map(|index| read(source.clone(), offset + index as u32 * stride, ty, rules))
+                .map(|index| {
+                    read(
+                        source.clone(),
+                        offset + index as u32 * stride,
+                        ty,
+                        rules,
+                        parameter,
+                    )
+                })
                 .collect::<Result<_>>()?,
         ));
     }

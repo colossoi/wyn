@@ -1,0 +1,7 @@
+-- Regression: zero-length and singleton inputs must survive all eight passes.
+-- Expected (0, [@[0xffffffff,42]]); watch for zero-sized allocations or dispatches.
+module Sort = import "../src/lib"
+entry main() (i32,[1]vec2u32) =
+  let empty = Sort.radix_sort(map(|i| @[u32(i),u32(i)],iota(0)),iota(0)) in
+  let one = Sort.radix_sort([@[4294967295u32,42u32]],iota(1)) in
+  (length(empty),one)

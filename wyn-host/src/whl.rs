@@ -350,13 +350,19 @@ impl Program {
         }
     }
 
-    fn resource_description(&self, id: ResourceId) -> String {
+    fn resource_description(&self, id: ResourceId, logical_array: bool) -> String {
         if self.depth_targets.values().any(|&depth| depth == id) {
             return ":texture :read-write :dimension :d2 :format :depth32float :samples 1".into();
         }
         match self.resource_binding(id) {
             Some(b) => {
-                let mut description = self.binding_description(b);
+                // Returned views use their live range; kernel bindings retain allocation bounds.
+                let mut description = match b {
+                    Binding::StorageBuffer { access: a, .. } if logical_array => {
+                        format!(":buffer {} :element :u8 :stride 1", access(a))
+                    }
+                    _ => self.binding_description(b),
+                };
                 let passes = &self.interface.frame_graph.passes;
                 let readable = passes.iter().any(|p| p.reads.iter().any(|r| r.resource == id.0));
                 let writable = passes.iter().any(|p| p.writes.iter().any(|r| r.resource == id.0));
@@ -388,9 +394,7 @@ impl Program {
                     let current = resource(self.scalar_resource(*pipeline, &repeated.current)?);
                     let next = resource(self.scalar_resource(*pipeline, &repeated.next)?);
                     let index = resource(self.scalar_resource(*pipeline, &repeated.index)?);
-                    writeln!(out, "    (when (> {} 0)", self.whl_scalar(*pipeline, &repeated.initial_length)?)?;
                     self.write_operations(out, setup)?;
-                    writeln!(out, "    )")?;
                     writeln!(out, "    (dotimes (iteration {})", self.whl_scalar(*pipeline, &repeated.count)?)?;
                     writeln!(out, "      (gpu-write-scalar {index} 0 'i32 (i32 iteration))")?;
                     self.write_operations(out, body)?;
@@ -418,7 +422,7 @@ impl Program {
                 out,
                 "    ({} {} :source-name {}{host})",
                 resource(id),
-                self.resource_description(id),
+                self.resource_description(id, false),
                 string(&self.interface.frame_graph.resources[id.0].name)
             )?;
         }
@@ -438,7 +442,11 @@ impl Program {
                 out,
                 "\n    ({} {} :source-name {} :ownership {}",
                 symbol(source_name),
-                self.resource_description(id),
+                self.resource_description(
+                    id,
+                    source_result.is_some_and(|r| !r.shape.is_empty()
+                        && matches!(r.layout, ResultLayout::Array { length: None, .. }))
+                ),
                 string(source_name),
                 if entry.inputs.contains(&id) { ":borrowed" } else { ":owned" }
             )?;

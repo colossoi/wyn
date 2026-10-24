@@ -1,0 +1,8 @@
+-- Expected 27*seed+111 (300 for seed=7). Each map creates a fresh temporary;
+-- after reduction it is dead before the next iteration allocates another.
+-- Generated code should index its allocation without whole-array snapshots.
+entry temporary_lifetime(seed: i32) i32 =
+  let (total,_k) = loop (total,k) = (0i32,0i32) while k<3 do
+    let values=map(|i| seed+i+k,iota(8)) in
+    (total+reduce((+),0i32,values)+values[0],k+1) in
+  total

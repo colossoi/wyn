@@ -1,0 +1,7 @@
+-- Regression: allocation must use a proven search-interval bound instead of
+-- trying to evaluate the GPU-dependent loop on the host. Both backends compile.
+entry main(xs:[16]i32, needle:i32) []i32 =
+  let (lo,hi) = loop (lo,hi) = (0i32,length(xs)) while lo < hi do
+    let mid = lo+(hi-lo)/2 in
+    if xs[mid] < needle then (mid+1,hi) else (lo,mid) in
+  scan((+),0i32,map(|i| i*i,iota(lo*2)))

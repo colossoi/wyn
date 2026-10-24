@@ -82,7 +82,7 @@ pub(super) fn storage_bindings(
     for value in compiler.facts.set("RootResourceSet", (root,)) {
         let flags = Query(&compiler.program.graph).required("RootResource", (root, value))?;
         let access = compiler.facts.storage_access(flags)?;
-        if let Some((binding, element, _)) = compiler.bindings.buffer(value)? {
+        if let Some((binding, _element, _)) = compiler.bindings.buffer(value)? {
             if let Some(access) = access.map(ResourceAccess::from) {
                 accesses.entry(binding).and_modify(|old| *old = old.merge(access)).or_insert(access);
             }
@@ -109,7 +109,7 @@ pub(super) fn storage_bindings(
                     Some(StorageAccess::WriteOnly) => StorageRole::Output,
                     Some(StorageAccess::ReadWrite) => StorageRole::InputOutput,
                 },
-                elem_ty: compiler.facts.physical_type(element, true)?,
+                elem_ty: compiler.bindings.buffer_element(value)?,
                 host: StorageHost {
                     logical_resource: name,
                     length: sizes::capacity(compiler, value)?,

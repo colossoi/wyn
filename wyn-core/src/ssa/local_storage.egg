@@ -19,7 +19,10 @@
 (function Blocked (i64) bool :merge (or old new))
 (function MultipleOrigins (i64) bool :merge (or old new))
 (relation Reuse (i64))
+(relation StorageCandidate (i64))
+(relation Indexed (i64))
 (relation Flow (i64 i64))
+(relation AllocationStep (i64 i64 i64))
 (relation Allocation (i64))
 (relation PlaceIndex (i64 i64))
 (relation PlaceAlias (i64 i64))
@@ -58,9 +61,27 @@
       ((AfterOrigin v after) (PlaceAlias place place) (set (AccessedLater v) false)) :ruleset storage-liveness)
 (rule ((PlaceAlias base p) (PlaceIndex p child)) ((PlaceAlias base child)) :ruleset storage-liveness)
 (rule ((AfterOrigin v before) (Flow before after)) ((AfterOrigin v after)) :ruleset storage-liveness)
+; A fresh execution of the source allocation starts a new lifetime. It can
+; reuse the place only when no version of the old value remains live there.
+(rule ((OriginLoad v base start) (AfterOrigin v before)
+       (AllocationStep other before after) (!= base other))
+      ((AfterOrigin v after)) :ruleset storage-liveness)
+(rule ((OriginLoad v base start) (AfterOrigin v before)
+       (AllocationStep base before after) (Live before current)
+       (= root (Web v)) (= root (Web current)))
+      ((set (AccessedLater v) true)) :ruleset storage-liveness)
 (rule ((OriginLoad v base start) (AfterOrigin v point) (PlaceUse point p) (PlaceAlias base p))
       ((set (AccessedLater v) true)) :ruleset storage-liveness)
-(rule ((Updated v) (= root (Web v)) (Origin origin) (= root (Web origin)) (= false (Blocked root)))
+(rule ((Updated v)) ((StorageCandidate v)) :ruleset storage-select)
+; Locally materialized rows can be indexed through their existing allocation.
+; Constants and interface memory retain their backend-specific addressing.
+(rule ((Indexed v) (= root (Web v)) (OriginLoad origin place point)
+       (= root (Web origin)) (Allocation place))
+      ((StorageCandidate v)) :ruleset storage-select)
+; Arrays carried through control flow need stable storage even when their
+; next versions are produced by maps rather than element updates.
+(rule ((Parameter point v)) ((StorageCandidate v)) :ruleset storage-select)
+(rule ((StorageCandidate v) (= root (Web v)) (Origin origin) (= root (Web origin)) (= false (Blocked root)))
       ((Reuse root)) :ruleset storage-select)
 (rule ((Reuse root) (OriginLoad v p after) (= root (Web v))
        (= false (MultipleOrigins root)) (= false (AccessedLater v)) (Allocation p))

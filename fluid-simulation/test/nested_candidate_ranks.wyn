@@ -1,0 +1,15 @@
+-- Nested array scheduling probe: rank 32 candidate flags per querying leaf.
+-- FAILS with installed compiler dated 2026-10-20 17:08 EDT:
+-- "SSA lowering: local slot output has no planned static capacity".
+-- Input flags are 0 or 1. Output: 32 exclusive ranks plus accepted count.
+-- Inspect whether the inner scan/reduction is serial, segmented, or cooperative;
+-- serial scheduling alone is not a numerical bug. Numeric oracle: exclusive
+-- prefix sums and sum of each input row.
+-- wyn build fluid-simulation/test/nested_candidate_ranks.wyn -o /tmp/candidate-ranks.spv
+entry ranks(hits: []i32) [][33]i32 =
+  map(|leaf|
+    let flags = hits[leaf*32..(leaf+1)*32] in
+    let inclusive = scan(|a,b| a+b,0i32,flags) in
+    let total = reduce(|a,b| a+b,0i32,flags) in
+    map(|i| if i == 32 then total else inclusive[i]-flags[i],0i32..<33),
+    0i32..<(length(hits)/32))

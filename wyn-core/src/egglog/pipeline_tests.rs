@@ -1145,6 +1145,17 @@ fn local_map_captures_are_computed_before_the_element_loop() {
             }
         });
     }
+    for entry in &module.entry_points {
+        visit_loop_depths(&entry.function.body, 0, &mut |statement, depth| {
+            if matches!(statement, Statement::Loop { .. }) && depth > 0 {
+                loops += 1;
+                assert_eq!(
+                    depth, 1,
+                    "inlined captured scan must not repeat for every output element"
+                );
+            }
+        });
+    }
     assert!(loops >= 2, "fixture must retain the scan and output traversal");
 }
 
@@ -1666,5 +1677,58 @@ fn branch_loop_state_keeps_inferred_array_layout() {
 fn cooperative_loop_parallel_assignment_preserves_array_sources() {
     shaders(include_str!(
         "../../../fluid-simulation/test/repro_shared_loop_swap.wyn"
+    ));
+}
+
+#[test]
+fn module_counted_loop_counters_have_distinct_types() {
+    shaders(
+        "module S = { def run(x:i32) i32 = loop x=x for i<8 do x+i }
+        entry main() (i32,i32) = (S.run(1),S.run(2))",
+    );
+}
+
+#[test]
+fn inferred_array_scan_accumulators_keep_their_row_layout() {
+    shaders(
+        "entry main() [16]i32 =
+      let rows=map(|i| map(|j| if i == j then 1i32 else 0i32,iota(16)),iota(4)) in
+        let ranks=scan(|a,b| map(|(x,y)| x+y,zip(a,b)),replicate(16,0i32),rows) in
+        ranks[3]",
+    );
+}
+
+#[test]
+fn four_bit_radix_sort_reaches_both_backends() {
+    let source = format!(
+        "{}\nentry main() [4]vec2u32 = radix_sort(
+      [@[4294967295u32,0u32],@[1u32,1u32],@[1u32,2u32],@[0u32,3u32]],iota(4))",
+        include_str!("../../../pkg/sort/src/lib.wyn")
+    );
+    shaders(&source);
+}
+
+#[test]
+fn narrowing_loop_bounds_device_sized_allocations() {
+    shaders(include_str!(
+        "../../../testfiles/regressions/narrowing_loop_capacity.wyn"
+    ));
+}
+
+#[test]
+fn narrowing_loop_capacity_requires_bounded_backedge() {
+    let source = include_str!("../../../testfiles/regressions/narrowing_loop_capacity.wyn")
+        .replace("(mid+1,hi)", "(hi+1,hi)");
+    assert!(compile_thru_ssa(&source).is_err());
+}
+
+#[test]
+fn inferred_loop_result_arrays_retain_logical_extents() {
+    let fixture = include_str!("../../../fluid-simulation/test/parity_tree.wyn")
+        .replace("module Tree = import \"../packages/spatial/src/octree\"", "")
+        .replace("Tree.", "");
+    shaders(&format!(
+        "{}\n{fixture}",
+        include_str!("../../../fluid-simulation/packages/spatial/src/octree.wyn")
     ));
 }

@@ -1,0 +1,6 @@
+-- Expected seed+2. The generated shader must not carry a whole array through
+-- an OpPhi: map-produced loop state should use liveness-proven local storage.
+entry map_loop(seed: i32) i32 =
+  let (values,_j) = loop (values,j) = (replicate(257,seed),0i32) while j<2 do
+    (map(|v| v+1,values),j+1) in
+  values[256]

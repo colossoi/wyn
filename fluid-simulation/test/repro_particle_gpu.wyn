@@ -1,0 +1,13 @@
+-- GPU isolation: narrow-phase neighbors should return indices 0,1, count 2, overflow 0.
+-- FIXED in the 2026-10-07 22:58 UTC retest: NVIDIA returns all 98 expected values.
+-- Former failure: compiled, but viz rejected SPIR-V with InvalidAccessType(75).
+-- Reproduces on NVIDIA GTX 1660 Ti and llvmpipe before GPU execution.
+-- wyn build fluid-simulation/test/repro_particle_gpu.wyn -o /tmp/fluid-particle.spv
+-- extra/viz/target/release/viz pipeline /tmp/fluid-particle.spv --verbose
+module S = import "pkg:spatial"
+entry neighbors() [98]i32 =
+  let positions = [@[1.0,1.0,1.0,0.35],@[1.5,1.0,1.0,0.35],@[8.0,8.0,8.0,0.35]] in
+  let corners = [0u32,1073741824u32] in
+  let offsets = [0i32,3i32] in
+  let candidates = ((replicate(258,-1i32) with [0] = 0) with [256] = 1) with [257] = 0 in
+  S.Neighbors.particle_neighbors(0,positions,offsets,candidates,1.7)

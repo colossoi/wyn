@@ -26,7 +26,6 @@ fn selected_loops_stay_contiguous_and_wait_for_outer_dependencies() {
         ..FrameGraph::default()
     };
     let repeated = DispatchLoop {
-        initial_length: ScalarExpr::I32(8),
         pipeline: 0,
         setup: 0,
         body: vec![1],

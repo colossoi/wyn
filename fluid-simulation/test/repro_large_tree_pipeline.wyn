@@ -1,0 +1,12 @@
+-- Expected: eight octants followed by sentinels, then one root followed by
+-- sentinels; both overflow flags false. Watch GPU pipeline creation: this
+-- 4097-slot case stalls on llvmpipe even though the 17-slot parity_tree runs;
+-- validate on the host GPU as well (a sandbox may hide GPU devices).
+-- Shader code size must not grow by thousands of extracts for buffer copies.
+module Tree = import "../packages/spatial/src/octree"
+entry tree() ([]u32,bool,[]u32,bool) =
+  let slots=iota(4097) in
+  let root=map(|i| if i == 0 then 0u32 else Tree.sentinel,slots) in
+  let (split,e1)=Tree.build([0u32,268435456u32,536870912u32,805306368u32],root,slots,2) in
+  let (merged,e2)=Tree.build_mode([0u32],split,slots,2,true) in
+  (split,e1,merged,e2)

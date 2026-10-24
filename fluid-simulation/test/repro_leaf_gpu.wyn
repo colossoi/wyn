@@ -1,0 +1,14 @@
+-- GPU isolation: leaf traversal should return candidate 0, count 1, overflow 0.
+-- FIXED in the 2026-10-07 22:58 UTC retest: NVIDIA returns all 258 expected values.
+-- Former failure: compiled, but viz rejected the shader before execution:
+-- "pointer [65] doesn't relate to a valid destination for a store".
+-- Reproduces on NVIDIA GTX 1660 Ti and llvmpipe; not hardware-specific.
+-- wyn build fluid-simulation/test/repro_leaf_gpu.wyn -o /tmp/fluid-leaf.spv
+-- extra/viz/target/release/viz pipeline /tmp/fluid-leaf.spv --verbose
+module S = import "pkg:spatial"
+entry neighbors() [258]i32 =
+  let positions = [@[1.0,1.0,1.0,0.35],@[1.5,1.0,1.0,0.35],@[8.0,8.0,8.0,0.35]] in
+  let corners = [0u32,1073741824u32] in
+  let offsets = [0i32,3i32] in
+  let candidates = S.Neighbors.leaf_neighbors(0,positions,corners,offsets,1.7,16.0) in
+  candidates

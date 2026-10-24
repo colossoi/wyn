@@ -40,8 +40,6 @@ pub struct SourceResultBinding {
 
 #[derive(Debug, Clone)]
 pub struct DispatchLoop {
-    /// Logical carry length; empty initialization performs no device work.
-    pub initial_length: ScalarExpr,
     /// Compute pipeline containing this loop and its carried bindings.
     pub pipeline: usize,
     /// Initialization dispatch, executed once even for zero iterations.

@@ -233,6 +233,9 @@ impl<'source> Import<'_, '_, '_, 'source> {
         args: &[Value],
     ) -> Result<(), OptimizeError> {
         match (&func.kind, args) {
+            (TermKind::BinOp(op), &[left, right]) => {
+                self.sink.add("SourceBinary", (value, op.op.symbol(), left, right))?;
+            }
             (TermKind::Var(VarRef::Builtin { id, .. }), &[array, _, _])
                 if *id == catalog().known().array_with || *id == catalog().known().array_with_in_place =>
             {

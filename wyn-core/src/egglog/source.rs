@@ -488,7 +488,8 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 }
             }
             TermKind::Index { array, index } => {
-                self.operand(array, value, scope)?;
+                let input = self.operand(array, value, scope)?;
+                self.sink.set("SourceIndexedArray", value, input)?;
                 self.operand(index, value, scope)?;
                 self.operation(value, "index", scope)?;
             }

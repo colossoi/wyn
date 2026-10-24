@@ -1,0 +1,12 @@
+-- Expected: neighbor-list and all-pairs results agree for eight nearby
+-- particles, exercising two complete four-load batches per particle.
+-- WGSL currently fails validation of a tuple argument in density_interaction.
+module Fluid = import "../src/dfsph"
+entry batches() ([]vec4f32,[]vec4f32,[]vec4f32,[]vec4f32) =
+  let ids=iota(8) in
+  let p=map(|i| @[5.0+f32(i%2)*0.5,5.0+f32((i/2)%2)*0.5,5.0+f32(i/4)*0.5,0.2],ids) in
+  let v=map(|i| @[f32(i)*0.03,0.0,0.0,0.0],ids) in
+  let neighbors=map(|a| if a%32 < 8 && a/32 < 8 then a/32 else -1i32,iota(3072)) in
+  let (a,b)=Fluid.step_neighbors(p,v,@[16.0,12.0,10.0],ids,neighbors,replicate(8,8i32)) in
+  let (c,d)=Fluid.step(p,v,@[16.0,12.0,10.0],ids) in
+  (a,b,c,d)

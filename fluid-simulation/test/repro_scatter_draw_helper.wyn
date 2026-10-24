@@ -1,0 +1,13 @@
+-- FIXED by the installed compiler built 2026-10-08 19:35 EDT; this now compiles.
+-- Former failure in checkout a151de4d: source import failed with an unbound TLC symbol.
+-- Expected: helper-local scatter feeds the vertex shader and renders two triangles.
+-- The error occurs at compile time, before SPIR-V or GPU execution.
+-- Reproduce from /home/jonah/wyn using the freshly built checkout compiler:
+-- target/release/wyn build fluid-simulation/test/repro_scatter_draw_helper.wyn --graphics -o /tmp/scatter-draw-helper.spv
+def draw<[n]>(ids: [n]i32, screen: *render_target<vec4f32>) render_target<vec4f32> =
+  let compacted = scatter(replicate(length(ids),-1i32),ids,ids) in
+  let triangles = rasterize_triangles(direct_draw(3u32,2u32),|vi,ii,_|
+    vertex_output(@[f32.u32(vi)*0.1,f32(compacted[i32.u32(ii)])*0.1,0.5,1.0],0.0)) in
+  shade(screen,triangles,|_,_,_,_,_| @[1.0,0.0,0.0,1.0])
+entry reproduce(screen: render_target<vec4f32>) render_target<vec4f32> =
+  draw(0i32..<2,screen)

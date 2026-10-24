@@ -587,9 +587,8 @@ impl Program {
                     body,
                 } => {
                     let repeated = &self.interface.dispatch_loops[*region];
-                    for value in [&repeated.initial_length, &repeated.count] {
-                        dependencies.scalar(value, |source| self.scalar_resource(*pipeline, source))?;
-                    }
+                    dependencies
+                        .scalar(&repeated.count, |source| self.scalar_resource(*pipeline, source))?;
                     operations.extend(setup);
                     operations.extend(body);
                     *pipeline

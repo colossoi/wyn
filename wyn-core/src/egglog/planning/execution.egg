@@ -89,10 +89,34 @@
 
 ; Calls made inside a workgroup kernel retain lexical access to its shared
 ; resources, including calls from invocation-local element callbacks. Calls in
-; ordinary invocation kernels use the function ABI. This storage domain is
-; independent of the scope selected for a local collective's execution.
+; invocation kernels also expand calls that pass owned arrays, exposing their
+; accesses to local bufferization. Other calls retain the function ABI. This
+; storage domain is independent of a local collective's execution scope.
 (function InlineCall (RegionKey ExecutionScope) bool :no-merge)
-(rule ((= region (RegionId i)) (= (RegionRecursive region) false))
-      ((set (InlineCall region (WorkgroupScope)) true)) :ruleset execution-finalize)
+(function RegionHasOwnedArrayParameter (RegionKey) bool :merge (or old new))
 (rule ((= region (RegionId i)))
-      ((set (InlineCall region (InvocationScope)) false)) :ruleset execution-finalize)
+      ((set (RegionHasOwnedArrayParameter region) false)) :ruleset execution-discover)
+(rule ((= formal (SourceParameter region i)) (= ty (SourceType formal))
+       (SourceOwnedArrayType ty))
+      ((set (RegionHasOwnedArrayParameter region) true)) :ruleset execution-discover)
+(rule ((= actual (SourceCapture region formal)) (= ty (SourceType formal))
+       (SourceOwnedArrayType ty))
+      ((set (RegionHasOwnedArrayParameter region) true)) :ruleset execution-discover)
+(rule ((= region (RegionId i)) (= (RegionRecursive region) false))
+      ((set (InlineCall region (WorkgroupScope)) true)) :ruleset readout)
+(rule ((= region (RegionId i)) (= (RegionHasOwnedArrayParameter region) false))
+      ((set (InlineCall region (InvocationScope)) false)) :ruleset readout)
+(rule ((= region (RegionId i)) (= (RegionRecursive region) true))
+      ((set (InlineCall region (InvocationScope)) false)) :ruleset readout)
+; Expose by-value array accesses to local bufferization instead of copying a
+; complete array through the function ABI at each element callback.
+(rule ((= (RegionHasOwnedArrayParameter region) true) (= (RegionRecursive region) false))
+      ((set (InlineCall region (InvocationScope)) true)) :ruleset readout)
+
+(rule ((= actual (SourceCapture region formal))
+       (= (ValueRepresentation actual) (ArrayLayout count element)))
+      ((set (RegionHasOwnedArrayParameter region) true)) :ruleset representations)
+(rule ((= call (SourceInvocation caller function args)) (= region (PlanCallee call))
+       (= formal (SourceParameter region i)) (< i (vec-length args))
+       (= (ValueRepresentation (vec-get args i)) (ArrayLayout count element)))
+      ((set (RegionHasOwnedArrayParameter region) true)) :ruleset representations)

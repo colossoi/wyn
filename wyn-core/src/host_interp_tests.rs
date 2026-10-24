@@ -419,3 +419,45 @@ fn spirv_dispatch_includes_its_scalar_push_constants() {
     let result = program.run("main", &[input], &mut backend).unwrap();
     assert_eq!(backend.buffers[&result.handle().unwrap()].len(), 68);
 }
+
+#[test]
+fn emitted_dispatch_loop_runs_setup_condition_and_iteration_writes() {
+    let program = generated(
+        "entry main(xs:[]i32) []i32 =
+         loop xs=xs for i<2 do map(|x|x+i,xs)",
+    );
+    for count in [0, 4] {
+        let mut backend = Trace::default();
+        let input = backend.input(vec![0; count * 4]);
+        program.run("main", &[input], &mut backend).unwrap();
+        // Shape metadata also writes scalars; identify the loop counter by its second value.
+        let counter =
+            backend.scalar_writes.iter().find(|(_, bytes)| i32::from_le_bytes(*bytes) == 1).unwrap().0;
+        let iterations: Vec<_> = backend
+            .scalar_writes
+            .iter()
+            .filter(|(buffer, _)| *buffer == counter)
+            .map(|(_, bytes)| i32::from_le_bytes(*bytes))
+            .collect();
+        assert_eq!(iterations, [0, 1]);
+    }
+}
+
+#[test]
+fn bounded_device_array_returns_its_live_range() {
+    let program = generated(include_str!(
+        "../../testfiles/regressions/narrowing_loop_capacity.wyn"
+    ));
+    let mut backend = Trace::default();
+    let inputs = program
+        .entry("main")
+        .unwrap()
+        .parameters
+        .iter()
+        .map(|parameter| backend.input(vec![0; parameter.minimum_bytes().unwrap().unwrap() as usize]))
+        .collect::<Vec<_>>();
+    let result = program.run("main", &inputs, &mut backend).unwrap();
+    // The GPU test backend leaves the search result zero, despite capacity for 32 elements.
+    assert!(backend.buffers[&result.handle().unwrap()].is_empty());
+    assert_eq!(backend.device_reads.len(), 1);
+}

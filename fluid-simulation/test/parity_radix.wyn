@@ -1,0 +1,6 @@
+-- Expected: [0,3], [1,1], [1,2], [0xffffffff,0], in stable key order.
+-- Current failure: missing AST type or missing selected control-boundary
+-- layout in the nested-array scan/loop. Keep the natural radix pass loop.
+module Sort = import "pkg:sort"
+entry radix() [4]vec2u32 =
+  Sort.radix_sort([@[4294967295u32,0u32],@[1u32,1u32],@[1u32,2u32],@[0u32,3u32]],iota(4))

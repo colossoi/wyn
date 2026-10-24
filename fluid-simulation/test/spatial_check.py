@@ -37,4 +37,10 @@ if __name__ == '__main__':
             tree,overflow = run(ROOT/'fluid-simulation/test/octree.wyn',directory,target)
             assert tree == [i*(1<<27) for i in range(8)]+[1<<30]*8,(target,tree)
             assert overflow == [0]
+            split, split_overflow, merged, merge_overflow = run(
+                ROOT/'fluid-simulation/test/repro_large_tree_pipeline.wyn',directory,target)
+            assert split == [i*(1<<27) for i in range(8)]+[1<<30]*4089, (target,split)
+            assert merged == [0]+[1<<30]*4096, (target,merged)
+            assert split_overflow == merge_overflow == [False]
             print(target, 'Hilbert oracle, 30-bit radix sort and stability across scan blocks, cornerstone split: passed')
+            print(target, '4097-slot octree split and merge: passed')

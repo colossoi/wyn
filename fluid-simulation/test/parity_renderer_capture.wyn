@@ -1,0 +1,11 @@
+-- Expected: helper-local scatter feeds a vertex shader and compiles.
+-- Current failure on checkout and installed compilers: "unbound TLC symbol"
+-- during source import, before GPU execution. Do not inline away the helper.
+-- wyn build fluid-simulation/test/parity_renderer_capture.wyn --graphics -o /tmp/capture.spv
+ def draw<[n]>(ids: [n]i32, screen: *render_target<vec4f32>) render_target<vec4f32> =
+  let compacted = scatter(replicate(length(ids),-1i32),ids,ids) in
+  let triangles = rasterize_triangles(direct_draw(3u32,2u32),|vi,ii,_|
+    vertex_output(@[f32(vi)*0.1,f32(compacted[i32(ii)])*0.1,0.5,1.0],0.0)) in
+  shade(screen,triangles,|_,_,_,_,_| @[1.0,0.0,0.0,1.0])
+entry reproduce(screen: render_target<vec4f32>) render_target<vec4f32> =
+  draw(0i32..<2,screen)

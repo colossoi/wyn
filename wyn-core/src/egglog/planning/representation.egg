@@ -130,6 +130,13 @@
 ; A fixed logical dimension comes from its type. A dynamic dimension comes
 ; from the selected view, including slices and compacted live counts.
 (function LogicalExtent (SourceValue) Extent :no-merge)
+; A projected fixed-array value has the same length as its selected SSA
+; representation. Runtime views keep their separately carried descriptor length.
+(rule ((= (SourceProjection source) (ProjectionInfo parent i))
+       (= (SourceLoop parent) (LoopInfo header iteration))
+       (= ty (SourceType source)) (= (SourceArraySize ty) (DynamicSize))
+       (= (ValueRepresentation source) (ArrayLayout count element)))
+      ((set (ViewExtent source) (Fixed count))) :ruleset residency)
 (rule ((= ty (SourceType source)) (= (SourceArraySize ty) (FixedSize n)))
       ((set (LogicalExtent source) (Fixed n))) :ruleset readout)
 (rule ((= ty (SourceType source)) (= (SourceArraySize ty) (DynamicSize))
@@ -259,3 +266,64 @@
 (rule ((= (SourceProjection source) (ProjectionInfo parent i))
        (= ty (SourceType parent)) (= size (SourceArraySize ty)))
       ((ArrayStreamProjection source)) :ruleset readout)
+
+; A collective's accumulator shape is established by its neutral value, even
+; when inferred array dimensions have no type-wide representation.
+(rule ((= neutral (SourceNeutral op)) (= layout (ValueRepresentation neutral))
+       (= body (SourceOperatorBody op)) (= formal (SourceParameter body i))
+       (= ty (SourceType formal)) (= (HasTypeLayout ty) false))
+      ((set (ValueRepresentation formal) layout)) :ruleset representations)
+(rule ((= neutral (SourceNeutral op)) (= layout (ValueRepresentation neutral))
+       (= (SourceOperation op) (OperationInfo region "scan")) (= value (SourceOperationValue op)))
+      ((set (ArrayElementLayout value) layout)) :ruleset representations)
+(rule ((= neutral (SourceNeutral op)) (= layout (ValueRepresentation neutral))
+       (= (SourceOperation op) (OperationInfo region "reduce")) (= value (SourceOperationValue op))
+       (= ty (SourceType value)) (= (HasTypeLayout ty) false))
+      ((set (ValueRepresentation value) layout)) :ruleset representations)
+(rule ((= array (SourceIndexedArray value)) (= layout (ArrayElementLayout array))
+       (= ty (SourceType value)) (= (HasTypeLayout ty) false))
+      ((set (ValueRepresentation value) layout)) :ruleset representations)
+
+; Buffer element representation belongs to the allocation, not to a possibly
+; unresolved semantic type shared by several occurrences. Select it at readout,
+; after rectangular storage and its HasStorageShape flag have settled.
+(function BufferElementLayout (ValueKey) LocalLayout :no-merge)
+(rule ((Allocation value extent) (ElementType value ty) (= (HasStorageShape value) false) (= layout (BoundaryLayout ty)))
+      ((set (BufferElementLayout value) layout)) :ruleset readout)
+(rule ((Allocation value extent) (= (StorageLayout value) (FlatStorage ty shape count)) (= layout (BoundaryLayout ty)))
+      ((set (BufferElementLayout value) layout)) :ruleset readout)
+(rule ((DirectResult source owner i) (Allocation (Result owner i) extent) (ElementType (Result owner i) ty)
+       (= (HasTypeLayout ty) false) (= (HasStorageShape (Result owner i)) false)
+       (= (ResultRead owner i) (ReadView (Result owner i))) (= layout (ArrayElementLayout source)))
+      ((set (BufferElementLayout (Result owner i)) layout)) :ruleset readout)
+(rule ((DirectResult source owner i) (Allocation (Result owner i) extent) (ElementType (Result owner i) ty)
+       (= (HasTypeLayout ty) false) (= (HasStorageShape (Result owner i)) false)
+       (= (ResultRead owner i) (ReadElement (Result owner i))) (= layout (ValueRepresentation source)))
+      ((set (BufferElementLayout (Result owner i)) layout)) :ruleset readout)
+(rule ((Accumulator owner i ty role slot source) (= op (SourceValueOperation source))
+       (= neutral (SourceNeutral op)) (= layout (ValueRepresentation neutral))
+       (= value (Temporary owner name i)) (Allocation value extent) (ElementType value ty) (= (HasTypeLayout ty) false))
+      ((set (BufferElementLayout value) layout)) :ruleset readout)
+(rule ((= call (SourceInvocation caller function args)) (= callee (PlanCallee call))
+       (= formal (SourceParameter callee i)) (< i (vec-length args))
+       (= ty (SourceType formal)) (= (HasTypeLayout ty) false)
+       (= layout (ValueRepresentation (vec-get args i))))
+      ((set (ValueRepresentation formal) layout)) :ruleset representations)
+; Indexing a rectangular array exposes one fixed-size row. Equal branch
+; lengths remain known without evaluating the branch predicate on the host.
+(rule ((= array (SourceIndexedArray value)) (= (ArrayElementLayout array) (ArrayLayout count element)))
+      ((set (ViewExtent value) (Fixed count))) :ruleset representations)
+(rule ((= (SourceBranch value) (BranchInfo condition yes no))
+       (= a (SourceResult yes)) (= b (SourceResult no))
+       (= extent (ViewExtent a)) (= extent (ViewExtent b)))
+      ((set (ViewExtent value) extent)) :ruleset representations)
+
+(function ConstantLogicalExtent (Extent) i64 :no-merge)
+(rule ((Fixed n)) ((set (ConstantLogicalExtent (Fixed n)) n)) :ruleset representations)
+(rule ((Scalar value) (= n (SourceInteger32 value)))
+      ((set (ConstantLogicalExtent (Scalar value)) n)) :ruleset representations)
+(rule ((= (SourceBranch value) (BranchInfo condition yes no))
+       (= a (SourceResult yes)) (= b (SourceResult no))
+       (= ea (ViewExtent a)) (= eb (ViewExtent b)) (!= ea eb)
+       (= n (ConstantLogicalExtent ea)) (= n (ConstantLogicalExtent eb)))
+      ((set (ViewExtent value) (Fixed n))) :ruleset representations)

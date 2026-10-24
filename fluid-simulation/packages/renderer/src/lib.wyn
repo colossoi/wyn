@@ -1,40 +1,53 @@
--- Portable sphere renderer: nearest ray hit, with orbit camera and ground grid.
+-- Upstream sphere impostors: cull, compact, rasterize quads, shade sphere depth.
+-- Indexed instancing supplies the same quads as upstream's task/mesh shaders.
 import "pkg:gfx"
-def vertex_main(vi: u32, ii: u32, di: u32) vertex<vec2f32> =
-  vertex_output(if vi == 0u32 then @[-1.0,-1.0,0.0,1.0]
-    else if vi == 1u32 then @[3.0,-1.0,0.0,1.0] else @[-1.0,3.0,0.0,1.0],@[0.0,0.0])
 
-def pixel(positions: []vec4f32, velocities: []vec4f32, coord: vec2f32,
-          resolution: vec3f32, mouse: vec4f32, bounds: vec3f32) vec4f32 =
-  let azimuth = if mouse.z > 0.0 then (mouse.x/resolution.x-0.5)*6.28 else 0.45 in
-  let elevation = if mouse.z > 0.0 then (mouse.y/resolution.y-0.5)*1.8 else -0.3 in
-  let camera = { target = bounds*0.5, azimuth = azimuth, elevation = elevation,
-                 distance = bounds.x*1.65 } in
-  let (eye,ray) = gfx.camera.orbit.ray(
-    gfx.camera.ray_direction(45.0,resolution.xy,@[coord.x,resolution.y-coord.y]),camera) in
-  let floor_t = if ray.y < -0.00001 then -eye.y/ray.y else 100000.0 in
-  let floor_p = eye + ray*floor_t in
-  let on_floor = floor_t > 0.0 && floor_p.x >= 0.0 && floor_p.x <= bounds.x
-    && floor_p.z >= 0.0 && floor_p.z <= bounds.z in
-  let initial_t = if on_floor then floor_t else 100000.0 in
-  let (nearest,hit,j) = loop (nearest,hit,j) = (initial_t,-1i32,0i32)
-    while j < length(positions) do
-      let p = positions[j] in
-      let oc = eye-p.xyz in
-      let b = dot(oc,ray) in
-      let c = dot(oc,oc)-p.w*p.w in
-      let disc = b*b-c in
-      let t = -b-f32.sqrt(max(disc,0.0)) in
-      let closer = disc > 0.0 && t > 0.0 && t < nearest in
-      (if closer then t else nearest,if closer then j else hit,j+1) in
-  let background = if on_floor then
-      let grid = min(floor_p.x % 1.0,floor_p.z % 1.0) < 0.035 in
-      if grid then @[0.12,0.20,0.27] else @[0.045,0.08,0.12]
-    else @[0.015,0.025,0.045] in
-  let color = if hit < 0 then background else
-    let normal = normalize(eye + nearest*ray - positions[hit].xyz) in
-    let light = 0.25+0.75*max(dot(normal,normalize(@[-0.4,0.8,0.6])),0.0) in
-    let speed = clamp(magnitude(velocities[hit].xyz)/10.0,0.0,1.0) in
-    let tint = @[0.05+speed*0.4,0.4+speed*0.4,0.95] in
-    light*tint in
-  @[color...,1.0]
+def color(speed: f32) vec3f32 =
+  let t = clamp(speed/14.5,0.0,1.0) in
+  let a = smoothstep(0.0,0.5,t) in
+  let b = smoothstep(0.5,1.0,t) in
+  let low = @[0.0,0.0,1.0]*(1.0-a)+@[1.0,0.5,1.0]*a in
+  low*(1.0-b)+@[1.0,1.0,0.0]*b
+
+def render<[n]>(positions: [n]vec4f32, velocities: [n]vec4f32, ids: [n]i32,
+    resolution: vec3f32, mouse: vec4f32, bounds: vec3f32, overflow: bool,
+    screen: *render_target<vec4f32>) render_target<vec4f32> =
+  let camera = {target = bounds*0.5,
+    azimuth = if mouse.z > 0.0 then (mouse.x/resolution.x-0.5)*6.28 else 0.45,
+    elevation = if mouse.z > 0.0 then (mouse.y/resolution.y-0.5)*1.8 else -0.3,
+    distance = bounds.x*1.65} in
+  let view = gfx.camera.look_at(gfx.camera.orbit.eye(camera),camera.target,@[0.0,1.0,0.0]) in
+  let projection = gfx.camera.perspective(45.0,resolution.x/resolution.y,0.1,1000.0) in
+  let visible = map(|p|
+    let clip = gfx.camera.world_to_clip(p.xyz,view,projection) in
+    let r = p.w*clip.w in
+    if clip.w > 0.0 && abs(clip.x) < clip.w+r && abs(clip.y) < clip.w+r
+       && clip.z > 0.0 && clip.z < clip.w+r then 1i32 else 0i32,positions) in
+  let offsets = scan((+),0i32,visible) in
+  let destinations = map(|i| if visible[i] != 0 then offsets[i]-1 else -1i32,ids) in
+  let compacted = scatter(map(|_| -1i32,ids),destinations,ids) in
+  let count = if length(ids) == 0 then 0u32 else u32(offsets[length(ids)-1]) in
+  let indices = [0u32,1u32,2u32,2u32,1u32,3u32] in
+  let command = {index_count=6u32,instance_count=count,first_index=0u32,
+                 vertex_offset=0i32,first_instance=0u32} in
+  let triangles = rasterize_triangles(indexed_indirect_draw(indices,command),|vi,ii,_|
+    let id = compacted[i32(ii)] in
+    let p = positions[id] in
+    let center = view*@[p.xyz...,1.0] in
+    let uv = [@[-0.5,-0.5],@[0.5,-0.5],@[-0.5,0.5],@[0.5,0.5]][i32(vi)] in
+    let vertex = @[center.x+uv.x*p.w*2.0,center.y+uv.y*p.w*2.0,center.z] in
+    vertex_output(projection*@[vertex...,1.0],
+      {uv=uv,view_position=vertex,radius=p.w,base_color=color(magnitude(velocities[id].xyz))})) in
+  shade_with({depth_test=#less_equal,depth_write=true,blend=#replace,color_write=true},
+    screen,triangles,|v,_,_,_,_|
+      let r2 = dot(v.uv,v.uv) in
+      if r2 > 0.25 then #discard else
+      let xy = v.uv*2.0 in
+      let normal = @[xy...,f32.sqrt(max(0.0,1.0-dot(xy,xy)))] in
+      let light = (view*@[normalize(@[500.0,700.0,500.0])...,0.0]).xyz in
+      let fragment = v.view_position+normal*v.radius in
+      let diffuse = clamp(dot(normal,normalize(light-fragment)),0.0,1.0) in
+      let rgb = if overflow then @[0.7,0.0,0.1] else v.base_color*(0.2+0.85*diffuse) in
+      let surface = @[v.view_position.x,v.view_position.y,v.view_position.z+normal.z*v.radius,1.0] in
+      let clip = projection*surface in
+      #depth(@[rgb...,1.0],clip.z/clip.w))

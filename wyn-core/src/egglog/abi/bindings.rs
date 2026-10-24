@@ -4,6 +4,7 @@ use crate::egglog::query::Query;
 use crate::egglog::{output_error as error, OptimizeError, Optimized, Program};
 use crate::interface::publish::EntryOutput;
 use crate::interface::EntryParamBindingKind;
+use crate::ssa::layout::storage_value_type;
 use crate::tlc::extract_lambda_params_ref;
 use crate::tlc::DefMeta;
 use crate::types::{strip_existentials, Type, TypeName};
@@ -114,6 +115,13 @@ impl<'a, 'source> Bindings<'a, 'source> {
             self.query.program.identities.types.resolve(self.query.integer(allocation[1])),
             allocation[2],
         )))
+    }
+
+    pub fn buffer_element(&self, key: Value) -> Result<Type, OptimizeError> {
+        let Some(layout) = self.query.lookup("BufferElementLayout", (key,)) else {
+            return Err(error("allocation has no selected element representation"));
+        };
+        Ok(storage_value_type(&self.query.layout_type(layout)?))
     }
 
     pub fn buffer_name(&self, key: Value) -> Result<String, OptimizeError> {

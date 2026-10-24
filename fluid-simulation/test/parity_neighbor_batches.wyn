@@ -1,0 +1,9 @@
+-- Expected: first row has neighbors 0..6 (four loads plus three tails).
+-- Second row retains exactly 0..95 from 99 hits, preserving upstream order.
+module N = import "../packages/spatial/src/neighbors"
+entry neighbors() ([98]i32,[98]i32) =
+  let positions=map(|i| @[f32(i)*0.001,0.0,0.0,0.2],iota(99)) in
+  let candidates=(replicate(258,-1i32) with [0]=0) with [256]=1 in
+  let candidates=candidates with [257]=0 in
+  (N.linked_particle_neighbors(0,positions,[@[0i32,7i32]],candidates,1.7),
+   N.linked_particle_neighbors(0,positions,[@[0i32,99i32]],candidates,1.7))

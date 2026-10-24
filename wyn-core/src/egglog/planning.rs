@@ -60,7 +60,9 @@ pub(super) fn place(graph: &mut EGraph, topology: PipelineTopologyPolicy) -> Res
             include_str!("planning/segments.egg"),
             include_str!("planning/execution.egg"),
             "\n",
-            include_str!("planning/bindings.egg")
+            include_str!("planning/bindings.egg"),
+            "\n",
+            include_str!("planning/capacity.egg")
         ),
     )?;
     let policy = match topology {

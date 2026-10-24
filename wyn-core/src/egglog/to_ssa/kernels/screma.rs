@@ -52,10 +52,9 @@ pub(super) fn screma(
             body.literal("0", ty)?
         } else {
             let neutral = body.compiler.facts.neutral(operation)?;
-            // Carry the selected value layout, not the seed's storage-view representation.
             let layout = body.compiler.facts.value_layout(neutral)?;
-            let neutral = body.value(scope, neutral)?;
-            body.materialize(neutral, layout)?
+            let value = body.value(scope, neutral)?;
+            body.materialize(value, layout)?
         };
         accumulators.push(Accumulator::new(body, plan, source, operation, neutral)?);
     }
@@ -502,6 +501,7 @@ pub(super) struct Accumulator {
     operation: Value,
     count: bool,
     neutral: Typed,
+    layout: Option<Value>,
 }
 
 impl Accumulator {
@@ -530,7 +530,13 @@ impl Accumulator {
             };
             input = source;
         }
+        let layout = if body.compiler.facts.operation_kind(operation)? == "filter" {
+            None
+        } else {
+            Some(body.compiler.facts.value_layout(body.compiler.facts.neutral(operation)?)?)
+        };
         Ok(Self {
+            layout,
             source,
             input,
             filter,
@@ -577,7 +583,15 @@ impl Accumulator {
             let increment = body.cast(keep, &state.ty)?;
             return body.binary(Add, state, increment);
         }
-        self.combine(body, scope, state, incoming)
+        let value = body.callback(scope, self.operation, vec![state, incoming])?;
+        self.materialize(body, value)
+    }
+
+    fn materialize(&self, body: &mut Body<'_, '_, '_>, value: Typed) -> Result<Typed, OptimizeError> {
+        match self.layout {
+            Some(layout) => body.materialize(value, layout),
+            None => Ok(value),
+        }
     }
 
     fn combine(
@@ -590,10 +604,8 @@ impl Accumulator {
         if self.count {
             body.binary(Add, a, b)
         } else {
-            let neutral = body.compiler.facts.neutral(self.operation)?;
-            let layout = body.compiler.facts.value_layout(neutral)?;
             let value = body.callback(scope, self.operation, vec![a, b])?;
-            body.materialize(value, layout)
+            self.materialize(body, value)
         }
     }
 }

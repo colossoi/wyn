@@ -7,39 +7,55 @@ def lower_bound<[n]>(keys: [n]u32, value: u32) i32 =
     let mid = lo+(hi-lo)/2 in
     if keys[mid] < value then (mid+1,hi) else (lo,mid) in lo
 
--- One subdivision round. ncrit is upstream's device subgroup size (32/64).
--- Returns the old tree and overflow=true if the next tree cannot fit.
-def split<[n],[m]>(keys: [n]u32, corners: [m]u32, slots: [m]i32, ncrit: i32)
-    ([m]u32,bool) =
-  let counts = map(|i|
-    if i+1 >= length(corners) then 0i32 else
-    let lo = corners[i] in let hi = corners[i+1] in
-    if lo >= sentinel then 0i32 else
-    if hi-lo >= 8u32 && lower_bound(keys,hi)-lower_bound(keys,lo) > ncrit
-    then 8i32 else 1i32,slots) in
-  let ends = scan(|a,b| a+b,0i32,counts) in
+-- Upstream rebalance markers: 8 splits, 1 retains, 0 removes a merged sibling.
+def rebalance<[n],[m]>(keys: [n]u32, corners: [m]u32, slots: [m]i32,
+    ncrit: i32, maintenance: bool) ([m]u32,bool,bool) =
+  let leaves = lower_bound(corners,sentinel) in
+  let active = iota(leaves) in
+  let offsets = map(|key| lower_bound(keys,key),corners[0..leaves+1]) in
+  let ops = map(|i|
+    if i >= leaves then 0i32 else
+    let span = corners[i+1]-corners[i] in
+    let count = offsets[i+1]-offsets[i] in
+    if count > ncrit && span >= 8u32 then 8i32 else
+    if !maintenance || span == sentinel then 1i32 else
+    let parent_span = span << 3u32 in
+    let octant = i32((corners[i] % parent_span)/span) in
+    let first = i-octant in
+    if maintenance && octant != 0 && first >= 0 && first+8 <= leaves then
+      if corners[first]+parent_span == corners[first+8]
+         && offsets[first+8]-offsets[first] <= ncrit then 0i32 else 1i32
+    else 1i32,active) in
+  let ends = scan((+),0i32,ops) in
   let total = ends[length(ends)-1] in
   let overflow = total >= length(corners) in
-  let next = map(|i|
-    if overflow then corners[i] else if i >= total then sentinel else
-    let (lo,hi) = loop (lo,hi) = (0i32,length(ends)) while lo < hi do
-      let mid = lo+(hi-lo)/2 in
-      if ends[mid] <= i then (mid+1,hi) else (lo,mid) in
-    let before = ends[lo]-counts[lo] in
-    corners[lo]+u32(i-before)*((corners[lo+1]-corners[lo])/u32(counts[lo])),slots) in
+  let changed = reduce(|a,b| a || b,false,map(|op| op != 1,ops)) in
+  let writes = iota(leaves*8) in
+  let destinations = map(|j|
+    let i=j/8 in let child=j%8 in
+    if i < leaves && child < ops[i] && !overflow then ends[i]-ops[i]+child else -1i32,writes) in
+  let values = map(|j|
+    let i=j/8 in let child=j%8 in
+    if i < leaves && child < ops[i] then
+      corners[i]+u32(child)*((corners[i+1]-corners[i])/u32(ops[i])) else sentinel,writes) in
+  let next = scatter(map(|_| sentinel,slots),destinations,values) in
+  (if overflow then corners else next,overflow,changed)
+
+def split<[n],[m]>(keys: [n]u32, corners: [m]u32, slots: [m]i32, ncrit: i32)
+    ([m]u32,bool) =
+  let (next,overflow,_changed) = rebalance(keys,corners,slots,ncrit,false) in
   (next,overflow)
 
--- Ten rounds reach the finest possible cell, retaining previous subdivisions.
+-- Upstream bounds construction by ten levels and disables further work once
+-- no marker changes. The simulation uses maintenance=false; callers may merge.
+def build_mode<[n],[m]>(keys: [n]u32, previous: [m]u32, slots: [m]i32,
+    ncrit: i32, maintenance: bool) ([m]u32,bool) =
+  let (tree,overflow,_changed,_level) =
+    loop (tree,overflow,changed,level) = (previous,false,true,0i32)
+    while level < 10 && changed && !overflow do
+      let (next,error,changed) = rebalance(keys,tree,slots,ncrit,maintenance) in
+      (next,error,changed,level+1) in
+  (tree,overflow)
+
 def build<[n],[m]>(keys: [n]u32, previous: [m]u32, slots: [m]i32, ncrit: i32)
-    ([m]u32,bool) =
-  let (t1,e1) = split(keys,previous,slots,ncrit) in
-  let (t2,e2) = split(keys,t1,slots,ncrit) in
-  let (t3,e3) = split(keys,t2,slots,ncrit) in
-  let (t4,e4) = split(keys,t3,slots,ncrit) in
-  let (t5,e5) = split(keys,t4,slots,ncrit) in
-  let (t6,e6) = split(keys,t5,slots,ncrit) in
-  let (t7,e7) = split(keys,t6,slots,ncrit) in
-  let (t8,e8) = split(keys,t7,slots,ncrit) in
-  let (t9,e9) = split(keys,t8,slots,ncrit) in
-  let (t10,e10) = split(keys,t9,slots,ncrit) in
-  (t10,e1 || e2 || e3 || e4 || e5 || e6 || e7 || e8 || e9 || e10)
+    ([m]u32,bool) = build_mode(keys,previous,slots,ncrit,false)

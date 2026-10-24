@@ -1522,6 +1522,16 @@ fn collective_phase_accesses_exclude_unused_inputs_and_producer_captures() {
         .unwrap();
     assert!(p.stages.iter().all(|stage| stage.uses.access(unused).is_none()));
     let combine = p.stages.iter().find(|stage| stage.entry_point.ends_with("combine")).unwrap();
-    assert!(output.program.interface.scalar_tasks.iter().all(|task| task.stage != combine.entry_point));
-    assert!(!output.program.interface.scalar_tasks.is_empty());
+    // Combining needs the live input length, but not the producer's bias computation.
+    assert!(output
+        .program
+        .interface
+        .scalar_tasks
+        .iter()
+        .filter(|task| task.stage == combine.entry_point)
+        .all(|task| matches!(task.value, host::ScalarExpr::BufferLength { .. })));
+    assert!(
+        output.program.interface.scalar_tasks.iter().any(|task| task.stage != combine.entry_point
+            && !matches!(task.value, host::ScalarExpr::BufferLength { .. }))
+    );
 }

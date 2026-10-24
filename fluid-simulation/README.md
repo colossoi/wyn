@@ -29,8 +29,8 @@ orbit camera. Starts running; pass `--paused` to inspect the initial state. Pres
   pressure solves, gravity, wall repulsion, damping, integration and collision.
 - `packages/presets`: the three upstream initial conditions, with reproducible
   jitter from the repository's `wyn/rng` package.
-- `packages/renderer`: ray/sphere rendering, ground grid, speed colors, and
-  camera math from `wyn/gfx`.
+- `packages/renderer`: culled, compacted sphere impostors using indexed
+  indirect instancing, sphere depth, speed colors, and `wyn/gfx` camera math.
 - `packages/spatial`: Hilbert keys, cornerstone octree, and neighbor lists.
 - `../pkg/sort`: stable 30-bit radix sorting shared by spatial preparation.
 - `src/main.wyn`: frame orchestration and position/velocity feedback.
@@ -44,11 +44,11 @@ The explicit index array preserves static intermediate buffer sizes.
 This is a small reference port, not the upstream million-particle implementation.
 The viewer uses Hilbert sorting, a persistent cornerstone octree, and capped
 neighbor lists; the small reference fixture also retains the all-pairs solver.
-Rendering uses ray/sphere intersections instead of mesh shaders.
+Rendering uses indexed instanced quads instead of task/mesh shaders.
 Default count is 4,320 particles;
 keep `count`, `tree_capacity`, and `bounds` in `src/main.wyn` consistent with
 the feedback storage sizes in `launch.py` when changing the scene. Rendering
-also scales with particle count per pixel. No upstream performance claim applies.
+uses four vertices per visible particle. No upstream performance claim applies.
 
 The pass ordering and default one iteration per pressure solve match upstream.
 The timestep is fixed at 1/90 second per rendered frame, so wall-clock playback
@@ -65,13 +65,20 @@ Revisit the sidecar if changing the authored result order.
 python3 fluid-simulation/test/check.py
 python3 fluid-simulation/test/check_neighbors_step.py
 python3 fluid-simulation/test/spatial_check.py
+python3 fluid-simulation/test/check_linked_neighbors.py
+python3 fluid-simulation/test/check_renderer_path.py
 ```
 
 Builds both shader targets and compares a headless GPU step with a Python
 reference, including interacting particles and collisions at both bounds.
-The 4,320-particle viewer also completed a three-frame headless smoke test at
-64×48 with finite particle positions, exercising startup and cross-frame
-feedback. Its interactive performance has not been measured.
+Both backends completed four headless frames at 320×240 with identical
+positions and velocities for 4,320 particles. A 120-frame WGSL run through
+block contact retained finite positions and velocities and kept particles
+inside the simulation bounds. This does not establish 100k-particle performance.
+
+GPU tests need access to the host GPU. A sandbox without GPU devices falls
+back to llvmpipe, where the 4097-slot octree can stall during pipeline creation.
+Check the selected adapter before interpreting that timeout as a compiler failure.
 
 The checks use this checkout's release compiler and viewer by default. Set
 `WYN` and `VIZ` to test alternate builds (for example, `target/debug/wyn` and

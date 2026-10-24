@@ -1,0 +1,16 @@
+-- Capability probe for upstream's cooperative per-leaf bounding-box reduction.
+-- Required execution: independent groups reduce 32 lanes together; later leaf
+-- traversal needs the same group to share a queue across loop iterations.
+-- Failure to look for: each map lane serially reduces all 32 input elements,
+-- or compilation rejects the nested reduction. Correct numbers alone do not
+-- establish the cooperative execution needed for upstream parity.
+-- Confirmed with installed compiler dated 2026-10-08 21:11 EDT: one 64-thread
+-- map kernel, serial per-lane sum, no workgroup storage or barriers.
+-- Same scheduling observed with installed compiler dated 2026-10-20 17:08 EDT.
+-- This is a scheduling observation, not by itself a compiler defect: an inner
+-- reduction may deliberately be serial when outer parallelism is sufficient.
+-- wyn build fluid-simulation/test/repro_cooperative_leaf.wyn -o /tmp/cooperative-leaf.spv
+-- spirv-dis /tmp/cooperative-leaf.spv -o /tmp/cooperative-leaf.spvasm
+-- With input xs=[0..127], expect [496,1520,2544,3568].
+entry reproduce(xs: []i32) []i32 =
+  map(|leaf| reduce(|a,b| a+b,0i32,xs[leaf*32..(leaf+1)*32]),0i32..<(length(xs)/32))

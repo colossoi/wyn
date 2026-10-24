@@ -36,7 +36,7 @@ def build<[m],[k]>(corners: [m]u32, offsets: [m]i32, slots: [k]i32, world_size: 
   let leaves = Tree.lower_bound(corners,Tree.sentinel) in
   let internals = (leaves-1)/7 in
   let count = leaves+internals in
-  let leaf_slots = iota(length(corners)) in
+  let leaf_slots = iota(leaves) in
   let leaf_dest = map(|i| if i < leaves then internals+i else -1i32,leaf_slots) in
   let leaf_keys = map(|i|
     if i < leaves then @[placeholder(corners[i],10-high_bit(corners[i+1]-corners[i])/3),u32(i)]
@@ -49,8 +49,8 @@ def build<[m],[k]>(corners: [m]u32, offsets: [m]i32, slots: [k]i32, world_size: 
     let level = divergence/3 in
     (internal_index(corners[i],level,i),placeholder(corners[i],level)),leaf_slots) in
   let unsorted = scatter(initial,map(|(i,_)| i,internal),map(|(_,key)| @[key,4294967295u32],internal)) in
-  -- Placeholder keys use 31 bits; the final digit also orders padding last.
-  let ordered = Sort.radix_digit(Sort.radix_sort(unsorted,slots),30u32) in
+  -- Sort all 32 bits so the all-ones padding follows valid placeholder keys.
+  let ordered = Sort.radix_sort(unsorted[0..count],iota(count)) in
   let keys = map(|node| node.x,ordered) in
   let children = map(|i|
     if i >= count || high_bit(keys[i])/3 >= 10 then 0i32 else
@@ -59,8 +59,9 @@ def build<[m],[k]>(corners: [m]u32, offsets: [m]i32, slots: [k]i32, world_size: 
     if child < count && keys[child] == child_key then child else 0i32,slots) in
   let boxes = map(|i| if i < count then bounds(keys[i],world_size) else @[0.0,0.0,0.0,0.0],slots) in
   let ranges = map(|i|
+    if i >= count then @[0i32,0i32] else
     let leaf = ordered[i].y in
-    if i < count && leaf != 4294967295u32 then
+    if leaf != 4294967295u32 then
       @[offsets[i32(leaf)],offsets[i32(leaf)+1]-offsets[i32(leaf)]]
     else @[0i32,0i32],slots) in
   (children,boxes,ranges,count)

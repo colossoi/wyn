@@ -1,0 +1,17 @@
+-- Expected: a helper renders an image, and the entry returns it with an array.
+-- Fixed with the installed compiler on 2026-10-07; this now compiles.
+-- Former failure: "graphics invocation that cannot be planned as an ordered
+-- rasterization and shading operation". No particles or indirect draw needed.
+-- Control: return draw(screen) directly as a render_target instead of a tuple.
+-- Reproduce from /home/jonah/wyn:
+-- wyn build fluid-simulation/test/repro_render_helper_tuple.wyn --graphics -o /tmp/repro-render-helper-tuple.spv
+def draw(screen: *render_target<vec4f32>) render_target<vec4f32> =
+  let triangles = rasterize_triangles(direct_draw(3u32,1u32),|vi,_,_|
+    vertex_output(if vi == 0u32 then @[-1.0,-1.0,0.0,1.0]
+      else if vi == 1u32 then @[3.0,-1.0,0.0,1.0] else @[-1.0,3.0,0.0,1.0],0.0)) in
+  let background = shade(screen,triangles,|_,_,_,_,_| @[0.0,0.0,0.0,1.0]) in
+  background
+
+entry reproduce(screen: render_target<vec4f32>) ([]i32,render_target<vec4f32>) =
+  let image = draw(screen) in
+  ([1i32,2i32],image)

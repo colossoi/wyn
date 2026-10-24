@@ -1,3 +1,27 @@
+# Current WIP validation: 2026-10-21
+
+The 4097-slot octree reproducer completes on NVIDIA GeForce GTX 1660 Ti
+with correct split and merge results on both SPIR-V and WGSL. It is included
+in `spatial_check.py`. A sandbox without GPU device access instead selects
+llvmpipe, where pipeline creation stalls. Run GPU acceptance tests with
+host GPU access; `viz pipeline --verbose` reports the adapter.
+
+The checkout compiler passes the spatial, linked-neighbor, 76-query traversal,
+neighbor-based DFSPH reference, and indexed-renderer pixel checks on both
+backends. Four full simulator frames produce identical SPIR-V/WGSL positions
+and velocities. A 120-frame WGSL run through block contact preserves finite
+values and simulation bounds for all 4,320 particles. These runs use 320×240
+render targets and do not establish 100k-particle performance.
+
+The core suite passes 1,509 tests with 14 ignored; the remaining workspace
+passes 148 tests, the viewer passes 10, and native `wyn-wasm` passes 3.
+The WebAssembly target check and simulator SPIR-V validation also pass.
+Both testfile gates pass: 124 SPIR-V cases and 123 WGSL cases, with the
+linked-SPIR-V helper case skipped by the WGSL gate. These include the local
+untracked `kogepan.wyn` playground shader. Workspace all-target builds,
+formatting, and diff whitespace checks pass. The all-target build retains
+two existing analyzer deprecation warnings for `DocumentSymbol::deprecated`.
+
 # Batched traversal acceptance probes: 2026-10-20
 
 `batched_traversal.wyn` expresses a breadth-first search using nested maps,

@@ -163,9 +163,10 @@ pub fn clone_decl_fresh_ids(decl: &Decl, nc: &mut NodeCounter) -> Decl {
 fn clone_loop_form(form: &LoopForm, nc: &mut NodeCounter) -> LoopForm {
     match form {
         LoopForm::While(cond) => LoopForm::While(Box::new(clone_expr_fresh_ids(cond, nc))),
-        LoopForm::For(name, bound) => {
-            LoopForm::For(name.clone(), Box::new(clone_expr_fresh_ids(bound, nc)))
-        }
+        LoopForm::For(pattern, bound) => LoopForm::For(
+            clone_pattern_fresh_ids(pattern, nc),
+            Box::new(clone_expr_fresh_ids(bound, nc)),
+        ),
         LoopForm::ForIn(pat, iter) => LoopForm::ForIn(
             clone_pattern_fresh_ids(pat, nc),
             Box::new(clone_expr_fresh_ids(iter, nc)),

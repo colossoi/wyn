@@ -7,6 +7,8 @@
 use super::{validate_wgsl_identifier, wgsl_mangle, TypeEmitter};
 use crate::ast::TypeName;
 use crate::compile_thru_ssa;
+use crate::compile_thru_ssa_with_policy;
+use crate::egglog::ScalarOptimization;
 use crate::err_spirv;
 use crate::error;
 use crate::lower_ssa_to_wgsl;
@@ -14,7 +16,7 @@ use crate::lower_ssa_to_wgsl_with_options;
 use crate::ssa;
 use crate::types;
 use crate::wgsl;
-use crate::CodegenTarget;
+use crate::{CodegenTarget, LookupSet};
 use polytype::Type as PolyType;
 
 // ---------- wgsl_mangle: per-char cases ----------
@@ -1209,7 +1211,7 @@ entry pick(roots: [1]([2]u32), table: [1024][2]u32) [1]([2]u32) =
 }
 
 #[test]
-fn wgsl_distinctness_indexes_512_element_helper_parameter() {
+fn wgsl_distinctness_indexes_512_element_array_without_inner_copies() {
     let wgsl = std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(|| {
@@ -1236,16 +1238,43 @@ entry check(inputs: [1]([512]u32)) [1]u32 =
     validate_wgsl(&wgsl);
     let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
     let is_row = |ty| matches!(module.types[ty].inner,naga::TypeInner::Array {size:naga::ArraySize::Constant(n),..} if n.get()==512);
-    let (_, helper) = module
-        .functions
-        .iter()
-        .find(|(_, f)| f.arguments.iter().any(|arg| is_row(arg.ty)))
-        .expect("array-valued helper input");
-    assert!(helper.expressions.iter().filter(|(_,e)| matches!(e,naga::Expression::Access {base,..} if matches!(helper.expressions[*base],naga::Expression::FunctionArgument(_)))).count()>=2,"both distinctness indices must access the parameter");
+    let function = &module.entry_points[0].function;
+    let rows: LookupSet<_> =
+        function.local_variables.iter().filter(|(_, local)| is_row(local.ty)).map(|(id, _)| id).collect();
+    let is_row_pointer = |expression| {
+        matches!(function.expressions[expression],
+        naga::Expression::LocalVariable(local) if rows.contains(&local))
+    };
+    let accesses = function.expressions.iter().filter(|(_, expression)|
+        matches!(expression, naga::Expression::Access {base,..} if is_row_pointer(*base))).count();
     assert!(
-        !helper.local_variables.iter().any(|(_, local)| is_row(local.ty)),
-        "no full-array local copy"
+        accesses >= 2,
+        "both distinctness indices must address stable array storage"
     );
+    let mut blocks = vec![(&function.body, 0)];
+    while let Some((block, depth)) = blocks.pop() {
+        for statement in block {
+            match statement {
+                naga::Statement::Store { pointer, .. } if is_row_pointer(*pointer) => {
+                    assert!(
+                        depth <= 1,
+                        "array snapshot repeated inside the distinctness loops"
+                    );
+                }
+                naga::Statement::Block(block) => blocks.push((block, depth)),
+                naga::Statement::If { accept, reject, .. } => {
+                    blocks.extend([(accept, depth), (reject, depth)]);
+                }
+                naga::Statement::Loop { body, continuing, .. } => {
+                    blocks.extend([(body, depth + 1), (continuing, depth + 1)]);
+                }
+                naga::Statement::Switch { cases, .. } => {
+                    blocks.extend(cases.iter().map(|case| (&case.body, depth)));
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 #[test]
@@ -1399,4 +1428,22 @@ fn signed_shift_counts_validate_in_wgsl() {
     let source = "entry shifted(x:i32,n:i32) (i32,i32) = (x << n, x >> n)";
     let wgsl = compile_to_wgsl(source).expect("integer shifts must lower");
     validate_wgsl(&wgsl);
+}
+
+#[test]
+fn helpers_with_identical_display_names_keep_distinct_identities() {
+    let mut program = compile_thru_ssa_with_policy(
+        "def add(x:i32) i32 = x+1\ndef twice(x:i32) i32 = x*2\nentry main(x:i32) i32 = add(x)+twice(x)",
+        CodegenTarget::Wgsl,
+        ScalarOptimization::Basic,
+    )
+    .unwrap();
+    assert!(program.functions.len() >= 2);
+    for function in &mut program.functions {
+        function.name = "same_name".into();
+    }
+    let count = program.functions.len();
+    let text = lower_ssa_to_wgsl(program).unwrap();
+    assert_eq!(text.matches("fn w_Uw_Ufunction_").count(), count);
+    validate_wgsl(&text);
 }

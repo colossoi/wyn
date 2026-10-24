@@ -565,11 +565,10 @@ impl Program {
                     let next = resource(self.scalar_resource(*pipeline, &repeated.next)?);
                     let index = resource(self.scalar_resource(*pipeline, &repeated.index)?);
                     let count = self.rust_scalar(*pipeline, &repeated.count)?;
-                    let initial_length = self.rust_scalar(*pipeline, &repeated.initial_length)?;
                     let setup = self.rust_operations(setup, entry, format, context)?;
                     let body = self.rust_operations(body, entry, format, context)?;
                     quote!({
-                        if #initial_length > 0 { #setup }
+                        #setup
                         let iterations = #count;
                         for iteration in 0..iterations {
                             // Record the index upload between dispatches, so each

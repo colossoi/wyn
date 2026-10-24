@@ -472,7 +472,7 @@ fn adapt_host_interface_for_wgsl(
                     .dispatch_loops
                     .iter_mut()
                     .filter(|repeated| repeated.pipeline == pipeline_index)
-                    .flat_map(|repeated| [&mut repeated.count, &mut repeated.initial_length]),
+                    .map(|repeated| &mut repeated.count),
             );
         let mut missing = None;
         let mut legalize = |source: &mut ScalarSource, offset: &mut u32, stage: Option<&str>| {

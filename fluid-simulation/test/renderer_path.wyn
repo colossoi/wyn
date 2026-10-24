@@ -1,0 +1,40 @@
+-- Rendering-path check: expect two overlapping round particles, never square
+-- corners, with the nearer sphere surface winning even where its quad is behind.
+-- A third particle is culled; compute must publish instance_count = 2 and IDs 0,1.
+-- Indices use a let binding as requested while repro_indexed_literal.wyn
+-- retains the inline-array graphics-planning failure.
+-- Regression check: python3 fluid-simulation/test/check_renderer_path.py
+-- Verified on SPIR-V after the 2026-10-07 indirect-draw compiler fix.
+-- Build: wyn build fluid-simulation/test/renderer_path.wyn --graphics -o /tmp/renderer-path.spv
+-- Run: extra/viz/target/release/viz pipeline /tmp/renderer-path.spv --headless --size 64x64 --max-frames 1 --uniform shift:f32=0
+entry renderer_path(shift: f32, screen: render_target<vec4f32>)
+    (render_target<vec4f32>, []i32, u32) =
+  let ids = 0i32..<3 in
+  let particles = map(|i|
+    if i == 0 then @[-0.15 + shift, 0.0, 0.55, 0.4]
+    else if i == 1 then @[0.15 + shift, 0.0, 0.45, 0.2]
+    else @[3.0 + shift, 0.0, 0.5, 0.2], ids) in
+  let visible = map(|p| if abs(p.x) < 1.0 + p.w then 1i32 else 0i32, particles) in
+  let offsets = scan(|a,b| a+b, 0i32, visible) in
+  let destinations = map(|i| if visible[i] != 0 then offsets[i]-1 else -1i32, ids) in
+  let compacted = scatter(replicate(3, -1i32), destinations, ids) in
+  let count = u32.i32(offsets[2]) in
+  let indices = [0u32,1u32,2u32,2u32,1u32,3u32] in
+  let command = {index_count = 6u32, instance_count = count, first_index = 0u32,
+                 vertex_offset = 0i32, first_instance = 0u32} in
+  let triangles = rasterize_triangles(
+    indexed_indirect_draw(indices, command),
+    |vi,ii,_|
+      let id = compacted[i32.u32(ii)] in
+      let p = particles[id] in
+      let uv = [@[-1.0,-1.0],@[1.0,-1.0],@[-1.0,1.0],@[1.0,1.0]][i32.u32(vi)] in
+      let color = if id == 0 then @[1.0,0.0,0.0] else @[0.0,1.0,0.0] in
+      vertex_output(@[p.x+uv.x*p.w,p.y+uv.y*p.w,p.z,1.0],
+        {uv = uv, center_depth = p.z, radius = p.w, color = color})) in
+  let image = shade_with(
+    {depth_test = #less_equal, depth_write = true, blend = #replace, color_write = true},
+    screen, triangles, |v,_,_,_,_|
+      let r2 = dot(v.uv,v.uv) in
+      if r2 > 1.0 then #discard else
+        #depth(@[v.color...,1.0],v.center_depth-v.radius*f32.sqrt(max(0.0,1.0-r2)))) in
+  (image,compacted,count)

@@ -23,7 +23,7 @@ def prepare<[n],[m],[k]>(positions: [n]vec4f32, velocities: [n]vec4f32,
   let offsets = map(|key| Octree.lower_bound(keys,key),tree) in
   let node_slots = iota(((length(leaf_slots)-2)/7)*8+1) in
   let (children,boxes,ranges,node_count) = Linked.build(tree,offsets,node_slots,world_size) in
-  let leaves = map(|i| Neighbors.linked_leaf_neighbors(i,p,offsets,children,boxes,ranges,node_count,radius),leaf_slots) in
+  let leaves = map(|i| Neighbors.linked_leaf_neighbors(i,p,offsets,children,boxes,ranges,node_count,radius),iota(Octree.lower_bound(tree,Octree.sentinel))) in
   let neighbors = map(|i|
     let leaf = Octree.lower_bound(tree,keys[i]+1u32)-1 in
     Neighbors.linked_particle_neighbors(i,p,ranges,leaves[leaf],radius),ids) in
