@@ -7,4 +7,3 @@
 
 pub mod bind;
 pub mod coverage;
-pub mod refutability;

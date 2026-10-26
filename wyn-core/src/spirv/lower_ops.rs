@@ -409,9 +409,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
         match prim_op {
             PrimOp::RecordUpdate => {
-                let &[record, _, replacement] = arg_ids else {
-                    bail_spirv!("record update requires three operands");
-                };
+                let record = arg_ids[0];
+                let replacement = arg_ids[2];
                 let Some(ConstantValue::I32(index)) = value_refs[1].as_const() else {
                     bail_spirv!("record update requires a constant field index");
                 };
@@ -440,9 +439,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 )?)
             }
             PrimOp::Select => {
-                let &[no, yes, condition] = arg_ids else {
-                    bail_spirv!("select requires false value, true value, and condition");
-                };
+                let no = arg_ids[0];
+                let yes = arg_ids[1];
+                let condition = arg_ids[2];
                 Ok(*self.constructor.builder.select_value(
                     builder::TypeId::new(result_ty),
                     builder::ValueId::new(condition),
@@ -451,9 +450,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 )?)
             }
             PrimOp::FloatBound { negative } => {
-                if arg_ids.len() != 1 {
-                    bail_spirv!("float bound requires one precision witness");
-                }
                 // Keep nonfinite values out of the constant-expression section:
                 // SPIR-V consumers such as Naga reject infinite float literals.
                 let value = if *negative { f32::NEG_INFINITY } else { f32::INFINITY };
@@ -471,76 +467,27 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, *ext_op, operands)?)
             }
             PrimOp::IntPow { signed } => {
-                if arg_ids.len() != 2 {
-                    bail_spirv!("int_pow requires 2 args");
-                }
                 let func_id = self.constructor.int_pow_function(*signed);
                 Ok(self.constructor.builder.function_call(result_ty, None, func_id, arg_ids.to_vec())?)
             }
-            PrimOp::Dot => {
-                if arg_ids.len() != 2 {
-                    bail_spirv!("dot requires 2 args");
-                }
-                Ok(self.constructor.builder.dot(result_ty, None, arg_ids[0], arg_ids[1])?)
-            }
-            PrimOp::MatrixTimesMatrix => {
-                if arg_ids.len() != 2 {
-                    bail_spirv!("matrix × matrix requires 2 args");
-                }
-                Ok(
-                    self.constructor
-                        .builder
-                        .matrix_times_matrix(result_ty, None, arg_ids[0], arg_ids[1])?,
-                )
-            }
-            PrimOp::MatrixTimesVector => {
-                if arg_ids.len() != 2 {
-                    bail_spirv!("matrix × vector requires 2 args");
-                }
-                Ok(
-                    self.constructor
-                        .builder
-                        .matrix_times_vector(result_ty, None, arg_ids[0], arg_ids[1])?,
-                )
-            }
-            PrimOp::VectorTimesMatrix => {
-                if arg_ids.len() != 2 {
-                    bail_spirv!("vector × matrix requires 2 args");
-                }
-                Ok(
-                    self.constructor
-                        .builder
-                        .vector_times_matrix(result_ty, None, arg_ids[0], arg_ids[1])?,
-                )
-            }
-            PrimOp::FPToSI => {
-                if arg_ids.len() != 1 {
-                    bail_spirv!("FPToSI requires 1 arg");
-                }
-                Ok(self.constructor.builder.convert_f_to_s(result_ty, None, arg_ids[0])?)
-            }
-            PrimOp::FPToUI => {
-                if arg_ids.len() != 1 {
-                    bail_spirv!("FPToUI requires 1 arg");
-                }
-                Ok(self.constructor.builder.convert_f_to_u(result_ty, None, arg_ids[0])?)
-            }
-            PrimOp::SIToFP => {
-                if arg_ids.len() != 1 {
-                    bail_spirv!("SIToFP requires 1 arg");
-                }
-                Ok(self.constructor.builder.convert_s_to_f(result_ty, None, arg_ids[0])?)
-            }
-            PrimOp::UIToFP => {
-                if arg_ids.len() != 1 {
-                    bail_spirv!("UIToFP requires 1 arg");
-                }
-                Ok(self.constructor.builder.convert_u_to_f(result_ty, None, arg_ids[0])?)
-            }
+            PrimOp::Dot => Ok(self.constructor.builder.dot(result_ty, None, arg_ids[0], arg_ids[1])?),
+            PrimOp::MatrixTimesMatrix => Ok(self
+                .constructor
+                .builder
+                .matrix_times_matrix(result_ty, None, arg_ids[0], arg_ids[1])?),
+            PrimOp::MatrixTimesVector => Ok(self
+                .constructor
+                .builder
+                .matrix_times_vector(result_ty, None, arg_ids[0], arg_ids[1])?),
+            PrimOp::VectorTimesMatrix => Ok(self
+                .constructor
+                .builder
+                .vector_times_matrix(result_ty, None, arg_ids[0], arg_ids[1])?),
+            PrimOp::FPToSI => Ok(self.constructor.builder.convert_f_to_s(result_ty, None, arg_ids[0])?),
+            PrimOp::FPToUI => Ok(self.constructor.builder.convert_f_to_u(result_ty, None, arg_ids[0])?),
+            PrimOp::SIToFP => Ok(self.constructor.builder.convert_s_to_f(result_ty, None, arg_ids[0])?),
+            PrimOp::UIToFP => Ok(self.constructor.builder.convert_u_to_f(result_ty, None, arg_ids[0])?),
             PrimOp::Bitcast => {
-                if arg_ids.len() != 1 || value_refs.len() != 1 {
-                    bail_spirv!("Bitcast requires 1 arg");
-                }
                 let operand_ty = self.get_value_type_ref(value_refs[0]);
                 let operand_ty = self.constructor.polytype_to_spirv(&operand_ty)?;
                 if operand_ty == result_ty {
@@ -549,23 +496,10 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     Ok(self.constructor.builder.bitcast(result_ty, None, arg_ids[0])?)
                 }
             }
-            PrimOp::IsNan => {
-                if arg_ids.len() != 1 {
-                    bail_spirv!("isnan requires 1 arg");
-                }
-                Ok(self.constructor.builder.is_nan(result_ty, None, arg_ids[0])?)
-            }
-            PrimOp::IsInf => {
-                if arg_ids.len() != 1 {
-                    bail_spirv!("isinf requires 1 arg");
-                }
-                Ok(self.constructor.builder.is_inf(result_ty, None, arg_ids[0])?)
-            }
+            PrimOp::IsNan => Ok(self.constructor.builder.is_nan(result_ty, None, arg_ids[0])?),
+            PrimOp::IsInf => Ok(self.constructor.builder.is_inf(result_ty, None, arg_ids[0])?),
             // Additional arithmetic ops
             PrimOp::FAdd | PrimOp::FSub | PrimOp::FMul | PrimOp::FDiv | PrimOp::FRem | PrimOp::FMod => {
-                if arg_ids.len() != 2 {
-                    bail_spirv!("Float binary op requires 2 args");
-                }
                 match prim_op {
                     PrimOp::FAdd => {
                         Ok(self.constructor.builder.f_add(result_ty, None, arg_ids[0], arg_ids[1])?)
@@ -595,76 +529,65 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             | PrimOp::UDiv
             | PrimOp::SRem
             | PrimOp::SMod
-            | PrimOp::UMod => {
-                if arg_ids.len() != 2 {
-                    bail_spirv!("Integer binary op requires 2 args");
+            | PrimOp::UMod => match prim_op {
+                PrimOp::IAdd => {
+                    Ok(self.constructor.builder.i_add(result_ty, None, arg_ids[0], arg_ids[1])?)
                 }
-                match prim_op {
-                    PrimOp::IAdd => {
-                        Ok(self.constructor.builder.i_add(result_ty, None, arg_ids[0], arg_ids[1])?)
-                    }
-                    PrimOp::ISub => {
-                        Ok(self.constructor.builder.i_sub(result_ty, None, arg_ids[0], arg_ids[1])?)
-                    }
-                    PrimOp::IMul => {
-                        Ok(self.constructor.builder.i_mul(result_ty, None, arg_ids[0], arg_ids[1])?)
-                    }
-                    PrimOp::SDiv => {
-                        Ok(self.constructor.builder.s_div(result_ty, None, arg_ids[0], arg_ids[1])?)
-                    }
-                    PrimOp::UDiv => {
-                        Ok(self.constructor.builder.u_div(result_ty, None, arg_ids[0], arg_ids[1])?)
-                    }
-                    PrimOp::SRem => {
-                        Ok(self.constructor.builder.s_rem(result_ty, None, arg_ids[0], arg_ids[1])?)
-                    }
-                    PrimOp::SMod => {
-                        Ok(self.constructor.builder.s_mod(result_ty, None, arg_ids[0], arg_ids[1])?)
-                    }
-                    PrimOp::UMod => {
-                        Ok(self.constructor.builder.u_mod(result_ty, None, arg_ids[0], arg_ids[1])?)
-                    }
-                    _ => unreachable!(),
+                PrimOp::ISub => {
+                    Ok(self.constructor.builder.i_sub(result_ty, None, arg_ids[0], arg_ids[1])?)
                 }
-            }
+                PrimOp::IMul => {
+                    Ok(self.constructor.builder.i_mul(result_ty, None, arg_ids[0], arg_ids[1])?)
+                }
+                PrimOp::SDiv => {
+                    Ok(self.constructor.builder.s_div(result_ty, None, arg_ids[0], arg_ids[1])?)
+                }
+                PrimOp::UDiv => {
+                    Ok(self.constructor.builder.u_div(result_ty, None, arg_ids[0], arg_ids[1])?)
+                }
+                PrimOp::SRem => {
+                    Ok(self.constructor.builder.s_rem(result_ty, None, arg_ids[0], arg_ids[1])?)
+                }
+                PrimOp::SMod => {
+                    Ok(self.constructor.builder.s_mod(result_ty, None, arg_ids[0], arg_ids[1])?)
+                }
+                PrimOp::UMod => {
+                    Ok(self.constructor.builder.u_mod(result_ty, None, arg_ids[0], arg_ids[1])?)
+                }
+                _ => unreachable!(),
+            },
             // Comparison ops
             PrimOp::FOrdEqual
             | PrimOp::FOrdNotEqual
             | PrimOp::FOrdLessThan
             | PrimOp::FOrdGreaterThan
             | PrimOp::FOrdLessThanEqual
-            | PrimOp::FOrdGreaterThanEqual => {
-                if arg_ids.len() != 2 {
-                    bail_spirv!("Float comparison requires 2 args");
+            | PrimOp::FOrdGreaterThanEqual => match prim_op {
+                PrimOp::FOrdEqual => {
+                    Ok(self.constructor.builder.f_ord_equal(result_ty, None, arg_ids[0], arg_ids[1])?)
                 }
-                match prim_op {
-                    PrimOp::FOrdEqual => Ok(self
-                        .constructor
-                        .builder
-                        .f_ord_equal(result_ty, None, arg_ids[0], arg_ids[1])?),
-                    PrimOp::FOrdNotEqual => Ok(self
-                        .constructor
-                        .builder
-                        .f_ord_not_equal(result_ty, None, arg_ids[0], arg_ids[1])?),
-                    PrimOp::FOrdLessThan => Ok(self
-                        .constructor
-                        .builder
-                        .f_ord_less_than(result_ty, None, arg_ids[0], arg_ids[1])?),
-                    PrimOp::FOrdGreaterThan => Ok(self
-                        .constructor
-                        .builder
-                        .f_ord_greater_than(result_ty, None, arg_ids[0], arg_ids[1])?),
-                    PrimOp::FOrdLessThanEqual => Ok(self
-                        .constructor
-                        .builder
-                        .f_ord_less_than_equal(result_ty, None, arg_ids[0], arg_ids[1])?),
-                    PrimOp::FOrdGreaterThanEqual => Ok(self
-                        .constructor
-                        .builder
-                        .f_ord_greater_than_equal(result_ty, None, arg_ids[0], arg_ids[1])?),
-                    _ => unreachable!(),
-                }
-            }
+                PrimOp::FOrdNotEqual => Ok(self
+                    .constructor
+                    .builder
+                    .f_ord_not_equal(result_ty, None, arg_ids[0], arg_ids[1])?),
+                PrimOp::FOrdLessThan => Ok(self
+                    .constructor
+                    .builder
+                    .f_ord_less_than(result_ty, None, arg_ids[0], arg_ids[1])?),
+                PrimOp::FOrdGreaterThan => Ok(self
+                    .constructor
+                    .builder
+                    .f_ord_greater_than(result_ty, None, arg_ids[0], arg_ids[1])?),
+                PrimOp::FOrdLessThanEqual => Ok(self
+                    .constructor
+                    .builder
+                    .f_ord_less_than_equal(result_ty, None, arg_ids[0], arg_ids[1])?),
+                PrimOp::FOrdGreaterThanEqual => Ok(self
+                    .constructor
+                    .builder
+                    .f_ord_greater_than_equal(result_ty, None, arg_ids[0], arg_ids[1])?),
+                _ => unreachable!(),
+            },
             PrimOp::IEqual
             | PrimOp::INotEqual
             | PrimOp::SLessThan
@@ -674,83 +597,58 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             | PrimOp::SLessThanEqual
             | PrimOp::ULessThanEqual
             | PrimOp::SGreaterThanEqual
-            | PrimOp::UGreaterThanEqual => {
-                if arg_ids.len() != 2 {
-                    bail_spirv!("Integer comparison requires 2 args");
+            | PrimOp::UGreaterThanEqual => match prim_op {
+                PrimOp::IEqual => {
+                    Ok(self.constructor.builder.i_equal(result_ty, None, arg_ids[0], arg_ids[1])?)
                 }
-                match prim_op {
-                    PrimOp::IEqual => {
-                        Ok(self.constructor.builder.i_equal(result_ty, None, arg_ids[0], arg_ids[1])?)
-                    }
-                    PrimOp::INotEqual => Ok(self
-                        .constructor
-                        .builder
-                        .i_not_equal(result_ty, None, arg_ids[0], arg_ids[1])?),
-                    PrimOp::SLessThan => Ok(self
-                        .constructor
-                        .builder
-                        .s_less_than(result_ty, None, arg_ids[0], arg_ids[1])?),
-                    PrimOp::ULessThan => Ok(self
-                        .constructor
-                        .builder
-                        .u_less_than(result_ty, None, arg_ids[0], arg_ids[1])?),
-                    PrimOp::SGreaterThan => Ok(self
-                        .constructor
-                        .builder
-                        .s_greater_than(result_ty, None, arg_ids[0], arg_ids[1])?),
-                    PrimOp::UGreaterThan => Ok(self
-                        .constructor
-                        .builder
-                        .u_greater_than(result_ty, None, arg_ids[0], arg_ids[1])?),
-                    PrimOp::SLessThanEqual => Ok(self
-                        .constructor
-                        .builder
-                        .s_less_than_equal(result_ty, None, arg_ids[0], arg_ids[1])?),
-                    PrimOp::ULessThanEqual => Ok(self
-                        .constructor
-                        .builder
-                        .u_less_than_equal(result_ty, None, arg_ids[0], arg_ids[1])?),
-                    PrimOp::SGreaterThanEqual => Ok(self
-                        .constructor
-                        .builder
-                        .s_greater_than_equal(result_ty, None, arg_ids[0], arg_ids[1])?),
-                    PrimOp::UGreaterThanEqual => Ok(self
-                        .constructor
-                        .builder
-                        .u_greater_than_equal(result_ty, None, arg_ids[0], arg_ids[1])?),
-                    _ => unreachable!(),
+                PrimOp::INotEqual => {
+                    Ok(self.constructor.builder.i_not_equal(result_ty, None, arg_ids[0], arg_ids[1])?)
                 }
-            }
+                PrimOp::SLessThan => {
+                    Ok(self.constructor.builder.s_less_than(result_ty, None, arg_ids[0], arg_ids[1])?)
+                }
+                PrimOp::ULessThan => {
+                    Ok(self.constructor.builder.u_less_than(result_ty, None, arg_ids[0], arg_ids[1])?)
+                }
+                PrimOp::SGreaterThan => {
+                    Ok(self.constructor.builder.s_greater_than(result_ty, None, arg_ids[0], arg_ids[1])?)
+                }
+                PrimOp::UGreaterThan => {
+                    Ok(self.constructor.builder.u_greater_than(result_ty, None, arg_ids[0], arg_ids[1])?)
+                }
+                PrimOp::SLessThanEqual => Ok(self
+                    .constructor
+                    .builder
+                    .s_less_than_equal(result_ty, None, arg_ids[0], arg_ids[1])?),
+                PrimOp::ULessThanEqual => Ok(self
+                    .constructor
+                    .builder
+                    .u_less_than_equal(result_ty, None, arg_ids[0], arg_ids[1])?),
+                PrimOp::SGreaterThanEqual => Ok(self
+                    .constructor
+                    .builder
+                    .s_greater_than_equal(result_ty, None, arg_ids[0], arg_ids[1])?),
+                PrimOp::UGreaterThanEqual => Ok(self
+                    .constructor
+                    .builder
+                    .u_greater_than_equal(result_ty, None, arg_ids[0], arg_ids[1])?),
+                _ => unreachable!(),
+            },
             // Bitwise ops
-            PrimOp::BitwiseAnd | PrimOp::BitwiseOr | PrimOp::BitwiseXor => {
-                if arg_ids.len() != 2 {
-                    bail_spirv!("Bitwise binary op requires 2 args");
+            PrimOp::BitwiseAnd | PrimOp::BitwiseOr | PrimOp::BitwiseXor => match prim_op {
+                PrimOp::BitwiseAnd => {
+                    Ok(self.constructor.builder.bitwise_and(result_ty, None, arg_ids[0], arg_ids[1])?)
                 }
-                match prim_op {
-                    PrimOp::BitwiseAnd => Ok(self
-                        .constructor
-                        .builder
-                        .bitwise_and(result_ty, None, arg_ids[0], arg_ids[1])?),
-                    PrimOp::BitwiseOr => {
-                        Ok(self.constructor.builder.bitwise_or(result_ty, None, arg_ids[0], arg_ids[1])?)
-                    }
-                    PrimOp::BitwiseXor => Ok(self
-                        .constructor
-                        .builder
-                        .bitwise_xor(result_ty, None, arg_ids[0], arg_ids[1])?),
-                    _ => unreachable!(),
+                PrimOp::BitwiseOr => {
+                    Ok(self.constructor.builder.bitwise_or(result_ty, None, arg_ids[0], arg_ids[1])?)
                 }
-            }
-            PrimOp::Not => {
-                if arg_ids.len() != 1 {
-                    bail_spirv!("Not requires 1 arg");
+                PrimOp::BitwiseXor => {
+                    Ok(self.constructor.builder.bitwise_xor(result_ty, None, arg_ids[0], arg_ids[1])?)
                 }
-                Ok(self.constructor.builder.not(result_ty, None, arg_ids[0])?)
-            }
+                _ => unreachable!(),
+            },
+            PrimOp::Not => Ok(self.constructor.builder.not(result_ty, None, arg_ids[0])?),
             PrimOp::ShiftLeftLogical | PrimOp::ShiftRightArithmetic | PrimOp::ShiftRightLogical => {
-                if arg_ids.len() != 2 {
-                    bail_spirv!("Shift op requires 2 args");
-                }
                 match prim_op {
                     PrimOp::ShiftLeftLogical => Ok(self
                         .constructor
@@ -768,69 +666,24 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 }
             }
             // Additional type conversions
-            PrimOp::FPConvert => {
-                if arg_ids.len() != 1 {
-                    bail_spirv!("FPConvert requires 1 arg");
-                }
-                Ok(self.constructor.builder.f_convert(result_ty, None, arg_ids[0])?)
-            }
-            PrimOp::SConvert => {
-                if arg_ids.len() != 1 {
-                    bail_spirv!("SConvert requires 1 arg");
-                }
-                Ok(self.constructor.builder.s_convert(result_ty, None, arg_ids[0])?)
-            }
-            PrimOp::UConvert => {
-                if arg_ids.len() != 1 {
-                    bail_spirv!("UConvert requires 1 arg");
-                }
-                Ok(self.constructor.builder.u_convert(result_ty, None, arg_ids[0])?)
-            }
+            PrimOp::FPConvert => Ok(self.constructor.builder.f_convert(result_ty, None, arg_ids[0])?),
+            PrimOp::SConvert => Ok(self.constructor.builder.s_convert(result_ty, None, arg_ids[0])?),
+            PrimOp::UConvert => Ok(self.constructor.builder.u_convert(result_ty, None, arg_ids[0])?),
             // Additional matrix/vector ops
             PrimOp::OuterProduct => {
-                if arg_ids.len() != 2 {
-                    bail_spirv!("OuterProduct requires 2 args");
-                }
                 Ok(self.constructor.builder.outer_product(result_ty, None, arg_ids[0], arg_ids[1])?)
             }
-            PrimOp::VectorTimesScalar => {
-                if arg_ids.len() != 2 {
-                    bail_spirv!("VectorTimesScalar requires 2 args");
-                }
-                Ok(
-                    self.constructor
-                        .builder
-                        .vector_times_scalar(result_ty, None, arg_ids[0], arg_ids[1])?,
-                )
-            }
-            PrimOp::MatrixTimesScalar => {
-                if arg_ids.len() != 2 {
-                    bail_spirv!("MatrixTimesScalar requires 2 args");
-                }
-                Ok(
-                    self.constructor
-                        .builder
-                        .matrix_times_scalar(result_ty, None, arg_ids[0], arg_ids[1])?,
-                )
-            }
-            PrimOp::DPdx => {
-                if arg_ids.len() != 1 {
-                    bail_spirv!("DPdx requires 1 arg");
-                }
-                Ok(self.constructor.builder.d_pdx(result_ty, None, arg_ids[0])?)
-            }
-            PrimOp::DPdy => {
-                if arg_ids.len() != 1 {
-                    bail_spirv!("DPdy requires 1 arg");
-                }
-                Ok(self.constructor.builder.d_pdy(result_ty, None, arg_ids[0])?)
-            }
-            PrimOp::Fwidth => {
-                if arg_ids.len() != 1 {
-                    bail_spirv!("Fwidth requires 1 arg");
-                }
-                Ok(self.constructor.builder.fwidth(result_ty, None, arg_ids[0])?)
-            }
+            PrimOp::VectorTimesScalar => Ok(self
+                .constructor
+                .builder
+                .vector_times_scalar(result_ty, None, arg_ids[0], arg_ids[1])?),
+            PrimOp::MatrixTimesScalar => Ok(self
+                .constructor
+                .builder
+                .matrix_times_scalar(result_ty, None, arg_ids[0], arg_ids[1])?),
+            PrimOp::DPdx => Ok(self.constructor.builder.d_pdx(result_ty, None, arg_ids[0])?),
+            PrimOp::DPdy => Ok(self.constructor.builder.d_pdy(result_ty, None, arg_ids[0])?),
+            PrimOp::Fwidth => Ok(self.constructor.builder.fwidth(result_ty, None, arg_ids[0])?),
         }
     }
 }

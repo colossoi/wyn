@@ -15,7 +15,6 @@ pub mod lexer;
 mod name_resolution;
 pub mod op;
 mod parser;
-pub mod pattern;
 mod resolve_imports;
 mod resolve_opens;
 mod resolve_placeholders;

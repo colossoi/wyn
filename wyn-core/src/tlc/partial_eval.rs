@@ -31,7 +31,6 @@ pub type PartialEvaled =
 /// Consume a validated TLC program and rebuild its definitions from the
 /// evaluator's residual terms.
 pub fn partial_eval(program: OwnershipValidated) -> PartialEvaled {
-    program.assert_flat_apps();
     let Program {
         defs,
         symbols,

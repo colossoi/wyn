@@ -35,7 +35,6 @@ pub mod uses;
 
 use crate::err_spirv;
 use crate::error;
-use crate::spirv;
 use crate::CodegenTarget;
 pub use addressable_constants::promote_addressable_constants;
 pub use optimize::optimize;
@@ -84,7 +83,6 @@ pub fn prepare_spirv(mut program: stage::Reachable) -> error::Result<stage::Spir
     local_storage::apply(&mut program)?;
     texture_sampling::publish_texture_sampling(&mut program);
     backend_validation::verify_no_abstract_types(&program)?;
-    spirv::verify_buffer_layouts::verify_buffer_layouts(&program)?;
     Ok(program.retag())
 }
 

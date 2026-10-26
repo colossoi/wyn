@@ -22,7 +22,6 @@ mod lowering_tests;
 mod pow;
 mod storage;
 mod types_lowering;
-pub mod verify_buffer_layouts;
 use crate::builtins::catalog;
 use crate::{LookupMap, LookupSet};
 

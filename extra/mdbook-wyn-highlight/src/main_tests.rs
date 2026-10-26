@@ -15,7 +15,10 @@ fn highlights_mdbook_chapters_and_nested_chapters() {
         });
         highlight_sections(&mut book, &config).unwrap();
         let chapter = &book[root_key][0]["Chapter"];
-        for content in [&chapter["content"], &chapter["sub_items"][0]["Chapter"]["content"]] {
+        for content in [
+            &chapter["content"],
+            &chapter["sub_items"][0]["Chapter"]["content"],
+        ] {
             assert!(content.as_str().unwrap().contains("class=\"hljs-keyword\">def</span>"));
         }
     }

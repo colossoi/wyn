@@ -388,10 +388,6 @@ fn workgroup_reduce(
     if accumulators.is_empty() {
         return Ok(Vec::new());
     }
-    assert!(
-        width.is_power_of_two(),
-        "workgroup reduction width must be a power of two: {width}"
-    );
     let mut shared = Vec::new();
     for value in values {
         let buffer = body.workgroup_array(width, &value.ty)?;
@@ -435,10 +431,6 @@ pub(super) fn workgroup_scan(
     lane: Typed,
     width: u32,
 ) -> Result<(Vec<Typed>, Vec<Typed>, Vec<Typed>), OptimizeError> {
-    assert!(
-        width.is_power_of_two(),
-        "workgroup scan width must be a power of two: {width}"
-    );
     let mut shared = Vec::new();
     for value in &values {
         let banks = [

@@ -101,11 +101,6 @@ impl<C: Payload, S: Payload> Term<C, S> {
         }
     }
 
-    /// Assert that no App node in this tree has a func that is itself an App.
-    pub fn assert_flat_apps(&self) {
-        self.assert_flat_apps_in("<unknown>");
-    }
-
     pub(super) fn assert_flat_apps_in(&self, def_name: &str) {
         if let TermKind::App { func, args } = &self.kind {
             if let TermKind::App { args: inner_args, .. } = &func.kind {

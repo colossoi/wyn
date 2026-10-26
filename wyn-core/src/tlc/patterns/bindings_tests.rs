@@ -157,3 +157,43 @@ def f(p: ((i32, i32), i32)) i32 =
         let_count
     );
 }
+
+#[test]
+fn nested_loop_bindings_keep_resolved_symbols_types_and_projection_paths() {
+    let program = compile_to_tlc_raw(
+        "def preserve(p: (i32, (bool, f32))) (i32, (bool, f32)) =
+           loop (x, (y, z)) = p for i < 1 do (x, (y, z))",
+    );
+    let TermKind::Lambda(lambda) = &find_def_body(&program, "preserve").kind else {
+        panic!("expected lambda");
+    };
+    let TermKind::Loop {
+        loop_var,
+        init_bindings,
+        ..
+    } = &lambda.body.kind
+    else {
+        panic!("expected loop");
+    };
+    let expected = [
+        ("x", crate::types::i32(), vec![0]),
+        ("y", crate::types::bool_type(), vec![1, 0]),
+        ("z", crate::types::f32(), vec![1, 1]),
+    ];
+    assert_eq!(init_bindings.len(), expected.len());
+    for ((symbol, ty, extraction), (name, expected_ty, expected_path)) in init_bindings.iter().zip(expected)
+    {
+        assert_eq!(program.symbols.get(*symbol).map(String::as_str), Some(name));
+        assert_eq!(*ty, expected_ty);
+        assert_eq!(&extraction.ty, ty);
+        let mut term = extraction;
+        let mut path = Vec::new();
+        while let TermKind::TupleProj { tuple, idx } = &term.kind {
+            path.push(*idx);
+            term = tuple;
+        }
+        path.reverse();
+        assert_eq!(path, expected_path);
+        assert!(matches!(&term.kind, TermKind::Var(crate::tlc::VarRef::Symbol(s)) if s == loop_var));
+    }
+}

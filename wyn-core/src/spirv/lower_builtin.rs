@@ -107,9 +107,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     // texture_load(tex, coord, lod) → OpImageFetch. Raw texel
                     // fetch; referentially transparent (no derivatives).
                     // arg_ids = [image, coord, lod].
-                    if arg_ids.len() != 3 {
-                        bail_spirv!("texture_load requires 3 arguments");
-                    }
                     Ok(self.constructor.builder.image_fetch(
                         result_ty,
                         None,
@@ -126,9 +123,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     // referentially transparent and valid in any stage. See
                     // the texture plan's v2 note for gradient-based filtering
                     // (`texture_sample_grad`). arg_ids = [image, sampler, uv, lod].
-                    if arg_ids.len() != 4 {
-                        bail_spirv!("texture_sample requires 4 arguments");
-                    }
                     let image_ty = self
                         .constructor
                         .polytype_to_spirv(&PolyType::Constructed(TypeName::Texture2D, vec![]))?;
@@ -154,9 +148,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     // already express OpCompositeInsert (literal idx) or a
                     // local-buffer round-trip (dynamic idx). An in-place
                     // optimization for the dynamic case is left as future work.
-                    if arg_ids.len() != 3 {
-                        bail_spirv!("ArrayWith requires 3 arguments");
-                    }
                     let arr = arg_ids[0];
                     let idx = arg_ids[1];
                     let val = arg_ids[2];
@@ -303,9 +294,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         Ok(self.constructor.builder.load(result_ty, None, arr_var, None, [])?)
                     }
                 } else if id == known.length {
-                    if arg_ids.len() != 1 {
-                        bail_spirv!("length requires 1 argument");
-                    }
                     let arr_ty = self.get_value_type_ref(value_refs[0]);
                     let variant = arr_ty
                         .array_variant()
@@ -378,9 +366,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         _ => bail_spirv!("length: unknown array variant: {:?}", variant),
                     }
                 } else if id == known.slice {
-                    if arg_ids.len() != 3 {
-                        bail_spirv!("_w_slice requires 3 arguments (arr, start, end)");
-                    }
                     let arr = arg_ids[0];
                     let start_id = arg_ids[1];
                     let end_id = arg_ids[2];

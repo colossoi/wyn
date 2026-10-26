@@ -327,7 +327,6 @@ qualified.
 | `prepare_*` → `local_storage::apply` | `ownership::apply` | Use placed SSA aliases, uses, dominance, and loop scopes to elide remaining local value-update copies. Runs for both SPIR-V and WGSL. |
 | `prepare_*` | `texture_sampling::publish_texture_sampling` | Publish texture-sampling requirements. |
 | `prepare_*` | `backend_validation::verify_no_abstract_types` | Reject unresolved type representations. |
-| `prepare_spirv` | `spirv::verify_buffer_layouts` | Verify concrete buffer layouts. |
 
 `--output-mir` shows SSA before cleanup and backend preparation.
 
