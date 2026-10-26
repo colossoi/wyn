@@ -254,11 +254,12 @@ pub use polytype::Context as PolytypeContext;
 // Egglog stages:
 //       egglog::from_tlc(&program)       -> Imported
 //       egglog::fuse(...)                -> Fused
-//       egglog::insert_expressions(...)  -> Expressions
-//       egglog::simplify(..., algebra)   -> Simplified
 //       egglog::place(...)               -> Placed
-//       egglog::schedule(..., topology)  -> Scheduled
-//       egglog::to_ssa(&program, target) -> ssa::stage::Elaborated
+//       egglog::schedule(...)            -> Scheduled
+//       egglog::prepare_interfaces(...)  -> InterfacesPrepared
+//       egglog::optimize(...)            -> Optimized
+//       egglog::prepare_host(...)        -> HostPrepared
+//       egglog::to_ssa(program, target)   -> ssa::stage::Elaborated
 //
 // Backend:
 //       ssa::filter_reachable(...)         -> ssa::stage::Reachable
@@ -652,7 +653,9 @@ pub(crate) fn compile_thru_ssa_with_policy(
     let program = egglog::fuse(program)?;
     let program = egglog::place(program, PipelineTopologyPolicy::AllowGenerated)?;
     let program = egglog::schedule(program)?;
+    let program = egglog::prepare_interfaces(program)?;
     let program = egglog::optimize_with_policy(program, policy)?;
+    let program = egglog::prepare_host(program)?;
     Ok(egglog::to_ssa(program, target)?)
 }
 

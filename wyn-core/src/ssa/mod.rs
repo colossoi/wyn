@@ -66,6 +66,8 @@ fn simplify_values(program: &mut stage::Reachable) {
     {
         eliminate_dead_pure_instructions(body);
         if_conversion::run(body);
+        constant_folding::fold(body);
+        eliminate_dead_pure_instructions(body);
         ir::eliminate_single_input_params(&mut body.inner);
     }
 }

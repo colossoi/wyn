@@ -1,10 +1,11 @@
 //! Regression inputs exercise the public pipeline and backend-visible output.
+use crate::egglog::prepare_interfaces;
 use crate::{compile_thru_ssa, lower_ssa_to_spirv, lower_ssa_to_wgsl};
 use naga::{BinaryOperator, Expression, Statement};
 
 #[test]
 fn size_hint_survives_egglog_optimization() {
-    use super::{from_tlc, fuse, optimize, place, schedule, to_ssa};
+    use super::{finish_for_test, from_tlc, fuse, optimize_for_test, place, schedule};
     use crate::interface::Attribute;
     use crate::tlc::DefMeta;
     use crate::{CodegenTarget, PipelineTopologyPolicy};
@@ -19,7 +20,7 @@ fn size_hint_survives_egglog_optimization() {
            shade(target, fragments, |_, _, _, _, _| data[0])",
     ] {
         let tlc = crate::compile_thru_tlc(source).unwrap();
-        let program = optimize(
+        let program = optimize_for_test(
             schedule(
                 place(
                     fuse(from_tlc(&tlc).unwrap()).unwrap(),
@@ -41,7 +42,7 @@ fn size_hint_survives_egglog_optimization() {
             }
         }
         assert!(entries > 0);
-        let ssa = to_ssa(program, CodegenTarget::Portable).unwrap();
+        let ssa = finish_for_test(program, CodegenTarget::Portable).unwrap();
         lower_ssa_to_wgsl(ssa.clone()).unwrap();
         lower_ssa_to_spirv(ssa).unwrap();
     }
@@ -140,10 +141,13 @@ fn expression_projection_retains_host_capture_inputs_without_admission_tables() 
         crate::compile_thru_tlc("entry main(xs:[]i32,bias:i32) []i32=map(|x:i32|x+bias*bias,xs)").unwrap();
     for policy in [ScalarOptimization::Basic, ScalarOptimization::Full] {
         let program = optimize_with_policy(
-            schedule(
-                place(
-                    fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                    PipelineTopologyPolicy::AllowGenerated,
+            prepare_interfaces(
+                schedule(
+                    place(
+                        fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                        PipelineTopologyPolicy::AllowGenerated,
+                    )
+                    .unwrap(),
                 )
                 .unwrap(),
             )
@@ -151,6 +155,11 @@ fn expression_projection_retains_host_capture_inputs_without_admission_tables() 
             policy,
         )
         .unwrap();
+        assert!(
+            program.stage.captures.is_empty(),
+            "scalar optimization must not lower host captures"
+        );
+        let program = super::prepare_host(program).unwrap().program;
         if policy == ScalarOptimization::Full {
             assert!(
                 !program.stage.captures.is_empty(),
@@ -182,7 +191,9 @@ fn expression_projection_retains_host_capture_inputs_without_admission_tables() 
 
 #[test]
 fn basic_scalar_policy_retains_calls_and_validates_both_backends() {
-    use super::{from_tlc, fuse, optimize_with_policy, place, schedule, to_ssa, ScalarOptimization};
+    use super::{
+        finish_for_test, from_tlc, fuse, optimize_with_policy, place, schedule, ScalarOptimization,
+    };
     use crate::{CodegenTarget, PipelineTopologyPolicy};
     let helper = "def helper(x:i32) i32 =
         (x-x)+(x-x)+(x-x)+(x-x)+(x-x)+(x-x)+(x-x)+(x-x)
@@ -204,10 +215,13 @@ fn basic_scalar_policy_retains_calls_and_validates_both_backends() {
         for policy in [ScalarOptimization::Basic, ScalarOptimization::Full] {
             for target in [CodegenTarget::Spirv, CodegenTarget::Wgsl] {
                 let program = optimize_with_policy(
-                    schedule(
-                        place(
-                            fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                            PipelineTopologyPolicy::AllowGenerated,
+                    prepare_interfaces(
+                        schedule(
+                            place(
+                                fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                                PipelineTopologyPolicy::AllowGenerated,
+                            )
+                            .unwrap(),
                         )
                         .unwrap(),
                     )
@@ -222,7 +236,7 @@ fn basic_scalar_policy_retains_calls_and_validates_both_backends() {
                 } else if source == helper || source == small_helper {
                     assert!(templates > 0, "fixture must exercise optional helper expansion");
                 }
-                let ssa = to_ssa(program, target).unwrap();
+                let ssa = finish_for_test(program, target).unwrap();
                 if source == small_helper {
                     assert_eq!(
                         ssa.functions.iter().any(|function| function.name.contains("helper")),

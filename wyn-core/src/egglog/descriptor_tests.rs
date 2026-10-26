@@ -1,11 +1,14 @@
-//! Check the descriptor contract before allocating bindings or emitting SSA.
-use super::{error, Facts, OptimizeError};
-use crate::egglog::query::Query;
+//! Unit checks for the array descriptors produced by planning.
+use super::facts::Facts;
+use super::query::Query;
+use super::{
+    from_tlc, fuse, optimize_for_test, output_error as error, place, prepare_host, schedule, OptimizeError,
+};
 use crate::types::TypeExt;
-use crate::LookupSet;
-use egglog_engine::Value;
+use crate::{compile_thru_tlc, LookupSet, PipelineTopologyPolicy};
+use egglog_engine::{Value, Write};
 
-pub(super) fn validate(facts: &Facts<'_, '_>) -> Result<(), OptimizeError> {
+fn validate(facts: &Facts<'_, '_>) -> Result<(), OptimizeError> {
     let query = Query(&facts.program.graph);
     let mut controls = LookupSet::default();
     query.for_function("SourceLoop", |row, info| {
@@ -84,5 +87,73 @@ fn extent(
             Ok(())
         }
         _ => Err(error("unsupported array descriptor extent")),
+    }
+}
+
+#[test]
+fn planned_array_descriptors_are_consistent() {
+    for source in [
+        include_str!("../../../testfiles/regressions/triangulation_runtime_array_branch.wyn"),
+        include_str!("../../../testfiles/regressions/triangulation_runtime_array_loop.wyn"),
+        include_str!("../../../testfiles/regressions/runtime_array_updated_slice.wyn"),
+    ] {
+        let tlc = compile_thru_tlc(source).unwrap();
+        let program = optimize_for_test(
+            schedule(
+                place(
+                    fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                    PipelineTopologyPolicy::AllowGenerated,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let prepared = prepare_host(program).unwrap();
+        validate(&Facts {
+            program: &prepared.program,
+        })
+        .unwrap();
+    }
+}
+
+#[test]
+fn incomplete_descriptors_are_detected() {
+    let tlc = compile_thru_tlc(include_str!(
+        "../../../testfiles/regressions/triangulation_runtime_array_branch.wyn"
+    ))
+    .unwrap();
+    for (missing, expected) in [
+        ("ArrayView", "no complete descriptor"),
+        ("ArrayStorage", "array read disagrees with planned storage"),
+        ("SourceType", "descriptor scalar has no type"),
+        ("ExprContextOwner", "descriptor scalar has no lexical context"),
+        ("SourceBranch", "context field has no control-flow binder"),
+    ] {
+        let mut program = optimize_for_test(
+            schedule(
+                place(
+                    fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                    PipelineTopologyPolicy::AllowGenerated,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let query = Query(&program.graph);
+        let output = query.row("ReturnArray", |_| true).unwrap().unwrap()[1];
+        let view = query.record("ArrayView", "ViewInfo", (output,)).unwrap().unwrap();
+        let scalar = query.enode("Scalar", view[2]).unwrap().unwrap()[0];
+        let value =
+            if matches!(missing, "ArrayView" | "ArrayStorage" | "SourceBranch") { output } else { scalar };
+        program.graph.update(|mut sink| sink.remove(missing, (value,))).unwrap();
+        let prepared = prepare_host(program).unwrap();
+        let error = validate(&Facts {
+            program: &prepared.program,
+        })
+        .expect_err("invalid descriptor accepted")
+        .to_string();
+        assert!(error.contains(expected), "{error}");
     }
 }

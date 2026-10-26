@@ -21,6 +21,15 @@ mod analysis_tests;
 mod selected;
 pub(super) use selected::Selected;
 
+pub(super) fn plan_evaluation(
+    program: &super::Program<'_, super::Optimized>,
+) -> Result<(placement::Placement, evaluation::Evaluation), OptimizeError> {
+    let _timing = timing::span("egglog evaluation planning");
+    let placements = placement::Placement::new(program)?;
+    let evaluations = evaluation::Evaluation::new(program, &placements)?;
+    Ok((placements, evaluations))
+}
+
 const RULES: &str = concat!(
     include_str!("scalar/schema.egg"),
     "\n",
@@ -33,12 +42,7 @@ const RULES: &str = concat!(
     include_str!("scalar/micro.egg"),
 );
 
-pub(super) fn run(
-    graph: &mut EGraph,
-    identities: &source::Identities<'_>,
-    policy: ScalarOptimization,
-) -> Result<(Selected, EGraph), OptimizeError> {
-    let _timing = timing::span("egglog scalar optimization");
+pub(super) fn admit(graph: &mut EGraph) -> Result<(), OptimizeError> {
     fold::register(graph);
     graph.parse_and_run_program(Some("scalar rules".into()), RULES)?;
     graph.parse_and_run_program(
@@ -46,11 +50,16 @@ pub(super) fn run(
         include_str!("scalar/admission.egg"),
     )?;
     graph.parse_and_run_program(Some("host preferences".into()), include_str!("host.egg"))?;
-    graph.parse_and_run_program(
-        Some("publication dependencies".into()),
-        include_str!("publication.egg"),
-    )?;
-    graph.parse_and_run_program(None, "(run-schedule (saturate scalar-admission) (saturate scalar-contexts) (saturate scalar-demands) (saturate host-targets) (saturate scalar-import) (run readout) (saturate physical-abi) (run physical-bindings) (saturate publication-uses) (saturate (seq publication-access physical-abi)) (saturate publication-order))")?;
+    graph.parse_and_run_program(None, "(run-schedule (saturate scalar-admission) (saturate scalar-contexts) (saturate scalar-demands) (saturate host-targets) (saturate scalar-import) (run readout))")?;
+    Ok(())
+}
+
+pub(super) fn run(
+    graph: &EGraph,
+    identities: &source::Identities<'_>,
+    policy: ScalarOptimization,
+) -> Result<(Selected, EGraph), OptimizeError> {
+    let _timing = timing::span("egglog scalar optimization");
     let schedule = parse_program(
         "scalar fixed point",
         match policy {

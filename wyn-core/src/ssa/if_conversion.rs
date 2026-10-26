@@ -61,8 +61,6 @@ fn convert(body: &mut FuncBody, budget: usize) {
         body.inner.blocks.retain(|block, _| !candidate.blocks.contains(&block));
         replacements.finish(&mut body.inner);
     }
-    super::constant_folding::fold(body);
-    super::eliminate_dead_pure_instructions(body);
 }
 
 struct Arm {

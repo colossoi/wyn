@@ -29,6 +29,15 @@ pub(super) mod bindings;
 pub(super) mod publication;
 mod sizes;
 
+pub(super) fn prepare(graph: &mut egglog_engine::EGraph) -> Result<(), OptimizeError> {
+    graph.parse_and_run_program(
+        Some("publication dependencies".into()),
+        include_str!("publication.egg"),
+    )?;
+    graph.parse_and_run_program(None, "(run-schedule (saturate physical-abi) (run physical-bindings) (saturate publication-uses) (saturate (seq publication-access physical-abi)) (saturate publication-order))")?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "abi/input_bounds_tests.rs"]
 mod input_bounds_tests;

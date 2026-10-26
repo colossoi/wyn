@@ -679,7 +679,10 @@ fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileRe
         let program = egglog::fuse(program)?;
         let program = egglog::place(program, topology)?;
         let program = egglog::schedule(program)?;
-        Ok(egglog::to_ssa(egglog::optimize(program)?, CodegenTarget::Wgsl)?)
+        let program = egglog::prepare_interfaces(program)?;
+        let program = egglog::optimize(program)?;
+        let program = egglog::prepare_host(program)?;
+        Ok(egglog::to_ssa(program, CodegenTarget::Wgsl)?)
     };
     let ssa = match lower() {
         Ok(s) => s,

@@ -1,4 +1,4 @@
-use crate::egglog::{from_tlc, fuse, optimize, place, schedule, to_ssa};
+use crate::egglog::{finish_for_test, from_tlc, fuse, optimize_for_test, place, schedule};
 use crate::host::Pipeline;
 use crate::interface::ComputeDispatchGrid;
 use crate::tlc::DefMeta;
@@ -128,7 +128,7 @@ fn missing_selected_abi_facts_are_errors() {
         ("AbiStorage", "has no host length input"),
     ] {
         let tlc = compile_thru_tlc("entry main(xs:[]i32,k:i32) []i32=map(|x|x+k,xs)").unwrap();
-        let mut program = optimize(
+        let mut program = optimize_for_test(
             schedule(
                 place(
                     fuse(from_tlc(&tlc).unwrap()).unwrap(),
@@ -140,7 +140,7 @@ fn missing_selected_abi_facts_are_errors() {
         )
         .unwrap();
         program.graph.clear_function(table).unwrap();
-        let Err(error) = to_ssa(program, CodegenTarget::Wgsl) else {
+        let Err(error) = finish_for_test(program, CodegenTarget::Wgsl) else {
             panic!("missing {table} was silently accepted");
         };
         assert!(error.to_string().contains(diagnostic), "{table}: {error}");
@@ -151,7 +151,7 @@ fn missing_selected_abi_facts_are_errors() {
 fn invalid_selected_workgroup_is_an_error() {
     use egglog_engine::Write;
     let tlc = compile_thru_tlc("entry main(xs:[4]i32) [4]i32=map(|x|x+1,xs)").unwrap();
-    let mut program = optimize(
+    let mut program = optimize_for_test(
         schedule(
             place(
                 fuse(from_tlc(&tlc).unwrap()).unwrap(),
@@ -175,7 +175,7 @@ fn invalid_selected_workgroup_is_an_error() {
             Ok(())
         })
         .unwrap();
-    let Err(error) = to_ssa(program, CodegenTarget::Wgsl) else {
+    let Err(error) = finish_for_test(program, CodegenTarget::Wgsl) else {
         panic!("zero-width workgroup was silently accepted");
     };
     assert!(error.to_string().contains("grid x must be positive"), "{error}");
@@ -438,7 +438,7 @@ fn external_functions_retain_their_declared_signatures() {
         "#[linked(\"foreign_add\")] extern add(a:i32,b:i32) i32\nentry main(x:i32) i32 = add(x, 3)",
     )
     .unwrap();
-    let program = optimize(
+    let program = optimize_for_test(
         schedule(
             place(
                 fuse(from_tlc(&tlc).unwrap()).unwrap(),
@@ -449,7 +449,7 @@ fn external_functions_retain_their_declared_signatures() {
         .unwrap(),
     )
     .unwrap();
-    let ssa = to_ssa(program, CodegenTarget::Spirv).unwrap();
+    let ssa = finish_for_test(program, CodegenTarget::Spirv).unwrap();
     let external = ssa.functions.iter().find(|f| f.linkage_name.as_deref() == Some("foreign_add")).unwrap();
     assert_eq!(external.body.params().len(), 2);
     assert_eq!(external.body.return_ty, crate::types::i32());
@@ -677,7 +677,7 @@ fn existing_spirv_backend_also_accepts_the_handoff() {
         "entry main(xs: [4]i32, n: i32) [4]i32 = loop acc = xs for k < n do map(|x: i32| x + k, acc)",
     ] {
         let tlc = compile_thru_tlc(source).unwrap();
-        let program = optimize(
+        let program = optimize_for_test(
             schedule(
                 place(
                     fuse(from_tlc(&tlc).unwrap()).unwrap(),
@@ -688,7 +688,7 @@ fn existing_spirv_backend_also_accepts_the_handoff() {
             .unwrap(),
         )
         .unwrap();
-        let ssa = to_ssa(program, CodegenTarget::Spirv).unwrap();
+        let ssa = finish_for_test(program, CodegenTarget::Spirv).unwrap();
         let output = lower_ssa_to_spirv(ssa).unwrap();
         let bytes: Vec<_> = output.spirv.iter().flat_map(|w| w.to_le_bytes()).collect();
         let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
@@ -737,7 +737,7 @@ fn pipeline_with_grid(source: &str, grid: Option<(u32, u32, u32)>) -> LoweredWgs
             entry.declaration.compute_dispatch = grid.map(|(x, y, z)| ComputeDispatchGrid { x, y, z });
         }
     }
-    let program = optimize(
+    let program = optimize_for_test(
         schedule(
             place(
                 fuse(from_tlc(&tlc).unwrap()).unwrap(),
@@ -748,7 +748,7 @@ fn pipeline_with_grid(source: &str, grid: Option<(u32, u32, u32)>) -> LoweredWgs
         .unwrap(),
     )
     .unwrap();
-    lower_ssa_to_wgsl_with_program(to_ssa(program, CodegenTarget::Wgsl).unwrap()).unwrap()
+    lower_ssa_to_wgsl_with_program(finish_for_test(program, CodegenTarget::Wgsl).unwrap()).unwrap()
 }
 
 #[test]
@@ -1095,7 +1095,7 @@ fn unsigned_ranges_keep_their_extent_in_the_element_representation() {
     let source = "entry main(n:u32) []u32 = map(|i:u32|i+1u32, 0u32..<n)";
     compile(source);
     let tlc = compile_thru_tlc(source).unwrap();
-    let program = optimize(
+    let program = optimize_for_test(
         schedule(
             place(
                 fuse(from_tlc(&tlc).unwrap()).unwrap(),
@@ -1106,7 +1106,7 @@ fn unsigned_ranges_keep_their_extent_in_the_element_representation() {
         .unwrap(),
     )
     .unwrap();
-    let output = lower_ssa_to_spirv(to_ssa(program, CodegenTarget::Spirv).unwrap()).unwrap();
+    let output = lower_ssa_to_spirv(finish_for_test(program, CodegenTarget::Spirv).unwrap()).unwrap();
     let bytes: Vec<_> = output.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
     let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
     naga::valid::Validator::new(
@@ -1220,7 +1220,7 @@ fn direct_mode_keeps_collectives_in_the_authored_entry() {
         include_str!("../../../testfiles/unified_triangle.wyn"),
     ] {
         let tlc = compile_thru_tlc(source).unwrap();
-        let scheduled = optimize(
+        let scheduled = optimize_for_test(
             schedule(
                 place(
                     fuse(from_tlc(&tlc).unwrap()).unwrap(),
@@ -1232,7 +1232,8 @@ fn direct_mode_keeps_collectives_in_the_authored_entry() {
         )
         .unwrap();
         let output =
-            lower_ssa_to_wgsl_with_program(to_ssa(scheduled, CodegenTarget::Wgsl).unwrap()).unwrap();
+            lower_ssa_to_wgsl_with_program(finish_for_test(scheduled, CodegenTarget::Wgsl).unwrap())
+                .unwrap();
         for pipeline in &output.program.interface.pipelines {
             if let Pipeline::Compute(p) = pipeline {
                 assert_eq!(p.stages.len(), 1);
@@ -1280,7 +1281,7 @@ fn authored_outputs_consume_selected_capacities() {
         ),
     ] {
         let tlc = compile_thru_tlc(source).unwrap();
-        let program = optimize(
+        let program = optimize_for_test(
             schedule(
                 place(
                     fuse(from_tlc(&tlc).unwrap()).unwrap(),
@@ -1291,7 +1292,8 @@ fn authored_outputs_consume_selected_capacities() {
             .unwrap(),
         )
         .unwrap();
-        let output = lower_ssa_to_wgsl_with_program(to_ssa(program, CodegenTarget::Wgsl).unwrap()).unwrap();
+        let output =
+            lower_ssa_to_wgsl_with_program(finish_for_test(program, CodegenTarget::Wgsl).unwrap()).unwrap();
         assert!(
             output.program.interface.pipelines.iter().any(|pipeline| {
                 let Pipeline::Compute(pipeline) = pipeline else {
@@ -1311,7 +1313,7 @@ fn authored_outputs_consume_selected_capacities() {
 #[test]
 fn missing_authored_output_capacity_is_an_error() {
     let tlc = compile_thru_tlc("entry main() i32=42").unwrap();
-    let mut program = optimize(
+    let mut program = optimize_for_test(
         schedule(
             place(
                 fuse(from_tlc(&tlc).unwrap()).unwrap(),
@@ -1323,7 +1325,7 @@ fn missing_authored_output_capacity_is_an_error() {
     )
     .unwrap();
     program.graph.clear_function("SelectedOutputCapacity").unwrap();
-    let Err(error) = to_ssa(program, CodegenTarget::Wgsl) else {
+    let Err(error) = finish_for_test(program, CodegenTarget::Wgsl) else {
         panic!("missing selected capacity was silently accepted");
     };
     assert!(

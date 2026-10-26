@@ -63,6 +63,37 @@ fn arm_result(body: &mut FuncBody, block: BlockId, value: ValueRef) {
 }
 
 #[test]
+fn if_conversion_leaves_unrelated_folding_and_dead_code_to_cleanup() {
+    let mut body = FuncBuilder::new(vec![], types::i32()).finish_unchecked();
+    let block = body.inner.entry;
+    let add = InstKind::Op {
+        tag: OpTag::BinOp(BinaryOperator::Add),
+        operands: vec![
+            ValueRef::Const(ConstantValue::I32(1)),
+            ValueRef::Const(ConstantValue::I32(2)),
+        ],
+    };
+    let result = body.inner.append_inst(block, add.clone(), types::i32());
+    body.inner.append_inst(block, add, types::i32());
+    body.inner.blocks[block].term = Terminator::Return(Some(result.into()));
+
+    run(&mut body);
+    assert_eq!(body.inner.insts.len(), 2);
+    assert!(matches!(
+        body.inner.blocks[block].term,
+        Terminator::Return(Some(ValueRef::Ssa(_)))
+    ));
+
+    super::super::constant_folding::fold(&mut body);
+    super::super::eliminate_dead_pure_instructions(&mut body);
+    assert!(body.inner.insts.is_empty());
+    assert!(matches!(
+        body.inner.blocks[block].term,
+        Terminator::Return(Some(ValueRef::Const(ConstantValue::I32(3))))
+    ));
+}
+
+#[test]
 fn select_diamond_uses_existing_values_and_removes_merge_parameters() {
     for ty in [types::i32(), bool_type(), types::vec(4, types::f32())] {
         let (mut body, _, _, merge) = diamond(ty);
