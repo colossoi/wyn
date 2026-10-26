@@ -30,5 +30,7 @@ esac
 cd "$(dirname "$0")/.."
 
 python3 scripts/split_spec.py
-mdbook build docs --dest-dir "$dest"
+# The preprocessor command in book.toml is relative to docs/.
+cd docs
+mdbook build --dest-dir "$dest"
 echo "built → $dest/index.html"

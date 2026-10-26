@@ -92,7 +92,9 @@ fn highlight_sections(
     book: &mut Value,
     config: &HighlightConfiguration,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let items = if book.get("items").is_some() { book.get_mut("items") } else { book.get_mut("sub_items") };
+    // mdBook 0.4 uses `sections`; 0.5 uses `items`. Chapters use `sub_items`.
+    let key = ["sections", "items", "sub_items"].into_iter().find(|key| book.get(key).is_some());
+    let items = key.and_then(|key| book.get_mut(key));
     let Some(sections) = items.and_then(Value::as_array_mut) else {
         return Ok(());
     };

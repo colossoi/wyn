@@ -132,7 +132,7 @@ module.exports = grammar({
     // brackets; ordinary type parameters begin with an uppercase letter.
     generic_params: $ => seq(
       '<',
-      commaSep1(choice($.size_param, $.type_parameter)),
+      commaSep(choice($.size_param, $.type_parameter)),
       '>',
     ),
 
@@ -142,10 +142,24 @@ module.exports = grammar({
       field('name', $.identifier),
       optional($.generic_params),
       $.entry_params,
-      field('return_type', $._type),  // Required
+      field('return_type', choice($._entry_return_type, $.entry_return_types)),
       '=',
       field('body', $._expression),
     ),
+
+    _entry_return_type: $ => prec(1, choice($._type, $.attributed_return_type)),
+
+    attributed_return_type: $ => seq(
+      $.attribute,
+      field('type', $._type),
+    ),
+
+    // Entries may attach an attribute to each output in the return tuple.
+    entry_return_types: $ => prec(1, seq(
+      '(',
+      optional(seq($._entry_return_type, repeat(seq(',', $._entry_return_type)))),
+      ')',
+    )),
 
     sig_declaration: $ => seq(
       repeat($.attribute),
