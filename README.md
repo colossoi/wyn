@@ -131,16 +131,24 @@ The passes below run in order. SOACs are second-order array combinators, such as
 | `lower_from_ast` | Lower the typed AST to polymorphic TLC, including patterns and maps whose inputs and callback parameters already correspond, while retaining unified root entries and source ownership contracts. |
 | `validate_ownership` | Check source consumption and aliasing rules before evaluation or inlining can erase call boundaries. This includes graphics resource ownership. |
 | `partial_eval` | Evaluate known applications and constants, simplify their residual terms, and retain computations that depend on runtime values. |
+| `specialize_types` | Specialize intrinsic calls and reachable user definitions while preserving unresolved buffer regions until final stage interfaces exist. |
+| `inline_unified_helpers` | Expand constants and inline array-work helpers, graphics orchestration helpers, callbacks, and structural helpers so stage extraction, fusion, and dispatch planning can see their bodies and values. Scalar helper optimization is left to egglog. |
 | `extract_stages` | Extract compute, vertex, and fragment entries and their interfaces from root orchestration, including graphics callbacks and the compute work feeding them. |
-| `pin_entry_buffers` | Substitute each storage parameter's assigned binding into its buffer-region type before specialization. |
-| `monomorphize` | Specialize intrinsic calls by type and instantiate reachable user definitions by type and known array-producer representation, including the bounded capacity of filter results. |
-| `force_inline_soac_helpers` | Expand constants, then repeatedly inline helpers containing SOACs, array producers, or length queries so fusion and dispatch planning can see that work in the caller. Scalar helper optimization is left to egglog. |
+| `pin_entry_buffers` | Substitute each storage parameter's assigned binding into its buffer-region type after final stage interfaces exist and before buffer-dependent specialization. |
+| `monomorphize` | Finish specialization with concrete buffer regions, instantiating reachable user definitions by type and known array-producer representation, including the bounded capacity of filter results. |
 | `canonicalize_conditional_producers` | Rewrite supported array-valued conditionals into a pointwise map with the branch inside its callback. |
 | `normalize_soacs` | Lower local arrays of tuples and their operations to tuples of arrays; turn standalone `zip` into tuple construction; name SOAC application arguments and flatten let chains. |
 | `float_runtime_index_nested_producers` | Move eligible runtime-indexed producers out of nested callbacks before defunctionalization, exposing the producer and gather separately. |
 | `defunctionalize` | Lift lambdas, make captures explicit, specialize higher-order functions, and lower closure applications to direct calls. |
 | `fold_generated_lambdas` | Inline applications of compiler-generated lifted lambdas and remove definitions made unreachable. |
 | `apply_ownership` | Export ownership permission on values without changing the functional TLC tree. Egglog decides buffer reuse after fusion and dispatch planning; SSA commits optional local array updates after placement. |
+
+Stage extraction needs unified helpers exposed before it selects entry interfaces.
+Those interfaces determine buffer bindings, which must be pinned before final
+specialization can distinguish helpers operating on different buffers. Array work
+is exposed once, before extraction; final specialization checks that it remains
+visible. Intrinsic specialization shares the definition-specialization traversal,
+after type substitution, instead of walking the program separately.
 
 Specialization, helper inlining, and conditional-producer rewriting retain the
 source array shapes. SoA lowering then runs once, with concrete element types
