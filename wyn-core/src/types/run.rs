@@ -35,7 +35,7 @@ pub type TypeChecked =
     ast::Program<TypeCheckedTag, TypeCheckedFamily, ast::TypedGlobal<ast::TypedDefinition, ast::TypedTree>>;
 
 pub fn type_check(program: resolve_opens::OpensResolved, options: CompilerOptions) -> Result<TypeChecked> {
-    let name_resolution = name_resolution::build_name_resolution(
+    let name_resolution = name_resolution::resolve_names(
         &program,
         &program.global_context.semantic_modules,
         builtins::catalog(),

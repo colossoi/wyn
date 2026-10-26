@@ -1,7 +1,7 @@
 //! Resolve `#[view(resource, usage)]` params against top-level `resource`
 //! declarations.
 //!
-//! Runs after name resolution and before type checking. For each view it
+//! Runs after module-access qualification and before type checking. For each view it
 //! derives the backing resource's `(set, binding)` and rewrites the `View` attribute
 //! into the concrete `StorageImage` / `Texture` binding attribute. After this
 //! pass no `View` attributes or `resource` declarations affect later stages —
@@ -51,7 +51,9 @@ struct ResolvedResource {
     current_sampled: Option<BindingRef>,
 }
 
-pub fn resolve_resources(mut program: name_resolution::NamesResolved) -> Result<ResourcesResolved> {
+pub fn resolve_resources(
+    mut program: name_resolution::ModuleAccessesQualified,
+) -> Result<ResourcesResolved> {
     let decls: Vec<ResourceDecl> = program
         .declarations
         .iter()
@@ -76,7 +78,7 @@ pub fn resolve_resources(mut program: name_resolution::NamesResolved) -> Result<
 /// param attributes or pins.
 fn derive_bindings(
     decls: &[ResourceDecl],
-    program: &name_resolution::NamesResolved,
+    program: &name_resolution::ModuleAccessesQualified,
 ) -> Result<LookupMap<String, ResolvedResource>> {
     let mut used: LookupSet<(u32, u32)> = collect_explicit_slots(program);
     for r in decls {
@@ -228,7 +230,7 @@ fn rewrite_view_param(param: &mut Pattern, table: &LookupMap<String, ResolvedRes
     Ok(())
 }
 
-fn materialize(program: name_resolution::NamesResolved) -> Result<ResourcesResolved> {
+fn materialize(program: name_resolution::ModuleAccessesQualified) -> Result<ResourcesResolved> {
     program.try_rebuild(|declarations, global_context, _| {
         let mut resolved = Vec::with_capacity(declarations.len());
         for declaration in declarations {
@@ -293,7 +295,7 @@ fn materialize_frontend(
 
 /// Every `(set, binding)` already claimed by an explicit binding attribute on
 /// any entry param — so auto-assigned resources don't collide with them.
-fn collect_explicit_slots(program: &name_resolution::NamesResolved) -> LookupSet<(u32, u32)> {
+fn collect_explicit_slots(program: &name_resolution::ModuleAccessesQualified) -> LookupSet<(u32, u32)> {
     let mut used = LookupSet::new();
     for decl in &program.declarations {
         let Declaration::Entry(entry) = decl else {

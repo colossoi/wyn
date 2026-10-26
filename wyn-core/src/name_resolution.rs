@@ -1,21 +1,17 @@
-//! Name resolution pass
+//! Module-access qualification and name resolution.
 //!
-//! Resolves module-qualified names by rewriting:
+//! `qualify_module_accesses` rewrites:
 //!   `FieldAccess(Identifier(module), field)` → `Identifier([module], field)`
 //! when `module` is a known module name.
 //!
 //! The same AST-walking machinery is reused by the module-elaboration path
 //! (`semantic_modules::SemanticModules::resolve_names_in_expr`) — the walker is
 //! generic over a `ResolveContext` that decides what a given identifier /
-//! field-access means in the current mode. See `Resolver` below.
+//! field-access means in the current mode. See `ResolveContext` below.
 //!
-//! `build_name_resolution` then populates a
-//! `NameResolution` side table that classifies each `Identifier` NodeId as
-//! `Builtin(BuiltinId)` (single catalog match) or
-//! `OverloadedBuiltin(Vec<BuiltinId>)` (multiple catalog matches under
-//! the same surface name). Identifiers not in the catalog (locals,
-//! top-level defs, module values) are absent from the side table — the
-//! type checker handles them via scope/module lookup.
+//! After opens have been resolved, `resolve_names` populates a `NameResolution`
+//! side table with builtin classifications and symbol identities. The type
+//! checker completes reference resolution through scope and module lookup.
 
 use crate::ast;
 use crate::elaborate_modules;
@@ -32,11 +28,11 @@ use crate::scope::{for_each_pattern_name, ScopeStack};
 use crate::semantic_modules::SemanticModules;
 use wyn_module_graph::PackageId;
 
-/// AST after module-qualified value names have been resolved.
+/// AST after module field accesses have been rewritten as qualified identifiers.
 #[derive(Debug, Clone, Copy)]
-pub enum NamesResolvedTag {}
-pub type NamesResolved =
-    Program<NamesResolvedTag, elaborate_modules::ModulesElaboratedFamily, SemanticModules>;
+pub enum ModuleAccessesQualifiedTag {}
+pub type ModuleAccessesQualified =
+    Program<ModuleAccessesQualifiedTag, elaborate_modules::ModulesElaboratedFamily, SemanticModules>;
 
 /// Insert every name bound by `pattern` into `scope`.
 fn collect_pattern_bindings<T, A>(pattern: &ast::Pattern<T, A>, scope: &mut ScopeStack<()>)
@@ -256,7 +252,7 @@ pub fn rewrite_expr<C: ResolveContext>(
 // Program-mode resolver (top-level pass over user code)
 // ---------------------------------------------------------------------------
 
-/// Context used by the program-level name-resolution pass: rewrites
+/// Context used by the program-level module-access qualification pass: rewrites
 /// `mod.name` to `Identifier([mod], name)` when `mod` is a registered
 /// module.
 struct ProgramResolver<'a> {
@@ -287,8 +283,10 @@ impl<'a> ResolveContext for ProgramResolver<'a> {
     }
 }
 
-/// Resolve qualified field accesses while consuming the old program stage.
-pub fn resolve_names(mut program: elaborate_modules::ModulesElaborated) -> NamesResolved {
+/// Qualify module field accesses while consuming the old program stage.
+pub fn qualify_module_accesses(
+    mut program: elaborate_modules::ModulesElaborated,
+) -> ModuleAccessesQualified {
     {
         let context = ProgramResolver {
             known_modules: program.global_context.known_module_names(),
@@ -311,7 +309,7 @@ pub fn resolve_names(mut program: elaborate_modules::ModulesElaborated) -> Names
     program.retag()
 }
 
-/// Resolve names in a single Decl (for prelude functions).
+/// Qualify module accesses in a single Decl (for prelude functions).
 pub fn resolve_decl(mut decl: ast::Decl, known_modules: &LookupSet<String>) -> ast::Decl {
     let context = ProgramResolver { known_modules };
     let mut scope = ScopeStack::new();
@@ -404,9 +402,8 @@ pub enum ResolvedValueRef {
     Soac(SoacKind),
 }
 
-/// Side table populated by `build_name_resolution`. Maps Identifier
-/// NodeIds to their catalog classification. Identifiers not in the
-/// catalog (locals, top-level defs, module values) are absent.
+/// Side table populated by `resolve_names` and completed during type checking.
+/// Stores reference classifications and symbol identities for definitions and bindings.
 #[derive(Debug, Clone)]
 pub struct NameResolution {
     pub values: LookupMap<NodeId, ResolvedValueRef>,
@@ -475,8 +472,8 @@ impl NameResolution {
     }
 }
 
-/// Walk the program after module-qualification rewrite and build the
-/// side table. Top-level def names are pushed into scope first, so
+/// Classify references and assign symbol identities after open resolution.
+/// Top-level def names are pushed into scope first, so
 /// user code that shadows a builtin (e.g. `def length = ...`) is
 /// classified as a non-builtin.
 ///
@@ -485,7 +482,7 @@ impl NameResolution {
 /// `clone_expr_fresh_ids` / `clone_pattern_fresh_ids` in
 /// `semantic_modules::elaborate_decl_signature`), so per-instance bodies
 /// have their own NodeId space and the previous collision risk is gone.
-pub fn build_name_resolution(
+pub fn resolve_names(
     program: &resolve_opens::OpensResolved,
     semantic_modules: &SemanticModules,
     catalog: &BuiltinCatalog,

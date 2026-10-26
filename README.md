@@ -108,12 +108,12 @@ The frontend pipeline runs these passes in order:
 | `parser::parse_file` | Build each module's AST; the frontend adapter reports its imports to the module loader. |
 | `resolve_imports` | Replace physical source imports with syntax from the loaded module graph. |
 | `elaborate_modules` | Elaborate module definitions, signatures, and applications into semantic module state. |
-| `name_resolution::resolve_names` | Distinguish qualified module names from ordinary field access. Symbol classification is completed during type checking. |
+| `name_resolution::qualify_module_accesses` | Rewrite module field accesses as qualified identifiers. Symbol classification is completed during type checking. |
 | `resolve_resources` | Assign resource bindings and resolve resource views to concrete binding attributes. |
 | `ast_const_fold::fold_constants` | Fold integer constants and expose static array dimensions before type inference; retain source references for diagnostics. |
 | `resolve_placeholders::resolve_type_placeholders` | Replace type and size placeholders with inference variables, preserving named parameters within each declaration. |
 | `resolve_opens` | Resolve names imported by `open`, respecting lexical scope and reporting ambiguity. |
-| `types::run::type_check` | Build symbol/name resolution, infer and check types and pattern coverage, materialize the typed AST, validate stage contexts, and collect warnings. |
+| `types::run::type_check` | Run `name_resolution::resolve_names`, infer and check types and pattern coverage, materialize the typed AST, validate stage contexts, and collect warnings. |
 | `ast_type_holes::reject_type_holes` / `fill_type_holes` | Report inferred types for unfinished `???` expressions, or replace them with supported typed defaults when `--fill-holes` is enabled. |
 
 The resulting AST retains inferred types, definition schemes, resolved symbols,

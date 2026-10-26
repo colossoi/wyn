@@ -54,7 +54,7 @@ impl ParsedModules {
         let source_graph = Arc::clone(&program.source_graph);
         let result = (|| {
             let program = elaborate_modules::elaborate_modules(program)?;
-            let program = name_resolution::resolve_names(program);
+            let program = name_resolution::qualify_module_accesses(program);
             let program = resolve_resources::resolve_resources(program)?;
             let program = ast_const_fold::fold_constants(program);
             let program = resolve_placeholders::resolve_type_placeholders(program);
