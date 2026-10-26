@@ -39,7 +39,33 @@ pub(super) fn screma(
     results: &[(String, i64, Value)],
     segment: Option<&SegmentOutput<'_>>,
 ) -> Result<(), OptimizeError> {
-    let components = body.compiler.facts.accumulators(plan)?;
+    // Local recipes have no separate combine dispatch. Complete captured totals
+    // first; the normal traversal can then emit each prefix with the final total.
+    // These plans have duplicable callbacks; replay only their original domain.
+    if matches!(phase, "ordered" | "local" | "segment")
+        && body.compiler.facts.contains("PlanLateTotals", (plan,))
+    {
+        screma(
+            body,
+            scope,
+            phase_owner,
+            if phase == "ordered" { "ordered-totals" } else { "local-totals" },
+            phase_width,
+            plan,
+            &[],
+            None,
+        )?;
+    }
+    let totals_only = matches!(phase, "ordered-totals" | "local-totals");
+    let phase = match phase {
+        "ordered-totals" => "ordered",
+        "local-totals" => "local",
+        phase => phase,
+    };
+    let mut components = body.compiler.facts.accumulators(plan)?;
+    if totals_only {
+        components.retain(|component| component.role != "scan");
+    }
     let has_scans = components.iter().any(|component| component.role == "scan");
     let mut accumulators = Vec::new();
     for component in &components {
@@ -75,10 +101,16 @@ pub(super) fn screma(
                 cache.insert(accumulator.source, value.clone());
                 next.push(value);
             }
-            write_arrays(body, scope, phase_owner, plan, results, &[index], &mut cache)?;
+            if !totals_only {
+                write_output(body, scope, phase_owner, phase, plan, results, index, &mut cache)?;
+            }
             Ok(next)
         })?;
         for (component, value) in components.iter().zip(state).filter(|(c, _)| c.role != "scan") {
+            if totals_only {
+                body.values.insert(component.source, value);
+                continue;
+            }
             if let Some(output) = body.slot(scope, phase_owner, "total", component.output_slot, 2)? {
                 body.store(output, zero.clone(), value)?;
             }
@@ -150,7 +182,7 @@ pub(super) fn screma(
                                 )?;
                                 values.push(value);
                             }
-                            if !has_scans && segment.is_none() {
+                            if !has_scans && segment.is_none() && !totals_only {
                                 write_arrays(
                                     body,
                                     scope,
@@ -216,13 +248,14 @@ pub(super) fn screma(
                                 target.store(body, Some(index.clone()), value)?;
                             }
                         } else if phase == "local" && has_scans {
-                            write_arrays(
+                            write_output(
                                 body,
                                 scope,
                                 phase_owner,
+                                phase,
                                 plan,
                                 results,
-                                &[index.clone()],
+                                index.clone(),
                                 &mut cache,
                             )?;
                         }
@@ -235,6 +268,12 @@ pub(super) fn screma(
                         .collect()
                 },
             )?;
+            if totals_only {
+                for (component, value) in components.iter().zip(state) {
+                    body.values.insert(component.source, value);
+                }
+                return Ok(());
+            }
             let first = body.binary(Equal, lane, Body::number(0))?;
             body.when(first, |body| {
                 for (i, value) in state.into_iter().enumerate() {
@@ -341,7 +380,6 @@ pub(super) fn screma(
         }
         "offsets" => {
             let (start, step) = invocation(body, phase_width)?;
-            let writes_destination = body.compiler.facts.destination(phase_owner).is_some();
             body.counted(start, n, step, vec![], |body, index, _| {
                 let chunk = body.binary(Divide, index.clone(), span)?;
                 let mut cache = LookupMap::default();
@@ -359,20 +397,33 @@ pub(super) fn screma(
                     let value = accumulators[i].combine(body, scope, a, b)?;
                     cache.insert(component.source, value);
                 }
-                if writes_destination {
-                    let Some(output) = body.slot(scope, phase_owner, "output", 0, 2)? else {
-                        return Err(error("scan output action has no destination"));
-                    };
-                    indexed::update(body, scope, phase_owner, phase, plan, output, index, &mut cache)?;
-                } else {
-                    write_arrays(body, scope, phase_owner, plan, results, &[index], &mut cache)?;
-                }
+                write_output(body, scope, phase_owner, phase, plan, results, index, &mut cache)?;
                 Ok(vec![])
             })?;
         }
         _ => return Err(error("invalid collective phase")),
     }
     Ok(())
+}
+
+fn write_output(
+    body: &mut Body<'_, '_, '_>,
+    scope: Value,
+    owner: Value,
+    phase: &str,
+    plan: Value,
+    results: &[(String, i64, Value)],
+    index: Typed,
+    cache: &mut LookupMap<Value, Typed>,
+) -> Result<(), OptimizeError> {
+    if body.compiler.facts.destination(owner).is_some() {
+        let Some(output) = body.slot(scope, owner, "output", 0, 2)? else {
+            return Err(error("scan output action has no destination"));
+        };
+        indexed::update(body, scope, owner, phase, plan, output, index, cache)
+    } else {
+        write_arrays(body, scope, owner, plan, results, &[index], cache)
+    }
 }
 
 /// Reduce adjacent contiguous ranges in source order. A single shared bank is

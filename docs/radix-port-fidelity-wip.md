@@ -1,9 +1,10 @@
 # Radix port fidelity and compiler support — WIP
 
-Status at 2026-10-01: **still WIP**. The tuple-loop regressions are fixed, and
+Status at 2026-10-26: **still WIP**. The tuple-loop regressions are fixed, and
 all six sorting APIs pass the GPU cases below through generated Rust/WGPU and
 WGSL on an RX 580. Numeric-width coverage and package integration remain
-incomplete. Fusion is not yet demonstrated to match or exceed Futhark.
+incomplete. Radix passes now use three dispatches; comparative performance
+against Futhark remains unmeasured.
 
 This records outstanding differences and current evidence, not historical
 compiler failures that have already been fixed.
@@ -85,7 +86,13 @@ Derived dispatch grids allow zero workgroups. Rust/WGPU and the WHL GPU backend
 skip zero-work dispatches before constructing buffer bindings. This permits
 zero-byte inputs to the by-key setup and gather phases, as verified below.
 
-## Validation at the WIP checkpoint
+## Validation
+
+On 2026-10-26 the radix and tuple-loop GPU suite below passed again with the
+three-phase schedule. Five additional completed-total cases cover generated
+dispatches, nested maps, conditional local execution, a cooperative loop, and
+local scan/scatter. Compiler regressions check the three-phase host-loop body
+and reject fusion when totals feed scan inputs, neutrals, or combiners.
 
 [The GPU harness](../pkg/sort/test/radix_gpu.rs),
 [source fixture](../pkg/sort/test/radix_gpu.wyn), and
@@ -114,7 +121,7 @@ These are correctness checks, not fresh performance measurements. They do not
 establish all numeric-width or cross-device/backend parity. In particular, the
 current GPU harness runs generated Rust/WGPU with WGSL, not native SPIR-V.
 
-Compiler gates pass: 1,320 core tests (14 ignored), 5 host tests, and 8 interpreter
+At the earlier 2026-10-01 checkpoint, compiler gates passed: 1,320 core tests (14 ignored), 5 host tests, and 8 interpreter
 tests. The interpreter also passes its 8 tests with its WGPU feature enabled
 in a separate invocation. The tracked SPIR-V testfile gate passes 120 files.
 The existing generated-host GPU suite also passes for both WGSL and SPIR-V;
@@ -147,7 +154,7 @@ The runner defaults to Vulkan unless WGPU_BACKEND is already set. Generated
 modules, the temporary Cargo crate, and local run logs live under
 `target/radix-validation`.
 
-## Fusion comparison: not yet equal or better
+## Fusion comparison
 
 Reference: the earlier inspected Futhark 0.27.1 GPU IR and backend code recorded
 in [radix-fusion-wip.md](radix-fusion-wip.md). The current check inspected newly
@@ -159,13 +166,14 @@ IR. Futhark was not rebuilt or benchmarked during this audit.
 | Bin map plus totals reduction | Bin extraction is fused into the partial reduction; bins are not stored | Shared traversal emits bins and totals |
 | Bin reuse | Separate source bin maps feed reduction and scan; final scatter recomputes its bin | Scan reads retained bins |
 | Scan prefix adjustment, index calculation, scatter | Fused final kernel; no separate destination-index array | Fused scan output action |
-| Scratch initialization per radix pass | No initializer stores or allocation | Eliminated |
-| Reduction | Two launches: partials and combine | One reduction launch, then a scalar-copy launch |
+| Scratch initialization per radix pass | No initializer stores, allocation, or dispatch | Eliminated |
+| Reduction | Shares the scan's chunks and combine launches | One reduction launch, then a scalar-copy launch |
 | Scan | Three launches; full-length partial-prefix storage | OpenCL: three launches and full-length prefixes; CUDA/HIP: status clear plus lookback scan |
-| Launches per nonempty 32-bit pass | 5 | OpenCL: 5; CUDA/HIP: 4 |
+| Launches per two-bit pass | 3 | OpenCL: 5; CUDA/HIP: 4 |
 
-The current five-loop-kernel sequence is partial reduction, reduction combine,
-partial scan, scan carry combine, and adjusted-prefix scatter. There is also
+The current loop sequence is shared reduction/scan chunks, shared combine,
+and adjusted-prefix scatter. Completed totals are captured only by that final
+phase, so they do not force the chunks to wait for a separate reduction. There is also
 one initialization copy outside the loop. The publication-only completion
 stage is not dispatched. Counts exclude uploads, readback, scalar uploads,
 and context/cache management.
@@ -186,7 +194,8 @@ regression checks that only the four-component prefix array and sorted result
 have allocations proportional to input length.
 
 This removes one key-sized array allocation and one full key-array write per
-pass. It does not establish that recomputing bins is preferable to retaining
+pass. The scheduler also omits pure maps observed only through lengths, removing
+the empty scratch-initializer dispatch. It does not establish that recomputing bins is preferable to retaining
 them; a general cost decision across independently written but equivalent
 producers remains open.
 
@@ -208,7 +217,7 @@ vertical/horizontal/inner fusion, and removes unused outputs after convergence.
 | Array loop body | Sharing works within an iteration and across its reduction boundary; host iterations remain ordered. This does not establish arbitrary nested parallelism parity. |
 | Scan output action | Radix fuses adjusted-prefix scatter. The simpler `action` fixture still has four launches: a shape observer of the horizontally fused scratch initializer prevents the contraction and leaves a stored index array. |
 | Scan also returned | The observable scan output remains available; scatter stays separate. Broader output-action composition remains open. |
-| Shape-only scratch initializer | Unused initializer storage and arithmetic are omitted; observed sibling results remain. |
+| Shape-only scratch initializer | Unused initializer storage, arithmetic, and pure map dispatches are omitted; observed sibling results remain. |
 
 The collective cache is scoped to one valid input element, before any workgroup
 barrier. Slice traversal uses a separate cache for its adjusted index so two

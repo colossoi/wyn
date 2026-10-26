@@ -34,6 +34,96 @@ fn operations(graph: &EGraph, kind: &str) -> Vec<Value> {
 }
 
 #[test]
+fn scan_output_can_capture_a_fused_total() {
+    planned(
+        "entry main(xs: [257]i32) [257]i32 =
+         let prefix = scan((+), 0, xs) in
+         let total = reduce((+), 0, xs) in
+         map(|x| x + total, prefix)",
+        |graph| {
+            let query = Query(graph);
+            let scan = operations(graph, "scan")[0];
+            let reduce = operations(graph, "reduce")[0];
+            let plan = query.required("SelectedPlan", (scan,)).unwrap();
+            assert_eq!(plan, query.required("SelectedPlan", (reduce,)).unwrap());
+            let owner = query.required("Owner", (plan,)).unwrap();
+            let total = query.constructor("Result", (owner, 0i64)).unwrap().unwrap();
+            for phase in ["chunks", "combine", "offsets"] {
+                let stage = query.constructor("Stage", (owner, phase)).unwrap().unwrap();
+                assert_eq!(
+                    query.contains("Needs", (stage, total)).unwrap(),
+                    phase == "offsets"
+                );
+                assert_eq!(
+                    query.contains("Produces", (stage, total)).unwrap(),
+                    phase == "combine"
+                );
+            }
+            let mut phases = 0;
+            query
+                .for_each("Phase", |_| {
+                    phases += 1;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(phases, 3);
+        },
+    );
+}
+
+#[test]
+fn radix_step_has_three_phases() {
+    let source = format!(
+        "{}\n entry main(xs: []i32) []i32 = radix_sort_step(xs, |i:i32,x:i32| (x >> i) & 1, 0)",
+        include_str!("../../../pkg/sort/src/radix_sort.wyn")
+    );
+    planned(&source, |graph| {
+        let query = Query(graph);
+        let mut phases = Vec::new();
+        query
+            .for_each("Phase", |row| {
+                let stage = query.enode("Stage", row[0])?.unwrap();
+                let info = query.record("SourceOperation", "OperationInfo", (stage[0],))?.unwrap();
+                phases.push((
+                    graph.value_to_base::<S>(stage[1]).to_string(),
+                    graph.value_to_base::<S>(info[1]).to_string(),
+                ));
+                Ok(())
+            })
+            .unwrap();
+        phases.sort();
+        assert_eq!(
+            phases,
+            vec![
+                ("chunks".into(), "scatter".into()),
+                ("combine".into(), "scatter".into()),
+                ("offsets".into(), "scatter".into())
+            ]
+        );
+    });
+}
+
+#[test]
+fn scan_input_cannot_capture_a_fused_total() {
+    for source in [
+        "entry main(xs:[]i32) []i32 = let t=reduce((+),0,xs) in scan((+),0,map(|x|x+t,xs))",
+        "entry main(xs:[]i32) []i32 = let t=reduce((+),0,xs) in scan((+),t,xs)",
+        "entry main(xs:[]i32) []i32 = let t=reduce((+),0,xs) in scan(|a,b|a+b+t,0,xs)",
+    ] {
+        planned(source, |graph| {
+            let query = Query(graph);
+            let scan = operations(graph, "scan")[0];
+            let reduce = operations(graph, "reduce")[0];
+            assert_ne!(
+                query.required("SelectedPlan", (scan,)).unwrap(),
+                query.required("SelectedPlan", (reduce,)).unwrap(),
+                "{source}"
+            );
+        });
+    }
+}
+
+#[test]
 fn updated_slice_preserves_its_descriptor() {
     planned(
         include_str!("../../../testfiles/regressions/runtime_array_updated_slice.wyn"),

@@ -9,7 +9,6 @@
 (function PlanArrays (FusionPlan) ResultTree :no-merge)
 (function PlanScans (FusionPlan) ResultTree :no-merge)
 (function PlanDomain (FusionPlan) OperationKey :no-merge)
-(relation PlanMember (FusionPlan OperationKey))
 ; Inputs and callbacks use the immutable source tables directly.
 (function PlanMapping (OperationKey) bool :no-merge)
 (function PlanCallee (SourceValue) RegionKey :no-merge)

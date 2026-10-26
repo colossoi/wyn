@@ -39,7 +39,7 @@ The collective chunk grid and scratch sizes come from the scheduling decision. T
 
 Invocation-local array operations inside a callback have a different implementation, often serial loops and bounded local arrays. See [nested bodies](#nested-bodies-and-runtime-loops); a single outer dispatch is not evidence that the inner operations fused.
 
-All families have legality conditions. Compatible source regions and iteration domains are required; captured completed results, intervening writes, extra observers, or an alternate dependency path can prevent contraction. The compiler exposes array-work helpers by inlining before this analysis; fusion itself does not generally cross an opaque function boundary. Horizontal fusion requires independence, and vertical fusion requires the right kind of connection: passing an array as a whole captured value is different from consuming its aligned elements. The planner chooses contractions greedily, so the availability of several pairwise rules is not a guarantee that every larger composition reaches the ideal result.
+All families have legality conditions. Compatible source regions and iteration domains are required; captured completed results, intervening writes, extra observers, or an alternate dependency path can prevent contraction. The compiler exposes array-work helpers by inlining before this analysis; fusion itself does not generally cross an opaque function boundary. Horizontal fusion requires independence during the shared phases; a scan's output phase can use a total produced by the shared combine phase. Vertical fusion requires the right kind of connection: passing an array as a whole captured value is different from consuming its aligned elements. The planner chooses contractions greedily, so the availability of several pairwise rules is not a guarantee that every larger composition reaches the ideal result.
 
 ## Primitive-pair coverage
 
@@ -383,11 +383,11 @@ out</code></pre></td>
 
 **Intermediates:** the source `flags[n]`, `prefixes[n]`, and `keys[n]` arrays disappear. Each final prefix feeds the destination calculation and write directly. The standalone scatter dispatch can disappear too. Internal scan-prefix scratch still exists; maps preparing contributions or the output action can join this computation.
 
-Current restrictions are substantial: the destination must be recognized as fresh scratch; the producer group cannot contain reductions; unrelated observations of its arrays block the contraction; the stream must be direct and unsliced; ordering and dependency checks must pass. Destination allocation cannot depend on a prefix result that is available only after the scan completes.
+Current restrictions are substantial: the destination must be recognized as fresh scratch; unrelated observations of the producer group block the contraction; the stream must be direct and unsliced; ordering and dependency checks must pass. Destination allocation cannot depend on a prefix result that is available only after the scan completes. A group may contain reductions when their completed totals feed only output callbacks; accumulator inputs, neutrals, and combiners cannot depend on those totals.
 
-**† Current matching/setup shortcomings:** a scratch `replicate(length(xs),0)` probe does fuse the scatter into the third scan phase, but also emits an empty setup kernel: four dispatches instead of the desired three. The otherwise similar scratch `copy(xs)` probe misses the contraction and emits three scan phases plus a separate scatter. Returning the prefixes also prevents the current contraction. These are distinct from the successful scan-output-action path used by the radix sketch.
+Returning the prefixes still prevents the current scatter contraction. The radix regression covers scratch `copy(xs)`, including omission of its unused initializer dispatch; matching more complicated output actions remains constrained by the observer and dependency checks above.
 
-The radix sketch has five dispatches per pass: two reduction phases, then three scan phases with the scatter in the last phase. Its cross-phase bin computations and remaining prefix traffic are not eliminated merely by this fusion.
+The radix port now has three dispatches per pass: shared scan/reduction chunks, shared combine, and adjusted-prefix scatter. Shape-only pure maps create no dispatch. Its cross-phase bin computations and remaining prefix traffic are not eliminated by this fusion. Local execution completes captured totals in a preliminary traversal before emitting the scan outputs.
 
 ## Horizontal fusion: independent results from one traversal
 

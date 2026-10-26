@@ -133,6 +133,33 @@ fn radix_scratch_initializer_has_no_array_allocation() {
 }
 
 #[test]
+fn radix_host_loop_dispatches_three_phases_per_pass() {
+    let source = format!(
+        "{}\n entry main(xs: []i32) []i32 = radix_sort(32, i32.get_bit, xs)",
+        include_str!("../../../pkg/sort/src/radix_sort.wyn")
+    );
+    let compiled = crate::lower_ssa_to_wgsl_with_program(compile_thru_ssa(&source).unwrap()).unwrap();
+    let [region] = compiled.program.interface.dispatch_loops.as_slice() else {
+        panic!("expected one host loop");
+    };
+    assert_eq!(region.body.len(), 3);
+}
+
+#[test]
+fn scan_outputs_can_use_completed_totals() {
+    shaders(include_str!(
+        "../../../testfiles/regressions/scan_completed_totals.wyn"
+    ));
+    for source in [
+        "entry main(xs:[]i32) []i32 = let p=scan((+),0,xs) in let t=reduce((+),0,xs) in map(|x|x+t,p)",
+        "entry main(xs:[][513]i32) [][513]i32 = map(|row|let p=scan((+),0,row) in let t=reduce((+),0,row) in map(|x|x+t,p),xs)",
+        "entry main(xs:[2][17]i32) [2][17]i32 = map(|row|if row[0]>0 then let p=scan((+),0,row) in let t=reduce((+),0,row) in map(|x|x+t,p) else row,xs)",
+    ] {
+        shaders(source);
+    }
+}
+
+#[test]
 fn expression_projection_retains_host_capture_inputs_without_admission_tables() {
     use super::{from_tlc, fuse, optimize_with_policy, place, schedule, ScalarOptimization};
     use crate::PipelineTopologyPolicy;

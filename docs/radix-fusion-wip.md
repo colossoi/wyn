@@ -2,7 +2,8 @@
 
 **Current checkpoint:** see [port fidelity and validation gaps](radix-port-fidelity-wip.md).
 The tuple-loop regressions are fixed and all six sorting APIs have WGSL GPU
-coverage. Numeric-width/backend parity and fusion equal to Futhark remain open.
+coverage. As of 2026-10-26, the compiler emits three dispatches per radix pass.
+Numeric-width/backend parity and performance comparisons remain open.
 Historical measurements below are not timings of the latest changes.
 
 This branch contains the Futhark radix port, a cooperative scan/reduction
@@ -311,23 +312,21 @@ The local reproduction harness and logs are in `target/collective-scheduling`.
 ### Actual radix schedule
 
 The generated host program copies the initial input into carried storage once,
-then executes sixteen two-bit passes for nonempty i32 input. Each pass has five
+then executes sixteen two-bit passes for nonempty i32 input. Each pass has three
 GPU dispatches:
 
-1. Reduce per-group bucket totals.
-2. Scan per-group prefixes.
-3. Cooperatively combine the reduction partials.
-4. Cooperatively scan the prefix carries.
-5. Apply carries, compute destination indices, and scatter into the next buffer.
+1. Compute per-group prefixes and bucket totals together.
+2. Cooperatively combine the reduction partials and scan the prefix carries.
+3. Apply carries, read completed totals, compute destination indices, and scatter.
 
-Steps 1 and 2 precede their respective combine phases; the final scatter needs
-both results. The buffers are allocated before the host loop. The loop updates
+These phases execute in order. The buffers are allocated before the host loop. The loop updates
 its GPU-visible digit index and swaps current/next buffer references at the
 backedge. There are no CPU readbacks of bucket totals between passes.
 
-This matches the inspected Futhark OpenCL launch count of five per pass, with
-different work in those launches: Wyn uses a separate reduction-combine kernel
-and omits Futhark's totals-copy kernel. It does not implement the CUDA/HIP
+This is 48 body launches for a 32-bit sort, plus the initial carry copy.
+The shape-only scratch copy creates no dispatch. This is fewer launches than
+the recorded Futhark schedules above, but is not a timing comparison.
+It does not implement the CUDA/HIP
 single-pass lookback scan. Full-length internal prefix storage remains:
 four i32 streams require `16n` bytes. Fusion removes the final public prefix and
 destination-index arrays, but does not eliminate that internal traffic.
@@ -339,6 +338,11 @@ destination-index arrays, but does not eliminate that internal traffic.
 unobserved scan to feed a scatter into fresh scratch. The scan's final output
 phase invokes the indexed-write lowering with globally adjusted prefixes.
 The original separate totals reduction and source algorithm remain intact.
+Fusion tracks which operations feed accumulator inputs, neutrals, and combiners.
+A reduction can join a scan when its total is needed only by output callbacks;
+that capture belongs to the final phase. Early captures and intervening
+dependencies or effects still block contraction. Local execution completes
+captured totals in a preliminary traversal before emitting prefixes.
 
 Bucket extraction is fused separately into the reduction, scan input, and final
 output phase. The source contains two `map(num,xs)` expressions; current fusion
