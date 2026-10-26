@@ -35,11 +35,9 @@ Differences and limitations:
 - Upstream marks `radix_sort_step` and `by_key_wrapper` local. Wyn currently
   declares both as ordinary module definitions. `with_indices` is public in
   upstream too; the “six public functions” refers to the six sorting APIs.
-- **The package manifest still selects the old `src/lib.wyn`.** That separate
-  implementation uses 15 explicit passes, sorts only 30-bit keys, reads totals
-  from the final prefix, uses replicate for scratch, and requires nonempty
-  input. It is not the faithful port. Current port probes explicitly import
-  `src/radix_sort`. Package integration remains unfinished.
+- The package manifest exports `src/radix_sort.wyn` directly. The old unrolled
+  `src/lib.wyn` implementation has been removed, and spatial callers use the
+  port's bit-count and bit-extraction API.
 - Presence of all six definitions is not proof of executable API parity.
   This WIP supplies integral num_bits and f32.get_bit. It does not establish
   parity for every numeric module or width: f16/f64 bit-introspection contracts

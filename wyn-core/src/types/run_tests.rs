@@ -9,6 +9,18 @@ use wyn_module_graph::{
 };
 
 #[test]
+fn aliased_module_counted_loops_have_distinct_binders() {
+    crate::compile_thru_tlc(
+        "module A = {
+            def sum(n: i32) i32 = loop acc = 0 for i < n do acc + i
+        }
+        module B = A
+        entry main(n: i32) i32 = A.sum(n) + B.sum(n)",
+    )
+    .expect("both module copies should retain their loop index types and bindings");
+}
+
+#[test]
 fn source_package_identity_reaches_typed_and_tlc_definitions() {
     let root_identity = PackageIdentity::new("test/root", "v0.0.0").expect("valid root identity");
     let dependency_identity =

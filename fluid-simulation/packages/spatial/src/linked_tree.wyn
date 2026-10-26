@@ -50,7 +50,7 @@ def build<[m],[k]>(corners: [m]u32, offsets: [m]i32, slots: [k]i32, world_size: 
     (internal_index(corners[i],level,i),placeholder(corners[i],level)),leaf_slots) in
   let unsorted = scatter(initial,map(|(i,_)| i,internal),map(|(_,key)| @[key,4294967295u32],internal)) in
   -- Placeholder keys use 31 bits; the final digit also orders padding last.
-  let ordered = Sort.radix_digit(Sort.radix_sort(unsorted,slots),30u32) in
+  let ordered = Sort.radix_sort(32,|i,p| u32.get_bit(i,p.x),unsorted) in
   let keys = map(|node| node.x,ordered) in
   let children = map(|i|
     if i >= count || high_bit(keys[i])/3 >= 10 then 0i32 else

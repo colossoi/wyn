@@ -15,7 +15,7 @@ def prepare<[n],[m],[k]>(positions: [n]vec4f32, velocities: [n]vec4f32,
       neighbor_slots: [k]i32, world_size: f32, radius: f32, ncrit: i32)
     ([n]vec4f32,[n]vec4f32,[m]u32,[k]i32,[n]i32,bool) =
   let pairs = map(|i| @[Hilbert.encode(positions[i].xyz,world_size),u32(i)],ids) in
-  let sorted = Sort.radix_sort(pairs,ids) in
+  let sorted = Sort.radix_sort(30,|i,p| u32.get_bit(i,p.x),pairs) in
   let keys = map(|p| p.x,sorted) in
   let p = map(|pair| positions[i32(pair.y)],sorted) in
   let v = map(|pair| velocities[i32(pair.y)],sorted) in

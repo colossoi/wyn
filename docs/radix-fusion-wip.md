@@ -30,9 +30,9 @@ and counts to Wyn's index range. Bucket labels now also use `i32` instead of
 Futhark's `i8`, as requested, for compatibility with WGSL and the normal Naga
 runtime. Their values remain 0-3. Key and payload types are unchanged.
 
-The package's existing `src/lib.wyn` remains its default library; this new module
-is imported directly by the existing
-[smoke probe](../pkg/sort/test/radix_futhark.wyn). Do not inline helpers by hand,
+The package exports `src/radix_sort.wyn` directly; the older unrolled
+`src/lib.wyn` implementation has been removed. The existing
+[smoke probe](../pkg/sort/test/radix_futhark.wyn) also imports this module. Do not inline helpers by hand,
 unroll the source loop, replace
 the scratch producer, or derive totals from the last scan element to bypass
 compiler limitations.
@@ -458,7 +458,7 @@ Next:
 
 1. Compare retention against recomputation for equivalent source producers;
    extend slice fusion and composition with still-observed output actions.
-2. Finish package integration and audit numeric contracts beyond i32/f32.
+2. Audit numeric contracts beyond i32/f32.
 3. Broaden backend/device coverage, then rerun release timings
    and compare launch count, allocations, live storage, and transferred bytes
    with the inspected Futhark schedules. Reducing internal prefix traffic is
