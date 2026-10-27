@@ -1,0 +1,7 @@
+--! command = "build"
+--! exit = 2
+--! targets = ["wgsl"]
+--! args = ["--direct-wgsl"]
+--! errors = ["unexpected argument '--direct-wgsl'"]
+
+entry main(x: i32) i32 = x

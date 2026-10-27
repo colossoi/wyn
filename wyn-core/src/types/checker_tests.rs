@@ -2,7 +2,6 @@ use crate::ast;
 use crate::compile_thru_frontend;
 use crate::error::CompilerError;
 use crate::types;
-use crate::types::FrontendWarning;
 use crate::types::{Type, TypeExt, TypeName, TypeScheme};
 
 /// Helper to parse and type check source code, expecting success
@@ -499,45 +498,6 @@ def test_mul(mat1: mat4f32, mat2: mat4f32) mat4f32 =
     mul(mat1, mat2)
         "#,
     );
-}
-
-/// Helper function to check a program with a type hole and return the inferred type
-fn check_type_hole(source: &str) -> Type {
-    let checked = compile_thru_frontend(source).unwrap();
-    let warnings = &checked.global_context.warnings;
-    assert_eq!(warnings.len(), 1, "Expected exactly one type hole warning");
-
-    match &warnings[0] {
-        FrontendWarning::TypeHoleFilled { inferred_type, .. } => inferred_type.clone(),
-        warning => panic!("expected a type-hole warning, got {warning:?}"),
-    }
-}
-
-#[test]
-fn test_type_hole_in_array() {
-    let inferred = check_type_hole("def arr = [1i32, ???, 3i32]");
-
-    // ??? should be inferred as i32 (to match array elements)
-    let expected = Type::Constructed(TypeName::Int(32), vec![]);
-    assert_eq!(inferred, expected);
-}
-
-#[test]
-fn test_type_hole_in_binop() {
-    let inferred = check_type_hole("def result = 5i32 + ???");
-
-    // ??? should be inferred as i32 (to match addition operand)
-    let expected = Type::Constructed(TypeName::Int(32), vec![]);
-    assert_eq!(inferred, expected);
-}
-
-#[test]
-fn test_type_hole_function_arg() {
-    let inferred = check_type_hole("def apply = (|x: i32| x + 1i32)(???)");
-
-    // ??? should be inferred as i32 (the function argument type)
-    let expected = Type::Constructed(TypeName::Int(32), vec![]);
-    assert_eq!(inferred, expected);
 }
 
 #[test]

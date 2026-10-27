@@ -1,0 +1,7 @@
+--! command = "check"
+--! exit = 1
+--! args = ["--graphics"]
+--! errors = ["Type error:"]
+--! contains = ["pattern requires a vec2"]
+
+def f(n: f32) f32 = let @[a, b] = n in a + b

@@ -1,3 +1,5 @@
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -208,6 +210,7 @@ fn wgsl_output_is_independent_of_source_directory() {
             "local module compilation failed:\n{}",
             String::from_utf8_lossy(&result.stderr)
         );
+        support::validate_shader(output, "wgsl");
     }
 
     assert_eq!(

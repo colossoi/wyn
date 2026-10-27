@@ -1,0 +1,10 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv"]
+--! args = ["--max-warnings", "10"]
+--! warnings = ["unused parameter `first`", "unused parameter `second`", "unused parameter `third`"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"main\""]
+
+entry main(first: i32, second: i32, third: i32) i32 = 0

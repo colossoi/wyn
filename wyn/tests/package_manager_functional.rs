@@ -1,3 +1,5 @@
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -206,6 +208,7 @@ fn package_compiles_with_a_local_dependency() {
         String::from_utf8_lossy(&output.stderr),
     );
     assert!(output_path.is_file(), "package output should be written");
+    support::validate_shader(&output_path, "wgsl");
 }
 
 #[test]
@@ -235,6 +238,7 @@ fn current_package_directory_can_name_an_output_directory() {
         output_directory.join("app.wgsl").is_file(),
         "package-named output should be written"
     );
+    support::validate_shader(&output_directory.join("app.wgsl"), "wgsl");
 }
 
 #[test]

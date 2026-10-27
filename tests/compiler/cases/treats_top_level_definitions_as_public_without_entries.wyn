@@ -1,0 +1,6 @@
+--! command = "check"
+--! exit = 0
+--! warnings = ["unused parameter `unused`"]
+--! excludes = ["additional warnings omitted"]
+
+def public(unused: i32) i32 = 0

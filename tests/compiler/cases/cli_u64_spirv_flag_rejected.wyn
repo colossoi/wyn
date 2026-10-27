@@ -1,0 +1,7 @@
+--! command = "build"
+--! exit = 1
+--! targets = ["spirv"]
+--! args = ["--wgsl-emulate-u64"]
+--! errors = ["invalid command-line option: --wgsl-emulate-u64 requires --target wgsl"]
+
+entry main(x: i32) i32 = x

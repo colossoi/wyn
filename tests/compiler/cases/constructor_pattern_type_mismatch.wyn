@@ -1,0 +1,8 @@
+--! command = "check"
+--! exit = 1
+--! args = ["--graphics"]
+--! errors = ["Type error: constructor pattern"]
+--! excludes = ["refutable"]
+--! contains = ["requires a sum-typed scrutinee"]
+
+def f(n: i32) i32 = let #foo = n in 0

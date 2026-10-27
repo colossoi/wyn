@@ -1,0 +1,55 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = ["--graphics"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"filter_then_user_helper_static_capacity_tick\"", ":source-name \"filter_then_user_helper_runtime_size_tick\"", ":source-name \"filter_into_nested_helper_specializes_recursively_tick\"", ":source-name \"non_filter_let_binding_does_not_trigger_spec_tick\"", ":source-name \"tuple_reduce_fragment_main\"", ":source-name \"filtered_range_map\""]
+
+-- Migrated from filter_then_user_helper_static_capacity
+def filter_then_user_helper_static_capacity_sum<[n]>(arr: [n]i32) i32 = reduce(|a: i32, b: i32| a + b, 0, arr)
+def filter_then_user_helper_static_capacity_center(arr: []i32) i32 = filter_then_user_helper_static_capacity_sum(arr)
+entry filter_then_user_helper_static_capacity_tick() i32 =
+  let kept = filter(|x: i32| x > 0, [1, -2, 3, -4, 5]) in
+  filter_then_user_helper_static_capacity_center(kept)
+
+-- Migrated from filter_then_user_helper_runtime_size
+def filter_then_user_helper_runtime_size_sum<[n]>(arr: [n]i32) i32 = reduce(|a: i32, b: i32| a + b, 0, arr)
+def filter_then_user_helper_runtime_size_center(arr: []i32) i32 = filter_then_user_helper_runtime_size_sum(arr)
+entry filter_then_user_helper_runtime_size_tick(xs: []i32) i32 =
+  let kept = filter(|x: i32| x > 0, xs) in
+  filter_then_user_helper_runtime_size_center(kept)
+
+-- Migrated from filter_into_nested_helper_specializes_recursively
+def filter_into_nested_helper_specializes_recursively_sum<[n]>(arr: [n]i32) i32 = reduce(|a: i32, b: i32| a + b, 0, arr)
+def filter_into_nested_helper_specializes_recursively_center(arr: []i32) i32 =
+  let s = filter_into_nested_helper_specializes_recursively_sum(arr) in
+  s + filter_into_nested_helper_specializes_recursively_sum(arr)
+entry filter_into_nested_helper_specializes_recursively_tick() i32 =
+  let kept = filter(|x: i32| x > 0, [1, -2, 3, -4, 5, -6]) in
+  filter_into_nested_helper_specializes_recursively_center(kept)
+
+-- Migrated from non_filter_let_binding_does_not_trigger_spec
+def non_filter_let_binding_does_not_trigger_spec_double<[n]>(arr: [n]i32) i32 = reduce(|a: i32, b: i32| a + b, 0, arr)
+entry non_filter_let_binding_does_not_trigger_spec_tick() i32 =
+  let xs = [1, 2, 3, 4] in
+  non_filter_let_binding_does_not_trigger_spec_double(xs)
+
+-- Tuple-destructuring combiner specialization before backend lowering.
+def tuple_reduce_min_pair(hits: [4](f32, i32)) (f32, i32) =
+  reduce(|(t1, m1): (f32, i32), (t2, m2): (f32, i32)|
+           if t1 < t2 then (t1, m1) else (t2, m2),
+         (1000.0, 0),
+         hits)
+
+def tuple_reduce_hits: [4](f32, i32) = [(1.0, 1), (2.0, 2), (0.5, 3), (3.0, 4)]
+
+
+entry tuple_reduce_fragment_main(pos: vec4f32) vec4f32 =
+  let (t, m) = tuple_reduce_min_pair(tuple_reduce_hits) in
+  @[t, t, 0.0, 1.0]
+
+-- wgsl_i32_range_filter_then_map_validates
+entry filtered_range_map() []i32 =
+  let kept = filter(|i| i % 2 == 0, iota(64)) in
+  map(|i| i + 1, kept)

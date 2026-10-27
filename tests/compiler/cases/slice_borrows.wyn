@@ -1,0 +1,40 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = ["--graphics"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"slice_borrowed_from_original_vertex_main\"", ":source-name \"multiple_slices_borrow_from_same_vertex_main\"", ":source-name \"slice_becomes_view_main\""]
+
+-- Migrated from test_slice_borrowed_from_original
+def slice_borrowed_from_original_borrow(arr: [5]i32) i32 = arr[0]
+
+def slice_borrowed_from_original_use_slice(arr: [10]i32) i32 =
+    let sliced = arr[0..5] in
+    let _ = slice_borrowed_from_original_borrow(sliced) in
+    arr[0]
+
+
+entry slice_borrowed_from_original_vertex_main() vec4f32 =
+    let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] in
+    @[f32.i32(slice_borrowed_from_original_use_slice(arr)), 0.0f32, 0.0f32, 1.0f32]
+
+-- Migrated from test_multiple_slices_borrow_from_same
+def multiple_slices_borrow_from_same_borrow(arr: [3]i32) i32 = arr[0]
+
+def multiple_slices_borrow_from_same_use_slices(arr: [10]i32) i32 =
+    let s1 = arr[0..3] in
+    let s2 = arr[3..6] in
+    let _ = multiple_slices_borrow_from_same_borrow(s1) in
+    s2[0]
+
+
+entry multiple_slices_borrow_from_same_vertex_main() vec4f32 =
+    let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] in
+    @[f32.i32(multiple_slices_borrow_from_same_use_slices(arr)), 0.0f32, 0.0f32, 1.0f32]
+
+-- Migrated from test_slice_becomes_view
+def slice_becomes_view_slice_test(arr: [10]i32) [5]i32 =
+    arr[0..5]
+
+entry slice_becomes_view_main(xs: [10]i32) [5]i32 = slice_becomes_view_slice_test(xs)

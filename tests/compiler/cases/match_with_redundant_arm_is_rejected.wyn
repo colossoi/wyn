@@ -1,0 +1,10 @@
+--! command = "check"
+--! exit = 1
+--! args = ["--graphics"]
+--! errors = ["Type error: unreachable match arm"]
+
+def f(t: #a | #b) i32 =
+  match t
+  case #a -> 1
+  case #a -> 2
+  case #b -> 0

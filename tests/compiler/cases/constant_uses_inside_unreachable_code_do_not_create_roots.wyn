@@ -1,0 +1,8 @@
+--! command = "check"
+--! exit = 0
+--! warnings = ["unused definition `constant`", "unused definition `dead`"]
+--! excludes = ["additional warnings omitted"]
+
+def constant: i32 = 1
+def dead: i32 = constant
+entry main() i32 = 0

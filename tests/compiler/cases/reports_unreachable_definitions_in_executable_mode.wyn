@@ -1,0 +1,10 @@
+--! command = "check"
+--! exit = 0
+--! warnings = ["unused definition `dead`", "unused definition `cycle_a`", "unused definition `cycle_b`"]
+--! excludes = ["additional warnings omitted"]
+
+def used(value: i32) i32 = value
+def dead(value: i32) i32 = value
+def cycle_a(value: i32) i32 = cycle_b(value)
+def cycle_b(value: i32) i32 = cycle_a(value)
+entry main(value: i32) i32 = used(value)

@@ -1,0 +1,31 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["wgsl"]
+--! args = ["--wgsl-emulate-u64"]
+--! [[artifacts]]
+--! path = "output.wgsl"
+--! contains = ["fn _wyn_u64_add", "vec2<u32>(1985229328u, 4275878552u)"]
+--! excludes = ["fn _wyn_u64_shl", "fn _wyn_u64_shr"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"blake2b_mix\""]
+
+def rotr16(x: u64) u64 = (x >> 16u64) | (x << 48u64)
+def rotr24(x: u64) u64 = (x >> 24u64) | (x << 40u64)
+def rotr32(x: u64) u64 = (x >> 32u64) | (x << 32u64)
+def rotr63(x: u64) u64 = (x >> 63u64) | (x << 1u64)
+
+def blake2b_lane(x: u64, y: u64) u64 =
+  let a0 = 0x6a09e667f3bcc908u64 + 0xbb67ae8584caa73bu64 + x
+  let d0 = rotr32(0xa54ff53a5f1d36f1u64 ^ a0)
+  let c0 = 0x3c6ef372fe94f82bu64 + d0
+  let b0 = rotr24(0xbb67ae8584caa73bu64 ^ c0)
+  let a1 = a0 + b0 + y
+  let d1 = rotr16(d0 ^ a1)
+  let c1 = c0 + d1 in
+  rotr63(b0 ^ c1)
+
+entry blake2b_mix(words: []u32) []u32 =
+  map(|word: u32|
+    u32.u64(blake2b_lane(u64.u32(word), 0xfedcba9876543210u64)),
+    words)

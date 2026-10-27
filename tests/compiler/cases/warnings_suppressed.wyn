@@ -1,0 +1,7 @@
+--! command = "check"
+--! exit = 0
+--! args = ["--max-warnings", "0"]
+--! warnings = []
+--! excludes = ["additional warnings omitted"]
+
+entry main(first: i32, second: i32, third: i32) i32 = 0

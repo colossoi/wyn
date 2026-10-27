@@ -1,0 +1,24 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = ["--graphics"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"range_simple_main\"", ":source-name \"simple_range_stays_as_range_main\"", ":source-name \"complex_range_stays_as_range_main\""]
+
+-- Migrated from test_range_simple
+def range_simple_test: [4]i32 = 0..<4
+
+entry range_simple_main() [4]i32 = range_simple_test
+
+-- Migrated from test_simple_range_stays_as_range
+def simple_range_stays_as_range_range_test: [5]i32 =
+    0..<5
+
+entry simple_range_stays_as_range_main() [5]i32 = simple_range_stays_as_range_range_test
+
+-- Migrated from test_complex_range_stays_as_range
+def complex_range_stays_as_range_range_test: [5]i32 =
+    1..<6
+
+entry complex_range_stays_as_range_main() [5]i32 = complex_range_stays_as_range_range_test

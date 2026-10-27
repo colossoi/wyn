@@ -42,18 +42,24 @@ done
 
 if [ "$PROFILE" = "release" ]; then
     CARGO_FLAG="--release"
-    WYN_BIN="./target/release/wyn"
-    VIZ_BIN="./extra/viz/target/release/viz"
 else
     CARGO_FLAG=""
-    WYN_BIN="./target/debug/wyn"
-    VIZ_BIN="./extra/viz/target/debug/viz"
 fi
+
+# Ask Cargo so CARGO_TARGET_DIR and build.target-dir work for both crates.
+# Python 3 is used only to read Cargo's JSON metadata.
+cargo_target_dir() {
+    cargo metadata --no-deps --format-version 1 --manifest-path "$1" |
+        python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])'
+}
+
+WYN_BIN="$(cargo_target_dir Cargo.toml)/$PROFILE/wyn"
 
 echo "Building wyn ($PROFILE)..."
 cargo build $CARGO_FLAG -p wyn
 
 if [ "$MODE" = "wgsl" ]; then
+    VIZ_BIN="$(cd extra/viz && cargo_target_dir Cargo.toml)/$PROFILE/viz"
     echo "Building viz ($PROFILE) for WGSL validation..."
     (cd extra/viz && cargo build $CARGO_FLAG --quiet)
 fi

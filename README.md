@@ -435,6 +435,8 @@ Run `scripts/validate_testfiles.ps1` for SPIR-V testfile validation and add
 validation builds and uses `extra/viz`. Add `-TrackedOnly` to the PowerShell
 script to skip local, untracked experiments, and `-Release` to use release
 binaries. The Bash and Nushell variants accept `--wgsl` and `--release`.
+The Bash script uses Cargo metadata to locate both binaries, respecting
+`CARGO_TARGET_DIR` and Cargo configuration; it requires Python 3 to read that metadata.
 
 `wyn-wasm` has its own lockfile and needs a separate browser-target check.
 Install `wasm32-unknown-unknown`, then run `bash scripts/check_wasm.sh` or

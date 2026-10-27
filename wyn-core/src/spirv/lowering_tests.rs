@@ -811,25 +811,6 @@ def sum_scan(arr: [4]i32) [4]i32 = scan((|a, b| a + b), 0, arr)
 }
 
 #[test]
-fn test_map_variants() {
-    // Test map with zip variants: map over zipped inputs
-    let spirv = compile_to_spirv(
-        r#"
-def double(x: i32) i32 = x * 2
-
-def test_map(arr: [3]i32) [3]i32 = map(double, arr)
-def test_map2(xs: [3]i32, ys: [3]i32) [3]i32 = map(|(x, y)| x + y, zip(xs, ys))
-def test_map3(xs: [3]i32, ys: [3]i32, zs: [3]i32) [3]i32 = map(|(x, y, z)| x + y + z, zip3(xs, ys, zs))
-def test_map4(a: [3]i32, b: [3]i32, c: [3]i32, d: [3]i32) [3]i32 = map(|(a, b, c, d)| a + b + c + d, zip4(a, b, c, d))
-def test_map5(a: [3]i32, b: [3]i32, c: [3]i32, d: [3]i32, e: [3]i32) [3]i32 = map(|(a, b, c, d, e)| a + b + c + d + e, zip5(a, b, c, d, e))
-"#,
-    )
-    .unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
 fn test_scatter_update() {
     // Scatter: write values to array at given indices
     let spirv = compile_to_spirv(
@@ -887,37 +868,6 @@ def sum_u32(arr: [4]u32) u32 =
 }
 
 #[test]
-fn test_reduce_with_tuple_destructuring() {
-    // HOF specialization must eliminate the tuple-destructuring combiner's
-    // function parameters before SPIR-V lowering.
-    let result = compile_to_spirv(
-        r#"
-def minPair(hits: [4](f32, i32)) (f32, i32) =
-  reduce(|(t1, m1): (f32, i32), (t2, m2): (f32, i32)|
-           if t1 < t2 then (t1, m1) else (t2, m2),
-         (1000.0, 0),
-         hits)
-
-def testHits: [4](f32, i32) = [(1.0, 1), (2.0, 2), (0.5, 3), (3.0, 4)]
-
-
-entry fragment_main(pos: vec4f32) vec4f32 =
-  let (t, m) = minPair(testHits) in
-  @[t, t, 0.0, 1.0]
-"#,
-    );
-    // Should compile without "Undefined global" error
-    assert!(
-        result.is_ok(),
-        "Expected successful compilation, got: {:?}",
-        result.err()
-    );
-    let spirv = result.unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
 fn test_algebraic_simplifications() {
     // Test all algebraic identity simplifications compile correctly
     let spirv = compile_to_spirv(
@@ -937,85 +887,6 @@ def test(x: f32) f32 =
 "#,
     )
     .unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_partial_eval_inlined_function_local_id_collision() {
-    // Partial evaluation of an inlined helper with an unknown let RHS must
-    // allocate locals independently of the caller's local map.
-    let spirv = compile_to_spirv(
-        r#"
--- Helper function that will be inlined when called with known args.
--- The let binding 'weight' uses iTime which is unknown, so it gets residualized.
-def helper(x: f32, iTime: f32) f32 =
-    let weight = x * iTime in
-    weight
-
-
-entry fragment_main(iTime: f32, pos: vec4f32) vec4f32 =
-    -- Create multiple locals to ensure LocalId collision
-    let a = pos.x in
-    let b = pos.y in
-    let c = pos.z in
-    -- Call helper with known arg - this gets inlined.
-    -- helper's 'weight' local may collide with our locals.
-    let d = helper(3.0, iTime) in
-    @[d, a, b, c]
-"#,
-    )
-    .unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_partial_eval_intrinsic_arg_types() {
-    // Residualizing dot(vec3, vec3) -> f32 must reify each known argument with
-    // its vec3 type rather than the scalar result type.
-    let spirv = compile_to_spirv(
-        r#"
-def verts: [3]vec4f32 =
-  [@[-1.0, -1.0, 0.0, 1.0],
-   @[3.0, -1.0, 0.0, 1.0],
-   @[-1.0, 3.0, 0.0, 1.0]]
-
-
-entry vertex_main(vertex_id: i32) vec4f32 = verts[vertex_id]
-
-
-entry fragment_main() vec4f32 =
-  let g = @[1.0, 2.0, 3.0] in
-  let h = dot(g, @[127.1, 311.7, 74.7]) in
-  @[h, h, h, 1.0]
-"#,
-    )
-    .unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_nested_if_else_in_entry_point() {
-    // Entry-point return emission must preserve the multi-block structure of
-    // nested conditionals.
-    let result = compile_to_spirv(
-        r#"
-
-entry fragment_main(fragCoord: vec4f32) vec4f32 =
-  let x = fragCoord.x in
-  if x < 0.5 then @[1.0, 0.0, 0.0, 1.0]
-  else if x < 1.5 then @[0.0, 1.0, 0.0, 1.0]
-  else @[0.0, 0.0, 1.0, 1.0]
-"#,
-    );
-    assert!(
-        result.is_ok(),
-        "Nested if-else in entry point should compile. Got: {:?}",
-        result.err()
-    );
-    let spirv = result.unwrap();
     assert!(!spirv.is_empty());
     assert_eq!(spirv[0], 0x07230203);
 }

@@ -1,0 +1,7 @@
+--! command = "check"
+--! exit = 1
+--! args = ["--graphics"]
+--! errors = ["Type error: refutable pattern"]
+--! contains = ["other variants: #b"]
+
+def f(p: #boxed(#a | #b)) i32 = let #boxed(#a) = p in 0

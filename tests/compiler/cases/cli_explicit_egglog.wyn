@@ -1,0 +1,20 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["wgsl"]
+--! args = ["--verbose", "--egglog"]
+--! emit_mir = true
+--! [[artifacts]]
+--! path = "output.ssa"
+--! contains = ["main_compute"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = ["(define-host-program :version 1)", "(gpu-dispatch ", ":source-name \"main\""]
+--! [[artifacts]]
+--! path = "output.json"
+--! absent = true
+--! [[artifacts]]
+--! path = "output.wgsl"
+--! targets = ["wgsl"]
+--! contains = ["@compute"]
+
+entry main(xs: []i32) []i32 = map(|x| x + 1, xs)

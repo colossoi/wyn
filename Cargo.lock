@@ -3094,6 +3094,7 @@ dependencies = [
  "clap",
  "env_logger",
  "log",
+ "naga",
  "serde",
  "thiserror 1.0.69",
  "toml",

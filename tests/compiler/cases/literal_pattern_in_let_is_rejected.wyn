@@ -1,0 +1,7 @@
+--! command = "check"
+--! exit = 1
+--! args = ["--graphics"]
+--! errors = ["Type error: refutable pattern"]
+--! contains = ["literal patterns are refutable"]
+
+def f(n: i32) i32 = let 0 = n in 1

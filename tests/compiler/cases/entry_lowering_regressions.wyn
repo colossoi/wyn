@@ -1,0 +1,47 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = ["--graphics"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"inlined_locals_fragment_main\"", ":source-name \"intrinsic_types_vertex_main\"", ":source-name \"intrinsic_types_fragment_main\"", ":source-name \"nested_branches_fragment_main\""]
+
+-- test_partial_eval_inlined_function_local_id_collision
+-- Helper function that will be inlined when called with known args.
+-- The let binding 'weight' uses iTime which is unknown, so it gets residualized.
+def helper(x: f32, iTime: f32) f32 =
+    let weight = x * iTime in
+    weight
+
+
+entry inlined_locals_fragment_main(iTime: f32, pos: vec4f32) vec4f32 =
+    -- Create multiple locals to ensure LocalId collision
+    let a = pos.x in
+    let b = pos.y in
+    let c = pos.z in
+    -- Call helper with known arg - this gets inlined.
+    -- helper's 'weight' local may collide with our locals.
+    let d = helper(3.0, iTime) in
+    @[d, a, b, c]
+
+-- test_partial_eval_intrinsic_arg_types
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0, -1.0, 0.0, 1.0],
+   @[-1.0, 3.0, 0.0, 1.0]]
+
+
+entry intrinsic_types_vertex_main(vertex_id: i32) vec4f32 = verts[vertex_id]
+
+
+entry intrinsic_types_fragment_main() vec4f32 =
+  let g = @[1.0, 2.0, 3.0] in
+  let h = dot(g, @[127.1, 311.7, 74.7]) in
+  @[h, h, h, 1.0]
+
+-- test_nested_if_else_in_entry_point
+entry nested_branches_fragment_main(fragCoord: vec4f32) vec4f32 =
+  let x = fragCoord.x in
+  if x < 0.5 then @[1.0, 0.0, 0.0, 1.0]
+  else if x < 1.5 then @[0.0, 1.0, 0.0, 1.0]
+  else @[0.0, 0.0, 1.0, 1.0]

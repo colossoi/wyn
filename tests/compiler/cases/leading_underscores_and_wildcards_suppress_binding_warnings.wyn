@@ -1,0 +1,8 @@
+--! command = "check"
+--! exit = 0
+--! warnings = []
+--! excludes = ["additional warnings omitted"]
+
+def public(pair: (i32, i32, i32), _parameter: i32) i32 =
+  let (used, _ignored, _) = pair in
+  used

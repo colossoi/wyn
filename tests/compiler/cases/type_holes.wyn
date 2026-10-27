@@ -1,0 +1,10 @@
+--! command = "check"
+--! exit = 2
+--! warnings = ["Hole of type i32", "Hole of type i32", "Hole of type i32"]
+--! errors = ["type hole inferred as `i32`", "type hole inferred as `i32`", "type hole inferred as `i32`"]
+
+def arr = [1i32, ???, 3i32]
+
+def result = 5i32 + ???
+
+def apply = (|x: i32| x + 1i32)(???)

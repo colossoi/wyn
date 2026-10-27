@@ -1,0 +1,8 @@
+--! command = "check"
+--! exit = 0
+--! warnings = ["unused parameter `value`"]
+--! excludes = ["additional warnings omitted"]
+
+entry main(value: i32, condition: bool) i32 =
+  let value = if condition then 1 else 2 in
+  value

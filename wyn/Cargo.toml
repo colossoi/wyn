@@ -22,3 +22,4 @@ env_logger.workspace = true
 [dev-dependencies]
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
+naga = { version = "27.0", features = ["wgsl-in", "spv-in"] }

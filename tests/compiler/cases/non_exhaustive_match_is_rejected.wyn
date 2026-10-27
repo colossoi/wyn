@@ -1,0 +1,8 @@
+--! command = "check"
+--! exit = 1
+--! args = ["--graphics"]
+--! errors = ["Type error: non-exhaustive"]
+
+def f(t: #a | #b) i32 =
+  match t
+  case #a -> 1

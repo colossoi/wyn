@@ -1,0 +1,8 @@
+--! command = "check"
+--! exit = 0
+--! warnings = ["unused parameter `unused`", "unused parameter `another`", "unused binding `dead`"]
+--! excludes = ["additional warnings omitted"]
+
+entry main(used: i32, unused: i32, another: i32) i32 =
+  let dead = 1 in
+  used

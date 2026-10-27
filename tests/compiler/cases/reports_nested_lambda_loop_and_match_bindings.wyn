@@ -1,0 +1,11 @@
+--! command = "check"
+--! exit = 0
+--! warnings = ["unused parameter `unused_lambda`", "unused loop variable `unused_index`", "unused pattern binding `unused_payload`"]
+--! excludes = ["additional warnings omitted"]
+
+def nested(value: #some(i32) | #none) i32 =
+  let from_lambda = (|unused_lambda: i32| 1)(0) in
+  let from_loop = loop acc = 0 for unused_index < 1 do acc in
+  match value
+  case #some(unused_payload) -> from_lambda + from_loop
+  case #none -> 0

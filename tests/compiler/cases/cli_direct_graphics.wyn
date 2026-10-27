@@ -1,0 +1,20 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = ["--graphics", "--direct"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = ["(define-gpu-graphics ", ":source-name \"frame\""]
+--! excludes = ["(gpu-dispatch ", "(gpu-alloc "]
+--! [[artifacts]]
+--! path = "output.json"
+--! absent = true
+
+def vertex_main(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<vec2f32> =
+  let x = if vertex_index == 0u32 then -1.0 else if vertex_index == 1u32 then 3.0 else -1.0 in
+  let y = if vertex_index == 0u32 then -1.0 else if vertex_index == 1u32 then -1.0 else 3.0 in
+  vertex_output(@[x, y, 0.0, 1.0], @[0.0, 0.0])
+
+entry frame(screen: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(direct_draw(3u32, 1u32), vertex_main) in
+  shade(screen, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| @[fragment_position.x, 0.0, 0.0, 1.0])

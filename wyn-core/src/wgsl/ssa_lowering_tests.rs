@@ -929,52 +929,6 @@ entry sum_array(#[size_hint(1024)] data: []f32) f32 =
     );
 }
 
-/// An `i32`-range reduce lowers to valid WGSL and provides the signed
-/// counterpart to the `u32` case below.
-#[test]
-fn wgsl_i32_range_reduce_validates() {
-    let wgsl = compile_to_wgsl(
-        r#"
-entry mn(n: i32) i32 =
-  reduce(|a: i32, b: i32| if a < b then a else b, 2147483647, 0..<n)
-"#,
-    )
-    .expect("compile");
-    validate_wgsl(&wgsl);
-}
-
-/// A reduce over a u32 virtual range still uses an i32 loop counter.
-/// `_w_intrinsic_length` must honor `wants_i32` by casting the range's
-/// element-typed `.f2` field at the comparison site; each element is converted
-/// back with `u32(idx)`.
-#[test]
-fn wgsl_u32_range_reduce_validates() {
-    let wgsl = compile_to_wgsl(
-        r#"
-entry mn(n: u32) u32 =
-  reduce(|a: u32, b: u32| if a < b then a else b, 4294967295u32, 0u32..<n)
-"#,
-    )
-    .expect("compile");
-    validate_wgsl(&wgsl);
-}
-
-/// A parallel consumer requests its range extent as `u32`, even when the
-/// source range is element-typed as `i32`. The virtual-array length lowering
-/// must bridge that signedness boundary explicitly for WGSL.
-#[test]
-fn wgsl_i32_range_filter_then_map_validates() {
-    let wgsl = compile_to_wgsl(
-        r#"
-entry filtered() []i32 =
-  let kept = filter(|i| i % 2 == 0, iota(64)) in
-  map(|i| i + 1, kept)
-"#,
-    )
-    .expect("compile");
-    validate_wgsl(&wgsl);
-}
-
 #[test]
 fn wgsl_compute_multi_output_runtime_sized_arrays() {
     // A compute entry returning a tuple of >1 runtime-sized array: each
@@ -1398,16 +1352,6 @@ fn stores_binding(module: &naga::Module, group: u32, binding: u32) -> bool {
         .map(|(_, f)| f)
         .chain(module.entry_points.iter().map(|entry| &entry.function))
         .any(|f| stores(module, f, &f.body, group, binding))
-}
-
-#[test]
-fn float_powers_coerce_constant_and_dynamic_integer_exponents() {
-    let source = r#"
-entry powers(xs: []f32, exponent: i32) []f32 =
-    map(|x: f32| x ** 5 + x ** exponent, xs)
-"#;
-    let wgsl = compile_to_wgsl(source).expect("mixed float/integer powers must lower");
-    validate_wgsl(&wgsl);
 }
 
 #[test]

@@ -1,0 +1,7 @@
+--! command = "check"
+--! exit = 2
+--! args = ["--max-warnings", "0"]
+--! warnings = []
+--! errors = ["type hole inferred as `i32`"]
+
+entry main(unused: i32) i32 = ???

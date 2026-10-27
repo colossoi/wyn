@@ -1,0 +1,17 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = ["--graphics"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"expanded_vector\"", ":source-name \"expanded_swizzles\"", ":source-name \"expanded_array\"", ":source-name \"expanded_matrix\"", ":source-name \"strided_range\""]
+
+entry expanded_vector(v: vec3f32) vec4f32 = @[v..., 1.0]
+
+entry expanded_swizzles(v: vec3f32) vec4f32 = @[v.yx..., v.zz...]
+
+entry expanded_array(v: vec3f32) f32 = let a: [5]f32 = [0.0, v..., 1.0] in a[2]
+
+entry expanded_matrix(v: vec2f32) mat2x2f32 = @[[v.yx...], [v...]]
+
+entry strided_range() i32 = let r = 0..2..=4 in r[2]

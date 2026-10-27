@@ -1,0 +1,7 @@
+--! command = "check"
+--! exit = 1
+--! args = ["--graphics"]
+--! errors = ["Type error: Unit pattern doesn't match expected type"]
+--! excludes = ["refutable"]
+
+def f(n: i32) i32 = let () = n in 0
