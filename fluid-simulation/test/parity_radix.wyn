@@ -3,4 +3,4 @@
 -- layout in the nested-array scan/loop. Keep the natural radix pass loop.
 module Sort = import "pkg:sort"
 entry radix() [4]vec2u32 =
-  Sort.radix_sort([@[4294967295u32,0u32],@[1u32,1u32],@[1u32,2u32],@[0u32,3u32]],iota(4))
+  Sort.FourBit.radix_sort(32,|i,p| u32.get_bit(i,p.x),[@[4294967295u32,0u32],@[1u32,1u32],@[1u32,2u32],@[0u32,3u32]])

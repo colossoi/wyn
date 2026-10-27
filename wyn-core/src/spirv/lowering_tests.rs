@@ -434,7 +434,10 @@ fn fixed_array_output_constructs_only_the_indexed_value() {
                 && inst.result_type.is_some_and(|ty| arrays.contains(&ty))
         })
         .count();
-    assert_eq!(constructors, 1, "static length queries must not construct arrays");
+    assert_eq!(
+        constructors, 0,
+        "a single-element output needs no array constructor"
+    );
 }
 
 #[test]

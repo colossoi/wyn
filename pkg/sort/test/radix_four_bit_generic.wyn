@@ -1,0 +1,11 @@
+-- Expected: stable tuple keys, signed integer/float order, and only five low
+-- bits sorted. The partial digit must not request a sixth bit. Zero bits is identity.
+module R = import "../src/four_bit"
+entry main() ([4]i32,[4]i32,[4]f32,[4]i32,[3]i32) =
+  let records = [(2u32,10i32),(1u32,20i32),(2u32,30i32),(0u32,40i32)] in
+  let sorted = R.radix_sort_by_key(|(key,_)| key,32,u32.get_bit,records) in
+  (map(|(_,value)| value,sorted),
+   R.radix_sort_int(32,i32.get_bit,[3,-2,0,-1]),
+   R.radix_sort_float(32,f32.get_bit,[3.5,-2.0,0.0,-1.25]),
+   R.radix_sort(5,i32.get_bit,[33,2,32,1]),
+   R.radix_sort(0,i32.get_bit,[3,1,2]))

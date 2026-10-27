@@ -264,6 +264,26 @@ fn list_deletion_consumes_an_adjacent_comma() {
 }
 
 #[test]
+fn list_deletion_handles_generic_parameters_and_entry_returns() {
+    for (source, expected) in [
+        ("def f<A>(x: i32) = x", "def f<>(x: i32) = x"),
+        ("entry f() (i32, f32) = ???", "entry f() (i32) = ???"),
+        (
+            "entry f() (i32, #[size_hint(4)] []i32) = ???",
+            "entry f() (#[size_hint(4)] []i32) = ???",
+        ),
+    ] {
+        let source = source.as_bytes();
+        let tree = parse(&language(), source).unwrap();
+        assert!(collect_candidates(&tree, source).iter().any(|candidate| {
+            candidate.kind == CandidateKind::ListDeletion
+                && apply_candidate(source, candidate) == expected.as_bytes()
+        }));
+        assert!(!parse(&language(), expected.as_bytes()).unwrap().root_node().has_error());
+    }
+}
+
+#[test]
 fn list_deletion_consumes_a_single_trailing_comma() {
     let source = b"def f(x,) = 0";
     let tree = parse(&language(), source).unwrap();

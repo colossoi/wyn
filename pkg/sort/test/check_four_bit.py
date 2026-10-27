@@ -45,6 +45,10 @@ def main():
     pairs = sorted([((i % 97) * 2654435761 & 0xffffffff, i) for i in range(513)],
                    key=lambda pair: pair[0])
     cases = {
+        "small_local_arrays.wyn": [[180,261], [0,1,2,3,4,6,8,10,12,15,18,21]],
+        "radix_four_bit_generic.wyn": [[40,20,10,30],[-2,-1,0,3],[-2.0,-1.25,0.0,3.5],[32,33,1,2],[3,1,2]],
+        "radix_four_bit_keys.wyn": [[20,40,10,30],[0xbf800001,0xbf800003,4,0x3f800002]],
+        "scratch_allocators.wyn": [[5,4,3,2,1], [5,4,3,2,1], [1,2,3,4,5], [0]],
         "radix_four_bit.wyn": [[0, 3, 1, 1, 1, 2, 0xffffffff, 0]],
         "radix_four_bit_edges.wyn": [[0], [0xffffffff, 42]],
         "radix_four_bit_large.wyn": [[item for pair in pairs for item in pair]],

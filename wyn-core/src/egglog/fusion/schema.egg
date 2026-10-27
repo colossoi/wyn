@@ -52,3 +52,9 @@
 (constructor DomainValue (i64) Domain)
 (constructor FixedDomain (i64) Domain)
 (relation RelevantPair (FusionGroup FusionGroup))
+; Only dependencies of the accumulators execute before the output phase.
+(function PlanEarly (FusionPlan OperationKey) bool :merge (or old new))
+(function LateFusionBlocked (FusionPlan FusionPlan) bool :merge (or old new))
+(relation PlanLateTotals (FusionPlan))
+(relation LateFusionCompatible (FusionPlan FusionPlan))
+(relation PlanMember (FusionPlan OperationKey))

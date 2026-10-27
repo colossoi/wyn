@@ -15,7 +15,6 @@ pub mod lexer;
 mod name_resolution;
 pub mod op;
 mod parser;
-pub mod pattern;
 mod resolve_imports;
 mod resolve_opens;
 mod resolve_placeholders;
@@ -243,8 +242,6 @@ pub use polytype::Context as PolytypeContext;
 //       tlc::extract_stages(...)          -> tlc::stage::StagesExtracted
 //       tlc::pin_entry_buffers(...)       -> tlc::stage::BuffersPinned
 //       tlc::monomorphize(...)           -> tlc::stage::Monomorphized
-//       tlc::force_inline_soac_helpers(...)
-//                                      -> tlc::stage::SoacHelpersInlined
 //       tlc::canonicalize_conditional_producers(...)
 //                                      -> tlc::stage::ConditionalProducersCanonicalized
 //       tlc::normalize_soacs(...)        -> tlc::stage::SoacsAnfNormalized
@@ -256,11 +253,12 @@ pub use polytype::Context as PolytypeContext;
 // Egglog stages:
 //       egglog::from_tlc(&program)       -> Imported
 //       egglog::fuse(...)                -> Fused
-//       egglog::insert_expressions(...)  -> Expressions
-//       egglog::simplify(..., algebra)   -> Simplified
 //       egglog::place(...)               -> Placed
-//       egglog::schedule(..., topology)  -> Scheduled
-//       egglog::to_ssa(&program, target) -> ssa::stage::Elaborated
+//       egglog::schedule(...)            -> Scheduled
+//       egglog::prepare_interfaces(...)  -> InterfacesPrepared
+//       egglog::optimize(...)            -> Optimized
+//       egglog::prepare_host(...)        -> HostPrepared
+//       egglog::to_ssa(program, target)   -> ssa::stage::Elaborated
 //
 // Backend:
 //       ssa::filter_reachable(...)         -> ssa::stage::Reachable
@@ -304,7 +302,6 @@ pub(crate) fn optimize_tlc_for_test_thru_soac_normalization(
     let program = tlc::extract_stages(program)?;
     let program = tlc::pin_entry_buffers(program)?;
     let program = tlc::monomorphize(program)?;
-    let program = tlc::force_inline_soac_helpers(program);
     let program = tlc::canonicalize_conditional_producers(program);
     Ok(tlc::normalize_soacs(program))
 }
@@ -655,7 +652,9 @@ pub(crate) fn compile_thru_ssa_with_policy(
     let program = egglog::fuse(program)?;
     let program = egglog::place(program, PipelineTopologyPolicy::AllowGenerated)?;
     let program = egglog::schedule(program)?;
+    let program = egglog::prepare_interfaces(program)?;
     let program = egglog::optimize_with_policy(program, policy)?;
+    let program = egglog::prepare_host(program)?;
     Ok(egglog::to_ssa(program, target)?)
 }
 

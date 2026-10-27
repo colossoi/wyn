@@ -1,0 +1,4 @@
+module Two = import "../src/radix_sort"
+module Four = import "../src/four_bit"
+entry two(xs: []i32) []i32 = Two.radix_sort_int(32,i32.get_bit,xs)
+entry four(xs: []i32) []i32 = Four.radix_sort_int(32,i32.get_bit,xs)

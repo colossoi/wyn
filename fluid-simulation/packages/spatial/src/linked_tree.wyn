@@ -49,8 +49,8 @@ def build<[m],[k]>(corners: [m]u32, offsets: [m]i32, slots: [k]i32, world_size: 
     let level = divergence/3 in
     (internal_index(corners[i],level,i),placeholder(corners[i],level)),leaf_slots) in
   let unsorted = scatter(initial,map(|(i,_)| i,internal),map(|(_,key)| @[key,4294967295u32],internal)) in
-  -- Sort all 32 bits so the all-ones padding follows valid placeholder keys.
-  let ordered = Sort.radix_sort(unsorted[0..count],iota(count)) in
+  -- Sort all 32 bits of the live placeholder keys.
+  let ordered = Sort.FourBit.radix_sort(32,|i,p| u32.get_bit(i,p.x),unsorted[0..count]) in
   let keys = map(|node| node.x,ordered) in
   let children = map(|i|
     if i >= count || high_bit(keys[i])/3 >= 10 then 0i32 else

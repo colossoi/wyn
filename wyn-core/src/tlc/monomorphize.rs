@@ -40,7 +40,6 @@ pub type TypesSpecialized =
 pub fn specialize_types(
     mut program: super::stage::PartialEvaled,
 ) -> Result<TypesSpecialized, CompilerError> {
-    super::specialize::specialize_intrinsics(&mut program);
     program.defs = Monomorphizer::new(&mut program.symbols, program.defs, &mut program.term_ids, false)
         .monomorphize()?;
     program.assert_flat_apps();
@@ -48,8 +47,7 @@ pub fn specialize_types(
 }
 
 /// Finish representation and buffer specialization after physical interfaces are known.
-pub fn monomorphize(mut program: BuffersPinned) -> std::result::Result<Monomorphized, CompilerError> {
-    super::specialize::specialize_intrinsics(&mut program);
+pub fn monomorphize(program: BuffersPinned) -> std::result::Result<Monomorphized, CompilerError> {
     let Program {
         defs,
         mut symbols,
@@ -74,6 +72,7 @@ pub fn monomorphize(mut program: BuffersPinned) -> std::result::Result<Monomorph
         .collect();
     let program = Program::from_parts(defs, symbols, term_ids, global_context);
     program.assert_flat_apps();
+    super::inline::assert_array_work_helpers_inlined(&program);
     Ok(program)
 }
 
@@ -479,7 +478,7 @@ impl<E: Clone + Debug> TermRewriter<Empty, Empty> for Monomorphizer<'_, '_, E> {
                     RewriteDecision::Unchanged
                 }
             }
-            _ => RewriteDecision::Unchanged,
+            _ => super::specialize::specialize_intrinsic(term, self.term_ids),
         }
     }
 }

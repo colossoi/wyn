@@ -1,0 +1,6 @@
+-- Failure: repeated loop expansions reuse the first iteration's scalar values,
+-- or fixed-array scan copies lose elements. Both outputs must match the CPU reference.
+entry main() ([2]i32, [3][4]i32) =
+  (map(|x| loop acc=x for i<4 do acc*3+i, [2i32,3i32]),
+   scan(|a,b| map2((+),a,b), replicate(4,0i32),
+     map(|i| map(|j| i*4+j,iota(4)),iota(3))))

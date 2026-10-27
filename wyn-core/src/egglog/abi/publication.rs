@@ -619,8 +619,10 @@ fn publish_loops(
         };
         let context = crate::egglog::query::Query(&compiler.program.graph)
             .required("ExprContextForSource", (form[0],))?;
-        let count = host::expression(compiler.program, context, form[0])
-            .map_err(|error| error.required("loop count"))?;
+        let count = host::published_expression(compiler.program, context, form[0], &|resource| {
+            sizes::published_read(compiler, resource)
+        })
+        .map_err(|error| error.required("loop count"))?;
         let slot = |value: Option<Value>| -> Result<ScalarSource, OptimizeError> {
             let Some(backing) =
                 value.and_then(|v| compiler.facts.value_ref(v)).and_then(|v| compiler.facts.backing(v))

@@ -9,6 +9,18 @@ use wyn_module_graph::{
 };
 
 #[test]
+fn aliased_module_counted_loops_have_distinct_binders() {
+    crate::compile_thru_tlc(
+        "module A = {
+            def sum(n: i32) i32 = loop acc = 0 for i < n do acc + i
+        }
+        module B = A
+        entry main(n: i32) i32 = A.sum(n) + B.sum(n)",
+    )
+    .expect("both module copies should retain their loop index types and bindings");
+}
+
+#[test]
 fn source_package_identity_reaches_typed_and_tlc_definitions() {
     let root_identity = PackageIdentity::new("test/root", "v0.0.0").expect("valid root identity");
     let dependency_identity =
@@ -52,7 +64,7 @@ fn source_package_identity_reaches_typed_and_tlc_definitions() {
         .expect("module graph should load");
     let program = resolve_imports::resolve_imports(modules).expect("imports should resolve");
     let program = elaborate_modules::elaborate_modules(program).expect("modules should elaborate");
-    let program = name_resolution::resolve_names(program);
+    let program = name_resolution::qualify_module_accesses(program);
     let program = resolve_resources::resolve_resources(program).expect("resources should resolve");
     let program = ast_const_fold::fold_constants(program);
     let program = resolve_placeholders::resolve_type_placeholders(program);
@@ -243,7 +255,7 @@ fn dependency_local_aliases_have_independent_semantic_namespaces() {
         .expect("module graph should load");
     let program = resolve_imports::resolve_imports(modules).expect("imports should resolve");
     let program = elaborate_modules::elaborate_modules(program).expect("modules should elaborate");
-    let program = name_resolution::resolve_names(program);
+    let program = name_resolution::qualify_module_accesses(program);
     let program = resolve_resources::resolve_resources(program).expect("resources should resolve");
     let program = ast_const_fold::fold_constants(program);
     let program = resolve_placeholders::resolve_type_placeholders(program);

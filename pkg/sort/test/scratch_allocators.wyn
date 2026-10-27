@@ -1,0 +1,8 @@
+-- Expected: two reversed arrays, the unchanged input, and zero for the empty result.
+-- Both public allocators must create independent storage without initialization.
+entry main() ([5]i32,[5]i32,[5]i32,i32) =
+  let xs=[1,2,3,4,5] in
+  let output: []i32 = scratch(5) in
+  let empty = scatter(scratch(0),iota(0),iota(0)) in
+  (scatter(duplicate_scratch(xs),[4,3,2,1,0],xs),
+   scatter(output,[4,3,2,1,0],xs),xs,length(empty))

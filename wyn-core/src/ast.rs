@@ -158,15 +158,11 @@ where
 /// resource resolution changes only that localized part of the tree.
 pub trait BindingName: Clone + std::fmt::Debug + PartialEq {
     fn source_name(&self) -> &str;
-    fn symbol(&self) -> Option<SymbolId>;
 }
 
 impl BindingName for String {
     fn source_name(&self) -> &str {
         self
-    }
-    fn symbol(&self) -> Option<SymbolId> {
-        None
     }
 }
 
@@ -197,9 +193,6 @@ pub struct ResolvedBinding {
 impl BindingName for ResolvedBinding {
     fn source_name(&self) -> &str {
         &self.source
-    }
-    fn symbol(&self) -> Option<SymbolId> {
-        Some(self.symbol)
     }
 }
 

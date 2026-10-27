@@ -1,5 +1,5 @@
 use super::super::query::Query;
-use super::super::{from_tlc, fuse, optimize, place, schedule, to_ssa};
+use super::super::{finish_for_test, from_tlc, fuse, optimize_for_test, place, schedule};
 use crate::{compile_thru_tlc, CodegenTarget, PipelineTopologyPolicy};
 use egglog_engine::{
     sort::{SetContainer, VecContainer, S},
@@ -34,39 +34,124 @@ fn operations(graph: &EGraph, kind: &str) -> Vec<Value> {
 }
 
 #[test]
-fn incomplete_descriptors_fail_before_ssa_emission() {
-    let tlc = compile_thru_tlc(include_str!(
-        "../../../testfiles/regressions/triangulation_runtime_array_branch.wyn"
-    ))
-    .unwrap();
-    for (missing, expected) in [
-        ("ArrayView", "no complete descriptor"),
-        ("ArrayStorage", "array read disagrees with planned storage"),
-        ("SourceType", "descriptor scalar has no type"),
-        ("ExprContextOwner", "descriptor scalar has no lexical context"),
-        ("SourceBranch", "context field has no control-flow binder"),
+fn scan_output_can_capture_a_fused_total() {
+    planned(
+        "entry main(xs: [257]i32) [257]i32 =
+         let prefix = scan((+), 0, xs) in
+         let total = reduce((+), 0, xs) in
+         map(|x| x + total, prefix)",
+        |graph| {
+            let query = Query(graph);
+            let scan = operations(graph, "scan")[0];
+            let reduce = operations(graph, "reduce")[0];
+            let plan = query.required("SelectedPlan", (scan,)).unwrap();
+            assert_eq!(plan, query.required("SelectedPlan", (reduce,)).unwrap());
+            let owner = query.required("Owner", (plan,)).unwrap();
+            let total = query.constructor("Result", (owner, 0i64)).unwrap().unwrap();
+            for phase in ["chunks", "combine", "offsets"] {
+                let stage = query.constructor("Stage", (owner, phase)).unwrap().unwrap();
+                assert_eq!(
+                    query.contains("Needs", (stage, total)).unwrap(),
+                    phase == "offsets"
+                );
+                assert_eq!(
+                    query.contains("Produces", (stage, total)).unwrap(),
+                    phase == "combine"
+                );
+            }
+            let mut phases = 0;
+            query
+                .for_each("Phase", |_| {
+                    phases += 1;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(phases, 3);
+        },
+    );
+}
+
+#[test]
+fn radix_step_has_three_phases() {
+    let source = format!(
+        "{}\n entry main(xs: []i32) []i32 = radix_sort_step(xs, |i:i32,x:i32| (x >> i) & 1, 0)",
+        include_str!("../../../pkg/sort/src/radix_sort.wyn")
+    );
+    planned(&source, |graph| {
+        let query = Query(graph);
+        let mut phases = Vec::new();
+        query
+            .for_each("Phase", |row| {
+                let stage = query.enode("Stage", row[0])?.unwrap();
+                let info = query.record("SourceOperation", "OperationInfo", (stage[0],))?.unwrap();
+                phases.push((
+                    graph.value_to_base::<S>(stage[1]).to_string(),
+                    graph.value_to_base::<S>(info[1]).to_string(),
+                ));
+                Ok(())
+            })
+            .unwrap();
+        phases.sort();
+        assert_eq!(
+            phases,
+            vec![
+                ("chunks".into(), "scatter".into()),
+                ("combine".into(), "scatter".into()),
+                ("offsets".into(), "scatter".into())
+            ]
+        );
+    });
+}
+
+#[test]
+fn four_bit_radix_step_has_three_phases() {
+    let source = format!(
+        "{}\n entry main(xs: []vec2u32) []vec2u32 = radix_sort_step(xs, |i,p| u32.get_bit(i,p.x), 0)",
+        include_str!("../../../pkg/sort/src/four_bit.wyn")
+    );
+    planned(&source, |graph| {
+        let query = Query(graph);
+        let mut phases = Vec::new();
+        query
+            .for_each("Phase", |row| {
+                let stage = query.enode("Stage", row[0])?.unwrap();
+                let info = query.record("SourceOperation", "OperationInfo", (stage[0],))?.unwrap();
+                phases.push((
+                    graph.value_to_base::<S>(stage[1]).to_string(),
+                    graph.value_to_base::<S>(info[1]).to_string(),
+                ));
+                Ok(())
+            })
+            .unwrap();
+        phases.sort();
+        assert_eq!(
+            phases,
+            vec![
+                ("chunks".into(), "scatter".into()),
+                ("combine".into(), "scatter".into()),
+                ("offsets".into(), "scatter".into())
+            ]
+        );
+    });
+}
+
+#[test]
+fn scan_input_cannot_capture_a_fused_total() {
+    for source in [
+        "entry main(xs:[]i32) []i32 = let t=reduce((+),0,xs) in scan((+),0,map(|x|x+t,xs))",
+        "entry main(xs:[]i32) []i32 = let t=reduce((+),0,xs) in scan((+),t,xs)",
+        "entry main(xs:[]i32) []i32 = let t=reduce((+),0,xs) in scan(|a,b|a+b+t,0,xs)",
     ] {
-        let mut program = optimize(
-            schedule(
-                place(
-                    fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                    PipelineTopologyPolicy::AllowGenerated,
-                )
-                .unwrap(),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let query = Query(&program.graph);
-        let output = query.row("ReturnArray", |_| true).unwrap().unwrap()[1];
-        let view = query.record("ArrayView", "ViewInfo", (output,)).unwrap().unwrap();
-        let scalar = query.enode("Scalar", view[2]).unwrap().unwrap()[0];
-        let value =
-            if matches!(missing, "ArrayView" | "ArrayStorage" | "SourceBranch") { output } else { scalar };
-        program.graph.update(|mut sink| sink.remove(missing, (value,))).unwrap();
-        let error =
-            to_ssa(program, CodegenTarget::Wgsl).err().expect("invalid descriptor accepted").to_string();
-        assert!(error.contains(expected), "{error}");
+        planned(source, |graph| {
+            let query = Query(graph);
+            let scan = operations(graph, "scan")[0];
+            let reduce = operations(graph, "reduce")[0];
+            assert_ne!(
+                query.required("SelectedPlan", (scan,)).unwrap(),
+                query.required("SelectedPlan", (reduce,)).unwrap(),
+                "{source}"
+            );
+        });
     }
 }
 
@@ -358,7 +443,7 @@ fn indexed_phase_domains_preserve_validation() {
         ("ambiguous", "ambiguous PhaseDomain"),
         ("zero-width", "stage width must be positive"),
     ] {
-        let mut program = optimize(
+        let mut program = optimize_for_test(
             schedule(
                 place(
                     fuse(from_tlc(&tlc).unwrap()).unwrap(),
@@ -382,7 +467,7 @@ fn indexed_phase_domains_preserve_validation() {
                 })
                 .unwrap();
         }
-        let Err(error) = to_ssa(program, CodegenTarget::Wgsl) else {
+        let Err(error) = finish_for_test(program, CodegenTarget::Wgsl) else {
             panic!("invalid {mode} phase domain was accepted");
         };
         assert!(error.to_string().contains(expected), "{mode}: {error}");
@@ -392,7 +477,7 @@ fn indexed_phase_domains_preserve_validation() {
 #[test]
 fn collective_emission_requires_the_planned_group_count() {
     let tlc = compile_thru_tlc("entry main(xs:[]i32) i32=reduce((+),0,xs)").unwrap();
-    let mut program = optimize(
+    let mut program = optimize_for_test(
         schedule(
             place(
                 fuse(from_tlc(&tlc).unwrap()).unwrap(),
@@ -404,7 +489,7 @@ fn collective_emission_requires_the_planned_group_count() {
     )
     .unwrap();
     program.graph.clear_function("CollectiveGroups").unwrap();
-    let Err(error) = to_ssa(program, CodegenTarget::Wgsl) else {
+    let Err(error) = finish_for_test(program, CodegenTarget::Wgsl) else {
         panic!("emission must not reconstruct a missing group count from the grid");
     };
     assert!(
@@ -451,7 +536,11 @@ fn accumulator_state_order_is_read_from_the_plan() {
             Ok(())
         })
         .unwrap();
-    let ssa = to_ssa(optimize(schedule(program).unwrap()).unwrap(), CodegenTarget::Wgsl).unwrap();
+    let ssa = finish_for_test(
+        optimize_for_test(schedule(program).unwrap()).unwrap(),
+        CodegenTarget::Wgsl,
+    )
+    .unwrap();
     let wgsl = crate::lower_ssa_to_wgsl(ssa).unwrap();
     let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
     naga::valid::Validator::new(
@@ -659,7 +748,7 @@ fn map_and_bucket_emission_require_selected_axes_not_source_domains() {
     ] {
         let tlc = compile_thru_tlc(source).unwrap();
         let planned = || {
-            optimize(
+            optimize_for_test(
                 schedule(
                     place(
                         fuse(from_tlc(&tlc).unwrap()).unwrap(),
@@ -675,10 +764,10 @@ fn map_and_bucket_emission_require_selected_axes_not_source_domains() {
         for table in ["SourceDomainAxis", "SourceDomainRank", "PlanDomain"] {
             selected_only.graph.clear_function(table).unwrap();
         }
-        to_ssa(selected_only, CodegenTarget::Wgsl).unwrap();
+        finish_for_test(selected_only, CodegenTarget::Wgsl).unwrap();
         let mut program = planned();
         program.graph.clear_function("IterationAxis").unwrap();
-        let Err(error) = to_ssa(program, CodegenTarget::Wgsl) else {
+        let Err(error) = finish_for_test(program, CodegenTarget::Wgsl) else {
             panic!("a missing dimension was silently accepted");
         };
         assert!(
@@ -716,7 +805,7 @@ fn rectangular_maps_expand_launch_without_expanding_row_capacity() {
         assert_eq!(flattened, 1);
     });
     let tlc = compile_thru_tlc(source).unwrap();
-    let program = optimize(
+    let program = optimize_for_test(
         schedule(
             place(
                 fuse(from_tlc(&tlc).unwrap()).unwrap(),
@@ -727,7 +816,7 @@ fn rectangular_maps_expand_launch_without_expanding_row_capacity() {
         .unwrap(),
     )
     .unwrap();
-    to_ssa(program, CodegenTarget::Wgsl).unwrap();
+    finish_for_test(program, CodegenTarget::Wgsl).unwrap();
 }
 
 #[test]
@@ -757,9 +846,9 @@ fn rectangular_planning_and_emission_use_fused_structure() {
         .unwrap();
     assert!(ranks.contains(&2));
 
-    let mut program = optimize(schedule(program).unwrap()).unwrap();
+    let mut program = optimize_for_test(schedule(program).unwrap()).unwrap();
     program.graph.clear_function("SourceOperation").unwrap();
-    to_ssa(program, CodegenTarget::Wgsl).unwrap();
+    finish_for_test(program, CodegenTarget::Wgsl).unwrap();
 }
 
 #[test]
@@ -1002,7 +1091,7 @@ fn selected_map_bindings_replace_callback_discovery() {
         ),
     ] {
         let tlc = compile_thru_tlc(source).unwrap();
-        let mut program = optimize(
+        let mut program = optimize_for_test(
             schedule(
                 place(
                     fuse(from_tlc(&tlc).unwrap()).unwrap(),
@@ -1075,7 +1164,7 @@ fn selected_map_bindings_replace_callback_discovery() {
                 Ok(())
             })
             .unwrap();
-        to_ssa(program, CodegenTarget::Wgsl).unwrap();
+        finish_for_test(program, CodegenTarget::Wgsl).unwrap();
     }
 }
 

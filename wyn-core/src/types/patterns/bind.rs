@@ -2,7 +2,6 @@
 //! `fresh_type_for_pattern` (used by lambda parameter inference) and
 //! `bind_pattern` (used by `let` and `match` arms).
 
-use super::refutability::is_irrefutable;
 use crate::ast::{Pattern, PatternKind, PatternLiteral};
 use crate::error::CompilerError;
 use crate::scope::IdentifierKind;
@@ -49,16 +48,7 @@ impl<'a> TypeChecker<'a> {
         expected_type: &Type,
         generalize: bool,
     ) -> Result<Type> {
-        let result = self.bind_pattern(pattern, expected_type, generalize)?;
-        let applied = expected_type.apply(&self.context);
-        if let Err(e) = is_irrefutable(pattern, &applied) {
-            bail_type_at!(
-                e.culprit,
-                "refutable pattern in irrefutable position: {}",
-                e.reason
-            );
-        }
-        Ok(result)
+        self.bind_pattern_inner(pattern, expected_type, generalize, true)
     }
 
     /// Bind a pattern at the given type, adding the bound names to the
@@ -69,6 +59,16 @@ impl<'a> TypeChecker<'a> {
         pattern: &Pattern,
         expected_type: &Type,
         generalize: bool,
+    ) -> Result<Type> {
+        self.bind_pattern_inner(pattern, expected_type, generalize, false)
+    }
+
+    fn bind_pattern_inner(
+        &mut self,
+        pattern: &Pattern,
+        expected_type: &Type,
+        generalize: bool,
+        irrefutable: bool,
     ) -> Result<Type> {
         match &pattern.kind {
             PatternKind::Name(name) => {
@@ -104,7 +104,7 @@ impl<'a> TypeChecker<'a> {
                             );
                         }
                         for (sub_pattern, elem_type) in patterns.iter().zip(elem_types.iter()) {
-                            self.bind_pattern(sub_pattern, elem_type, generalize)?;
+                            self.bind_pattern_inner(sub_pattern, elem_type, generalize, irrefutable)?;
                         }
                         self.type_table.insert(
                             pattern.h.id,
@@ -137,7 +137,7 @@ impl<'a> TypeChecker<'a> {
                 })?;
                 let elem_ty = elem_tvar.apply(&self.context);
                 for sub_pattern in patterns {
-                    self.bind_pattern(sub_pattern, &elem_ty, generalize)?;
+                    self.bind_pattern_inner(sub_pattern, &elem_ty, generalize, irrefutable)?;
                 }
                 self.type_table.insert(
                     pattern.h.id,
@@ -156,13 +156,15 @@ impl<'a> TypeChecker<'a> {
                         self.format_type(expected_type)
                     )
                 })?;
-                let result = self.bind_pattern(inner_pattern, &normalized, generalize)?;
+                let result =
+                    self.bind_pattern_inner(inner_pattern, &normalized, generalize, irrefutable)?;
                 let resolved = normalized.apply(&self.context);
                 self.type_table.insert(pattern.h.id, TypeScheme::Monotype(resolved));
                 Ok(result)
             }
             PatternKind::Attributed(_, inner_pattern) => {
-                let result = self.bind_pattern(inner_pattern, expected_type, generalize)?;
+                let result =
+                    self.bind_pattern_inner(inner_pattern, expected_type, generalize, irrefutable)?;
                 self.type_table.insert(
                     pattern.h.id,
                     TypeScheme::Monotype(expected_type.apply(&self.context)),
@@ -210,8 +212,21 @@ impl<'a> TypeChecker<'a> {
                         args.len()
                     );
                 }
+                if irrefutable && variants.len() > 1 {
+                    let other_variants: Vec<_> = variants
+                        .iter()
+                        .filter(|(variant, _)| variant != name)
+                        .map(|(variant, _)| format!("#{variant}"))
+                        .collect();
+                    bail_type_at!(
+                        pattern.h.span,
+                        "refutable pattern in irrefutable position: constructor `#{}` doesn't cover other variants: {} — use `match` instead",
+                        name,
+                        other_variants.join(", ")
+                    );
+                }
                 for (sub_pattern, payload_ty) in args.iter().zip(payload_types.iter()) {
-                    self.bind_pattern(sub_pattern, payload_ty, generalize)?;
+                    self.bind_pattern_inner(sub_pattern, payload_ty, generalize, irrefutable)?;
                 }
                 self.type_table.insert(
                     pattern.h.id,
@@ -266,6 +281,12 @@ impl<'a> TypeChecker<'a> {
                         inferred
                     }
                 };
+                if irrefutable {
+                    bail_type_at!(
+                        pattern.h.span,
+                        "refutable pattern in irrefutable position: literal patterns are refutable — use `match` to dispatch on values"
+                    );
+                }
                 self.type_table.insert(pattern.h.id, TypeScheme::Monotype(lit_ty.apply(&self.context)));
                 Ok(lit_ty)
             }
@@ -280,3 +301,7 @@ impl<'a> TypeChecker<'a> {
 #[cfg(test)]
 #[path = "bind_tests.rs"]
 mod bind_tests;
+
+#[cfg(test)]
+#[path = "refutability_tests.rs"]
+mod refutability_tests;

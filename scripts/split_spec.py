@@ -28,7 +28,7 @@ def slug(title: str) -> str:
 def main() -> None:
     if not SPEC.exists():
         sys.exit(f"missing {SPEC}")
-    lines = SPEC.read_text().splitlines()
+    lines = SPEC.read_text(encoding="utf-8").splitlines()
 
     h2_idx = [i for i, ln in enumerate(lines) if re.match(r"^## ", ln)]
     if not h2_idx:
@@ -57,7 +57,7 @@ def main() -> None:
     summary = ["# Summary", ""]
     for i, (title, sl, body) in enumerate(chapters):
         fname = f"{sl}.md"
-        (OUT / fname).write_text(body)
+        (OUT / fname).write_text(body, encoding="utf-8")
         if i == 0:
             # Prefix chapter — no bullet, mdBook renders before numbered list.
             summary.append(f"[{title}]({fname})")
@@ -65,10 +65,10 @@ def main() -> None:
         else:
             summary.append(f"- [{title}]({fname})")
     summary.append("")
-    (OUT / "SUMMARY.md").write_text("\n".join(summary))
+    (OUT / "SUMMARY.md").write_text("\n".join(summary), encoding="utf-8")
 
     rel = OUT.relative_to(REPO)
-    print(f"wrote {len(chapters)} chapters → {rel}/")
+    print(f"wrote {len(chapters)} chapters to {rel}/")
 
 
 if __name__ == "__main__":

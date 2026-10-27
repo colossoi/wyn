@@ -1,0 +1,50 @@
+-- Stable radix sorting with sixteen bins per pass. Elements may have any type.
+-- get_bit must return 0 or 1; bits are numbered from least significant to most.
+def radix_sort_step<[n], T>(xs: [n]T, get_bit: i32 -> T -> i32, digit_n: i32) [n]T =
+  let bins = map(|x| get_bit(digit_n,x) + 2*get_bit(digit_n+1,x)
+    + 4*get_bit(digit_n+2,x) + 8*get_bit(digit_n+3,x),xs) in
+  let flags = map(|bin| map(|b| if b == bin then 1i32 else 0i32,iota(16)),bins) in
+  let ranks = scan(|a,b| map(|(x,y)| x+y,zip(a,b)),replicate(16,0i32),flags) in
+  let totals = reduce_comm(|a,b| map(|(x,y)| x+y,zip(a,b)),replicate(16,0i32),flags) in
+  let destinations = map2(|bin,rank|
+    let start = loop start=0i32 for b<bin do start+totals[b] in
+    start+rank[bin]-1,bins,ranks) in
+  scatter(duplicate_scratch(xs),destinations,xs)
+
+-- Sort by exactly num_bits low bits. Empty arrays and nonpositive bit counts
+-- are unchanged; a partial final digit never calls get_bit beyond num_bits.
+def radix_sort<[n], T>(num_bits: i32, get_bit: i32 -> T -> i32, xs: [n]T) [n]T =
+  let passes = if length(xs) == 0 || num_bits <= 0 then 0 else
+    num_bits / 4 + i32.bool(num_bits % 4 != 0) in
+  let bit = |i,x| if i < num_bits then get_bit(i,x) else 0i32 in
+  loop xs=xs for pass<passes do radix_sort_step(xs,bit,pass*4)
+
+-- Flip the sign bit to obtain signed integer order.
+def radix_sort_int<[n], T>(num_bits: i32, get_bit: i32 -> T -> i32, xs: [n]T) [n]T =
+  radix_sort(num_bits, |i,x| get_bit(i,x) ^ i32.bool(i == num_bits-1), xs)
+
+-- IEEE bit-pattern order, including distinct signed zeros and NaN encodings.
+def radix_sort_float<[n], T>(num_bits: i32, get_bit: i32 -> T -> i32, xs: [n]T) [n]T =
+  radix_sort(num_bits, |i,x|
+    get_bit(i,x) ^ i32.bool(get_bit(num_bits-1,x) == 1 || i == num_bits-1), xs)
+
+-- Evaluate each key once and sort its permutation, preserving equal-key order.
+def by_key_wrapper<[n], T, K>(
+    sorter: i32 -> (i32 -> (K,i32) -> i32) -> [n](K,i32) -> [n](K,i32),
+    key: T -> K, num_bits: i32, get_bit: i32 -> K -> i32, xs: [n]T
+  ) [n]T =
+  let keys = zip(map(key,xs),iota(length(xs))) in
+  let order = sorter(num_bits,|i,(k,_)| get_bit(i,k),keys) in
+  map(|(_,i:i32)| xs[i],order)
+
+def radix_sort_by_key<[n], T, K>(
+    key: T -> K, num_bits: i32, get_bit: i32 -> K -> i32, xs: [n]T
+  ) [n]T = by_key_wrapper(radix_sort,key,num_bits,get_bit,xs)
+
+def radix_sort_int_by_key<[n], T, K>(
+    key: T -> K, num_bits: i32, get_bit: i32 -> K -> i32, xs: [n]T
+  ) [n]T = by_key_wrapper(radix_sort_int,key,num_bits,get_bit,xs)
+
+def radix_sort_float_by_key<[n], T, K>(
+    key: T -> K, num_bits: i32, get_bit: i32 -> K -> i32, xs: [n]T
+  ) [n]T = by_key_wrapper(radix_sort_float,key,num_bits,get_bit,xs)

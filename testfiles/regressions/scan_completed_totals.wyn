@@ -1,0 +1,24 @@
+-- Output callbacks need the completed reduction, not the running total.
+def row<[n]>(xs: [n]i32) [n]i32 =
+  let prefix = scan((+), 0, xs) in
+  let total = reduce((+), 0, xs) in
+  map(|x| x + total, prefix)
+
+entry streamed() [513]i32 = row(map(|i| i + 1, iota(513)))
+
+entry nested() [2][513]i32 =
+  map(|j| row(map(|i| i + j + 1, iota(513))), iota(2))
+
+entry conditional() [2][17]i32 =
+  map(|j| if j == 0 then row(map(|i| i + 1, iota(17))) else copy(iota(17)), iota(2))
+
+entry cooperative() [2][513]i32 =
+  map(|j| loop xs = map(|i| i + j + 1, iota(513)) for k < 2 do row(xs), iota(2))
+
+entry local_scatter() [2][17]i32 =
+  map(|j|
+    let xs = map(|i| i + j, iota(17)) in
+    let ones = map(|_| 1, xs) in
+    let prefix = scan((+), 0, ones) in
+    let total = reduce((+), 0, ones) in
+    scatter((#[scratch] copy(xs)), map(|p| total - p, prefix), xs), iota(2))

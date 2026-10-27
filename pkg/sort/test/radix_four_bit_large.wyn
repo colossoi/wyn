@@ -1,7 +1,7 @@
 -- Regression: scan prefixes must carry across workgroups and preserve equal-key order.
 -- Expected ascending unsigned keys; for equal keys, payloads remain ascending.
 -- 513 elements cross two 256-lane scan boundaries; keys exercise all 32 bits.
-module Sort = import "../src/lib"
+module Sort = import "../src/four_bit"
 entry main() [513]vec2u32 =
   let pairs = map(|i| @[u32(i % 97) * 2654435761u32,u32(i)],iota(513)) in
-  Sort.radix_sort(pairs,iota(513))
+  Sort.radix_sort(32,|i,p| u32.get_bit(i,p.x),pairs)

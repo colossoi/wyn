@@ -53,6 +53,36 @@ fn runtime_array_joins_wait_for_producers_in_branch_arms() {
 }
 
 #[test]
+fn device_computed_trip_counts_are_published_before_the_loop() {
+    let program = compile(
+        "entry main(xs:[]i32) []i32 =
+        let n=reduce((+),0,xs) in
+        loop values=xs for i<n do map(|x|x+1,values)",
+    );
+    let whl = program.to_whl("device_count", ShaderFormat::Wgsl).unwrap();
+    assert!(whl.contains("gpu-read-scalar"), "{whl}");
+    assert_eq!(
+        program.entries[0].operations.iter().filter(|op| matches!(op, Operation::Loop { .. })).count(),
+        1
+    );
+}
+
+#[test]
+fn partial_radix_pass_counts_reach_host_backends() {
+    let source = format!(
+        "{}\nentry main(xs:[]i32) []i32 = radix_sort(5,i32.get_bit,xs)",
+        include_str!("../../pkg/sort/src/four_bit.wyn")
+    );
+    let program = compile(&source);
+    assert_eq!(
+        program.entries[0].operations.iter().filter(|op| matches!(op, Operation::Loop { .. })).count(),
+        1
+    );
+    program.to_rust_wgpu("partial_radix", ShaderFormat::Wgsl).unwrap();
+    program.to_whl("partial_radix", ShaderFormat::Wgsl).unwrap();
+}
+
+#[test]
 fn independent_work_and_successive_loops_reach_host_backends() {
     let source = "entry main(xs:[8]i32, ys:[8]i32, k:i32) ([8]i32,i32) =
         let first=loop values=xs for i<k do map(|x|x+i,values) in

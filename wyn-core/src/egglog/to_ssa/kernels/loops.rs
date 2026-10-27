@@ -29,8 +29,8 @@ pub(super) fn emit(
         let n = body.length(initial.clone())?;
         let (start, step) = invocation(body, phase_width)?;
         body.counted(start, n, step, vec![], |body, index, _| {
-            let value = body.index(initial, index.clone())?;
-            body.store(output, index, value)?;
+            let value = body.index(initial.clone(), index.clone())?;
+            body.store(output.clone(), index, value)?;
             Ok(vec![])
         })?;
     }

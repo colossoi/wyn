@@ -32,7 +32,7 @@ orbit camera. Starts running; pass `--paused` to inspect the initial state. Pres
 - `packages/renderer`: culled, compacted sphere impostors using indexed
   indirect instancing, sphere depth, speed colors, and `wyn/gfx` camera math.
 - `packages/spatial`: Hilbert keys, cornerstone octree, and neighbor lists.
-- `../pkg/sort`: stable 30-bit radix sorting shared by spatial preparation.
+- `../pkg/sort`: stable four-bit radix sorting (`Sort.FourBit`) for particles and live tree nodes.
 - `src/main.wyn`: frame orchestration and position/velocity feedback.
 
 The solver takes equal-length position/velocity arrays and an index array

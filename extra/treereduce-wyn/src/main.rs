@@ -1472,9 +1472,9 @@ fn collect_list_deletions(node: Node<'_>, source: &[u8], candidates: &mut Vec<Ca
             let mut cursor = node.walk();
             (
                 node.named_children(&mut cursor)
-                    .filter(|child| matches!(child.kind(), "size_param" | "type_variable"))
+                    .filter(|child| matches!(child.kind(), "size_param" | "type_parameter"))
                     .collect(),
-                false,
+                true,
                 false,
             )
         }
@@ -1493,7 +1493,7 @@ fn collect_list_deletions(node: Node<'_>, source: &[u8], candidates: &mut Vec<Ca
         "record_expression" => (named_children_of_kind(node, "record_field"), true, false),
         "record_pattern" => (named_children_of_kind(node, "record_field_pattern"), true, false),
         "record_type" => (named_children_of_kind(node, "record_field_type"), true, false),
-        "tuple_pattern" | "tuple_type" => {
+        "tuple_pattern" | "tuple_type" | "entry_return_types" => {
             let mut cursor = node.walk();
             (node.named_children(&mut cursor).collect(), true, true)
         }

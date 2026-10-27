@@ -42,9 +42,9 @@ pub(super) fn compact(
         one.clone(),
         vec![zero.clone()],
         |body, tile, state| {
-            let base = body.binary(BinaryOperator::Multiply, tile, width)?;
+            let base = body.binary(BinaryOperator::Multiply, tile, width.clone())?;
             let index = body.binary(BinaryOperator::Add, base, lane.clone())?;
-            let valid = body.binary(BinaryOperator::Less, index.clone(), n)?;
+            let valid = body.binary(BinaryOperator::Less, index.clone(), n.clone())?;
             // Carry the evaluated input with its flag. Only valid lanes evaluate
             // the producer; only selected lanes consume the retained element.
             let retained = body.branch_with_type(

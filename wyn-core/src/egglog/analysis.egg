@@ -1,6 +1,17 @@
 ; Source summaries settle before boundary-sensitive dependency queries run.
 (ruleset source-summary)
 (ruleset source-dependencies)
+; Keep tiny local traversals explicit so array indices become constants.
+; Larger traversals retain loops to bound generated code size.
+(relation ExpandLocalTripCount (i64))
+(ExpandLocalTripCount 0)
+(rule ((ExpandLocalTripCount n) (< n 16))
+      ((ExpandLocalTripCount (+ n 1))) :ruleset source-summary)
+; Collective lanes access the same component together: store those components
+; in separate columns instead of striding across an array-valued lane record.
+(relation ColumnarCollectiveExtent (i64))
+(rule ((ExpandLocalTripCount n) (> n 0))
+      ((ColumnarCollectiveExtent n)) :ruleset source-summary)
 ; Source identities are queried in either direction during scalar admission and
 ; final readout. Populate the shared inverse indexes with the source summaries.
 (rule ((= value (SourceParameter region index)))
@@ -204,3 +215,13 @@
 (function SourceOutputsForEntry (i64) SourceOutputIds :merge (set-union old new))
 (rule ((= (SourceOutput id) (OutputInfo entry value ty array)))
       ((set (SourceOutputsForEntry entry) (set-of id))) :ruleset source-summary)
+
+
+; Literal-valued helpers can supply constant array seeds without a GPU producer.
+(function SourceConstantInteger (SourceValue) i64 :no-merge)
+(rule ((= n (SourceInteger32 value))) ((set (SourceConstantInteger value) n)) :ruleset source-summary)
+(rule ((= original (SourceAlias value)) (= n (SourceConstantInteger original)))
+      ((set (SourceConstantInteger value) n)) :ruleset source-summary)
+(rule ((= value (SourceInvocation caller function args)) (= callee (SourceCallable function))
+       (= result (SourceResult callee)) (= n (SourceConstantInteger result)))
+      ((set (SourceConstantInteger value) n)) :ruleset source-summary)

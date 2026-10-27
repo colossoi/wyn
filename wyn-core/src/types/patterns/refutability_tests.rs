@@ -1,264 +1,52 @@
-//! Tests for `is_irrefutable`.
+//! Refutability is checked while binding patterns, including nested patterns.
 
-use super::*;
-use crate::ast;
-use crate::lexer;
-use crate::types::{sum, tuple, Type, TypeName};
+use crate::compile_thru_frontend;
 
-fn dummy_span() -> ast::Span {
-    ast::Span::generated()
-}
-
-fn pat(kind: ast::PatternKind, id: u32) -> ast::Pattern {
-    ast::Pattern {
-        h: ast::Header {
-            id: ast::NodeId(id),
-            span: dummy_span(),
-        },
-        kind,
+#[test]
+fn accepts_irrefutable_patterns() {
+    for source in [
+        "def f(n: i32) i32 = let x = n in x",
+        "def f(n: i32) i32 = let _ = n in 0",
+        "def f(n: i32) i32 = let x: i32 = n in x",
+        "def f(p: (i32, i32)) i32 = let (x, y) = p in x + y",
+        "def f(p: (i32, (i32, i32))) i32 = let (x, (y, z)) = p in x + y + z",
+        "def f(v: vec2i32) i32 = let @[x, y] = v in x + y",
+        "def f(u: ()) i32 = let () = u in 0",
+        "def f(p: #boxed(i32)) i32 = let #boxed(x) = p in x",
+        "def f(p: #boxed(#inner(i32))) i32 = let #boxed(#inner(_)) = p in 0",
+    ] {
+        assert!(compile_thru_frontend(source).is_ok(), "rejected: {source}");
     }
 }
 
-fn i32_ty() -> Type {
-    Type::Constructed(TypeName::Int(32), vec![])
-}
-
-fn bool_ty() -> Type {
-    Type::Constructed(TypeName::Bool, vec![])
+#[test]
+fn rejects_nested_refutable_patterns() {
+    for (source, reason) in [
+        ("def f(n: i32) i32 = let 0 = n in 1", "literal"),
+        ("def f(n: i32) i32 = let 0: i32 = n in 1", "literal"),
+        ("def f(p: (i32, i32)) i32 = let (0, x) = p in x", "literal"),
+        ("def f(p: (i32, i32)) i32 = let (x, 0) = p in x", "literal"),
+        ("def f(v: vec2i32) i32 = let @[x, 0] = v in x", "literal"),
+        ("def f(p: #a | #b) i32 = let #a = p in 0", "#b"),
+        ("def f(p: #boxed(#a | #b)) i32 = let #boxed(#a) = p in 0", "#b"),
+        ("def f(p: #boxed(i32)) i32 = let #boxed(0) = p in 0", "literal"),
+        ("def f(p: #a | #b | #c) i32 = let #a = p in 0", "#c"),
+    ] {
+        let error = compile_thru_frontend(source).expect_err(source).to_string();
+        assert!(
+            error.contains("refutable") && error.contains(reason),
+            "{source}: {error}"
+        );
+    }
 }
 
 #[test]
-fn name_is_irrefutable() {
-    let p = pat(ast::PatternKind::Name("x".to_string()), 0);
-    assert!(is_irrefutable(&p, &i32_ty()).is_ok());
-}
-
-#[test]
-fn wildcard_is_irrefutable() {
-    let p = pat(ast::PatternKind::Wildcard, 0);
-    assert!(is_irrefutable(&p, &i32_ty()).is_ok());
-}
-
-#[test]
-fn literal_is_refutable() {
-    let p = pat(
-        ast::PatternKind::Literal(ast::PatternLiteral::Int(lexer::IntString("0".to_string()))),
-        0,
-    );
-    assert!(is_irrefutable(&p, &i32_ty()).is_err());
-}
-
-#[test]
-fn tuple_of_names_is_irrefutable() {
-    let ty = tuple(vec![i32_ty(), bool_ty()]);
-    let p = pat(
-        ast::PatternKind::Tuple(vec![
-            pat(ast::PatternKind::Name("x".to_string()), 1),
-            pat(ast::PatternKind::Name("y".to_string()), 2),
-        ]),
-        0,
-    );
-    assert!(is_irrefutable(&p, &ty).is_ok());
-}
-
-#[test]
-fn tuple_with_inner_literal_is_refutable() {
-    let ty = tuple(vec![i32_ty(), bool_ty()]);
-    let p = pat(
-        ast::PatternKind::Tuple(vec![
-            pat(ast::PatternKind::Name("x".to_string()), 1),
-            pat(ast::PatternKind::Literal(ast::PatternLiteral::Bool(true)), 2),
-        ]),
-        0,
-    );
-    assert!(is_irrefutable(&p, &ty).is_err());
-}
-
-#[test]
-fn single_variant_constructor_is_irrefutable() {
-    let ty = sum(vec![("only".to_string(), vec![i32_ty()])]);
-    let p = pat(
-        ast::PatternKind::Constructor(
-            "only".to_string(),
-            vec![pat(ast::PatternKind::Name("x".to_string()), 1)],
-        ),
-        0,
-    );
-    assert!(is_irrefutable(&p, &ty).is_ok());
-}
-
-#[test]
-fn multi_variant_constructor_is_refutable() {
-    let ty = sum(vec![("a".to_string(), vec![]), ("b".to_string(), vec![])]);
-    let p = pat(ast::PatternKind::Constructor("a".to_string(), vec![]), 0);
-    let err = is_irrefutable(&p, &ty).expect_err("expected refutable error");
-    assert!(
-        err.reason.contains("#b"),
-        "reason should mention missing variant #b: {}",
-        err.reason
-    );
-}
-
-#[test]
-fn single_variant_with_refutable_payload_is_refutable() {
-    // Single variant carrying multi-variant sub-sum: refutable because
-    // the sub-pattern fails to cover.
-    let inner = sum(vec![("p".to_string(), vec![]), ("q".to_string(), vec![])]);
-    let outer = sum(vec![("only".to_string(), vec![inner])]);
-    let p = pat(
-        ast::PatternKind::Constructor(
-            "only".to_string(),
-            vec![pat(ast::PatternKind::Constructor("p".to_string(), vec![]), 1)],
-        ),
-        0,
-    );
-    assert!(is_irrefutable(&p, &outer).is_err());
-}
-
-#[test]
-fn unit_against_unit_is_irrefutable() {
-    let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-    let p = pat(ast::PatternKind::Unit, 0);
-    assert!(is_irrefutable(&p, &unit_ty).is_ok());
-}
-
-// =========================================================================
-// Additional coverage
-// =========================================================================
-
-fn single_variant_with_payload(payload_ty: Type) -> Type {
-    sum(vec![("only".to_string(), vec![payload_ty])])
-}
-
-#[test]
-fn nested_single_variant_ctor_with_wild_payload_is_irrefutable() {
-    let ty = single_variant_with_payload(i32_ty());
-    let p = pat(
-        ast::PatternKind::Constructor("only".to_string(), vec![pat(ast::PatternKind::Wildcard, 1)]),
-        0,
-    );
-    assert!(is_irrefutable(&p, &ty).is_ok());
-}
-
-#[test]
-fn typed_wrapping_refutable_literal_is_refutable() {
-    let lit = pat(
-        ast::PatternKind::Literal(ast::PatternLiteral::Int(lexer::IntString("0".to_string()))),
-        1,
-    );
-    let typed = pat(
-        ast::PatternKind::Typed(
-            Box::new(lit),
-            ast::Type::Constructed(ast::TypeName::Int(32), vec![]),
-        ),
-        0,
-    );
-    assert!(is_irrefutable(&typed, &i32_ty()).is_err());
-}
-
-#[test]
-fn attributed_wrapping_irrefutable_name_is_irrefutable() {
-    let inner = pat(ast::PatternKind::Name("x".to_string()), 1);
-    let attributed = pat(ast::PatternKind::Attributed(vec![], Box::new(inner)), 0);
-    assert!(is_irrefutable(&attributed, &i32_ty()).is_ok());
-}
-
-#[test]
-fn tuple_with_refutable_first_element_is_refutable() {
-    let ty = tuple(vec![i32_ty(), bool_ty()]);
-    let lit = pat(
-        ast::PatternKind::Literal(ast::PatternLiteral::Int(lexer::IntString("0".to_string()))),
-        1,
-    );
-    let p = pat(
-        ast::PatternKind::Tuple(vec![lit, pat(ast::PatternKind::Name("y".to_string()), 2)]),
-        0,
-    );
-    let err = is_irrefutable(&p, &ty).expect_err("expected refutable");
-    assert!(err.reason.contains("literal"));
-}
-
-#[test]
-fn tuple_with_refutable_second_element_is_refutable() {
-    let ty = tuple(vec![i32_ty(), bool_ty()]);
-    let p = pat(
-        ast::PatternKind::Tuple(vec![
-            pat(ast::PatternKind::Wildcard, 1),
-            pat(ast::PatternKind::Literal(ast::PatternLiteral::Bool(true)), 2),
-        ]),
-        0,
-    );
-    assert!(is_irrefutable(&p, &ty).is_err());
-}
-
-#[test]
-fn nested_tuple_of_names_is_irrefutable() {
-    let ty = tuple(vec![tuple(vec![i32_ty(), i32_ty()]), bool_ty()]);
-    let p = pat(
-        ast::PatternKind::Tuple(vec![
-            pat(
-                ast::PatternKind::Tuple(vec![
-                    pat(ast::PatternKind::Name("a".to_string()), 2),
-                    pat(ast::PatternKind::Name("b".to_string()), 3),
-                ]),
-                1,
-            ),
-            pat(ast::PatternKind::Name("c".to_string()), 4),
-        ]),
-        0,
-    );
-    assert!(is_irrefutable(&p, &ty).is_ok());
-}
-
-#[test]
-fn nested_ctor_with_refutable_inner_in_single_variant_outer_is_refutable() {
-    let inner_sum = sum(vec![("p".to_string(), vec![]), ("q".to_string(), vec![])]);
-    let outer = sum(vec![("only".to_string(), vec![inner_sum])]);
-    let p = pat(
-        ast::PatternKind::Constructor(
-            "only".to_string(),
-            vec![pat(ast::PatternKind::Constructor("p".to_string(), vec![]), 1)],
-        ),
-        0,
-    );
-    let err = is_irrefutable(&p, &outer).expect_err("expected refutable");
-    assert!(
-        err.reason.contains("#q"),
-        "should mention missing #q: {}",
-        err.reason
-    );
-}
-
-#[test]
-fn constructor_pattern_against_non_sum_is_refutable_with_clear_reason() {
-    let p = pat(ast::PatternKind::Constructor("foo".to_string(), vec![]), 0);
-    let err = is_irrefutable(&p, &i32_ty()).expect_err("expected error");
-    assert!(err.reason.contains("non-sum"));
-}
-
-#[test]
-fn unit_pattern_against_non_unit_type_is_refutable() {
-    let p = pat(ast::PatternKind::Unit, 0);
-    assert!(is_irrefutable(&p, &i32_ty()).is_err());
-}
-
-#[test]
-fn multi_variant_ctor_witness_lists_other_variants() {
-    let ty = sum(vec![
-        ("a".to_string(), vec![]),
-        ("b".to_string(), vec![]),
-        ("c".to_string(), vec![]),
-    ]);
-    let p = pat(ast::PatternKind::Constructor("a".to_string(), vec![]), 0);
-    let err = is_irrefutable(&p, &ty).expect_err("expected refutable");
-    assert!(
-        err.reason.contains("#b"),
-        "reason should mention #b: {}",
-        err.reason
-    );
-    assert!(
-        err.reason.contains("#c"),
-        "reason should mention #c: {}",
-        err.reason
-    );
+fn rejects_incompatible_pattern_types_before_refutability() {
+    for source in [
+        "def f(n: i32) i32 = let () = n in 0",
+        "def f(n: i32) i32 = let #foo = n in 0",
+    ] {
+        let error = compile_thru_frontend(source).expect_err(source).to_string();
+        assert!(!error.contains("refutable"), "{source}: {error}");
+    }
 }

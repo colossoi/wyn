@@ -8,9 +8,9 @@ $wyn = if ($Compiler) { (Resolve-Path -LiteralPath $Compiler).Path } else { Join
 if (-not $env:WGPU_BACKEND) { $env:WGPU_BACKEND = 'vulkan' }
 & $wyn build -O --target wgsl --target-double rust-wgpu --max-warnings 0 (Join-Path $workspace 'pkg/sort/test/radix_gpu.wyn') -o (Join-Path $outDir 'radix.wgsl')
 if ($LASTEXITCODE -ne 0) { throw 'Radix compilation failed' }
-foreach ($fixture in @(@('local_tuple_collectives', 'tuples'), @('nested_tuple_loop_state', 'nested'))) {
+foreach ($fixture in @(@('local_tuple_collectives', 'tuples'), @('nested_tuple_loop_state', 'nested'), @('scan_completed_totals', 'completed'))) {
     & $wyn build -O --target wgsl --target-double rust-wgpu --max-warnings 0 (Join-Path $workspace "testfiles/regressions/$($fixture[0]).wyn") -o (Join-Path $outDir "$($fixture[1]).wgsl")
-    if ($LASTEXITCODE -ne 0) { throw "Tuple-loop compilation failed: $($fixture[0])" }
+    if ($LASTEXITCODE -ne 0) { throw "GPU fixture compilation failed: $($fixture[0])" }
 }
 Copy-Item -LiteralPath (Join-Path $workspace 'pkg/sort/test/radix_gpu.rs') -Destination (Join-Path $outDir 'lib.rs')
 @'

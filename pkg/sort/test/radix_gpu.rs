@@ -1,5 +1,7 @@
 // Copied beside the generated Rust/WGPU module by scripts/test_radix_gpu.ps1.
 #[allow(dead_code, non_snake_case, unused_imports, unused_variables, unused_mut)]
+mod completed;
+#[allow(dead_code, non_snake_case, unused_imports, unused_variables, unused_mut)]
 mod nested;
 #[allow(dead_code, non_snake_case, unused_imports, unused_variables, unused_mut)]
 mod radix;
@@ -9,7 +11,7 @@ mod tuples;
 #[cfg(test)]
 mod tests {
     use super::radix::{self, output::OutputResource, HostContext};
-    use super::{nested, tuples};
+    use super::{completed, nested, tuples};
     use wgpu::util::DeviceExt;
 
     fn input(device: &wgpu::Device, values: &[u32]) -> wgpu::Buffer {
@@ -49,6 +51,59 @@ mod tests {
         } else {
             bits ^ 0x8000_0000
         }
+    }
+
+    #[test]
+    fn scan_outputs_observe_completed_totals_in_each_execution_scope() {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_limits: adapter.limits(),
+            ..Default::default()
+        }))
+        .unwrap();
+        let mut context = completed::HostContext::new(&device).unwrap();
+        let row = |n: u32, start: u32| -> Vec<u32> {
+            let total = n * start + n * (n - 1) / 2;
+            (1..=n).map(|i| total + i * start + i * (i - 1) / 2).collect()
+        };
+        macro_rules! check {
+            ($entry:ident, $expected:expr) => {{
+                let result = completed::$entry(&mut context, &queue).unwrap();
+                let expected = $expected;
+                let completed::output::OutputResource::Buffer { buffer, .. } = &result.values[0].resource
+                else {
+                    panic!("array result");
+                };
+                assert_eq!(
+                    read(&device, &queue, buffer, expected.len()),
+                    expected,
+                    "{}",
+                    result.entry
+                );
+            }};
+        }
+        check!(host_streamed, row(513, 1));
+        check!(host_nested, [row(513, 1), row(513, 2)].concat());
+        check!(host_conditional, [row(17, 1), (0..17).collect()].concat());
+        let again = |xs: Vec<u32>| -> Vec<u32> {
+            let total: u32 = xs.iter().sum();
+            let mut prefix = 0;
+            xs.into_iter()
+                .map(|x| {
+                    prefix += x;
+                    prefix + total
+                })
+                .collect()
+        };
+        check!(
+            host_cooperative,
+            [again(row(513, 1)), again(row(513, 2))].concat()
+        );
+        check!(
+            host_local_scatter,
+            [(0..17).rev().collect::<Vec<_>>(), (1..18).rev().collect()].concat()
+        );
     }
 
     #[test]
@@ -210,7 +265,7 @@ mod tests {
         for n in [0, 7, 8, 9] {
             let values: Vec<_> = (0..n).rev().map(|x| x as u32).collect();
             let xs = input(&device, &values);
-            let result = radix::host_fixed(&mut context, &queue, &xs, &xs, &xs, &xs, &xs, &xs, &xs, &xs);
+            let result = radix::host_fixed(&mut context, &queue, &xs, &xs, &xs, &xs, &xs);
             if n == 8 {
                 let result = result.unwrap();
                 let OutputResource::Buffer { buffer, .. } = &result.values[0].resource else {

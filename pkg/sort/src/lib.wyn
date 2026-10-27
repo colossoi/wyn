@@ -1,14 +1,2 @@
--- Stable four-bit key/value radix sorting, matching upstream's 16 bins.
--- Counts and ranks are expressed as array scans; payloads retain stable order.
-def radix_digit<[n]>(pairs: [n]vec2u32, shift: u32) [n]vec2u32 =
-  let bins = map(|p| i32((p.x >> shift) & 15u32),pairs) in
-  let flags = map(|bin| map(|b| if b == bin then 1i32 else 0i32,iota(16)),bins) in
-  let ranks = scan(|a,b| map(|(x,y)| x+y,zip(a,b)),replicate(16,0i32),flags) in
-  let totals = if length(pairs) == 0 then replicate(16,0i32) else ranks[length(pairs)-1] in
-  let ends = scan((+),0i32,totals) in
-  let destinations = map(|i| let bin=bins[i] in
-    ends[bin]-totals[bin]+ranks[i][bin]-1,iota(length(pairs))) in
-  scatter((#[scratch] replicate(length(pairs),@[0u32,0u32])),destinations,pairs)
-
-def radix_sort<[n]>(pairs: [n]vec2u32, _ids: [n]i32) [n]vec2u32 =
-  loop pairs=pairs for pass<8 do radix_digit(pairs,u32(pass*4))
+import "radix_sort"
+module FourBit = import "four_bit"

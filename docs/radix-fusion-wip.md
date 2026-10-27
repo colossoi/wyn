@@ -2,7 +2,8 @@
 
 **Current checkpoint:** see [port fidelity and validation gaps](radix-port-fidelity-wip.md).
 The tuple-loop regressions are fixed and all six sorting APIs have WGSL GPU
-coverage. Numeric-width/backend parity and fusion equal to Futhark remain open.
+coverage. As of 2026-10-26, the compiler emits three dispatches per radix pass.
+Numeric-width/backend parity and performance comparisons remain open.
 Historical measurements below are not timings of the latest changes.
 
 This branch contains the Futhark radix port, a cooperative scan/reduction
@@ -30,9 +31,9 @@ and counts to Wyn's index range. Bucket labels now also use `i32` instead of
 Futhark's `i8`, as requested, for compatibility with WGSL and the normal Naga
 runtime. Their values remain 0-3. Key and payload types are unchanged.
 
-The package's existing `src/lib.wyn` remains its default library; this new module
-is imported directly by the existing
-[smoke probe](../pkg/sort/test/radix_futhark.wyn). Do not inline helpers by hand,
+The package exports `src/radix_sort.wyn` directly; the older unrolled
+`src/lib.wyn` implementation has been removed. The existing
+[smoke probe](../pkg/sort/test/radix_futhark.wyn) also imports this module. Do not inline helpers by hand,
 unroll the source loop, replace
 the scratch producer, or derive totals from the last scan element to bypass
 compiler limitations.
@@ -311,26 +312,57 @@ The local reproduction harness and logs are in `target/collective-scheduling`.
 ### Actual radix schedule
 
 The generated host program copies the initial input into carried storage once,
-then executes sixteen two-bit passes for nonempty i32 input. Each pass has five
+then executes sixteen two-bit passes for nonempty i32 input. Each pass has three
 GPU dispatches:
 
-1. Reduce per-group bucket totals.
-2. Scan per-group prefixes.
-3. Cooperatively combine the reduction partials.
-4. Cooperatively scan the prefix carries.
-5. Apply carries, compute destination indices, and scatter into the next buffer.
+1. Compute per-group prefixes and bucket totals together.
+2. Cooperatively combine the reduction partials and scan the prefix carries.
+3. Apply carries, read completed totals, compute destination indices, and scatter.
 
-Steps 1 and 2 precede their respective combine phases; the final scatter needs
-both results. The buffers are allocated before the host loop. The loop updates
+These phases execute in order. The buffers are allocated before the host loop. The loop updates
 its GPU-visible digit index and swaps current/next buffer references at the
 backedge. There are no CPU readbacks of bucket totals between passes.
 
-This matches the inspected Futhark OpenCL launch count of five per pass, with
-different work in those launches: Wyn uses a separate reduction-combine kernel
-and omits Futhark's totals-copy kernel. It does not implement the CUDA/HIP
+This is 48 body launches for a 32-bit sort, plus the initial carry copy.
+The shape-only scratch copy creates no dispatch. This is fewer launches than
+the recorded Futhark schedules above, but is not a timing comparison.
+It does not implement the CUDA/HIP
 single-pass lookback scan. Full-length internal prefix storage remains:
 four i32 streams require `16n` bytes. Fusion removes the final public prefix and
 destination-index arrays, but does not eliminate that internal traffic.
+
+### Four-bit package variant
+
+`Sort.FourBit` exposes the same generic sorting, signed-integer, floating-point,
+and sort-by-key APIs. Its `radix_sort(num_bits, get_bit, xs)` sorts arbitrary
+array elements stably. Unlike the two-bit upstream translation, it pads a partial
+final digit with zero bits, so `get_bit` is never called beyond `num_bits`.
+
+A 32-bit sort has eight passes of three dispatches (24 body launches), plus the
+initial carry copy. Small constant neutral arrays execute locally. The scan uses
+one shared bank with a barrier between reads and writes, reducing this variant's
+per-workgroup scan storage from 64 KiB to 32 KiB. Its sixteen-stream prefix buffer
+still occupies `64n` bytes; fewer launches alone do not establish better performance.
+
+Egglog selects expansion of constant local traversals up to sixteen elements.
+Fixed owned-array lengths are available during SSA emission, so these traversals
+use constant element indices. Explicit source loops retain their control flow.
+Small array-valued scan and reduction accumulators use separate shared-memory
+columns for their components, keeping adjacent lanes adjacent in memory without
+increasing shared storage. The four-bit partial scan retains just its input-tile
+loop; its sixteen-element copy and arithmetic loops are expanded.
+
+`python3 pkg/sort/test/benchmark_radix.py` compares both digit widths on the
+single-threaded CPU, Rayon, and WGSL/Vulkan GPU implementations. Inputs range
+from 64 B to 16 MiB in factors of eight; every timed output is checked against
+the reference sort. The script writes raw samples and a Matplotlib chart under
+`target/radix-bench/results`.
+
+At 16 MiB, the GTX 1660 Ti measured 27.1 ms for two-bit and 81.6 ms for four-bit
+resident sorting (medians of five runs after one warmup). Four-bit improved from
+1454.8 ms before local traversal expansion and columnar shared storage. Including
+transfers, the corresponding times were 48.2 ms and 104.6 ms. This remains a
+performance checkpoint: four-bit is still slower than two-bit on this GPU.
 
 ### Fusion and sharing
 
@@ -339,6 +371,11 @@ destination-index arrays, but does not eliminate that internal traffic.
 unobserved scan to feed a scatter into fresh scratch. The scan's final output
 phase invokes the indexed-write lowering with globally adjusted prefixes.
 The original separate totals reduction and source algorithm remain intact.
+Fusion tracks which operations feed accumulator inputs, neutrals, and combiners.
+A reduction can join a scan when its total is needed only by output callbacks;
+that capture belongs to the final phase. Early captures and intervening
+dependencies or effects still block contraction. Local execution completes
+captured totals in a preliminary traversal before emitting prefixes.
 
 Bucket extraction is fused separately into the reduction, scan input, and final
 output phase. The source contains two `map(num,xs)` expressions; current fusion
@@ -423,16 +460,18 @@ outside the interval. Every output in all six runs (one warmup plus five timed)
 matched the CPU reference. Relative to the 2085.427 ms CPU radix median, these
 are approximately **11.1x** and **9.3x** faster, respectively.
 
-The Rayon version in `pkg/sort/radix_rayon.rs` retains sixteen stable two-bit
-passes. Workers count buckets in contiguous chunks, then scatter into disjoint
+The Rayon version in `pkg/sort/radix_rayon.rs` supports sixteen two-bit or eight
+four-bit stable passes (four-bit by default). Workers count buckets in contiguous chunks, then scatter into disjoint
 output slices assigned by bucket and input-chunk order. This preserves stability
 without unsafe code or atomics. A small serial prefix over chunk histograms
 assigns those slices; it does not scan the full input serially.
 Build with `RUSTFLAGS="-C target-cpu=native" cargo build --release
 --manifest-path pkg/sort/cpu-bench/Cargo.toml` (Rayon 1.12.0 in the lockfile).
-Run the resulting `radix-rayon 25000000 5` with `RAYON_NUM_THREADS=8` or `16`.
+The third argument selects digit width: `radix-rayon 4194304 5 4`, with
+`RAYON_NUM_THREADS=8` or `16`.
 
-On the same Ryzen 7 2700X and identical input, five warm runs gave:
+The earlier two-bit measurements on the same Ryzen 7 2700X and identical input,
+before the smaller-input benchmark cap, gave:
 
 | Rayon workers | Run times (ms) | Median (ms) |
 |---|---|---|
@@ -458,7 +497,7 @@ Next:
 
 1. Compare retention against recomputation for equivalent source producers;
    extend slice fusion and composition with still-observed output actions.
-2. Finish package integration and audit numeric contracts beyond i32/f32.
+2. Audit numeric contracts beyond i32/f32.
 3. Broaden backend/device coverage, then rerun release timings
    and compare launch count, allocations, live storage, and transferred bytes
    with the inspected Futhark schedules. Reducing internal prefix traffic is

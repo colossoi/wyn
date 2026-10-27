@@ -1,10 +1,9 @@
-//! Emit selected egglog expressions and scheduled execution directly into SSA.
+//! Lower selected egglog expressions and scheduled execution into SSA and host interfaces.
 use super::scalar::evaluation::Evaluation;
 use super::scalar::placement::Placement;
 use super::{timing, OptimizeError, Optimized, Program};
+use crate::interface::publish::EntryPoint;
 use crate::ssa::builder::BuilderError;
-use crate::ssa::context::BackendGlobal;
-use crate::ssa::stage::Elaborated;
 use crate::ssa::types::{Function, ValueRef};
 use crate::tlc::DefMeta;
 use crate::types::Type;
@@ -14,7 +13,6 @@ use wyn_base::IdSource;
 use wyn_graph::topo_sort_by_dependencies;
 
 mod body;
-mod descriptors;
 mod entry;
 mod kernels;
 use super::facts::Facts;
@@ -29,12 +27,10 @@ use crate::SymbolId;
 pub(super) fn lower(
     program: &Program<'_, Optimized>,
     target: CodegenTarget,
-) -> Result<Elaborated, OptimizeError> {
+) -> Result<crate::ssa::stage::Elaborated, OptimizeError> {
+    let (placements, evaluations) = super::scalar::plan_evaluation(program)?;
     let _timing = timing::span("egglog to SSA");
     let facts = Facts { program };
-    descriptors::validate(&facts)?;
-    let placements = Placement::new(program)?;
-    let evaluations = Evaluation::new(program, &placements)?;
     let mut local_buffers = LookupMap::<_, Vec<_>>::default();
     program.graph.constructor_enodes("LocalBuffer", |row| {
         local_buffers.entry(row.children[0]).or_default().push([
@@ -107,17 +103,16 @@ pub(super) fn lower(
     let pipeline = super::abi::publication::publish(&mut compiler, &entries)?;
     entries.retain(|entry| {
         let (owner, _) = &compiler.entry_origins[&entry.id];
-        !compiler
-            .program
+        !program
             .identities
             .symbols
             .get(owner)
             .is_some_and(|symbol| compiler.facts.contains("InterfaceOnlyEntry", (symbol,)))
     });
-    Ok(Elaborated::from_parts(
+    Ok(crate::ssa::stage::Elaborated::from_parts(
         compiler.functions,
-        entries.into_iter().map(crate::interface::publish::EntryPoint::into_shader).collect(),
-        BackendGlobal { pipeline, target },
+        entries.into_iter().map(EntryPoint::into_shader).collect(),
+        crate::ssa::context::BackendGlobal { pipeline, target },
     ))
 }
 

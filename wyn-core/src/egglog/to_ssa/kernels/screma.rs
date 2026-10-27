@@ -4,7 +4,8 @@ use super::{coordinates, element, indexed, invocation, write_arrays};
 use crate::op::BinaryOperator::{
     Add, Divide, Equal, Greater, GreaterEqual, Less, Multiply, Remainder, Subtract,
 };
-use crate::types::{self, Type, TypeName};
+use crate::op::OpTag;
+use crate::types::{self, Type, TypeExt, TypeName};
 use crate::LookupMap;
 use egglog_engine::Value;
 
@@ -39,7 +40,33 @@ pub(super) fn screma(
     results: &[(String, i64, Value)],
     segment: Option<&SegmentOutput<'_>>,
 ) -> Result<(), OptimizeError> {
-    let components = body.compiler.facts.accumulators(plan)?;
+    // Local recipes have no separate combine dispatch. Complete captured totals
+    // first; the normal traversal can then emit each prefix with the final total.
+    // These plans have duplicable callbacks; replay only their original domain.
+    if matches!(phase, "ordered" | "local" | "segment")
+        && body.compiler.facts.contains("PlanLateTotals", (plan,))
+    {
+        screma(
+            body,
+            scope,
+            phase_owner,
+            if phase == "ordered" { "ordered-totals" } else { "local-totals" },
+            phase_width,
+            plan,
+            &[],
+            None,
+        )?;
+    }
+    let totals_only = matches!(phase, "ordered-totals" | "local-totals");
+    let phase = match phase {
+        "ordered-totals" => "ordered",
+        "local-totals" => "local",
+        phase => phase,
+    };
+    let mut components = body.compiler.facts.accumulators(plan)?;
+    if totals_only {
+        components.retain(|component| component.role != "scan");
+    }
     let has_scans = components.iter().any(|component| component.role == "scan");
     let mut accumulators = Vec::new();
     for component in &components {
@@ -74,10 +101,16 @@ pub(super) fn screma(
                 cache.insert(accumulator.source, value.clone());
                 next.push(value);
             }
-            write_arrays(body, scope, phase_owner, plan, results, &[index], &mut cache)?;
+            if !totals_only {
+                write_output(body, scope, phase_owner, phase, plan, results, index, &mut cache)?;
+            }
             Ok(next)
         })?;
         for (component, value) in components.iter().zip(state).filter(|(c, _)| c.role != "scan") {
+            if totals_only {
+                body.values.insert(component.source, value);
+                continue;
+            }
             if let Some(output) = body.slot(scope, phase_owner, "total", component.output_slot, 2)? {
                 body.store(output, zero.clone(), value)?;
             }
@@ -149,7 +182,7 @@ pub(super) fn screma(
                                 )?;
                                 values.push(value);
                             }
-                            if !has_scans && segment.is_none() {
+                            if !has_scans && segment.is_none() && !totals_only {
                                 write_arrays(
                                     body,
                                     scope,
@@ -215,13 +248,14 @@ pub(super) fn screma(
                                 target.store(body, Some(index.clone()), value)?;
                             }
                         } else if phase == "local" && has_scans {
-                            write_arrays(
+                            write_output(
                                 body,
                                 scope,
                                 phase_owner,
+                                phase,
                                 plan,
                                 results,
-                                &[index.clone()],
+                                index.clone(),
                                 &mut cache,
                             )?;
                         }
@@ -234,6 +268,12 @@ pub(super) fn screma(
                         .collect()
                 },
             )?;
+            if totals_only {
+                for (component, value) in components.iter().zip(state) {
+                    body.values.insert(component.source, value);
+                }
+                return Ok(());
+            }
             let first = body.binary(Equal, lane, Body::number(0))?;
             body.when(first, |body| {
                 for (i, value) in state.into_iter().enumerate() {
@@ -266,7 +306,7 @@ pub(super) fn screma(
                 initial.clone(),
                 |body, base, carry| {
                     let index = body.binary(Add, base, lane.clone())?;
-                    let valid = body.binary(Less, index.clone(), groups)?;
+                    let valid = body.binary(Less, index.clone(), groups.clone())?;
                     let mut values = Vec::new();
                     for (i, neutral) in initial.iter().enumerate() {
                         values.push(body.branch(
@@ -340,9 +380,8 @@ pub(super) fn screma(
         }
         "offsets" => {
             let (start, step) = invocation(body, phase_width)?;
-            let writes_destination = body.compiler.facts.destination(phase_owner).is_some();
             body.counted(start, n, step, vec![], |body, index, _| {
-                let chunk = body.binary(Divide, index.clone(), span)?;
+                let chunk = body.binary(Divide, index.clone(), span.clone())?;
                 let mut cache = LookupMap::default();
                 for (i, component) in components.iter().enumerate().filter(|(_, c)| c.role == "scan") {
                     let Some(prefix) = body.slot(scope, phase_owner, "prefix", component.output_slot, 1)?
@@ -358,20 +397,33 @@ pub(super) fn screma(
                     let value = accumulators[i].combine(body, scope, a, b)?;
                     cache.insert(component.source, value);
                 }
-                if writes_destination {
-                    let Some(output) = body.slot(scope, phase_owner, "output", 0, 2)? else {
-                        return Err(error("scan output action has no destination"));
-                    };
-                    indexed::update(body, scope, phase_owner, phase, plan, output, index, &mut cache)?;
-                } else {
-                    write_arrays(body, scope, phase_owner, plan, results, &[index], &mut cache)?;
-                }
+                write_output(body, scope, phase_owner, phase, plan, results, index, &mut cache)?;
                 Ok(vec![])
             })?;
         }
         _ => return Err(error("invalid collective phase")),
     }
     Ok(())
+}
+
+fn write_output(
+    body: &mut Body<'_, '_, '_>,
+    scope: Value,
+    owner: Value,
+    phase: &str,
+    plan: Value,
+    results: &[(String, i64, Value)],
+    index: Typed,
+    cache: &mut LookupMap<Value, Typed>,
+) -> Result<(), OptimizeError> {
+    if body.compiler.facts.destination(owner).is_some() {
+        let Some(output) = body.slot(scope, owner, "output", 0, 2)? else {
+            return Err(error("scan output action has no destination"));
+        };
+        indexed::update(body, scope, owner, phase, plan, output, index, cache)
+    } else {
+        write_arrays(body, scope, owner, plan, results, &[index], cache)
+    }
 }
 
 /// Reduce adjacent contiguous ranges in source order. A single shared bank is
@@ -387,14 +439,10 @@ fn workgroup_reduce(
     if accumulators.is_empty() {
         return Ok(Vec::new());
     }
-    assert!(
-        width.is_power_of_two(),
-        "workgroup reduction width must be a power of two: {width}"
-    );
     let mut shared = Vec::new();
     for value in values {
-        let buffer = body.workgroup_array(width, &value.ty)?;
-        body.store(buffer.clone(), lane.clone(), value)?;
+        let buffer = CollectiveStorage::new(body, width, &value.ty)?;
+        buffer.store(body, lane.clone(), value)?;
         shared.push(buffer);
     }
     body.workgroup_barrier()?;
@@ -404,10 +452,10 @@ fn workgroup_reduce(
         body.when(active, |body| {
             let right = body.binary(Add, lane.clone(), Body::number(1 << bit))?;
             for (i, buffer) in shared.iter().enumerate() {
-                let a = body.index(buffer.clone(), lane.clone())?;
-                let b = body.index(buffer.clone(), right.clone())?;
+                let a = buffer.load(body, lane.clone())?;
+                let b = buffer.load(body, right.clone())?;
                 let value = accumulators[i].combine(body, scope, a, b)?;
-                body.store(buffer.clone(), lane.clone(), value)?;
+                buffer.store(body, lane.clone(), value)?;
             }
             Ok(())
         })?;
@@ -417,13 +465,62 @@ fn workgroup_reduce(
         .into_iter()
         .zip(accumulators)
         .map(|(buffer, accumulator)| {
-            let total = body.index(buffer, Body::number(0))?;
+            let total = buffer.load(body, Body::number(0))?;
             body.cast(total, &accumulator.neutral.ty)
         })
         .collect::<Result<Vec<_>, _>>()?;
     // Every lane reads the total before the next tile overwrites shared storage.
     body.workgroup_barrier()?;
     Ok(totals)
+}
+
+enum CollectiveStorage {
+    Lanes(Typed),
+    Columns(Type, Vec<CollectiveStorage>),
+}
+
+impl CollectiveStorage {
+    fn new(body: &mut Body<'_, '_, '_>, width: u32, ty: &Type) -> Result<Self, OptimizeError> {
+        if ty.array_variant().is_some_and(types::is_array_variant_composite) {
+            if let Some(Type::Constructed(TypeName::Size(n), _)) = ty.array_size() {
+                if body.compiler.facts.contains("ColumnarCollectiveExtent", (*n as i64,)) {
+                    let Some(element) = ty.elem_type() else {
+                        return Err(error("collective array has no element type"));
+                    };
+                    let columns =
+                        (0..*n).map(|_| Self::new(body, width, element)).collect::<Result<_, _>>()?;
+                    return Ok(Self::Columns(ty.clone(), columns));
+                }
+            }
+        }
+        Ok(Self::Lanes(body.workgroup_array(width, ty)?))
+    }
+
+    fn load(&self, body: &mut Body<'_, '_, '_>, lane: Typed) -> Result<Typed, OptimizeError> {
+        match self {
+            Self::Lanes(buffer) => body.index(buffer.clone(), lane),
+            Self::Columns(ty, columns) => {
+                let values = columns
+                    .iter()
+                    .map(|column| column.load(body, lane.clone()))
+                    .collect::<Result<_, _>>()?;
+                body.op(OpTag::ArrayLit, values, ty.clone())
+            }
+        }
+    }
+
+    fn store(&self, body: &mut Body<'_, '_, '_>, lane: Typed, value: Typed) -> Result<(), OptimizeError> {
+        match self {
+            Self::Lanes(buffer) => body.store(buffer.clone(), lane, value),
+            Self::Columns(_, columns) => {
+                for (i, column) in columns.iter().enumerate() {
+                    let item = body.index(value.clone(), Body::number(i as u32))?;
+                    column.store(body, lane.clone(), item)?;
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 pub(super) fn workgroup_scan(
@@ -434,21 +531,13 @@ pub(super) fn workgroup_scan(
     lane: Typed,
     width: u32,
 ) -> Result<(Vec<Typed>, Vec<Typed>, Vec<Typed>), OptimizeError> {
-    assert!(
-        width.is_power_of_two(),
-        "workgroup scan width must be a power of two: {width}"
-    );
     let mut shared = Vec::new();
     for value in &values {
-        let banks = [
-            body.workgroup_array(width, &value.ty)?,
-            body.workgroup_array(width, &value.ty)?,
-        ];
-        body.store(banks[0].clone(), lane.clone(), value.clone())?;
-        shared.push(banks);
+        let buffer = CollectiveStorage::new(body, width, &value.ty)?;
+        buffer.store(body, lane.clone(), value.clone())?;
+        shared.push(buffer);
     }
     body.workgroup_barrier()?;
-    let mut bank = 0;
     for bit in 0..width.trailing_zeros() {
         let distance = Body::number(1 << bit);
         let valid = body.binary(GreaterEqual, lane.clone(), distance.clone())?;
@@ -458,34 +547,37 @@ pub(super) fn workgroup_scan(
                 valid.clone(),
                 |body| {
                     let index = body.binary(Subtract, lane.clone(), distance.clone())?;
-                    let peer = body.index(shared[i][bank].clone(), index)?;
+                    let peer = shared[i].load(body, index)?;
                     accumulators[i].combine(body, scope, peer, value.clone())
                 },
                 |_| Ok(value.clone()),
                 None,
             )?;
-            body.store(shared[i][1 - bank].clone(), lane.clone(), value.clone())?;
         }
-        bank = 1 - bank;
+        // Finish all reads before reusing the same shared bank for the next step.
+        body.workgroup_barrier()?;
+        for (buffer, value) in shared.iter().zip(&values) {
+            buffer.store(body, lane.clone(), value.clone())?;
+        }
         body.workgroup_barrier()?;
     }
     let after_first = body.binary(Greater, lane.clone(), Body::number(0))?;
     let mut exclusive = Vec::new();
     let mut totals = Vec::new();
-    for (i, banks) in shared.iter().enumerate() {
+    for (i, buffer) in shared.iter().enumerate() {
         let neutral = &accumulators[i].neutral;
         exclusive.push(body.branch(
             scope,
             after_first.clone(),
             |body| {
                 let previous = body.binary(Subtract, lane.clone(), Body::number(1))?;
-                let value = body.index(banks[bank].clone(), previous)?;
+                let value = buffer.load(body, previous)?;
                 body.cast(value, &neutral.ty)
             },
             |_| Ok(neutral.clone()),
             None,
         )?);
-        let value = body.index(banks[bank].clone(), Body::number(width - 1))?;
+        let value = buffer.load(body, Body::number(width - 1))?;
         totals.push(body.cast(value, &neutral.ty)?);
     }
     // All lanes must finish reading before the next tile reuses shared storage.

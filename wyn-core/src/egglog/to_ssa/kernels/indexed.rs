@@ -64,7 +64,7 @@ pub(super) fn indexed(
         if phase == "initialize" {
             let original = body.value(scope, destination)?;
             let value = body.index(original, index.clone())?;
-            body.store(output, index, value)?;
+            body.store(output.clone(), index, value)?;
             return Ok(vec![]);
         }
         update(
@@ -73,7 +73,7 @@ pub(super) fn indexed(
             phase_owner,
             phase,
             plan,
-            output,
+            output.clone(),
             index,
             &mut LookupMap::default(),
         )?;

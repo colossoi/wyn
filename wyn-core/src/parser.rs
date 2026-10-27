@@ -1983,7 +1983,7 @@ impl<'a> Parser<'a> {
                 let function = self.node_counter.mk_node(
                     ExprKind::Identifier(Identifier {
                         qualifiers: vec![],
-                        name: crate::builtins::names::INTRINSIC_SCRATCH.into(),
+                        name: "duplicate_scratch".into(),
                     }),
                     start,
                 );

@@ -4,22 +4,18 @@
 //! `apply_bindings_around`.
 //!
 //! Refutable patterns (`Literal`, `Constructor` against a
-//! multi-variant sum) hit `todo!` here today — they're rejected
-//! upstream by the refutability gate in `types/patterns/refutability`.
+//! multi-variant sum) are rejected upstream during pattern binding.
 //! Single-variant Constructor and `Unit` are valid irrefutable
 //! patterns; they're handled here.
 
 use crate::ast::{self, PatternKind, Span, TypeName};
 use crate::tlc::{PendingBinding, Term, TermKind, Transformer, VarRef};
-use crate::types;
-use crate::types::TypeExt;
-use crate::LookupMap;
 use crate::SymbolId;
 use polytype::Type;
 
 impl<'a> Transformer<'a> {
     /// Top-level entry: compute the binding plan for a pattern against
-    /// a scrutinee. Tuple/Record patterns produce a chain of
+    /// a scrutinee. Compound patterns produce a chain of
     /// projections; simple Name/Wildcard at top level produce no
     /// bindings (caller wraps with a `Let` directly).
     pub(in crate::tlc) fn compute_pattern_bindings<A>(
@@ -72,104 +68,31 @@ impl<'a> Transformer<'a> {
             PatternKind::Typed(inner, _) | PatternKind::Attributed(_, inner) => {
                 self.compute_pattern_bindings_inner(inner, scrutinee, span, is_top_level)
             }
-            PatternKind::Tuple(patterns) => {
-                let fresh_name = format!("_w_tup_{}", self.term_ids.next_id());
+            PatternKind::Tuple(patterns)
+            | PatternKind::Vec(patterns)
+            | PatternKind::Constructor(_, patterns) => {
+                let fresh_name = format!("_w_pattern_{}", self.term_ids.next_id());
                 let fresh_sym = self.fresh(&fresh_name);
-                let tuple_ty = scrutinee.ty.clone();
-                let component_types = self.extract_tuple_types(&tuple_ty, patterns.len());
-
+                let scrutinee_ty = scrutinee.ty.clone();
                 let mut bindings = vec![PendingBinding {
                     name: fresh_sym,
-                    ty: tuple_ty.clone(),
+                    ty: scrutinee_ty.clone(),
                     expr: scrutinee,
                 }];
-
+                // Irrefutable constructors have one variant, with payload after the tag.
+                let offset = usize::from(matches!(&pattern.kind, PatternKind::Constructor(..)));
                 for (i, sub_pattern) in patterns.iter().enumerate() {
-                    let comp_ty = component_types
-                        .get(i)
-                        .cloned()
-                        .expect("BUG: Tuple pattern has more elements than tuple type");
-
-                    let proj = self.build_tuple_projection(fresh_sym, &tuple_ty, i, comp_ty, span);
-                    let (_, sub_bindings) =
-                        self.compute_pattern_bindings_inner(sub_pattern, proj, span, false);
-                    bindings.extend(sub_bindings);
-                }
-
-                (fresh_sym, bindings)
-            }
-            PatternKind::Vec(patterns) => {
-                // Bind the vec to a fresh symbol, then build .x/.y/.z/.w
-                // projections for each sub-pattern. All sub-patterns
-                // share the same element type (vec's element).
-                let fresh_name = format!("_w_vec_{}", self.term_ids.next_id());
-                let fresh_sym = self.fresh(&fresh_name);
-                let vec_ty = scrutinee.ty.clone();
-                let elem_ty =
-                    vec_ty.elem_type().cloned().expect("BUG: Vec pattern scrutinee is not a vec type");
-
-                let mut bindings = vec![PendingBinding {
-                    name: fresh_sym,
-                    ty: vec_ty.clone(),
-                    expr: scrutinee,
-                }];
-
-                for (i, sub_pattern) in patterns.iter().enumerate() {
-                    let proj = self.build_tuple_projection(fresh_sym, &vec_ty, i, elem_ty.clone(), span);
-                    let (_, sub_bindings) =
-                        self.compute_pattern_bindings_inner(sub_pattern, proj, span, false);
-                    bindings.extend(sub_bindings);
-                }
-
-                (fresh_sym, bindings)
-            }
-            PatternKind::Record(fields) => {
-                let fresh_name = format!("_w_rec_{}", self.term_ids.next_id());
-                let fresh_sym = self.fresh(&fresh_name);
-                let record_ty = scrutinee.ty.clone();
-                let field_types = self.extract_record_types(&record_ty);
-
-                let mut bindings = vec![PendingBinding {
-                    name: fresh_sym,
-                    ty: record_ty.clone(),
-                    expr: scrutinee,
-                }];
-
-                for field in fields {
-                    let field_ty = field_types
-                        .get(&field.field)
-                        .cloned()
-                        .unwrap_or_else(|| panic!("BUG: Record field '{}' not found in type", field.field));
-
-                    let field_idx = self
-                        .resolve_field_index(&record_ty, &field.field)
-                        .unwrap_or_else(|| panic!("BUG: field '{}' not in record type", field.field));
-
-                    let field_access = self.build_tuple_projection(
+                    let proj = self.build_tuple_projection(
                         fresh_sym,
-                        &record_ty,
-                        field_idx,
-                        field_ty.clone(),
+                        &scrutinee_ty,
+                        offset + i,
+                        Self::type_of(&sub_pattern.h),
                         span,
                     );
-
-                    match &field.target {
-                        ast::RecordPatternTarget::Pattern(pattern) => {
-                            let (_, sub_bindings) =
-                                self.compute_pattern_bindings_inner(pattern, field_access, span, false);
-                            bindings.extend(sub_bindings);
-                        }
-                        ast::RecordPatternTarget::Shorthand(binding) => {
-                            let field_sym = binding.symbol;
-                            bindings.push(PendingBinding {
-                                name: field_sym,
-                                ty: field_ty,
-                                expr: field_access,
-                            });
-                        }
-                    }
+                    let (_, sub_bindings) =
+                        self.compute_pattern_bindings_inner(sub_pattern, proj, span, false);
+                    bindings.extend(sub_bindings);
                 }
-
                 (fresh_sym, bindings)
             }
             PatternKind::Unit => {
@@ -189,76 +112,7 @@ impl<'a> Transformer<'a> {
                     (sym, vec![binding])
                 }
             }
-            PatternKind::Literal(_) => {
-                unreachable!(
-                    "refutable Literal pattern reached TLC lowering — \
-                     refutability gate should reject this in the checker"
-                )
-            }
-            PatternKind::Constructor(name, sub_patterns) => {
-                // Refutability gate guarantees this is a single-variant
-                // sum; the tag is statically known and no test is
-                // emitted. Project each payload slot and bind it.
-                let sum_ty = scrutinee.ty.clone();
-                let variants = if let Some(variants) = types::sum_variants(&sum_ty) {
-                    variants
-                } else {
-                    match &sum_ty {
-                        Type::Constructed(TypeName::Tuple(_), _) => {
-                            // Scrutinee already lowered from a sum to a flat
-                            // tuple. Recover the original variant list from
-                            // the pattern's type-table entry.
-                            types::sum_variants(&Self::raw_type(&pattern.h)).unwrap_or_else(|| {
-                                panic!(
-                                    "BUG: Constructor pattern lacks sum type in type table for NodeId {:?}",
-                                    pattern.h.id
-                                )
-                            })
-                        }
-                        other => panic!(
-                            "BUG: Constructor pattern against non-sum scrutinee type {:?}",
-                            other
-                        ),
-                    }
-                };
-                let layout = Self::sum_layout(&variants);
-                let &(_tag, payload_offset) =
-                    layout.constructor_info.get(name).expect("BUG: constructor name not in sum layout");
-                let payload_types =
-                    &variants.iter().find(|(n, _)| n == name).expect("BUG: constructor must exist").1;
-                debug_assert_eq!(
-                    sub_patterns.len(),
-                    payload_types.len(),
-                    "constructor `#{}` pattern arity ({}) must match payload arity ({}); \
-                     the type checker should reject this upstream",
-                    name,
-                    sub_patterns.len(),
-                    payload_types.len()
-                );
-
-                let fresh_name = format!("_w_ctor_{}", self.term_ids.next_id());
-                let fresh_sym = self.fresh(&fresh_name);
-                let mut bindings = vec![PendingBinding {
-                    name: fresh_sym,
-                    ty: sum_ty.clone(),
-                    expr: scrutinee,
-                }];
-
-                for (i, sub_pat) in sub_patterns.iter().enumerate() {
-                    let payload_ty = Self::lower_type(payload_types[i].clone());
-                    let proj = self.build_tuple_projection(
-                        fresh_sym,
-                        &sum_ty,
-                        payload_offset + i,
-                        payload_ty,
-                        span,
-                    );
-                    let (_, sub_bindings) = self.compute_pattern_bindings_inner(sub_pat, proj, span, false);
-                    bindings.extend(sub_bindings);
-                }
-
-                (fresh_sym, bindings)
-            }
+            PatternKind::Literal(_) | PatternKind::Record(_) => unreachable!(),
         }
     }
 
@@ -299,48 +153,5 @@ impl<'a> Transformer<'a> {
     ) -> Term {
         let var_term = self.mk_term(var_ty.clone(), span, TermKind::Var(VarRef::Symbol(var_sym)));
         self.mk_tuple_proj(var_term, index, result_ty, span)
-    }
-
-    pub(in crate::tlc) fn extract_tuple_types(
-        &self,
-        ty: &Type<TypeName>,
-        _expected_len: usize,
-    ) -> Vec<Type<TypeName>> {
-        match ty {
-            Type::Constructed(TypeName::Tuple(_), args) => args.clone(),
-            _ => panic!("BUG: Expected tuple type, got {:?}", ty),
-        }
-    }
-
-    /// Resolve a field name to its index in a record / vec / tuple
-    /// type. Returns None for unresolved field names; callers panic
-    /// on None since checker validated upstream.
-    pub(in crate::tlc) fn resolve_field_index(&self, ty: &Type<TypeName>, field: &str) -> Option<usize> {
-        match ty {
-            Type::Constructed(TypeName::Record(fields), _) => fields.iter().position(|f| f == field),
-            // Vec swizzle: x=0, y=1, z=2, w=3
-            Type::Constructed(TypeName::Vec, _) => match field {
-                "x" => Some(0),
-                "y" => Some(1),
-                "z" => Some(2),
-                "w" => Some(3),
-                _ => None,
-            },
-            // Tuple positional access: .0, .1, etc.
-            Type::Constructed(TypeName::Tuple(_), _) => field.parse::<usize>().ok(),
-            _ => None,
-        }
-    }
-
-    pub(in crate::tlc) fn extract_record_types(
-        &self,
-        ty: &Type<TypeName>,
-    ) -> LookupMap<String, Type<TypeName>> {
-        match ty {
-            Type::Constructed(TypeName::Record(fields), args) => {
-                fields.iter().cloned().zip(args.iter().cloned()).collect()
-            }
-            _ => LookupMap::new(),
-        }
     }
 }

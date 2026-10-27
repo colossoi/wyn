@@ -1,7 +1,7 @@
 use super::{builder_error, error, Body, OptimizeError, Typed, Value};
 use crate::flow::ControlHeader;
-use crate::op::BinaryOperator;
-use crate::ssa::types::Terminator;
+use crate::op::{BinaryOperator, OpTag};
+use crate::ssa::types::{ConstantValue, InstKind, Terminator, ValueRef};
 use crate::types;
 
 impl Body<'_, '_, '_> {
@@ -198,7 +198,7 @@ impl Body<'_, '_, '_> {
         };
         let zero = self.literal("0", &index_ty)?;
         let one = self.literal("1", &index_ty)?;
-        let results = self.counted(zero, bound, one, vec![initial], |body, index, mut carried| {
+        let results = self.counted_loop(zero, bound, one, vec![initial], |body, index, mut carried| {
             let Some(value) = carried.pop() else {
                 return Err(error("loop state parameter is missing"));
             };
@@ -225,8 +225,49 @@ impl Body<'_, '_, '_> {
 }
 
 impl Body<'_, '_, '_> {
-    /// Emit a structured counted loop, carrying only its SSA accumulator values.
+    /// Expand small local traversals selected by policy; retain a loop otherwise.
     pub(in crate::egglog::to_ssa) fn counted(
+        &mut self,
+        start: Typed,
+        bound: Typed,
+        step: Typed,
+        initial: Vec<Typed>,
+        mut emit: impl FnMut(&mut Self, Typed, Vec<Typed>) -> Result<Vec<Typed>, OptimizeError>,
+    ) -> Result<Vec<Typed>, OptimizeError> {
+        if let (Some(0), Some(n), Some(1)) = (
+            self.integer_literal(&start),
+            self.integer_literal(&bound),
+            self.integer_literal(&step),
+        ) {
+            if self.compiler.facts.contains("ExpandLocalTripCount", (n,)) {
+                let types: Vec<_> = initial.iter().map(|value| value.ty.clone()).collect();
+                let mut state = initial;
+                for i in 0..n {
+                    let index = self.literal(&i.to_string(), &start.ty)?;
+                    let values = self.values.checkpoint();
+                    let scopes = self.scopes.checkpoint();
+                    let scalar_values = std::mem::take(&mut self.scalar_values);
+                    state = emit(self, index, state)?;
+                    if state.len() != types.len() {
+                        return Err(error("loop accumulator arity mismatch"));
+                    }
+                    state = state
+                        .into_iter()
+                        .zip(&types)
+                        .map(|(value, ty)| self.cast(value, ty))
+                        .collect::<Result<_, _>>()?;
+                    self.values.restore(values);
+                    self.scopes.restore(scopes);
+                    self.scalar_values = scalar_values;
+                }
+                return Ok(state);
+            }
+        }
+        self.counted_loop(start, bound, step, initial, emit)
+    }
+
+    // Source loops can contain arbitrarily large bodies, even with small trip counts.
+    fn counted_loop(
         &mut self,
         start: Typed,
         bound: Typed,
@@ -306,6 +347,25 @@ impl Body<'_, '_, '_> {
                 ty: ty.clone(),
             })
             .collect())
+    }
+
+    fn integer_literal(&self, value: &Typed) -> Option<i64> {
+        match value.value {
+            ValueRef::Const(ConstantValue::I32(n)) => Some(i64::from(n)),
+            ValueRef::Const(ConstantValue::U32(n)) => Some(i64::from(n)),
+            ValueRef::Ssa(id) => {
+                let function = self.builder.func();
+                let inst = function.inst_of_value(id)?;
+                match &function.insts[inst].data {
+                    InstKind::Op {
+                        tag: OpTag::Int(n) | OpTag::Uint(n),
+                        ..
+                    } => n.parse().ok(),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 }
 

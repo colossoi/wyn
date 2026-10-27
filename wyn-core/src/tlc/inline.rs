@@ -28,15 +28,10 @@ pub type UnifiedHelpersInlined =
 
 pub fn inline_unified_helpers(mut program: super::stage::TypesSpecialized) -> UnifiedHelpersInlined {
     expand_constants(&mut program);
-    inline_helpers_to_fixpoint(&mut program, true);
+    inline_helpers_to_fixpoint(&mut program);
     program.assert_flat_apps();
     program.retag()
 }
-
-#[derive(Debug, Clone, Copy)]
-pub enum SoacHelpersInlinedTag {}
-pub type SoacHelpersInlined =
-    super::Program<SoacHelpersInlinedTag, super::monomorphize::Monomorphic, super::context::RewriteGlobal>;
 
 #[derive(Debug, Clone, Copy)]
 pub enum GeneratedLambdasFoldedTag {}
@@ -46,26 +41,14 @@ pub type GeneratedLambdasFolded = super::Program<
     super::context::PostClosureGlobal,
 >;
 
-/// Expand constants, then force-inline helpers whose bodies contain array work.
-/// Array computations and shape queries must be visible in the caller so
-/// egglog can infer producer/consumer relationships and dispatch extents.
-/// Scalar helper optimization is left to egglog.
-///
-/// Iterates to a fixpoint so chains like `clump → center → sum` (each a
-/// SOAC helper) fully expand: one round inlines `center`, the next sees
-/// `sum` calls inside the freshly-expanded clump body and inlines those
-/// too.
-pub fn force_inline_soac_helpers(mut program: Monomorphized) -> SoacHelpersInlined {
-    expand_constants(&mut program);
-    super::dce::eliminate_unreachable_defs(&mut program.defs);
-    inline_helpers_to_fixpoint(&mut program, false);
+/// Stage extraction and final specialization must preserve exposed array work.
+pub(super) fn assert_array_work_helpers_inlined(program: &Monomorphized) {
     debug_assert!(
-        verify_array_work_helpers_inlined(&program).is_ok(),
-        "force-inline left an array-work helper behind a call boundary; \
+        verify_array_work_helpers_inlined(program).is_ok(),
+        "an array-work helper remains behind a call boundary after specialization; \
          egglog would need an interprocedural path: {:?}",
-        verify_array_work_helpers_inlined(&program).err(),
+        verify_array_work_helpers_inlined(program).err(),
     );
-    program.retag()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -113,25 +96,24 @@ fn collect_called_array_work_helpers(
     });
 }
 
-fn inline_helpers_to_fixpoint<Tag, F, G>(program: &mut Program<Tag, F, G>, unified: bool)
+fn inline_helpers_to_fixpoint<Tag, F, G>(program: &mut Program<Tag, F, G>)
 where
     F: Family<ClosureData = Empty, SoacBodyData = Empty>,
 {
     // Bound expansion of recursive helpers.
-    for _ in 0..8 {
-        let candidates = build_helper_candidates(program, unified);
+    for _ in 0..16 {
+        let candidates = build_helper_candidates(program);
         let mut changed = false;
         map_in_place(&mut program.defs, |def| {
             let mut inliner = FunctionInliner {
                 candidates: &candidates,
                 term_ids: &mut program.term_ids,
-                expand_values: unified,
+                expand_values: true,
             };
             let (body, inlined) = inliner.rewrite_owned_tracked(def.body);
             // Helper expansion exposes constant dimensions needed by storage planning.
             let (body, folded) = super::partial_eval::fold_residual_constants(body, &mut program.term_ids);
-            let (body, normalized) =
-                if unified { normalize_values(body, &mut program.term_ids) } else { (body, false) };
+            let (body, normalized) = normalize_values(body, &mut program.term_ids);
             changed |= inlined || folded || normalized;
             Def { body, ..def }
         });
@@ -144,17 +126,14 @@ where
 
 fn build_helper_candidates<Tag, F, G>(
     program: &Program<Tag, F, G>,
-    unified: bool,
 ) -> LookupMap<SymbolId, InlineBody<Empty, Empty>>
 where
     F: Family<ClosureData = Empty, SoacBodyData = Empty>,
 {
     let mut callbacks = LookupSet::new();
-    if unified {
-        for def in &program.defs {
-            let (body, _) = super::extract_lambda_params_ref(&def.body);
-            collect_function_values(body, &mut callbacks);
-        }
+    for def in &program.defs {
+        let (body, _) = super::extract_lambda_params_ref(&def.body);
+        collect_function_values(body, &mut callbacks);
     }
     let mut candidates = LookupMap::new();
     for def in &program.defs {
@@ -170,10 +149,9 @@ where
         // not, so neither a SOAC nor an explicit range/literal producer is
         // reachable behind a call (`verify_array_work_helpers_inlined`).
         if !contains_array_work(&body)
-            && !(unified
-                && (contains_opaque_type(&def.ty)
-                    || callbacks.contains(&def.name)
-                    || is_structural_value(&body)))
+            && !contains_opaque_type(&def.ty)
+            && !callbacks.contains(&def.name)
+            && !is_structural_value(&body)
         {
             continue;
         }

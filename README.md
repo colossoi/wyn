@@ -88,6 +88,10 @@ analysis.
 Passes consume and produce typed checkpoints that enforce their ordering and
 record which invariants later passes may rely on.
 
+Frontend analysis and optimization are shared across targets. Backend preparation
+adapts SSA and resource interfaces to the selected shader format before device
+and host code generation.
+
 ### Frontend passes
 
 The frontend establishes what the source program means. Lexing and parsing build
@@ -100,16 +104,16 @@ The frontend pipeline runs these passes in order:
 
 | Pass | Responsibility |
 | --- | --- |
-| Lexing (`lexer::tokenize`) | Turn source text into located tokens. |
-| Parsing (`parser::parse_file`) | Build each module's AST and report imports so the complete source graph can be loaded. |
+| `lexer::tokenize` | Turn source text into located tokens. |
+| `parser::parse_file` | Build each module's AST; the frontend adapter reports its imports to the module loader. |
 | `resolve_imports` | Replace physical source imports with syntax from the loaded module graph. |
 | `elaborate_modules` | Elaborate module definitions, signatures, and applications into semantic module state. |
-| `name_resolution::resolve_names` | Distinguish qualified module names from ordinary field access. |
-| `resolve_resources` | Resolve resource views to concrete binding attributes. |
-| `ast_const_fold::fold_constants` | Fold integer constants and expose static array dimensions before type inference. |
+| `name_resolution::qualify_module_accesses` | Rewrite module field accesses as qualified identifiers. Symbol classification is completed during type checking. |
+| `resolve_resources` | Assign resource bindings and resolve resource views to concrete binding attributes. |
+| `ast_const_fold::fold_constants` | Fold integer constants and expose static array dimensions before type inference; retain source references for diagnostics. |
 | `resolve_placeholders::resolve_type_placeholders` | Replace type and size placeholders with inference variables, preserving named parameters within each declaration. |
 | `resolve_opens` | Resolve names imported by `open`, respecting lexical scope and reporting ambiguity. |
-| `types::run::type_check` | Infer and check types, resolve identifier identities, validate stage contexts and pattern coverage, and collect warnings. |
+| `types::run::type_check` | Run `name_resolution::resolve_names`, infer and check types and pattern coverage, materialize the typed AST, validate stage contexts, and collect warnings. |
 | `ast_type_holes::reject_type_holes` / `fill_type_holes` | Report inferred types for unfinished `???` expressions, or replace them with supported typed defaults when `--fill-holes` is enabled. |
 
 The resulting AST retains inferred types, definition schemes, resolved symbols,
@@ -128,19 +132,27 @@ The passes below run in order. SOACs are second-order array combinators, such as
 
 | Pass (`tlc::`) | Responsibility |
 | --- | --- |
-| `lower_from_ast` | Lower the typed AST to polymorphic TLC, including patterns and maps whose inputs and callback parameters already correspond, while retaining unified root entries and source ownership contracts. |
+| `lower_from_ast` | Lower the typed AST to polymorphic TLC, including patterns and maps whose inputs and callback parameters already correspond; retain unified root entries and source ownership contracts. |
 | `validate_ownership` | Check source consumption and aliasing rules before evaluation or inlining can erase call boundaries. This includes graphics resource ownership. |
-| `partial_eval` | Evaluate known applications and constants, simplify their residual terms, and retain computations that depend on runtime values. |
-| `extract_stages` | Extract compute, vertex, and fragment entries and their interfaces from root orchestration, including graphics callbacks and the compute work feeding them. |
-| `pin_entry_buffers` | Substitute each storage parameter's assigned binding into its buffer-region type before specialization. |
-| `monomorphize` | Specialize intrinsic calls by type and instantiate reachable user definitions by type and known array-producer representation, including the bounded capacity of filter results. |
-| `force_inline_soac_helpers` | Expand constants, then repeatedly inline helpers containing SOACs, array producers, or length queries so fusion and dispatch planning can see that work in the caller. Scalar helper optimization is left to egglog. |
+| `partial_eval` | Discover global constants, evaluate known applications and constants, simplify residual terms, and retain computations that depend on runtime values. |
+| `specialize_types` | Specialize intrinsic calls and reachable user definitions while preserving unresolved buffer regions until final stage interfaces exist. |
+| `inline_unified_helpers` | Expand constants and inline array-work, graphics orchestration, callback, and structural helpers. Each iteration also folds residual constants, normalizes values, and prunes unreachable definitions. Scalar helper optimization is left to egglog. |
+| `extract_stages` | Extract compute, vertex, and fragment entries and their interfaces from root orchestration, including graphics callbacks and the compute work feeding them. Ordinary roots become compute entries. |
+| `pin_entry_buffers` | Resolve entry binding layouts and substitute each storage parameter's assigned binding into its buffer-region type before buffer-dependent specialization. |
+| `monomorphize` | Finish specialization with concrete buffer regions, instantiating reachable user definitions by type and known array-producer representation, including the bounded capacity of filter results. |
 | `canonicalize_conditional_producers` | Rewrite supported array-valued conditionals into a pointwise map with the branch inside its callback. |
 | `normalize_soacs` | Lower local arrays of tuples and their operations to tuples of arrays; turn standalone `zip` into tuple construction; name SOAC application arguments and flatten let chains. |
 | `float_runtime_index_nested_producers` | Move eligible runtime-indexed producers out of nested callbacks before defunctionalization, exposing the producer and gather separately. |
-| `defunctionalize` | Lift lambdas, make captures explicit, specialize higher-order functions, and lower closure applications to direct calls. |
-| `fold_generated_lambdas` | Inline applications of compiler-generated lifted lambdas and remove definitions made unreachable. |
-| `apply_ownership` | Export ownership permission on values without changing the functional TLC tree. Egglog decides buffer reuse after fusion and dispatch planning; SSA commits optional local array updates after placement. |
+| `defunctionalize` | Run closure conversion/lambda lifting, higher-order-function specialization, then closure-call lowering to direct calls. |
+| `fold_generated_lambdas` | Inline applications of compiler-generated lifted lambdas, prune unreachable definitions, and verify that higher-order parameters have been eliminated. |
+| `apply_ownership` | Export ownership permission on values without changing the functional TLC tree. Egglog decides buffer reuse after fusion and dispatch planning; SSA commits local storage and update decisions after placement. |
+
+Stage extraction needs unified helpers exposed before it selects entry interfaces.
+Those interfaces determine buffer bindings, which must be pinned before final
+specialization can distinguish helpers operating on different buffers. Array work
+is exposed once, before extraction; final specialization checks that it remains
+visible. Intrinsic specialization shares the definition-specialization traversal,
+after type substitution, instead of walking the program separately.
 
 Specialization, helper inlining, and conditional-producer rewriting retain the
 source array shapes. SoA lowering then runs once, with concrete element types
@@ -156,28 +168,16 @@ loops, and callbacks retain their own evaluation scopes; moving producers across
 boundaries remains an explicit transformation. SoA lowering completes binding
 normalization in the same traversal, including expressions emitted by earlier rewrites.
 
-`fold_generated_lambdas` performs the final definition cleanup and checks that
-no function-typed parameters remain. Ownership export preserves the tree and
-its term identities, so no additional reachability pass is needed before egglog import.
+Ownership information lets fusion reuse an input buffer when its contents are no
+longer needed. Reuse must preserve other reads, captured values, aliases, and
+returned results. Observing an array's length alone does not prevent reuse of its
+contents. Both backends also use liveness and ownership analysis to share storage
+between local array values and eliminate unnecessary copies.
 
-Ownership permission survives eliminated producers and applies to any compatible
-input of a fused operation. Reuse planning checks final element types, live
-content reads, captures, aliases, output bindings, and execution regions before
-selecting storage. Length-only observations retain descriptor metadata without
-keeping the old contents live. Local composite updates remain functional through
-scalar optimization. WGSL preparation uses SSA's use map, dominance, and
-instruction storage semantics to check aliases before eliding a local copy.
-Each rewrite is visible to subsequent decisions. Donors from dominating blocks
-in the same loop scope can be reused; escaping aliases, loop-invariant donors
-used inside loops, and incomparable branch uses remain functional. SPIR-V
-currently lowers both local update forms identically and skips this pass.
-Storage-view writes are made explicit during representation lowering.
-
-`--output-tlc` shows an early TLC snapshot after partial evaluation and entry
-interface resolution. It exposes resolved buffer bindings while functions are
-still polymorphic and higher-order. The remaining passes specialize functions,
-normalize arrays, and eliminate function values before handing the program
-to egglog.
+`--output-tlc` shows TLC after entry buffer bindings are resolved. Functions may
+be polymorphic and higher-order at this point; final specialization, array
+normalization, and defunctionalization follow. The CLI's `check` command stops at
+the same point, before the remaining optimization and backend passes.
 
 ### Egglog passes
 
@@ -204,33 +204,30 @@ The passes below run in order:
 | Pass | Responsibility |
 | --- | --- |
 | `egglog::from_tlc` | Walk normalized TLC once, resolve bindings, and import structural summaries with source identities and scope relationships. |
-| `egglog::fuse` | Derive structural dependencies and select a deterministic greedy fusion plan, recording callback composition and argument routing in egglog. |
-| `egglog::place` | Choose execution domains, rematerialization, and scalar dispatch groups under the selected topology policy. |
-| `egglog::schedule` | Select dispatch recipes, resource requirements, storage allocation and reuse, output routes, and effect ordering. |
-| `egglog::optimize` | Resolve scalar demands and physical interface facts, optimize demanded scalar regions, choose safe scopes for selected terms, and lower supported host scalar expressions and captures. |
-| `egglog::to_ssa` | Query the selected plan to emit scalar terms and scheduled kernels directly into SSA; publish final shader interfaces, sizes, resource accesses, dispatch loops, and the companion host program. |
+| `egglog::fuse` | Run source-summary, dependency, work-cost, and effect-order analyses, then select a deterministic greedy fusion plan and record callback composition, argument routing, and result signatures. |
+| `egglog::place` | Import the fused plan, order its execution graph and reject cycles, then choose execution domains, rematerialization, host regions, and scalar dispatch groups under the selected topology policy. |
+| `egglog::schedule` | Resolve shapes, traversal proofs, execution recipes, representations, storage allocation/reuse, output routes, capacity bounds, and local-storage/boundary facts. |
+| `egglog::prepare_interfaces` | Resolve scalar admission, contexts, demands, and host targets, then derive physical ABI, binding, and publication dependency/order facts. |
+| `egglog::optimize_with_policy` / `optimize` | Optimize and extract demanded scalar DAGs under the selected optimization policy. |
+| `egglog::prepare_host` | Prepare lowering queries and lower supported host scalar expressions/captures from the selected DAG. |
+| `scalar::plan_evaluation` | Build operand-availability constraints and plan safe scalar hoisting, common-branch work, and evaluation order over the selected DAG. |
+| `egglog::to_ssa` | Lower functions, kernels, control flow, and host interfaces using the evaluation plan. Resolve Egglog facts for sizes, resource accesses, scalar tasks, and dispatch loops during lowering; remove interface-only entries and return shader SSA with its host interface description. |
 
 Egglog infers minimum input-buffer sizes for inputs used only in constant prefix
 slices. Other inputs need sizes from their interface or runtime.
 
-Scalar substitution finishes before safety analysis and reducing rewrites. Completed
-substitutions and replaced arithmetic forms are retired from matching. Unary and
-binary operations have direct operands; argument lists serve variable-arity forms.
-Native bulk extraction shares reconstruction across demanded roots and compares
-candidate DAGs by their shared operation cost. Only selected terms reach placement
-and SSA emission; there is no intervening Rust expression IR.
+#### Scalar optimization and computation placement
 
-The [fact-query layer](wyn-core/src/egglog/facts.rs) borrows planning facts from
-egglog for both device emission and [host scalar lowering](wyn-core/src/egglog/host/lower.rs).
-[Interface publication](wyn-core/src/egglog/abi/publication.rs) resolves final
-resource bindings and execution dependencies from those facts and the emitted
-entries, including storage used by graphics draw operands.
+| Optimization | Behavior |
+| --- | --- |
+| Helper expansion | Inline eligible helpers to expose arithmetic simplifications and shared expressions. |
+| Constant folding and simplification | Fold constants and simplify integer identities, constant/equal-arm choices, and aggregate projections. General reassociation and expansion are not performed. |
+| Common-subexpression sharing | Extract required expressions together into a shared graph, comparing alternatives by their combined computation cost. |
+| Loop-invariant code motion (LICM) and branch hoisting | Move computations to the lowest legal loop depth and identify work common to branch arms. Operands must be available, and speculative evaluation must be read-only and guaranteed to terminate without trapping. Reuse requires the computed value to dominate its uses. |
 
-Hoisting is an exit analysis over the selected DAG. Egglog proves whether evaluation
-is safe, while scope and dominator analyses determine where operands are available
-and where a result can serve its uses. Inlining at an existing call site does not
-require the stronger safety proof needed to speculate an expression outside a
-branch or loop. SSA emission queries scalar safety and placement facts directly.
+`-O` enables scalar helper inlining and a broader search for shared computations.
+Constant folding, algebraic simplification, aggregate cleanup, and safety analysis
+run in both modes. Structural fusion and required lowering are always enabled.
 
 #### Fusion
 
@@ -297,8 +294,6 @@ results needed outside it. Mutable reads, effects, and unbounded work are exclud
 from rematerialization. Allocation and reuse decisions use post-fusion liveness,
 ownership candidates, and resource accesses.
 
-Publication turns the plan into the shader interface and companion host program,
-including resource accesses, dispatch dimensions, dependencies, inputs, and results.
 Supported counted array loops publish repeated dispatches with a CPU-computable
 iteration count. General conditional dispatch orchestration remains unsupported.
 Direct mode retains the authored stages and rejects programs requiring generated
@@ -308,44 +303,32 @@ prepasses or intermediate host storage.
 
 Static single assignment (SSA) represents device computation as explicit
 instructions and control-flow blocks. Each value is defined once, and block
-parameters carry values across branches and loops. With array scheduling already
-decided, this stage can clean up scalar code, place computations where they are
-needed, and establish the representation invariants required by code generation.
+parameters carry values across branches and loops. Array scheduling and scalar
+computation placement are decided during the Egglog stage. SSA preparation
+simplifies the generated instructions and assigns concrete storage for code
+generation.
 
-The [shared SSA pipeline](wyn-core/src/ssa/mod.rs) groups the following subpasses,
-listed in execution order. Names are relative to `ssa::` unless otherwise qualified.
+The passes below run in order. Names are relative to `ssa::` unless otherwise
+qualified.
 
 | Orchestration pass | Subpass | Responsibility |
 | --- | --- | --- |
 | `optimize` | `storage::lower_array_update` | Make authored storage-view writes explicit during concrete representation lowering. |
 | `optimize` | `materialize_dynamic_index` | Introduce and share addressable storage for dynamic indexing of fixed scalar-array values, preserving existing array views. |
 | `place_floating` | `ir::schedule_floating` | Assign the generated array materializations to concrete control-flow blocks. |
-| `filter_reachable` | Reachability walk | Prune functions and constants unreachable from entries. |
+| `filter_reachable` | Reachability walk | Prune function definitions unreachable from entries, counting calls only in CFG-reachable blocks. |
 | `prepare_wgsl` | `promote_addressable_constants` | Promote constants needing addressable storage. |
-| `prepare_*` | `eliminate_dead_pure_instructions` | Remove unused pure computations. |
-| `prepare_*` | `if_conversion::convert` | Convert eligible control-flow diamonds to selects, processing inner selections first. |
-| `prepare_*` → `if_conversion` | `constant_folding::fold` | Fold generated constants and simplify constant selections. |
-| `prepare_*` → `if_conversion` | `eliminate_dead_pure_instructions` | Remove computations made unused by conversion and folding. |
-| `prepare_*` | `ir::eliminate_single_input_params` | Replace single-input block parameters with their dominating incoming values. |
-| `prepare_wgsl` | `ownership` | Use placed SSA aliases and uses to elide local array copies. |
+| `prepare_*` → `simplify_values` | `eliminate_dead_pure_instructions` | Remove unused pure computations. |
+| `prepare_*` → `simplify_values` | `if_conversion::run` → `convert` | Convert eligible control-flow diamonds to selects, processing inner selections first and bounding added speculative work. |
+| `prepare_*` → `simplify_values` | `constant_folding::fold` | Fold generated constants and simplify constant selections. |
+| `prepare_*` → `simplify_values` | `eliminate_dead_pure_instructions` | Remove computations made unused by conversion and folding. |
+| `prepare_*` → `simplify_values` | `ir::eliminate_single_input_params` | Replace single-input block parameters with their dominating incoming values. |
+| `prepare_*` → `local_storage::apply` | `bufferize` | For bodies with eligible local array updates: split aggregate block parameters, remove unused local loads, analyze liveness, allocate/reuse storage, validate the assignment, rewrite to explicit storage operations, and remove dead instructions/value metadata. |
+| `prepare_*` → `local_storage::apply` | `ownership::apply` | Use placed SSA aliases, uses, dominance, and loop scopes to elide remaining local value-update copies. Runs for both SPIR-V and WGSL. |
 | `prepare_*` | `texture_sampling::publish_texture_sampling` | Publish texture-sampling requirements. |
 | `prepare_*` | `backend_validation::verify_no_abstract_types` | Reject unresolved type representations. |
-| `prepare_spirv` | `spirv::verify_buffer_layouts` | Verify concrete buffer layouts. |
 
-Scalar helper expansion, expression sharing, and scope placement belong to the
-egglog stage. SSA preparation handles concrete storage and backend-specific cleanup;
-its `place_floating` pass places storage materializations introduced after lowering.
-Constant folding during backend preparation simplifies generated SSA operations.
-
-`--output-mir` dumps `Elaborated` SSA before these cleanup and backend passes.
-Without `-O`, constant folding, reducing identities, safety analysis, and aggregate
-cleanup remain enabled, while optional scalar helper expansion and the second
-extraction search are skipped. `-O` enables both for more optimized generated code.
-Structural fusion and required lowering run in either mode.
-The library's `egglog::optimize` keeps the full policy;
-`optimize_with_policy` selects either policy explicitly. Tests can use
-`compile_thru_frontend`, `compile_thru_tlc` (through TLC reachability),
-`compile_thru_ssa`, and `compile_thru_spirv` to stop at shared checkpoints.
+`--output-mir` shows SSA before cleanup and backend preparation.
 
 ### Backends and output modes
 

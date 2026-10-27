@@ -1,6 +1,7 @@
 //! Compiler mid-end using [egglog](https://github.com/egraphs-good/egglog).
 //! Pass order is enforced by typestate:
-//! [`from_tlc`] → [`fuse`] → [`place`] → [`schedule`] → [`optimize`] → [`to_ssa`].
+//! [`from_tlc`] → [`fuse`] → [`place`] → [`schedule`] → [`prepare_interfaces`]
+//! → [`optimize`] → [`prepare_host`] → [`to_ssa`].
 use crate::host::ScalarExpr;
 use crate::ssa::stage::Elaborated;
 use crate::tlc::stage::OwnershipApplied;
@@ -72,8 +73,19 @@ pub fn schedule(mut program: Program<'_, Placed>) -> Result<Program<'_, Schedule
     Ok(program.advance(Scheduled))
 }
 
-/// Optimize demanded scalar regions after structural scheduling.
-pub fn optimize(program: Program<'_, Scheduled>) -> Result<Program<'_, Optimized>, OptimizeError> {
+/// Resolve demanded scalar inputs and the physical ABI before scalar optimization.
+pub fn prepare_interfaces(
+    mut program: Program<'_, Scheduled>,
+) -> Result<Program<'_, InterfacesPrepared>, OptimizeError> {
+    let _timing = timing::span("egglog interface preparation");
+    scalar::admit(&mut program.graph)?;
+    // Physical ABI and publication rules consume the scalar demand facts.
+    abi::prepare(&mut program.graph)?;
+    Ok(program.advance(InterfacesPrepared))
+}
+
+/// Optimize and extract demanded scalar regions.
+pub fn optimize(program: Program<'_, InterfacesPrepared>) -> Result<Program<'_, Optimized>, OptimizeError> {
     optimize_with_policy(program, ScalarOptimization::Full)
 }
 
@@ -86,24 +98,29 @@ pub enum ScalarOptimization {
 }
 
 pub fn optimize_with_policy(
-    mut program: Program<'_, Scheduled>,
+    program: Program<'_, InterfacesPrepared>,
     policy: ScalarOptimization,
 ) -> Result<Program<'_, Optimized>, OptimizeError> {
-    let (selected, scalars) = scalar::run(&mut program.graph, &program.identities, policy)?;
-    let mut program = program.advance(Optimized {
+    let (selected, scalars) = scalar::run(&program.graph, &program.identities, policy)?;
+    Ok(program.advance(Optimized {
         selected,
         scalars,
         host: LookupMap::default(),
         captures: LookupMap::default(),
-    });
-    facts::prepare(&mut program)?;
-    host::prepare(&mut program)?;
-    Ok(program)
+    }))
 }
 
-/// Emit the optimized scalar graph directly into SSA.
-pub fn to_ssa(program: Program<'_, Optimized>, target: CodegenTarget) -> Result<Elaborated, OptimizeError> {
-    to_ssa::lower(&program, target)
+/// Lower supported host scalar expressions and captures from the selected DAG.
+pub fn prepare_host(mut program: Program<'_, Optimized>) -> Result<HostPrepared<'_>, OptimizeError> {
+    let _timing = timing::span("egglog host preparation");
+    facts::prepare(&mut program)?;
+    host::prepare(&mut program)?;
+    Ok(HostPrepared { program })
+}
+
+/// Plan evaluation and lower shader SSA together with its host interfaces.
+pub fn to_ssa(program: HostPrepared<'_>, target: CodegenTarget) -> Result<Elaborated, OptimizeError> {
+    to_ssa::lower(&program.program, target)
 }
 
 /// Original TLC supplies untouched bodies and source metadata. The graph owns
@@ -131,8 +148,9 @@ pub struct Fused;
 pub struct Placed;
 
 /// Dispatch recipes, execution domains, storage, and effect order are fixed.
-/// Scalar optimization finalizes host execution and the physical ABI.
 pub struct Scheduled;
+
+pub struct InterfacesPrepared;
 
 pub struct Optimized {
     captures: LookupMap<egglog_engine::TermId, host::Capture>,
@@ -143,8 +161,29 @@ pub struct Optimized {
     scalars: EGraph,
 }
 
+pub struct HostPrepared<'source> {
+    program: Program<'source, Optimized>,
+}
+
 #[cfg(test)]
 mod pipeline_tests;
+
+#[cfg(test)]
+mod descriptor_tests;
+
+#[cfg(test)]
+fn optimize_for_test(program: Program<'_, Scheduled>) -> Result<Program<'_, Optimized>, OptimizeError> {
+    optimize(prepare_interfaces(program)?)
+}
+
+#[cfg(test)]
+fn finish_for_test(
+    program: Program<'_, Optimized>,
+    target: CodegenTarget,
+) -> Result<Elaborated, OptimizeError> {
+    let program = prepare_host(program)?;
+    to_ssa(program, target)
+}
 
 fn parse_program(filename: &str, source: &str) -> Result<Vec<Command>, OptimizeError> {
     Parser::default()

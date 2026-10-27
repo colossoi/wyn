@@ -207,39 +207,44 @@ pub(in crate::egglog) fn published_shape(
     compiler: &Compiler<'_, '_>,
     source: Value,
 ) -> Result<Expr, OptimizeError> {
-    let read = |resource| {
-        let Some(backing) = compiler.facts.backing(resource) else {
-            return Ok(None);
-        };
-        let Some((binding, _, _)) = compiler.bindings.buffer(backing)? else {
-            return Ok(None);
-        };
-        let ty = compiler.bindings.buffer_element(backing)?;
-        let index = compiler
-            .facts
-            .lookup("MetadataIndex", (resource,))
-            .map(|value| compiler.facts.integer(value))
-            .unwrap_or(0);
-        let offset = u32::try_from(index)
-            .ok()
-            .and_then(|index| index.checked_mul(4))
-            .ok_or_else(|| error("shape offset overflow"))?;
-        match host::read(
-            ScalarSource::Binding {
-                set: binding.set,
-                binding: binding.binding,
-            },
-            offset,
-            &ty,
-            StorageLayout::Std430,
-            false,
-        ) {
-            Ok(value) => Ok(Some(value)),
-            Err(host::Error::Unsupported) => Ok(None),
-            Err(host::Error::Invalid(error)) => Err(error.into()),
-        }
-    };
+    let read = |resource| published_read(compiler, resource);
     host::published_length(compiler.program, source, &read)
         .map(|length| Expr::Max(Box::new(Expr::Scalar(length)), Box::new(Expr::Integer(0))))
         .map_err(|e| e.required("published array shape"))
+}
+
+pub(super) fn published_read(
+    compiler: &Compiler<'_, '_>,
+    resource: Value,
+) -> Result<Option<ScalarExpr>, host::Error> {
+    let Some(backing) = compiler.facts.backing(resource) else {
+        return Ok(None);
+    };
+    let Some((binding, _, _)) = compiler.bindings.buffer(backing)? else {
+        return Ok(None);
+    };
+    let ty = compiler.bindings.buffer_element(backing)?;
+    let index = compiler
+        .facts
+        .lookup("MetadataIndex", (resource,))
+        .map(|value| compiler.facts.integer(value))
+        .unwrap_or(0);
+    let offset = u32::try_from(index)
+        .ok()
+        .and_then(|index| index.checked_mul(4))
+        .ok_or_else(|| error("shape offset overflow"))?;
+    match host::read(
+        ScalarSource::Binding {
+            set: binding.set,
+            binding: binding.binding,
+        },
+        offset,
+        &ty,
+        StorageLayout::Std430,
+        false,
+    ) {
+        Ok(value) => Ok(Some(value)),
+        Err(host::Error::Unsupported) => Ok(None),
+        Err(host::Error::Invalid(error)) => Err(error.into()),
+    }
 }

@@ -52,6 +52,17 @@ pub(in crate::egglog) fn expression(
     let value = lower.source(context, source)?;
     Ok(lower.finish(value))
 }
+pub(in crate::egglog) fn published_expression(
+    program: &Program<'_, Optimized>,
+    context: Value,
+    source: Value,
+    device_read: &DeviceRead<'_>,
+) -> Result<ScalarExpr> {
+    let mut lower = Lower::new(program);
+    lower.device_read = Some(device_read);
+    let value = lower.source(context, source)?;
+    Ok(lower.finish(value))
+}
 /// Allocation capacities may use proven bounds for device-produced logical lengths.
 pub(in crate::egglog) fn allocation(program: &Program<'_, Optimized>, extent: Value) -> Result<ScalarExpr> {
     let mut lower = Lower::new(program);
@@ -356,6 +367,9 @@ impl<'a, 'source> Lower<'a, 'source> {
         if self.facts.operation(source).is_some() {
             return Err(Error::Unsupported);
         }
+        if self.facts.source_type(source).is_some_and(|ty| ty.elem_type().is_some()) {
+            return Err(Error::Unsupported);
+        }
         Err(error(format!(
             "host expression has no selected root or boundary: {source:?}"
         ))
@@ -499,14 +513,20 @@ impl<'a, 'source> Lower<'a, 'source> {
                 yes: Box::new(self.scope(|lower| lower.term(f[3]))?),
                 no: Box::new(self.scope(|lower| lower.term(f[4]))?),
             },
-            "ExprCall" | "ExprInvoke" if self.capacity_bounds || self.device_read.is_some() => {
+            "ExprCall" | "ExprInvoke" => {
                 let callee = selected.values[f[f.len() - 2]];
+                if !self.capacity_bounds
+                    && self.device_read.is_none()
+                    && !self.facts.contains("WorkInlineEligible", (callee,))
+                {
+                    return Err(Error::Unsupported);
+                }
                 let arguments = selected
                     .arguments(f[f.len() - 1])?
                     .into_iter()
                     .map(|term| self.term(term))
                     .collect::<Result<Vec<_>>>()?;
-                // Required size expressions also support retained helper calls.
+                // Required sizes and cheap scalar helpers may retain calls after extraction.
                 self.scope(|lower| {
                     for (index, argument) in arguments.into_iter().enumerate() {
                         let Some(formal) = lower.facts.parameter(callee, index as i64) else {
@@ -517,7 +537,6 @@ impl<'a, 'source> Lower<'a, 'source> {
                     lower.region(callee)
                 })?
             }
-            "ExprCall" | "ExprInvoke" => return Err(Error::Unsupported),
             "ExprInstruction" => {
                 let Some(array) = self.facts.lookup("SourceLength", (selected.values[f[2]],)) else {
                     return Err(Error::Unsupported);

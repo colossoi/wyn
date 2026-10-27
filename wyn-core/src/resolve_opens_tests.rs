@@ -21,7 +21,7 @@ fn parse(src: &str) -> resolve_resources::ResourcesResolved {
     );
     let program = resolve_imports::resolve_imports(modules).expect("imports");
     let program = elaborate_modules::elaborate_modules(program).expect("modules");
-    let program = name_resolution::resolve_names(program);
+    let program = name_resolution::qualify_module_accesses(program);
     resolve_resources::resolve_resources(program).expect("resources")
 }
 
@@ -189,7 +189,7 @@ fn lambda_param_shadows_open() {
 
 #[test]
 fn already_qualified_left_alone() {
-    // Name resolution has already represented `f32.sin` as a qualified
+    // Module-access qualification has already represented `f32.sin` as a qualified
     // identifier. Opening `f32` must leave that qualification unchanged.
     let mut prog = parse(
         r#"

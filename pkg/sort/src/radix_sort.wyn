@@ -5,7 +5,8 @@
 -- Array dimensions, indices, ranks, and bucket counts use Wyn-native i32
 -- instead of Futhark i64. Bucket labels use i32 instead of i8 for GPU portability.
 -- Key types and the algorithm are unchanged.
--- Compiler support is incomplete. Do not replace copy with another producer,
+-- Scratch allocation uses Wyn's duplicate_scratch instead of the scratch-copy attribute.
+-- Compiler support is incomplete. Do not change the allocation contract,
 -- inline away higher-order helpers, unroll the loop,
 -- or replace the separate totals reduction with the last scan element.
 -- `map2`, `copy`, `reduce_comm`, and `iota` retain their prelude contracts;
@@ -40,7 +41,7 @@ def radix_sort_step<[n], T>(
     + nc * i32.bool(bin > 2i32)
     + d * i32.bool(bin == 3i32) in
   let is = map2(f, bins, offsets) in
-  scatter((#[scratch] copy(xs)), is, xs)
+  scatter(duplicate_scratch(xs), is, xs)
 
 -- Stable unsigned bit-pattern order. Supply the numeric module's num_bits
 -- and get_bit, or a smaller bit count when the key representation permits it.

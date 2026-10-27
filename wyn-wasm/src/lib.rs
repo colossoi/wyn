@@ -665,7 +665,6 @@ fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileRe
         Ok(t) => t,
         Err(e) => return CompileResultWgsl::err(source, e),
     };
-    let program = wyn_core::tlc::force_inline_soac_helpers(program);
     let program = wyn_core::tlc::canonicalize_conditional_producers(program);
     let program = wyn_core::tlc::normalize_soacs(program);
     let program = wyn_core::tlc::float_runtime_index_nested_producers(program);
@@ -680,7 +679,10 @@ fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileRe
         let program = egglog::fuse(program)?;
         let program = egglog::place(program, topology)?;
         let program = egglog::schedule(program)?;
-        Ok(egglog::to_ssa(egglog::optimize(program)?, CodegenTarget::Wgsl)?)
+        let program = egglog::prepare_interfaces(program)?;
+        let program = egglog::optimize(program)?;
+        let program = egglog::prepare_host(program)?;
+        Ok(egglog::to_ssa(program, CodegenTarget::Wgsl)?)
     };
     let ssa = match lower() {
         Ok(s) => s,

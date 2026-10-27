@@ -85,7 +85,7 @@ for f in testfiles/*.wyn testfiles/playground/*.wyn; do
     # its shared image header. Explicit compute/feedback pipelines retain an
     # entry declaration and compile unchanged.
     if [[ "$f" == testfiles/playground/* ]] && ! grep -q '^entry ' "$f"; then
-        PREPARED_SOURCE="testfiles/playground/.validate-${base}-$$.wyn"
+        PREPARED_SOURCE=$(mktemp "testfiles/playground/.validate-${base}-XXXXXXXX.wyn")
         { cat "$PLAYGROUND_HEADER"; printf '\n'; cat "$f"; } > "$PREPARED_SOURCE"
         compile_source="$PREPARED_SOURCE"
     else

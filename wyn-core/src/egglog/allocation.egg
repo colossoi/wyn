@@ -1,10 +1,10 @@
 ; Backing identity is distinct from the version of a value stored there.
 ; Destination selection completes before fresh storage can be allocated.
-(rule ((InitializedResult op 0 t n))
-      ((set (SelectedDestination op) (DestinationBuffer (Result op 0)))) :ruleset allocation)
-(rule ((UninitializedResult op 0 t n))
-      ((set (SelectedDestination op) (DestinationBuffer (Result op 0)))) :ruleset allocation)
-(rule ((UpdatedResult op 0 source))
+(rule ((InitializedResult op i t n))
+      ((set (SelectedDestination op) (DestinationBuffer (Result op i)))) :ruleset allocation)
+(rule ((UninitializedResult op i t n))
+      ((set (SelectedDestination op) (DestinationBuffer (Result op i)))) :ruleset allocation)
+(rule ((UpdatedResult op i source))
       ((set (SelectedDestination op) (DestinationValue source))) :ruleset allocation)
 (rule ((BucketResult op source))
       ((set (SelectedDestination op) (DestinationValue source))) :ruleset allocation)
@@ -73,7 +73,7 @@
       ((ElementType (Result op i) t) (set (CapacityExtent (Result op i)) n)
        (set (ResultRead op i) (ReadView (Result op i)))
        (set (LiveLength (Result op i)) n) (FreshValue (Result op i))
-       (set (BufferSlot op "output" i) (Result op i))) :ruleset allocation)
+       (set (BufferSlot op "output" 0) (Result op i))) :ruleset allocation)
 (rule ((InitializedResult op i t n) (Produces stage (Result op i)))
       ((Materialize (Result op i))) :ruleset allocation)
 (rule ((UpdatedResult op i source) (= (ValueRef source) old) (Produces stage (Result op i)))
@@ -128,7 +128,7 @@
       ((ElementType (Result op i) t) (set (CapacityExtent (Result op i)) n)
        (set (ResultRead op i) (ReadView (Result op i)))
        (set (LiveLength (Result op i)) n) (FreshValue (Result op i))
-       (set (BufferSlot op "output" i) (Result op i))) :ruleset allocation)
+       (set (BufferSlot op "output" 0) (Result op i))) :ruleset allocation)
 (rule ((UninitializedResult op i t n) (Requires site (Result op i))) ((Materialize (Result op i))) :ruleset allocation)
 (rule ((UninitializedResult op i t n) (Produces stage (Result op i))) ((Materialize (Result op i))) :ruleset allocation)
 

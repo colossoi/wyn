@@ -41,7 +41,7 @@
     "prebuildify": "^6.0.0"
   },
   "scripts": {
-    "build": "tree-sitter generate && node-gyp build",
+    "build": "tree-sitter generate && node-gyp rebuild",
     "parse": "tree-sitter parse",
     "test": "tree-sitter test",
     "generate": "tree-sitter generate",

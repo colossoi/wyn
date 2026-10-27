@@ -4,9 +4,13 @@
 (datatype Recipe (Elements) (Totals) (Prefixes) (Compact) (Scatter) (Serial) (Atomic AtomicUpdate) (Buckets))
 (relation FilterShape (OperationKey))
 (relation IndexedWrite (OperationKey bool))
+; Result indices include preceding totals; the destination's output buffer slot is 0.
+(function DestinationSlot (OperationKey) i64 :no-merge)
 (relation IndexedReducer (OperationKey bool AtomicUpdate))
 (relation BucketShape (OperationKey bool))
 (function Plan (OperationKey) Recipe :no-merge)
+(function ElideElements (OperationKey) bool :merge (or old new))
+(rule ((= r (OperationRegion op))) ((set (ElideElements op) false)) :ruleset structure)
 ; Parallel callbacks may read arrays and contain control flow. They must not
 ; write shared state or call unknown effects. This is weaker than movability.
 (rule ((= r (OperationRegion op))) ((set (ParallelSafe op) true) (set (ParallelBodySafe op) true)) :ruleset structure)
@@ -79,16 +83,16 @@
       ((Produces (Stage leader "scalar") (Result op 0))
        (FirstPhase op (Stage leader "scalar")) (LastPhase op (Stage leader "scalar"))
        (PhaseInput (Stage leader "scalar") op "environment")) :ruleset schedule)
-(rule ((= (Plan op) (Elements)) (= (MapSegmented op) false)
+(rule ((= (Plan op) (Elements)) (= (ElideElements op) false) (= (MapSegmented op) false)
        (= (MapExecution op) (InvocationScope)) (= width (MapScopeWidth (InvocationScope)))
        (= n (IterationExtent op)) (= grid (OperationGrid op)))
       ((KernelPhase op "elements" n width grid) (PhaseEnds op "elements" "elements")) :ruleset schedule)
-(rule ((= (Plan op) (Elements)) (= (MapSegmented op) false)
+(rule ((= (Plan op) (Elements)) (= (ElideElements op) false) (= (MapSegmented op) false)
        (= (MapExecution op) (WorkgroupScope)) (= width (MapScopeWidth (WorkgroupScope)))
        (= n (IterationExtent op)) (= grid (OperationGrid op)))
       ((KernelPhase op "elements" (Product n (Fixed width)) width grid)
        (PhaseEnds op "elements" "elements")) :ruleset schedule)
-(rule ((= (Plan op) (Elements)) (= (MapSegmented op) true)
+(rule ((= (Plan op) (Elements)) (= (ElideElements op) false) (= (MapSegmented op) true)
        (= n (IterationExtent op)) (= grid (OperationGrid op)))
       ((KernelPhase op "segments" (Product n (Fixed collective-width)) collective-width grid)
        (PhaseEnds op "segments" "segments")) :ruleset schedule)
@@ -130,8 +134,12 @@
 (rule ((KernelPhase op name n width grid) (= r (OperationRegion op)) (HostRegion r))
       ((Phase (Stage op name) r) (PhaseDomain (Stage op name) n width)
        (set (PhaseGrid (Stage op name)) grid)) :ruleset schedule)
-(rule ((Phase (Stage op name) r) (!= name "combine"))
+(rule ((Phase (Stage op name) r) (!= name "combine") (!= name "chunks"))
       ((PhaseInput (Stage op name) op "environment")) :ruleset schedule)
+(rule ((Phase (Stage op "chunks") r))
+      ((PhaseInput (Stage op "chunks") op "early-environment")) :ruleset schedule)
+(rule ((Phase (Stage op "chunks") r) (= (Plan op) (Totals)))
+      ((PhaseInput (Stage op "chunks") op "environment")) :ruleset schedule)
 (rule ((PhaseEnds op first last) (Phase (Stage op first) r) (Phase (Stage op last) r))
       ((FirstPhase op (Stage op first)) (LastPhase op (Stage op last))) :ruleset schedule)
 (rule ((PhaseLink op a b) (Phase (Stage op a) r) (Phase (Stage op b) r))
@@ -162,8 +170,8 @@
       ((Produces (Stage op "compact") (Result op 0))
        (Produces (Stage op "compact") (Result op 1))) :ruleset schedule)
 
-(rule ((IndexedWrite op true) (Phase (Stage op "offsets") r))
-      ((Produces (Stage op "offsets") (Result op 0))) :ruleset schedule)
+(rule ((IndexedWrite op true) (Phase (Stage op "offsets") r) (= slot (DestinationSlot op)))
+      ((Produces (Stage op "offsets") (Result op slot))) :ruleset schedule)
 
 ; Temporary recipe results have ordinary producers, consumers, and capacity.
 (rule ((Accumulator op i t role slot source) (= groups (CollectiveGroups op)) (Phase (Stage op "chunks") r))
@@ -195,7 +203,7 @@
 
 (rule ((= (Plan op) (Scatter)) (UninitializedResult op i t n)) ((PhaseEnds op "scatter" "scatter")) :ruleset schedule)
 
-(rule ((DeviceOperation op) (UninitializedResult op i t n)) ((LocalBuffer op "output" i t n)) :ruleset schedule)
+(rule ((DeviceOperation op) (UninitializedResult op i t n)) ((LocalBuffer op "output" 0 t n)) :ruleset schedule)
 
 (rule ((HostLoop op r a s i n) (= grid (OperationGrid op)))
       ((KernelPhase op "loop_enter" (Length a) 64 grid)

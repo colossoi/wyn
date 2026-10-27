@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use super::specialize_intrinsics;
+use super::specialize_intrinsic;
 use super::VarRef;
 use crate::ast::TypeName;
 use crate::builtins;
@@ -75,7 +75,7 @@ fn test_specialize_sign_f32() {
         },
     );
 
-    specialize_intrinsics(&mut program);
+    specialize_intrinsic(&mut program.defs[0].body, &mut program.term_ids);
 
     // Check that sign became f32.sign
     match &program.defs[0].body.kind {
@@ -164,7 +164,7 @@ fn test_specialize_min_i32() {
         },
     );
 
-    specialize_intrinsics(&mut program);
+    specialize_intrinsic(&mut program.defs[0].body, &mut program.term_ids);
 
     // Check that min became i32.min in the application
     match &program.defs[0].body.kind {

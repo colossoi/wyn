@@ -2,14 +2,23 @@
 
 `scatter(destination, indices, values)` ignores out-of-bounds indices. If multiple inputs target the same valid index, they must supply identical values. Conflicting values have unspecified behavior; there is no last-writer guarantee. This is the caller's obligation, not an injectivity proof performed by the compiler.
 
-`#[scratch] expression` retains an array expression's shape and element type while permitting uninitialized storage. For example:
+`duplicate_scratch(xs)` creates a fresh array with the shape and element type
+of `xs`, without copying its elements. `scratch(n)` creates an uninitialized
+array of length `n`; its element type is inferred from context or a type annotation.
 
 ```wyn
-let output = #[scratch] replicate(length(xs), 0i32) in
+let output = duplicate_scratch(xs) in
 scatter(output, destinations, xs)
 ```
 
-The `0i32` determines the element type; it does not cause an initialization pass. This follows the array semantics of Futhark's [scratch attribute](https://futhark.readthedocs.io/en/latest/language-reference.html#scratch). Wyn currently accepts this attribute on array expressions. It is not a public allocation function.
+```wyn
+let output: []i32 = scratch(n) in
+scatter(output, destinations, values)
+```
+
+Both forms use the same allocation machinery. The compatibility spelling
+`#[scratch] expression` also retains the expression's shape and element type
+without requiring initialization, including for `map` and `replicate` expressions.
 
 Every element must be written before it is read. A full permutation scatter satisfies this condition; a partial scatter only permits subsequent reads of the written positions. The compiler does not prove full coverage. Normal, unannotated destinations retain their initial values at unwritten positions.
 

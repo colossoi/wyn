@@ -25,8 +25,6 @@ impl<'a> Transformer<'a> {
         result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        debug_assert!(!match_expr.cases.is_empty(), "checker rejects empty match");
-
         let scrutinee = self.transform_expr(&match_expr.scrutinee);
         let scrut_ty = scrutinee.ty.clone();
 
@@ -109,35 +107,11 @@ impl<'a> Transformer<'a> {
                 );
                 (cond, Vec::new())
             }
-            PatternKind::Tuple(sub_patterns) => {
+            PatternKind::Tuple(sub_patterns) | PatternKind::Vec(sub_patterns) => {
                 let mut cond = self.bool_lit(true, span);
                 let mut bindings = Vec::new();
-                let elem_tys = match &scrut.ty {
-                    Type::Constructed(TypeName::Tuple(_), args) => args.clone(),
-                    other => panic!("BUG: tuple pattern against non-tuple type {:?}", other),
-                };
                 for (i, sub) in sub_patterns.iter().enumerate() {
-                    let proj = self.mk_tuple_proj(scrut.clone(), i, elem_tys[i].clone(), span);
-                    let (sub_cond, sub_bindings) = self.compile_pattern_test(&proj, sub);
-                    cond = self.and_cond(cond, sub_cond, span);
-                    bindings.extend(sub_bindings);
-                }
-                (cond, bindings)
-            }
-            PatternKind::Vec(sub_patterns) => {
-                // Vec patterns in `match`: all sub-patterns share the
-                // single element type and the size is fixed by the type,
-                // so the pattern is irrefutable (always matches once
-                // the type checker has confirmed arity). Project each
-                // component as a `.x`/`.y`/`.z`/`.w` swizzle.
-                let mut cond = self.bool_lit(true, span);
-                let mut bindings = Vec::new();
-                let elem_ty = match &scrut.ty {
-                    Type::Constructed(TypeName::Vec, args) if args.len() == 2 => args[0].clone(),
-                    other => panic!("BUG: vec pattern against non-vec type {:?}", other),
-                };
-                for (i, sub) in sub_patterns.iter().enumerate() {
-                    let proj = self.mk_tuple_proj(scrut.clone(), i, elem_ty.clone(), span);
+                    let proj = self.mk_tuple_proj(scrut.clone(), i, Self::type_of(&sub.h), span);
                     let (sub_cond, sub_bindings) = self.compile_pattern_test(&proj, sub);
                     cond = self.and_cond(cond, sub_cond, span);
                     bindings.extend(sub_bindings);
@@ -145,26 +119,9 @@ impl<'a> Transformer<'a> {
                 (cond, bindings)
             }
             PatternKind::Constructor(name, sub_patterns) => {
-                let variants = if let Some(variants) = types::sum_variants(&scrut.ty) {
-                    variants
-                } else {
-                    match &scrut.ty {
-                        Type::Constructed(TypeName::Tuple(_), _) => {
-                            // Scrutinee already lowered from a sum to a
-                            // flat tuple. Re-derive the layout from the
-                            // raw type table — Constructor patterns carry
-                            // their sum's raw shape via the pattern's
-                            // type-table entry.
-                            self.lookup_sum_variants_for_pattern(&pattern.h).unwrap_or_else(|| {
-                                panic!("BUG: Constructor pattern without sum-type entry in type table")
-                            })
-                        }
-                        other => panic!("BUG: Constructor pattern against non-sum type {:?}", other),
-                    }
-                };
+                let variants = types::sum_variants(&Self::raw_type(&pattern.h)).unwrap();
                 let layout = Self::sum_layout(&variants);
-                let &(tag_value, payload_offset) =
-                    layout.constructor_info.get(name).expect("BUG: constructor name not in sum layout");
+                let (tag_value, payload_offset) = layout.constructor_info[name];
 
                 // Tag check: `scrut.0 == tag_value`.
                 let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
@@ -180,20 +137,9 @@ impl<'a> Transformer<'a> {
                     span,
                 );
 
-                let payload_types =
-                    &variants.iter().find(|(n, _)| n == name).expect("BUG: constructor must exist").1;
-                debug_assert_eq!(
-                    sub_patterns.len(),
-                    payload_types.len(),
-                    "constructor `#{}` arity ({}) must match payload arity ({}); \
-                     the type checker should reject this upstream",
-                    name,
-                    sub_patterns.len(),
-                    payload_types.len()
-                );
                 let mut bindings = Vec::new();
                 for (i, sub) in sub_patterns.iter().enumerate() {
-                    let payload_ty = Self::lower_type(payload_types[i].clone());
+                    let payload_ty = Self::type_of(&sub.h);
                     let proj = self.mk_tuple_proj(scrut.clone(), payload_offset + i, payload_ty, span);
                     let (sub_cond, sub_bindings) = self.compile_pattern_test(&proj, sub);
                     cond = self.and_cond(cond, sub_cond, span);
@@ -247,18 +193,6 @@ impl<'a> Transformer<'a> {
             PatternLiteral::Float(v) => self.mk_term(expected_ty.clone(), span, TermKind::FloatLit(*v)),
             PatternLiteral::Bool(b) => self.mk_term(Self::bool_ty(), span, TermKind::BoolLit(*b)),
         }
-    }
-
-    /// Look up the raw (pre-lower) sum-type variants for a Constructor
-    /// pattern. The type table stores the pattern's pre-lower type,
-    /// which lets us recover the variant list even after the scrutinee
-    /// has been rewritten to a flat tuple.
-    fn lookup_sum_variants_for_pattern(
-        &self,
-        header: &ast::TypedHeader,
-    ) -> Option<Vec<(String, Vec<Type<TypeName>>)>> {
-        let raw = Self::raw_type(header);
-        types::sum_variants(&raw)
     }
 }
 

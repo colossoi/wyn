@@ -125,7 +125,7 @@ impl<'a> Transformer<'a> {
     ) -> Option<Def<run::UnpinnedPolymorphic>> {
         let body_ty = Self::type_of(&decl.body.h);
         let full_ty = self.build_function_type(&decl.params, &body_ty);
-        let body = self.transform_with_params(&decl.params, &decl.body, full_ty.clone());
+        let body = self.transform_with_params(&decl.params, &decl.body);
 
         Some(Def {
             data: data::PolymorphicDefinition {
@@ -148,7 +148,7 @@ impl<'a> Transformer<'a> {
     ) -> Option<Def<run::UnpinnedPolymorphic>> {
         let body_ty = Self::type_of(&entry.body.h);
         let full_ty = self.build_function_type(&entry.params, &body_ty);
-        let body = self.transform_with_params(&entry.params, &entry.body, full_ty.clone());
+        let body = self.transform_with_params(&entry.params, &entry.body);
 
         Some(Def {
             data: data::PolymorphicDefinition {
@@ -190,19 +190,11 @@ impl<'a> Transformer<'a> {
         let mut ty = ret_ty.clone();
 
         for param in params.iter().rev() {
-            let param_ty = self.pattern_type(param);
+            let param_ty = Self::type_of(&param.h);
             ty = Type::Constructed(TypeName::Arrow, vec![param_ty, ty]);
         }
 
         ty
-    }
-
-    fn pattern_type<A>(&self, pattern: &ast::Pattern<ast::HolesResolvedTree, A>) -> Type<TypeName> {
-        match &pattern.kind {
-            // For attributed patterns, recurse into the inner pattern
-            ast::PatternKind::Attributed(_, inner) => self.pattern_type(inner),
-            _ => Self::type_of(&pattern.h),
-        }
     }
 
     fn lower_entry_param(
@@ -237,10 +229,9 @@ impl<'a> Transformer<'a> {
         &mut self,
         params: &[ast::Pattern<ast::HolesResolvedTree, A>],
         body: &ast::Expression<ast::HolesResolvedTree>,
-        full_ty: Type<TypeName>,
     ) -> Term {
         let span = params.first().map(|p| p.h.span).unwrap_or(body.h.span);
-        self.build_lambda_chain(params, body, full_ty, span)
+        self.build_lambda_chain(params, body, span)
     }
 
     /// Build a chain of nested lambdas from patterns, deferring all let-bindings
@@ -250,7 +241,6 @@ impl<'a> Transformer<'a> {
         &mut self,
         params: &[ast::Pattern<ast::HolesResolvedTree, A>],
         body: &ast::Expression<ast::HolesResolvedTree>,
-        full_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
         if params.is_empty() {
@@ -260,13 +250,12 @@ impl<'a> Transformer<'a> {
         // Collect all lambda parameters and their pending bindings
         // compute_pattern_bindings already creates SymbolIds via define()
         let mut lambda_info: Vec<(SymbolId, Type<TypeName>, Vec<PendingBinding>)> = Vec::new();
-        let mut current_ty = full_ty;
 
         // Use the shared placeholder symbol for the scrutinee in compute_pattern_bindings
         let placeholder_sym = self.placeholder_sym;
 
         for param in params {
-            let param_ty = self.get_param_type(&current_ty);
+            let param_ty = Self::type_of(&param.h);
 
             // Use a placeholder scrutinee - we need to call compute_pattern_bindings to get
             // the param name and projection bindings, but the actual lambda param value
@@ -286,7 +275,6 @@ impl<'a> Transformer<'a> {
             }
 
             lambda_info.push((param_sym, param_ty.clone(), bindings));
-            current_ty = self.get_body_type(&current_ty);
         }
 
         // Transform the body expression
@@ -368,8 +356,7 @@ impl<'a> Transformer<'a> {
         })
     }
 
-    // simple_pattern_name, extract_tuple_types, resolve_field_index,
-    // and extract_record_types live in tlc/patterns/bindings.rs.
+    // Pattern binding helpers live in tlc/patterns/bindings.rs.
 
     pub(super) fn transform_expr(&mut self, expr: &ast::Expression<ast::HolesResolvedTree>) -> Term {
         let ty = Self::type_of(&expr.h);
@@ -485,7 +472,7 @@ impl<'a> Transformer<'a> {
                 self.mk_tuple(terms, ty, span)
             }
 
-            ast::ExprKind::Lambda(lam) => self.transform_lambda(&lam.params, &lam.body, ty, span),
+            ast::ExprKind::Lambda(lam) => self.build_lambda_chain(&lam.params, &lam.body, span),
 
             ast::ExprKind::Application(func, args) => self.transform_application(func, args, ty, span),
 
@@ -589,9 +576,11 @@ impl<'a> Transformer<'a> {
                     };
                 }
                 // Resolve field name to index, treat record as tuple
-                let field_idx = self
-                    .resolve_field_index(&rec.ty, field)
-                    .unwrap_or_else(|| panic!("BUG: field '{}' not in record type", field));
+                let field_idx = match &rec.ty {
+                    Type::Constructed(TypeName::Record(fields), _) => fields.get_index(field).unwrap(),
+                    Type::Constructed(TypeName::Tuple(_), _) => field.parse().unwrap(),
+                    _ => unreachable!(),
+                };
                 self.mk_tuple_proj(rec, field_idx, ty, span)
             }
 
@@ -612,26 +601,16 @@ impl<'a> Transformer<'a> {
 
             ast::ExprKind::Loop(loop_expr) => self.transform_loop(loop_expr, ty, span),
 
-            ast::ExprKind::Match(match_expr) => self.transform_match(match_expr, ty, span),
+            ast::ExprKind::Match(match_expr) => self.compile_match(match_expr, ty, span),
 
             ast::ExprKind::Constructor(name, args) => {
                 // Lower `#ck(a1..am)` to a flat tuple
                 // `(tag=k, slot_1, ..., slot_total-1)` where the active
                 // constructor's payload occupies slots [offset_k, offset_k+m)
                 // and dead slots get blank-filled.
-                let raw_sum_ty = Self::raw_type(&expr.h);
-                let variants = match &raw_sum_ty {
-                    Type::Constructed(TypeName::Sum(v), _) => v.clone(),
-                    Type::Constructed(TypeName::FragmentOutput, args) if args.len() == 1 => {
-                        types::fragment_output_variants(args[0].clone())
-                    }
-                    _ => panic!("BUG: Constructor `#{}` has non-sum type {:?}", name, raw_sum_ty),
-                };
+                let variants = types::sum_variants(&Self::raw_type(&expr.h)).unwrap();
                 let layout = Self::sum_layout(&variants);
-                let &(tag_value, payload_offset) = layout
-                    .constructor_info
-                    .get(name)
-                    .expect("BUG: Phase B should have validated constructor name");
+                let (tag_value, payload_offset) = layout.constructor_info[name];
 
                 let arg_terms: Vec<Term> = args.iter().map(|a| self.transform_expr(a)).collect();
 
@@ -745,30 +724,6 @@ impl<'a> Transformer<'a> {
         }
     }
 
-    fn transform_lambda(
-        &mut self,
-        params: &[ast::Pattern<ast::HolesResolvedTree>],
-        body: &ast::Expression<ast::HolesResolvedTree>,
-        ty: Type<TypeName>,
-        span: Span,
-    ) -> Term {
-        self.build_lambda_chain(params, body, ty, span)
-    }
-
-    fn get_param_type(&self, ty: &Type<TypeName>) -> Type<TypeName> {
-        match ty {
-            Type::Constructed(TypeName::Arrow, args) if args.len() == 2 => args[0].clone(),
-            _ => panic!("BUG: Expected arrow type for function param, got {:?}", ty),
-        }
-    }
-
-    fn get_body_type(&self, ty: &Type<TypeName>) -> Type<TypeName> {
-        match ty {
-            Type::Constructed(TypeName::Arrow, args) if args.len() == 2 => args[1].clone(),
-            _ => ty.clone(),
-        }
-    }
-
     fn transform_application(
         &mut self,
         func: &ast::Expression<ast::HolesResolvedTree>,
@@ -794,12 +749,6 @@ impl<'a> Transformer<'a> {
                 component_conversion,
             } = &identifier.resolution
             {
-                debug_assert_eq!(
-                    args.len(),
-                    1,
-                    "BUG: vec constructor expected 1 arg, got {}",
-                    args.len()
-                );
                 return self.transform_vec_constructor(&args[0], *component_conversion, *arity, ty, span);
             }
         }
@@ -857,17 +806,13 @@ impl<'a> Transformer<'a> {
         span: Span,
     ) -> Term {
         let arg_term = self.transform_expr(arg);
-        // The arg is a vec whose elem type tells us the source-elem
-        // module name. `i32`-to-`f32` keys map to the catalog entry
-        // `f32.i32` (target.source); we form that surface name and
-        // dispatch via the builtin catalog.
-        let source_elem_ty = arg_term
-            .ty
-            .elem_type()
-            .expect("vec constructor arg must be a vec — type checker enforces this")
-            .clone();
-        let target_elem_ty =
-            result_ty.elem_type().expect("vec constructor result type is always a vec").clone();
+        let (Type::Constructed(_, source_args), Type::Constructed(_, target_args)) =
+            (&arg_term.ty, &result_ty)
+        else {
+            unreachable!()
+        };
+        let source_elem_ty = source_args[0].clone();
+        let target_elem_ty = target_args[0].clone();
 
         // Bind the arg once to a synthetic let so each component
         // projection reuses the same evaluation. `SymbolId(0)` is the
@@ -963,7 +908,6 @@ impl<'a> Transformer<'a> {
         ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        assert_eq!(args.len(), 2, "replicate requires 2 arguments");
         let size = self.transform_expr(&args[0]);
         let value = self.transform_expr(&args[1]);
         let value_ty = value.ty.clone();
@@ -1019,7 +963,6 @@ impl<'a> Transformer<'a> {
         ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        assert!(args.len() >= 2, "map requires at least 2 arguments");
         let func_term = self.transform_expr(&args[0]);
         let arr_term = self.transform_expr(&args[1]);
 
@@ -1091,7 +1034,6 @@ impl<'a> Transformer<'a> {
         ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        assert!(args.len() >= 3, "reduce requires 3 arguments");
         let op_term = self.transform_expr(&args[0]);
         let ne_term = self.transform_expr(&args[1]);
         let arr_term = self.transform_expr(&args[2]);
@@ -1119,7 +1061,6 @@ impl<'a> Transformer<'a> {
         ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        assert!(args.len() >= 3, "scan requires 3 arguments");
         let op_term = self.transform_expr(&args[0]);
         let ne_term = self.transform_expr(&args[1]);
         let arr_term = self.transform_expr(&args[2]);
@@ -1147,7 +1088,6 @@ impl<'a> Transformer<'a> {
         ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        assert!(args.len() >= 2, "filter requires 2 arguments");
         let pred_term = self.transform_expr(&args[0]);
         let arr_term = self.transform_expr(&args[1]);
 
@@ -1185,7 +1125,6 @@ impl<'a> Transformer<'a> {
         ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        assert!(args.len() >= 5, "reduce_by_index requires 5 arguments");
         let dest_term = self.transform_expr(&args[0]);
         let op_term = self.transform_expr(&args[1]);
         let ne_term = self.transform_expr(&args[2]);
@@ -1195,7 +1134,7 @@ impl<'a> Transformer<'a> {
         let op = self.term_to_lambda(op_term);
 
         // Build a Place from dest_term
-        let dest_elem_ty = self.get_array_element_type(&dest_term.ty);
+        let dest_elem_ty = dest_term.ty.elem_type().unwrap().clone();
         let dest = Place {
             id: match &dest_term.kind {
                 TermKind::Var(VarRef::Symbol(sym)) => sym.clone(),
@@ -1235,14 +1174,13 @@ impl<'a> Transformer<'a> {
         ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        assert!(args.len() >= 3, "scatter requires 3 arguments");
         let dest_term = self.transform_expr(&args[0]);
         let indices_term = self.transform_expr(&args[1]);
         let values_term = self.transform_expr(&args[2]);
 
-        let dest_elem_ty = self.get_array_element_type(&dest_term.ty);
-        let idx_elem_ty = self.get_array_element_type(&indices_term.ty);
-        let val_elem_ty = self.get_array_element_type(&values_term.ty);
+        let dest_elem_ty = dest_term.ty.elem_type().unwrap().clone();
+        let idx_elem_ty = indices_term.ty.elem_type().unwrap().clone();
+        let val_elem_ty = values_term.ty.elem_type().unwrap().clone();
         let mut binds = Bindings::new();
         let dest = Place {
             id: match &dest_term.kind {
@@ -1302,21 +1240,13 @@ impl<'a> Transformer<'a> {
         span: Span,
         input_rank: u8,
     ) -> Term {
-        assert_eq!(args.len(), 2, "bucket_scatter_Nd requires 2 arguments");
         let dest_term = self.transform_expr(&args[0]);
         let items_term = self.transform_expr(&args[1]);
 
-        let dest_row_ty = self.get_array_element_type(&dest_term.ty);
-        let dest_elem_ty = self.get_array_element_type(&dest_row_ty);
-        let mut item_ty = items_term.ty.clone();
-        for _ in 0..input_rank {
-            item_ty = self.get_array_element_type(&item_ty);
-        }
-        let Type::Constructed(TypeName::Tuple(2), pair_types) = &item_ty else {
-            panic!("BUG: bucket_scatter_Nd item must be a (key, value) pair, got {item_ty:?}");
-        };
-        let key_ty = pair_types[0].clone();
-        let value_ty = pair_types[1].clone();
+        let dest_row_ty = dest_term.ty.elem_type().unwrap().clone();
+        let dest_elem_ty = dest_row_ty.elem_type().unwrap().clone();
+        let key_ty = types::i32();
+        let value_ty = dest_elem_ty.clone();
         let pair_ty = Type::Constructed(TypeName::Tuple(2), vec![key_ty.clone(), value_ty.clone()]);
         let dest = Place {
             id: match &dest_term.kind {
@@ -1378,18 +1308,9 @@ impl<'a> Transformer<'a> {
                 let mut param_tys = Vec::new();
                 let mut current = term.ty.clone();
                 while let Type::Constructed(TypeName::Arrow, ref args) = current {
-                    if args.len() == 2 {
-                        param_tys.push(args[0].clone());
-                        current = args[1].clone();
-                    } else {
-                        break;
-                    }
+                    param_tys.push(args[0].clone());
+                    current = args[1].clone();
                 }
-                assert!(
-                    !param_tys.is_empty(),
-                    "BUG: Expected arrow type for SOAC function arg, got {:?}",
-                    term.ty
-                );
                 let ret_ty = current;
 
                 // Create parameter symbols. Display names must be distinct
@@ -1478,7 +1399,7 @@ impl<'a> Transformer<'a> {
 
             ast::LoopForm::ForIn(elem_pattern, iter) => {
                 let iter_term = self.transform_expr(iter);
-                let elem_ty = self.get_array_element_type(&iter_term.ty);
+                let elem_ty = Self::type_of(&elem_pattern.h);
                 let elem_var_sym =
                     self.simple_pattern_symbol(elem_pattern).unwrap_or_else(|| self.fresh("_w_elem"));
 
@@ -1532,90 +1453,45 @@ impl<'a> Transformer<'a> {
         acc_ty: &Type<TypeName>,
         span: Span,
     ) -> (SymbolId, Type<TypeName>, Vec<(SymbolId, Type<TypeName>, Term)>) {
-        use crate::pattern::binding_paths;
-
-        // For a simple name pattern, use it directly
         if let ast::PatternKind::Name(binding) = &pattern.kind {
             return (binding.symbol, acc_ty.clone(), vec![]);
         }
 
-        // For complex patterns, create a fresh loop_var and build projections
         let loop_var_name = format!("_w_loop_{}", self.term_ids.next_id());
-        let loop_var_sym = self.fresh(&loop_var_name);
-        let paths = binding_paths(pattern);
-
-        let init_bindings = paths
-            .into_iter()
-            .filter_map(|bp| {
-                if bp.path.is_empty() {
-                    // This is the root binding - shouldn't happen for complex patterns
-                    None
-                } else {
-                    let binding_ty = self.type_at_path(acc_ty, &bp.path);
-                    let proj_term = self.build_projection_chain(loop_var_sym, acc_ty, &bp.path, span);
-                    let binding_sym = bp.symbol.unwrap_or_else(|| {
-                        panic!("BUG: loop binding '{}' lacks its resolved identity", bp.name)
-                    });
-                    Some((binding_sym, binding_ty, proj_term))
-                }
-            })
-            .collect();
-
-        (loop_var_sym, acc_ty.clone(), init_bindings)
+        let loop_var = self.fresh(&loop_var_name);
+        let value = self.mk_term(acc_ty.clone(), span, TermKind::Var(VarRef::Symbol(loop_var)));
+        let mut bindings = Vec::new();
+        self.collect_loop_bindings(pattern, value, &mut bindings);
+        (loop_var, acc_ty.clone(), bindings)
     }
 
-    /// Get the type at a given projection path within a tuple/record type.
-    fn type_at_path(&self, ty: &Type<TypeName>, path: &[usize]) -> Type<TypeName> {
-        let mut current = ty.clone();
-        for &idx in path {
-            current = match &current {
-                Type::Constructed(TypeName::Tuple(_), args) => {
-                    args.get(idx).cloned().unwrap_or_else(|| {
-                        panic!(
-                            "BUG: tuple projection index {} out of bounds for {:?}",
-                            idx, current
-                        )
-                    })
-                }
-                Type::Constructed(TypeName::Record(fields), args) => {
-                    args.get(idx).cloned().unwrap_or_else(|| {
-                        panic!(
-                            "BUG: record projection index {} out of bounds for {:?} (fields: {:?})",
-                            idx, current, fields
-                        )
-                    })
-                }
-                _ => panic!("BUG: projection on non-tuple/record type: {:?}", current),
-            };
-        }
-        current
-    }
-
-    /// Build a chain of tuple projections: proj[path[n-1]](...proj[path[0]](var))
-    fn build_projection_chain(
+    fn collect_loop_bindings(
         &mut self,
-        var_sym: SymbolId,
-        var_ty: &Type<TypeName>,
-        path: &[usize],
-        span: Span,
-    ) -> Term {
-        let mut current_ty = var_ty.clone();
-        let mut current = self.mk_term(current_ty.clone(), span, TermKind::Var(VarRef::Symbol(var_sym)));
-
-        for &idx in path {
-            let elem_ty = self.type_at_path(&current_ty, &[idx]);
-            current = self.mk_tuple_proj(current, idx, elem_ty.clone(), span);
-            current_ty = elem_ty;
+        pattern: &ast::Pattern<ast::HolesResolvedTree>,
+        value: Term,
+        bindings: &mut Vec<(SymbolId, Type<TypeName>, Term)>,
+    ) {
+        match &pattern.kind {
+            ast::PatternKind::Name(binding) => {
+                bindings.push((binding.symbol, value.ty.clone(), value));
+            }
+            ast::PatternKind::Tuple(patterns)
+            | ast::PatternKind::Vec(patterns)
+            | ast::PatternKind::Constructor(_, patterns) => {
+                // Irrefutable constructors have one variant, with payload after the tag.
+                let offset = usize::from(matches!(&pattern.kind, ast::PatternKind::Constructor(..)));
+                for (i, sub) in patterns.iter().enumerate() {
+                    let projected =
+                        self.mk_tuple_proj(value.clone(), offset + i, Self::type_of(&sub.h), sub.h.span);
+                    self.collect_loop_bindings(sub, projected, bindings);
+                }
+            }
+            ast::PatternKind::Typed(inner, _) | ast::PatternKind::Attributed(_, inner) => {
+                self.collect_loop_bindings(inner, value, bindings);
+            }
+            ast::PatternKind::Wildcard | ast::PatternKind::Unit => {}
+            ast::PatternKind::Literal(_) | ast::PatternKind::Record(_) => unreachable!(),
         }
-
-        current
-    }
-
-    fn get_array_element_type(&self, ty: &Type<TypeName>) -> Type<TypeName> {
-        ty.elem_type()
-            .filter(|_| ty.is_array())
-            .cloned()
-            .unwrap_or_else(|| panic!("BUG: Expected array type, got {:?}", ty))
     }
 
     /// Lower `target with .swizzle [op]= value` into a let-bound
@@ -1640,7 +1516,10 @@ impl<'a> Transformer<'a> {
     ) -> Term {
         let t_term = self.transform_expr(target);
         let target_ty = t_term.ty.clone();
-        let elem_ty = target_ty.elem_type().cloned().expect("VecWith target must be a vec by type-check");
+        let Type::Constructed(_, target_args) = &target_ty else {
+            unreachable!()
+        };
+        let elem_ty = target_args[0].clone();
         let vec_size = target_ty.vec_size().expect("VecWith target must have known size");
 
         // Bind `_t = target` so each per-slot projection reads the
@@ -1839,19 +1718,6 @@ impl<'a> Transformer<'a> {
         self.mk_tuple_proj(target.clone(), idx, result_ty.clone(), span)
     }
 
-    fn transform_match(
-        &mut self,
-        match_expr: &ast::MatchExpr<ast::HolesResolvedTree>,
-        ty: Type<TypeName>,
-        span: Span,
-    ) -> Term {
-        debug_assert!(
-            !match_expr.cases.is_empty(),
-            "checker rejects empty match upstream"
-        );
-        self.compile_match(match_expr, ty, span)
-    }
-
     /// Produce a typed-blank Term for `ty`. Fills dead
     /// constructor-payload slots in a flattened sum-type tuple.
     fn build_blank(&mut self, ty: &Type<TypeName>, span: Span) -> Term {
@@ -2044,7 +1910,7 @@ impl<'a> Transformer<'a> {
         self.mk_term(result_ty, span, TermKind::ArrayExpr(ArrayExpr::Literal(parts)))
     }
 
-    fn type_of(header: &ast::TypedHeader) -> Type<TypeName> {
+    pub(super) fn type_of(header: &ast::TypedHeader) -> Type<TypeName> {
         Self::lower_type(Self::raw_type(header))
     }
 

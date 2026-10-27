@@ -2506,12 +2506,9 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             tag: op::OpTag::Intrinsic { id, .. },
                             operands,
                         } if *id == catalog().known().record_with => {
-                            let &[record, index, replacement] = operands.as_slice() else {
-                                return Err(err_wgsl_at!(
-                                    self.blame_span(),
-                                    "record update requires three operands"
-                                ));
-                            };
+                            let record = operands[0];
+                            let index = operands[1];
+                            let replacement = operands[2];
                             let Some(ConstantValue::I32(index)) = index.as_const() else {
                                 return Err(err_wgsl_at!(
                                     self.blame_span(),

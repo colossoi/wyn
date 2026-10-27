@@ -171,7 +171,7 @@ pub struct TypeChecker<'a> {
     /// Set during check_decl_as_in_module for module function checking.
     pub(super) current_module: Option<String>,
     /// Side table: maps `Identifier` NodeIds to their builtin classification.
-    /// Built once before type-check by `name_resolution::build_name_resolution`.
+    /// Built once before type-check by `name_resolution::resolve_names`.
     /// Identifiers absent from this table are resolved via scope/module lookup.
     name_resolution: NameResolution,
     /// Side table for constructor-call dispatch (`i32(x)`, `f32(true)`,

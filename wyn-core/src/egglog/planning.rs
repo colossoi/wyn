@@ -71,7 +71,10 @@ pub(super) fn place(graph: &mut EGraph, topology: PipelineTopologyPolicy) -> Res
     };
     graph.update(|mut sink| sink.add(policy, RawValues(Vec::new())))?;
     timing::time("egglog placement / import", || {
-        graph.parse_and_run_program(None, "(run-schedule (saturate planning-import))")
+        graph.parse_and_run_program(
+            None,
+            "(run-schedule (saturate planning-constants) (saturate planning-import))",
+        )
     })?;
     timing::time("egglog placement / order", || {
         graph.parse_and_run_program(Some("execution order".into()), include_str!("planning/order.egg"))

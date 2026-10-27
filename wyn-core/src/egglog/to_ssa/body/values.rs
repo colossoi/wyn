@@ -269,6 +269,11 @@ impl Body<'_, '_, '_> {
         self.op(tag, vec![], ty.clone())
     }
     pub(in crate::egglog::to_ssa) fn length(&mut self, array: Typed) -> Result<Typed, OptimizeError> {
+        if array.ty.array_variant().is_some_and(types::is_array_variant_composite) {
+            if let Some(Type::Constructed(TypeName::Size(n), _)) = array.ty.array_size() {
+                return self.literal(&n.to_string(), &types::i32());
+            }
+        }
         if matches!(array.ty, Type::Constructed(TypeName::Tuple(_), _)) {
             let first = self.field(array, 0)?;
             return self.length(first);

@@ -71,12 +71,12 @@ fn test_query_f32_sin_from_math_prelude() {
     );
     let program = resolve_imports::resolve_imports(modules).unwrap();
     let program = elaborate_modules::elaborate_modules(program).unwrap();
-    let program = name_resolution::resolve_names(program);
+    let program = name_resolution::qualify_module_accesses(program);
     let program = resolve_resources::resolve_resources(program).unwrap();
     let program = ast_const_fold::fold_constants(program);
     let program = resolve_placeholders::resolve_type_placeholders(program);
     let program = resolve_opens::resolve_opens(program).unwrap();
-    let nr = name_resolution::build_name_resolution(
+    let nr = name_resolution::resolve_names(
         &program,
         &program.global_context.semantic_modules,
         builtins::catalog(),

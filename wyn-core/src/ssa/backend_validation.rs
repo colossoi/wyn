@@ -21,13 +21,8 @@
 //! construction and backend lowering.
 
 use crate::ast::TypeName;
-use crate::builtins::{
-    catalog,
-    select::{self, Selection},
-};
 use crate::error::{CompilerError, Result};
-use crate::op::OpTag;
-use crate::ssa::types::{ConstantValue, FuncBody, InstKind, Program};
+use crate::ssa::types::{FuncBody, Program};
 use crate::types;
 use polytype::Type;
 
@@ -46,67 +41,6 @@ pub fn verify_no_abstract_types<Tag, GlobalContext>(program: &Program<Tag, Globa
 }
 
 fn check_body(scope: &str, body: &FuncBody) -> Result<()> {
-    for node in body.inner.insts.values() {
-        if let InstKind::Op {
-            tag: OpTag::Intrinsic { id, overload_idx },
-            operands,
-        } = &node.data
-        {
-            if *id == catalog().known().record_with {
-                let valid = match (operands.as_slice(), node.result) {
-                    ([record, index, replacement], Some(result)) if *overload_idx == 0 => {
-                        let ty = body.get_value_type(result);
-                        match (ty, index.as_const()) {
-                            (
-                                Type::Constructed(name @ TypeName::Tuple(_), fields),
-                                Some(ConstantValue::I32(index)),
-                            ) => {
-                                if let (Type::Constructed(base_name, base_fields), Ok(index)) =
-                                    (body.value_ref_type(*record), usize::try_from(index))
-                                {
-                                    base_name == *name
-                                        && base_fields.len() == fields.len()
-                                        && fields.get(index) == Some(&body.value_ref_type(*replacement))
-                                        && fields
-                                            .iter()
-                                            .zip(&base_fields)
-                                            .enumerate()
-                                            .all(|(i, (a, b))| i == index || a == b)
-                                } else {
-                                    false
-                                }
-                            }
-                            _ => false,
-                        }
-                    }
-                    _ => false,
-                };
-                if !valid {
-                    return Err(CompilerError::TypeError(
-                        format!("invalid record update in {scope}: expected a record, constant field index, and matching replacement"),
-                        node.span,
-                    ));
-                }
-                continue;
-            }
-            if *id != catalog().known().select {
-                continue;
-            }
-            let valid = Selection::from_operands(operands).zip(node.result).is_some_and(|(s, result)| {
-                let ty = body.get_value_type(result);
-                *overload_idx == 0
-                    && select::supported_type(ty)
-                    && body.value_ref_type(s.condition) == types::bool_type()
-                    && body.value_ref_type(s.yes) == *ty
-                    && body.value_ref_type(s.no) == *ty
-            });
-            if !valid {
-                return Err(CompilerError::TypeError(format!(
-                    "invalid select in {scope}: expected same-typed scalar/vector values and a scalar bool condition"
-                ), node.span));
-            }
-        }
-    }
     // Params first — the most common failure surface (a non-inlined
     // size-poly helper carrying an Abstract param).
     for (i, (_, ty)) in body.params().enumerate() {

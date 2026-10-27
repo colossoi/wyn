@@ -1,10 +1,11 @@
 //! Regression inputs exercise the public pipeline and backend-visible output.
+use crate::egglog::prepare_interfaces;
 use crate::{compile_thru_ssa, lower_ssa_to_spirv, lower_ssa_to_wgsl};
 use naga::{BinaryOperator, Expression, Statement};
 
 #[test]
 fn size_hint_survives_egglog_optimization() {
-    use super::{from_tlc, fuse, optimize, place, schedule, to_ssa};
+    use super::{finish_for_test, from_tlc, fuse, optimize_for_test, place, schedule};
     use crate::interface::Attribute;
     use crate::tlc::DefMeta;
     use crate::{CodegenTarget, PipelineTopologyPolicy};
@@ -19,7 +20,7 @@ fn size_hint_survives_egglog_optimization() {
            shade(target, fragments, |_, _, _, _, _| data[0])",
     ] {
         let tlc = crate::compile_thru_tlc(source).unwrap();
-        let program = optimize(
+        let program = optimize_for_test(
             schedule(
                 place(
                     fuse(from_tlc(&tlc).unwrap()).unwrap(),
@@ -41,7 +42,7 @@ fn size_hint_survives_egglog_optimization() {
             }
         }
         assert!(entries > 0);
-        let ssa = to_ssa(program, CodegenTarget::Portable).unwrap();
+        let ssa = finish_for_test(program, CodegenTarget::Portable).unwrap();
         lower_ssa_to_wgsl(ssa.clone()).unwrap();
         lower_ssa_to_spirv(ssa).unwrap();
     }
@@ -132,6 +133,33 @@ fn radix_scratch_initializer_has_no_array_allocation() {
 }
 
 #[test]
+fn radix_host_loop_dispatches_three_phases_per_pass() {
+    let source = format!(
+        "{}\n entry main(xs: []i32) []i32 = radix_sort(32, i32.get_bit, xs)",
+        include_str!("../../../pkg/sort/src/radix_sort.wyn")
+    );
+    let compiled = crate::lower_ssa_to_wgsl_with_program(compile_thru_ssa(&source).unwrap()).unwrap();
+    let [region] = compiled.program.interface.dispatch_loops.as_slice() else {
+        panic!("expected one host loop");
+    };
+    assert_eq!(region.body.len(), 3);
+}
+
+#[test]
+fn scan_outputs_can_use_completed_totals() {
+    shaders(include_str!(
+        "../../../testfiles/regressions/scan_completed_totals.wyn"
+    ));
+    for source in [
+        "entry main(xs:[]i32) []i32 = let p=scan((+),0,xs) in let t=reduce((+),0,xs) in map(|x|x+t,p)",
+        "entry main(xs:[][513]i32) [][513]i32 = map(|row|let p=scan((+),0,row) in let t=reduce((+),0,row) in map(|x|x+t,p),xs)",
+        "entry main(xs:[2][17]i32) [2][17]i32 = map(|row|if row[0]>0 then let p=scan((+),0,row) in let t=reduce((+),0,row) in map(|x|x+t,p) else row,xs)",
+    ] {
+        shaders(source);
+    }
+}
+
+#[test]
 fn expression_projection_retains_host_capture_inputs_without_admission_tables() {
     use super::{from_tlc, fuse, optimize_with_policy, place, schedule, ScalarOptimization};
     use crate::PipelineTopologyPolicy;
@@ -140,10 +168,13 @@ fn expression_projection_retains_host_capture_inputs_without_admission_tables() 
         crate::compile_thru_tlc("entry main(xs:[]i32,bias:i32) []i32=map(|x:i32|x+bias*bias,xs)").unwrap();
     for policy in [ScalarOptimization::Basic, ScalarOptimization::Full] {
         let program = optimize_with_policy(
-            schedule(
-                place(
-                    fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                    PipelineTopologyPolicy::AllowGenerated,
+            prepare_interfaces(
+                schedule(
+                    place(
+                        fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                        PipelineTopologyPolicy::AllowGenerated,
+                    )
+                    .unwrap(),
                 )
                 .unwrap(),
             )
@@ -151,6 +182,11 @@ fn expression_projection_retains_host_capture_inputs_without_admission_tables() 
             policy,
         )
         .unwrap();
+        assert!(
+            program.stage.captures.is_empty(),
+            "scalar optimization must not lower host captures"
+        );
+        let program = super::prepare_host(program).unwrap().program;
         if policy == ScalarOptimization::Full {
             assert!(
                 !program.stage.captures.is_empty(),
@@ -182,7 +218,9 @@ fn expression_projection_retains_host_capture_inputs_without_admission_tables() 
 
 #[test]
 fn basic_scalar_policy_retains_calls_and_validates_both_backends() {
-    use super::{from_tlc, fuse, optimize_with_policy, place, schedule, to_ssa, ScalarOptimization};
+    use super::{
+        finish_for_test, from_tlc, fuse, optimize_with_policy, place, schedule, ScalarOptimization,
+    };
     use crate::{CodegenTarget, PipelineTopologyPolicy};
     let helper = "def helper(x:i32) i32 =
         (x-x)+(x-x)+(x-x)+(x-x)+(x-x)+(x-x)+(x-x)+(x-x)
@@ -204,10 +242,13 @@ fn basic_scalar_policy_retains_calls_and_validates_both_backends() {
         for policy in [ScalarOptimization::Basic, ScalarOptimization::Full] {
             for target in [CodegenTarget::Spirv, CodegenTarget::Wgsl] {
                 let program = optimize_with_policy(
-                    schedule(
-                        place(
-                            fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                            PipelineTopologyPolicy::AllowGenerated,
+                    prepare_interfaces(
+                        schedule(
+                            place(
+                                fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                                PipelineTopologyPolicy::AllowGenerated,
+                            )
+                            .unwrap(),
                         )
                         .unwrap(),
                     )
@@ -222,7 +263,7 @@ fn basic_scalar_policy_retains_calls_and_validates_both_backends() {
                 } else if source == helper || source == small_helper {
                     assert!(templates > 0, "fixture must exercise optional helper expansion");
                 }
-                let ssa = to_ssa(program, target).unwrap();
+                let ssa = finish_for_test(program, target).unwrap();
                 if source == small_helper {
                     assert_eq!(
                         ssa.functions.iter().any(|function| function.name.contains("helper")),
@@ -1111,16 +1152,17 @@ fn compaction_retains_producer_elements_across_the_scan() {
 }
 
 #[test]
-fn reductions_use_less_shared_storage_than_scans() {
+fn scans_and_reductions_use_one_shared_bank_per_phase() {
     let reduce = shaders("entry total(xs:[]i32) i32=reduce((+),0,xs)");
     let scan = shaders("entry prefixes(xs:[]i32) []i32=scan((+),0,xs)");
     let shared = |module: &naga::Module| {
         module.global_variables.iter().filter(|(_, v)| v.space == naga::AddressSpace::WorkGroup).count()
     };
     assert!(shared(&reduce) > 0);
-    assert!(
-        shared(&reduce) < shared(&scan),
-        "reductions need no prefix ping-pong bank"
+    assert_eq!(
+        shared(&reduce),
+        shared(&scan),
+        "scans reuse their bank after a read barrier"
     );
 }
 #[test]
@@ -1130,11 +1172,12 @@ fn nested_reduction_stays_inside_the_map_invocation() {
 
 #[test]
 fn local_map_captures_are_computed_before_the_element_loop() {
+    // Keep these traversals above the small-loop expansion limit.
     let module = shaders(
-        "entry main(xs:[][8]i32) [][16]i32 =
+        "entry main(xs:[][32]i32) [][32]i32 =
           map(|row|let prefixes=scan((+),0i32,row) in
             let offset=reduce((+),0i32,row)+1i32 in
-            map(|j|prefixes[j%8]+offset,iota(16)),xs)",
+            map(|j|prefixes[j%32]+offset,iota(32)),xs)",
     );
     let mut loops = 0;
     for (_, function) in module.functions.iter() {
@@ -1701,9 +1744,9 @@ fn inferred_array_scan_accumulators_keep_their_row_layout() {
 #[test]
 fn four_bit_radix_sort_reaches_both_backends() {
     let source = format!(
-        "{}\nentry main() [4]vec2u32 = radix_sort(
-      [@[4294967295u32,0u32],@[1u32,1u32],@[1u32,2u32],@[0u32,3u32]],iota(4))",
-        include_str!("../../../pkg/sort/src/lib.wyn")
+        "{}\nentry main() [4]vec2u32 = radix_sort(32, |i,p| u32.get_bit(i,p.x),
+      [@[4294967295u32,0u32],@[1u32,1u32],@[1u32,2u32],@[0u32,3u32]])",
+        include_str!("../../../pkg/sort/src/four_bit.wyn")
     );
     shaders(&source);
 }
@@ -1731,4 +1774,15 @@ fn inferred_loop_result_arrays_retain_logical_extents() {
         "{}\n{fixture}",
         include_str!("../../../fluid-simulation/packages/spatial/src/octree.wyn")
     ));
+}
+
+#[test]
+fn public_scratch_allocators_reach_both_backends() {
+    for source in [
+        "entry main(xs:[]i32) []i32 = scatter(duplicate_scratch(xs),iota(length(xs)),xs)",
+        "entry main(xs:[]i32) []i32 = scatter(scratch(length(xs)),iota(length(xs)),xs)",
+        "entry main(xs:[4]vec2u32) [4]vec2u32 = scatter(duplicate_scratch(xs),[3,2,1,0],xs)",
+    ] {
+        shaders(source);
+    }
 }

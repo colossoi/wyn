@@ -7,7 +7,8 @@ use std::process::ExitCode;
 use std::time::Instant;
 use thiserror::Error;
 use wyn_core::egglog::{
-    from_tlc, fuse, optimize_with_policy, place, schedule, to_ssa, with_timings, ScalarOptimization,
+    from_tlc, fuse, optimize_with_policy, place, prepare_host, prepare_interfaces, schedule, to_ssa,
+    with_timings, ScalarOptimization,
 };
 use wyn_core::host::{HostError, Program, ShaderFormat};
 use wyn_core::ssa::stage::Elaborated;
@@ -684,9 +685,6 @@ fn compile_tlc(modules: ParsedModules, options: &CompileOptions) -> Result<TlcCo
         }),
         &source_graph,
     )?;
-    let program = time("force_inline_soac_helpers", verbose, || {
-        wyn_core::tlc::force_inline_soac_helpers(program)
-    });
     let program = time("canonicalize_conditional_producers", verbose, || {
         wyn_core::tlc::canonicalize_conditional_producers(program)
     });
@@ -733,8 +731,10 @@ fn compile_egglog(
         };
         let program = place(program, topology)?;
         let program = schedule(program)?;
+        let program = prepare_interfaces(program)?;
         let policy = if algebra { ScalarOptimization::Full } else { ScalarOptimization::Basic };
         let program = optimize_with_policy(program, policy)?;
+        let program = prepare_host(program)?;
         let ssa = to_ssa(
             program,
             match target {

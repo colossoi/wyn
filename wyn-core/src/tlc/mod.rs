@@ -309,7 +309,7 @@ pub mod family {
 pub mod stage {
     pub use super::defunctionalize::Defunctionalized;
     pub use super::if_over_producer::ConditionalProducersCanonicalized;
-    pub use super::inline::{GeneratedLambdasFolded, SoacHelpersInlined, UnifiedHelpersInlined};
+    pub use super::inline::{GeneratedLambdasFolded, UnifiedHelpersInlined};
     pub use super::monomorphize::{Monomorphized, TypesSpecialized};
     pub use super::ownership::{OwnershipApplied, OwnershipValidated};
     pub use super::partial_eval::PartialEvaled;
@@ -324,7 +324,7 @@ pub mod stage {
 // `tlc::stage`, while callers compose the pipeline as ordinary functions.
 pub use defunctionalize::defunctionalize;
 pub use if_over_producer::canonicalize_conditional_producers;
-pub use inline::{fold_generated_lambdas, force_inline_soac_helpers, inline_unified_helpers};
+pub use inline::{fold_generated_lambdas, inline_unified_helpers};
 pub use monomorphize::{monomorphize, specialize_types};
 pub use ownership::{apply_ownership, validate_ownership};
 pub use partial_eval::partial_eval;

@@ -232,6 +232,19 @@ fn compiler_supported_forms_parse() {
 }
 
 #[test]
+fn empty_generics_and_attributed_entry_returns_parse() {
+    for source in [
+        "def f<>(x: i32) = x",
+        "type t<> = i32",
+        "entry main() #[size_hint(4)] []i32 = [1, 2, 3, 4]",
+        "entry main() (#[size_hint(4)] []i32, i32) = ([1, 2, 3, 4], 0)",
+        "entry main() (i32, #[size_hint(4)] []i32) = (0, [1, 2, 3, 4])",
+    ] {
+        parse_source(source);
+    }
+}
+
+#[test]
 fn malformed_literals_and_singleton_tuple_types_are_rejected() {
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&LANGUAGE.into()).unwrap();

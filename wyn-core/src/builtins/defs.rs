@@ -618,8 +618,8 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         ],
     },
     BuiltinDefRaw {
-        surface_name: crate::builtins::names::INTRINSIC_SCRATCH,
-        intrinsic_source_names: &[crate::builtins::names::INTRINSIC_SCRATCH],
+        surface_name: "duplicate_scratch",
+        intrinsic_source_names: &["duplicate_scratch", crate::builtins::names::INTRINSIC_SCRATCH],
         impl_source_names: &[crate::builtins::names::INTRINSIC_SCRATCH],
         kind: BuiltinKind::InternalIntrinsic,
         purity: Purity::Pure,
@@ -629,8 +629,8 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         }],
     },
     BuiltinDefRaw {
-        surface_name: crate::builtins::names::INTRINSIC_SCRATCH_ALLOC,
-        intrinsic_source_names: &[crate::builtins::names::INTRINSIC_SCRATCH_ALLOC],
+        surface_name: "scratch",
+        intrinsic_source_names: &["scratch", crate::builtins::names::INTRINSIC_SCRATCH_ALLOC],
         impl_source_names: &[crate::builtins::names::INTRINSIC_SCRATCH_ALLOC],
         kind: BuiltinKind::InternalIntrinsic,
         purity: Purity::Pure,
