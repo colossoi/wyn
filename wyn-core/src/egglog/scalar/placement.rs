@@ -158,4 +158,8 @@ impl Placement {
     pub fn sites(&self, context: Value, scope: Value, term: TermId) -> Vec<(Value, usize, usize)> {
         self.scopes.sites(context, scope, &self.requirements[term])
     }
+
+    pub(super) fn required_scopes(&self, term: TermId) -> &[Scope] {
+        &self.requirements[term]
+    }
 }

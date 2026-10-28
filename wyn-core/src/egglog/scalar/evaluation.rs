@@ -3,6 +3,7 @@
 //! regions to discover an earlier producer.
 use super::extract::operands;
 use super::placement::Placement;
+use super::Selected;
 use crate::egglog::facts::Facts;
 use crate::egglog::query::Query;
 use crate::egglog::{timing, OptimizeError, Optimized, Program};
@@ -160,6 +161,12 @@ impl Evaluation {
                 }
             }
         }
+        if std::env::var_os("WYN_EGGLOG_PROFILE").is_some() {
+            eprintln!(
+                "egglog evaluation facts: {n} DAG nodes, {} roots, {} leaves, {} boundaries, {} branch pairs",
+                selected.roots.len(), leaves.len(), boundaries.len(), pairs.len()
+            );
+        }
         drop(inputs);
         let schema = timing::span("egglog evaluation / schema");
         let mut graph = EGraph::default();
@@ -276,12 +283,28 @@ impl Evaluation {
         }
         let mut queries: Vec<_> = queries.into_iter().collect();
         queries.sort();
+        let query_count = queries.len();
+        let mut classes = LookupMap::default();
+        let mut groups = Vec::<Vec<(Value, TermId)>>::new();
+        for (scope, term) in queries {
+            if !plan.total[term] {
+                continue;
+            }
+            let Term::App(_, fields) = selected.dag.get(term) else {
+                continue;
+            };
+            // Equal context, scope, and requirements have the same legal placement sites.
+            let key = (selected.values[fields[0]], scope, placement.required_scopes(term));
+            let group = *classes.entry(key).or_insert_with(|| {
+                groups.push(Vec::new());
+                groups.len() - 1
+            });
+            groups[group].push((scope, term));
+        }
         let mut sites = Vec::new();
         graph.update(|mut sink| {
-            for (query, &(scope, term)) in queries.iter().enumerate() {
-                if !plan.total[term] {
-                    continue;
-                }
+            for (query, members) in groups.iter().enumerate() {
+                let (scope, term) = members[0];
                 let Term::App(_, fields) = selected.dag.get(term) else {
                     continue;
                 };
@@ -304,6 +327,13 @@ impl Evaluation {
             Ok::<_, egglog_engine::Error>(())
         })?;
         drop(sites_time);
+        if std::env::var_os("WYN_EGGLOG_PROFILE").is_some() {
+            eprintln!(
+                "egglog evaluation sites: {query_count} queries, {} classes, {} candidates",
+                groups.len(),
+                sites.len()
+            );
+        }
         timing::time("egglog evaluation / target rules", || {
             graph.parse_and_run_program(None, "(run-schedule (saturate evaluation-frequency) (saturate evaluation-lifetime) (saturate evaluation-target))")
         })?;
@@ -311,7 +341,9 @@ impl Evaluation {
         Query(&graph).for_function("EvaluationTarget", |row, target| {
             let query = graph.value_to_base::<i64>(row[0]) as usize;
             let site = graph.value_to_base::<i64>(target) as usize;
-            plan.targets.insert(queries[query], sites[site]);
+            for &member in &groups[query] {
+                plan.targets.insert(member, sites[site]);
+            }
             Ok(())
         })?;
         for &(a, b) in &pairs {
@@ -319,7 +351,7 @@ impl Evaluation {
         }
         drop(readout);
         timing::time("egglog evaluation / schedule anchors", || {
-            plan.schedule_anchors(program, &mut graph)
+            plan.schedule_anchors(selected, &mut graph)
         })?;
         Ok(plan)
     }
@@ -331,14 +363,20 @@ impl Evaluation {
         };
         Ok(schedule)
     }
-    fn schedule_anchors(
-        &mut self,
-        program: &Program<'_, Optimized>,
-        graph: &mut EGraph,
-    ) -> Result<(), OptimizeError> {
-        let selected = &program.stage.selected;
+    fn schedule_anchors(&mut self, selected: &Selected, graph: &mut EGraph) -> Result<(), OptimizeError> {
         timing::time("egglog anchors / rank rules", || {
             graph.parse_and_run_program(None, "(run-schedule (saturate schedule-rank))")
+        })?;
+        // Ranks and choice conditions are expression properties, shared by every request.
+        let mut ordering = vec![(0, None); selected.dag.size()];
+        Query(graph).for_function("ExprScheduleChoiceDepth", |row, rank| {
+            ordering[graph.value_to_base::<i64>(row[0]) as usize].0 = graph.value_to_base::<i64>(rank);
+            Ok(())
+        })?;
+        Query(graph).for_function("ExprScheduleCondition", |row, condition| {
+            ordering[graph.value_to_base::<i64>(row[0]) as usize].1 =
+                Some(graph.value_to_base::<i64>(condition) as usize);
+            Ok(())
         })?;
         let mut pending: Vec<_> = selected.roots.values().map(|t| vec![*t]).collect();
         pending.extend(selected.extents.values().map(|t| vec![*t]));
@@ -348,7 +386,6 @@ impl Evaluation {
         }));
         pending.extend(self.shared.values().flatten().map(|(t, _)| vec![*t]));
         pending.extend(self.before.values().flatten().map(|t| vec![*t]));
-        let mut next = 0i64;
         while !pending.is_empty() {
             let requests_time = timing::span("egglog anchors / import requests");
             let mut requests = Vec::new();
@@ -366,46 +403,40 @@ impl Evaluation {
                         }
                     },
                 );
-                requests.push((next, roots, order));
-                next += 1;
+                requests.push((roots, order));
             }
-            graph.update(|mut sink| {
-                for (id, roots, order) in &requests {
-                    sink.set(
-                        "ExprScheduleReorderable",
-                        *id,
-                        roots.iter().all(|t| self.readonly[*t]),
-                    )?;
-                    for &term in order {
-                        sink.set("ExprSchedulePriority", (*id, term as i64), 0i64)?;
-                    }
-                }
-                Ok::<_, egglog_engine::Error>(())
-            })?;
+            if std::env::var_os("WYN_EGGLOG_PROFILE").is_some() {
+                let memberships: usize = requests.iter().map(|(_, order)| order.len()).sum();
+                let terms: LookupSet<_> = requests.iter().flat_map(|(_, order)| order.iter()).collect();
+                eprintln!(
+                    "egglog anchor facts: {} requests, {memberships} memberships, {} distinct terms",
+                    requests.len(),
+                    terms.len()
+                );
+            }
             drop(requests_time);
-            timing::time("egglog anchors / rules", || {
-                graph.parse_and_run_program(None, "(run-schedule (saturate schedule-anchors))")
-            })?;
             let _readout = timing::span("egglog anchors / read schedules");
-            for (id, roots, mut order) in requests {
-                let mut ordering = LookupMap::default();
+            for (roots, mut order) in requests {
+                let reorderable = roots.iter().all(|t| self.readonly[*t]);
+                let group = |term: TermId| {
+                    ordering[term].1.map(|condition| if reorderable { condition } else { term })
+                };
                 let mut groups = LookupMap::<_, Vec<_>>::default();
                 for &term in &order {
-                    let rank = Query(graph).required("ExprSchedulePriority", (id, term as i64))?;
-                    let group = Query(graph).lookup("ExprScheduleGroup", (id, term as i64))?;
-                    ordering.insert(term, (graph.value_to_base::<i64>(rank), group));
-                    if let Some(group) = group {
+                    if let Some(group) = group(term) {
                         groups.entry(group).or_default().push(term);
                     }
                 }
-                order.sort_by_key(|t| ordering[t].0);
+                if reorderable {
+                    order.sort_by_key(|t| ordering[*t].0);
+                }
                 let mut schedule = Vec::new();
                 for term in order {
                     let (name, _) = selected.app(term)?;
                     if matches!(name, "ExprCons" | "ExprNil") {
                         continue;
                     }
-                    let terms = if let Some(group) = ordering[&term].1 {
+                    let terms = if let Some(group) = group(term) {
                         let Some(terms) = groups.remove(&group) else {
                             continue;
                         };
@@ -463,3 +494,7 @@ impl Evaluation {
             .collect()
     }
 }
+
+#[cfg(test)]
+#[path = "evaluation_tests.rs"]
+mod tests;
