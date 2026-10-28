@@ -1,222 +1,221 @@
 # Detailed CLI compiler timings
 
-Follow-up: the [local-storage optimization](compiler-profile-storage-2026-10-28.md)
-reduces fluid's storage phase by 9.65x and whole compilation time by 32.6%, with
-all full gates passing. The measurements below describe the earlier baseline.
+Updated after storage optimization **`60a400de`** and evaluation-planning
+optimization **`edcd3590`**. All current tables below use the final paired run's
+updated compiler. The [coarse report](compiler-profile-2026-10-28.md) and
+[original fine-profile evidence](profiles/2026-10-28-compiler-fine.json) preserve
+the earlier baseline.
 
-The fluid simulator spends **1.46 seconds in SSA local-storage analysis**, of
-which **1.34 seconds executes Egglog storage rules**. Actual SPIR-V emission
-takes **42 ms**. Tinyporto spends **2.13 seconds in scalar optimization**,
-including **1.09 seconds computing extraction costs**, followed by **1.20
-seconds of evaluation planning**.
+Tinyporto evaluation planning is now **463 ms**, versus **1,224 ms** in the paired
+baseline: **2.64x faster**, with total compilation **10.7% shorter**. Fluid
+planning falls from **83 ms to 50 ms (1.66x)**. Fluid's previously optimized
+local-storage phase remains about **151 ms**, rather than the original 1.46 s.
 
-These measurements refine the two largest groups in the
-[coarse profile](compiler-profile-2026-10-28.md). They support prioritizing
-structural analysis costs: the main timer named `egglog` is not synonymous with
-arithmetic optimization, and backend preparation runs another Egglog program.
+## Method
+
+Release CLI, one warmup per binary/workload, then three sequential fresh
+processes each, alternating before/after order by round. Tables show median
+milliseconds unless otherwise labeled. Builds and tests finished before timing.
+Tinyporto uses `-O`, graphics, and a Rust/WGPU host; fluid uses graphics and
+subgroups without `-O`. Both target SPIR-V on the same Windows i7-9700 host.
+
+Parent rows include their children; do not add nested tables together. Repeated
+timers are summed within each run. Independent medians and untimed cleanup mean
+rows need not sum exactly to parent medians. Small changes outside the optimized
+phases can reflect desktop scheduling and normal run variation.
 
 ## Egglog through SSA generation
 
-Median milliseconds, three fresh processes after one warmup, normal project
-options: Tinyporto with `-O` and a Rust/WGPU host; fluid without `-O`, with
-`--subgroups` and a WHL host. Both target SPIR-V.
-
-| Phase | Tinyporto ms | Fluid ms |
-| --- | ---: | ---: |
-| Import TLC into the compiler graph | 261 | 96 |
-| Structural analysis | 77 | 25 |
-| Fusion | 242 | 795 |
-| Execution placement | 445 | 212 |
-| Structural scheduling | 620 | 344 |
-| Interface preparation | 242 | 120 |
-| Scalar optimization including extraction | 2,130 | 146 |
-| Host preparation | 17 | 4 |
-| Evaluation planning | 1,196 | 78 |
-| Emit SSA from graph facts | 228 | 79 |
-| Other untimed work within the group | 99 | 50 |
-| **Whole Egglog-through-SSA group** | **5,562** | **1,979** |
-
-These are sequential groups. Parent timings include their children in the
-tables below. Independent medians and untimed cleanup mean the displayed rows
-need not sum exactly to the group median.
-
-### Scalar optimization and extraction
-
 | Work | Tinyporto ms | Fluid ms |
 | --- | ---: | ---: |
-| Project scalar graph | 78 | 41 |
-| Import scalar expressions | 114 | 19 |
-| Execute scalar rewrite schedule | 485 | 10 |
-| Compute effect summaries | 163 | 14 |
-| Compute compact extraction costs | 420 | 39 |
-| Reconstruct compact DAG | 27 | 6 |
-| Compute inlined extraction costs | 670 | Not run without `-O` |
-| Reconstruct inlined DAG | 33 | Not run without `-O` |
-| Compare and copy selected DAGs | 67 | 3 for copying only |
+| Import TLC | 275 | 99 |
+| Structural analysis | 85 | 26 |
+| Fusion | 263 | 836 |
+| Execution placement | 432 | 205 |
+| Structural scheduling | 636 | 360 |
+| Interface preparation | 244 | 130 |
+| Scalar optimization including extraction | 2,254 | 156 |
+| Host preparation | 16 | 4 |
+| Evaluation planning | 463 | 50 |
+| Emit SSA | 223 | 84 |
+| Other work within the group | 100 | 50 |
+| **Whole Egglog-through-SSA group** | **5,001** | **2,039** |
 
-The two cost computations together take **1.09 seconds** in Tinyporto. They use
-different cost models over the scalar graph. Reconstructing and selecting the
-resulting DAGs is much smaller. Arithmetic rewrite execution itself is **485
-ms**, so the 2.13-second scalar parent is not all rewrite search.
+## Evaluation-planning improvement
 
-The extraction parent is 1,231 ms in Tinyporto and 49 ms in fluid. These parent
-figures overlap the extraction-cost/reconstruction rows above and must not be
-added to them.
+The paired baseline already contains the storage optimization. Only the
+subsequent evaluation-planning change differs between these two binaries.
 
-### Evaluation planning
+| Measurement | Tinyporto before | Tinyporto after | Fluid before | Fluid after |
+| --- | ---: | ---: | ---: | ---: |
+| Evaluation planning | 1,224.5 ms | 463.3 ms | 83.4 ms | 50.3 ms |
+| Anchor scheduling | 628.2 ms | 128.5 ms | 36.3 ms | 15.0 ms |
+| Placement-site preparation | 139.5 ms | 28.5 ms | 5.8 ms | 3.0 ms |
+| Target-selection rules | 163.3 ms | 13.9 ms | 11.0 ms | 3.0 ms |
+| Whole compiler process | 7.458 s | 6.657 s | 2.906 s | 2.804 s |
+
+Tinyporto process ranges were **7.422-7.504 s before** and **6.619-6.732 s after**.
+Fluid ranges overlap: **2.736-2.910 s before** and **2.728-2.902 s after**. Its
+3.5% lower whole-process median is an observation, not a precise attribution of
+all that difference to this change; the evaluation phase itself saves 33 ms.
+
+### Granularity
+
+Expression-level facts are needed for dependency ordering and legal placement.
+The excessive detail was replication of identical decisions across requests:
+
+- The first Tinyporto anchor batch had **329,846 request/expression memberships
+  for 26,984 distinct expressions**. Across all batches, 338,668 priority seeds
+  were imported. Rank and condition are now read once per expression; the
+  request-indexed priority/group tables and their copy rules are gone. Each
+  request still retains its own roots, order, and permission to reorder.
+- Tinyporto discovers **90,787 scope/expression queries**. After eligibility
+  filtering, equivalent queries share **3,245 placement classes**, keyed by
+  context, lexical scope, and required definitions. Candidate rows fall from
+  **145,274 to 12,136**. Fluid candidate rows fall from **5,973 to 1,619** across
+  847 classes. The same Egglog rules still choose execution frequency and
+  lexical depth; each class's decision is expanded back to its members.
+
+Effectful requests retain dependency postorder and separate choice groups.
+Source leaves remain evaluation boundaries. The change does not approximate
+arithmetic, remove effects/guard proofs, or change placement policy.
+
+### Current evaluation costs
 
 | Work | Tinyporto ms | Fluid ms |
 | --- | ---: | ---: |
 | Collect input facts | 16 | 3 |
-| Initialize evaluation schema | 2 | 2 |
-| Import facts into evaluation graph | 85 | 12 |
-| Reachability rules | 123 | 5 |
+| Initialize schema | 1 | 2 |
+| Import facts | 86 | 13 |
+| Reachability rules | 128 | 6 |
 | Prepare availability facts | 3 | <1 |
-| Placement rules | 40 | 3 |
-| Prepare placement-site facts | 140 | 5 |
-| Frequency, lifetime, and target rules | 160 | 11 |
-| Read targets and common expressions | 6 | <1 |
-| Schedule evaluation anchors | 606 | 35 |
+| Placement rules | 41 | 3 |
+| Prepare placement classes and sites | 29 | 3 |
+| Frequency, lifetime, and target rules | 14 | 3 |
+| Read targets/common expressions | 6 | <1 |
+| Schedule anchors | 129 | 15 |
+| **Whole evaluation-planning phase** | 463 | 50 |
 
-Tinyporto's 606-ms anchor scheduling breaks down into **59 ms** ranking rules,
-**87 ms** building/importing requests, **254 ms** anchor rules, and **202 ms**
-reading/grouping schedules. There are four request batches. Thus both rule
-execution and the code feeding and querying the graph deserve attention.
-
-### Fluid fusion
-
-Fluid performs **33 candidate-selection rounds and 32 contractions**; Tinyporto
-performs two rounds and one contraction.
-
-| Fusion schedule work | Tinyporto ms | Fluid ms |
-| --- | ---: | ---: |
-| Dependencies | 89 | 111 |
-| Find and choose candidates | 52 | 503 |
-| Commit contractions | 9 | 127 |
-
-The separate engine-statistics run attributes approximately **435 ms** to
-`fusion-candidates` search/merge/rebuild. Candidate selection is the largest
-measured component of fluid's structural fusion.
-
-## SSA preparation and SPIR-V generation
-
-This flattens the nested backend timers into non-overlapping work:
+Anchor scheduling now consists of shared rank rules and native request ordering:
 
 | Work | Tinyporto ms | Fluid ms |
 | --- | ---: | ---: |
-| Prepare SSA values | 2.7 | 1.9 |
-| Place floating SSA instructions | 3.9 | 2.7 |
+| Compute shared expression ranks | 63 | 10 |
+| Build anchor request orders | 35 | 2 |
+| Read/group schedules | 26 | 1 |
+
+The timer named `egglog anchors / import requests` now covers construction of
+native request orders; those memberships are no longer imported into Egglog.
+The old per-request `schedule-anchors` rules no longer execute. Remaining
+reachability, import, and rank costs are still measurable; this change does not
+establish that all remaining structural analysis is minimal.
+
+## Scalar optimization and extraction
+
+| Work | Tinyporto ms | Fluid ms |
+| --- | ---: | ---: |
+| Project scalar graph | 84 | 44 |
+| Import scalar expressions | 121 | 21 |
+| Execute scalar rewrite schedule | 493 | 11 |
+| Compute effect summaries | 166 | 15 |
+| Compact extraction costs | 481 | 41 |
+| Reconstruct compact DAG | 28 | 8 |
+| Inlined extraction costs | 707 | Not run |
+| Reconstruct inlined DAG | 35 | Not run |
+| Compare/select DAGs | 66 | Not run |
+
+The compact and inlined cost computations are part of extraction, which is
+included in scalar optimization. Fluid does not run the inlined search without
+`-O`; its basic-path DAG copy takes 3.1 ms. Arithmetic rewrite execution is
+only one part of the scalar parent.
+
+## Fusion
+
+| Work | Tinyporto ms | Fluid ms |
+| --- | ---: | ---: |
+| Dependencies | 95 | 117 |
+| Choose candidates | 56 | 531 |
+| Commit contractions | 8 | 131 |
+
+Fluid still performs 33 selection rounds and 32 contractions; Tinyporto performs
+two rounds and one contraction. These are sums of the repeated timer calls.
+
+## SSA preparation and SPIR-V generation
+
+| Work | Tinyporto ms | Fluid ms |
+| --- | ---: | ---: |
+| Prepare SSA values | 2.8 | 2.0 |
+| Place floating SSA instructions | 3.9 | 2.6 |
 | Prune unreachable SSA | 0.4 | 0.3 |
-| Simplify SSA values | 85.4 | 28.8 |
-| **Local-storage analysis and rewriting** | **39.9** | **1,458.8** |
+| Simplify SSA values | 85.2 | 29.1 |
+| Local-storage analysis and rewriting | 34.3 | 151.0 |
 | Publish texture sampling | 0.2 | 0.2 |
-| Validate backend types | 5.0 | 4.0 |
-| **Emit SPIR-V** | **47.2** | **41.8** |
-| Construct host program | 0.4 | 0.3 |
-| **Whole backend group** | **190** | **1,542** |
+| Validate backend types | 5.1 | 4.0 |
+| Emit SPIR-V | 48.5 | 43.5 |
+| Construct host program | 0.5 | 0.3 |
+| **Whole backend group** | 187.0 | 236.0 |
 
-Local storage accounts for approximately **95% of fluid's backend group**.
-Tinyporto's backend is instead split mainly between SSA simplification,
-SPIR-V emission, and local storage.
+Local storage now uses storage-event groups rather than every instruction:
+Tinyporto has 17 groups for 1,020 instructions, and fluid has 533 for 16,233.
+All CFG blocks and required array/alias facts remain. Allocation-origin
+reachability is restricted to eligible reuse candidates. See the
+[storage optimization report](compiler-profile-storage-2026-10-28.md) for its
+paired **9.65x phase improvement** and the associated **32.6% fluid compile-time
+reduction**. Those historical improvements must not be added arithmetically to
+the new paired percentages.
 
-### Fluid local storage
+There are five analyzed storage bodies in Tinyporto and 19 in fluid:
 
-There are **19 analyzed bodies** in fluid and **five** in Tinyporto. Totals
-below sum repeated per-body timers within each run before taking medians.
-
-| Analysis work | Tinyporto ms | Fluid ms |
+| Work | Tinyporto ms | Fluid ms |
 | --- | ---: | ---: |
-| Collect SSA inputs | <1 | <1 |
-| Initialize graph and load schema | 12 | 47 |
-| Import facts | 1 | 24 |
-| **Execute storage rules** | **12** | **1,340** |
-| Read results | <1 | <1 |
+| Collect inputs | 0.3 | 2.8 |
+| Initialize graph/schema | 12.8 | 47.8 |
+| Import facts | 0.3 | 7.9 |
+| Execute storage rules | 5.4 | 58.9 |
+| Read results | 0.0 | 0.3 |
 
-Fluid spends another approximately **15 ms** splitting parameters, removing
-loads, allocating, checking, and rewriting. Parent analysis time also includes
-graph destruction and other untimed overhead.
+Schema setup and untimed graph cleanup now account for a larger share of this
+phase. The storage parent also includes allocation, verification, rewriting,
+and ownership work.
 
-Four generated kernels account for roughly **1.30 seconds**, approximately
-**89% of fluid's entire local-storage phase** (median of their per-run sums):
+## Production line counts
 
-| Generated kernel | Local-storage time ms |
-| --- | ---: |
-| `fluid__compute_7_partials` | 275 |
-| `fluid__compute_7_partials_2` | 276 |
-| `fluid__compute_7_combine` | 363 |
-| `fluid__compute_7_combine_2` | 369 |
+| Optimization | Added | Removed | Net production lines |
+| --- | ---: | ---: | ---: |
+| Storage granularity | 134 | 45 | +89 |
+| Evaluation ranks and placement classes | 78 | 50 | +28 |
 
-A separate diagnostic invocation enabled Egglog's own rule statistics. Across
-the 19 graphs, `storage-liveness` reports approximately **1.005 seconds** of
-search/merge/rebuild. The highest aggregated rule-search costs are:
+Counts include comments and diagnostic counters, and exclude tests,
+documentation, and the earlier general timing instrumentation. Evaluation's
+production changes are confined to `scalar/evaluation.rs`, `evaluation.egg`, and
+`placement.rs`.
 
-| Rule purpose | Search/apply ms | Reported matches |
-| --- | ---: | ---: |
-| Check whether an origin allocation is used later through an alias | 300 | 0 |
-| Propagate past an allocation while a related array version is live | 208 | 1,812 |
-| Propagate `AfterOrigin` along control flow | 165 | 272,854 |
-| Propagate `Live` across ordinary instructions | 66 | 77,322 |
+## Validation and reproduction
 
-The **300-ms zero-match join** is a concrete first investigation target. A
-negative result can still be necessary for correctness; zero matches do not
-justify removing the rule. Inspect join ordering, the size of intermediate
-relations, and opportunities to restrict the analysis to relevant origins and
-uses. The supplied statistics identify cost, not a proven replacement algorithm.
+All full gates passed on the evaluation change:
 
-Engine statistics are from one additional diagnostic run and rounded to whole
-milliseconds. They exclude some scheduling/engine overhead and are not a
-partition of the wall-clock timers. The main compiler graph's statistics are
-printed at structural scheduling; local-storage graphs are reported separately.
-Their sums must not be added to the measured phase times.
+- Workspace formatting, all-target build, and tests: **1,501 passed, zero failed,
+  14 existing ignores**, including all 127 compiler fixture files.
+- All-target builds and tests for `wyn-wasm`, viz, tephra, spirv-validator,
+  wyn-doc, mdbook-wyn-highlight, treereduce-wyn, and both tree-sitter-wyn manifests.
+- WASM formatting and locked `wasm32-unknown-unknown` check.
+- **123 SPIR-V files passed**; **122 WGSL files passed**, with one expected
+  linked-SPIR-V-helper skip; the library package compile/validation gate passed.
+- Targeted tests verify effectful ordering, grouped choice boundaries, separate
+  source anchors, and agreement between grouped and individual placement queries.
 
-## Instrumentation and validation
+Both final paired benchmark shaders and both generated hosts are byte-identical.
+All four shaders pass `spirv-val`. Other diagnostic runs can differ in fluid's
+`OpEntryPoint` interface-ID ordering, as documented in the storage report.
+GPU execution was not performed.
 
-The existing timing scope is now shared through `wyn-base::timing`, so CLI
-`-v` covers backend preparation as well as Egglog. New spans cover scalar DAG
-reconstruction/selection, evaluation planning, fusion rounds, backend phases,
-and local-storage analysis per body. Compiler rules, pass order, and
-optimization decisions are unchanged. Library calls remain quiet unless their
-timing scope is explicitly enabled.
+Windows tests used `RUST_MIN_STACK=67108864`; the workspace tests used a writable
+workspace directory for `TMP`/`TEMP`. Parser tests ran after the shader sweeps,
+and the package runner followed workspace tests to avoid file-lifecycle races.
 
-Use the commands in the coarse report with the updated release compiler to
-reproduce the phase breakdown. For additional diagnostic statistics:
-
-```powershell
-$env:WYN_EGGLOG_PROFILE = '1'
-& .\target\release\wyn.exe build fluid-simulation --graphics --subgroups -v -o tmp/compiler-profile/fluid.spv
-Remove-Item Env:WYN_EGGLOG_PROFILE
-```
-
-Keep those diagnostic runs separate from measurements. Repeated timer names
-are summed within a run; nested parent and child timers are not added together.
-[Detailed evidence](profiles/2026-10-28-compiler-fine.json) preserves commands,
-all measured runs, raw logs, the diagnostic statistics, and the measurement
-harness. The local harness and outputs are in
-`tmp/compiler-profile-fine-2026-10-28`.
-
-The release build and all nine `wyn-base` unit tests passed. The timing test
-checks nested scopes, unwind restoration, and thread isolation. CLI smoke
-checks verified that `-v` controls the added diagnostics and leaves SPIR-V/WGSL
-output identical. Both large SPIR-V outputs pass `spirv-val`. Tinyporto is byte
-identical to the original coarse-run output. The final fluid diagnostic output
-differs only in the ordering of interface IDs on 59 `OpEntryPoint` instructions;
-all other 27,472 disassembly lines are identical.
-
-The same CPU, revisions, and project options as the coarse run were used.
-Final wall times were 7.131–7.238 seconds for Tinyporto and 3.960–4.085 seconds
-for fluid. Timer logging, hashing/order variation, and desktop scheduling limit
-small cross-run comparisons. No runtime optimization or GPU execution was
-attempted, and the full regression suite was not run.
-
-## Recommended order of investigation
-
-1. Fluid's `storage-liveness` joins and control-flow propagation in the four
-   expensive partial/combine kernels.
-2. Fluid's repeated fusion-candidate selection.
-3. Tinyporto's evaluation scheduling, especially request import and result
-   queries alongside its rule execution.
-4. Tinyporto's two extraction cost calculations within arithmetic optimization.
-
-An order-of-magnitude reduction in structural analysis is a useful target,
-not a demonstrated result of these measurements. The profiles identify where
-to test that target without changing arithmetic optimization quality.
+The existing CLI `-v` flag emits timings. `WYN_EGGLOG_PROFILE=1` additionally
+prints evaluation cardinalities and engine diagnostics; keep those invocations
+separate from timed runs. Commands, raw logs, all samples, binary hashes,
+production diffs, and gate results are in
+[evaluation evidence](profiles/2026-10-28-compiler-evaluation.json). The local
+harness and full logs are under `tmp/compiler-evaluation-opt-2026-10-28`.
