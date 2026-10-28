@@ -38,6 +38,11 @@
 (function DirectInputs (FusionGroup) InputSites :merge (set-union old new))
 (relation GroupBefore (FusionGroup FusionGroup))
 (relation GroupEdge (FusionGroup FusionGroup))
+; Adjacency is immutable during candidate selection and cleared before union.
+(sort FusionPathNodes (Vec FusionGroup))
+(sort FusionPathGraph (Vec FusionPathNodes))
+(function FusionPathEdges () FusionPathGraph :no-merge)
+(function FusionPathOrder () FusionPathGraph :no-merge)
 (function GroupUsesOf (FusionGroup) GroupUses :merge (set-union old new))
 (function GroupLengths (FusionGroup) GroupUses :merge (set-union old new))
 (function GroupDirectLengthUses (FusionGroup) GroupUses :merge (set-union old new))

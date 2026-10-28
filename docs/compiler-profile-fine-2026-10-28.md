@@ -1,6 +1,98 @@
 # Detailed CLI compiler timings
 
-## Latest: frontend and host generation
+## Latest: fusion adjacency reuse
+
+Both workloads compile without `-O`. Against frontend/host revision `a18f4149`,
+five paired fresh-process medians are **Tinyporto 3.700 -> 3.613 s** and
+**fluid 2.169 -> 1.954 s (9.9% less time)**. Fluid's fusion phase falls
+**741.954 -> 533.603 ms (28.1% less time)**. This pass is complete; the
+250-300 ms fusion target is still not achieved.
+
+Fluid is below two seconds at the median, but **one of five runs is still
+2.084 s**. Tinyporto remains approximately 1.61 s above the goal. Its fusion
+phase changes by only 4 ms; the broader 87-ms whole-process difference includes
+variation in unrelated phases and should not be attributed entirely to this
+patch.
+
+| Work | Tinyporto before ms | Tinyporto after ms | Fluid before ms | Fluid after ms |
+| --- | ---: | ---: | ---: | ---: |
+| Fusion dependencies | 83.165 | 81.475 | 104.392 | 103.509 |
+| Build adjacency snapshots | - | 1.408 | - | 6.870 |
+| Choose fusion candidates | 46.918 | 45.524 | 472.815 | 267.381 |
+| Commit contractions | 7.529 | 7.198 | 111.843 | 101.793 |
+| **Whole fusion phase** | **225.540** | **221.641** | **741.954** | **533.603** |
+| **Whole process** | **3,700.263** | **3,612.814** | **2,168.974** | **1,954.293** |
+
+Nested parent spans overlap; independent phase medians do not add exactly.
+The baseline and modified compiler each received one warmup per workload,
+followed by five fresh processes each with binary order alternating by round.
+No builds or tests ran during timing; `WYN_EGGLOG_PROFILE` was unset. Graphics,
+SPIR-V, Tinyporto's Rust/WGPU host, and fluid's subgroups/WHL host are preserved.
+Filesystem caches were warm. Tinyporto ranges are 3.588-3.864 s before and
+3.596-3.681 s after; fluid ranges are 2.150-2.314 s before and 1.948-2.084 s after.
+Desktop activity and hash/order variation remain uncontrolled.
+
+Raw samples, executable hashes, source patch, harnesses, output comparisons,
+and gate results are in [fusion evidence](profiles/2026-10-28-compiler-fusion.json).
+
+### Granularity and implementation
+
+Fusion remains at the operation/group level. The adjacency snapshot contains
+only source groups and their neighbors, with no scalar syntax or unrelated
+source details. Two immutable adjacency vectors are built once per candidate
+round and passed explicitly into pure path predicates. Each vector has rows
+sorted by source group; each row contains that source followed by its neighbors.
+The predicates retain the same path/intervening-group tests. They can now use
+ordinary incremental Egglog rules instead of repeatedly reading live graph
+state in naive rules. Snapshots are cleared before every contraction, including
+contractions that absorb length observers, and are owned by the compiler graph.
+No graph-dependent candidate answer is retained across contractions.
+
+`ElementFusion` compatibility is now demanded only for candidate pairs rather
+than a cross product of current groups. In separate engine diagnostics, its
+accumulated fact count drops **8,617 -> 56**. Both versions still perform
+**32 contractions in 33 candidate rounds**, ending with **456 current groups**
+from 488 source operations. The final direct edge relations each contain 383
+edges. Snapshot roots are empty after selection, before later compiler passes.
+These are table/cardinality diagnostics, not an isolated performance attribution.
+
+### Validation and code size
+
+All full gates passed after the final code change:
+
+- Workspace formatting, all-target build, and **1,505 tests passed**, zero
+  failures, 14 existing ignores; all 127 compiler fixture files passed.
+- All-target builds/tests for seven standalone crates and both parser manifests,
+  plus WASM formatting and locked browser-target check.
+- **123 SPIR-V** validations; **122 WGSL** validations and one expected skip;
+  the library package compile/validation runner passed.
+- Regression cases cover direct paths, intervening barriers, disconnected/reverse
+  paths, contraction refresh, cycles, and independence of cloned graph snapshots.
+
+Both final paired shaders and generated hosts are **byte-identical** for both
+workloads. Both before/after shaders also pass `spirv-val`. Optional GPU execution
+scripts were not run. Gates used the existing writable workspace temporary
+folder and `RUST_MIN_STACK=67108864`; parser checks followed shader sweeps and
+the package runner followed workspace tests.
+
+Production code is **+53 net lines: 88 added, 35 removed**, including Rust and
+Egglog comments, excluding tests and documentation. No dependency was added.
+
+### Remaining work
+
+Further fusion optimization is possible, but this patch stops here. Fluid still
+spends 267 ms choosing candidates, 104 ms deriving dependencies, and 102 ms
+committing contractions. A reliable sub-two-second result needs margin for the
+observed 2.084-s run. Inspect the remaining candidate joins/proofs before adding
+cross-round retention; contracting intermediate groups can change paths between
+untouched endpoints. Immutable plan summaries and result counts already persist.
+
+Tinyporto's larger remaining opportunities are its basic scalar/evaluation
+path and structural planning. Its current total is 3.613 s, so further fusion
+work alone will not reach two seconds for that workload. The earlier phase
+budgets below remain engineering targets rather than demonstrated speedups.
+
+## Previous: frontend and host generation
 
 Both workloads still compile without `-O`. Against `ac0cfef0`, five paired
 fresh-process medians show **Tinyporto 3.720 -> 3.703 s (0.4% less time)** and
