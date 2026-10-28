@@ -1,0 +1,26 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"nested_loop_0_reproduce\"", ":source-name \"nested_loop_1_reproduce\""]
+--! [[shader]]
+--! entry = "nested_loop_0_reproduce"
+--! loop_depths = [0, 0, 1]
+--! [[shader]]
+--! entry = "nested_loop_1_reproduce"
+--! loop_depths = [0, 0, 1, 1]
+
+
+
+-- loop_binding_placement_preserves_guards_and_outer_iterations
+def nested_loop_0_walk(nested_loop_0_xs:[]i32,seed:i32) i32 = loop value=0 for k<4 do
+            if k < seed then
+                let total = loop total=0 for j<length(nested_loop_0_xs) do total+nested_loop_0_xs[j] in value+total
+            else value
+            entry nested_loop_0_reproduce(nested_loop_0_xs:[]i32) []i32 = map(|i|nested_loop_0_walk(nested_loop_0_xs,i),0i32..<64)
+
+def nested_loop_1_walk(nested_loop_1_xs:[]i32,seed:i32) i32 = loop value=0 for k<4 do
+            let total = loop total=0 for j<length(nested_loop_1_xs) do total+nested_loop_1_xs[j]*k in
+            loop result=value for step<3 do result+total
+            entry nested_loop_1_reproduce(nested_loop_1_xs:[]i32) []i32 = map(|i|nested_loop_1_walk(nested_loop_1_xs,i),0i32..<64)

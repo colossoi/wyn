@@ -5,6 +5,10 @@ use crate::host::BufferLen;
 
 fn input_length(source: &str, name: &str) -> Option<BufferLen> {
     let program = crate::compile_thru_ssa(source).expect("compile entry interface");
+    published_input_length(&program, name)
+}
+
+fn published_input_length(program: &crate::ssa::stage::Elaborated, name: &str) -> Option<BufferLen> {
     let mut lengths = program
         .global_context
         .pipeline
@@ -25,6 +29,47 @@ fn input_length(source: &str, name: &str) -> Option<BufferLen> {
         assert_eq!(length, first, "generated stages must agree on the input bound");
     }
     first
+}
+
+// These cases exercise the prefix proof itself, before shader ABI publication.
+fn inferred_prefixes(sources: &[String]) -> Vec<Option<i64>> {
+    use crate::egglog::{from_tlc, fuse, place, query::Query};
+    let source = sources
+        .iter()
+        .enumerate()
+        .map(|(i, source)| source.replacen("entry e(", &format!("entry prefix_{i}("), 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tlc = crate::compile_thru_tlc(&source).unwrap();
+    let mut program = place(
+        fuse(from_tlc(&tlc).unwrap()).unwrap(),
+        crate::PipelineTopologyPolicy::AllowGenerated,
+    )
+    .unwrap();
+    program
+        .graph
+        .parse_and_run_program(
+            None,
+            "(run-schedule (saturate planning-import) physical-bindings)",
+        )
+        .unwrap();
+    let query = Query(&program.graph);
+    let mut bounds = vec![None; sources.len()];
+    let mut seen = vec![false; sources.len()];
+    query
+        .for_each("SourceOriginalEntry", |row| {
+            let symbol = program.identities.symbols.resolve(program.graph.value_to_base::<i64>(row[0]));
+            let name = program.source.symbols.get(*symbol).unwrap();
+            let index: usize = name.strip_prefix("prefix_").unwrap().parse().unwrap();
+            seen[index] = true;
+            bounds[index] = query
+                .lookup("ParameterPrefixElements", (row[1], 0i64))?
+                .map(|value| program.graph.value_to_base::<i64>(value));
+            Ok(())
+        })
+        .unwrap();
+    assert!(seen.into_iter().all(|present| present));
+    bounds
 }
 
 #[test]
@@ -76,16 +121,20 @@ fn multiple_slices_take_max() {
 
 #[test]
 fn other_uses_disqualify_a_prefix_bound() {
-    for expression in [
+    let expressions = [
         "reduce(|a,b|a+b,0,xs[0..4])+length(xs)",
         "reduce(|a,b|a+b,0,xs[0..4])+xs[7]",
         "reduce(|a,b|a+b,0,xs[1..4])",
         "reduce(|a,b|a+b,0,xs[0..n])",
         "reduce(|a,b|a+b,0,xs[0..4])+reduce(|a,b|a+b,0,xs)",
         "reduce(|a,b|a+b,0,xs[0..4])+reduce(|a,b|a+b,0,map(|i|xs[i],iota(n)))",
-    ] {
-        let source = format!("entry e(xs:[]i32,n:i32) i32={expression}");
-        assert_eq!(input_length(&source, "xs"), None, "{expression}");
+    ];
+    let sources = expressions
+        .iter()
+        .map(|expression| format!("entry e(xs:[]i32,n:i32) i32={expression}"))
+        .collect::<Vec<_>>();
+    for (expression, bound) in expressions.iter().zip(inferred_prefixes(&sources)) {
+        assert_eq!(bound, None, "{expression}");
     }
 }
 
@@ -93,8 +142,12 @@ fn other_uses_disqualify_a_prefix_bound() {
 fn input_bounds_are_independent() {
     let source = "entry e(xs:[]i32,ys:[]i32) i32 =
         reduce(|a,b|a+b,0,xs[0..4])+length(ys)";
-    assert_eq!(input_length(source, "xs"), Some(BufferLen::Fixed { bytes: 16 }));
-    assert_eq!(input_length(source, "ys"), None);
+    let program = crate::compile_thru_ssa(source).expect("compile entry interface");
+    assert_eq!(
+        published_input_length(&program, "xs"),
+        Some(BufferLen::Fixed { bytes: 16 })
+    );
+    assert_eq!(published_input_length(&program, "ys"), None);
 }
 
 #[test]
@@ -118,8 +171,10 @@ fn prefix_uses_in_branches_take_the_maximum() {
 fn lexical_aliases_share_the_complete_use_set() {
     let source = "entry e(xs:[]i32) i32 =
         let ys=xs in reduce(|a,b|a+b,0,ys[0..4])";
-    assert_eq!(input_length(source, "xs"), Some(BufferLen::Fixed { bytes: 16 }));
-    assert_eq!(input_length(&format!("{source}+length(ys)"), "xs"), None);
+    assert_eq!(
+        inferred_prefixes(&[source.into(), format!("{source}+length(ys)")]),
+        vec![Some(4), None]
+    );
 }
 
 #[test]

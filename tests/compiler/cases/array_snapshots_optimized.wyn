@@ -1,0 +1,30 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = ["-O"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"retained_original\"", ":source-name \"parallel_swap\"", ":source-name \"retained_previous\""]
+--! [[spirv_array_loads]]
+--! entry = "retained_original"
+--! minimum = 1
+--! [[spirv_array_loads]]
+--! entry = "parallel_swap"
+--! minimum = 1
+--! [[spirv_array_loads]]
+--! entry = "retained_previous"
+--! minimum = 1
+
+-- Required array-copy traffic; this does not execute shaders or prove numerical results.
+def walk_retained_original(seed:i32,steps:i32) i32=let a=replicate(8,seed) in let (b,k)=loop (b,k)=(a,0i32) while k<steps do
+            (b with [k%8]=k,k+1) in a[b[seed%8]%8]+b[seed%8]
+entry retained_original(steps:i32) []i32=map(|i|walk_retained_original(i,steps),0i32..<4)
+
+def walk_parallel_swap(seed:i32,steps:i32) i32=let a=replicate(8,seed) in let b=replicate(8,seed+1) in
+            let (a,b,k)=loop (a,b,k)=(a,b,0i32) while k<steps do
+            (b,a with [k%8]=k,k+1) in a[seed%8]+b[seed%8]
+entry parallel_swap(steps:i32) []i32=map(|i|walk_parallel_swap(i,steps),0i32..<4)
+
+def walk_retained_previous(seed:i32,steps:i32) i32=let a=replicate(8,seed) in let (b,k)=loop (b,k)=(a,0i32) while k<steps do
+            let next=b with [k%8]=k in (next,k+1+b[next[k%8]%8]) in b[seed%8]
+entry retained_previous(steps:i32) []i32=map(|i|walk_retained_previous(i,steps),0i32..<4)

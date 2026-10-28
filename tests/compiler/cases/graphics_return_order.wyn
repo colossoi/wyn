@@ -1,0 +1,58 @@
+--! command = "build"
+--! exit = 0
+--! args = ["--graphics"]
+--! rust_host = true
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"return_order_0_reproduce\"", ":source-name \"return_order_1_reproduce\"", ":source-name \"return_order_2_reproduce\""]
+--! [[host]]
+--! entry = "return_order_0_reproduce"
+--! captured_results = [false, true, false]
+--! result_names = ["result_0", "result_1", "target"]
+--! [[host]]
+--! entry = "return_order_1_reproduce"
+--! captured_results = [false, false]
+--! result_names = ["result_0", "target"]
+--! [[host]]
+--! entry = "return_order_2_reproduce"
+--! captured_results = [true, true, false]
+--! result_names = ["result_0", "result_1", "target"]
+
+
+
+-- graphics_root_preserves_return_order_and_omits_intermediate_results
+-- Both computations belong to the same host call as the draw.
+entry return_order_0_reproduce(return_order_0_values: []vec4f32, target: render_target<vec4f32>)
+    ([]vec4f32, []vec4f32, render_target<vec4f32>) =
+  let shifted = map(|v: vec4f32| v + @[0.1, 0.0, 0.0, 0.0], return_order_0_values)
+  let doubled = map(|v: vec4f32| v * 2.0, return_order_0_values)
+  let triangles = rasterize_triangles(direct_draw(3u32, 1u32),
+    |vertex_index: u32, _: u32, _: u32|
+      vertex_output(shifted[i32(vertex_index)], @[1.0, 0.0, 0.0, 1.0]))
+  let image = shade(target, triangles, |value, _, _, _, _| value) in
+  (doubled, shifted, image)
+
+
+-- Both computations belong to the same host call as the draw.
+entry return_order_1_reproduce(return_order_1_values: []vec4f32, target: render_target<vec4f32>)
+    ([]vec4f32, render_target<vec4f32>) =
+  let shifted = map(|v: vec4f32| v + @[0.1, 0.0, 0.0, 0.0], return_order_1_values)
+  let doubled = map(|v: vec4f32| v * 2.0, return_order_1_values)
+  let triangles = rasterize_triangles(direct_draw(3u32, 1u32),
+    |vertex_index: u32, _: u32, _: u32|
+      vertex_output(shifted[i32(vertex_index)], @[1.0, 0.0, 0.0, 1.0]))
+  let image = shade(target, triangles, |value, _, _, _, _| value) in
+  (doubled, image)
+
+
+-- Both computations belong to the same host call as the draw.
+entry return_order_2_reproduce(return_order_2_values: []vec4f32, target: render_target<vec4f32>)
+    ([]vec4f32, []vec4f32, render_target<vec4f32>) =
+  let shifted = map(|v: vec4f32| v + @[0.1, 0.0, 0.0, 0.0], return_order_2_values)
+  let doubled = map(|v: vec4f32| v * 2.0, return_order_2_values)
+  let triangles = rasterize_triangles(direct_draw(3u32, 1u32),
+    |vertex_index: u32, _: u32, _: u32|
+      vertex_output(shifted[i32(vertex_index)], @[1.0, 0.0, 0.0, 1.0]))
+  let image = shade(target, triangles, |value, _, _, _, _| value) in
+  (shifted, shifted, image)

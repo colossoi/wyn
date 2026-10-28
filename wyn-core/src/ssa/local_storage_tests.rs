@@ -179,30 +179,6 @@ fn branch_updates_and_record_loop_state_keep_array_storage() {
 }
 
 #[test]
-fn retained_versions_and_parallel_array_swaps_keep_value_semantics() {
-    for body in [
-        "let a=replicate(8,seed) in let (b,k)=loop (b,k)=(a,0i32) while k<steps do
-            (b with [k%8]=k,k+1) in a[b[seed%8]%8]+b[seed%8]",
-        "let a=replicate(8,seed) in let b=replicate(8,seed+1) in
-            let (a,b,k)=loop (a,b,k)=(a,b,0i32) while k<steps do
-            (b,a with [k%8]=k,k+1) in a[seed%8]+b[seed%8]",
-        "let a=replicate(8,seed) in let (b,k)=loop (b,k)=(a,0i32) while k<steps do
-            let next=b with [k%8]=k in (next,k+1+b[next[k%8]%8]) in b[seed%8]",
-    ] {
-        let source = format!(
-            "def walk(seed:i32,steps:i32) i32={body}
-            entry main(steps:i32) []i32=map(|i|walk(i,steps),0i32..<4)"
-        );
-        shaders(&source, |m| {
-            assert!(
-                array_traffic(m).1 > 0,
-                "unproven reuse must keep array copies: {body}"
-            )
-        });
-    }
-}
-
-#[test]
 fn nested_counted_loops_reinitialize_private_arrays_each_iteration() {
     let source = "def walk(seed:i32,steps:i32) i32 =
         loop total=0 for outer<3 do

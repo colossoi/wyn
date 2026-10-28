@@ -127,54 +127,6 @@ fn host_calls_bind_each_invocation_separately() {
 }
 
 #[test]
-fn allocation_helpers_bind_nested_and_repeated_calls_under_both_policies() {
-    let source = "def quarter(n:i32) i32=(n+3)/4
-        def area(w:i32,h:i32) i32=quarter(w)*quarter(h)
-        entry main(resolution:vec2i32) []i32=map(|i|i+1,iota(area(resolution.x,resolution.y)))";
-    for policy in [
-        crate::egglog::ScalarOptimization::Basic,
-        crate::egglog::ScalarOptimization::Full,
-    ] {
-        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
-            let ssa = crate::compile_thru_ssa_with_policy(source, crate::CodegenTarget::Portable, policy)
-                .unwrap();
-            let host = match format {
-                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
-                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
-            };
-            host.to_rust_wgpu("sizes", format).unwrap();
-            let program = Program::parse(&host.to_whl("sizes", format).unwrap()).unwrap();
-            let mut backend = Trace::default();
-            let resolution =
-                backend.input(13i32.to_le_bytes().into_iter().chain(29i32.to_le_bytes()).collect());
-            let result = program.run("main", &[resolution], &mut backend).unwrap();
-            assert_eq!(backend.buffers[&result.handle().unwrap()].len(), 4 * 8 * 4);
-            assert!(backend.device_reads.is_empty());
-        }
-    }
-}
-
-#[test]
-fn i32_get_bit_reads_low_high_and_sign_bits() {
-    for (bit, value, expected) in [
-        (0i32, 0i32, 0),
-        (0, 1, 1),
-        (0, -2, 0),
-        (7, 128, 1),
-        (30, i32::MAX, 1),
-        (31, i32::MIN, 1),
-        (31, -1, 1),
-        (31, i32::MAX, 0),
-    ] {
-        let bytes = scalar(
-            "entry main(bit:i32, value:i32) i32=i32.get_bit(bit, value)",
-            &[[bit, value].into_iter().flat_map(i32::to_le_bytes).collect()],
-        );
-        assert_eq!(i32::from_le_bytes(bytes.try_into().unwrap()), expected);
-    }
-}
-
-#[test]
 fn multiple_callable_arguments_keep_distinct_captured_values() {
     let source = "def combine(f:i32 -> i32,g:i32 -> i32,x:i32) i32 =
         if x<0 then f(x) else g(x)
@@ -193,41 +145,6 @@ fn host_reads_packed_parameters_and_preserves_unsigned_comparisons() {
         &[u32::MAX.to_le_bytes().into_iter().chain(1u32.to_le_bytes()).collect()],
     );
     assert_eq!(u32::from_le_bytes(bytes.try_into().unwrap()), u32::MAX - 1);
-}
-
-#[test]
-fn host_eager_select_arms_preserve_native_arithmetic_at_boundaries() {
-    for (expression, input, expected) in [
-        ("if n>0 then n-1 else n+1", i32::MAX, i32::MAX - 1),
-        ("if n>0 then n-1 else n*n", i32::MAX, i32::MAX - 1),
-        ("if n<0 then n+1 else n-1", i32::MIN, i32::MIN + 1),
-        ("n+1", i32::MAX, i32::MIN),
-        ("n*n", i32::MAX, 1),
-    ] {
-        let bytes = scalar(
-            &format!("entry main(n:i32) i32={expression}"),
-            &[input.to_le_bytes().to_vec()],
-        );
-        assert_eq!(i32::from_le_bytes(bytes.try_into().unwrap()), expected);
-    }
-    for (expression, input, expected) in [
-        ("if n>0.0 then n else n+n", f32::MAX, f32::MAX),
-        ("n+n", f32::MAX, f32::INFINITY),
-        ("n*n", f32::INFINITY, f32::INFINITY),
-    ] {
-        let bytes = scalar(
-            &format!("entry main(n:f32) f32={expression}"),
-            &[input.to_le_bytes().to_vec()],
-        );
-        assert_eq!(f32::from_le_bytes(bytes.try_into().unwrap()), expected);
-    }
-    let compiled = lower_ssa_to_wgsl_with_program(
-        compile_thru_ssa("entry main(n:i32) i32=if n>0 then n-1 else n*n").unwrap(),
-    )
-    .unwrap();
-    let rust = compiled.program.to_rust_wgpu("test.wgsl", ShaderFormat::Wgsl).unwrap();
-    assert!(rust.contains("wrapping_mul"), "{rust}");
-    assert!(rust.contains("wrapping_sub"), "{rust}");
 }
 
 #[test]

@@ -1,0 +1,67 @@
+(define-host-program :version 1)
+(define-gpu-module 'shaders :format :wgsl :path "draw.wgsl")
+
+(define-gpu-kernel 'kernel-0-0
+  :module 'shaders :entry "reproduce_finish"
+  :workgroup-size '(1 1 1)
+  :parameters '(
+    (argument-0 :buffer :write :element :u8 :stride 1 :min-bytes 12))
+  :abi '(
+    (argument-0 :storage 0 1)))
+
+(define-gpu-kernel 'kernel-1-0
+  :module 'shaders :entry "reproduce__draw_operand_1_finish"
+  :workgroup-size '(1 1 1)
+  :parameters '(
+    (argument-0 :buffer :write :element :u8 :stride 1 :min-bytes 20))
+  :abi '(
+    (argument-0 :storage 0 0)))
+
+(define-gpu-graphics 'graphics-2
+  :vertex '(shaders "reproduce_vertex")
+  :fragment '(shaders "reproduce_fragment")
+  :parameters '()
+  :abi '()
+  :vertex-inputs '()
+  :color-outputs '((0 :caller))
+  :depth-format :depth32float :samples 1
+  :topology :triangle-list :front-face :counter-clockwise :cull :none :fill :fill
+  :depth-test :less-equal :depth-write t :blend :replace :color-write t)
+
+(define-host-entry 'source-reproduce
+  :function 'host-source-reproduce
+  :source-name "reproduce"
+  :parameters '(
+    (resource-2 :texture :read-write :dimension :d2 :format :caller :samples 1 :source-name "screen")
+    (resource-3 :texture :read-write :dimension :d2 :format :depth32float :samples 1 :source-name "depth-target-2")
+  )
+  :results '(
+    (source-screen :texture :read-write :dimension :d2 :format :caller :samples 1 :source-name "screen" :ownership :borrowed :alias resource-2)))
+
+(defun host-source-reproduce (resource-2 resource-3)
+  (let* (
+    (resource-0 (gpu-alloc (i64 12)))
+    (resource-1 (gpu-alloc (i64 20)))
+    (depth-view-2 (gpu-texture-view resource-3 :usage :render-target :dimension :d2 :mip 0 :mip-count 1 :layer 0 :layer-count 1))
+    (target-2-0 (gpu-texture-view resource-2 :usage :render-target :dimension :d2 :mip 0 :mip-count 1 :layer 0 :layer-count 1))
+  )
+    (gpu-dispatch 'kernel-0-0
+      :groups (list (i64 1) (i64 1) (i64 1))
+      :args (list resource-0))
+    (gpu-dispatch 'kernel-1-0
+      :groups (list (i64 1) (i64 1) (i64 1))
+      :args (list resource-1))
+    (gpu-draw 'graphics-2
+      :args (list )
+      :vertices (list)
+      :colors (list (list 0 target-2-0 :load :store nil))
+      :depth (list depth-view-2 :load :store nil)
+      :viewport :target
+      :scissor :target
+      :draw (list :indexed-indirect resource-0 :u32 resource-1 0 1 20))
+    (let* (
+      (result-0 resource-2)
+    )
+    (gpu-free resource-0)
+    (gpu-free resource-1)
+    result-0)))

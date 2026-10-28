@@ -3100,8 +3100,10 @@ dependencies = [
  "toml",
  "wyn-core",
  "wyn-diagnostics",
+ "wyn-host-interp",
  "wyn-module-graph",
  "wyn-package-manager",
+ "wyn-spirv",
 ]
 
 [[package]]

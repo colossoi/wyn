@@ -1,0 +1,30 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"collective_allocation_0_sum_doubled_iota\"", ":source-name \"collective_allocation_1_repro\""]
+--! [[host]]
+--! entry = "collective_allocation_0_sum_doubled_iota"
+--! minimum_calls = { "gpu-alloc" = 1 }
+--! [[host]]
+--! entry = "collective_allocation_1_repro"
+--! minimum_calls = { "gpu-alloc" = 1 }
+
+
+
+-- scalar_domain_collectives_publish_scratch_and_capacity_dependencies
+-- Reduce over a map over an iota: `reduce(op, ne, map(g, 0..<collective_allocation_0_n))`.
+-- Fuses to a Redomap over the virtual range, which the parallelizer
+-- chunk-slices per thread. The chunk arithmetic must run in the range's
+-- index type (i32 here), not u32 — otherwise the per-chunk `start`/`len`
+-- come out u32 and feed an i32 `{start, step, len}` range struct, producing
+-- an OpCompositeConstruct whose constituents don't match the struct
+-- (spirv-val rejects). See egir::parallelize::emit_chunk_arithmetic.
+
+entry collective_allocation_0_sum_doubled_iota(collective_allocation_0_n: i32) f32 =
+  reduce(|a: f32, b: f32| a + b, 0.0, map(|x: i32| f32.i32(x) * 2.0, 0..<collective_allocation_0_n))
+
+
+entry collective_allocation_1_repro(collective_allocation_1_xs: []f32, collective_allocation_1_n: i32) []f32 =
+  map(|i| f32(i + 1), filter(|i| collective_allocation_1_xs[i] > 0.0, iota(collective_allocation_1_n)))

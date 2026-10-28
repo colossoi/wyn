@@ -146,20 +146,6 @@ fn radix_host_loop_dispatches_three_phases_per_pass() {
 }
 
 #[test]
-fn scan_outputs_can_use_completed_totals() {
-    shaders(include_str!(
-        "../../../testfiles/regressions/scan_completed_totals.wyn"
-    ));
-    for source in [
-        "entry main(xs:[]i32) []i32 = let p=scan((+),0,xs) in let t=reduce((+),0,xs) in map(|x|x+t,p)",
-        "entry main(xs:[][513]i32) [][513]i32 = map(|row|let p=scan((+),0,row) in let t=reduce((+),0,row) in map(|x|x+t,p),xs)",
-        "entry main(xs:[2][17]i32) [2][17]i32 = map(|row|if row[0]>0 then let p=scan((+),0,row) in let t=reduce((+),0,row) in map(|x|x+t,p) else row,xs)",
-    ] {
-        shaders(source);
-    }
-}
-
-#[test]
 fn expression_projection_retains_host_capture_inputs_without_admission_tables() {
     use super::{from_tlc, fuse, optimize_with_policy, place, schedule, ScalarOptimization};
     use crate::PipelineTopologyPolicy;
@@ -216,87 +202,17 @@ fn expression_projection_retains_host_capture_inputs_without_admission_tables() 
     }
 }
 
+// Broad policy/backend coverage lives in tests/compiler/cases/scalar_policy_*.wyn.
 #[test]
-fn basic_scalar_policy_retains_calls_and_validates_both_backends() {
-    use super::{
-        finish_for_test, from_tlc, fuse, optimize_with_policy, place, schedule, ScalarOptimization,
-    };
-    use crate::{CodegenTarget, PipelineTopologyPolicy};
-    let helper = "def helper(x:i32) i32 =
-        (x-x)+(x-x)+(x-x)+(x-x)+(x-x)+(x-x)+(x-x)+(x-x)
-        entry main(x:i32) i32 = helper(x)+1";
-    let small_helper = "def helper(x:i32) i32=x+1
-        entry main(x:i32) i32=helper(x)*2";
-    for source in [
-        helper,
-        small_helper,
-        include_str!("../../../testfiles/regressions/aggregate_forwarding.wyn"),
-        include_str!("../../../testfiles/select_lowering.wyn"),
-        include_str!("../../../testfiles/filter_then_map.wyn"),
-        "entry main(xs:[4]i32,i:i32) (i32,(i32,i32)) =
-         let ys=map(|x|(x,(x+1,x+2)),xs) in ys[i]",
-        "def row(n:i32,x:i32) []i32=map(|y|x+y,iota(n+1)) entry main(xs:[]i32,n:i32) [][]i32=map(|x|row(n,x),xs)",
-        "def row(ys:[]i32,x:i32) []i32=map(|y|x+y,iota(length(ys)+1)) entry main(xs:[]i32,ys:[]i32) [][]i32=map(|x|row(ys,x),xs)",
-    ] {
-        let tlc = crate::compile_thru_tlc(source).unwrap();
-        for policy in [ScalarOptimization::Basic, ScalarOptimization::Full] {
-            for target in [CodegenTarget::Spirv, CodegenTarget::Wgsl] {
-                let program = optimize_with_policy(
-                    prepare_interfaces(
-                        schedule(
-                            place(
-                                fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                                PipelineTopologyPolicy::AllowGenerated,
-                            )
-                            .unwrap(),
-                        )
-                        .unwrap(),
-                    )
-                    .unwrap(),
-                    policy,
-                )
-                .unwrap();
-                let mut templates = 0;
-                program.stage.scalars.constructor_enodes("ExprTemplateBody", |_| templates += 1).unwrap();
-                if policy == ScalarOptimization::Basic {
-                    assert_eq!(templates, 0, "basic mode must not import optional templates");
-                } else if source == helper || source == small_helper {
-                    assert!(templates > 0, "fixture must exercise optional helper expansion");
-                }
-                let ssa = finish_for_test(program, target).unwrap();
-                if source == small_helper {
-                    assert_eq!(
-                        ssa.functions.iter().any(|function| function.name.contains("helper")),
-                        policy == ScalarOptimization::Basic,
-                        "scalar policy controls tiny helpers as well as larger ones"
-                    );
-                }
-                let module = match target {
-                    CodegenTarget::Portable => unreachable!("test uses concrete shader targets"),
-                    CodegenTarget::Spirv => {
-                        let binary = lower_ssa_to_spirv(ssa).unwrap();
-                        if source == helper {
-                            let module = wspirv::dr::load_words(&binary.spirv).unwrap();
-                            assert!(
-                                !module.all_inst_iter().any(|i| i.class.opcode == wspirv::spirv::Op::ISub),
-                                "cheap x-x cleanup must remain enabled"
-                            );
-                        }
-                        let bytes: Vec<_> = binary.spirv.iter().flat_map(|w| w.to_le_bytes()).collect();
-                        naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap()
-                    }
-                    CodegenTarget::Wgsl => {
-                        naga::front::wgsl::parse_str(&lower_ssa_to_wgsl(ssa).unwrap()).unwrap()
-                    }
-                };
-                naga::valid::Validator::new(
-                    naga::valid::ValidationFlags::all(),
-                    naga::valid::Capabilities::all(),
-                )
-                .validate(&module)
-                .unwrap();
-            }
-        }
+fn scalar_policy_controls_optional_templates() {
+    let tlc =
+        crate::compile_thru_tlc("def helper(x:i32) i32=x+1 entry main(x:i32) i32=helper(x)*2").unwrap();
+    let program = interfaces_for_test(&tlc);
+    for policy in [super::ScalarOptimization::Basic, super::ScalarOptimization::Full] {
+        let (_, scalars) = super::scalar::run(&program.graph, &program.identities, policy).unwrap();
+        let mut templates = 0;
+        scalars.constructor_enodes("ExprTemplateBody", |_| templates += 1).unwrap();
+        assert_eq!(templates > 0, policy == super::ScalarOptimization::Full);
     }
 }
 
@@ -334,83 +250,8 @@ fn compiler_repro_array_loop() {
 }
 
 #[test]
-fn compiler_repro_runtime_array_loop() {
-    for source in [
-        include_str!("../../../testfiles/regressions/triangulation_runtime_array_loop.wyn"),
-        "entry main(xs:[]i32) []i32 = xs with [0] = xs[0]+1",
-        "entry main(xs:[]i32) []i32 =
-         loop out=xs while length(out)>0 && out[0]<4 do out with [0]=out[0]+1",
-        "entry main(xs:[]i32) []i32 =
-         loop out=xs for i<length(xs) do
-           loop inner=out for j<2 do inner with [i]=inner[i]+1",
-        "entry main(xs:[]i32) []i32 =
-         loop out=xs[1..length(xs)] for i<length(xs)-1 do out with [i]=out[i]+1",
-    ] {
-        shaders(source);
-    }
-}
-
-#[test]
 fn compiler_repro_array_reduce() {
     shaders(include_str!("../../../testfiles/regressions/array_reduce.wyn"));
-}
-
-#[test]
-fn compiler_repro_runtime_array_branch() {
-    for source in [
-        include_str!("../../../testfiles/regressions/triangulation_runtime_array_branch.wyn"),
-        include_str!("../../../testfiles/regressions/runtime_array_updated_slice.wyn"),
-        include_str!("../../../testfiles/regressions/runtime_array_three_outputs.wyn"),
-        include_str!("../../../testfiles/regressions/triangulation_runtime_array_zip_map.wyn"),
-        "entry main(xs:[]i32) []i32 =
-         let out=if length(xs)>10 then replicate(0,0i32) else xs in
-         map(|(x,(y,z))|x+y+z,zip(out,zip(out,out)))",
-        "entry main(xs:[]i32) []i32 =
-         let out=if length(xs)>10 then replicate(0,0i32) else xs in
-         let half=out[0..length(out)/2] in map(|(x,y)|x+y,zip(half,half))",
-        "entry main(xs:[]i32) []i32 = if xs[0]>0 then replicate(2,7i32) else xs",
-        "entry main(xs:[]i32) []i32 =
-         if length(xs)>10 then replicate(0,0i32)
-         else if length(xs)>5 then replicate(2,7i32) else xs",
-        "entry main(xs:[]i32) []i32 =
-         let out = if length(xs)>10 then replicate(0,0i32) else xs
-         in out[0..length(out)/2]",
-        "entry main(xs:[]i32) []i32 =
-         let out = if length(xs)>10 then replicate(0,0i32) else xs
-         in map(|x| x+1, out)",
-        "entry main(xs:[]i32) []i32 =
-         let initial=if length(xs)>10 then replicate(0,0i32) else xs in
-         loop out=initial for i<length(initial) do out with [i]=out[i]+1",
-        "entry main(n:i32) []i32 =
-         let a=replicate(n,1i32) let b=replicate(n+1,2i32)
-         in if n>2 then a else b",
-    ] {
-        shaders(source);
-    }
-}
-
-#[test]
-fn compiler_repro_allocated_array_loop() {
-    for source in [
-        include_str!("../../../testfiles/regressions/runtime_array_shrinking_loop.wyn"),
-        include_str!("../../../testfiles/regressions/triangulation_allocated_array_loop.wyn"),
-        "entry main(n:i32) []i32 =
-         loop out=replicate(n,0i32) while n>0 && out[0]<3 do out with [0]=out[0]+1",
-        "entry main(n:i32) []i32 =
-         loop out=replicate(n,0i32) for i<n do
-           loop inner=out for j<2 do inner with [i]=inner[i]+1",
-        "entry main(n:i32) ([]i32,[]i32) =
-         let initial=replicate(n,0i32)
-         let output=loop out=initial for i<n do out with [i]=i+1
-         in (initial,output)",
-        "entry main(n:i32) []i32 =
-         loop out=iota(n) for i<2 do out[1..length(out)]",
-        "entry main(n:i32) []i32 =
-         let out=loop out=iota(n) for i<2 do out[1..length(out)]
-         in map(|x|x+1,out)",
-    ] {
-        shaders(source);
-    }
 }
 
 #[test]
@@ -427,73 +268,6 @@ fn compiler_repro_matrix_reduce_loop() {
         include_str!("../../../testfiles/regressions/matrix_reduce_loop.wyn"),
         |_| {},
     );
-}
-
-#[test]
-fn compiler_repro_shared_scalar_loop() {
-    let source = include_str!("../../../testfiles/regressions/shared_scalar_loop.wyn");
-    placement_shaders(source, |_| {});
-    let while_loop = source.replace(
-        "loop p = initial for iteration < 2 do p * 0.5",
-        "let (p, iteration) = loop (p, iteration) = (initial, 0i32)\n\
-         while iteration < 2 do (p * 0.5, iteration + 1) in p",
-    );
-    placement_shaders(&while_loop, |_| {});
-}
-
-#[test]
-fn compiler_repro_nested_replicate() {
-    for source in [
-        include_str!("../../../testfiles/regressions/nested_replicate.wyn"),
-        "entry check(x: f32) [2][5]f32 = replicate(2, replicate(5, x))",
-        "entry check(x: f32) [2][3][4]f32 = replicate(2, replicate(3, replicate(4, x)))",
-        "entry check(x: i32) [2][3]bool = replicate(2, map(|i: i32| i > x, iota(3)))",
-        "entry check(x: f32) [2][3]f32 =
-         let values = map(|i: i32| x + f32.i32(i), iota(5)) in
-         let row: [3]f32 = values[1..4] in replicate(2, row)",
-    ] {
-        placement_shaders(source, |_| {});
-    }
-}
-
-#[test]
-fn compiler_repro_tuple_reduce_seed() {
-    let source = include_str!("../../../testfiles/regressions/tuple_reduce_seed.wyn");
-    placement_shaders(source, |_| {});
-    for variant in [
-        source.replace("loop value = 0.0 for step < 2 do", "let value = 0.0 in"),
-        source.replace("map(|i: i32| a[i] + b[i], iota(3))", "zero"),
-        source.replace(
-            "let zero = replicate(3, 0.0) in",
-            "let values = replicate(5, 0.0) in let zero: [3]f32 = values[1..4] in",
-        ),
-        source
-            .replace("loop value = 0.0 for step < 2 do", "let value = 0.0 in")
-            .replace("let (total, _) = reduce(", "let scanned = scan(")
-            .replace(
-                "    total[0]",
-                "    let (total, _) = scanned[length(xs) - 1] in total[0]",
-            ),
-    ] {
-        placement_shaders(&variant, |_| {});
-    }
-}
-
-#[test]
-fn local_array_layouts_support_rectangles_and_higher_rank() {
-    for source in [
-        "entry check(xs: []f32) []f32 =
-         map(|x: f32|
-           let a = map(|i: i32| map(|j: i32| x + f32.i32(i+j), iota(5)), iota(2)) in
-           a[1][4], xs)",
-        "entry check(xs: []f32) []f32 =
-         map(|x: f32|
-           let a = map(|i: i32| map(|j: i32|
-             map(|k: i32| x + f32.i32(i+j+k), iota(4)), iota(3)), iota(2)) in
-           a[1][2][3], xs)",
-    ] {
-        placement_shaders(source, |_| {});
-    }
 }
 
 #[test]
@@ -819,65 +593,6 @@ fn guarded_loops(block: &naga::Block, depth: usize) -> Vec<usize> {
 }
 
 #[test]
-fn sibling_branches_share_producers_only_under_matching_guards() {
-    let source = include_str!("../../../testfiles/regressions/sibling_branch_producer.wyn");
-    for (direct, specular, loops, unguarded) in [
-        (
-            "if skip then 0.0 else s",
-            "if skip then 0.0 else s*position.z",
-            1,
-            0,
-        ),
-        (
-            "if skip then s else 0.0",
-            "if skip then s*position.z else 0.0",
-            1,
-            0,
-        ),
-        // One consumer demands s on each path, so evaluating it before the
-        // common split is safe even though the individual uses are guarded.
-        (
-            "if skip then 0.0 else s",
-            "if skip then s*position.z else 0.0",
-            1,
-            1,
-        ),
-        (
-            "if skip then 0.0 else s",
-            "if position.y>2.0 then 0.0 else s*position.z",
-            2,
-            0,
-        ),
-        (
-            "if skip then 0.0 else (if position.z>0.0 then s else 0.0)",
-            "if skip then 0.0 else s*position.z",
-            1,
-            0,
-        ),
-    ] {
-        let source = source
-            .replace(
-                "let direct=if skip then 0.0 else s",
-                &format!("let direct={direct}"),
-            )
-            .replace(
-                "let specular=if skip then 0.0 else s*position.z",
-                &format!("let specular={specular}"),
-            );
-        let module = shaders(&source);
-        let fragment =
-            &module.entry_points.iter().find(|e| e.stage == naga::ShaderStage::Fragment).unwrap().function;
-        let depths = guarded_loops(&fragment.body, 0);
-        assert_eq!(depths.len(), loops, "{source}");
-        assert_eq!(
-            depths.iter().filter(|&&depth| depth == 0).count(),
-            unguarded,
-            "{source}"
-        );
-    }
-}
-
-#[test]
 fn grouped_materializations_keep_guarded_availability() {
     let source = include_str!("../../../testfiles/regressions/sibling_branch_producer.wyn");
     for (last, loops, unguarded) in [
@@ -963,54 +678,6 @@ fn pointwise_map_emits_a_parallel_dispatch() {
 }
 
 #[test]
-fn rectangular_map_nests_reach_both_backends() {
-    for source in [
-        "entry main(xs:[4]i32) [4][3]i32=map(|x|map(|y|x+y,iota(3)),xs)",
-        "entry main(xs:[4][3]i32) [4][3]i32=map(|row|map(|x|x+1,row),xs)",
-        "entry main(xs:[][3]i32) [][3]i32=map(|row|map(|x|x+1,row),xs)",
-        "entry main(xs:[]i32) [][3]i32=map(|x|let t=x*x in map(|y|t+y,iota(3)),xs)",
-        "entry main(xs:[2]i32) [2][3][4]i32=map(|x|map(|y|map(|z|x+y+z,iota(4)),iota(3)),xs)",
-        "entry main(xs:[2]i32) [2][3][4][5]i32=map(|x|map(|y|map(|z|map(|w|x+y+z+w,iota(5)),iota(4)),iota(3)),xs)",
-        "entry main(xs:[4][3]i32) [3][4]i32=map(|j|map(|i|xs[i][j],iota(4)),iota(3))",
-        "entry main(xs:[]i32) [][3]i32=map(|x|map(|y|reduce(|a,b|a+b,0,[x,y]),iota(3)),xs)",
-        "entry main(xs:[]i32) [][3]i32=map(|x|map(|y|x+y,iota(3)),map(|x|x+1,xs))",
-        "entry main(xs:[]i32) [][3]i32=map(|x|map(|y|x+y,map(|y|y+1,iota(3))),xs)",
-        "entry main(xs:[]i32) [][3]i32=map(|x|let t=loop a=x for i<16 do a+i in map(|y|t+y,iota(3)),xs)",
-    ] {
-        placement_shaders(source, |_| {});
-    }
-}
-
-#[test]
-fn rectangular_map_tuple_rows_reach_both_backends() {
-    for source in [
-        "entry main(xs:[]i32) [][3](i32,i32)=map(|x|map(|y|(x,y),iota(3)),xs)",
-        "entry main(xs:[]i32) [][3][4](i32,bool)=map(|x|map(|y|map(|z|(x+y,z>1),iota(4)),iota(3)),xs)",
-        "entry main(xs:[]i32) [][3](i32,i32)=map(|x|let t=reduce((+),0,[x,x]) in map(|y|(t,y),iota(3)),xs)",
-    ] {
-        placement_shaders(source, |_| {});
-    }
-}
-
-#[test]
-fn segmented_collectives_reach_both_backends() {
-    for source in [
-        "entry main(xs:[][513]i32) []i32=map(|row|reduce((+),0,row),xs)",
-        "entry main(xs:[][513]i32) [][513]i32=map(|row|scan((+),0,row),xs)",
-        "entry main(xs:[][3][17]i32) [][3]i32=map(|rows|map(|row|reduce((+),0,row),rows),xs)",
-        "entry main(xs:[][513]i32) [][513]i32=map(|row|map(|x|x*2,scan((+),0,map(|x|x+1,row))),xs)",
-        "entry main(xs:[][513]i32) ([]i32,[][513]i32)=(map(|row|reduce((+),0,row),xs),map(|row|scan((+),0,row),xs))",
-        "entry main(xs:[][17]i32) [](i32,i32)=map(|row|reduce(|a,b|(a.0+b.0,a.1+b.1),(0,0),map(|x|(x,x*x),row)),xs)",
-        "entry main(xs:[][17]i32) []i32=map(|row|reduce((+),0,row[0..0]),xs)",
-        "entry main(xs:[][17]i32) [][0]i32=map(|row|scan((+),0,row[0..0]),xs)",
-    ] {
-        let module = shaders(source);
-        assert!(module.entry_points.iter().any(|entry| entry.workgroup_size == [256, 1, 1]), "{source}");
-        assert!(module.global_variables.iter().any(|(_, variable)| variable.space == naga::AddressSpace::WorkGroup), "{source}");
-    }
-}
-
-#[test]
 fn fused_maps_preserve_captured_inputs() {
     shaders("entry result(xs:[]i32,n:i32) []i32=map(|x:i32|x*2,map(|x:i32|x+n,xs))");
 }
@@ -1036,22 +703,6 @@ fn filters_of_tuples_with_boolean_fields() {
 }
 
 #[test]
-fn projected_tuple_arrays_preserve_their_extents() {
-    for source in [
-        "entry kept(xs:[]i32) [](i32,i32)=filter(|(x,y)|x>0,map(|x|(x,x+1),xs))",
-        "entry kept(xs:[]i32) i32=length(filter(|(x,y)|x>0,map(|x|(x,x+1),xs)))",
-        "entry kept(xs:[]i32) []i32=map(|(x,y)|x+y,filter(|(x,y)|x>0,map(|x|(x,x+1),xs)))",
-        "entry kept(xs:[]i32,ys:[]i32) ([]i32,[]i32)=(xs,ys)",
-        "entry kept(xs:[]i32) ([]i32,[]i32)=(xs,map(|(x,y)|y,filter(|(x,y)|x>0,map(|x|(x,x+1),xs))))",
-        "entry kept(xs:[4]i32) [4](i32,i32)=map(|x|(x,x+1),xs)",
-        "entry kept() ([1]i32,[3]i32)=([1],[2,3,4])",
-        "entry kept(xs:[]i32) [](i32,(bool,i32))=filter(|(x,p)|x>0,map(|x|(x,(x>1,x+1)),xs))",
-    ] {
-        shaders(source);
-    }
-}
-
-#[test]
 fn resource_records_passed_to_helpers_reach_both_backends() {
     placement_shaders(
         "type textures = { image: texture2d, filtering: sampler }
@@ -1062,58 +713,6 @@ fn resource_records_passed_to_helpers_reach_both_backends() {
            map(|uv| sample(maps, uv), pixels)",
         |_| {},
     );
-}
-
-#[test]
-fn generic_tuple_array_helpers_reach_both_backends() {
-    for source in [
-        "entry main(xs:[]i32,ys:[]i32) ([]i32,[]i32)=unzip(zip(xs,ys))",
-        "entry main(xs:[]i32) []i32=
-         let (a,b)=unzip(map(|x|(x,(x,x+1)),xs)) in map(|(c,d)|c+d,b)",
-        "def duplicate<[n], A>(xs:[n]A) [n](A,A)=map(|x|(x,x),xs)
-         entry main(xs:[]i32) []i32=map(|((a,b),(c,d))|a+b+c+d,duplicate(duplicate(xs)))",
-        "def firsts<[n], A, B>(xs:[n](A,B)) [n]A=map(|(a,b)|a,xs)
-         entry main(xs:[]i32,ys:[]i32) []i32=firsts(zip(xs,ys))",
-        "def firsts<[n], A, B>(xs:[n](A,B)) [n]A=map(|(a,b)|a,xs)
-         entry main(xs:[](i32,i32)) []i32=firsts(xs)",
-        "def firsts<[n], A, B>(xs:[n](A,B)) [n]A=map(|(a,b)|a,xs)
-         entry main(xs:[4]i32) []i32=firsts(filter(|(a,b)|a>0,map(|x|(x,x+1),xs)))",
-    ] {
-        shaders(source);
-    }
-}
-
-#[test]
-fn nested_tuple_array_operations_reach_both_backends() {
-    for source in [
-        "entry main(xs:[4]i32) [4]i32 = map(|(a,(b,c))|a+b+c,map(|x|(x,(x+1,x+2)),xs))",
-        "entry main(x:i32,i:i32) (i32,(i32,i32)) =
-         let ys=[(x,(x+1,x+2)),(x+3,(x+4,x+5))] in
-         let zs=ys with [i]=(7,(8,9)) in zs[i]",
-        "entry main(xs:[](i32,i32),i:i32) (i32,i32)=xs[i]",
-        "entry main(x:i32,i:i32) (i32,(i32,i32)) = [(x,(x+1,x+2)),(x+3,(x+4,x+5))][i]",
-    ] {
-        shaders(source);
-    }
-}
-
-#[test]
-fn runtime_indexing_a_tuple_valued_map_preserves_storage_layout() {
-    for source in [
-        "entry main(xs:[4]i32,i:i32) (i32,(i32,i32)) =
-         let ys=map(|x|(x,(x+1,x+2)),xs) in ys[i]",
-        "entry main(xs:[]i32,i:i32) (i32,(bool,i32)) =
-         let ys=map(|x|(x,(x>0,x+2)),xs) in ys[i]",
-        "entry main(xs:[4]i32,i:i32) (i32,i32) =
-         let (_,ys)=unzip(map(|x|(x,(x+1,x+2)),xs)) in ys[i]",
-        "entry main(xs:[4]i32,i:i32) (i32,(i32,i32)) =
-         let ys=filter(|(x,p)|x>0,map(|x|(x,(x+1,x+2)),xs)) in ys[i]",
-        "entry main(xs:[1]i32,ys:[4]i32,zs:[4]i32,flag:bool,i:i32) i32 =
-         let arrays=if flag then (xs,ys) else (xs,zs) in
-         let (_,right)=arrays in right[i]",
-    ] {
-        shaders(source);
-    }
 }
 
 #[test]
@@ -1344,11 +943,25 @@ fn independent_scalar_results_do_not_share_a_host_resource() {
     }
 }
 
+// Target-independent preparation is shared; each backend still lowers and validates separately.
+fn interfaces_for_test(
+    tlc: &crate::tlc::stage::OwnershipApplied,
+) -> super::Program<'_, super::InterfacesPrepared> {
+    let program = super::from_tlc(tlc).unwrap();
+    let program = super::fuse(program).unwrap();
+    let program = super::place(program, crate::PipelineTopologyPolicy::AllowGenerated).unwrap();
+    let program = super::schedule(program).unwrap();
+    prepare_interfaces(program).unwrap()
+}
+
 // Inspect both emitted shader formats under the CLI's default and -O policies.
 fn placement_shaders(source: &str, mut check: impl FnMut(&naga::Module)) {
+    let tlc = crate::compile_thru_tlc(source).unwrap();
     for policy in [super::ScalarOptimization::Basic, super::ScalarOptimization::Full] {
+        let program = super::optimize_with_policy(interfaces_for_test(&tlc), policy).unwrap();
+        let prepared = super::prepare_host(program).unwrap();
         for target in [crate::CodegenTarget::Spirv, crate::CodegenTarget::Wgsl] {
-            let program = crate::compile_thru_ssa_with_policy(source, target, policy).unwrap();
+            let program = super::to_ssa::lower(&prepared.program, target).unwrap();
             let module = match target {
                 crate::CodegenTarget::Spirv => {
                     let binary = lower_ssa_to_spirv(program).unwrap();
@@ -1395,93 +1008,6 @@ fn visit_loop_depths(block: &naga::Block, depth: usize, visit: &mut impl FnMut(&
             }
             _ => {}
         }
-    }
-}
-
-#[test]
-fn earlier_loop_result_is_not_recomputed_inside_its_consumer() {
-    for consumer in [
-        "let (value,k) = loop (value,k) = (seed,0i32)
-          while k < 64 do ((value+total)%100003,k+1) in value",
-        "loop value=seed for k<64 do (value+total)%100003",
-        "loop value=seed while value < total do value+1",
-        // The dependency is behind a branch execution boundary, as in the BFS.
-        "let (value,k) = loop (value,k) = (seed,0i32)
-          while k < 64 do
-            if k%2 == 0 then ((value+total)%100003,k+1) else (value,k+1)
-          in value",
-    ] {
-        let source = format!(
-            "def walk(xs:[]i32, seed:i32) i32 =
-            let (total,j) = loop (total,j) = (0i32,0i32)
-              while j < length(xs) do (total+xs[j],j+1) in
-            {consumer}
-            entry reproduce(xs:[]i32) []i32 = map(|i|walk(xs,i),0i32..<64)"
-        );
-        placement_shaders(&source, |module| {
-            let mut depths = Vec::new();
-            for function in module
-                .functions
-                .iter()
-                .map(|(_, f)| f)
-                .chain(module.entry_points.iter().map(|e| &e.function))
-            {
-                visit_loop_depths(&function.body, 0, &mut |statement, depth| {
-                    if matches!(statement, Statement::Loop { .. }) {
-                        depths.push(depth);
-                    }
-                });
-            }
-            // Two helper loops and the entry point's grid-stride loop.
-            assert_eq!(
-                depths,
-                vec![0, 0, 0],
-                "sum and walk must be sibling loops: {consumer}"
-            );
-        });
-    }
-}
-
-#[test]
-fn loop_binding_placement_preserves_guards_and_outer_iterations() {
-    for (body, expected) in [
-        // This scan belongs to an arm inside the walk, so it must stay there.
-        (
-            "loop value=0 for k<4 do
-            if k < seed then
-                let total = loop total=0 for j<length(xs) do total+xs[j] in value+total
-            else value",
-            vec![0, 0, 1],
-        ),
-        // Each outer iteration computes its own sum, once before its inner walk.
-        (
-            "loop value=0 for k<4 do
-            let total = loop total=0 for j<length(xs) do total+xs[j]*k in
-            loop result=value for step<3 do result+total",
-            vec![0, 0, 1, 1],
-        ),
-    ] {
-        let source = format!(
-            "def walk(xs:[]i32,seed:i32) i32 = {body}
-            entry reproduce(xs:[]i32) []i32 = map(|i|walk(xs,i),0i32..<64)"
-        );
-        placement_shaders(&source, |module| {
-            let mut depths = Vec::new();
-            for function in module
-                .functions
-                .iter()
-                .map(|(_, f)| f)
-                .chain(module.entry_points.iter().map(|e| &e.function))
-            {
-                visit_loop_depths(&function.body, 0, &mut |statement, depth| {
-                    if matches!(statement, Statement::Loop { .. }) {
-                        depths.push(depth);
-                    }
-                });
-            }
-            depths.sort();
-            assert_eq!(depths, expected, "{body}");
-        });
     }
 }
 
@@ -1693,23 +1219,6 @@ fn camera_field_math_is_shared_across_indexing() {
 }
 
 #[test]
-fn runtime_rectangular_maps_reach_both_backends() {
-    for source in [
-        include_str!("../../../testfiles/regressions/runtime_array_rectangular_slice.wyn"),
-        "def row(n:i32,x:i32) []i32=map(|y|x+y,iota(n+1)) entry main(xs:[]i32,n:i32) [][]i32=map(|x|row(n,x),xs)",
-        "def row(ys:[]i32,x:i32) []i32=map(|y|x+y,iota(length(ys)+1)) entry main(xs:[]i32,ys:[]i32) [][]i32=map(|x|row(ys,x),xs)",
-        "entry main(xs:[]i32,n:i32) [][]i32=map(|x|map(|y|x+y,iota(n)),xs)",
-        "entry main(xs:[]i32,ys:[]i32) [][]i32=map(|x|map(|y|x+y,ys),xs)",
-        "entry main(xs:[]i32,n:i32,m:i32) [][][]i32=map(|x|map(|y|map(|z|x+y+z,iota(m)),iota(n)),xs)",
-        "entry main(xs:[]i32,n:i32) []i32=map(|x|reduce((+),0,map(|y|x+y,iota(n))),xs)",
-        "entry main(xs:[]i32,n:i32) [][]i32=map(|x|scan((+),0,map(|y|x+y,iota(n))),xs)",
-        "entry main(xs:[]i32,n:i32) [][](i32,bool)=map(|x|map(|y|(x+y,y>1),iota(n)),xs)",
-    ] {
-        shaders(source);
-    }
-}
-
-#[test]
 fn branch_loop_state_keeps_inferred_array_layout() {
     shaders(include_str!(
         "../../../fluid-simulation/test/repro_branch_array_layout.wyn"
@@ -1729,26 +1238,6 @@ fn module_counted_loop_counters_have_distinct_types() {
         "module S = { def run(x:i32) i32 = loop x=x for i<8 do x+i }
         entry main() (i32,i32) = (S.run(1),S.run(2))",
     );
-}
-
-#[test]
-fn inferred_array_scan_accumulators_keep_their_row_layout() {
-    shaders(
-        "entry main() [16]i32 =
-      let rows=map(|i| map(|j| if i == j then 1i32 else 0i32,iota(16)),iota(4)) in
-        let ranks=scan(|a,b| map(|(x,y)| x+y,zip(a,b)),replicate(16,0i32),rows) in
-        ranks[3]",
-    );
-}
-
-#[test]
-fn four_bit_radix_sort_reaches_both_backends() {
-    let source = format!(
-        "{}\nentry main() [4]vec2u32 = radix_sort(32, |i,p| u32.get_bit(i,p.x),
-      [@[4294967295u32,0u32],@[1u32,1u32],@[1u32,2u32],@[0u32,3u32]])",
-        include_str!("../../../pkg/sort/src/four_bit.wyn")
-    );
-    shaders(&source);
 }
 
 #[test]

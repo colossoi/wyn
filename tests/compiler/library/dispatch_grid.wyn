@@ -1,0 +1,3 @@
+entry mapped(mapped_xs:[4096]i32) [4096]i32 = map(|x:i32|x+1,mapped_xs)
+entry reduced(reduced_xs:[4096]i32) i32 = reduce(|a:i32,b:i32|a+b,0,reduced_xs)
+entry scanned(scanned_xs:[4096]i32) [4096]i32 = scan(|a:i32,b:i32|a+b,0,scanned_xs)

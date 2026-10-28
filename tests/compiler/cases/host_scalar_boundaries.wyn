@@ -1,0 +1,121 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["wgsl"]
+--! args = []
+--! rust_host = true
+--! [[host]]
+--! entry = "arithmetic_0"
+--! inputs = { input_0 = [2147483647] }
+--! result_words = [2147483646]
+--! dispatches = 0
+--! no_device_reads = true
+--! [[host]]
+--! entry = "arithmetic_1"
+--! inputs = { input_1 = [2147483647] }
+--! result_words = [2147483646]
+--! dispatches = 0
+--! no_device_reads = true
+--! [[host]]
+--! entry = "arithmetic_2"
+--! inputs = { input_2 = [-2147483648] }
+--! result_words = [-2147483647]
+--! dispatches = 0
+--! no_device_reads = true
+--! [[host]]
+--! entry = "arithmetic_3"
+--! inputs = { input_3 = [2147483647] }
+--! result_words = [-2147483648]
+--! dispatches = 0
+--! no_device_reads = true
+--! [[host]]
+--! entry = "arithmetic_4"
+--! inputs = { input_4 = [2147483647] }
+--! result_words = [1]
+--! dispatches = 0
+--! no_device_reads = true
+--! [[host]]
+--! entry = "arithmetic_5"
+--! inputs = { input_5 = [2139095039] }
+--! result_words = [2139095039]
+--! dispatches = 0
+--! no_device_reads = true
+--! [[host]]
+--! entry = "arithmetic_6"
+--! inputs = { input_6 = [2139095039] }
+--! result_words = [2139095040]
+--! dispatches = 0
+--! no_device_reads = true
+--! [[host]]
+--! entry = "arithmetic_7"
+--! inputs = { input_7 = [2139095040] }
+--! result_words = [2139095040]
+--! dispatches = 0
+--! no_device_reads = true
+--! [[host]]
+--! entry = "get_bit"
+--! inputs = { bit = [0], value = [0] }
+--! result_words = [0]
+--! dispatches = 0
+--! no_device_reads = true
+--! [[host]]
+--! entry = "get_bit"
+--! inputs = { bit = [0], value = [1] }
+--! result_words = [1]
+--! dispatches = 0
+--! no_device_reads = true
+--! [[host]]
+--! entry = "get_bit"
+--! inputs = { bit = [0], value = [-2] }
+--! result_words = [0]
+--! dispatches = 0
+--! no_device_reads = true
+--! [[host]]
+--! entry = "get_bit"
+--! inputs = { bit = [7], value = [128] }
+--! result_words = [1]
+--! dispatches = 0
+--! no_device_reads = true
+--! [[host]]
+--! entry = "get_bit"
+--! inputs = { bit = [30], value = [2147483647] }
+--! result_words = [1]
+--! dispatches = 0
+--! no_device_reads = true
+--! [[host]]
+--! entry = "get_bit"
+--! inputs = { bit = [31], value = [-2147483648] }
+--! result_words = [1]
+--! dispatches = 0
+--! no_device_reads = true
+--! [[host]]
+--! entry = "get_bit"
+--! inputs = { bit = [31], value = [-1] }
+--! result_words = [1]
+--! dispatches = 0
+--! no_device_reads = true
+--! [[host]]
+--! entry = "get_bit"
+--! inputs = { bit = [31], value = [2147483647] }
+--! result_words = [0]
+--! dispatches = 0
+--! no_device_reads = true
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"arithmetic_0\"", ":source-name \"arithmetic_1\"", ":source-name \"arithmetic_2\"", ":source-name \"arithmetic_3\"", ":source-name \"arithmetic_4\"", ":source-name \"arithmetic_5\"", ":source-name \"arithmetic_6\"", ":source-name \"arithmetic_7\"", ":source-name \"get_bit\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! excludes = ["(gpu-dispatch "]
+--! [[artifacts]]
+--! path = "output.rs"
+--! contains = ["wrapping_mul", "wrapping_sub"]
+--! excludes = ["dispatch_workgroups"]
+
+entry arithmetic_0(input_0:i32) i32 = if input_0>0 then input_0-1 else input_0+1
+entry arithmetic_1(input_1:i32) i32 = if input_1>0 then input_1-1 else input_1*input_1
+entry arithmetic_2(input_2:i32) i32 = if input_2<0 then input_2+1 else input_2-1
+entry arithmetic_3(input_3:i32) i32 = input_3+1
+entry arithmetic_4(input_4:i32) i32 = input_4*input_4
+entry arithmetic_5(input_5:f32) f32 = if input_5>0.0 then input_5 else input_5+input_5
+entry arithmetic_6(input_6:f32) f32 = input_6+input_6
+entry arithmetic_7(input_7:f32) f32 = input_7*input_7
+entry get_bit(bit:i32,value:i32) i32=i32.get_bit(bit,value)

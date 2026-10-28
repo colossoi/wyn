@@ -1,0 +1,12 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"main\""]
+
+-- Full-sort compilation regression; this does not check execution or sorted values.
+module Sort = import "../../src/four_bit"
+
+entry main() [4]vec2u32 = Sort.radix_sort(32, |i,p| u32.get_bit(i,p.x),
+  [@[4294967295u32,0u32],@[1u32,1u32],@[1u32,2u32],@[0u32,3u32]])

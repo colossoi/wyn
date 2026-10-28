@@ -1,0 +1,53 @@
+--! command = "build"
+--! exit = 0
+--! args = ["--graphics"]
+--! rust_host = true
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"blend_replace_reproduce\"", ":source-name \"blend_over_reproduce\"", ":source-name \"blend_add_reproduce\""]
+--! [[artifacts]]
+--! path = "output.rs"
+--! contains = ["blend: None", "blend: Some(BlendState::ALPHA_BLENDING)", "blend: Some(BlendState {"]
+--! excludes = ["BlendState::REPLACE"]
+
+
+
+-- rust_host_replacement_disables_blending_and_preserves_other_modes
+-- Replacement writes must not enable blending on an R32Float target.
+entry blend_replace_reproduce(target: render_target<f32>) render_target<f32> =
+  let triangles = rasterize_triangles(direct_draw(3u32, 1u32),
+    |index: u32, _: u32, _: u32|
+      let positions = [@[-1.0, -1.0, 0.0, 1.0],
+                       @[ 3.0, -1.0, 0.0, 1.0],
+                       @[-1.0,  3.0, 0.0, 1.0]] in
+      vertex_output(positions[i32(index)], 0.0)) in
+  shade_with({ depth_test = #disabled, depth_write = false,
+               blend = #replace, color_write = true },
+             target, triangles, |_, _, _, _, _| 0.5)
+
+
+-- Replacement writes must not enable blending on an R32Float target.
+entry blend_over_reproduce(target: render_target<f32>) render_target<f32> =
+  let triangles = rasterize_triangles(direct_draw(3u32, 1u32),
+    |index: u32, _: u32, _: u32|
+      let positions = [@[-1.0, -1.0, 0.0, 1.0],
+                       @[ 3.0, -1.0, 0.0, 1.0],
+                       @[-1.0,  3.0, 0.0, 1.0]] in
+      vertex_output(positions[i32(index)], 0.0)) in
+  shade_with({ depth_test = #disabled, depth_write = false,
+               blend = #source_over, color_write = true },
+             target, triangles, |_, _, _, _, _| 0.5)
+
+
+-- Replacement writes must not enable blending on an R32Float target.
+entry blend_add_reproduce(target: render_target<f32>) render_target<f32> =
+  let triangles = rasterize_triangles(direct_draw(3u32, 1u32),
+    |index: u32, _: u32, _: u32|
+      let positions = [@[-1.0, -1.0, 0.0, 1.0],
+                       @[ 3.0, -1.0, 0.0, 1.0],
+                       @[-1.0,  3.0, 0.0, 1.0]] in
+      vertex_output(positions[i32(index)], 0.0)) in
+  shade_with({ depth_test = #disabled, depth_write = false,
+               blend = #add, color_write = true },
+             target, triangles, |_, _, _, _, _| 0.5)

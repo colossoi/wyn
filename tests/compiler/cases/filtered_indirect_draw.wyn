@@ -1,0 +1,24 @@
+--! command = "build"
+--! exit = 0
+--! args = ["--graphics"]
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"filtered_indirect_0_reproduce\""]
+--! [[host]]
+--! entry = "filtered_indirect_0_reproduce"
+--! parameters = 2
+--! calls = { "gpu-alloc" = 4 }
+
+
+
+-- filtered_indirect_draw_keeps_generated_outputs_internal
+type filtered_indirect_0_command = {vertex_count:u32, instance_count:u32, first_vertex:u32, first_instance:u32}
+        def filtered_indirect_0_cull(filtered_indirect_0_values: []vec4f32) ([]vec4f32, filtered_indirect_0_command) =
+          let live = filter(|v|v.x>0.0, filtered_indirect_0_values) in
+          (live, {vertex_count=3u32, instance_count=u32(length(live)), first_vertex=0u32, first_instance=0u32})
+        entry filtered_indirect_0_reproduce(filtered_indirect_0_values: []vec4f32, target: render_target<vec4f32>) render_target<vec4f32> =
+          let (compacted, draw) = filtered_indirect_0_cull(filtered_indirect_0_values)
+          let fragments = rasterize_triangles(indirect_draw(draw),
+            |_,_,_| vertex_output(compacted[0], ())) in
+          shade(target, fragments, |_,_,_,_,_| compacted[0])

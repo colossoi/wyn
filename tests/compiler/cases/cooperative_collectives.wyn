@@ -1,0 +1,21 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"cooperative_0_main\"", ":source-name \"cooperative_1_main\""]
+--! [[shader]]
+--! entry = "cooperative_0_main"
+--! barrier = true
+--! workgroup_storage = true
+--! [[shader]]
+--! entry = "cooperative_1_main"
+--! barrier = true
+--! workgroup_storage = true
+
+
+
+-- cooperative_recipes_emit_barriers_and_workgroup_storage
+entry cooperative_0_main(cooperative_0_xs:[]i32) i32 = reduce(|a:i32,b:i32|a+b,0,cooperative_0_xs)
+
+entry cooperative_1_main(cooperative_1_xs:[]i32) []i32 = filter(|x:i32|x%3==0,cooperative_1_xs)

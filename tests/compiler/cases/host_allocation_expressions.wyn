@@ -1,0 +1,37 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = []
+--! rust_host = false
+--! [[host]]
+--! entry = "cast_size"
+--! inputs = { cast_n = [1089994752] }
+--! result_bytes = 28
+--! [[host]]
+--! entry = "cast_size"
+--! inputs = { cast_n = [-1073741824] }
+--! result_bytes = 0
+--! [[host]]
+--! entry = "branch_size"
+--! inputs = { branch_n = [7] }
+--! result_bytes = 56
+--! [[host]]
+--! entry = "branch_size"
+--! inputs = { branch_n = [-1] }
+--! result_bytes = 12
+--! [[host]]
+--! entry = "wrap_size"
+--! inputs = { wrap_n = [2147483647] }
+--! result_bytes = 4
+--! [[host]]
+--! entry = "unsigned_size"
+--! inputs = { unsigned_n = [-1] }
+--! result_bytes = 4
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"cast_size\"", ":source-name \"branch_size\"", ":source-name \"wrap_size\"", ":source-name \"unsigned_size\""]
+
+entry cast_size(cast_n:f32) []i32 = iota(i32(cast_n))
+entry branch_size(branch_n:i32) []i32 = iota(if branch_n>0 then branch_n*2 else 3)
+entry wrap_size(wrap_n:i32) []i32 = iota(wrap_n*2+3)
+entry unsigned_size(unsigned_n:u32) []i32 = iota(i32(unsigned_n+2u32))

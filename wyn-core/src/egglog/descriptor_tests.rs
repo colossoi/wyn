@@ -123,6 +123,22 @@ fn incomplete_descriptors_are_detected() {
         "../../../testfiles/regressions/triangulation_runtime_array_branch.wyn"
     ))
     .unwrap();
+    let program = optimize_for_test(
+        schedule(
+            place(
+                fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                PipelineTopologyPolicy::AllowGenerated,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut prepared = prepare_host(program).unwrap();
+    validate(&Facts {
+        program: &prepared.program,
+    })
+    .unwrap();
     for (missing, expected) in [
         ("ArrayView", "no complete descriptor"),
         ("ArrayStorage", "array read disagrees with planned storage"),
@@ -130,30 +146,24 @@ fn incomplete_descriptors_are_detected() {
         ("ExprContextOwner", "descriptor scalar has no lexical context"),
         ("SourceBranch", "context field has no control-flow binder"),
     ] {
-        let mut program = optimize_for_test(
-            schedule(
-                place(
-                    fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                    PipelineTopologyPolicy::AllowGenerated,
-                )
-                .unwrap(),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let query = Query(&program.graph);
+        let query = Query(&prepared.program.graph);
         let output = query.row("ReturnArray", |_| true).unwrap().unwrap()[1];
         let view = query.record("ArrayView", "ViewInfo", (output,)).unwrap().unwrap();
         let scalar = query.enode("Scalar", view[2]).unwrap().unwrap()[0];
         let value =
             if matches!(missing, "ArrayView" | "ArrayStorage" | "SourceBranch") { output } else { scalar };
-        program.graph.update(|mut sink| sink.remove(missing, (value,))).unwrap();
-        let prepared = prepare_host(program).unwrap();
+        let original = query.required(missing, (value,)).unwrap();
+        prepared.program.graph.update(|mut sink| sink.remove(missing, (value,))).unwrap();
         let error = validate(&Facts {
             program: &prepared.program,
         })
         .expect_err("invalid descriptor accepted")
         .to_string();
-        assert!(error.contains(expected), "{error}");
+        assert!(error.contains(expected), "{missing}: {error}");
+        prepared.program.graph.update(|mut sink| sink.set(missing, (value,), original)).unwrap();
+        validate(&Facts {
+            program: &prepared.program,
+        })
+        .unwrap();
     }
 }

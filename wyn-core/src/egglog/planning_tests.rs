@@ -21,6 +21,37 @@ fn planned(source: &str, check: impl FnOnce(&EGraph)) {
     check(&program.graph);
 }
 
+// Compile related cases once; keep every assertion tied to its source entry.
+fn planned_cases(sources: &[&str], check: impl Fn(usize, &EGraph, Value)) {
+    let source = sources
+        .iter()
+        .enumerate()
+        .map(|(i, source)| source.replacen("entry main(", &format!("entry case_{i}("), 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tlc = compile_thru_tlc(&source).unwrap();
+    let program = schedule(
+        place(
+            fuse(from_tlc(&tlc).unwrap()).unwrap(),
+            PipelineTopologyPolicy::AllowGenerated,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut seen = vec![false; sources.len()];
+    Query(&program.graph)
+        .for_each("SourceOriginalEntry", |row| {
+            let symbol = program.identities.symbols.resolve(program.graph.value_to_base::<i64>(row[0]));
+            let name = program.source.symbols.get(*symbol).unwrap();
+            let index: usize = name.strip_prefix("case_").unwrap().parse().unwrap();
+            seen[index] = true;
+            check(index, &program.graph, row[1]);
+            Ok(())
+        })
+        .unwrap();
+    assert!(seen.into_iter().all(|present| present));
+}
+
 fn operations(graph: &EGraph, kind: &str) -> Vec<Value> {
     let mut operations = Vec::new();
     Query(graph)
@@ -612,7 +643,7 @@ fn fused_scan_and_filter_count_have_distinct_accumulator_slots() {
 
 #[test]
 fn flat_and_ranked_collectives_share_dimension_metadata() {
-    for (source, kind, rank, count) in [
+    let cases = [
         ("entry main(xs:[6]i32) [6]i32=map(|x|x+1,xs)", "map", 1, 6),
         ("entry main(xs:[6]i32) i32=reduce(|a,b|a+b,0,xs)", "reduce", 1, 6),
         ("entry main(xs:[6]i32) [6]i32=scan(|a,b|a+b,0,xs)", "scan", 1, 6),
@@ -632,39 +663,44 @@ fn flat_and_ranked_collectives_share_dimension_metadata() {
             3,
             8,
         ),
-    ] {
-        planned(source, |graph| {
-            let query = Query(graph);
-            let [operation] = operations(graph, kind)[..] else {
-                panic!("one {kind}")
-            };
-            assert_eq!(
-                graph.value_to_base::<i64>(query.required("SourceDomainRank", (operation,)).unwrap()),
-                rank
-            );
-            let extent = query.required("SourceDomainExtent", (operation,)).unwrap();
-            assert_eq!(
-                graph.value_to_base::<i64>(query.required("StaticCapacityBound", (extent,)).unwrap()),
-                count
-            );
-            for axis in 0..rank {
-                query.required("SourceDomainAxis", (operation, axis)).unwrap();
-            }
-            query
-                .for_function("SourceInputRank", |keys, value| {
-                    if keys[0] == operation {
-                        for dimension in 0..graph.value_to_base::<i64>(value) {
-                            let axis = graph.value_to_base::<i64>(
-                                query.required("SourceInputDimension", (operation, keys[1], dimension))?,
-                            );
-                            assert!((0..rank).contains(&axis));
-                        }
+    ];
+    let sources = cases.iter().map(|case| case.0).collect::<Vec<_>>();
+    planned_cases(&sources, |index, graph, scope| {
+        let (_source, kind, rank, count) = cases[index];
+        let query = Query(graph);
+        let matching = operations(graph, kind)
+            .into_iter()
+            .filter(|&operation| query.required("OperationRegion", (operation,)).unwrap() == scope)
+            .collect::<Vec<_>>();
+        let [operation] = matching[..] else {
+            panic!("one {kind}")
+        };
+        assert_eq!(
+            graph.value_to_base::<i64>(query.required("SourceDomainRank", (operation,)).unwrap()),
+            rank
+        );
+        let extent = query.required("SourceDomainExtent", (operation,)).unwrap();
+        assert_eq!(
+            graph.value_to_base::<i64>(query.required("StaticCapacityBound", (extent,)).unwrap()),
+            count
+        );
+        for axis in 0..rank {
+            query.required("SourceDomainAxis", (operation, axis)).unwrap();
+        }
+        query
+            .for_function("SourceInputRank", |keys, value| {
+                if keys[0] == operation {
+                    for dimension in 0..graph.value_to_base::<i64>(value) {
+                        let axis = graph.value_to_base::<i64>(
+                            query.required("SourceInputDimension", (operation, keys[1], dimension))?,
+                        );
+                        assert!((0..rank).contains(&axis));
                     }
-                    Ok(())
-                })
-                .unwrap();
-        });
-    }
+                }
+                Ok(())
+            })
+            .unwrap();
+    });
 }
 
 #[test]
@@ -913,7 +949,7 @@ fn rectangular_maps_ignore_scalar_recomputation_cost() {
 
 #[test]
 fn rectangular_maps_select_arbitrary_rank_and_preserve_sequential_prefixes() {
-    for (source, expected_rank) in [
+    let cases = [
         ("entry main(xs:[]i32) [][3]i32=map(|x|map(|y|x+y,iota(3)),map(|x|x+1,xs))", 2),
         ("entry main(xs:[]i32) [][3]i32=map(|x|map(|y|x+y,map(|y|y+1,iota(3))),xs)", 2),
         ("entry main(xs:[]i32) [][3]i32=map(|x|map(|y|x+y,iota(3)),map(|x|loop a=x for i<16 do a+i,xs))", 1),
@@ -925,19 +961,24 @@ fn rectangular_maps_select_arbitrary_rank_and_preserve_sequential_prefixes() {
         ("entry main(xs:[2]i32) [2][0]i32=map(|x|map(|y|x+y,iota(0)),xs)", 2),
         ("entry main(xs:[]i32) [][3]i32=map(|x|let t=loop a=x for i<16 do a+i in map(|y|t+y,iota(3)),xs)", 1),
         ("entry main(xs:[]i32) [][3]i32=map(|x|let t=reduce(|a,b|a+b,0,[x,x,x]) in map(|y|t+y,iota(3)),xs)", 1),
-    ] {
-        planned(source, |graph| {
-            let query = Query(graph);
-            let mut ranks = Vec::new();
-            query.for_function("IterationRank", |keys, rank| {
+    ];
+    let sources = cases.iter().map(|case| case.0).collect::<Vec<_>>();
+    planned_cases(&sources, |index, graph, scope| {
+        let (source, expected_rank) = cases[index];
+        let query = Query(graph);
+        let mut ranks = Vec::new();
+        query
+            .for_function("IterationRank", |keys, rank| {
                 let region = query.required("OperationRegion", (keys[0],))?;
                 let host = query.contains("HostRegion", (region,))?;
-                if host { ranks.push(graph.value_to_base::<i64>(rank)); }
+                if host && region == scope {
+                    ranks.push(graph.value_to_base::<i64>(rank));
+                }
                 Ok(())
-            }).unwrap();
-            assert_eq!(ranks, vec![expected_rank], "{source}");
-        });
-    }
+            })
+            .unwrap();
+        assert_eq!(ranks, vec![expected_rank], "{source}");
+    });
 }
 
 #[test]

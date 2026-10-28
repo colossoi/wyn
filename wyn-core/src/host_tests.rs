@@ -1,7 +1,7 @@
 use crate::host::arithmetic::{add, ceiling, dimension, floor, multiply, signed_size, size, subtract};
 use crate::host::{
-    Allocation, Binding, Expr, FrameGraph, Operation, Pipeline, Program, ResultKind, ResultLayout,
-    ResultScalar, ShaderFormat, TextureSampleType,
+    Allocation, Binding, Expr, FrameGraph, Operation, Pipeline, Program, ResultLayout, ResultScalar,
+    ShaderFormat,
 };
 use crate::{compile_thru_ssa, lower_ssa_to_spirv, lower_ssa_to_wgsl_with_program};
 use std::collections::BTreeSet;
@@ -68,21 +68,6 @@ fn device_computed_trip_counts_are_published_before_the_loop() {
 }
 
 #[test]
-fn partial_radix_pass_counts_reach_host_backends() {
-    let source = format!(
-        "{}\nentry main(xs:[]i32) []i32 = radix_sort(5,i32.get_bit,xs)",
-        include_str!("../../pkg/sort/src/four_bit.wyn")
-    );
-    let program = compile(&source);
-    assert_eq!(
-        program.entries[0].operations.iter().filter(|op| matches!(op, Operation::Loop { .. })).count(),
-        1
-    );
-    program.to_rust_wgpu("partial_radix", ShaderFormat::Wgsl).unwrap();
-    program.to_whl("partial_radix", ShaderFormat::Wgsl).unwrap();
-}
-
-#[test]
 fn independent_work_and_successive_loops_reach_host_backends() {
     let source = "entry main(xs:[8]i32, ys:[8]i32, k:i32) ([8]i32,i32) =
         let first=loop values=xs for i<k do map(|x|x+i,values) in
@@ -144,39 +129,6 @@ fn finish_dispatch_waits_for_all_reduction_results() {
     let combine = dispatches.iter().position(|name| name.ends_with("_combine")).unwrap();
     let finish = dispatches.iter().position(|name| name.ends_with("_finish")).unwrap();
     assert!(combine < finish, "{dispatches:?}");
-}
-
-#[test]
-fn tuple_loop_outputs_and_scalar_bounds_reach_host_backends() {
-    for source in [
-        include_str!("../../testfiles/regressions/local_tuple_collectives.wyn"),
-        include_str!("../../testfiles/regressions/nested_tuple_loop_state.wyn"),
-    ] {
-        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
-            let ssa = compile_thru_ssa(source).unwrap();
-            let program = match format {
-                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
-                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
-            };
-            program.to_rust_wgpu("tuple_loops", format).unwrap();
-            for entry in &program.entries {
-                for (position, operation) in entry.operations.iter().enumerate() {
-                    let Operation::Loop { region, pipeline, .. } = operation else {
-                        continue;
-                    };
-                    let completion = program.interface.dispatch_loops[*region].completion;
-                    let Pipeline::Compute(compute) = &program.interface.pipelines[*pipeline] else {
-                        panic!("compute loop");
-                    };
-                    if !compute.stages[completion].uses.writes.is_empty() {
-                        assert!(entry.operations[position + 1..].iter().any(|operation|
-                            matches!(operation, Operation::Dispatch { pipeline: p, stage, .. }
-                                if p == pipeline && *stage == completion)), "{} output copy", entry.name);
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[test]
@@ -245,50 +197,6 @@ fn graphics_helper_returns_image_with_inline_array_results() {
             );
             assert!(entry.operations.iter().any(|op| matches!(op, Operation::Dispatch { .. })));
             program.to_rust_wgpu("helper_tuple", format).unwrap();
-        }
-    }
-}
-
-#[test]
-fn graphics_result_demands_reuse_inputs_or_materialize_virtual_arrays() {
-    let source = include_str!("../../testfiles/regressions/render_helper_tuple.wyn");
-    for (expression, borrowed) in [
-        ("values", true),
-        ("0i32..<2i32", false),
-        ("map(|x|x+1i32,values)", false),
-    ] {
-        let source = source
-            .replace(
-                "entry reproduce(screen:",
-                "entry reproduce(values: []i32, screen:",
-            )
-            .replace("[1i32,2i32]", expression);
-        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
-            let ssa = compile_thru_ssa(&source).unwrap();
-            let program = match format {
-                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
-                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
-            };
-            let entry = &program.entries[0];
-            assert_eq!(entry.results.len(), 2, "{expression}");
-            assert_eq!(entry.inputs.contains(&entry.results[0]), borrowed, "{expression}");
-            let allocations =
-                entry.allocations.iter().filter(|a| matches!(a, Allocation::Buffer { .. })).count();
-            assert_eq!(
-                allocations,
-                usize::from(!borrowed) + usize::from(expression.starts_with("map(")),
-                "element storage and input length: {expression}"
-            );
-            assert_eq!(
-                entry.operations.iter().any(|op| matches!(op, Operation::Dispatch { .. })),
-                !borrowed,
-                "{expression}"
-            );
-            assert_eq!(
-                entry.operations.iter().filter(|op| matches!(op, Operation::Draw { .. })).count(),
-                1
-            );
-            program.to_rust_wgpu("result_demands", format).unwrap();
         }
     }
 }
@@ -519,36 +427,6 @@ fn resolution_allocation_expressions_keep_cpu_parameters() {
             assert!(!rust.contains(readback), "unexpected {readback}: {rust}");
         }
     }
-}
-
-#[test]
-fn cpu_input_dependencies_cover_scalar_work_and_dispatch_loops() {
-    for source in [
-        "entry main(n:i32) i32=if n>0 then n*n else n+1",
-        "entry main(n:i32) []i32=iota(n)",
-        "entry main(xs:[8]i32,n:i32) [8]i32=loop values=xs for i<n do map(|x|x+i,values)",
-        "entry main(xs:[]i32,n:i32) []i32=let a=loop acc=0 for i<n do acc+i in map(|x:i32|x+a,xs)",
-    ] {
-        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
-            let ssa = compile_thru_ssa(source).unwrap();
-            let program = match format {
-                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
-                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
-            };
-            let entry = &program.entries[0];
-            assert!(!entry.host_inputs.is_empty(), "{source} / {format:?}");
-            assert!(entry.host_inputs.values().all(|&bytes| bytes >= 4 && bytes % 4 == 0));
-            let whl = program.to_whl("cpu_inputs", format).unwrap();
-            assert!(whl.contains("host-read-scalar"), "{source}: {whl}");
-            assert!(!whl.contains("gpu-read-scalar"), "{source}: {whl}");
-            let rust = program.to_rust_wgpu("cpu_inputs", format).unwrap();
-            assert!(rust.contains("pub fn encode_main("));
-            assert!(!rust.contains("read_gpu_word"));
-        }
-    }
-    let device_only =
-        compile("entry main(xs:[137]i32) []i32=let total=reduce((+),0,xs) in map(|x:i32|x+total,xs)");
-    assert!(device_only.entries[0].host_inputs.is_empty());
 }
 
 #[test]
@@ -835,6 +713,9 @@ fn rust_graphics_arguments_keep_buffer_texture_and_sampler_source_names() {
 
 #[test]
 fn rust_argument_names_handle_keywords_and_generated_binding_collisions() {
+    let mut program = compile("entry main(input:[]i32) []i32 = map(|x:i32|x+1,input)");
+    let input = *program.entries[0].inputs.iter().next().unwrap();
+
     for (source, parameter) in [
         ("async", "r#async"),
         ("crate", "crate_2"),
@@ -848,9 +729,12 @@ fn rust_argument_names_handle_keywords_and_generated_binding_collisions() {
         ("resource_1", "resource_1_2"),
         ("size", "size_2"),
     ] {
-        let program = compile(&format!(
-            "entry main({source}:[]i32) []i32 = map(|x:i32|x+1,{source})"
-        ));
+        // Only the emitted Rust argument spelling changes; the shader and resource graph do not.
+        let resource = &mut program.interface.frame_graph.resources[input.0];
+        resource.name = source.into();
+        for binding in &mut resource.bindings {
+            binding.name = source.into();
+        }
         let rust = program.to_rust_wgpu("names.wgsl", ShaderFormat::Wgsl).unwrap();
         assert!(rust.contains(&format!("{parameter}: &Buffer")), "{rust}");
         assert!(rust.contains(&format!("{parameter}.size()")), "{rust}");
@@ -1067,31 +951,6 @@ fn rust_spirv_emits_explicit_graphics_layouts() {
 }
 
 #[test]
-fn rust_host_replacement_disables_blending_and_preserves_other_modes() {
-    let source = include_str!("../../testfiles/rust_host_replace_float_target.wyn");
-    for (mode, expected) in [
-        ("replace", "blend: None"),
-        ("source_over", "blend: Some(BlendState::ALPHA_BLENDING)"),
-        ("add", "blend: Some(BlendState {"),
-    ] {
-        let source = source.replace("#replace", &format!("#{mode}"));
-        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
-            let ssa = compile_thru_ssa(&source).unwrap();
-            let program = match format {
-                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
-                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
-            };
-            let rust = program.to_rust_wgpu("float_target", format).unwrap();
-            assert!(
-                rust.contains(expected),
-                "missing {expected} for {mode} / {format:?}"
-            );
-            assert!(!rust.contains("BlendState::REPLACE"));
-        }
-    }
-}
-
-#[test]
 fn filter_phase_layout_matches_the_selected_shader_storage_access() {
     let source = include_str!("../../testfiles/rust_host_storage_access_mismatch.wyn");
     for (format, read_only) in [(ShaderFormat::Spirv, true), (ShaderFormat::Wgsl, false)] {
@@ -1279,259 +1138,6 @@ fn texture_readers_finish_before_the_target_is_overwritten() {
 }
 
 #[test]
-fn texture_consumers_wait_for_draws_with_delayed_vertex_inputs() {
-    let source = include_str!("../../testfiles/rust_host_draw_consumer_order.wyn");
-    let control = source.replace(
-        "let selected = filter(|v: vec4f32| v.w > 0.0, values) in\n  map(|v| v, selected)",
-        "map(|v| v, values)",
-    );
-    assert_ne!(control, source, "control removes the filter dependency chain");
-    for source in [source, control.as_str()] {
-        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
-            let ssa = compile_thru_ssa(source).unwrap();
-            let program = match format {
-                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
-                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
-            };
-            let [entry] = program.entries.as_slice() else {
-                panic!("one source entry")
-            };
-            let draw = |source_operation| {
-                entry
-                    .operations
-                    .iter()
-                    .enumerate()
-                    .find_map(|(index, operation)| {
-                        let Operation::Draw { pipeline } = operation else {
-                            return None;
-                        };
-                        let Pipeline::Graphics(graphics) = &program.interface.pipelines[*pipeline] else {
-                            panic!("draw pipeline")
-                        };
-                        (graphics.source_operation == Some(source_operation)).then_some((index, *pipeline))
-                    })
-                    .unwrap()
-            };
-            let sampled = entry.results[0];
-            let (sample_position, sample_pipeline, sample_stage) = entry
-                .operations
-                .iter()
-                .enumerate()
-                .find_map(|(index, operation)| {
-                    let Operation::Dispatch { pipeline, stage, .. } = operation else {
-                        return None;
-                    };
-                    let Pipeline::Compute(compute) = &program.interface.pipelines[*pipeline] else {
-                        panic!("compute pipeline")
-                    };
-                    compute.stages[*stage]
-                        .uses
-                        .writes
-                        .iter()
-                        .any(|&binding| program.binding_resource(*pipeline, binding).unwrap() == sampled)
-                        .then_some((index, *pipeline, *stage))
-                })
-                .unwrap();
-            let (ground, ground_pipeline) = draw(0);
-            let (props, props_pipeline) = draw(1);
-            let (resolve, resolve_pipeline) = draw(2);
-            assert!(
-                ground < props && props < sample_position && sample_position < resolve,
-                "{format:?}: ground={ground}, props={props}, sampling={sample_position}, resolve={resolve}"
-            );
-            let graph = &program.interface.frame_graph;
-            let passes = [
-                (ground_pipeline, 0),
-                (props_pipeline, 0),
-                (sample_pipeline, sample_stage),
-                (resolve_pipeline, 0),
-            ]
-            .map(|(pipeline, stage)| {
-                graph
-                    .passes
-                    .iter()
-                    .position(|pass| pass.pipeline_index == pipeline && pass.stage_index == stage)
-                    .unwrap()
-            });
-            for pair in passes.windows(2) {
-                assert_dependency(graph, pair[0], pair[1]);
-            }
-            let [ground_pass, props_pass, sample_pass, resolve_pass] =
-                passes.map(|index| &graph.passes[index]);
-            let scene = entry.results[1].0;
-            for pass in [ground_pass, props_pass] {
-                assert!(pass.writes.iter().any(|access| access.resource == scene));
-            }
-            assert!(sample_pass.reads.iter().any(|access| access.resource == scene));
-            assert!(sample_pass.writes.iter().any(|access| access.resource == sampled.0));
-            assert!(resolve_pass.reads.iter().any(|access| access.resource == sampled.0));
-            let rust = program.to_rust_wgpu("draw_order", format).unwrap();
-            let call: String =
-                rust.split_once("pub fn host_reproduce(").unwrap().1.split_whitespace().collect();
-            let whl = program.to_whl("draw_order", format).unwrap();
-            let rust_operations = [
-                format!("context.render_{ground_pipeline}("),
-                format!("context.render_{props_pipeline}("),
-                format!("&context.compute_{sample_pipeline}_{sample_stage}"),
-                format!("context.render_{resolve_pipeline}("),
-            ];
-            let whl_operations = [
-                format!("(gpu-draw 'graphics-{ground_pipeline}"),
-                format!("(gpu-draw 'graphics-{props_pipeline}"),
-                format!("(gpu-dispatch 'kernel-{sample_pipeline}-{sample_stage}"),
-                format!("(gpu-draw 'graphics-{resolve_pipeline}"),
-            ];
-            for (output, operations) in [(call.as_str(), rust_operations), (whl.as_str(), whl_operations)] {
-                let positions = operations.map(|operation| output.find(&operation).unwrap());
-                assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
-            }
-        }
-    }
-}
-
-#[test]
-fn rust_context_keeps_pipeline_creation_out_of_entry_calls() {
-    for source in [
-        include_str!("../../testfiles/rust_host_storage_access_mismatch.wyn"),
-        include_str!("../../testfiles/rust_host_frame_composition.wyn"),
-    ] {
-        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
-            let ssa = compile_thru_ssa(source).unwrap();
-            let program = match format {
-                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
-                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
-            };
-            let rust = program.to_rust_wgpu("shader", format).unwrap();
-            let (context, call) = rust.split_once("pub fn host_reproduce(").unwrap();
-            assert!(context.contains("pub struct HostContext"));
-            assert_eq!(context.matches("create_shader_module").count(), 1);
-            for creation in [
-                "create_shader_module",
-                "create_compute_pipeline",
-                "create_render_pipeline",
-                "create_pipeline_layout",
-            ] {
-                assert!(
-                    !call.contains(creation),
-                    "{format:?}: {creation} inside entry call"
-                );
-            }
-            let entry = &program.entries[0];
-            let scratch = entry.allocations.iter().filter(|allocation| {
-                matches!(allocation, Allocation::Buffer { resource, .. } if !entry.results.contains(resource))
-            }).count();
-            assert_eq!(call.matches("support::scratch_buffer(").count(), scratch);
-            assert_eq!(call.matches("encoder.clear_buffer(").count(), scratch);
-            let returned_buffers = entry.allocations.iter().filter(|allocation| {
-                matches!(allocation, Allocation::Buffer { resource, .. } if entry.results.contains(resource))
-            }).count();
-            assert_eq!(call.matches("device.create_buffer(").count(), returned_buffers);
-        }
-    }
-}
-
-#[test]
-fn compute_texture_parameters_validate_in_both_backends() {
-    let load = include_str!("../../testfiles/sample_pixels.wyn");
-    let sample = "entry sample_pixels(image: texture2d, samp: sampler, pixels: []vec2f32) []vec4f32 =
-        map(|pixel| texture_sample(image, samp, pixel, 0.0), pixels)";
-    let multiple = "entry sample_pixels(a: texture2d, pixels: []vec2i32, b: texture2d) []vec4f32 =
-        map(|pixel| texture_load(a, pixel, 0i32) + texture_load(b, pixel, 0i32), pixels)";
-    for source in [load, sample, multiple] {
-        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
-            let ssa = compile_thru_ssa(source).unwrap();
-            let module = match format {
-                ShaderFormat::Spirv => {
-                    let binary = lower_ssa_to_spirv(ssa).unwrap();
-                    let bytes: Vec<_> = binary.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
-                    naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap()
-                }
-                ShaderFormat::Wgsl => {
-                    let compiled = lower_ssa_to_wgsl_with_program(ssa).unwrap();
-                    naga::front::wgsl::parse_str(&compiled.wgsl).unwrap()
-                }
-            };
-            naga::valid::Validator::new(
-                naga::valid::ValidationFlags::all(),
-                naga::valid::Capabilities::all(),
-            )
-            .validate(&module)
-            .unwrap_or_else(|error| panic!("{format:?}: {error:?}\n{source}"));
-        }
-    }
-}
-
-#[test]
-fn texture_load_bindings_do_not_require_filtering() {
-    let source = include_str!("../../testfiles/rust_host_unfiltered_float_texture.wyn");
-    let mixed = format!(
-        "def sample_color(tex: texture2d, samp: sampler, uv: vec2f32) f32 =\n\
-         let color = texture_sample(tex, samp, uv, 0.0) in color.x\n{}",
-        source
-            .replace(
-                "source: render_target<f32>,",
-                "source: render_target<f32>, sampled: texture2d, samp: sampler,"
-            )
-            .replace(
-                "target_load(source, @[0i32, 0i32], 0u32)",
-                "let x = target_load(source, @[0i32, 0i32], 0u32) in sample_color(sampled, samp, @[x, x])"
-            )
-    );
-    for (source, expected) in [
-        (
-            include_str!("../../testfiles/sample_pixels.wyn"),
-            vec![("image", false)],
-        ),
-        (source, vec![("source", false)]),
-        (mixed.as_str(), vec![("sampled", true), ("source", false)]),
-        (
-            include_str!("../../testfiles/texture_sample.wyn"),
-            vec![("tex", true)],
-        ),
-    ] {
-        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
-            let ssa = compile_thru_ssa(source).unwrap();
-            let program = match format {
-                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
-                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
-            };
-            let mut filterable = program
-                .interface
-                .pipelines
-                .iter()
-                .flat_map(|pipeline| {
-                    let bindings = match pipeline {
-                        Pipeline::Compute(compute) => &compute.bindings,
-                        Pipeline::Graphics(graphics) => &graphics.bindings,
-                    };
-                    bindings.iter().filter_map(|binding| match binding {
-                        Binding::Texture {
-                            name,
-                            sample_type: TextureSampleType::Float { filterable },
-                            ..
-                        } => Some((name.as_str(), *filterable)),
-                        _ => None,
-                    })
-                })
-                .collect::<Vec<_>>();
-            filterable.sort_unstable();
-            assert_eq!(filterable, expected, "{format:?}: {source}");
-            let rust = program.to_rust_wgpu("texture_load", format).unwrap();
-            let whl = program.to_whl("texture_load", format).unwrap();
-            check_whl(&whl);
-            for (_, value) in &expected {
-                assert!(
-                    rust.contains(&format!("filterable: {value}")),
-                    "{format:?}: {source}\n{rust}"
-                );
-                let sample_type = if *value { ":filterable-float" } else { ":float" };
-                assert!(whl.contains(&format!(":sample-type {sample_type}")));
-            }
-        }
-    }
-}
-
-#[test]
 fn graphics_root_composes_multiple_computations_and_source_results() {
     let source = include_str!("../../testfiles/rust_host_frame_composition.wyn");
     for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
@@ -1606,213 +1212,5 @@ fn graphics_root_composes_multiple_computations_and_source_results() {
         assert_eq!(rust.matches("pass.dispatch_workgroups(").count(), 2);
         assert_eq!(rust.matches("OutputResource::Buffer {").count(), 2);
         assert_eq!(rust.matches("OutputResource::Texture(Texture::clone(").count(), 1);
-    }
-}
-
-#[test]
-fn graphics_root_preserves_return_order_and_omits_intermediate_results() {
-    let source = include_str!("../../testfiles/rust_host_frame_composition.wyn");
-    for (source, shifted_result, result_count) in [
-        (
-            source.replace("(shifted, doubled, image)", "(doubled, shifted, image)"),
-            Some(1),
-            3,
-        ),
-        (
-            source
-                .replace(
-                    "([]vec4f32, []vec4f32, render_target<vec4f32>)",
-                    "([]vec4f32, render_target<vec4f32>)",
-                )
-                .replace("(shifted, doubled, image)", "(doubled, image)"),
-            None,
-            2,
-        ),
-        (
-            source.replace("(shifted, doubled, image)", "(shifted, shifted, image)"),
-            Some(0),
-            3,
-        ),
-    ] {
-        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
-            let ssa = compile_thru_ssa(&source).unwrap();
-            let program = match format {
-                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
-                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
-            };
-            let [entry] = program.entries.as_slice() else {
-                panic!("one source root")
-            };
-            assert_eq!(entry.results.len(), result_count);
-            let graphics = entry
-                .operations
-                .iter()
-                .find_map(|op| match op {
-                    Operation::Draw { pipeline } => Some(*pipeline),
-                    _ => None,
-                })
-                .unwrap();
-            let captures = program
-                .parameter_indices(graphics, None)
-                .into_iter()
-                .map(|b| program.binding_resource(graphics, b).unwrap())
-                .collect::<BTreeSet<_>>();
-            match shifted_result {
-                Some(index) => assert!(captures.contains(&entry.results[index])),
-                None => assert!(!captures.contains(&entry.results[0])),
-            }
-            let mut results = program.interface.source_results.iter().collect::<Vec<_>>();
-            results.sort_by_key(|r| r.result);
-            assert_eq!(results.len(), result_count - 1);
-            for (index, result) in results.iter().enumerate() {
-                assert_eq!(result.result, index);
-                assert_eq!(result.name, format!("result_{index}"));
-                assert_eq!(result.kind, ResultKind::TupleField);
-            }
-            assert_eq!(
-                program.to_rust_wgpu("composition", format).unwrap().matches("pub fn host_").count(),
-                1
-            );
-        }
-    }
-}
-
-#[test]
-fn draw_buffer_demands_use_selected_storage_and_wait_for_writers() {
-    use crate::host::{DrawCall, DrawCount, FramePassKind, IndexFormat};
-
-    let command =
-        "{index_count=3u32,instance_count=2u32,first_index=0u32,vertex_offset=0i32,first_instance=0u32}";
-    let cases = [
-        ("literal", "", "", "indexed_draw_from([0u32,1u32,2u32],3u32,2u32,0u32,0i32,0u32)".to_string(), 1),
-        ("range", "", "", "indexed_draw_from(0u32..<3u32,3u32,2u32,0u32,0i32,0u32)".to_string(), 1),
-        ("implicit_count", "", "", "indexed_draw(0u32..<3u32,2u32)".to_string(), 1),
-        ("mapped", "xs:[3]u32,", "", "indexed_draw_from(map(|i|i+1u32,xs),3u32,2u32,0u32,0i32,0u32)".to_string(), 1),
-        ("named", "xs:[3]u32,", "let indices=map(|i|i+1u32,xs) in", "indexed_draw_from(indices,3u32,2u32,0u32,0i32,0u32)".to_string(), 1),
-        ("borrowed", "xs:[3]u32,", "", "indexed_draw_from(xs,3u32,2u32,0u32,0i32,0u32)".to_string(), 0),
-        ("slice", "xs:[5]u32,", "", "indexed_draw_from(xs[1..4],3u32,2u32,0u32,0i32,0u32)".to_string(), 1),
-        ("indirect", "", "", format!("indexed_indirect_draw([0u32,1u32,2u32],{command})"), 2),
-        ("nonindexed_command", "", "", "indirect_draw({vertex_count=3u32,instance_count=2u32,first_vertex=0u32,first_instance=0u32})".to_string(), 1),
-        ("nonindexed_commands", "", "", "indirect_draws([{vertex_count=3u32,instance_count=2u32,first_vertex=0u32,first_instance=0u32}])".to_string(), 1),
-        ("uniform_command", "cmd:{index_count:u32,instance_count:u32,first_index:u32,vertex_offset:i32,first_instance:u32},", "", "indexed_indirect_draw([0u32,1u32,2u32],cmd)".to_string(), 2),
-        ("named_command", "n:u32,", "let command={index_count=3u32,instance_count=n+1u32,first_index=0u32,vertex_offset=0i32,first_instance=0u32} in", "indexed_indirect_draw([0u32,1u32,2u32],command)".to_string(), 2),
-        ("commands", "", "", format!("indexed_indirect_draws([0u32,1u32,2u32],[{command}])"), 2),
-        ("offset", "", "", format!("indexed_indirect_draw([0u32,1u32,2u32],[{command},{command}][1])"), 2),
-        ("dynamic", "i:i32,", "", format!("indexed_indirect_draw([0u32,1u32,2u32],[{command},{command}][i])"), 2),
-    ];
-    for (name, params, setup, draw, allocations) in cases {
-        let source = format!(
-            "entry reproduce({params}screen:render_target<vec4f32>) render_target<vec4f32> =
-            {setup} let covered=rasterize_triangles({draw},
-                |vi,ii,_|vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
-            shade(screen,covered,|_,_,_,_,_|@[1.0,0.0,0.0,1.0])"
-        );
-        let source = match name {
-            "literal" => include_str!("../../testfiles/regressions/indexed_literal_draw.wyn"),
-            "indirect" => include_str!("../../testfiles/regressions/indexed_indirect_draw.wyn"),
-            _ => &source,
-        };
-        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
-            let ssa = compile_thru_ssa(source).unwrap_or_else(|error| panic!("{name}: {error}"));
-            let (program, module) = match format {
-                ShaderFormat::Spirv => {
-                    let compiled = lower_ssa_to_spirv(ssa).unwrap();
-                    let bytes: Vec<_> = compiled.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
-                    (
-                        compiled.program,
-                        naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap(),
-                    )
-                }
-                ShaderFormat::Wgsl => {
-                    let compiled = lower_ssa_to_wgsl_with_program(ssa).unwrap();
-                    (
-                        compiled.program,
-                        naga::front::wgsl::parse_str(&compiled.wgsl).unwrap(),
-                    )
-                }
-            };
-            naga::valid::Validator::new(
-                naga::valid::ValidationFlags::all(),
-                naga::valid::Capabilities::all(),
-            )
-            .validate(&module)
-            .unwrap_or_else(|error| panic!("{name}/{format:?}: {error:?}"));
-            let entry = &program.entries[0];
-            assert_eq!(
-                entry.allocations.iter().filter(|a| matches!(a, Allocation::Buffer { .. })).count(),
-                allocations,
-                "{name}"
-            );
-            let graph = &program.interface.frame_graph;
-            let (draw_pass, pass) =
-                graph.passes.iter().enumerate().find(|(_, p)| p.kind == FramePassKind::Draw).unwrap();
-            let (pipeline, graphics) = program
-                .interface
-                .pipelines
-                .iter()
-                .enumerate()
-                .find_map(|(i, p)| match p {
-                    Pipeline::Graphics(p) => Some((i, p)),
-                    _ => None,
-                })
-                .unwrap();
-            match &graphics.invocation.draw {
-                DrawCall::Indexed {
-                    index_count,
-                    instance_count,
-                    ..
-                } => {
-                    assert_eq!(*index_count, DrawCount::Fixed(3));
-                    assert_eq!(*instance_count, 2);
-                }
-                DrawCall::IndexedIndirect {
-                    index_format,
-                    offset,
-                    draw_count,
-                    ..
-                } => {
-                    assert_eq!(*index_format, IndexFormat::Uint32);
-                    assert_eq!(*offset, if name == "offset" { 20 } else { 0 });
-                    assert_eq!(*draw_count, DrawCount::Fixed(1));
-                }
-                DrawCall::Indirect {
-                    offset, draw_count, ..
-                } => {
-                    assert_eq!(*offset, 0);
-                    assert_eq!(*draw_count, DrawCount::Fixed(1));
-                }
-                _ => panic!("unexpected draw"),
-            }
-            for operand in [
-                graphics.invocation.draw.indices(),
-                graphics.invocation.draw.indirect_commands(),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                let resource = program.draw_resource(pipeline, operand).unwrap();
-                assert!(pass.reads.iter().any(|r| r.resource == resource.0), "{name}");
-                if name == "borrowed" {
-                    assert!(entry.inputs.contains(&resource));
-                } else {
-                    assert!(
-                        !entry.inputs.contains(&resource),
-                        "{name}: generated operand became a caller input"
-                    );
-                    assert!(entry.allocations.iter().any(|a| a.resource() == resource));
-                    let writer = graph
-                        .passes
-                        .iter()
-                        .position(|p| p.writes.iter().any(|w| w.resource == resource.0))
-                        .unwrap();
-                    assert!(
-                        writer < draw_pass && pass.depends_on.contains(&writer),
-                        "{name}: missing draw dependency"
-                    );
-                }
-            }
-            program.to_rust_wgpu("draw_buffers", format).unwrap();
-            program.to_whl("draw_buffers", format).unwrap();
-        }
     }
 }

@@ -182,22 +182,6 @@ fn trivial_loop_phis_are_removed_without_losing_loop_state_or_wgsl_scope() {
 }
 
 #[test]
-fn repeated_scan_builds_emit_identical_phi_order() {
-    let source = include_str!("../../../testfiles/scan_compute.wyn");
-    let expected = compile_to_spirv(source).unwrap();
-    let module = wspirv::dr::load_words(&expected).unwrap();
-    assert!(module.functions.iter().flat_map(|f| &f.blocks).any(|block| block
-        .instructions
-        .iter()
-        .filter(|i| i.class.opcode == spirv::Op::Phi)
-        .count()
-        >= 2));
-    for _ in 0..12 {
-        assert_eq!(compile_to_spirv(source).unwrap(), expected);
-    }
-}
-
-#[test]
 fn integer_power_helpers_are_emitted_only_for_used_signedness() {
     let signed = "entry signed(x:i32, y:i32) i32 = x ** y";
     let unsigned = "entry unsigned(x:u32, y:u32) u32 = x ** y";
@@ -280,27 +264,38 @@ fn storage_length_descriptors_do_not_emit_unused_constant_ids() {
 
 #[test]
 fn unrelated_entries_preserve_storage_buffer_element_types() {
-    let source = include_str!("../../../testfiles/graphics_compute_entry_buffer_types.wyn");
-    for source in [
-        source.to_string(),
-        source.replace("weights[0]", "weights[length(weights) - 1]"),
-        source
-            .replace("weights: []f32", "weights: []vec4f32")
-            .replace("weights[0]", "weights[0].x")
-            .replace("values: []vec4f32) []vec4f32", "values: []f32) []f32"),
-    ] {
-        let (draw, compute) = source.split_once("entry compute").unwrap();
-        let compute = format!("entry compute{compute}");
-        for source in [draw.to_string(), source.to_string(), format!("{compute}\n{draw}")] {
-            let words = compile_to_spirv(&source).unwrap();
-            let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
-            let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
-            naga::valid::Validator::new(
-                naga::valid::ValidationFlags::all(),
-                naga::valid::Capabilities::all(),
-            )
-            .validate(&module)
-            .unwrap();
+    use crate::BindingRef;
+    use crate::{types, EntryId, LookupMap, ResourceAccess};
+    let binding = BindingRef::new(0, 0);
+    for reordered in [false, true] {
+        let mut constructor = super::Constructor::new();
+        let mut entries = vec![
+            (EntryId::from_index(0), types::f32()),
+            (EntryId::from_index(1), types::vec(4, types::f32())),
+            (EntryId::from_index(2), types::f32()),
+        ];
+        if reordered {
+            entries.swap(0, 1);
+        }
+        let accesses = LookupMap::from_iter([(binding, ResourceAccess::Read)]);
+        let mut created = Vec::new();
+        for (entry, ty) in &entries {
+            constructor.select_storage_accesses(&accesses, Some(*entry));
+            let variable = constructor.create_storage_buffer_for_element(ty, 0, 0, false).unwrap();
+            let element = constructor.storage_polytype_to_spirv(ty).unwrap();
+            created.push((*entry, variable, element));
+        }
+        created.sort_by_key(|(entry, _, _)| *entry);
+        assert_eq!(created[0].1, created[2].1, "identical types share a global");
+        assert_ne!(
+            created[0].1, created[1].1,
+            "different types need distinct globals"
+        );
+        for (entry, variable, element) in created {
+            constructor.select_storage_accesses(&accesses, Some(entry));
+            let buffer = constructor.storage_buffer(binding).unwrap();
+            assert_eq!(buffer.variable, variable);
+            assert_eq!(buffer.element_type, element);
         }
     }
 }

@@ -1,3 +1,9 @@
+#[path = "support/host_checks.rs"]
+mod host_checks;
+#[path = "support/shader_checks.rs"]
+mod shader_checks;
+#[path = "support/spirv_checks.rs"]
+mod spirv_checks;
 mod support;
 
 use serde::Deserialize;
@@ -24,6 +30,17 @@ struct Expectations {
     #[serde(default)]
     emit_mir: bool,
     source_path: Option<PathBuf>,
+    compare_host: Option<PathBuf>,
+    repeat_builds: Option<usize>,
+    spirv_min_block_phis: Option<usize>,
+    #[serde(default)]
+    rust_host: bool,
+    #[serde(default)]
+    host: Vec<host_checks::Expectation>,
+    #[serde(default)]
+    shader: Vec<shader_checks::Expectation>,
+    #[serde(default)]
+    spirv_array_loads: Vec<spirv_checks::ArrayLoads>,
     output_path: Option<String>,
     #[serde(default)]
     artifacts: Vec<Artifact>,
@@ -81,6 +98,22 @@ fn run_fixture(path: &Path) {
         .join("\n");
     assert!(!header.is_empty(), "fixture must start with --! expectations");
     let expected: Expectations = toml::from_str(&header).expect("valid fixture expectations");
+    assert!(
+        (expected.host.is_empty()
+            && expected.shader.is_empty()
+            && expected.compare_host.is_none()
+            && !expected.rust_host
+            && expected.spirv_array_loads.is_empty()
+            && expected.repeat_builds.is_none()
+            && expected.spirv_min_block_phis.is_none())
+            || (matches!(expected.command, Action::Build) && expected.exit == 0),
+        "host and SPIR-V inspections require a successful build"
+    );
+    assert!(
+        (expected.spirv_array_loads.is_empty() && expected.spirv_min_block_phis.is_none())
+            || expected.targets.iter().any(|t| t == "spirv"),
+        "array-load inspection requires the SPIR-V target"
+    );
     let targets = match expected.command {
         Action::Check => {
             assert!(
@@ -192,6 +225,92 @@ fn run_fixture(path: &Path) {
         }
         if matches!(expected.command, Action::Build) && expected.exit == 0 {
             support::validate_shader(&artifact, target);
+            if !expected.shader.is_empty() {
+                shader_checks::check(&fs::read(&artifact).unwrap(), target, &expected.shader);
+            }
+        }
+        if target == "spirv" && !expected.spirv_array_loads.is_empty() {
+            spirv_checks::check(&fs::read(&artifact).unwrap(), &expected.spirv_array_loads);
+        }
+        if target == "spirv" {
+            if let Some(minimum) = expected.spirv_min_block_phis {
+                spirv_checks::check_block_phis(&fs::read(&artifact).unwrap(), minimum);
+            }
+        }
+        if let Some(count) = expected.repeat_builds {
+            assert!((2..=3).contains(&count), "repeat_builds must be 2 or 3");
+            let original = fs::read(&artifact).expect("reference shader");
+            for _ in 1..count {
+                fs::remove_file(&artifact).expect("remove shader before repeat");
+                let repeated = command.output().expect("repeat CLI build");
+                assert!(
+                    repeated.status.success(),
+                    "repeat failed: {}",
+                    String::from_utf8_lossy(&repeated.stderr)
+                );
+                let diagnostic_lines = |text: &str| {
+                    text.lines()
+                        .filter(|line| line.starts_with("error: ") || line.starts_with("warning: "))
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(
+                    diagnostic_lines(&String::from_utf8_lossy(&repeated.stderr)),
+                    diagnostic_lines(&stderr),
+                    "repeated build diagnostics differ"
+                );
+                let actual = fs::read(&artifact).expect("repeated shader");
+                assert_eq!(actual, original, "repeated shader output differs");
+            }
+        }
+        if !expected.host.is_empty() {
+            let text = fs::read_to_string(directory.0.join("output.wynhost")).expect("read WHL");
+            host_checks::check(&text, &expected.host);
+        }
+        if let Some(other) = &expected.compare_host {
+            assert!(
+                expected.source_path.is_none(),
+                "host comparison uses original fixture paths"
+            );
+            let other = path.parent().unwrap().join(other).canonicalize().expect("comparison source");
+            let original = fs::read(directory.0.join("output.wynhost")).expect("read reference WHL");
+            let mut comparison = Command::new(env!("CARGO_BIN_EXE_wyn"));
+            comparison.current_dir(&directory.0).args(command.get_args().map(|arg| {
+                if arg == path.as_os_str() {
+                    other.as_os_str()
+                } else {
+                    arg
+                }
+            }));
+            fs::remove_file(&artifact).expect("remove reference shader before comparison");
+            fs::remove_file(directory.0.join("output.wynhost"))
+                .expect("remove reference host before comparison");
+            let output = comparison.output().expect("compile comparison source");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "comparison failed: {stderr}");
+            assert_diagnostics(&stderr, "error", &[]);
+            support::validate_shader(&artifact, target);
+            assert_eq!(
+                fs::read(directory.0.join("output.wynhost")).unwrap(),
+                original,
+                "host programs differ: {} and {}",
+                path.display(),
+                other.display()
+            );
+        }
+        if expected.rust_host {
+            fs::remove_file(&artifact).expect("remove shader before Rust-host build");
+            let output = command.args(["--target-double", "rust-wgpu"]).output().expect("emit Rust host");
+            assert!(
+                output.status.success(),
+                "Rust host emission failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            support::validate_shader(&artifact, target);
+            let rust = fs::read_to_string(directory.0.join("output.rs")).expect("Rust host artifact");
+            assert!(!rust.trim().is_empty());
+            let whl = fs::read_to_string(directory.0.join("output.wynhost")).unwrap();
+            host_checks::check_rust(&whl, &rust, &expected.host);
         }
         for artifact in &expected.artifacts {
             if !artifact.targets.is_empty() && !artifact.targets.iter().any(|wanted| wanted == target) {
@@ -236,9 +355,11 @@ fn run_fixture(path: &Path) {
 
 #[test]
 fn compiler_fixtures() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/compiler/cases");
-    let mut paths: Vec<_> = fs::read_dir(root)
-        .unwrap()
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    // Package fixtures stay inside their package so imports obey the normal root boundary.
+    let mut paths: Vec<_> = ["tests/compiler/cases", "pkg/sort/test/compiler"]
+        .into_iter()
+        .flat_map(|directory| fs::read_dir(root.join(directory)).unwrap())
         .map(|entry| entry.unwrap().path())
         .filter(|path| path.extension().is_some_and(|extension| extension == "wyn"))
         .collect();

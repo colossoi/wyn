@@ -1,0 +1,92 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"replicated_square\"", ":source-name \"replicated_rectangle\"", ":source-name \"replicated_rank_three\"", ":source-name \"replicated_bools\"", ":source-name \"replicated_slice\"", ":source-name \"tuple_rows\"", ":source-name \"tuple_rank_three\"", ":source-name \"tuple_captured_reduce\"", ":source-name \"mapped_fixed_rows\"", ":source-name \"mapped_fixed_matrix\"", ":source-name \"mapped_runtime_matrix\"", ":source-name \"captured_scalar_rows\"", ":source-name \"mapped_rank_three\"", ":source-name \"mapped_rank_four\"", ":source-name \"transposed_matrix\"", ":source-name \"nested_reduction_rows\"", ":source-name \"mapped_outer_input\"", ":source-name \"mapped_inner_input\"", ":source-name \"captured_loop_rows\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"runtime_rectangle_0_main\"", ":source-name \"runtime_rectangle_1_main\"", ":source-name \"runtime_rectangle_2_main\"", ":source-name \"runtime_rectangle_3_main\"", ":source-name \"runtime_rectangle_4_main\"", ":source-name \"runtime_rectangle_5_main\"", ":source-name \"runtime_rectangle_6_main\"", ":source-name \"runtime_rectangle_7_main\"", ":source-name \"runtime_rectangle_8_main\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"local_rectangle_0_check\"", ":source-name \"local_rectangle_1_check\""]
+
+entry replicated_square(x: f32) [3][3]f32 =
+  replicate(3, replicate(3, x))
+
+
+entry replicated_rectangle(x: f32) [2][5]f32 = replicate(2, replicate(5, x))
+
+entry replicated_rank_three(x: f32) [2][3][4]f32 = replicate(2, replicate(3, replicate(4, x)))
+
+entry replicated_bools(x: i32) [2][3]bool = replicate(2, map(|i: i32| i > x, iota(3)))
+
+entry replicated_slice(x: f32) [2][3]f32 =
+         let values = map(|i: i32| x + f32.i32(i), iota(5)) in
+         let row: [3]f32 = values[1..4] in replicate(2, row)
+
+entry tuple_rows(xs:[]i32) [][3](i32,i32)=map(|x|map(|y|(x,y),iota(3)),xs)
+
+entry tuple_rank_three(xs:[]i32) [][3][4](i32,bool)=map(|x|map(|y|map(|z|(x+y,z>1),iota(4)),iota(3)),xs)
+
+entry tuple_captured_reduce(xs:[]i32) [][3](i32,i32)=map(|x|let t=reduce((+),0,[x,x]) in map(|y|(t,y),iota(3)),xs)
+
+-- Rectangular-map compilation regressions; shader validity, not numerical results.
+entry mapped_fixed_rows(xs:[4]i32) [4][3]i32=map(|x|map(|y|x+y,iota(3)),xs)
+
+entry mapped_fixed_matrix(xs:[4][3]i32) [4][3]i32=map(|row|map(|x|x+1,row),xs)
+
+entry mapped_runtime_matrix(xs:[][3]i32) [][3]i32=map(|row|map(|x|x+1,row),xs)
+
+entry captured_scalar_rows(xs:[]i32) [][3]i32=map(|x|let t=x*x in map(|y|t+y,iota(3)),xs)
+
+entry mapped_rank_three(xs:[2]i32) [2][3][4]i32=map(|x|map(|y|map(|z|x+y+z,iota(4)),iota(3)),xs)
+
+entry mapped_rank_four(xs:[2]i32) [2][3][4][5]i32=map(|x|map(|y|map(|z|map(|w|x+y+z+w,iota(5)),iota(4)),iota(3)),xs)
+
+entry transposed_matrix(xs:[4][3]i32) [3][4]i32=map(|j|map(|i|xs[i][j],iota(4)),iota(3))
+
+entry nested_reduction_rows(xs:[]i32) [][3]i32=map(|x|map(|y|reduce(|a,b|a+b,0,[x,y]),iota(3)),xs)
+
+entry mapped_outer_input(xs:[]i32) [][3]i32=map(|x|map(|y|x+y,iota(3)),map(|x|x+1,xs))
+
+entry mapped_inner_input(xs:[]i32) [][3]i32=map(|x|map(|y|x+y,map(|y|y+1,iota(3))),xs)
+
+entry captured_loop_rows(xs:[]i32) [][3]i32=map(|x|let t=loop a=x for i<16 do a+i in map(|y|t+y,iota(3)),xs)
+
+
+-- runtime_rectangular_maps_reach_both_backends
+entry runtime_rectangle_0_main(runtime_rectangle_0_xs: []i32) [][3]i32 =
+  let rows = map(|x| map(|j| x+j, iota(3)), runtime_rectangle_0_xs)
+  let start = if length(rows)>0 then 1 else 0
+  in rows[start..length(rows)]
+
+
+def runtime_rectangle_1_row(runtime_rectangle_1_n:i32,x:i32) []i32=map(|y|x+y,iota(runtime_rectangle_1_n+1)) entry runtime_rectangle_1_main(runtime_rectangle_1_xs:[]i32,runtime_rectangle_1_n:i32) [][]i32=map(|x|runtime_rectangle_1_row(runtime_rectangle_1_n,x),runtime_rectangle_1_xs)
+
+def runtime_rectangle_2_row(runtime_rectangle_2_ys:[]i32,x:i32) []i32=map(|y|x+y,iota(length(runtime_rectangle_2_ys)+1)) entry runtime_rectangle_2_main(runtime_rectangle_2_xs:[]i32,runtime_rectangle_2_ys:[]i32) [][]i32=map(|x|runtime_rectangle_2_row(runtime_rectangle_2_ys,x),runtime_rectangle_2_xs)
+
+entry runtime_rectangle_3_main(runtime_rectangle_3_xs:[]i32,runtime_rectangle_3_n:i32) [][]i32=map(|x|map(|y|x+y,iota(runtime_rectangle_3_n)),runtime_rectangle_3_xs)
+
+entry runtime_rectangle_4_main(runtime_rectangle_4_xs:[]i32,runtime_rectangle_4_ys:[]i32) [][]i32=map(|x|map(|y|x+y,runtime_rectangle_4_ys),runtime_rectangle_4_xs)
+
+entry runtime_rectangle_5_main(runtime_rectangle_5_xs:[]i32,runtime_rectangle_5_n:i32,runtime_rectangle_5_m:i32) [][][]i32=map(|x|map(|y|map(|z|x+y+z,iota(runtime_rectangle_5_m)),iota(runtime_rectangle_5_n)),runtime_rectangle_5_xs)
+
+entry runtime_rectangle_6_main(runtime_rectangle_6_xs:[]i32,runtime_rectangle_6_n:i32) []i32=map(|x|reduce((+),0,map(|y|x+y,iota(runtime_rectangle_6_n))),runtime_rectangle_6_xs)
+
+entry runtime_rectangle_7_main(runtime_rectangle_7_xs:[]i32,runtime_rectangle_7_n:i32) [][]i32=map(|x|scan((+),0,map(|y|x+y,iota(runtime_rectangle_7_n))),runtime_rectangle_7_xs)
+
+entry runtime_rectangle_8_main(runtime_rectangle_8_xs:[]i32,runtime_rectangle_8_n:i32) [][](i32,bool)=map(|x|map(|y|(x+y,y>1),iota(runtime_rectangle_8_n)),runtime_rectangle_8_xs)
+
+
+-- local_array_layouts_support_rectangles_and_higher_rank
+entry local_rectangle_0_check(local_rectangle_0_xs: []f32) []f32 =
+         map(|x: f32|
+           let a = map(|i: i32| map(|j: i32| x + f32.i32(i+j), iota(5)), iota(2)) in
+           a[1][4], local_rectangle_0_xs)
+
+entry local_rectangle_1_check(local_rectangle_1_xs: []f32) []f32 =
+         map(|x: f32|
+           let a = map(|i: i32| map(|j: i32|
+             map(|k: i32| x + f32.i32(i+j+k), iota(4)), iota(3)), iota(2)) in
+           a[1][2][3], local_rectangle_1_xs)

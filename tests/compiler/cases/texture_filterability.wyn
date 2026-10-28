@@ -1,0 +1,91 @@
+--! command = "build"
+--! exit = 0
+--! args = ["--graphics"]
+--! rust_host = true
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"texture_binding_0_sample_pixels\"", ":source-name \"texture_binding_1_reproduce\"", ":source-name \"texture_binding_2_reproduce\"", ":source-name \"texture_binding_3_texture_sample_demo\""]
+--! [[host]]
+--! entry = "texture_binding_0_sample_pixels"
+--! texture_types = { "image" = ":float" }
+--! [[host]]
+--! entry = "texture_binding_1_reproduce"
+--! texture_types = { "source" = ":float" }
+--! [[host]]
+--! entry = "texture_binding_2_reproduce"
+--! texture_types = { "sampled" = ":filterable-float", "mixed_source" = ":float" }
+--! [[host]]
+--! entry = "texture_binding_3_texture_sample_demo"
+--! texture_types = { "tex" = ":filterable-float" }
+--! [[artifacts]]
+--! path = "output.rs"
+--! contains = ["filterable: true", "filterable: false"]
+
+
+
+-- texture_load_bindings_do_not_require_filtering
+entry texture_binding_0_sample_pixels(image: texture2d, pixels: []vec2i32) []vec4f32 =
+  map(|pixel| texture_load(image, pixel, 0i32), pixels)
+
+
+-- Integer-coordinate loads must not require FLOAT32_FILTERABLE.
+entry texture_binding_1_reproduce(source: render_target<f32>, target: render_target<f32>) render_target<f32> =
+  let triangles = rasterize_triangles(direct_draw(3u32, 1u32),
+    |index: u32, _: u32, _: u32|
+      let positions = [@[-1.0, -1.0, 0.0, 1.0],
+                       @[ 3.0, -1.0, 0.0, 1.0],
+                       @[-1.0,  3.0, 0.0, 1.0]] in
+      vertex_output(positions[i32(index)], 0.0)) in
+  shade(target, triangles,
+    |_, _, _, _, _| target_load(source, @[0i32, 0i32], 0u32))
+
+
+def texture_binding_2_sample_color(tex:texture2d,samp:sampler,uv:vec2f32) f32=let color=texture_sample(tex,samp,uv,0.0) in color.x
+-- Integer-coordinate loads must not require FLOAT32_FILTERABLE.
+entry texture_binding_2_reproduce(mixed_source: render_target<f32>, sampled: texture2d, mixed_samp: sampler, mixed_target: render_target<f32>) render_target<f32> =
+  let triangles = rasterize_triangles(direct_draw(3u32, 1u32),
+    |index: u32, _: u32, _: u32|
+      let positions = [@[-1.0, -1.0, 0.0, 1.0],
+                       @[ 3.0, -1.0, 0.0, 1.0],
+                       @[-1.0,  3.0, 0.0, 1.0]] in
+      vertex_output(positions[i32(index)], 0.0)) in
+  shade(mixed_target, triangles,
+    |_, _, _, _, _| let x = target_load(mixed_source, @[0i32, 0i32], 0u32) in texture_binding_2_sample_color(sampled, mixed_samp, @[x, x]))
+
+
+-- Texture + sampler capability demo.
+--
+-- A vertex shader passes a UV varying to the fragment shader, which
+-- both filtered-samples (`texture_sample`, explicit LOD) and raw-fetches
+-- (`texture_load`) the same texture, then sums the two. Exercises:
+--   * the `texture2d` / `sampler` opaque types,
+--   * texture and sampler texture_binding_3_values captured from the root entry,
+--   * `texture_sample(tex, mixed_samp, uv, lod)` — EXPLICIT LOD, so the result
+--     is a pure function of its arguments (referentially transparent;
+--     no screen-space-derivative dependence). See the texture plan's v2
+--     note for gradient-based filtering.
+--   * `texture_load(tex, coord, lod)` — raw texel fetch.
+
+def texture_binding_3_vertex_main(positions: []vec2f32,
+                vertex_index: u32, instance_index: u32, draw_index: u32) vertex<vec2f32> =
+  let pos = positions[i32(vertex_index)] in
+  vertex_output(
+    @[pos..., 0.0, 1.0],
+    @[pos.x * 0.5 + 0.5, pos.y * 0.5 + 0.5])
+
+def texture_binding_3_fragment_main(uv: vec2f32, tex: texture2d, samp: sampler) vec4f32 =
+  let filtered = texture_sample(tex, samp, uv, 0.0)
+  let texel = texture_load(tex, @[0, 0], 0) in
+  filtered + texel
+
+entry texture_binding_3_texture_sample_demo(
+    positions: []vec2f32,
+    tex: texture2d,
+    samp: sampler,
+    screen: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    texture_binding_3_vertex_main(positions, _, _, _)) in
+  shade(screen, covered,
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| texture_binding_3_fragment_main(fragment_value, tex, samp))

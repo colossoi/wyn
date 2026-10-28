@@ -420,12 +420,20 @@ fn vector_math_folds_all_existing_componentwise_overloads() {
     }
 }
 
-fn partial_source_body(source: &str, name: &str) -> Term<Empty, Empty> {
+fn partial_source_program(source: &str) -> super::PartialEvaled {
     let typed = crate::compile_thru_frontend(source).expect("type check");
     let typed = crate::ast_type_holes::reject_type_holes(typed).expect("type holes");
     let tlc = tlc::lower_from_ast(typed).expect("lower to TLC");
     let tlc = tlc::validate_ownership(tlc).expect("ownership");
-    let tlc = partial_eval(tlc);
+    partial_eval(tlc)
+}
+
+fn partial_source_body(source: &str, name: &str) -> Term<Empty, Empty> {
+    let tlc = partial_source_program(source);
+    partial_definition_body(&tlc, name).clone()
+}
+
+fn partial_definition_body<'a>(tlc: &'a super::PartialEvaled, name: &str) -> &'a Term<Empty, Empty> {
     let def = tlc
         .defs
         .iter()
@@ -435,7 +443,7 @@ fn partial_source_body(source: &str, name: &str) -> Term<Empty, Empty> {
     while let TermKind::Lambda(lambda) = &body.kind {
         body = &lambda.body;
     }
-    body.clone()
+    body
 }
 
 #[test]
@@ -505,7 +513,7 @@ entry e(x: f32) vec3f32 = palette
 
 #[test]
 fn vector_math_folds_source_constants_chains_and_scalar_broadcasts() {
-    for (expression, expected) in [
+    let cases = [
         ("vec.sin(@[0.0, 0.0])", vec![0.0, 0.0]),
         ("vec.pow(@[2.0, 3.0], @[3.0, 2.0])", vec![8.0, 9.0]),
         ("vec.floor(vec.exp2(@[1.0, 2.0]))", vec![2.0, 4.0]),
@@ -523,16 +531,22 @@ fn vector_math_folds_source_constants_chains_and_scalar_broadcasts() {
             "let v = vec.exp2(@[1.0, 2.0]) in vec.sqrt(v)",
             vec![2.0f32.sqrt(), 2.0],
         ),
-    ] {
-        let source = format!("entry e(x:f32) vec{}f32 = {expression}", expected.len());
-        assert_float_vector(&partial_source_body(&source, "e"), &expected);
-        crate::compile_thru_spirv(&source).unwrap_or_else(|error| panic!("{source}: {error:?}"));
-        let ssa = crate::compile_thru_ssa(&source).expect("SSA");
-        let wgsl = crate::lower_ssa_to_wgsl(ssa).expect("WGSL");
-        validate_math_wgsl(&wgsl);
+    ];
+    let mut source = String::from("def v:vec2f32 = vec.exp2(@[1.0, 2.0])\nentry named_constant(x:f32) vec2f32 = vec.max(v, @[3.0, 3.0])\n");
+    for (index, (expression, expected)) in cases.iter().enumerate() {
+        source.push_str(&format!(
+            "entry vector_{index}(x:f32) vec{}f32 = {expression}\n",
+            expected.len()
+        ));
     }
-    let source = "def v:vec2f32 = vec.exp2(@[1.0, 2.0])\nentry e(x:f32) vec2f32 = vec.max(v, @[3.0, 3.0])";
-    assert_float_vector(&partial_source_body(source, "e"), &[3.0, 4.0]);
+    let program = partial_source_program(&source);
+    for (index, (_, expected)) in cases.iter().enumerate() {
+        assert_float_vector(
+            partial_definition_body(&program, &format!("vector_{index}")),
+            expected,
+        );
+    }
+    assert_float_vector(partial_definition_body(&program, "named_constant"), &[3.0, 4.0]);
 }
 
 fn validate_math_wgsl(source: &str) {

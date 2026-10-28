@@ -1,0 +1,26 @@
+--! command = "build"
+--! exit = 0
+--! args = ["--graphics", "-O"]
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"tuple_result_0_reproduce\""]
+--! [[host]]
+--! entry = "tuple_result_0_reproduce"
+--! calls = { "gpu-alloc" = 1, "gpu-draw" = 1 }
+--! result_ownership = [":owned", ":borrowed"]
+--! result_names = ["result_0", "screen"]
+
+
+
+-- render_helper_preserves_tuple_results
+def tuple_result_0_draw(screen: *render_target<vec4f32>) render_target<vec4f32> =
+  let triangles = rasterize_triangles(direct_draw(3u32,1u32),|vi,_,_|
+    vertex_output(if vi == 0u32 then @[-1.0,-1.0,0.0,1.0]
+      else if vi == 1u32 then @[3.0,-1.0,0.0,1.0] else @[-1.0,3.0,0.0,1.0],0.0)) in
+  let background = shade(screen,triangles,|_,_,_,_,_| @[0.0,0.0,0.0,1.0]) in
+  background
+
+entry tuple_result_0_reproduce(screen: render_target<vec4f32>) ([]i32,render_target<vec4f32>) =
+  let image = tuple_result_0_draw(screen) in
+  ([1i32,2i32],image)

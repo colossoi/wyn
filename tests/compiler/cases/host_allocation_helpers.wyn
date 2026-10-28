@@ -1,0 +1,17 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = []
+--! rust_host = true
+--! [[host]]
+--! entry = "allocated"
+--! inputs = { resolution = [13, 29] }
+--! result_bytes = 128
+--! no_device_reads = true
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"allocated\""]
+
+def quarter(n:i32) i32=(n+3)/4
+def area(w:i32,h:i32) i32=quarter(w)*quarter(h)
+entry allocated(resolution:vec2i32) []i32=map(|i|i+1,iota(area(resolution.x,resolution.y)))

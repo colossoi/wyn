@@ -1,0 +1,99 @@
+--! command = "build"
+--! exit = 0
+--! args = ["--graphics"]
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"guarded_producer_0_repro\"", ":source-name \"guarded_producer_1_repro\"", ":source-name \"guarded_producer_2_repro\"", ":source-name \"guarded_producer_3_repro\"", ":source-name \"guarded_producer_4_repro\""]
+--! [[shader]]
+--! entry = "guarded_producer_0_repro"
+--! stage = "fragment"
+--! guarded_loops = [1, 0]
+--! [[shader]]
+--! entry = "guarded_producer_1_repro"
+--! stage = "fragment"
+--! guarded_loops = [1, 0]
+--! [[shader]]
+--! entry = "guarded_producer_2_repro"
+--! stage = "fragment"
+--! guarded_loops = [1, 1]
+--! [[shader]]
+--! entry = "guarded_producer_3_repro"
+--! stage = "fragment"
+--! guarded_loops = [2, 0]
+--! [[shader]]
+--! entry = "guarded_producer_4_repro"
+--! stage = "fragment"
+--! guarded_loops = [1, 0]
+
+
+
+-- sibling_branches_share_producers_only_under_matching_guards
+def guarded_producer_0_vertex(vi:u32,_instance:u32,_draw:u32) vertex<()> =
+  vertex_output(@[if vi==1u32 then 3.0 else -1.0,
+                  if vi==2u32 then 3.0 else -1.0,0.0,1.0],())
+
+entry guarded_producer_0_repro(guarded_producer_0_xs:[]f32,target:render_target<vec4f32>) render_target<vec4f32> =
+  let triangles=rasterize_triangles(direct_draw(3u32,1u32),guarded_producer_0_vertex) in
+  shade(target,triangles,|_,position,_,_,_|
+    let s=loop s=position.x for i<8 do f32.sin(s)+guarded_producer_0_xs[i]
+    let skip=position.y>1.0
+    let direct=if skip then 0.0 else s
+    let specular=if skip then 0.0 else s*position.z
+    in @[direct,specular,0.0,1.0])
+
+
+def guarded_producer_1_vertex(vi:u32,_instance:u32,_draw:u32) vertex<()> =
+  vertex_output(@[if vi==1u32 then 3.0 else -1.0,
+                  if vi==2u32 then 3.0 else -1.0,0.0,1.0],())
+
+entry guarded_producer_1_repro(guarded_producer_1_xs:[]f32,target:render_target<vec4f32>) render_target<vec4f32> =
+  let triangles=rasterize_triangles(direct_draw(3u32,1u32),guarded_producer_1_vertex) in
+  shade(target,triangles,|_,position,_,_,_|
+    let s=loop s=position.x for i<8 do f32.sin(s)+guarded_producer_1_xs[i]
+    let skip=position.y>1.0
+    let direct=if skip then s else 0.0
+    let specular=if skip then s*position.z else 0.0
+    in @[direct,specular,0.0,1.0])
+
+
+def guarded_producer_2_vertex(vi:u32,_instance:u32,_draw:u32) vertex<()> =
+  vertex_output(@[if vi==1u32 then 3.0 else -1.0,
+                  if vi==2u32 then 3.0 else -1.0,0.0,1.0],())
+
+entry guarded_producer_2_repro(guarded_producer_2_xs:[]f32,target:render_target<vec4f32>) render_target<vec4f32> =
+  let triangles=rasterize_triangles(direct_draw(3u32,1u32),guarded_producer_2_vertex) in
+  shade(target,triangles,|_,position,_,_,_|
+    let s=loop s=position.x for i<8 do f32.sin(s)+guarded_producer_2_xs[i]
+    let skip=position.y>1.0
+    let direct=if skip then 0.0 else s
+    let specular=if skip then s*position.z else 0.0
+    in @[direct,specular,0.0,1.0])
+
+
+def guarded_producer_3_vertex(vi:u32,_instance:u32,_draw:u32) vertex<()> =
+  vertex_output(@[if vi==1u32 then 3.0 else -1.0,
+                  if vi==2u32 then 3.0 else -1.0,0.0,1.0],())
+
+entry guarded_producer_3_repro(guarded_producer_3_xs:[]f32,target:render_target<vec4f32>) render_target<vec4f32> =
+  let triangles=rasterize_triangles(direct_draw(3u32,1u32),guarded_producer_3_vertex) in
+  shade(target,triangles,|_,position,_,_,_|
+    let s=loop s=position.x for i<8 do f32.sin(s)+guarded_producer_3_xs[i]
+    let skip=position.y>1.0
+    let direct=if skip then 0.0 else s
+    let specular=if position.y>2.0 then 0.0 else s*position.z
+    in @[direct,specular,0.0,1.0])
+
+
+def guarded_producer_4_vertex(vi:u32,_instance:u32,_draw:u32) vertex<()> =
+  vertex_output(@[if vi==1u32 then 3.0 else -1.0,
+                  if vi==2u32 then 3.0 else -1.0,0.0,1.0],())
+
+entry guarded_producer_4_repro(guarded_producer_4_xs:[]f32,target:render_target<vec4f32>) render_target<vec4f32> =
+  let triangles=rasterize_triangles(direct_draw(3u32,1u32),guarded_producer_4_vertex) in
+  shade(target,triangles,|_,position,_,_,_|
+    let s=loop s=position.x for i<8 do f32.sin(s)+guarded_producer_4_xs[i]
+    let skip=position.y>1.0
+    let direct=if skip then 0.0 else (if position.z>0.0 then s else 0.0)
+    let specular=if skip then 0.0 else s*position.z
+    in @[direct,specular,0.0,1.0])

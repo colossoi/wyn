@@ -1,0 +1,19 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"fixed_update_0_main\"", ":source-name \"fixed_update_1_main\""]
+
+
+
+-- stored_fixed_array_updates_materialize_owned_contents
+entry fixed_update_0_main() [258]i32 =
+            ((replicate(258,-1i32) with [0] = 0) with [256] = 1) with [257] = 0
+
+entry fixed_update_1_main(fixed_update_1_n:i32) [258]i32 =
+            let empty = replicate(258,-1i32) in
+            if fixed_update_1_n == 0 then (empty with [256] = 0) with [257] = 0 else
+            let (result,count) = loop (result,count) = (empty,0i32)
+                while count < fixed_update_1_n do (result with [count] = count,count+1) in
+            (result with [256] = count) with [257] = 0

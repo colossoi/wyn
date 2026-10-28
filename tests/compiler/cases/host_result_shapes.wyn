@@ -1,0 +1,49 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = []
+--! rust_host = false
+--! [[host]]
+--! entry = "shape_0"
+--! result_layouts = ["(:array :length 137 :stride 12 :range :caller :element (:sequence :count 3 :stride 4 :element :i32))"]
+--! result_at_least_bytes = 1644
+--! [[host]]
+--! entry = "shape_1"
+--! result_layouts = ["(:array :length 137 :stride 60 :range :caller :element (:sequence :count 3 :stride 20 :element (:sequence :count 5 :stride 4 :element :i32)))"]
+--! result_at_least_bytes = 8220
+--! [[host]]
+--! entry = "shape_2"
+--! result_layouts = ["(:array :length 137 :stride 4 :range :caller :element :i32)"]
+--! result_at_least_bytes = 548
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"shape_0\"", ":source-name \"shape_1\"", ":source-name \"shape_2\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"published_array_0_main\"", ":source-name \"published_array_1_main\""]
+--! [[host]]
+--! entry = "published_array_0_main"
+--! result_min_bytes = [4]
+--! [[host]]
+--! entry = "published_array_1_main"
+--! result_min_bytes = [4]
+
+entry shape_0(shape_0_xs:[137]i32) [137][3]i32 = map(|x|map(|j|x+j,iota(3)),shape_0_xs)
+entry shape_1(shape_1_xs:[137]i32) [137][3][5]i32 = map(|x|map(|j|map(|k|x+j+k,iota(5)),iota(3)),shape_1_xs)
+entry shape_2(shape_2_xs:[137]i32) [137]i32 = map(|x|reduce((+),0,map(|y|y+x,iota(5))),shape_2_xs)
+
+
+
+-- computed_array_outputs_have_storage_and_a_writer
+-- Test: same function called with two different storage buffers,
+-- plus a function that takes two storage buffers at once
+def published_array_0_first(arr: []i32) i32 = arr[0]
+def published_array_0_sum_firsts(x: []i32, y: []i32) i32 = x[0] + y[0]
+
+entry published_array_0_main(a: []i32, b: []i32) []i32 = [published_array_0_first(a) + published_array_0_first(b) + published_array_0_sum_firsts(a, b)]
+
+
+-- Minimal test: regular function slices then indexes a view-array parameter
+def published_array_1_second(arr: []i32) i32 = arr[1..3][0]
+
+entry published_array_1_main(data: []i32) []i32 = [published_array_1_second(data)]

@@ -1,0 +1,13 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["wgsl"]
+--! rust_host = true
+--! [[host]]
+--! entry = "partial_bits"
+--! calls = { dotimes = 1 }
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"partial_bits\""]
+
+module Sort = import "../../src/four_bit"
+entry partial_bits(partial_xs:[]i32) []i32 = Sort.radix_sort(5,i32.get_bit,partial_xs)

@@ -1,0 +1,57 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"segmented_0_main\"", ":source-name \"segmented_1_main\"", ":source-name \"segmented_2_main\"", ":source-name \"segmented_3_main\"", ":source-name \"segmented_4_main\"", ":source-name \"segmented_5_main\"", ":source-name \"segmented_6_main\"", ":source-name \"segmented_7_main\""]
+--! [[shader]]
+--! entry = "segmented_0_main"
+--! workgroup_size = [256, 1, 1]
+--! workgroup_storage = true
+--! [[shader]]
+--! entry = "segmented_1_main"
+--! workgroup_size = [256, 1, 1]
+--! workgroup_storage = true
+--! [[shader]]
+--! entry = "segmented_2_main"
+--! workgroup_size = [256, 1, 1]
+--! workgroup_storage = true
+--! [[shader]]
+--! entry = "segmented_3_main"
+--! workgroup_size = [256, 1, 1]
+--! workgroup_storage = true
+--! [[shader]]
+--! entry = "segmented_4_main"
+--! workgroup_size = [256, 1, 1]
+--! workgroup_storage = true
+--! [[shader]]
+--! entry = "segmented_5_main"
+--! workgroup_size = [256, 1, 1]
+--! workgroup_storage = true
+--! [[shader]]
+--! entry = "segmented_6_main"
+--! workgroup_size = [256, 1, 1]
+--! workgroup_storage = true
+--! [[shader]]
+--! entry = "segmented_7_main"
+--! workgroup_size = [256, 1, 1]
+--! workgroup_storage = true
+
+
+
+-- segmented_collectives_reach_both_backends
+entry segmented_0_main(segmented_0_xs:[][513]i32) []i32=map(|row|reduce((+),0,row),segmented_0_xs)
+
+entry segmented_1_main(segmented_1_xs:[][513]i32) [][513]i32=map(|row|scan((+),0,row),segmented_1_xs)
+
+entry segmented_2_main(segmented_2_xs:[][3][17]i32) [][3]i32=map(|rows|map(|row|reduce((+),0,row),rows),segmented_2_xs)
+
+entry segmented_3_main(segmented_3_xs:[][513]i32) [][513]i32=map(|row|map(|x|x*2,scan((+),0,map(|x|x+1,row))),segmented_3_xs)
+
+entry segmented_4_main(segmented_4_xs:[][513]i32) ([]i32,[][513]i32)=(map(|row|reduce((+),0,row),segmented_4_xs),map(|row|scan((+),0,row),segmented_4_xs))
+
+entry segmented_5_main(segmented_5_xs:[][17]i32) [](i32,i32)=map(|row|reduce(|a,b|(a.0+b.0,a.1+b.1),(0,0),map(|x|(x,x*x),row)),segmented_5_xs)
+
+entry segmented_6_main(segmented_6_xs:[][17]i32) []i32=map(|row|reduce((+),0,row[0..0]),segmented_6_xs)
+
+entry segmented_7_main(segmented_7_xs:[][17]i32) [][0]i32=map(|row|scan((+),0,row[0..0]),segmented_7_xs)

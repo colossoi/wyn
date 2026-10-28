@@ -1,0 +1,19 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! emit_mir = true
+--! args = ["-O"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"cancellation\"", ":source-name \"tiny_call\""]
+--! [[artifacts]]
+--! path = "output.ssa"
+--! contains = ["func @tiny_call"]
+--! excludes = ["binop -", "func @tiny_helper"]
+
+-- Both policies must retain cheap x-x cleanup; only -O expands small helpers.
+def cancellation_helper(x:i32) i32 =
+    (x-x)+(x-x)+(x-x)+(x-x)+(x-x)+(x-x)+(x-x)+(x-x)
+def tiny_helper(x:i32) i32 = x+1
+entry cancellation(x:i32) i32 = cancellation_helper(x)+1
+entry tiny_call(x:i32) i32 = tiny_helper(x)*2

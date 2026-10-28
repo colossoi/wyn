@@ -502,25 +502,60 @@ fn compile_to_wgsl_with_u64_emulation(source: &str) -> error::Result<String> {
 
 #[test]
 fn unrelated_entries_preserve_storage_buffer_element_types() {
-    let source = include_str!("../../../testfiles/graphics_compute_entry_buffer_types.wyn");
-    let helper = "def pick(xs: []f32) f32 =\n\
-        let first = xs[0] let last = xs[length(xs) - 1] in\n\
-        if first > last then first else last\n";
-    for source in [
-        source.to_string(),
-        source.replace("weights[0]", "weights[length(weights) - 1]"),
-        source
-            .replace("weights: []f32", "weights: []vec4f32")
-            .replace("weights[0]", "weights[0].x")
-            .replace("values: []vec4f32) []vec4f32", "values: []f32) []f32"),
-        format!("{helper}{}", source.replace("weights[0]", "pick(weights)")),
-    ] {
-        let (draw, compute) = source.split_once("entry compute").unwrap();
-        let compute = format!("entry compute{compute}");
-        for source in [draw.to_string(), source.to_string(), format!("{compute}\n{draw}")] {
-            let wgsl = compile_to_wgsl(&source).unwrap();
-            validate_wgsl(&wgsl);
+    use crate::ast::Span;
+    use crate::interface::{StorageBindingDecl, StorageRole};
+    use crate::ssa::builder::FuncBuilder;
+    use crate::ssa::types::{EntryPoint, ExecutionModel, Terminator};
+    use crate::BindingRef;
+    use crate::{EntryId, LookupMap};
+    let binding = BindingRef::new(0, 0);
+    for reordered in [false, true] {
+        let mut entries = Vec::new();
+        for (index, ty) in [types::f32(), types::vec(4, types::f32()), types::f32()].into_iter().enumerate()
+        {
+            let mut builder = FuncBuilder::new(vec![], types::unit());
+            builder.terminate(Terminator::Return(None)).unwrap();
+            entries.push(EntryPoint {
+                id: EntryId::from_index(index),
+                name: format!("entry_{index}"),
+                body: builder.finish().unwrap(),
+                execution_model: ExecutionModel::Compute {
+                    local_size: (1, 1, 1),
+                },
+                inputs: vec![],
+                parameter_inputs: vec![],
+                outputs: vec![],
+                storage_bindings: vec![StorageBindingDecl {
+                    binding,
+                    role: StorageRole::Input,
+                    elem_ty: ty,
+                    host: (),
+                }],
+                stage_descriptor_storage_accesses: LookupMap::new(),
+                pipeline_storage_accesses: LookupMap::new(),
+                span: Span::generated(),
+            });
         }
+        if reordered {
+            entries.swap(0, 1);
+        }
+        let program = ssa::stage::WgslReady::from_parts(
+            vec![],
+            entries,
+            ssa::context::BackendGlobal {
+                pipeline: Default::default(),
+                target: CodegenTarget::Wgsl,
+            },
+        );
+        let mut context = super::LowerCtx::new(&program, Default::default());
+        let declarations = context.storage_buffer_declarations().unwrap();
+        let name =
+            |index| context.storage_names[&(Some(EntryId::from_index(index)), binding, false)].clone();
+        assert_eq!(name(0), name(2), "identical types share a global");
+        assert_ne!(name(0), name(1), "different types need distinct globals");
+        assert!(declarations.contains(&format!("{}: array<f32>;", name(0))));
+        assert!(declarations.contains(&format!("{}: array<vec4<f32>>;", name(1))));
+        validate_wgsl(&declarations);
     }
 }
 

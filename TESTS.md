@@ -5,6 +5,21 @@ small source/error examples in table-driven unit tests with a helper that report
 the failing source. Use source fixtures for broader compiler scenarios, especially
 when the CLI, generated artifacts, or backend validation are part of the contract.
 
+## Unit or integration test?
+
+**Anything that runs substantially the whole compiler is probably an integration
+test**, even if it finishes quickly or currently lives in a `#[test]` function.
+Tests that start with Wyn source and run through lowering, optimization, or shader
+emission usually belong in CLI fixtures or a public-boundary integration harness.
+Inspecting an internal object at the end does not by itself make the test a unit
+test: prefer checking the emitted artifact or observable runtime behavior.
+
+Keep unit tests focused on a phase, algorithm, or representation. Stop at the
+phase being asserted, or construct a small input for it directly. A test of
+constant folding should inspect folded values without also compiling shaders.
+Both rules apply: a fast end-to-end test is still integration coverage, and a
+focused unit test must still meet the time limit below.
+
 ## Unit-test time limit
 
 **No individual unit test should take more than three seconds of wall-clock time.**
@@ -13,8 +28,10 @@ backend, or optimization mode in a loop—not three seconds per iteration. Measu
 execution after compilation, using the normal development test profile; record
 concurrency and resource limits when comparing timings.
 
-An over-budget test must be made smaller/faster or moved to an appropriate
-integration suite. Preserve the property it checks: a successful build cannot
+For a slow unit test, first remove wasted work: reuse pipeline setup, batch related
+inputs, and avoid repeating compilation just to change metadata. If it still
+exceeds three seconds, minimize its input and stop at the phase actually asserted.
+An end-to-end contract belongs in an appropriate integration suite. Preserve the property it checks: a successful build cannot
 replace an assertion about ownership, instruction structure, or evaluation order.
 For an expensive internal invariant, reduce its setup to the relevant phase or
 provide a suitable dedicated integration harness. Do not hide expensive work by
@@ -35,7 +52,7 @@ yet compliant. Resource caps for a whole test executable are a separate safeguar
 | Shader build/validation | The same source fixtures, with `command = "build"` and explicit targets. | End-to-end lowering/backend regressions. Example: `entry_lowering_regressions.wyn`. Successful builds require nonempty output, shader validation, and an affirmative artifact-content assertion for every target. |
 | Emitted artifacts | Artifact expectations in those fixtures; dedicated Rust integration code only when the data format cannot express the assertion. | Host entry names, required/forbidden generated operations, sidecar files, target-specific output, and path handling. Example: `cli_graphics_paths.wyn`. Successful validation alone does not establish these properties. |
 | Packages/filesystems | `tests/module-packages/cases/*/case.toml` plus package trees; `wyn/tests/package_manager_functional.rs` and `local_modules_cli.rs`. | Dependency resolution, imports, filesystem layout, source attribution, and CLI package behavior. Use temporary directories. See [package fixtures](tests/module-packages/README.md). |
-| Host execution | `wyn-host-interp/src/interp_tests.rs`, its test backend, and source-driven `wyn-core/src/host_interp_tests.rs`. | Actual host-program values, shapes, control flow, and backend events. Compiler-success assertions are insufficient. There is not yet a general execution mode in the `.wyn` fixture runner. |
+| Host execution | `wyn-host-interp/src/interp_tests.rs`, its test backend, and source-driven `wyn-core/src/host_interp_tests.rs`. | Actual host-program values, shapes, control flow, and backend events. Compiler-success assertions are insufficient. CLI `[[host]]` fixtures also execute emitted WHL with a tracing backend for allocation and draw-order contracts; they do not execute shaders. |
 | GPU execution | `wyn-host-interp/src/gpu/tests.rs`, `extra/tephra`, and `scripts/test_*_gpu.ps1`. | Shader numerical results, resource usage, or synchronization requiring a GPU. Requires the appropriate adapter/backend; preserve documented opt-in/ignored status and prerequisites. |
 | Product/protocol tests | Their owning crates and tools: `wyn-analyzer` (LSP), `wyn-wasm` (compiler API/browser target), `extra/wyn-doc` and `extra/mdbook-wyn-highlight` (documentation processing), `extra/treereduce-wyn` (reducer), both Tree-sitter Rust manifests, and `extra/viz` (validation/runtime CLI). | Test the actual product boundary. A compiler check does not substitute for an LSP response, browser build, preprocessor protocol, grammar result, or renderer behavior. These standalone crates need their own Cargo commands. |
 | Shared source assets and sweeps | `testfiles/`, `testfiles/regressions/`, `testfiles/playground/`, package test programs, and `scripts/validate_testfiles.*` / `scripts/run_tests.sh`. | Reusable programs and broad compile/validation or execution sweeps. A source asset alone is not a test: identify its runner and assertions. Shader sweeps need `spirv-val` or the WGSL validator; GPU execution has additional requirements. |

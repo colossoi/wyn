@@ -1,0 +1,238 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = ["--graphics", "-O"]
+--! rust_host = true
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"literal\"", ":source-name \"range\"", ":source-name \"implicit_count\"", ":source-name \"mapped\"", ":source-name \"named\"", ":source-name \"borrowed\"", ":source-name \"slice\"", ":source-name \"indirect\"", ":source-name \"nonindexed_command\"", ":source-name \"nonindexed_commands\"", ":source-name \"uniform_command\"", ":source-name \"named_command\"", ":source-name \"commands\"", ":source-name \"offset\"", ":source-name \"dynamic\"", ":source-name \"inline_implicit_literal\"", ":source-name \"inline_implicit_named\"", ":source-name \"inline_implicit_borrowed\"", ":source-name \"inline_explicit_literal\"", ":source-name \"inline_explicit_named\"", ":source-name \"inline_explicit_borrowed\""]
+--! [[host]]
+--! entry = "literal"
+--! allocations = [12]
+--! draws = ["(:indexed allocation-12-0 :u32 3 2 0 0 0)"]
+--! [[host]]
+--! entry = "range"
+--! allocations = [12]
+--! draws = ["(:indexed allocation-12-0 :u32 3 2 0 0 0)"]
+--! [[host]]
+--! entry = "implicit_count"
+--! allocations = [12]
+--! draws = ["(:indexed allocation-12-0 :u32 3 2 0 0 0)"]
+--! [[host]]
+--! entry = "mapped"
+--! allocations = [12]
+--! draws = ["(:indexed allocation-12-0 :u32 3 2 0 0 0)"]
+--! inputs = {"mapped_xs" = [0, 0, 0]}
+--! [[host]]
+--! entry = "named"
+--! allocations = [12]
+--! draws = ["(:indexed allocation-12-0 :u32 3 2 0 0 0)"]
+--! inputs = {"named_xs" = [0, 0, 0]}
+--! [[host]]
+--! entry = "borrowed"
+--! allocations = []
+--! draws = ["(:indexed input-borrowed-xs :u32 3 2 0 0 0)"]
+--! inputs = {"borrowed_xs" = [0, 0, 0]}
+--! [[host]]
+--! entry = "slice"
+--! allocations = [12]
+--! draws = ["(:indexed allocation-12-0 :u32 3 2 0 0 0)"]
+--! inputs = {"slice_xs" = [0, 0, 0, 0, 0]}
+--! [[host]]
+--! entry = "indirect"
+--! allocations = [12, 20]
+--! draws = ["(:indexed-indirect allocation-12-0 :u32 allocation-20-0 0 1 20)"]
+--! [[host]]
+--! entry = "nonindexed_command"
+--! allocations = [16]
+--! draws = ["(:indirect allocation-16-0 0 1 16)"]
+--! [[host]]
+--! entry = "nonindexed_commands"
+--! allocations = [16]
+--! draws = ["(:indirect allocation-16-0 0 1 16)"]
+--! [[host]]
+--! entry = "uniform_command"
+--! allocations = [12, 20]
+--! draws = ["(:indexed-indirect allocation-12-0 :u32 allocation-20-0 0 1 20)"]
+--! inputs = {"cmd" = [3, 2, 0, 0, 0]}
+--! [[host]]
+--! entry = "named_command"
+--! allocations = [12, 20]
+--! draws = ["(:indexed-indirect allocation-12-0 :u32 allocation-20-0 0 1 20)"]
+--! [[host]]
+--! entry = "commands"
+--! allocations = [12, 20]
+--! draws = ["(:indexed-indirect allocation-12-0 :u32 allocation-20-0 0 1 20)"]
+--! [[host]]
+--! entry = "offset"
+--! allocations = [12, 40]
+--! draws = ["(:indexed-indirect allocation-12-0 :u32 allocation-40-0 20 1 20)"]
+--! [[host]]
+--! entry = "dynamic"
+--! allocations = [12, 20]
+--! draws = ["(:indexed-indirect allocation-12-0 :u32 allocation-20-0 0 1 20)"]
+--! [[host]]
+--! entry = "inline_implicit_literal"
+--! parameters = 2
+--! allocations = [12]
+--! draws = ["(:indexed allocation-12-0 :u32 3 2 0 0 0)"]
+--! [[host]]
+--! entry = "inline_implicit_named"
+--! parameters = 2
+--! allocations = [12]
+--! draws = ["(:indexed allocation-12-0 :u32 3 2 0 0 0)"]
+--! [[host]]
+--! entry = "inline_implicit_borrowed"
+--! scalar_arguments = [3]
+--! allocations = []
+--! draws = ["(:indexed input-indices :u32 3 2 0 0 0)"]
+--! inputs = {"indices" = [0, 1, 2]}
+--! [[host]]
+--! entry = "inline_explicit_literal"
+--! parameters = 2
+--! allocations = [12]
+--! draws = ["(:indexed allocation-12-0 :u32 3 2 0 0 0)"]
+--! [[host]]
+--! entry = "inline_explicit_named"
+--! parameters = 2
+--! allocations = [12]
+--! draws = ["(:indexed allocation-12-0 :u32 3 2 0 0 0)"]
+--! [[host]]
+--! entry = "inline_explicit_borrowed"
+--! allocations = []
+--! draws = ["(:indexed input-indices :u32 3 2 0 0 0)"]
+--! inputs = {"indices" = [0, 1, 2]}
+
+-- Failure: compiler rejects the inline index array with "graphics invocation
+-- that cannot be planned as an ordered rasterization and shading operation".
+-- Expected: compile an indexed draw with three indices and two instances.
+-- Controls: direct_draw(3u32,2u32), or an entry-supplied []u32 index buffer,
+-- both compile. No compute, culling, fragment discard, or custom depth is needed.
+-- Reproduce from /home/jonah/wyn:
+-- wyn build fluid-simulation/test/repro_indexed_literal.wyn --graphics -o /tmp/repro-indexed-literal.spv
+entry literal(screen: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    indexed_draw_from([0u32,1u32,2u32],3u32,2u32,0u32,0i32,0u32),
+    |vi,ii,_| vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+  shade_with({depth_test = #less_equal, depth_write = true,
+              blend = #replace, color_write = true},
+    screen, covered, |_,_,_,_,_| @[1.0,0.0,0.0,1.0])
+
+
+entry range(screen:render_target<vec4f32>) render_target<vec4f32> =
+   let covered=rasterize_triangles(indexed_draw_from(0u32..<3u32,3u32,2u32,0u32,0i32,0u32),
+    |vi,ii,_|vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+  shade(screen,covered,|_,_,_,_,_|@[1.0,0.0,0.0,1.0])
+
+entry implicit_count(screen:render_target<vec4f32>) render_target<vec4f32> =
+   let covered=rasterize_triangles(indexed_draw(0u32..<3u32,2u32),
+    |vi,ii,_|vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+  shade(screen,covered,|_,_,_,_,_|@[1.0,0.0,0.0,1.0])
+
+entry mapped(mapped_xs:[3]u32,screen:render_target<vec4f32>) render_target<vec4f32> =
+   let covered=rasterize_triangles(indexed_draw_from(map(|i|i+1u32,mapped_xs),3u32,2u32,0u32,0i32,0u32),
+    |vi,ii,_|vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+  shade(screen,covered,|_,_,_,_,_|@[1.0,0.0,0.0,1.0])
+
+entry named(named_xs:[3]u32,screen:render_target<vec4f32>) render_target<vec4f32> =
+  let indices=map(|i|i+1u32,named_xs) in let covered=rasterize_triangles(indexed_draw_from(indices,3u32,2u32,0u32,0i32,0u32),
+    |vi,ii,_|vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+  shade(screen,covered,|_,_,_,_,_|@[1.0,0.0,0.0,1.0])
+
+entry borrowed(borrowed_xs:[3]u32,screen:render_target<vec4f32>) render_target<vec4f32> =
+   let covered=rasterize_triangles(indexed_draw_from(borrowed_xs,3u32,2u32,0u32,0i32,0u32),
+    |vi,ii,_|vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+  shade(screen,covered,|_,_,_,_,_|@[1.0,0.0,0.0,1.0])
+
+entry slice(slice_xs:[5]u32,screen:render_target<vec4f32>) render_target<vec4f32> =
+   let covered=rasterize_triangles(indexed_draw_from(slice_xs[1..4],3u32,2u32,0u32,0i32,0u32),
+    |vi,ii,_|vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+  shade(screen,covered,|_,_,_,_,_|@[1.0,0.0,0.0,1.0])
+
+-- Failure: "graphics invocation that cannot be planned as an ordered
+-- rasterization and shading operation", even with let-bound indices and command.
+-- Expected: compile an indexed indirect draw of two triangle instances.
+-- Control: indexed_draw_from(indices,3u32,2u32,0u32,0i32,0u32) compiles.
+-- Reproduce from /home/jonah/wyn:
+-- wyn build fluid-simulation/test/repro_indexed_indirect.wyn --graphics -o /tmp/repro-indexed-indirect.spv
+entry indirect(screen: render_target<vec4f32>) render_target<vec4f32> =
+  let indices = [0u32,1u32,2u32] in
+  let command = {index_count = 3u32, instance_count = 2u32, first_index = 0u32,
+                 vertex_offset = 0i32, first_instance = 0u32} in
+  let covered = rasterize_triangles(indexed_indirect_draw(indices,command),
+    |vi,ii,_| vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+  shade_with({depth_test = #less_equal, depth_write = true,
+              blend = #replace, color_write = true},
+    screen, covered, |_,_,_,_,_| @[1.0,0.0,0.0,1.0])
+
+
+entry nonindexed_command(screen:render_target<vec4f32>) render_target<vec4f32> =
+   let covered=rasterize_triangles(indirect_draw({vertex_count=3u32,instance_count=2u32,first_vertex=0u32,first_instance=0u32}),
+    |vi,ii,_|vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+  shade(screen,covered,|_,_,_,_,_|@[1.0,0.0,0.0,1.0])
+
+entry nonindexed_commands(screen:render_target<vec4f32>) render_target<vec4f32> =
+   let covered=rasterize_triangles(indirect_draws([{vertex_count=3u32,instance_count=2u32,first_vertex=0u32,first_instance=0u32}]),
+    |vi,ii,_|vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+  shade(screen,covered,|_,_,_,_,_|@[1.0,0.0,0.0,1.0])
+
+entry uniform_command(cmd:{index_count:u32,instance_count:u32,first_index:u32,vertex_offset:i32,first_instance:u32},screen:render_target<vec4f32>) render_target<vec4f32> =
+   let covered=rasterize_triangles(indexed_indirect_draw([0u32,1u32,2u32],cmd),
+    |vi,ii,_|vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+  shade(screen,covered,|_,_,_,_,_|@[1.0,0.0,0.0,1.0])
+
+entry named_command(n:u32,screen:render_target<vec4f32>) render_target<vec4f32> =
+  let command={index_count=3u32,instance_count=n+1u32,first_index=0u32,vertex_offset=0i32,first_instance=0u32} in let covered=rasterize_triangles(indexed_indirect_draw([0u32,1u32,2u32],command),
+    |vi,ii,_|vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+  shade(screen,covered,|_,_,_,_,_|@[1.0,0.0,0.0,1.0])
+
+entry commands(screen:render_target<vec4f32>) render_target<vec4f32> =
+   let covered=rasterize_triangles(indexed_indirect_draws([0u32,1u32,2u32],[{index_count=3u32,instance_count=2u32,first_index=0u32,vertex_offset=0i32,first_instance=0u32}]),
+    |vi,ii,_|vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+  shade(screen,covered,|_,_,_,_,_|@[1.0,0.0,0.0,1.0])
+
+entry offset(screen:render_target<vec4f32>) render_target<vec4f32> =
+   let covered=rasterize_triangles(indexed_indirect_draw([0u32,1u32,2u32],[{index_count=3u32,instance_count=2u32,first_index=0u32,vertex_offset=0i32,first_instance=0u32},{index_count=3u32,instance_count=2u32,first_index=0u32,vertex_offset=0i32,first_instance=0u32}][1]),
+    |vi,ii,_|vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+  shade(screen,covered,|_,_,_,_,_|@[1.0,0.0,0.0,1.0])
+
+entry dynamic(i:i32,screen:render_target<vec4f32>) render_target<vec4f32> =
+   let covered=rasterize_triangles(indexed_indirect_draw([0u32,1u32,2u32],[{index_count=3u32,instance_count=2u32,first_index=0u32,vertex_offset=0i32,first_instance=0u32},{index_count=3u32,instance_count=2u32,first_index=0u32,vertex_offset=0i32,first_instance=0u32}][i]),
+    |vi,ii,_|vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+  shade(screen,covered,|_,_,_,_,_|@[1.0,0.0,0.0,1.0])
+
+entry inline_implicit_literal(screen:render_target<vec4f32>) render_target<vec4f32> =
+     let covered=rasterize_triangles(indexed_draw([0u32,1u32,2u32], 2u32),
+      |vi,ii,_|vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+    shade_with({depth_test=#less_equal,depth_write=true,blend=#replace,color_write=true},
+      screen,covered,|_,_,_,_,_|@[1.0,0.0,0.0,1.0])
+
+entry inline_implicit_named(screen:render_target<vec4f32>) render_target<vec4f32> =
+    let indices=[0u32,1u32,2u32] in let covered=rasterize_triangles(indexed_draw(indices, 2u32),
+      |vi,ii,_|vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+    shade_with({depth_test=#less_equal,depth_write=true,blend=#replace,color_write=true},
+      screen,covered,|_,_,_,_,_|@[1.0,0.0,0.0,1.0])
+
+entry inline_implicit_borrowed(indices:[]u32,screen:render_target<vec4f32>) render_target<vec4f32> =
+     let covered=rasterize_triangles(indexed_draw(indices, 2u32),
+      |vi,ii,_|vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+    shade_with({depth_test=#less_equal,depth_write=true,blend=#replace,color_write=true},
+      screen,covered,|_,_,_,_,_|@[1.0,0.0,0.0,1.0])
+
+entry inline_explicit_literal(screen:render_target<vec4f32>) render_target<vec4f32> =
+     let covered=rasterize_triangles(indexed_draw_from([0u32,1u32,2u32], 3u32, 2u32, 0u32, 0i32, 0u32),
+      |vi,ii,_|vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+    shade_with({depth_test=#less_equal,depth_write=true,blend=#replace,color_write=true},
+      screen,covered,|_,_,_,_,_|@[1.0,0.0,0.0,1.0])
+
+entry inline_explicit_named(screen:render_target<vec4f32>) render_target<vec4f32> =
+    let indices=[0u32,1u32,2u32] in let covered=rasterize_triangles(indexed_draw_from(indices, 3u32, 2u32, 0u32, 0i32, 0u32),
+      |vi,ii,_|vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+    shade_with({depth_test=#less_equal,depth_write=true,blend=#replace,color_write=true},
+      screen,covered,|_,_,_,_,_|@[1.0,0.0,0.0,1.0])
+
+entry inline_explicit_borrowed(indices:[]u32,screen:render_target<vec4f32>) render_target<vec4f32> =
+     let covered=rasterize_triangles(indexed_draw_from(indices, 3u32, 2u32, 0u32, 0i32, 0u32),
+      |vi,ii,_|vertex_output(@[f32.u32(vi)*0.5,f32.u32(ii)*0.5,0.5,1.0],0.0)) in
+    shade_with({depth_test=#less_equal,depth_write=true,blend=#replace,color_write=true},
+      screen,covered,|_,_,_,_,_|@[1.0,0.0,0.0,1.0])

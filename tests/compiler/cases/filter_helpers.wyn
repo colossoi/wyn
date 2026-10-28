@@ -51,5 +51,5 @@ entry tuple_reduce_fragment_main(pos: vec4f32) vec4f32 =
 
 -- wgsl_i32_range_filter_then_map_validates
 entry filtered_range_map() []i32 =
-  let kept = filter(|i| i % 2 == 0, iota(64)) in
+  let kept = filter(|i| i % 2 == 0, iota(4096)) in
   map(|i| i + 1, kept)

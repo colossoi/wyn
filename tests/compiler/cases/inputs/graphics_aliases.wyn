@@ -1,0 +1,13 @@
+entry projection(values:[]vec4f32,target:render_target<vec4f32>) render_target<vec4f32> =
+  let produced=(map(|v|v+@[1.0,0.0,0.0,0.0],values),map(|v|v*2.0,values)) let selected=produced.0
+  let first=(selected,0i32) let (unpacked,_)=first let copy=unpacked let second={data=(copy,selected),tag=2i32} let pair=second.data let alias=pair.0
+  let fragments=rasterize_triangles(direct_draw(3u32,1u32),
+    |_,_,_|vertex_output(alias[0],())) in
+  shade(target,fragments,|_,_,_,_,_|alias[0])
+
+entry map_input(values:[]vec4f32,target:render_target<vec4f32>) render_target<vec4f32> =
+  let produced=(map(|v|v+@[1.0,0.0,0.0,0.0],values),map(|v|v*2.0,values)) let selected=produced.0
+  let first=(selected,values) let (a,_)=first let second={item=(a,a)} let alias=second.item.1 let mapped=map(|v|v*3.0,alias)
+  let fragments=rasterize_triangles(direct_draw(3u32,1u32),
+    |_,_,_|vertex_output(mapped[0],())) in
+  shade(target,fragments,|_,_,_,_,_|mapped[0])

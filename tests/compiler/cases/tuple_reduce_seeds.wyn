@@ -1,0 +1,60 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"loop_seed\"", ":source-name \"plain_seed\"", ":source-name \"constant_combiner\"", ":source-name \"slice_seed\"", ":source-name \"scan_seed\""]
+
+entry loop_seed(xs: []f32) f32 =
+  let zero = replicate(3, 0.0) in
+  loop value = 0.0 for step < 2 do
+    let (total, _) = reduce(
+      |(a, sa): ([3]f32, f32), (b, sb): ([3]f32, f32)|
+        (map(|i: i32| a[i] + b[i], iota(3)), sa + sb),
+      (zero, 0.0),
+      map(|x: f32| ([x + value, x, x], x), xs)) in
+    total[0]
+
+
+entry plain_seed(xs: []f32) f32 =
+  let zero = replicate(3, 0.0) in
+  let value = 0.0 in
+    let (total, _) = reduce(
+      |(a, sa): ([3]f32, f32), (b, sb): ([3]f32, f32)|
+        (map(|i: i32| a[i] + b[i], iota(3)), sa + sb),
+      (zero, 0.0),
+      map(|x: f32| ([x + value, x, x], x), xs)) in
+    total[0]
+
+
+entry constant_combiner(xs: []f32) f32 =
+  let zero = replicate(3, 0.0) in
+  loop value = 0.0 for step < 2 do
+    let (total, _) = reduce(
+      |(a, sa): ([3]f32, f32), (b, sb): ([3]f32, f32)|
+        (zero, sa + sb),
+      (zero, 0.0),
+      map(|x: f32| ([x + value, x, x], x), xs)) in
+    total[0]
+
+
+entry slice_seed(xs: []f32) f32 =
+  let values = replicate(5, 0.0) in let zero: [3]f32 = values[1..4] in
+  loop value = 0.0 for step < 2 do
+    let (total, _) = reduce(
+      |(a, sa): ([3]f32, f32), (b, sb): ([3]f32, f32)|
+        (map(|i: i32| a[i] + b[i], iota(3)), sa + sb),
+      (zero, 0.0),
+      map(|x: f32| ([x + value, x, x], x), xs)) in
+    total[0]
+
+
+entry scan_seed(xs: []f32) f32 =
+  let zero = replicate(3, 0.0) in
+  let value = 0.0 in
+    let scanned = scan(
+      |(a, sa): ([3]f32, f32), (b, sb): ([3]f32, f32)|
+        (map(|i: i32| a[i] + b[i], iota(3)), sa + sb),
+      (zero, 0.0),
+      map(|x: f32| ([x + value, x, x], x), xs)) in
+    let (total, _) = scanned[length(xs) - 1] in total[0]

@@ -134,19 +134,6 @@ fn fused_intermediate_element_types_do_not_restrict_final_reuse() {
 }
 
 #[test]
-fn permission_alone_does_not_allow_overwriting_observed_or_captured_contents() {
-    for source in [
-        "entry main(xs:[]i32) []i32 = map(|x:i32|x+1,xs)",
-        "entry main(xs:*[]i32) ([]i32,[]i32) = (map(|x:i32|x+1,xs),xs)",
-        "entry main(xs:*[]i32) []i32 = map(|x:i32|x+xs[0],xs)",
-        "entry main(xs:*[]i32) []bool = map(|x:i32|x>0,xs)",
-    ] {
-        let output = pipeline(source);
-        assert_ne!(output.program.interface.source_results[0].binding, 0, "{source}");
-    }
-}
-
-#[test]
 fn independent_writers_cannot_both_reuse_one_input() {
     let output = pipeline("entry main(xs:*[]i32) ([]i32,[]i32) = (map(|x:i32|x+1,xs),map(|x:i32|x*2,xs))");
     let results = &output.program.interface.source_results;
@@ -450,56 +437,6 @@ fn fused_indexed_updates_reach_wgsl() {
 }
 
 #[test]
-fn integer_indexed_reductions_select_atomic_and_compare_exchange_kernels() {
-    for (operator, primitive) in [
-        ("a+b", "atomicAdd"),
-        ("a&b", "atomicAnd"),
-        ("a|b", "atomicOr"),
-        ("a^b", "atomicXor"),
-        ("max(a,b)", "atomicCompareExchangeWeak"),
-    ] {
-        let source = format!(
-            "entry main(dest:*[3]i32, xs:[137]i32) [3]i32 =
-            reduce_by_index(dest, |a:i32,b:i32| {operator}, 0, map(|x:i32|x%3,xs), xs)"
-        );
-        compile(&source);
-        let output = pipeline(&source);
-        assert!(output.wgsl.contains(primitive), "{primitive}: {}", output.wgsl);
-        let Pipeline::Compute(p) = &output.program.interface.pipelines[0] else {
-            panic!("compute");
-        };
-        assert_eq!(p.stages[0].workgroup_size, (64, 1, 1));
-    }
-}
-
-#[test]
-fn cooperative_recipes_emit_barriers_and_workgroup_storage() {
-    for source in [
-        "entry main(xs:[]i32) i32 = reduce(|a:i32,b:i32|a+b,0,xs)",
-        "entry main(xs:[]i32) []i32 = filter(|x:i32|x%3==0,xs)",
-    ] {
-        compile(source);
-        let output = pipeline(source);
-        assert!(output.wgsl.contains("workgroupBarrier"));
-        assert!(output.wgsl.contains("var<workgroup>"));
-    }
-}
-
-#[test]
-fn scalar_domain_collectives_publish_scratch_and_capacity_dependencies() {
-    for source in [
-        include_str!("../../../testfiles/reduce_map_iota.wyn"),
-        include_str!("../../../testfiles/tinyporto_filter_scan.wyn"),
-    ] {
-        compile(source);
-        let output = pipeline(source);
-        let whl = output.program.to_whl("collectives.wgsl", host::ShaderFormat::Wgsl).unwrap();
-        wyn_host_interp::Program::parse(&whl).unwrap();
-        assert!(output.program.entries.iter().any(|entry| !entry.allocations.is_empty()));
-    }
-}
-
-#[test]
 fn external_functions_retain_their_declared_signatures() {
     let tlc = compile_thru_tlc(
         "#[linked(\"foreign_add\")] extern add(a:i32,b:i32) i32\nentry main(x:i32) i32 = add(x, 3)",
@@ -532,16 +469,6 @@ fn filtered_reduction_and_shared_count_reach_wgsl() {
 }
 
 #[test]
-fn invocation_local_filtered_and_mixed_collectives_reach_both_backends() {
-    let source = include_str!("../../../testfiles/rust_host_collectives.wyn");
-    compile(source);
-    let spirv = compile_thru_spirv(source).unwrap();
-    let bytes: Vec<_> = spirv.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
-    let module = spv::parse_u8_slice(&bytes, &spv::Options::default()).unwrap();
-    Validator::new(ValidationFlags::all(), Capabilities::all()).validate(&module).unwrap();
-}
-
-#[test]
 fn mapped_filter_result_keeps_its_runtime_sized_view() {
     compile(include_str!("../../../testfiles/filter_then_map.wyn"));
 }
@@ -554,27 +481,6 @@ fn signed_and_unsigned_integer_power_reach_wgsl() {
 #[test]
 fn invocation_local_filter_keeps_a_bounded_array_length() {
     compile(include_str!("../../../testfiles/filter_demo.wyn"));
-}
-
-#[test]
-fn computed_array_outputs_have_storage_and_a_writer() {
-    use host::{Binding, BufferLen};
-    for source in [
-        include_str!("../../../testfiles/array_param_view_multi.wyn"),
-        include_str!("../../../testfiles/array_param_view_slice.wyn"),
-    ] {
-        compile(source);
-        let output = pipeline(source);
-        let [result] = output.program.interface.source_results.as_slice() else {
-            panic!("one array result");
-        };
-        let Pipeline::Compute(p) = &output.program.interface.pipelines[result.pipeline_index] else {
-            panic!("compute result");
-        };
-        assert!(p.bindings.iter().any(|b| matches!(b, Binding::StorageBuffer {
-            set, binding, length: Some(BufferLen::Fixed { bytes: 4 }), ..
-        } if (*set, *binding) == (result.set, result.binding))));
-    }
 }
 
 #[test]
@@ -652,119 +558,6 @@ fn runtime_control_keeps_collectives_inside_device_execution() {
         "entry main(xs: [4]i32, yes: bool) [4]i32 = if yes then map(|x:i32|x+1,xs) else map(|x:i32|x-1,xs)",
     ] {
         compile(source);
-    }
-}
-
-#[test]
-fn scatter_local_destinations_reach_wgsl() {
-    for source in [
-        include_str!("../../../testfiles/regressions/scatter_radix_bit.wyn"),
-        "entry main(n: i32) [4]i32 = loop acc = [7, 7, 7, 7] for k < n do scatter(acc, [k], [k+10])",
-        "entry main() [4]i32 = scatter(replicate(4, 7i32), [2i32, 0i32], [30i32, 10i32])",
-        "entry main(xs: []i32) []i32 = scatter(replicate(length(xs), 7i32), [2i32, 0i32], [30i32, 10i32])",
-        "entry main() [4]i32 = scatter([7i32, 7i32, 7i32, 7i32], [2i32, 0i32], [30i32, 10i32])",
-        "entry main() [4]i32 = spread(4, 7i32, [2i32, 0i32], [30i32, 10i32])",
-    ] {
-        compile(source);
-    }
-}
-
-#[test]
-fn stored_fixed_array_updates_materialize_owned_contents() {
-    for source in [
-        "entry main() [258]i32 =
-            ((replicate(258,-1i32) with [0] = 0) with [256] = 1) with [257] = 0",
-        "entry main(n:i32) [258]i32 =
-            let empty = replicate(258,-1i32) in
-            if n == 0 then (empty with [256] = 0) with [257] = 0 else
-            let (result,count) = loop (result,count) = (empty,0i32)
-                while count < n do (result with [count] = count,count+1) in
-            (result with [256] = count) with [257] = 0",
-    ] {
-        compile(source);
-        let output = compile_thru_spirv(source).unwrap();
-        let bytes: Vec<_> = output.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
-        let module = spv::parse_u8_slice(&bytes, &spv::Options::default()).unwrap();
-        Validator::new(ValidationFlags::all(), Capabilities::all()).validate(&module).unwrap();
-    }
-}
-
-#[test]
-fn array_updates_preserve_loop_state_and_output_capacity() {
-    use crate::host::interface::{Binding, BufferLen};
-    for source in [
-        include_str!("../../../testfiles/regressions/array_update_return.wyn"),
-        include_str!("../../../testfiles/regressions/array_update_loop.wyn"),
-        include_str!("../../../testfiles/regressions/array_update_branch.wyn"),
-        include_str!("../../../testfiles/regressions/array_update_nested_queue.wyn"),
-        "entry main(n: i32) [4]i32 =
-            let (_, output) = loop (i, output) = (0i32, replicate(4, -1i32))
-                while i < n do (i+1, output with [i % 4] = i) in output",
-    ] {
-        compile(source);
-        for descriptor in [
-            pipeline(source).program.interface,
-            crate::compile_thru_spirv(source).unwrap().program.interface,
-        ] {
-            let [result] = descriptor.source_results.as_slice() else {
-                panic!("one array result");
-            };
-            let Pipeline::Compute(p) = &descriptor.pipelines[result.pipeline_index] else {
-                panic!("compute result");
-            };
-            assert!(
-                p.bindings.iter().any(|b| matches!(b, Binding::StorageBuffer {
-            set, binding, length: Some(BufferLen::Fixed { bytes: 16 }), ..
-        } if (*set, *binding) == (result.set, result.binding))),
-                "{source}\n{:?}",
-                p.bindings
-            );
-        }
-    }
-}
-
-#[test]
-fn existing_spirv_backend_also_accepts_the_handoff() {
-    for source in [
-        include_str!("../../../testfiles/regressions/stage_shared_mixed_tuple.wyn"),
-        include_str!("../../../testfiles/regressions/array_update_return.wyn"),
-        include_str!("../../../testfiles/regressions/array_update_loop.wyn"),
-        include_str!("../../../testfiles/regressions/scatter_radix_bit.wyn"),
-        "entry main(n: i32) [4]i32 = loop acc = [7, 7, 7, 7] for k < n do scatter(acc, [k], [k+10])",
-        "entry main() [4]i32 = scatter(replicate(4, 7i32), [2i32, 0i32], [30i32, 10i32])",
-        "entry main(xs: []i32) []i32 = scatter(replicate(length(xs), 7i32), [2i32, 0i32], [30i32, 10i32])",
-        "entry main() [4]i32 = scatter([7i32, 7i32, 7i32, 7i32], [2i32, 0i32], [30i32, 10i32])",
-        "entry main() [4]i32 = spread(4, 7i32, [2i32, 0i32], [30i32, 10i32])",
-        "entry main(xs: []i32) []i32 = map(|x: i32| x * 2, xs)",
-        "entry main(xs: []i32) [2]i32 = [xs[0], xs[1]]",
-        include_str!("../../../testfiles/filter_captures_runtime_array.wyn"),
-        include_str!("../../../testfiles/reduce_over_map.wyn"),
-        include_str!("../../../testfiles/scan_compute.wyn"),
-        include_str!("../../../testfiles/filter_then_map.wyn"),
-        "entry main(xs: [4]i32, n: i32) [4]i32 = loop acc = xs for k < n do map(|x: i32| x + k, acc)",
-    ] {
-        let tlc = compile_thru_tlc(source).unwrap();
-        let program = optimize_for_test(
-            schedule(
-                place(
-                    fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                    PipelineTopologyPolicy::AllowGenerated,
-                )
-                .unwrap(),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let ssa = finish_for_test(program, CodegenTarget::Spirv).unwrap();
-        let output = lower_ssa_to_spirv(ssa).unwrap();
-        let bytes: Vec<_> = output.spirv.iter().flat_map(|w| w.to_le_bytes()).collect();
-        let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
-        naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        )
-        .validate(&module)
-        .unwrap_or_else(|error| panic!("{error:?}\n{source}"));
     }
 }
 
@@ -1222,64 +1015,6 @@ fn bounded_filter_output_does_not_use_its_packed_backing_as_a_length() {
 }
 
 #[test]
-fn explicit_grids_preserve_all_axes_in_the_shader_and_descriptor() {
-    use host::DispatchSize;
-    for source in [
-        "entry main(xs:[4096]i32) [4096]i32 = map(|x:i32|x+1,xs)",
-        "entry main(xs:[4096]i32) i32 = reduce(|a:i32,b:i32|a+b,0,xs)",
-        "entry main(xs:[4096]i32) [4096]i32 = scan(|a:i32,b:i32|a+b,0,xs)",
-    ] {
-        for (x, y, z) in [(1, 1, 1), (2, 3, 4), (257, 1, 1), (3, 7, 17)] {
-            let output = pipeline_with_grid(source, Some((x, y, z)));
-            let [Pipeline::Compute(p)] = output.program.interface.pipelines.as_slice() else {
-                panic!("compute")
-            };
-            assert_eq!(
-                p.stages[0].dispatch_size,
-                DispatchSize::Fixed {
-                    x,
-                    y,
-                    z,
-                    explicit: true
-                }
-            );
-            for stage in &p.stages[1..] {
-                let (x, y, z) = if stage.entry_point.ends_with("offsets") { (x, y, z) } else { (1, 1, 1) };
-                assert_eq!(
-                    stage.dispatch_size,
-                    DispatchSize::Fixed {
-                        x,
-                        y,
-                        z,
-                        explicit: true
-                    }
-                );
-            }
-            if p.stages.len() > 1 {
-                let carries: Vec<_> =
-                    p.stages[0].writes.iter().filter(|slot| p.stages[1].reads.contains(slot)).collect();
-                assert!(!carries.is_empty());
-                for &slot in carries {
-                    assert!(matches!(&p.bindings[slot], host::Binding::StorageBuffer {
-                        length: Some(host::BufferLen::Fixed { bytes }), ..
-                    } if *bytes == u64::from(x) * u64::from(y) * u64::from(z) * 4));
-                }
-            }
-            let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
-            naga::valid::Validator::new(
-                naga::valid::ValidationFlags::all(),
-                naga::valid::Capabilities::all(),
-            )
-            .validate(&module)
-            .unwrap();
-            if y > 1 {
-                assert!(output.wgsl.contains(".y") && output.wgsl.contains(".z"));
-            }
-        }
-    }
-}
-
-#[test]
 fn direct_mode_keeps_collectives_in_the_authored_entry() {
     for source in [
         "entry main(xs:[137]i32) i32 = reduce(|a:i32,b:i32|a+b,0,xs)",
@@ -1483,27 +1218,6 @@ fn aggregate_forwarding_preserves_record_subsets_and_loop_state() {
                 }
             }
         }
-    }
-}
-
-#[test]
-fn materialized_boolean_reduction_reaches_both_backends() {
-    for condition in ["xs[0] > 0 || any", "any || xs[0] > 0", "any", "!any"] {
-        let source = format!(
-            "entry repro(xs: []i32) []i32 =
-              let any = reduce(|a,b| a || b,false,map(|x| x != 0,xs)) in
-              [if {condition} then 1i32 else 0i32]"
-        );
-        compile(&source);
-        let output = crate::compile_thru_spirv(&source).unwrap();
-        let bytes: Vec<_> = output.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
-        let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
-        naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        )
-        .validate(&module)
-        .unwrap();
     }
 }
 

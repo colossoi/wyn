@@ -1,0 +1,20 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"named_constant\"", ":source-name \"vector_0\"", ":source-name \"vector_1\"", ":source-name \"vector_2\"", ":source-name \"vector_3\"", ":source-name \"vector_4\"", ":source-name \"vector_5\"", ":source-name \"vector_6\"", ":source-name \"vector_7\"", ":source-name \"vector_8\"", ":source-name \"vector_9\"", ":source-name \"vector_10\""]
+
+def v:vec2f32 = vec.exp2(@[1.0, 2.0])
+entry named_constant(x:f32) vec2f32 = vec.max(v, @[3.0, 3.0])
+entry vector_0(x:f32) vec2f32 = vec.sin(@[0.0, 0.0])
+entry vector_1(x:f32) vec2f32 = vec.pow(@[2.0, 3.0], @[3.0, 2.0])
+entry vector_2(x:f32) vec2f32 = vec.floor(vec.exp2(@[1.0, 2.0]))
+entry vector_3(x:f32) vec4f32 = vec.abs(@[-1.0, -2.0, -3.0, -4.0].wzyx)
+entry vector_4(x:f32) vec2f32 = vec.floor(vec2f32(@[1i32, 3i32]))
+entry vector_5(x:f32) vec3f32 = clamp(@[-2.0, 0.5, 3.0], 0.0, 1.0)
+entry vector_6(x:f32) vec2f32 = mix(@[0.0, 4.0], @[4.0, 8.0], 0.25)
+entry vector_7(x:f32) vec2f32 = smoothstep(0.0, 1.0, @[0.25, 0.75])
+entry vector_8(x:f32) vec3f32 = step(0.5, @[0.25, 0.5, 0.75])
+entry vector_9(x:f32) vec2f32 = let v = @[-2.0, 4.0] in vec.max(v, @[0.0, 3.0])
+entry vector_10(x:f32) vec2f32 = let v = vec.exp2(@[1.0, 2.0]) in vec.sqrt(v)

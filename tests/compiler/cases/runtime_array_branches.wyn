@@ -1,0 +1,119 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"branch_extent\"", ":source-name \"updated_slice\"", ":source-name \"three_outputs\"", ":source-name \"zip_map\"", ":source-name \"nested_zip\"", ":source-name \"half_zip\"", ":source-name \"element_condition\"", ":source-name \"nested_branch\"", ":source-name \"half_slice\"", ":source-name \"mapped_branch\"", ":source-name \"updated_loop\"", ":source-name \"allocated_branches\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"allocated_loop_0_main\"", ":source-name \"allocated_loop_1_main\"", ":source-name \"allocated_loop_2_main\"", ":source-name \"allocated_loop_3_main\"", ":source-name \"allocated_loop_4_main\"", ":source-name \"allocated_loop_5_main\"", ":source-name \"allocated_loop_6_main\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"runtime_loop_0_main\"", ":source-name \"runtime_loop_1_main\"", ":source-name \"runtime_loop_2_main\"", ":source-name \"runtime_loop_3_main\"", ":source-name \"runtime_loop_4_main\""]
+
+-- Compiler handoff: returning branches with different runtime array extents.
+-- Expected: inputs of length <= 10 are unchanged; longer inputs return [].
+entry branch_extent(xs: []i32) []i32 =
+  if length(xs)>10 then replicate(0,0i32) else xs
+
+
+entry updated_slice(xs: []i32) []i32 =
+  let out = if length(xs)>10 then replicate(0,0i32) else xs
+  let start = if length(out)>0 then 1 else 0
+  in out[start..length(out)] with [0] = 99i32
+
+
+entry three_outputs(xs: []i32) ([]i32, []i32, []i32) =
+  let out = if length(xs)>10 then replicate(0,0i32) else xs
+  let start = if length(out)>0 then 1 else 0
+  in (out, out[0..length(out)], out[start..length(out)])
+
+
+-- Mapping zipped runtime views must preserve the branch's selected length.
+entry zip_map(xs: []i32) []i32 =
+  let out = if length(xs)>10 then replicate(0,0i32) else xs
+  in map(|(x,y)| x+y, zip(out,out))
+
+
+entry nested_zip(xs:[]i32) []i32 =
+         let out=if length(xs)>10 then replicate(0,0i32) else xs in
+         map(|(x,(y,z))|x+y+z,zip(out,zip(out,out)))
+
+entry half_zip(xs:[]i32) []i32 =
+         let out=if length(xs)>10 then replicate(0,0i32) else xs in
+         let half=out[0..length(out)/2] in map(|(x,y)|x+y,zip(half,half))
+
+entry element_condition(xs:[]i32) []i32 = if xs[0]>0 then replicate(2,7i32) else xs
+
+entry nested_branch(xs:[]i32) []i32 =
+         if length(xs)>10 then replicate(0,0i32)
+         else if length(xs)>5 then replicate(2,7i32) else xs
+
+entry half_slice(xs:[]i32) []i32 =
+         let out = if length(xs)>10 then replicate(0,0i32) else xs
+         in out[0..length(out)/2]
+
+entry mapped_branch(xs:[]i32) []i32 =
+         let out = if length(xs)>10 then replicate(0,0i32) else xs
+         in map(|x| x+1, out)
+
+entry updated_loop(xs:[]i32) []i32 =
+         let initial=if length(xs)>10 then replicate(0,0i32) else xs in
+         loop out=initial for i<length(initial) do out with [i]=out[i]+1
+
+entry allocated_branches(n:i32) []i32 =
+         let a=replicate(n,1i32) let b=replicate(n+1,2i32)
+         in if n>2 then a else b
+
+
+-- compiler_repro_allocated_array_loop
+entry allocated_loop_0_main(allocated_loop_0_n: i32) []i32 =
+  loop out = iota(allocated_loop_0_n) for _i < 2 do
+    let start = if length(out)>0 then 1 else 0
+    in out[start..length(out)]
+
+
+-- Compiler handoff: runtime-sized loop state allocated by replicate.
+-- For allocated_loop_1_n >= 0, expected allocated_loop_1_main(3) = [0,1,2] and allocated_loop_1_main(0) = [].
+entry allocated_loop_1_main(allocated_loop_1_n: i32) []i32 =
+  loop out = replicate(allocated_loop_1_n,0i32) for i < allocated_loop_1_n do out with [i] = i
+
+
+entry allocated_loop_2_main(allocated_loop_2_n:i32) []i32 =
+         loop out=replicate(allocated_loop_2_n,0i32) while allocated_loop_2_n>0 && out[0]<3 do out with [0]=out[0]+1
+
+entry allocated_loop_3_main(allocated_loop_3_n:i32) []i32 =
+         loop out=replicate(allocated_loop_3_n,0i32) for i<allocated_loop_3_n do
+           loop inner=out for j<2 do inner with [i]=inner[i]+1
+
+entry allocated_loop_4_main(allocated_loop_4_n:i32) ([]i32,[]i32) =
+         let initial=replicate(allocated_loop_4_n,0i32)
+         let output=loop out=initial for i<allocated_loop_4_n do out with [i]=i+1
+         in (initial,output)
+
+entry allocated_loop_5_main(allocated_loop_5_n:i32) []i32 =
+         loop out=iota(allocated_loop_5_n) for i<2 do out[1..length(out)]
+
+entry allocated_loop_6_main(allocated_loop_6_n:i32) []i32 =
+         let out=loop out=iota(allocated_loop_6_n) for i<2 do out[1..length(out)]
+         in map(|x|x+1,out)
+
+
+-- compiler_repro_runtime_array_loop
+-- Runtime array state retains its input extent across element updates.
+-- Expected runtime_loop_0_main([3, 7, -2]) = [4, 8, -1], and runtime_loop_0_main([]) = [].
+entry runtime_loop_0_main(runtime_loop_0_xs: []i32) []i32 =
+  loop out = runtime_loop_0_xs for i < length(runtime_loop_0_xs) do out with [i] = runtime_loop_0_xs[i] + 1
+
+
+entry runtime_loop_1_main(runtime_loop_1_xs:[]i32) []i32 = runtime_loop_1_xs with [0] = runtime_loop_1_xs[0]+1
+
+entry runtime_loop_2_main(runtime_loop_2_xs:[]i32) []i32 =
+         loop out=runtime_loop_2_xs while length(out)>0 && out[0]<4 do out with [0]=out[0]+1
+
+entry runtime_loop_3_main(runtime_loop_3_xs:[]i32) []i32 =
+         loop out=runtime_loop_3_xs for i<length(runtime_loop_3_xs) do
+           loop inner=out for j<2 do inner with [i]=inner[i]+1
+
+entry runtime_loop_4_main(runtime_loop_4_xs:[]i32) []i32 =
+         loop out=runtime_loop_4_xs[1..length(runtime_loop_4_xs)] for i<length(runtime_loop_4_xs)-1 do out with [i]=out[i]+1

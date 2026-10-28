@@ -1,0 +1,157 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"handoff_mapped_double\"", ":source-name \"handoff_gather_pair\"", ":source-name \"handoff_filter_capture\"", ":source-name \"handoff_reduce_map\"", ":source-name \"handoff_scan\"", ":source-name \"handoff_filter_map\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"row_scan_0_main\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"scan_total_0_streamed\"", ":source-name \"scan_total_0_nested\"", ":source-name \"scan_total_0_conditional\"", ":source-name \"scan_total_0_cooperative\"", ":source-name \"scan_total_0_local_scatter\"", ":source-name \"scan_total_1_main\"", ":source-name \"scan_total_2_main\"", ":source-name \"scan_total_3_main\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"mixed_collective_0_total\"", ":source-name \"mixed_collective_0_ordered\"", ":source-name \"mixed_collective_0_prefixes\"", ":source-name \"mixed_collective_0_ordered_prefixes\"", ":source-name \"mixed_collective_0_survivors\"", ":source-name \"mixed_collective_0_scoped\"", ":source-name \"mixed_collective_0_nested\"", ":source-name \"mixed_collective_0_local_filtered\"", ":source-name \"mixed_collective_0_local_mixed\"", ":source-name \"mixed_collective_0_ranked_stored\"", ":source-name \"mixed_collective_0_ranked_generated\"", ":source-name \"mixed_collective_0_ranked_3d\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"boolean_reduce_0_repro\"", ":source-name \"boolean_reduce_1_repro\"", ":source-name \"boolean_reduce_2_repro\"", ":source-name \"boolean_reduce_3_repro\""]
+
+entry handoff_mapped_double(mapped_double_input: []i32) []i32 = map(|x: i32| x * 2, mapped_double_input)
+
+entry handoff_gather_pair(gather_pair_input: []i32) [2]i32 = [gather_pair_input[0], gather_pair_input[1]]
+
+entry handoff_filter_capture(filter_capture_input: []i32) ([]i32, i32) =
+  let kept = filter(|i| filter_capture_input[i] > 0, iota(4096))
+  let mapped = map(|i| i + 1, kept) in
+  (mapped, length(kept))
+
+
+-- Inline SOAC fusion: a `reduce` consuming a `map` directly as its input
+-- (no intervening `let`). Fusion folds the map into a Redomap, avoiding an
+-- in-register runtime-sized Composite intermediate:
+--   reduce(op, ne, map(g, filter_capture_input)) → redomap(op∘g, op, ne, filter_capture_input)
+
+entry handoff_reduce_map(reduce_map_input: []f32) f32 =
+  reduce(|a: f32, b: f32| a + b, 0.0, map(|x: f32| x * 2.0, reduce_map_input))
+
+
+-- Scan (prefix sum) compute shader test
+-- Computes running sum of an array: [1,2,3,4] → [1,3,6,10]
+
+entry handoff_scan(
+    #[size_hint(1024)] data: []f32
+) []f32 =
+    scan(|a: f32, b: f32| a + b, 0.0, data)
+
+
+entry handoff_filter_map() []i32 =
+  let kept = filter(|i| i % 2 == 0, iota(4096)) in
+  map(|i| i + 1, kept)
+
+
+
+-- inferred_array_scan_accumulators_keep_their_row_layout
+entry row_scan_0_main() [16]i32 =
+      let rows=map(|i| map(|j| if i == j then 1i32 else 0i32,iota(16)),iota(4)) in
+        let ranks=scan(|a,b| map(|(x,y)| x+y,zip(a,b)),replicate(16,0i32),rows) in
+        ranks[3]
+
+
+-- scan_outputs_can_use_completed_totals
+-- Output callbacks need the completed reduction, not the running total.
+def scan_total_0_row<[scan_total_0_n]>(scan_total_0_xs: [scan_total_0_n]i32) [scan_total_0_n]i32 =
+  let prefix = scan((+), 0, scan_total_0_xs) in
+  let total = reduce((+), 0, scan_total_0_xs) in
+  map(|x| x + total, prefix)
+
+entry scan_total_0_streamed() [513]i32 = scan_total_0_row(map(|i| i + 1, iota(513)))
+
+entry scan_total_0_nested() [2][513]i32 =
+  map(|j| scan_total_0_row(map(|i| i + j + 1, iota(513))), iota(2))
+
+entry scan_total_0_conditional() [2][17]i32 =
+  map(|j| if j == 0 then scan_total_0_row(map(|i| i + 1, iota(17))) else copy(iota(17)), iota(2))
+
+entry scan_total_0_cooperative() [2][513]i32 =
+  map(|j| loop scan_total_0_xs = map(|i| i + j + 1, iota(513)) for k < 2 do scan_total_0_row(scan_total_0_xs), iota(2))
+
+entry scan_total_0_local_scatter() [2][17]i32 =
+  map(|j|
+    let scan_total_0_xs = map(|i| i + j, iota(17)) in
+    let ones = map(|_| 1, scan_total_0_xs) in
+    let prefix = scan((+), 0, ones) in
+    let total = reduce((+), 0, ones) in
+    scatter((#[scratch] copy(scan_total_0_xs)), map(|p| total - p, prefix), scan_total_0_xs), iota(2))
+
+
+entry scan_total_1_main(scan_total_1_xs:[]i32) []i32 = let p=scan((+),0,scan_total_1_xs) in let t=reduce((+),0,scan_total_1_xs) in map(|x|x+t,p)
+
+entry scan_total_2_main(scan_total_2_xs:[][513]i32) [][513]i32 = map(|row|let p=scan((+),0,row) in let t=reduce((+),0,row) in map(|x|x+t,p),scan_total_2_xs)
+
+entry scan_total_3_main(scan_total_3_xs:[2][17]i32) [2][17]i32 = map(|row|if row[0]>0 then let p=scan((+),0,row) in let t=reduce((+),0,row) in map(|x|x+t,p) else row,scan_total_3_xs)
+
+
+-- invocation_local_filtered_and_mixed_collectives_reach_both_backends
+entry mixed_collective_0_total(mixed_collective_0_xs: []i32) i32 = reduce(|a:i32,b:i32|a+b, 0, mixed_collective_0_xs)
+-- Affine composition is associative but not commutative: reassociation may
+-- change the tree, but must retain the order of inputs and neutral padding.
+def mixed_collective_0_compose(p:(i32,i32),q:(i32,i32)) (i32,i32) =
+  let (a,b)=p in let (c,d)=q in
+  ((a*c)%251,(b*c+d)%251)
+entry mixed_collective_0_ordered(mixed_collective_0_xs: []i32, mixed_collective_0_n: i32) (i32,i32) =
+  reduce(mixed_collective_0_compose,(1,0),map(|i| let x=mixed_collective_0_xs[i] in ((x+8)%7+1,(x+8)%251),iota(mixed_collective_0_n)))
+entry mixed_collective_0_prefixes(mixed_collective_0_xs: []i32) []i32 = scan(|a:i32,b:i32|a+b, 0, mixed_collective_0_xs)
+entry mixed_collective_0_ordered_prefixes(mixed_collective_0_xs: []i32) []i32 =
+  map(|p|p.1, scan(mixed_collective_0_compose,(1,0),map(|x|((x+8)%7+1,(x+8)%251),mixed_collective_0_xs)))
+entry mixed_collective_0_survivors(mixed_collective_0_xs: []i32) (i32, i32) =
+  let mixed_collective_0_ys = filter(|x:i32|x>0, mixed_collective_0_xs) in
+  (length(mixed_collective_0_ys), reduce(|a:i32,b:i32|a+b, 0, mixed_collective_0_ys))
+entry mixed_collective_0_scoped(mixed_collective_0_xs: []i32) []i32 =
+  map(|x:i32| loop a=0 for i<7 do
+    a+(if x==0 then i else 120/x+i), mixed_collective_0_xs)
+entry mixed_collective_0_nested(mixed_collective_0_xs: []i32) []i32 =
+  map(|x:i32| loop a=0 for i<4 do
+    a+(loop b=0 for j<3 do b+x*i+j), mixed_collective_0_xs)
+
+-- Invocation-local fusion must apply the predicate without reading the
+-- filtered array back from the collective that is currently being emitted.
+entry mixed_collective_0_local_filtered(input: []i32) [4]i32 =
+  let mixed_collective_0_xs=input[0..4] in
+  map(|p| let mixed_collective_0_ys=filter(|x|x<p,mixed_collective_0_xs) in
+    10*reduce(|a,b|a+b,0,mixed_collective_0_ys)+length(mixed_collective_0_ys), mixed_collective_0_xs)
+
+-- Two retained arrays follow two totals in the fused result list, but occupy
+-- array output buffers zero and one.
+entry mixed_collective_0_local_mixed(input: []i32) [4]i32 =
+  let mixed_collective_0_xs=input[0..4] in
+  map(|p| let mixed_collective_0_ys=map(|x|x+p,mixed_collective_0_xs)
+    let mixed_collective_0_zs=map(|x|x-p,mixed_collective_0_xs) in
+    reduce(|a,b|a+b,0,mixed_collective_0_ys)+2*reduce(|a,b|a+b,0,mixed_collective_0_zs)+mixed_collective_0_ys[0]+2*mixed_collective_0_zs[3], mixed_collective_0_xs)
+
+entry mixed_collective_0_ranked_stored(stored_dest: *[6][1]i32, items: *[2][3](i32,i32)) ([6][1]i32,[6]u32,u32) =
+  bucket_scatter_2d(stored_dest,items)
+
+entry mixed_collective_0_ranked_generated(generated_dest: *[120][1]i32, bias: []i32) ([120][1]i32,[120]u32,u32) =
+  let items: [2][3][4][5](i32,i32) =
+    map(|i|map(|j|map(|k|map(|l|
+      (((i*3+j)*4+k)*5+l,1000*i+100*j+10*k+l+bias[0]),
+      iota(5)),iota(4)),iota(3)),iota(2))
+  in bucket_scatter_4d(generated_dest,items)
+
+entry mixed_collective_0_ranked_3d(cube_dest: *[24][1]i32, bias: []i32) ([24][1]i32,[24]u32,u32) =
+  let items: [2][3][4](i32,i32) =
+    map(|i|map(|j|map(|k|
+      ((i*3+j)*4+k,100*i+10*j+k+bias[0]),iota(4)),iota(3)),iota(2))
+  in bucket_scatter_3d(cube_dest,items)
+
+
+
+-- materialized_boolean_reduction_reaches_both_backends
+entry boolean_reduce_0_repro(boolean_reduce_0_xs: []i32) []i32 = let any = reduce(|a,b| a || b,false,map(|x| x != 0,boolean_reduce_0_xs)) in [if boolean_reduce_0_xs[0] > 0 || any then 1i32 else 0i32]
+
+entry boolean_reduce_1_repro(boolean_reduce_1_xs: []i32) []i32 = let any = reduce(|a,b| a || b,false,map(|x| x != 0,boolean_reduce_1_xs)) in [if any || boolean_reduce_1_xs[0] > 0 then 1i32 else 0i32]
+
+entry boolean_reduce_2_repro(boolean_reduce_2_xs: []i32) []i32 = let any = reduce(|a,b| a || b,false,map(|x| x != 0,boolean_reduce_2_xs)) in [if any then 1i32 else 0i32]
+
+entry boolean_reduce_3_repro(boolean_reduce_3_xs: []i32) []i32 = let any = reduce(|a,b| a || b,false,map(|x| x != 0,boolean_reduce_3_xs)) in [if !any then 1i32 else 0i32]

@@ -1,0 +1,39 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"atomic_reduce_0_main\"", ":source-name \"atomic_reduce_1_main\"", ":source-name \"atomic_reduce_2_main\"", ":source-name \"atomic_reduce_3_main\"", ":source-name \"atomic_reduce_4_main\""]
+--! [[shader]]
+--! entry = "atomic_reduce_0_main"
+--! workgroup_size = [64, 1, 1]
+--! atomic = "Add"
+--! [[shader]]
+--! entry = "atomic_reduce_1_main"
+--! workgroup_size = [64, 1, 1]
+--! atomic = "And"
+--! [[shader]]
+--! entry = "atomic_reduce_2_main"
+--! workgroup_size = [64, 1, 1]
+--! atomic = "InclusiveOr"
+--! [[shader]]
+--! entry = "atomic_reduce_3_main"
+--! workgroup_size = [64, 1, 1]
+--! atomic = "ExclusiveOr"
+--! [[shader]]
+--! entry = "atomic_reduce_4_main"
+--! workgroup_size = [64, 1, 1]
+--! atomic = "Exchange"
+
+
+
+-- integer_indexed_reductions_select_atomic_and_compare_exchange_kernels
+entry atomic_reduce_0_main(atomic_reduce_0_dest:*[3]i32,atomic_reduce_0_xs:[137]i32) [3]i32=reduce_by_index(atomic_reduce_0_dest,|a:i32,b:i32|a+b,0,map(|x:i32|x%3,atomic_reduce_0_xs),atomic_reduce_0_xs)
+
+entry atomic_reduce_1_main(atomic_reduce_1_dest:*[3]i32,atomic_reduce_1_xs:[137]i32) [3]i32=reduce_by_index(atomic_reduce_1_dest,|a:i32,b:i32|a&b,0,map(|x:i32|x%3,atomic_reduce_1_xs),atomic_reduce_1_xs)
+
+entry atomic_reduce_2_main(atomic_reduce_2_dest:*[3]i32,atomic_reduce_2_xs:[137]i32) [3]i32=reduce_by_index(atomic_reduce_2_dest,|a:i32,b:i32|a|b,0,map(|x:i32|x%3,atomic_reduce_2_xs),atomic_reduce_2_xs)
+
+entry atomic_reduce_3_main(atomic_reduce_3_dest:*[3]i32,atomic_reduce_3_xs:[137]i32) [3]i32=reduce_by_index(atomic_reduce_3_dest,|a:i32,b:i32|a^b,0,map(|x:i32|x%3,atomic_reduce_3_xs),atomic_reduce_3_xs)
+
+entry atomic_reduce_4_main(atomic_reduce_4_dest:*[3]i32,atomic_reduce_4_xs:[137]i32) [3]i32=reduce_by_index(atomic_reduce_4_dest,|a:i32,b:i32|max(a,b),0,map(|x:i32|x%3,atomic_reduce_4_xs),atomic_reduce_4_xs)

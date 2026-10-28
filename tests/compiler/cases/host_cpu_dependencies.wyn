@@ -1,0 +1,47 @@
+--! command = "build"
+--! exit = 0
+--! rust_host = true
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"cpu_dependency_0_main\"", ":source-name \"cpu_dependency_1_main\"", ":source-name \"cpu_dependency_2_main\"", ":source-name \"cpu_dependency_3_main\"", ":source-name \"cpu_dependency_4_main\""]
+--! [[host]]
+--! entry = "cpu_dependency_0_main"
+--! host_inputs = true
+--! minimum_calls = { "host-read-scalar" = 1 }
+--! calls = { "gpu-read-scalar" = 0 }
+--! [[host]]
+--! entry = "cpu_dependency_1_main"
+--! host_inputs = true
+--! minimum_calls = { "host-read-scalar" = 1 }
+--! calls = { "gpu-read-scalar" = 0 }
+--! [[host]]
+--! entry = "cpu_dependency_2_main"
+--! host_inputs = true
+--! minimum_calls = { "host-read-scalar" = 1 }
+--! calls = { "gpu-read-scalar" = 0 }
+--! [[host]]
+--! entry = "cpu_dependency_3_main"
+--! host_inputs = true
+--! minimum_calls = { "host-read-scalar" = 1 }
+--! calls = { "gpu-read-scalar" = 0 }
+--! [[host]]
+--! entry = "cpu_dependency_4_main"
+--! host_inputs = false
+--! [[artifacts]]
+--! path = "output.rs"
+--! contains = ["pub fn encode_cpu_dependency_"]
+--! excludes = ["read_gpu_word"]
+
+
+
+-- cpu_input_dependencies_cover_scalar_work_and_dispatch_loops
+entry cpu_dependency_0_main(cpu_dependency_0_n:i32) i32=if cpu_dependency_0_n>0 then cpu_dependency_0_n*cpu_dependency_0_n else cpu_dependency_0_n+1
+
+entry cpu_dependency_1_main(cpu_dependency_1_n:i32) []i32=iota(cpu_dependency_1_n)
+
+entry cpu_dependency_2_main(cpu_dependency_2_xs:[8]i32,cpu_dependency_2_n:i32) [8]i32=loop cpu_dependency_2_values=cpu_dependency_2_xs for i<cpu_dependency_2_n do map(|x|x+i,cpu_dependency_2_values)
+
+entry cpu_dependency_3_main(cpu_dependency_3_xs:[]i32,cpu_dependency_3_n:i32) []i32=let a=loop acc=0 for i<cpu_dependency_3_n do acc+i in map(|x:i32|x+a,cpu_dependency_3_xs)
+
+entry cpu_dependency_4_main(cpu_dependency_4_xs:[137]i32) []i32=let total=reduce((+),0,cpu_dependency_4_xs) in map(|x:i32|x+total,cpu_dependency_4_xs)

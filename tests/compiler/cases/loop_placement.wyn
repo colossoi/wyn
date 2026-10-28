@@ -1,0 +1,49 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"sibling_loop_0_reproduce\"", ":source-name \"sibling_loop_1_reproduce\"", ":source-name \"sibling_loop_2_reproduce\"", ":source-name \"sibling_loop_3_reproduce\""]
+--! [[shader]]
+--! entry = "sibling_loop_0_reproduce"
+--! loop_depths = [0, 0, 0]
+--! [[shader]]
+--! entry = "sibling_loop_1_reproduce"
+--! loop_depths = [0, 0, 0]
+--! [[shader]]
+--! entry = "sibling_loop_2_reproduce"
+--! loop_depths = [0, 0, 0]
+--! [[shader]]
+--! entry = "sibling_loop_3_reproduce"
+--! loop_depths = [0, 0, 0]
+
+
+
+-- earlier_loop_result_is_not_recomputed_inside_its_consumer
+def sibling_loop_0_walk(sibling_loop_0_xs:[]i32, seed:i32) i32 =
+            let (total,j) = loop (total,j) = (0i32,0i32)
+              while j < length(sibling_loop_0_xs) do (total+sibling_loop_0_xs[j],j+1) in
+            let (value,k) = loop (value,k) = (seed,0i32)
+          while k < 64 do ((value+total)%100003,k+1) in value
+            entry sibling_loop_0_reproduce(sibling_loop_0_xs:[]i32) []i32 = map(|i|sibling_loop_0_walk(sibling_loop_0_xs,i),0i32..<64)
+
+def sibling_loop_1_walk(sibling_loop_1_xs:[]i32, seed:i32) i32 =
+            let (total,j) = loop (total,j) = (0i32,0i32)
+              while j < length(sibling_loop_1_xs) do (total+sibling_loop_1_xs[j],j+1) in
+            loop value=seed for k<64 do (value+total)%100003
+            entry sibling_loop_1_reproduce(sibling_loop_1_xs:[]i32) []i32 = map(|i|sibling_loop_1_walk(sibling_loop_1_xs,i),0i32..<64)
+
+def sibling_loop_2_walk(sibling_loop_2_xs:[]i32, seed:i32) i32 =
+            let (total,j) = loop (total,j) = (0i32,0i32)
+              while j < length(sibling_loop_2_xs) do (total+sibling_loop_2_xs[j],j+1) in
+            loop value=seed while value < total do value+1
+            entry sibling_loop_2_reproduce(sibling_loop_2_xs:[]i32) []i32 = map(|i|sibling_loop_2_walk(sibling_loop_2_xs,i),0i32..<64)
+
+def sibling_loop_3_walk(sibling_loop_3_xs:[]i32, seed:i32) i32 =
+            let (total,j) = loop (total,j) = (0i32,0i32)
+              while j < length(sibling_loop_3_xs) do (total+sibling_loop_3_xs[j],j+1) in
+            let (value,k) = loop (value,k) = (seed,0i32)
+          while k < 64 do
+            if k%2 == 0 then ((value+total)%100003,k+1) else (value,k+1)
+          in value
+            entry sibling_loop_3_reproduce(sibling_loop_3_xs:[]i32) []i32 = map(|i|sibling_loop_3_walk(sibling_loop_3_xs,i),0i32..<64)
