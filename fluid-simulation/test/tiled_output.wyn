@@ -1,0 +1,16 @@
+-- Regression: tiled stores must preserve metadata and ordinary row consumers.
+-- An incomplete tile must retain the gather and its explicit -1 padding.
+def row(i:i32) [3]i32 = [i,i+1,i+2]
+entry mapped() ([16]i32,[8]i32) =
+  let rows=map(row,iota(8)) in
+  (map(|a|rows[(a/8)*4+a%4][(a%8)/4],iota(16)),map(|r|r[2],rows))
+entry reduced() ([16]i32,i32) =
+  let rows=map(row,iota(8)) in
+  (map(|a|let i=(a/8)*4+a%4 in if i<length(rows) then rows[i][(a%8)/4] else -1,iota(16)),
+   reduce((+),0,map(|r|r[2],rows)))
+entry retained() ([16]i32,[8][3]i32) =
+  let rows=map(row,iota(8)) in
+  (map(|a|rows[(a/8)*4+a%4][(a%8)/4],iota(16)),rows)
+entry padded() [16]i32 =
+  let rows=map(row,iota(7)) in
+  map(|a|let i=(a/8)*4+a%4 in if i<length(rows) then rows[i][(a%8)/4] else -1,iota(16))

@@ -67,7 +67,17 @@ pub fn place(
 }
 
 /// Select dispatch recipes, resource requirements, and ordering constraints.
-pub fn schedule(mut program: Program<'_, Placed>) -> Result<Program<'_, Scheduled>, OptimizeError> {
+pub fn schedule(program: Program<'_, Placed>) -> Result<Program<'_, Scheduled>, OptimizeError> {
+    schedule_with_subgroups(program, false)
+}
+
+/// Enable native subgroup arithmetic on devices supporting that shader feature.
+/// Without it, scheduling retains portable workgroup collectives.
+pub fn schedule_with_subgroups(
+    mut program: Program<'_, Placed>,
+    enabled: bool,
+) -> Result<Program<'_, Scheduled>, OptimizeError> {
+    program.graph.parse_and_run_program(None, &format!("(set (SubgroupsEnabled) {enabled})"))?;
     let _timing = timing::span("egglog scheduling");
     planning::schedule(&mut program.graph)?;
     Ok(program.advance(Scheduled))

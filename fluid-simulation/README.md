@@ -13,6 +13,11 @@ bash fluid-simulation/run.sh --skip-build --max-frames 60
 bash fluid-simulation/run.sh --skip-build --compile-only
 ```
 
+The launcher builds with `--subgroups`, enabling native GPU scan/reduction arithmetic.
+It needs a GPU with subgroup support; omit that compiler flag for the portable
+workgroup implementation. Direct tiled neighbor output is enabled in both modes.
+
+
 Requires Rust/Cargo, Python 3, and a GPU supported by `extra/viz`. The launcher
 runs the generated `.wynhost` program, which allocates intermediate buffers
 and schedules compute stages. The launcher supplies initial feedback storage.

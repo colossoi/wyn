@@ -340,8 +340,14 @@ final digit with zero bits, so `get_bit` is never called beyond `num_bits`.
 
 A 32-bit sort has eight passes of three dispatches (24 body launches), plus the
 initial carry copy. Small constant neutral arrays execute locally. The scan uses
-one shared bank with a barrier between reads and writes, reducing this variant's
-per-workgroup scan storage from 64 KiB to 32 KiB. Its sixteen-stream prefix buffer
+one shared bank with a barrier between reads and writes. Egglog estimates
+materialized accumulator sizes and chooses a chunk width from 32–256 lanes,
+targeting roughly 8 KiB of accumulator storage per workgroup. Four-bit uses
+64-lane chunks and 8 KiB of shared state; two-bit retains 256-lane chunks.
+The carry-combine phase still uses 256 lanes and four-bit's 32 KiB shared bank.
+This is a scheduling heuristic, not a hard allocation limit. Missing layout estimates and the 32-lane floor can let actual storage exceed
+the target.
+Its sixteen-stream prefix buffer
 still occupies `64n` bytes; fewer launches alone do not establish better performance.
 
 Egglog selects expansion of constant local traversals up to sixteen elements.
@@ -358,11 +364,20 @@ from 64 B to 16 MiB in factors of eight; every timed output is checked against
 the reference sort. The script writes raw samples and a Matplotlib chart under
 `target/radix-bench/results`.
 
-At 16 MiB, the GTX 1660 Ti measured 27.1 ms for two-bit and 81.6 ms for four-bit
-resident sorting (medians of five runs after one warmup). Four-bit improved from
-1454.8 ms before local traversal expansion and columnar shared storage. Including
-transfers, the corresponding times were 48.2 ms and 104.6 ms. This remains a
-performance checkpoint: four-bit is still slower than two-bit on this GPU.
+At 16 MiB, the GTX 1660 Ti measured 26.3 ms for two-bit and 65.5 ms for four-bit
+resident sorting (medians of five runs after one warmup, 2026-10-27). Including
+transfers, the corresponding times were 44.2 ms and 86.6 ms. The size-dependent
+chunk width reduces four-bit time by about 20% from the 81.6 ms checkpoint;
+that checkpoint had already improved from 1454.8 ms through local traversal
+expansion and columnar shared storage. Raw samples for the width change are in
+`target/radix-bench/results/width-policy/`. Four-bit remains about 2.5× slower
+than two-bit at this size; the heuristic has only been timed on this GPU.
+
+The width change passed planning and scan tests plus GPU regressions on SPIR-V
+and WGSL. `wide_scan_order.wyn` checks noncommutative affine-composition prefixes
+across multiple tiles and a partial tile with a wide accumulator. The benchmark
+verifies every output from 64 B through 16 MiB. Three dispatches per pass and the
+Wyn radix source algorithm remain unchanged.
 
 ### Fusion and sharing
 

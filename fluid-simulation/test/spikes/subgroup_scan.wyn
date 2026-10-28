@@ -1,0 +1,4 @@
+-- Spike: every 32-element row must equal its CPU inclusive prefix sum.
+-- The generated-shader variant tests subgroup lowering of this same operation.
+entry main(xs: [32768][32]u32) [32768][32]u32 =
+  map(|row| scan((+),0u32,row),xs)

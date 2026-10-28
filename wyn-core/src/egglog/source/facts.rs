@@ -77,6 +77,12 @@ impl<'source> Import<'_, '_, '_, 'source> {
         } else if !semantic.is_array() && matches!(semantic, Type::Constructed(_, _)) {
             self.sink.add("SourceAtomicType", key)?;
         }
+        if matches!(
+            semantic,
+            Type::Constructed(TypeName::Int(32) | TypeName::UInt(32) | TypeName::Float(32), _)
+        ) {
+            self.sink.add("SourceSubgroupScalar", key)?;
+        }
         let storage = storage_value_type(ty);
         if let Some((size, align)) = std430_type_layout(&storage) {
             self.sink.add("SourceBlockLayout", (key, i64::from(size), i64::from(align)))?;

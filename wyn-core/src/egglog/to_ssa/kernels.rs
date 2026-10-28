@@ -289,13 +289,20 @@ pub(super) fn write_arrays(
     cache: &mut LookupMap<Value, Typed>,
 ) -> Result<(), OptimizeError> {
     let mut position = 0;
-    for (role, _, source) in results {
+    for (role, slot, source) in results {
         if role != "array" {
             continue;
         }
-        if let Some(output) = body.slot(scope, operation, "output", position, 2)? {
+        let output = body.slot(scope, operation, "output", position, 2)?;
+        let tiled = body.compiler.facts.set("TiledOutputs", (operation, *slot));
+        if output.is_some() || !tiled.is_empty() {
             let value = element(body, scope, plan, *source, indices, cache)?;
-            body.store_at(output, indices, value)?;
+            for destination in tiled {
+                body.store_tiled(scope, destination, indices[0].clone(), value.clone())?;
+            }
+            if let Some(output) = output {
+                body.store_at(output, indices, value)?;
+            }
         }
         position += 1;
     }

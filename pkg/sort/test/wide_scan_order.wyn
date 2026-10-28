@@ -1,0 +1,10 @@
+-- Failure: a chunk-width mismatch loses carries or changes operand order.
+-- Sixteen affine-composition streams force a wide accumulator; 33025 rows
+-- cross multiple tiles and leave a partial final tile. Check against CPU prefixes.
+entry main() [33025]vec2i32 =
+  let prefixes = scan(
+    |a,b| map2(|x,y| @[x.x*y.x,x.y*y.x+y.y],a,b),
+    replicate(16,@[1i32,0i32]),
+    map(|i| map(|j| @[if (i+j)%3 == 0 then -1i32 else 1i32,(i+j)%97],iota(16)),
+      iota(33025))) in
+  map(|row| row[0],prefixes)

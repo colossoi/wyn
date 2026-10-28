@@ -22,7 +22,8 @@ impl Default for DeviceRequest<'_> {
     fn default() -> Self {
         Self {
             instance_flags: InstanceFlags::VALIDATION,
-            desired_features: Features::FLOAT32_FILTERABLE
+            desired_features: Features::SUBGROUP
+                | Features::FLOAT32_FILTERABLE
                 | Features::VERTEX_WRITABLE_STORAGE
                 | Features::PUSH_CONSTANTS
                 | Features::POLYGON_MODE_LINE

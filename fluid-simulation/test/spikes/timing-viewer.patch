@@ -1,0 +1,7 @@
+--- a/src/modes/pipeline.rs
++++ b/src/modes/pipeline.rs
+@@ -227,0 +228 @@
++        let timing = std::time::Instant::now();
+@@ -273,0 +275,2 @@
++        self.backend.device.poll(wgpu::PollType::wait_indefinitely())?;
++        eprintln!("[frame timing] {} {:.6} ms", frame.index, timing.elapsed().as_secs_f64()*1000.0);

@@ -1,0 +1,14 @@
+-- Spike: both spellings must produce identical tiled neighbor IDs and counts.
+-- Inspect whether the scatter spelling eliminates the [n][98] intermediate.
+module N = import "../../packages/spatial/src/neighbors"
+def row<[n]>(positions:[n]vec4f32,i:i32) [98]i32 =
+  N.linked_particle_neighbors(i,positions,[@[(i/64)*64,64]],
+    ((replicate(258,-1i32) with [0]=0) with [256]=1) with [257]=0,1.0)
+entry baseline(positions:[4096]vec4f32) ([393216]i32,[4096]i32) =
+  let rows=map(|i|row(positions,i),iota(4096)) in
+  (map(|a| rows[(a/3072)*32+a%32][(a%3072)/32],iota(393216)),map(|r|r[96],rows))
+entry candidate(positions:[4096]vec4f32) ([393216]i32,[4096]i32) =
+  let rows=map(|i|row(positions,i),iota(4096)) in
+  let values=map(|a|rows[a/96][a%96],iota(393216)) in
+  let addresses=map(|a|let i=a/96 in (i/32)*3072+(a%96)*32+i%32,iota(393216)) in
+  (scatter(scratch(393216),addresses,values),map(|r|r[96],rows))

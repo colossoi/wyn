@@ -1,0 +1,30 @@
+-- Check: output must match stable sorting by the low four bits, preserving payloads.
+-- The updated compiler passes GPU checks on both backends; both compile blockers are fixed.
+-- Spike: a single four-bit stable pass, using 64-key blocks and packed local
+-- two-bit scans. Compare key/payload order with the existing four-bit pass.
+-- This establishes the block-histogram decomposition, not the full upstream kernel.
+module Sort = import "pkg:sort"
+def local_sort(xs:[64]vec2u32) [64]vec2u32 =
+  loop xs=xs for pass<2 do
+    let bins=map(|x| (x.x >> u32(pass*2)) & 3u32,xs) in
+    let flags=map(|b|1u32 << (b*8u32),bins) in
+    let prefix=scan((+),0u32,flags) in
+    let total=reduce((+),0u32,flags) in
+    let bases=(total<<8u32)+(total<<16u32)+(total<<24u32) in
+    let destinations=map2(|b,p|i32(((p+bases)>>(b*8u32))&255u32)-1,bins,prefix) in
+    scatter(duplicate_scratch(xs),destinations,xs)
+entry baseline(xs:[4096]vec2u32) [4096]vec2u32 =
+  Sort.FourBit.radix_sort_step(xs,|i,p|u32.get_bit(i,p.x),0)
+entry candidate(xs:[4096]vec2u32) [4096]vec2u32 =
+  let blocks=map(|b|local_sort(map(|j|xs[b*64+j],iota(64))),iota(64)) in
+  let counts=map(|bin|map(|b|
+    reduce((+),0i32,map(|j|i32.bool((xs[b*64+j].x&15u32)==u32(bin)),iota(64))),iota(64)),iota(16)) in
+  let prefixes=map(|cs|scan((+),0i32,cs),counts) in
+  let totals=map(|cs|reduce((+),0i32,cs),counts) in
+  let starts=scan((+),0i32,totals) in
+  let values=map(|i|blocks[i/64][i%64],iota(4096)) in
+  let destinations=map(|i|
+    let b=i/64 in let lane=i%64 in let bin=i32(values[i].x&15u32) in
+    let local_start=loop s=0i32 for j<bin do s+counts[j][b] in
+    starts[bin]-totals[bin]+prefixes[bin][b]-counts[bin][b]+lane-local_start,iota(4096)) in
+  scatter(duplicate_scratch(xs),destinations,values)

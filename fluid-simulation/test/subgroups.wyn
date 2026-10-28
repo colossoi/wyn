@@ -1,0 +1,7 @@
+-- Regression: every row must match a CPU scan/reduction, including inactive
+-- lanes, multiple subgroups, signed values, and the custom-operator fallback.
+entry scan65(xs:[3][65]i32) [3][65]i32 = map(|r|scan((+),0i32,r),xs)
+entry sum65(xs:[3][65]i32) [3]i32 = map(|r|reduce((+),0i32,r),xs)
+entry float17(floats:[3][17]f32) [3][17]f32 = map(|r|scan((+),0.0,r),floats)
+entry max17(short:[3][17]i32) [3][17]i32 =
+  map(|r|scan(|a,b|max(a,b),-2147483648,r),short)

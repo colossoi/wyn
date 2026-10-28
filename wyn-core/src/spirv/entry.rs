@@ -2,6 +2,7 @@
 //! `lower_ssa_body_for_entry` in `mod.rs`.
 
 use super::*;
+use crate::builtins::catalog;
 use crate::interface;
 use crate::op;
 use crate::ssa;
@@ -76,6 +77,31 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
                 spirv::BuiltIn::NumWorkgroups => constructor.num_workgroups = Some(variable),
                 spirv::BuiltIn::WorkgroupId => constructor.workgroup_id = Some(variable),
                 _ => unreachable!(),
+            }
+            interfaces.push(variable);
+        }
+    }
+    if is_compute {
+        let known = catalog().known();
+        for (id, builtin) in [
+            (known.subgroup_id, spirv::BuiltIn::SubgroupId),
+            (known.num_subgroups, spirv::BuiltIn::NumSubgroups),
+        ] {
+            if !body.inner.insts.iter().any(|(_, inst)| {
+                matches!(&inst.data,
+                InstKind::Op { tag: op::OpTag::Intrinsic { id: found, .. }, .. } if *found == id)
+            }) {
+                continue;
+            }
+            constructor.builder.capability(spirv::Capability::GroupNonUniform);
+            let pointer =
+                constructor.get_or_create_ptr_type(spirv::StorageClass::Input, constructor.u32_type);
+            let variable = constructor.builder.variable(pointer, None, spirv::StorageClass::Input, None);
+            constructor.builder.decorate(variable, spirv::Decoration::BuiltIn, [Operand::BuiltIn(builtin)]);
+            if id == known.subgroup_id {
+                constructor.subgroup_id = Some(variable);
+            } else {
+                constructor.num_subgroups = Some(variable);
             }
             interfaces.push(variable);
         }

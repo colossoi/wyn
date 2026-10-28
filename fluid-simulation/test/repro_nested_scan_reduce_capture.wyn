@@ -1,0 +1,10 @@
+-- Regression: inside an outer map, binding a computed reduction result (`offset`)
+-- and capturing it in an inner map over a scan previously made SSA lowering report
+-- "cyclic source evaluation during SSA emission". The updated compiler now passes
+-- compilation and GPU output checks on both WGSL and SPIR-V (2026-10-27).
+-- Expected: compile successfully; [[1,2],[3,4]] should produce [[5,7],[11,15]].
+-- Control: compute the reduction + 1 inside the inner map instead of binding offset.
+entry main(xs: [2][2]i32) [2][2]i32 =
+  map(|row|
+    let offset = reduce((+), 0i32, row) + 1 in
+    map(|x| x + offset, scan((+), 0i32, row)), xs)

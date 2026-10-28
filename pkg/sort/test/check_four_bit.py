@@ -44,7 +44,14 @@ def check(source, expected, directory, target, needle=None):
 def main():
     pairs = sorted([((i % 97) * 2654435761 & 0xffffffff, i) for i in range(513)],
                    key=lambda pair: pair[0])
+    affine = []
+    scale, shift = 1, 0
+    for i in range(33025):
+        factor = -1 if i % 3 == 0 else 1
+        scale, shift = scale * factor, shift * factor + i % 97
+        affine.extend([scale, shift])
     cases = {
+        "wide_scan_order.wyn": [affine],
         "small_local_arrays.wyn": [[180,261], [0,1,2,3,4,6,8,10,12,15,18,21]],
         "radix_four_bit_generic.wyn": [[40,20,10,30],[-2,-1,0,3],[-2.0,-1.25,0.0,3.5],[32,33,1,2],[3,1,2]],
         "radix_four_bit_keys.wyn": [[20,40,10,30],[0xbf800001,0xbf800003,4,0x3f800002]],

@@ -109,3 +109,8 @@
 (function SourceIndexedArray (SourceValue) SourceValue :no-merge)
 
 (relation SourceBinary (SourceValue String SourceValue SourceValue))
+
+(relation SourceSubgroupScalar (TypeKey))
+
+(function SourceIndex (SourceValue) SourceValue :no-merge)
+(relation SourceUnitRange (SourceValue SourceValue SourceValue))

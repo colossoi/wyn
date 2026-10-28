@@ -4,7 +4,7 @@ use super::{coordinates, emit_bindings, invocation, screma, workgroup};
 use crate::op::BinaryOperator;
 use crate::LookupMap;
 use egglog_engine::sort::S;
-use egglog_engine::Value;
+use egglog_engine::{RawValues, Value};
 
 pub(super) fn emit(
     body: &mut Body<'_, '_, '_>,
@@ -15,6 +15,9 @@ pub(super) fn emit(
     results: &[(String, i64, Value)],
 ) -> Result<(), OptimizeError> {
     let group = body.has_workgroup_scope("MapExecution", owner);
+    if group && body.compiler.facts.contains("NativeSubgroups", RawValues(vec![])) {
+        body.prepare_subgroups(width)?;
+    }
     let extents = body.compiler.facts.iteration_dimensions(owner)?;
     let mut dimensions = Vec::new();
     if extents.len() > 1 {
@@ -35,9 +38,11 @@ pub(super) fn emit(
             coordinates::decode(body, &dimensions, index)?
         };
         for (_, slot, _) in results.iter().filter(|r| r.0 == "array") {
-            let Some(output) = body.slot(scope, owner, "output", *slot, 2)? else {
+            let output = body.slot(scope, owner, "output", *slot, 2)?;
+            let tiled = body.compiler.facts.set("TiledOutputs", (owner, *slot));
+            if output.is_none() && tiled.is_empty() {
                 continue;
-            };
+            }
             let Some(bindings) = body.compiler.facts.lookup("MapOutputBindings", (owner, *slot)) else {
                 return Err(error("map output has no selected callback bindings"));
             };
@@ -65,9 +70,12 @@ pub(super) fn emit(
                         let role = body.compiler.program.graph.value_to_base::<S>(role);
                         let slot = body.compiler.facts.unsigned(slot, "segment result slot")? as usize;
                         let results = body.compiler.facts.results(plan)?;
+                        let Some(output) = output.clone() else {
+                            return Err(error("segment output missing"));
+                        };
                         let target = screma::SegmentOutput {
                             source,
-                            output: output.clone(),
+                            output,
                             indices: &indices,
                             axes,
                             role: role.as_ref(),
@@ -95,6 +103,12 @@ pub(super) fn emit(
                         body.invocation_execution = previous_execution;
                         let value = value?;
                         let indices = coordinates::project(body, axes, &indices, None)?;
+                        for destination in &tiled {
+                            body.store_tiled(scope, *destination, indices[0].clone(), value.clone())?;
+                        }
+                        let Some(output) = &output else {
+                            return Ok(());
+                        };
                         if group {
                             let lane = body.local_id()?;
                             let first = body.binary(BinaryOperator::Equal, lane, Body::number(0))?;

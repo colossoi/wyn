@@ -1,4 +1,5 @@
 //! Literal expansion and the disjoint inclusive-range spelling.
+use crate::tlc::{ArrayExpr, TermKind};
 use crate::{compile_thru_frontend, compile_thru_tlc};
 use crate::{compile_thru_spirv, compile_thru_ssa, lower_ssa_to_wgsl};
 
@@ -138,5 +139,20 @@ fn literal_expansion_preserves_component_order() {
         assert_eq!(tlc.defs.len(), 1);
         let actual = values(&tlc.defs[0].body, &mut HashMap::new());
         assert_eq!(actual, expected, "{literal}");
+    }
+}
+
+#[test]
+fn inclusive_stepped_ranges_count_the_endpoint_after_dividing() {
+    for (range, count) in [("0..2..=4", 3), ("0..2..=5", 3), ("1..3..=10", 4), ("2..=2", 1)] {
+        let source = format!("entry main() [{count}]i32 = {range}");
+        let tlc = compile_thru_tlc(&source).unwrap();
+        let TermKind::ArrayExpr(ArrayExpr::Range { len, .. }) = &tlc.defs[0].body.kind else {
+            panic!("expected a virtual range: {source}");
+        };
+        let TermKind::IntLit(length) = &len.kind else {
+            panic!("range length was not folded: {source}");
+        };
+        assert_eq!(length.parse::<usize>().unwrap(), count, "{source}");
     }
 }

@@ -61,6 +61,7 @@ pub(super) fn place(graph: &mut EGraph, topology: PipelineTopologyPolicy) -> Res
             include_str!("planning/execution.egg"),
             "\n",
             include_str!("planning/bindings.egg"),
+            include_str!("planning/output-layouts.egg"),
             "\n",
             include_str!("planning/capacity.egg")
         ),

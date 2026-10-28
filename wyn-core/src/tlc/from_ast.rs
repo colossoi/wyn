@@ -651,23 +651,22 @@ impl<'a> Transformer<'a> {
                 //   `a..b`   (Exclusive)   → b - a
                 //   `a..<b`  (ExclusiveLt) → b - a
                 //   `a..>b`  (ExclusiveGt) → a - b   (descending half-open)
-                //   `a..=b`  (Inclusive)   → b - a + 1
+                //   `a..=b`  (Inclusive)   → (b - a) / step + 1
                 let mut len = match range.kind {
-                    ast::RangeKind::Exclusive | ast::RangeKind::ExclusiveLt => {
+                    ast::RangeKind::Exclusive | ast::RangeKind::ExclusiveLt | ast::RangeKind::Inclusive => {
                         self.build_binop(minus.clone(), end.clone(), start.clone(), elem_ty.clone(), span)
                     }
                     ast::RangeKind::ExclusiveGt => {
                         self.build_binop(minus.clone(), start.clone(), end.clone(), elem_ty.clone(), span)
                     }
-                    ast::RangeKind::Inclusive => {
-                        let one = self.mk_term(elem_ty.clone(), span, TermKind::IntLit("1".to_string()));
-                        let diff =
-                            self.build_binop(minus, end.clone(), start.clone(), elem_ty.clone(), span);
-                        self.build_binop(plus, diff, one, elem_ty.clone(), span)
-                    }
                 };
                 if let Some(ref step_term) = step {
                     len = self.build_binop(div, len, step_term.clone(), elem_ty.clone(), span);
+                }
+
+                if range.kind == ast::RangeKind::Inclusive {
+                    let one = self.mk_term(elem_ty.clone(), span, TermKind::IntLit("1".to_string()));
+                    len = self.build_binop(plus, len, one, elem_ty, span);
                 }
 
                 let range_ae = ArrayExpr::Range {

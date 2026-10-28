@@ -1,5 +1,7 @@
 use super::super::query::Query;
-use super::super::{finish_for_test, from_tlc, fuse, optimize_for_test, place, schedule};
+use super::super::{
+    finish_for_test, from_tlc, fuse, optimize_for_test, place, schedule, schedule_with_subgroups,
+};
 use crate::{compile_thru_tlc, CodegenTarget, PipelineTopologyPolicy};
 use egglog_engine::{
     sort::{SetContainer, VecContainer, S},
@@ -104,6 +106,24 @@ fn radix_step_has_three_phases() {
 }
 
 #[test]
+fn collective_width_tracks_materialized_accumulator_size() {
+    for (columns, expected) in [(8, 256), (9, 128), (32, 64), (65, 32)] {
+        let source = format!(
+            "entry main(xs:[][{columns}]i32) [][{columns}]i32 =
+             scan(|a,b|map2((+),a,b),replicate({columns},0i32),xs)"
+        );
+        planned(&source, |graph| {
+            let query = Query(graph);
+            let scan = operations(graph, "scan")[0];
+            let plan = query.required("SelectedPlan", (scan,)).unwrap();
+            let owner = query.required("Owner", (plan,)).unwrap();
+            let width = query.required("CollectiveChunkWidth", (owner,)).unwrap();
+            assert_eq!(graph.value_to_base::<i64>(width), expected, "{columns} columns");
+        });
+    }
+}
+
+#[test]
 fn four_bit_radix_step_has_three_phases() {
     let source = format!(
         "{}\n entry main(xs: []vec2u32) []vec2u32 = radix_sort_step(xs, |i,p| u32.get_bit(i,p.x), 0)",
@@ -111,6 +131,11 @@ fn four_bit_radix_step_has_three_phases() {
     );
     planned(&source, |graph| {
         let query = Query(graph);
+        let scan = operations(graph, "scan")[0];
+        let plan = query.required("SelectedPlan", (scan,)).unwrap();
+        let owner = query.required("Owner", (plan,)).unwrap();
+        let width = query.required("CollectiveChunkWidth", (owner,)).unwrap();
+        assert_eq!(graph.value_to_base::<i64>(width), 64);
         let mut phases = Vec::new();
         query
             .for_each("Phase", |row| {
@@ -1196,5 +1221,66 @@ fn runtime_segmented_collectives_require_uniform_dimensions() {
                 })
                 .unwrap();
         });
+    }
+}
+
+#[test]
+fn subgroup_addition_is_opt_in_and_uses_small_segments() {
+    for enabled in [false, true] {
+        let tlc =
+            compile_thru_tlc("entry main(xs:[4][32]u32) [4][32]u32 = map(|row|scan((+),0u32,row),xs)")
+                .unwrap();
+        let program = schedule_with_subgroups(
+            place(
+                fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                PipelineTopologyPolicy::AllowGenerated,
+            )
+            .unwrap(),
+            enabled,
+        )
+        .unwrap();
+        let query = Query(&program.graph);
+        let scan = operations(&program.graph, "scan")[0];
+        assert_eq!(query.contains("SubgroupAddition", (scan,)).unwrap(), enabled);
+        let mut segments = 0;
+        query
+            .for_each("MapPlan", |row| {
+                if query.flag("MapHost", (row[0],))? && query.flag("MapSegmented", (row[1],))? {
+                    let width = query.required("SegmentWidth", (row[1],))?;
+                    assert_eq!(
+                        program.graph.value_to_base::<i64>(width),
+                        if enabled { 32 } else { 256 }
+                    );
+                    segments += 1;
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(segments, 1);
+    }
+}
+
+#[test]
+fn tiled_outputs_require_complete_tiles_and_preserve_other_consumers() {
+    for (count, fused) in [(8, true), (7, false)] {
+        for reduced in [false, true] {
+            let metadata = if reduced { "reduce((+),0,map(|r|r[2],rows))" } else { "map(|r|r[2],rows)" };
+            let metadata_type = if reduced { "i32".to_string() } else { format!("[{count}]i32") };
+            let source = format!("def row(i:i32) [3]i32 = [i,i+1,i+2]
+                entry main() ([16]i32,{metadata_type}) =
+                let rows = map(row,iota({count})) in
+                (map(|a|let i=(a/8)*4+a%4 in if i<length(rows) then rows[i][(a%8)/4] else -1,iota(16)), {metadata})");
+            planned(&source, |graph| {
+                let query = Query(graph);
+                let mut destinations = 0;
+                query
+                    .for_function("TiledOutputs", |_, _| {
+                        destinations += 1;
+                        Ok(())
+                    })
+                    .unwrap();
+                assert_eq!(destinations, usize::from(fused), "{source}");
+            });
+        }
     }
 }

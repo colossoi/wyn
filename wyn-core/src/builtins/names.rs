@@ -161,3 +161,9 @@ pub const INTRINSIC_TEXTURE_SAMPLE: &str = "_w_intrinsic_texture_sample";
 /// filtering — use `texture_sample` on a `Texture2D` view of the same
 /// underlying resource for bilinear access.
 pub const INTRINSIC_IMAGE_LOAD: &str = "_w_intrinsic_image_load";
+
+pub const INTRINSIC_SUBGROUP_ID: &str = "_w_intrinsic_subgroup_id";
+pub const INTRINSIC_NUM_SUBGROUPS: &str = "_w_intrinsic_num_subgroups";
+pub const INTRINSIC_SUBGROUP_ADD: &str = "_w_intrinsic_subgroup_add";
+pub const INTRINSIC_SUBGROUP_INCLUSIVE_ADD: &str = "_w_intrinsic_subgroup_inclusive_add";
+pub const INTRINSIC_SUBGROUP_EXCLUSIVE_ADD: &str = "_w_intrinsic_subgroup_exclusive_add";

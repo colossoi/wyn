@@ -1,4 +1,6 @@
-use crate::egglog::{finish_for_test, from_tlc, fuse, optimize_for_test, place, schedule};
+use crate::egglog::{
+    finish_for_test, from_tlc, fuse, optimize_for_test, place, schedule, schedule_with_subgroups,
+};
 use crate::host::Pipeline;
 use crate::interface::ComputeDispatchGrid;
 use crate::tlc::DefMeta;
@@ -1601,4 +1603,51 @@ fn collective_phase_accesses_exclude_unused_inputs_and_producer_captures() {
         output.program.interface.scalar_tasks.iter().any(|task| task.stage != combine.entry_point
             && !matches!(task.value, host::ScalarExpr::BufferLength { .. }))
     );
+}
+
+#[test]
+fn native_subgroups_validate_on_both_backends_with_portable_fallback() {
+    for (source, native) in [
+        (
+            "entry main(xs:[3][65]i32) [3][65]i32=map(|r|scan((+),0i32,r),xs)",
+            true,
+        ),
+        (
+            "entry main(xs:[3][65]i32) [3]i32=map(|r|reduce((+),0i32,r),xs)",
+            true,
+        ),
+        (
+            "entry main(xs:[3][17]f32) [3][17]f32=map(|r|scan((+),0.0,r),xs)",
+            true,
+        ),
+        (
+            "entry main(xs:[3][17]i32) [3][17]i32=map(|r|scan(|a,b|max(a,b),-2147483648,r),xs)",
+            false,
+        ),
+    ] {
+        for target in [CodegenTarget::Wgsl, CodegenTarget::Spirv] {
+            let tlc = compile_thru_tlc(source).unwrap();
+            let program = schedule_with_subgroups(
+                place(
+                    fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                    PipelineTopologyPolicy::AllowGenerated,
+                )
+                .unwrap(),
+                true,
+            )
+            .unwrap();
+            let program = optimize_for_test(program).unwrap();
+            let ssa = finish_for_test(program, target).unwrap();
+            let module = if target == CodegenTarget::Wgsl {
+                let output = lower_ssa_to_wgsl_with_program(ssa).unwrap();
+                assert_eq!(output.wgsl.contains("subgroupInclusiveAdd"), native);
+                naga::front::wgsl::parse_str(&output.wgsl).unwrap()
+            } else {
+                let output = lower_ssa_to_spirv(ssa).unwrap();
+                let bytes: Vec<_> = output.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
+                spv::parse_u8_slice(&bytes, &spv::Options::default()).unwrap()
+            };
+            Validator::new(ValidationFlags::all(), Capabilities::all()).validate(&module).unwrap();
+        }
+    }
 }

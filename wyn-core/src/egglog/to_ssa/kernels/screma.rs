@@ -439,6 +439,12 @@ fn workgroup_reduce(
     if accumulators.is_empty() {
         return Ok(Vec::new());
     }
+    if body.subgroup.is_some()
+        && accumulators.iter().all(|a| body.compiler.facts.contains("SubgroupAddition", (a.operation,)))
+    {
+        let (_, _, totals) = body.subgroup_scan(values, width)?;
+        return Ok(totals);
+    }
     let mut shared = Vec::new();
     for value in values {
         let buffer = CollectiveStorage::new(body, width, &value.ty)?;
@@ -531,6 +537,11 @@ pub(super) fn workgroup_scan(
     lane: Typed,
     width: u32,
 ) -> Result<(Vec<Typed>, Vec<Typed>, Vec<Typed>), OptimizeError> {
+    if body.subgroup.is_some()
+        && accumulators.iter().all(|a| body.compiler.facts.contains("SubgroupAddition", (a.operation,)))
+    {
+        return body.subgroup_scan(values, width);
+    }
     let mut shared = Vec::new();
     for value in &values {
         let buffer = CollectiveStorage::new(body, width, &value.ty)?;

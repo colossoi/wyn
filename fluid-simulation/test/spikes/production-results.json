@@ -1,0 +1,60 @@
+{
+  "load_before": [
+    5.9423828125,
+    3.7822265625,
+    2.63037109375
+  ],
+  "measurements": {
+    "current": [
+      {
+        "median_ms": 28.0235915,
+        "samples_ms": [
+          27.038775,
+          27.462168,
+          28.879463,
+          28.714901,
+          28.585015,
+          28.71986,
+          28.735871,
+          30.315964,
+          25.604639,
+          24.280509,
+          25.401133,
+          25.430408,
+          29.66463,
+          25.33119
+        ]
+      }
+    ],
+    "real": [
+      {
+        "median_ms": 24.124599500000002,
+        "samples_ms": [
+          22.848107,
+          24.197633,
+          26.242927,
+          26.179498,
+          23.235821,
+          24.580839,
+          23.56253,
+          24.051566,
+          26.096109,
+          27.70617,
+          23.95351,
+          23.902284,
+          27.979498,
+          22.41728
+        ]
+      }
+    ]
+  },
+  "output_values": 38657,
+  "max_abs_difference": 0.0,
+  "load_after": [
+    6.267578125,
+    3.8857421875,
+    2.67041015625
+  ],
+  "method": "16 frames including host execution and GPU completion; discard first two; GTX 1660 Ti, 4320 particles, 640x480 colliding-blocks; concurrent CPU work.",
+  "comparison": "current = saved baseline before both production optimizations; real = direct tiled output and --subgroups"
+}

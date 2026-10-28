@@ -7,8 +7,8 @@ use std::process::ExitCode;
 use std::time::Instant;
 use thiserror::Error;
 use wyn_core::egglog::{
-    from_tlc, fuse, optimize_with_policy, place, prepare_host, prepare_interfaces, schedule, to_ssa,
-    with_timings, ScalarOptimization,
+    from_tlc, fuse, optimize_with_policy, place, prepare_host, prepare_interfaces, schedule_with_subgroups,
+    to_ssa, with_timings, ScalarOptimization,
 };
 use wyn_core::host::{HostError, Program, ShaderFormat};
 use wyn_core::ssa::stage::Elaborated;
@@ -57,6 +57,7 @@ struct CompileOptions {
     algebra: bool,
     direct: bool,
     wgsl_emulate_u64: bool,
+    subgroups: bool,
     fill_holes: bool,
     output_tlc: Option<PathBuf>,
     output_mir: Option<PathBuf>,
@@ -154,6 +155,10 @@ enum Commands {
         /// This option is invalid for the SPIR-V target.
         #[arg(long)]
         wgsl_emulate_u64: bool,
+
+        /// Enable native subgroup arithmetic (requires GPU subgroup support)
+        #[arg(long)]
+        subgroups: bool,
 
         /// Treat any `???` type hole as a default value of its inferred
         /// type and continue compilation. Default: holes are a hard
@@ -537,6 +542,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             graphics,
             direct,
             wgsl_emulate_u64,
+            subgroups,
             fill_holes,
             max_warnings,
             verbose,
@@ -551,6 +557,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             graphics,
             direct,
             wgsl_emulate_u64,
+            subgroups,
             fill_holes,
             max_warnings,
             verbose,
@@ -575,6 +582,7 @@ fn build(
     graphics: bool,
     direct: bool,
     wgsl_emulate_u64: bool,
+    subgroups: bool,
     fill_holes: bool,
     warning_limit: usize,
     verbose: bool,
@@ -609,6 +617,7 @@ fn build(
         algebra,
         direct,
         wgsl_emulate_u64,
+        subgroups,
         fill_holes,
         output_tlc,
         output_mir,
@@ -719,6 +728,7 @@ fn compile_egglog(
     target: Target,
     algebra: bool,
     direct: bool,
+    subgroups: bool,
     verbose: bool,
 ) -> Result<Elaborated, DriverError> {
     with_timings(verbose, || -> Result<_, DriverError> {
@@ -730,7 +740,7 @@ fn compile_egglog(
             PipelineTopologyPolicy::AllowGenerated
         };
         let program = place(program, topology)?;
-        let program = schedule(program)?;
+        let program = schedule_with_subgroups(program, subgroups)?;
         let program = prepare_interfaces(program)?;
         let policy = if algebra { ScalarOptimization::Full } else { ScalarOptimization::Basic };
         let program = optimize_with_policy(program, policy)?;
@@ -757,11 +767,12 @@ fn compile(modules: ParsedModules, options: CompileOptions) -> Result<Compilatio
         algebra,
         direct,
         wgsl_emulate_u64,
+        subgroups,
         output_mir,
         verbose,
         ..
     } = options;
-    let ssa = compile_egglog(&program, target, algebra, direct, verbose)?;
+    let ssa = compile_egglog(&program, target, algebra, direct, subgroups, verbose)?;
 
     if let Some(path) = output_mir {
         auxiliary.push(TextArtifact {

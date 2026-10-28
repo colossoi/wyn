@@ -120,3 +120,18 @@
        (= formal (SourceParameter region i)) (< i (vec-length args))
        (= (ValueRepresentation (vec-get args i)) (ArrayLayout count element)))
       ((set (RegionHasOwnedArrayParameter region) true)) :ruleset representations)
+
+; Recognize associative scalar addition through ordinary function wrappers.
+(relation AdditionRegion (RegionKey))
+(rule ((= a (SourceParameter body 0)) (= b (SourceParameter body 1))
+       (= result (SourceResult body)) (SourceBinary result "+" a b))
+      ((AdditionRegion body)) :ruleset execution-discover)
+(rule ((= a (SourceParameter body 0)) (= b (SourceParameter body 1))
+       (= result (SourceResult body)) (= result (SourceInvocation body function args))
+       (= (vec-length args) 2) (= (vec-get args 0) a) (= (vec-get args 1) b)
+       (= callee (PlanCallee result)) (AdditionRegion callee))
+      ((AdditionRegion body)) :ruleset execution-discover)
+(relation SubgroupAddition (OperationKey))
+(rule ((= (SubgroupsEnabled) true) (= body (SourceOperatorBody op)) (AdditionRegion body)
+       (= neutral (SourceNeutral op)) (= ty (SourceType neutral)) (SourceSubgroupScalar ty))
+      ((SubgroupAddition op)) :ruleset execution-discover)

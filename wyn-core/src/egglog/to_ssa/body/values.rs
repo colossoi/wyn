@@ -217,6 +217,9 @@ impl Body<'_, '_, '_> {
         }
     }
     pub fn local_id(&mut self) -> Result<Typed, OptimizeError> {
+        if let Some(subgroup) = &self.subgroup {
+            return Ok(subgroup.lane.clone());
+        }
         self.op(
             OpTag::Intrinsic {
                 id: catalog().known().local_id,

@@ -19,7 +19,7 @@ if [[ $skip == false ]]; then
 fi
 out="$root/tmp/fluid-simulation"
 mkdir -p -- "$out"
-"$root/target/release/wyn" build "$root/fluid-simulation" --graphics -o "$out/fluid.spv"
+"$root/target/release/wyn" build "$root/fluid-simulation" --graphics --subgroups -o "$out/fluid.spv"
 launch=(python3 "$root/fluid-simulation/launch.py" "$out/fluid.spv")
 if [[ $compile_only == true ]]; then
     "${launch[@]}" --prepare-only

@@ -50,6 +50,10 @@
 (function IterationExtent (OperationKey) Extent :no-merge)
 (function IterationRank (OperationKey) i64 :no-merge)
 (function IterationAxis (OperationKey i64) Extent :no-merge)
+(function SubgroupsEnabled () bool :no-merge)
+(relation NativeSubgroups ())
+(rule ((= (SubgroupsEnabled) true)) ((NativeSubgroups)) :ruleset schedule)
+(function SegmentWidth (OperationKey) i64 :merge (min old new))
 (function MapSegmented (OperationKey) bool :merge (or old new))
 (relation KernelPhase (OperationKey String Extent i64 DispatchGrid))
 (rule ((= r (OperationRegion op)) (OwnedRegion entry r) (= grid (EntryGrid entry)))
@@ -57,6 +61,17 @@
 ; One choice supplies the chunk launch, scratch capacity, and carry count.
 ; The default bounds the carry scan to one workgroup.
 (let collective-width 256)
+; Estimate per-lane accumulator storage before selecting a launch. Keep the
+; chunk bank near 8 KiB, with power-of-two widths between 32 and 256 lanes.
+(ruleset collective-costs)
+(function CollectiveStatePrefix (OperationKey i64) i64 :no-merge)
+(function CollectiveChunkWidth (OperationKey) i64 :merge (min old new))
+(rule ((Accumulator op i ty role slot source))
+      ((set (CollectiveStatePrefix op 0) 0)
+       (set (CollectiveChunkWidth op) 256)) :ruleset collective-costs)
+(rule ((= bytes (CollectiveStatePrefix op i)) (= width (CollectiveChunkWidth op))
+       (> width 32) (> (* bytes width) 8192))
+      ((set (CollectiveChunkWidth op) (/ width 2))) :ruleset collective-costs)
 ; Default execution widths: segment collectives retain collective-width;
 ; ordinary maps select a width by the scope owning each logical coordinate.
 (function MapScopeWidth (ExecutionScope) i64 :no-merge)
@@ -92,12 +107,13 @@
        (= n (IterationExtent op)) (= grid (OperationGrid op)))
       ((KernelPhase op "elements" (Product n (Fixed width)) width grid)
        (PhaseEnds op "elements" "elements")) :ruleset schedule)
-(rule ((= (Plan op) (Elements)) (= (ElideElements op) false) (= (MapSegmented op) true)
+(rule ((= (Plan op) (Elements)) (= (ElideElements op) false) (= (MapSegmented op) true) (= width (SegmentWidth op))
        (= n (IterationExtent op)) (= grid (OperationGrid op)))
-      ((KernelPhase op "segments" (Product n (Fixed collective-width)) collective-width grid)
+      ((KernelPhase op "segments" (Product n (Fixed width)) width grid)
        (PhaseEnds op "segments" "segments")) :ruleset schedule)
-(rule ((ParallelCollective op) (= grid (CollectiveGrid op)) (= groups (CollectiveGroups op)))
-      ((KernelPhase op "chunks" (Fixed (* groups collective-width)) collective-width grid)
+(rule ((ParallelCollective op) (= grid (CollectiveGrid op)) (= groups (CollectiveGroups op))
+       (= width (CollectiveChunkWidth op)))
+      ((KernelPhase op "chunks" (Fixed (* groups width)) width grid)
        (KernelPhase op "combine" (Fixed collective-width) collective-width (FixedGrid 1 1 1))
        (PhaseLink op "chunks" "combine")) :ruleset schedule)
 (rule ((= (Plan op) (Totals))) ((PhaseEnds op "chunks" "combine")) :ruleset schedule)

@@ -20,6 +20,7 @@ mod control;
 mod materialize;
 mod readout;
 mod resources;
+mod subgroups;
 mod values;
 
 pub(super) struct Body<'a, 'p, 'source> {
@@ -40,6 +41,7 @@ pub(super) struct Body<'a, 'p, 'source> {
     // Kernel storage ownership survives invocation-local element callbacks.
     pub workgroup_width: Option<u32>,
     pub invocation_execution: bool,
+    pub subgroup: Option<subgroups::Subgroup>,
 }
 
 impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
@@ -85,6 +87,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
             next_workgroup_array: 0,
             workgroup_width: None,
             invocation_execution: true,
+            subgroup: None,
         })
     }
 

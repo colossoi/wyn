@@ -5,6 +5,7 @@ use super::lower::LowerCtx;
 use super::*;
 use crate::builtins;
 use crate::err_spirv;
+use crate::types::Type;
 
 impl<'a, 'b> LowerCtx<'a, 'b> {
     fn lower_storage_len(&mut self, values: &[ValueRef], result_ty: spirv::Word) -> Result<spirv::Word> {
@@ -446,6 +447,47 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     };
                     let ty = self.constructor.get_or_create_vec_type(self.constructor.u32_type, 3);
                     Ok(self.constructor.builder.load(ty, None, variable, None, [])?)
+                } else if id == known.subgroup_id || id == known.num_subgroups {
+                    let variable = if id == known.subgroup_id {
+                        self.constructor.subgroup_id
+                    } else {
+                        self.constructor.num_subgroups
+                    };
+                    let Some(variable) = variable else {
+                        bail_spirv!("subgroup builtin missing from entry");
+                    };
+                    Ok(self.constructor.builder.load(result_ty, None, variable, None, [])?)
+                } else if id == known.subgroup_add
+                    || id == known.subgroup_inclusive_add
+                    || id == known.subgroup_exclusive_add
+                {
+                    let [value] = arg_ids else {
+                        bail_spirv!("subgroup arithmetic requires one operand");
+                    };
+                    self.constructor.builder.capability(spirv::Capability::GroupNonUniform);
+                    self.constructor.builder.capability(spirv::Capability::GroupNonUniformArithmetic);
+                    let scope = self.constructor.const_u32(spirv::Scope::Subgroup as u32);
+                    let operation = if id == known.subgroup_add {
+                        spirv::GroupOperation::Reduce
+                    } else if id == known.subgroup_inclusive_add {
+                        spirv::GroupOperation::InclusiveScan
+                    } else {
+                        spirv::GroupOperation::ExclusiveScan
+                    };
+                    if matches!(
+                        inst.result.map(|r| self.body.inner.value_type(r)),
+                        Some(Type::Constructed(TypeName::Float(_), _))
+                    ) {
+                        Ok(self
+                            .constructor
+                            .builder
+                            .group_non_uniform_f_add(result_ty, None, scope, operation, *value, None)?)
+                    } else {
+                        Ok(self
+                            .constructor
+                            .builder
+                            .group_non_uniform_i_add(result_ty, None, scope, operation, *value, None)?)
+                    }
                 } else if id == known.local_id {
                     let lid_var = self
                         .constructor

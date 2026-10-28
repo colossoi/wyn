@@ -490,7 +490,8 @@ impl<'source> Import<'_, '_, '_, 'source> {
             TermKind::Index { array, index } => {
                 let input = self.operand(array, value, scope)?;
                 self.sink.set("SourceIndexedArray", value, input)?;
-                self.operand(index, value, scope)?;
+                let index = self.operand(index, value, scope)?;
+                self.sink.set("SourceIndex", value, index)?;
                 self.operation(value, "index", scope)?;
             }
             TermKind::Closure(closure) => {
@@ -677,10 +678,12 @@ impl<'source> Import<'_, '_, '_, 'source> {
             }
             ArrayExpr::Range { start, len, step } => {
                 self.flags(value, false, true, true, true, 0)?;
-                self.operand(start, value, scope)?;
+                let start = self.operand(start, value, scope)?;
                 let length = self.operand(len, value, scope)?;
                 if let Some(step) = step {
                     self.operand(step, value, scope)?;
+                } else {
+                    self.sink.add("SourceUnitRange", (value, start, length))?;
                 }
                 self.sink.add("Scalar", length)?
             }

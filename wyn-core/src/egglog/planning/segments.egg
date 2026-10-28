@@ -80,3 +80,9 @@
 (rule ((MapPlan plan owner extent) (= (MapHost plan) true)
        (= (SegmentRequiredOutputs plan) (SegmentApprovedOutputs plan)))
       ((set (MapSegmented owner) true)) :ruleset segment-select)
+
+; Small segments use a small workgroup; subgroup support is optional.
+(rule ((MapPlan plan owner extent)) ((set (SegmentWidth owner) 256)) :ruleset segment-shapes)
+(rule ((= (SubgroupsEnabled) true) (MapAnchor plan value) (= owner (Owner plan))
+       (= rank (IterationRank owner)) (= extent (SegmentExtent value rank)) (= n (ConstantLogicalExtent extent)) (<= n 32))
+      ((set (SegmentWidth owner) 32)) :ruleset collective-costs)

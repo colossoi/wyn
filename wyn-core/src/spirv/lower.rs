@@ -420,6 +420,11 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             || *id == known.thread_id_y
                             || *id == known.thread_id_z
                             || *id == known.local_id
+                            || *id == known.subgroup_id
+                            || *id == known.num_subgroups
+                            || *id == known.subgroup_add
+                            || *id == known.subgroup_inclusive_add
+                            || *id == known.subgroup_exclusive_add
                             || *id == known.num_workgroups
                             || *id == known.workgroup_id
                             || *id == known.length

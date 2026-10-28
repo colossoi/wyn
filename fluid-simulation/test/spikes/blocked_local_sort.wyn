@@ -1,0 +1,16 @@
+-- Check: every row must be stably sorted by the low four bits, preserving payloads.
+-- The updated compiler passes compilation and GPU checks on both backends.
+-- Spike: a single four-bit stable pass, using 64-key blocks and packed local
+-- two-bit scans. Compare key/payload order with the existing four-bit pass.
+-- This establishes the block-histogram decomposition, not the full upstream kernel.
+def local_sort(xs:[64]vec2u32) [64]vec2u32 =
+  loop xs=xs for pass<2 do
+    let bins=map(|x| (x.x >> u32(pass*2)) & 3u32,xs) in
+    let flags=map(|b|1u32 << (b*8u32),bins) in
+    let prefix=scan((+),0u32,flags) in
+    let total=reduce((+),0u32,flags) in
+    let bases=(total<<8u32)+(total<<16u32)+(total<<24u32) in
+    let destinations=map2(|b,p|i32(((p+bases)>>(b*8u32))&255u32)-1,bins,prefix) in
+    scatter(duplicate_scratch(xs),destinations,xs)
+-- Isolate local sorting from global histogram/scatter scheduling.
+entry main(xs:[64][64]vec2u32) [64][64]vec2u32 = map(local_sort,xs)

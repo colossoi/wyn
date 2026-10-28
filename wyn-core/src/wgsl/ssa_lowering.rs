@@ -1636,6 +1636,18 @@ impl<'a> LowerCtx<'a> {
             } else {
                 param_strs.push("@builtin(global_invocation_id) _wgsl_gid: vec3<u32>".to_string());
             }
+            let known = catalog().known();
+            for (id, builtin, name) in [
+                (known.subgroup_id, "subgroup_id", "_wgsl_subgroup"),
+                (known.num_subgroups, "num_subgroups", "_wgsl_subgroups"),
+            ] {
+                if body.inner.insts.iter().any(|(_, inst)| {
+                    matches!(&inst.data,
+                    InstKind::Op { tag: op::OpTag::Intrinsic { id: found, .. }, .. } if *found == id)
+                }) {
+                    param_strs.push(format!("@builtin({builtin}) {name}: u32"));
+                }
+            }
             // Likewise `_w_intrinsic_local_id()` → `_wgsl_lid.x`, the thread's
             // index within its workgroup (used by the workgroup-parallel
             // phase2 reduce for shared-memory addressing).
@@ -3163,6 +3175,24 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     // `_w_intrinsic_local_id()` → `_wgsl_lid.x` (also u32).
                     if *id == known.local_id && args.is_empty() {
                         return Ok("_wgsl_lid.x".to_string());
+                    }
+                    if *id == known.subgroup_id {
+                        return Ok("_wgsl_subgroup".to_string());
+                    }
+                    if *id == known.num_subgroups {
+                        return Ok("_wgsl_subgroups".to_string());
+                    }
+                    for (operation, name) in [
+                        (known.subgroup_add, "subgroupAdd"),
+                        (known.subgroup_inclusive_add, "subgroupInclusiveAdd"),
+                        (known.subgroup_exclusive_add, "subgroupExclusiveAdd"),
+                    ] {
+                        if *id == operation {
+                            let [value] = arg_strs.as_slice() else {
+                                return Err(err_wgsl!("subgroup arithmetic requires one operand"));
+                            };
+                            return Ok(format!("{name}({value})"));
+                        }
                     }
                     // `_w_intrinsic_num_workgroups()` → `_wgsl_nwg.x` (also u32).
                     if *id == known.num_workgroups && args.is_empty() {

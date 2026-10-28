@@ -1,0 +1,121 @@
+{
+  "date": "2026-10-27",
+  "particles": 4320,
+  "resolution": [
+    640,
+    480
+  ],
+  "preset": "colliding-blocks",
+  "backend": "SPIR-V/Vulkan",
+  "gpu": "NVIDIA GeForce GTX 1660 Ti",
+  "method": "Release viewer; complete run_frame including offscreen graphics, host execution and GPU completion. Excludes setup and final output readback. Frames 0 and 1 discarded. Concurrent user tests active; not an idle-machine benchmark.",
+  "frames": [
+    {
+      "frame": 0,
+      "ms": 7865.865142
+    },
+    {
+      "frame": 1,
+      "ms": 37.458705
+    },
+    {
+      "frame": 2,
+      "ms": 27.463394
+    },
+    {
+      "frame": 3,
+      "ms": 28.208733
+    },
+    {
+      "frame": 4,
+      "ms": 28.927191
+    },
+    {
+      "frame": 5,
+      "ms": 26.042939
+    },
+    {
+      "frame": 6,
+      "ms": 27.05357
+    },
+    {
+      "frame": 7,
+      "ms": 26.12277
+    },
+    {
+      "frame": 8,
+      "ms": 25.74679
+    },
+    {
+      "frame": 9,
+      "ms": 27.034875
+    },
+    {
+      "frame": 10,
+      "ms": 24.912603
+    },
+    {
+      "frame": 11,
+      "ms": 24.912724
+    }
+  ],
+  "mean_ms": 26.6425589,
+  "median_ms": 26.5788225,
+  "min_ms": 24.912603,
+  "max_ms": 28.927191,
+  "fps_equivalent": 37.5339322230043,
+  "load": [
+    {
+      "elapsed_s": 0.050795501098036766,
+      "gpu": "26, 18, 1207",
+      "load": "24.67 16.24 8.72 26/1981 1090337"
+    },
+    {
+      "elapsed_s": 1.1723847901448607,
+      "gpu": "34, 23, 1224",
+      "load": "24.67 16.24 8.72 26/1988 1090360"
+    },
+    {
+      "elapsed_s": 2.215724180918187,
+      "gpu": "17, 10, 1228",
+      "load": "24.67 16.24 8.72 24/1987 1090371"
+    },
+    {
+      "elapsed_s": 3.2350758272223175,
+      "gpu": "7, 2, 1246",
+      "load": "24.67 16.24 8.72 5/1957 1090376"
+    },
+    {
+      "elapsed_s": 4.261045601218939,
+      "gpu": "7, 2, 1277",
+      "load": "23.09 16.06 8.70 4/1958 1090386"
+    },
+    {
+      "elapsed_s": 5.2894899812527,
+      "gpu": "24, 16, 1283",
+      "load": "23.09 16.06 8.70 6/1963 1090400"
+    },
+    {
+      "elapsed_s": 6.32722668396309,
+      "gpu": "28, 17, 1290",
+      "load": "23.09 16.06 8.70 5/1958 1090409"
+    },
+    {
+      "elapsed_s": 7.353720848914236,
+      "gpu": "39, 24, 3965",
+      "load": "23.09 16.06 8.70 9/1946 1090411"
+    },
+    {
+      "elapsed_s": 8.381368143018335,
+      "gpu": "23, 17, 3972",
+      "load": "23.09 16.06 8.70 6/1945 1090426"
+    },
+    {
+      "elapsed_s": 9.40281921532005,
+      "gpu": "47, 20, 3964",
+      "load": "21.48 15.84 8.67 3/1945 1090428"
+    }
+  ],
+  "shader_sha256": "a6b9e608c6bfaeeee33f88e82770e84ef1d31a5c2ee21d2393d500d7c91cd9c4",
+  "finite_outputs": true
+}
