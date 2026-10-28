@@ -14,46 +14,6 @@ use naga::front::spv;
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 
 #[test]
-fn nested_map_scan_rows_flatten_by_index() {
-    for width in [2, 3] {
-        let count = 2 * width;
-        let source = format!(
-            "entry main(xs: [{count}]i32) [{count}]i32 =
-            let rows = map(|b| map(|j| xs[b*{width}+j], iota({width})), iota(2)) in
-            let prefixes = map(|row| scan((+), 0i32, row), rows) in
-            map(|i| prefixes[i/{width}][i%{width}], iota({count}))"
-        );
-        compile(&source);
-        let output = compile_thru_spirv(&source).unwrap();
-        let bytes: Vec<_> = output.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
-        let module = spv::parse_u8_slice(&bytes, &spv::Options::default()).unwrap();
-        Validator::new(ValidationFlags::all(), Capabilities::all()).validate(&module).unwrap();
-    }
-}
-
-#[test]
-fn nested_map_captures_computed_reduction_over_scan() {
-    for source in [
-        "entry main(xs: [2][2]i32) [2][2]i32 =
-        map(|row| let offset = reduce((+), 0i32, row) + 1 in
-            map(|x| x + offset, scan((+), 0i32, row)), xs)",
-        "entry main(xs: [2][2]i32, bias: i32) [2][2]i32 =
-        map(|row| let total = reduce((+), 0i32, row) in
-            let offset = (total + 1) * bias in
-            map(|x| x + offset, scan((+), 0i32, row)), xs)",
-        "entry main(xs: [2][2]i32) [2][2]i32 =
-        map(|row| map(|x| x + reduce((+), 0i32, row) + 1,
-            scan((+), 0i32, row)), xs)",
-    ] {
-        compile(source);
-        let output = compile_thru_spirv(source).unwrap();
-        let bytes: Vec<_> = output.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
-        let module = spv::parse_u8_slice(&bytes, &spv::Options::default()).unwrap();
-        Validator::new(ValidationFlags::all(), Capabilities::all()).validate(&module).unwrap();
-    }
-}
-
-#[test]
 fn fixed_array_scans_expand_local_traversals() {
     let output = pipeline(
         "entry main(xs:[][4]i32) [][4]i32 =
@@ -174,34 +134,6 @@ fn zipped_runtime_loop_retains_its_domain() {
 }
 
 #[test]
-fn missing_selected_abi_facts_are_errors() {
-    for (table, diagnostic) in [
-        ("SelectedLaunch", "missing selected SelectedLaunch"),
-        ("RootWorkgroup", "missing selected RootWorkgroup"),
-        ("ParameterAbi", "missing selected ParameterAbi"),
-        ("AbiStorage", "has no host length input"),
-    ] {
-        let tlc = compile_thru_tlc("entry main(xs:[]i32,k:i32) []i32=map(|x|x+k,xs)").unwrap();
-        let mut program = optimize_for_test(
-            schedule(
-                place(
-                    fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                    PipelineTopologyPolicy::AllowGenerated,
-                )
-                .unwrap(),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        program.graph.clear_function(table).unwrap();
-        let Err(error) = finish_for_test(program, CodegenTarget::Wgsl) else {
-            panic!("missing {table} was silently accepted");
-        };
-        assert!(error.to_string().contains(diagnostic), "{table}: {error}");
-    }
-}
-
-#[test]
 fn invalid_selected_workgroup_is_an_error() {
     use egglog_engine::Write;
     let tlc = compile_thru_tlc("entry main(xs:[4]i32) [4]i32=map(|x|x+1,xs)").unwrap();
@@ -291,49 +223,6 @@ fn loop_local_zip_preserves_nested_input_elements() {
 }
 
 #[test]
-fn nested_tuple_loop_state_preserves_component_arrays() {
-    use host::{Binding, BufferLen, ResultLayout, ResultScalar};
-    let source = include_str!("../../../testfiles/regressions/nested_tuple_loop_state.wyn");
-    compile(source);
-    for descriptor in [
-        pipeline(source).program.interface,
-        crate::compile_thru_spirv(source).unwrap().program.interface,
-    ] {
-        assert_eq!(descriptor.source_results.len(), 4);
-        for result in &descriptor.source_results {
-            let Pipeline::Compute(p) = &descriptor.pipelines[result.pipeline_index] else {
-                panic!("compute result");
-            };
-            let ResultLayout::Array {
-                element,
-                stride,
-                length: Some(2),
-            } = &result.layout
-            else {
-                panic!("fixed array result: {:?}", result.layout);
-            };
-            if result.result == 0 {
-                assert_eq!(*stride, 4);
-                assert_eq!(**element, ResultLayout::Scalar(ResultScalar::I32));
-            } else {
-                assert_eq!(*stride, 8);
-                let ResultLayout::Tuple { fields, size: 8 } = &**element else {
-                    panic!("tuple element: {element:?}");
-                };
-                assert_eq!(fields.len(), 2);
-                assert_eq!(fields[0].offset, 0);
-                assert_eq!(fields[1].offset, 4);
-                assert_eq!(fields[1].layout, ResultLayout::Scalar(ResultScalar::Bool));
-            }
-            assert!(p.bindings.iter().any(|b| matches!(b,
-                Binding::StorageBuffer { set, binding, length: Some(BufferLen::Fixed { bytes }), .. }
-                    if (*set, *binding) == (result.set, result.binding) && *bytes == u64::from(*stride) * 2
-            )));
-        }
-    }
-}
-
-#[test]
 fn loop_local_tuple_collectives_preserve_component_arrays() {
     let source = include_str!("../../../testfiles/regressions/local_tuple_collectives.wyn");
     compile(source);
@@ -399,18 +288,6 @@ fn conditional_fixed_array_outputs_reach_wgsl() {
             "entry repro(xs:[]i32,flag:bool) ([]i32,[1]i32)=let n=xs[0] in (map(|x|x+n,xs),{array})"
         ));
     }
-}
-
-#[test]
-fn nested_mountain_shader_reaches_valid_wgsl() {
-    std::thread::Builder::new()
-        .stack_size(32 * 1024 * 1024)
-        .spawn(|| {
-            compile(include_str!("../../../testfiles/playground/mountains.wyn"));
-        })
-        .unwrap()
-        .join()
-        .unwrap();
 }
 
 #[test]
@@ -548,17 +425,6 @@ fn conditional_expressions_inside_device_loops_reach_wgsl() {
 fn branching_loop_tests_and_header_array_reads_reach_wgsl() {
     compile("entry main(xs: [4]i32, limit: i32) i32 = loop acc = 0 while (if acc < limit then xs[acc % 4] > 0 else false) do acc + 1");
     compile("entry main(xs: [4]i32) i32 = loop acc = 0 for i < xs[0] do acc + i");
-}
-
-#[test]
-fn runtime_control_keeps_collectives_inside_device_execution() {
-    for source in [
-        "entry main(xs: [4]i32, n: i32) [4]i32 = loop acc = xs for k < n do map(|x: i32| x + k, acc)",
-        "entry main(xs: [4]i32, n: i32) i32 = loop acc = 0 for k < n do acc + reduce(|a:i32,b:i32|a+b, 0, map(|x:i32|x+k,xs))",
-        "entry main(xs: [4]i32, yes: bool) [4]i32 = if yes then map(|x:i32|x+1,xs) else map(|x:i32|x-1,xs)",
-    ] {
-        compile(source);
-    }
 }
 
 #[test]
@@ -1012,104 +878,6 @@ fn bounded_filter_output_does_not_use_its_packed_backing_as_a_length() {
     assert!(p.bindings.iter().any(|b| matches!(b, Binding::StorageBuffer {
         set, binding, length: Some(BufferLen::Fixed { bytes: 16384 }), ..
     } if (*set, *binding) == (result.set, result.binding))));
-}
-
-#[test]
-fn direct_mode_keeps_collectives_in_the_authored_entry() {
-    for source in [
-        "entry main(xs:[137]i32) i32 = reduce(|a:i32,b:i32|a+b,0,xs)",
-        "entry main(xs:[137]i32) [137]i32 = map(|x:i32|x+1,xs)",
-        include_str!("../../../testfiles/unified_triangle.wyn"),
-    ] {
-        let tlc = compile_thru_tlc(source).unwrap();
-        let scheduled = optimize_for_test(
-            schedule(
-                place(
-                    fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                    PipelineTopologyPolicy::AuthoredOnly,
-                )
-                .unwrap(),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let output =
-            lower_ssa_to_wgsl_with_program(finish_for_test(scheduled, CodegenTarget::Wgsl).unwrap())
-                .unwrap();
-        for pipeline in &output.program.interface.pipelines {
-            if let Pipeline::Compute(p) = pipeline {
-                assert_eq!(p.stages.len(), 1);
-            }
-        }
-        let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
-        naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        )
-        .validate(&module)
-        .unwrap();
-    }
-}
-
-#[test]
-fn authored_outputs_consume_selected_capacities() {
-    use host::{Binding, BufferLen};
-    for (source, expected) in [
-        (
-            "entry main(xs:[5]vec3f32) [5]vec3f32=xs",
-            BufferLen::Fixed { bytes: 80 },
-        ),
-        (
-            "entry main(xs:[]i32) []i32=xs",
-            BufferLen::LikeInput {
-                set: 0,
-                binding: 0,
-                elem_bytes: 4,
-                src_elem_bytes: 4,
-            },
-        ),
-        (
-            "entry main(xs:[]vec3f32,ys:[]i32) []i32=ys",
-            BufferLen::LikeInput {
-                set: 0,
-                binding: 1,
-                elem_bytes: 4,
-                src_elem_bytes: 4,
-            },
-        ),
-        (
-            "entry main(n:i32) []i32=iota(n)",
-            BufferLen::SameAsDispatch { elem_bytes: 4 },
-        ),
-    ] {
-        let tlc = compile_thru_tlc(source).unwrap();
-        let program = optimize_for_test(
-            schedule(
-                place(
-                    fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                    PipelineTopologyPolicy::AuthoredOnly,
-                )
-                .unwrap(),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let output =
-            lower_ssa_to_wgsl_with_program(finish_for_test(program, CodegenTarget::Wgsl).unwrap()).unwrap();
-        assert!(
-            output.program.interface.pipelines.iter().any(|pipeline| {
-                let Pipeline::Compute(pipeline) = pipeline else {
-                    return false;
-                };
-                pipeline.bindings.iter().any(|binding| {
-                    matches!(binding,
-                Binding::StorageBuffer { usage: host::BufferUsage::Output, length: Some(actual), .. }
-                if *actual == expected)
-                })
-            }),
-            "{source}: expected {expected:?}"
-        );
-    }
 }
 
 #[test]

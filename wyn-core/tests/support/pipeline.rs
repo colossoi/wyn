@@ -33,12 +33,26 @@ pub fn lower(
     source: &tlc::stage::OwnershipApplied,
     target: CodegenTarget,
 ) -> wyn_core::ssa::stage::Elaborated {
+    lower_with_options(
+        source,
+        target,
+        egglog::ScalarOptimization::Basic,
+        PipelineTopologyPolicy::AllowGenerated,
+    )
+}
+
+pub fn lower_with_options(
+    source: &tlc::stage::OwnershipApplied,
+    target: CodegenTarget,
+    policy: egglog::ScalarOptimization,
+    topology: PipelineTopologyPolicy,
+) -> wyn_core::ssa::stage::Elaborated {
     let program = egglog::from_tlc(source).unwrap();
     let program = egglog::fuse(program).unwrap();
-    let program = egglog::place(program, PipelineTopologyPolicy::AllowGenerated).unwrap();
+    let program = egglog::place(program, topology).unwrap();
     let program = egglog::schedule(program).unwrap();
     let program = egglog::prepare_interfaces(program).unwrap();
-    let program = egglog::optimize_with_policy(program, egglog::ScalarOptimization::Basic).unwrap();
+    let program = egglog::optimize_with_policy(program, policy).unwrap();
     let program = egglog::prepare_host(program).unwrap();
     egglog::to_ssa(program, target).unwrap()
 }

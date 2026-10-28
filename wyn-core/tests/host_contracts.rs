@@ -1,7 +1,7 @@
 #[path = "support/pipeline.rs"]
 mod pipeline;
 use wyn_core::host::{Allocation, Operation, Pipeline, ShaderFormat};
-use wyn_core::{ lower_ssa_to_spirv, lower_ssa_to_wgsl_with_program, CodegenTarget};
+use wyn_core::{lower_ssa_to_spirv, lower_ssa_to_wgsl_with_program, CodegenTarget};
 
 #[test]
 fn tuple_loop_outputs_and_scalar_bounds_reach_host_backends() {
@@ -9,6 +9,7 @@ fn tuple_loop_outputs_and_scalar_bounds_reach_host_backends() {
         include_str!("../../tests/compiler/library/local_tuple_collectives.wyn"),
         include_str!("../../tests/compiler/library/nested_tuple_loop_state.wyn"),
     ] {
+        let nested = source.contains("entry updated(");
         let source = pipeline::source(source);
         let ssa = pipeline::lower(&source, CodegenTarget::Portable);
         for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
@@ -18,6 +19,41 @@ fn tuple_loop_outputs_and_scalar_bounds_reach_host_backends() {
                 ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
             };
             program.to_rust_wgpu("tuple_loops", format).unwrap();
+            if nested {
+                use wyn_core::host::{Binding, BufferLen, ResultLayout, ResultScalar};
+                let descriptor = &program.interface;
+                assert_eq!(descriptor.source_results.len(), 4);
+                for result in &descriptor.source_results {
+                    let Pipeline::Compute(p) = &descriptor.pipelines[result.pipeline_index] else {
+                        panic!("compute result");
+                    };
+                    let ResultLayout::Array {
+                        element,
+                        stride,
+                        length: Some(2),
+                    } = &result.layout
+                    else {
+                        panic!("fixed array result: {:?}", result.layout);
+                    };
+                    if result.result == 0 {
+                        assert_eq!(*stride, 4);
+                        assert_eq!(**element, ResultLayout::Scalar(ResultScalar::I32));
+                    } else {
+                        assert_eq!(*stride, 8);
+                        let ResultLayout::Tuple { fields, size: 8 } = &**element else {
+                            panic!("tuple element: {element:?}");
+                        };
+                        assert_eq!(fields.len(), 2);
+                        assert_eq!(fields[0].offset, 0);
+                        assert_eq!(fields[1].offset, 4);
+                        assert_eq!(fields[1].layout, ResultLayout::Scalar(ResultScalar::Bool));
+                    }
+                    assert!(p.bindings.iter().any(|b| matches!(b,
+                Binding::StorageBuffer { set, binding, length: Some(BufferLen::Fixed { bytes }), .. }
+                    if (*set, *binding) == (result.set, result.binding) && *bytes == u64::from(*stride) * 2
+            )));
+                }
+            }
             for entry in &program.entries {
                 for (position, operation) in entry.operations.iter().enumerate() {
                     let Operation::Loop { region, pipeline, .. } = operation else {

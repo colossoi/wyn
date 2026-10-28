@@ -1,0 +1,1 @@
+entry main(xs:[5]vec3f32) [5]vec3f32=xs

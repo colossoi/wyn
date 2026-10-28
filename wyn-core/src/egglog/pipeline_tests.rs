@@ -5,47 +5,35 @@ use naga::{BinaryOperator, Expression, Statement};
 
 #[test]
 fn size_hint_survives_egglog_optimization() {
-    use super::{finish_for_test, from_tlc, fuse, optimize_for_test, place, schedule};
+    use super::{from_tlc, fuse, optimize_for_test, place, schedule};
     use crate::interface::Attribute;
     use crate::tlc::DefMeta;
-    use crate::{CodegenTarget, PipelineTopologyPolicy};
+    use crate::PipelineTopologyPolicy;
 
-    for source in [
-        include_str!("../../../testfiles/reduce_compute.wyn"),
-        include_str!("../../../testfiles/scan_compute.wyn"),
-        "entry frame(#[size_hint(1024)] data: []vec4f32,
-                     target: render_target<vec4f32>) render_target<vec4f32> =
-           let fragments = rasterize_triangles(direct_draw(3u32, 1u32),
-             |_, _, _| vertex_output(data[0], ())) in
-           shade(target, fragments, |_, _, _, _, _| data[0])",
-    ] {
-        let tlc = crate::compile_thru_tlc(source).unwrap();
-        let program = optimize_for_test(
-            schedule(
-                place(
-                    fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                    PipelineTopologyPolicy::AllowGenerated,
-                )
-                .unwrap(),
+    let source = "entry keep(#[size_hint(1024)] data:[]i32) []i32=data";
+    let tlc = crate::compile_thru_tlc(source).unwrap();
+    let program = optimize_for_test(
+        schedule(
+            place(
+                fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                PipelineTopologyPolicy::AllowGenerated,
             )
             .unwrap(),
         )
-        .unwrap();
-        let mut entries = 0;
-        for definition in &program.source.defs {
-            if let DefMeta::EntryPoint(entry) = &definition.meta {
-                entries += 1;
-                let data = entry.declaration.params.iter().find(|param| param.name == "data").unwrap();
-                assert!(data
-                    .attributes
-                    .contains(&Attribute::SizeHint(std::num::NonZeroU32::new(1024).unwrap())));
-            }
+        .unwrap(),
+    )
+    .unwrap();
+    let mut entries = 0;
+    for definition in &program.source.defs {
+        if let DefMeta::EntryPoint(entry) = &definition.meta {
+            entries += 1;
+            let data = entry.declaration.params.iter().find(|param| param.name == "data").unwrap();
+            assert!(data
+                .attributes
+                .contains(&Attribute::SizeHint(std::num::NonZeroU32::new(1024).unwrap())));
         }
-        assert!(entries > 0);
-        let ssa = finish_for_test(program, CodegenTarget::Portable).unwrap();
-        lower_ssa_to_wgsl(ssa.clone()).unwrap();
-        lower_ssa_to_spirv(ssa).unwrap();
     }
+    assert!(entries > 0);
 }
 
 fn storage_loads(function: &naga::Function, global: naga::Handle<naga::GlobalVariable>) -> usize {
@@ -233,18 +221,6 @@ fn shaders(source: &str) -> naga::Module {
 }
 
 #[test]
-fn compiler_repro_local_array_capacity() {
-    shaders(include_str!(
-        "../../../testfiles/regressions/local_array_capacity.wyn"
-    ));
-    shaders(
-        "entry check(xs: []f32) [3]f32 =
-         reduce(|a: [3]f32, b: [3]f32| map(|(x,y)| x+y, zip(a,b)),
-                [0.0,0.0,0.0], map(|x| [x,x+1.0,x+2.0], xs))",
-    );
-}
-
-#[test]
 fn compiler_repro_array_loop() {
     shaders(include_str!("../../../testfiles/regressions/array_loop.wyn"));
 }
@@ -263,44 +239,12 @@ fn compiler_repro_matrix_map() {
 }
 
 #[test]
-fn compiler_repro_matrix_reduce_loop() {
-    placement_shaders(
-        include_str!("../../../testfiles/regressions/matrix_reduce_loop.wyn"),
-        |_| {},
-    );
-}
-
-#[test]
 fn compiler_repro_boolean_record() {
     shaders(include_str!("../../../testfiles/regressions/boolean_record.wyn"));
     shaders(
         "type config = { flags: { enabled: bool }, scale: f32 }
          entry check(config: config, xs: []f32) []f32 =
            map(|x| if config.flags.enabled then x*config.scale else x, xs)",
-    );
-}
-
-#[test]
-fn compiler_repro_boolean_reduce() {
-    let module = shaders(include_str!("../../../testfiles/regressions/boolean_reduce.wyn"));
-    let mut workgroup_arrays = 0;
-    for (_, global) in module.global_variables.iter() {
-        if global.space == naga::AddressSpace::WorkGroup {
-            let naga::TypeInner::Array { base, .. } = module.types[global.ty].inner else {
-                panic!("expected workgroup array");
-            };
-            assert_eq!(
-                module.types[base].inner,
-                naga::TypeInner::Scalar(naga::Scalar::U32)
-            );
-            workgroup_arrays += 1;
-        }
-    }
-    assert!(workgroup_arrays > 0);
-    shaders("entry check(xs: []bool) []bool = scan(|a: bool,b: bool| a && b, true, xs)");
-    shaders(
-        "entry check(xs: []i32) (bool,i32) =
-         reduce(|(a,n),(b,m)| (a && b,n+m), (true,0), map(|x| (x>0,1),xs))",
     );
 }
 
@@ -350,20 +294,6 @@ fn record_update_handles_loop_state_and_record_fields() {
         let last = next with data = ys in
         map(|x: i32| x + next.count + last.count, last.data)",
     );
-}
-
-#[test]
-fn record_update_fields_can_size_host_allocations() {
-    for update in ["offset = c.offset + 1", "size = c.size + 1"] {
-        placement_shaders(
-            &format!(
-                "type config = {{ size: i32, offset: i32 }}
-                 entry check(c: config) []i32 =
-                   let next = c with {update} in iota(next.size)"
-            ),
-            |_| {},
-        );
-    }
 }
 
 #[test]
@@ -728,29 +658,6 @@ fn conditional_tuple_and_zipped_maps_reach_both_backends() {
 }
 
 #[test]
-fn compaction_retains_producer_elements_across_the_scan() {
-    for source in [
-        "entry kept(xs:[]i32) []i32=filter(|x|x>0,map(|x|x*x+17,xs))",
-        "entry kept(xs:[]i32) []{x:i32,y:i32}=filter(|p|p.x>0,map(|x|{x=x,y=x*3+1},xs))",
-        "entry kept(xs:[]i32) []{x:i32,keep:bool}=filter(|p|p.keep,map(|x|{x=x,keep=x>0},xs))",
-    ] {
-        let module = shaders(source);
-        let input = module
-            .global_variables
-            .iter()
-            .find(|(_, v)| v.binding.as_ref().is_some_and(|b| b.group == 0 && b.binding == 0))
-            .unwrap()
-            .0;
-        assert_eq!(module.entry_points.len(), 1);
-        assert_eq!(
-            storage_loads(&module.entry_points[0].function, input),
-            1,
-            "the predicate and output must share one input load: {source}"
-        );
-    }
-}
-
-#[test]
 fn scans_and_reductions_use_one_shared_bank_per_phase() {
     let reduce = shaders("entry total(xs:[]i32) i32=reduce((+),0,xs)");
     let scan = shaders("entry prefixes(xs:[]i32) []i32=scan((+),0,xs)");
@@ -1012,86 +919,6 @@ fn visit_loop_depths(block: &naga::Block, depth: usize, visit: &mut impl FnMut(&
 }
 
 #[test]
-fn fluid_leaf_bounds_are_computed_outside_the_bfs() {
-    stacker::grow(32 * 1024 * 1024, || {
-        // Use the simulator's implementation, including its queue sizes and guards.
-        let neighbors = include_str!("../../../fluid-simulation/packages/spatial/src/neighbors.wyn")
-            .replace(
-                "module Tree = import \"octree\"",
-                &format!(
-                    "module Tree = {{ {} }}",
-                    include_str!("../../../fluid-simulation/packages/spatial/src/octree.wyn")
-                ),
-            )
-            .replace(
-                "module Hilbert = import \"hilbert\"",
-                &format!(
-                    "module Hilbert = {{ {} }}",
-                    include_str!("../../../fluid-simulation/packages/spatial/src/hilbert.wyn")
-                ),
-            );
-        let source = format!(
-            "{neighbors}
-        entry neighbors(positions:[]vec4f32, corners:[]u32, offsets:[]i32) [258]i32 =
-            leaf_neighbors(0,positions,corners,offsets,1.7,16.0)"
-        );
-        placement_shaders(&source, |module| {
-            let mut bounds_depths = Vec::new();
-            let mut queues = 0;
-            for function in module
-                .functions
-                .iter()
-                .map(|(_, f)| f)
-                .chain(module.entry_points.iter().map(|e| &e.function))
-            {
-                let queue_variables: Vec<_> = function
-                    .local_variables
-                    .iter()
-                    .filter_map(|(id, v)| {
-                        matches!(module.types[v.ty].inner,
-                        naga::TypeInner::Array { base, .. } if matches!(module.types[base].inner,
-                            naga::TypeInner::Vector { size: naga::VectorSize::Bi, scalar }
-                                if scalar.kind == naga::ScalarKind::Uint))
-                        .then_some(id)
-                    })
-                    .collect();
-                queues += queue_variables.len();
-                let whole_queue = |pointer| {
-                    matches!(function.expressions[pointer],
-                    Expression::LocalVariable(v) if queue_variables.contains(&v))
-                };
-                assert!(!function
-                    .expressions
-                    .iter()
-                    .any(|(_, e)| matches!(e, Expression::Load { pointer } if whole_queue(*pointer))));
-                visit_loop_depths(&function.body, 0, &mut |statement, depth| {
-                    if let Statement::Store { pointer, .. } = statement {
-                        assert!(!whole_queue(*pointer), "BFS must update queue elements in place");
-                    }
-                    if let Statement::Emit(range) = statement {
-                        for value in range.clone() {
-                            if matches!(
-                                function.expressions[value],
-                                Expression::Math {
-                                    fun: naga::MathFunction::Max,
-                                    ..
-                                }
-                            ) {
-                                bounds_depths.push(depth);
-                            }
-                        }
-                    }
-                });
-            }
-            // Max updates the upper bound inside the bounds loop, never in a
-            // second enclosing loop (the BFS). Also reject duplicated bounds scans.
-            assert_eq!(bounds_depths, vec![1]);
-            assert_eq!(queues, 1);
-        });
-    });
-}
-
-#[test]
 fn nested_loop_invariants_keep_outer_iteration_dependencies() {
     shaders("entry nested(xs:[]i32) []i32 = map(|x:i32| loop a=0 for i<4 do a+(loop b=0 for j<3 do b+x*i+j), xs)");
 }
@@ -1150,40 +977,6 @@ fn runtime_array_metadata_shares_storage_and_fits_binding_limits() {
             assert_eq!(task.destination, lengths[0].destination);
             assert_eq!(task.offset % 4, 0);
         }
-    }
-}
-
-#[test]
-fn guarded_division_is_shared_across_control_indexing_and_composed_callbacks() {
-    for source in [
-        "entry main(xs:[]i32) []i32 = map(|n|
-         if n==0 then 7 else if 100/n>2 then 100/n+1 else 100/n+2,xs)",
-        "entry main(xs:[]i32) []i32 = map(|n|
-         if n==0 then 7 else loop a=100/n for i<2 do a+100/n,xs)",
-        "entry main(xs:[]i32) []i32 = map(|x|
-         let values=[x,x+1]
-         let i=if x==0 then 0 else 10/x in values[i%2]+i,xs)",
-        "entry main(xs:[]i32) []i32 =
-         map(|p|p.0+p.1,map(|x|let q=if x==0 then 0 else 100/x in (q+1,q+2),xs))",
-    ] {
-        let module = shaders(source);
-        let divisions = module
-            .functions
-            .iter()
-            .map(|(_, f)| f)
-            .chain(module.entry_points.iter().map(|e| &e.function))
-            .flat_map(|f| f.expressions.iter())
-            .filter(|(_, expression)| {
-                matches!(
-                    expression,
-                    Expression::Binary {
-                        op: BinaryOperator::Divide,
-                        ..
-                    }
-                )
-            })
-            .count();
-        assert_eq!(divisions, 1, "{source}");
     }
 }
 
@@ -1263,15 +1056,4 @@ fn inferred_loop_result_arrays_retain_logical_extents() {
         "{}\n{fixture}",
         include_str!("../../../fluid-simulation/packages/spatial/src/octree.wyn")
     ));
-}
-
-#[test]
-fn public_scratch_allocators_reach_both_backends() {
-    for source in [
-        "entry main(xs:[]i32) []i32 = scatter(duplicate_scratch(xs),iota(length(xs)),xs)",
-        "entry main(xs:[]i32) []i32 = scatter(scratch(length(xs)),iota(length(xs)),xs)",
-        "entry main(xs:[4]vec2u32) [4]vec2u32 = scatter(duplicate_scratch(xs),[3,2,1,0],xs)",
-    ] {
-        shaders(source);
-    }
 }

@@ -1,0 +1,1 @@
+entry neighbors(positions:[]vec4f32, corners:[]u32, offsets:[]i32) [258]i32 = leaf_neighbors(0,positions,corners,offsets,1.7,16.0)

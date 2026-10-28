@@ -1,0 +1,5 @@
+entry main(xs:[8]i32, ys:[8]i32, k:i32) ([8]i32,i32) =
+        let first=loop values=xs for i<k do map(|x|x+i,values) in
+        let other=reduce((+),0,map(|x|x*x,ys)) in
+        let second=loop values=first for i<k do map(|x|x*2+i,values) in
+        (second,other)

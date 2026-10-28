@@ -1,0 +1,5 @@
+entry generated_array(count:f32) []i32 = let xs=iota(i32(count)) let ys=iota(i32(count+1.0)) in xs
+
+entry generated_tuple(count:f32) ([]i32, []i32) = let xs=iota(i32(count)) let ys=iota(i32(count+1.0)) in (xs,ys)
+
+entry generated_record(count:f32) {ao:[]i32, coarse:[]i32} = let xs=iota(i32(count)) let ys=iota(i32(count+1.0)) in {ao=xs,coarse=ys}

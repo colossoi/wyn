@@ -1,0 +1,42 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"scope_0_repro\""]
+--! [[spirv]]
+--! entry = "scope_0_repro"
+--! counts = { SDiv = 1, SRem = 1 }
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"scope_1_repro\""]
+--! [[spirv]]
+--! entry = "scope_1_repro"
+--! counts = { SDiv = 1, SRem = 1 }
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"scope_2_repro\""]
+--! [[spirv]]
+--! entry = "scope_2_repro"
+--! counts = { SDiv = 1, SRem = 1 }
+
+entry scope_0_repro(indices: []i32, width: i32) []i32 =
+  map(|i|
+    let pixel = @[i % width, i / width] in
+    loop total = pixel.x + pixel.y for k < 2 do total + pixel.x + pixel.y,
+    indices)
+
+entry scope_1_repro(indices: []i32, width: i32) []i32 =
+  map(|i|
+    let pixel = @[i % width, i / width] in
+    loop total = pixel.x + pixel.y for j < 2 do
+      loop inner = total for k < 2 do inner + pixel.x + pixel.y,
+    indices)
+
+entry scope_2_repro(indices: []i32, width: i32) []i32 =
+  map(|i|
+    loop total = 0 for j < 2 do
+      let pixel = @[(i + j) % width, (i + j) / width] in
+      loop inner = total + pixel.x + pixel.y for k < 2 do
+        inner + pixel.x + pixel.y,
+    indices)

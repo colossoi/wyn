@@ -1,7 +1,6 @@
 use crate::host::arithmetic::{add, ceiling, dimension, floor, multiply, signed_size, size, subtract};
 use crate::host::{
-    Allocation, Binding, Expr, FrameGraph, Operation, Pipeline, Program, ResultLayout, ResultScalar,
-    ShaderFormat,
+    Allocation, Binding, Expr, FrameGraph, Operation, Pipeline, Program, ResultLayout, ShaderFormat,
 };
 use crate::{compile_thru_ssa, lower_ssa_to_spirv, lower_ssa_to_wgsl_with_program};
 use std::collections::BTreeSet;
@@ -68,28 +67,6 @@ fn device_computed_trip_counts_are_published_before_the_loop() {
 }
 
 #[test]
-fn independent_work_and_successive_loops_reach_host_backends() {
-    let source = "entry main(xs:[8]i32, ys:[8]i32, k:i32) ([8]i32,i32) =
-        let first=loop values=xs for i<k do map(|x|x+i,values) in
-        let other=reduce((+),0,map(|x|x*x,ys)) in
-        let second=loop values=first for i<k do map(|x|x*2+i,values) in
-        (second,other)";
-    for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
-        let ssa = compile_thru_ssa(source).unwrap();
-        let program = match format {
-            ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
-            ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
-        };
-        assert_eq!(
-            program.entries[0].operations.iter().filter(|op| matches!(op, Operation::Loop { .. })).count(),
-            2
-        );
-        program.to_rust_wgpu("loops", format).unwrap();
-        program.to_whl("loops", format).unwrap();
-    }
-}
-
-#[test]
 fn rematerialized_helpers_and_dispatch_extents_publish_their_inputs() {
     for source in [
         include_str!("../../testfiles/scalar_setup.wyn"),
@@ -129,76 +106,6 @@ fn finish_dispatch_waits_for_all_reduction_results() {
     let combine = dispatches.iter().position(|name| name.ends_with("_combine")).unwrap();
     let finish = dispatches.iter().position(|name| name.ends_with("_finish")).unwrap();
     assert!(combine < finish, "{dispatches:?}");
-}
-
-#[test]
-fn unrelated_compute_entries_preserve_graphics_inputs_and_resources() {
-    let source = include_str!("../../testfiles/graphics_compute_entry_bindings.wyn");
-    let (draw, compute) = source.split_once("entry compute").unwrap();
-    let compute = format!("entry compute{compute}");
-    // A one-input compute entry puts its output in colors' graphics slot;
-    // that collision must not turn colors into an allocated intermediate.
-    let output_collision = "entry compute(xs: []vec4f32) []vec4f32 = map(|x| x * 2.0, xs)";
-    for source in [
-        draw.to_string(),
-        source.to_string(),
-        format!("{compute}\n{draw}"),
-        format!("{draw}\n{output_collision}"),
-        format!("{output_collision}\n{draw}"),
-    ] {
-        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
-            let ssa = compile_thru_ssa(&source).unwrap();
-            let program = match format {
-                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
-                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
-            };
-            let entry = program.entries.iter().find(|entry| entry.name == "draw").unwrap();
-            let resources = &program.interface.frame_graph.resources;
-            let inputs: Vec<_> = entry.inputs.iter().map(|id| resources[id.0].name.as_str()).collect();
-            assert_eq!(inputs, ["positions", "colors", "target"], "{format:?}");
-            let rust = program.to_rust_wgpu("entry_bindings", format).unwrap();
-            let signature = rust.split_once("pub fn encode_draw(").unwrap().1.split_once(") ->").unwrap().0;
-            let signature: String = signature.split_whitespace().collect();
-            assert_eq!(signature, "context:&mutHostContext,encoder:&mutCommandEncoder,positions:&Buffer,colors:&Buffer,target:&Texture,");
-        }
-    }
-}
-
-#[test]
-fn graphics_helper_returns_image_with_inline_array_results() {
-    let source = include_str!("../../testfiles/regressions/render_helper_tuple.wyn");
-    for source in [
-        source.to_string(),
-        source
-            .replace(
-                "([]i32,render_target<vec4f32>)",
-                "{values: []i32, image: render_target<vec4f32>}",
-            )
-            .replace("([1i32,2i32],image)", "{values = [1i32,2i32], image = image}"),
-    ] {
-        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
-            let ssa = compile_thru_ssa(&source).unwrap();
-            let program = match format {
-                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
-                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
-            };
-            let [entry] = program.entries.as_slice() else {
-                panic!("one source entry")
-            };
-            assert_eq!(entry.inputs.len(), 1);
-            assert_eq!(entry.results.len(), 2);
-            assert_eq!(entry.results[1], *entry.inputs.first().unwrap());
-            assert_ne!(entry.results[0], *entry.inputs.first().unwrap());
-            assert!(entry.allocations.iter().any(|allocation|
-                matches!(allocation, Allocation::Buffer { resource, .. } if *resource == entry.results[0])));
-            assert_eq!(
-                entry.operations.iter().filter(|op| matches!(op, Operation::Draw { .. })).count(),
-                1
-            );
-            assert!(entry.operations.iter().any(|op| matches!(op, Operation::Dispatch { .. })));
-            program.to_rust_wgpu("helper_tuple", format).unwrap();
-        }
-    }
 }
 
 #[test]
@@ -430,35 +337,6 @@ fn resolution_allocation_expressions_keep_cpu_parameters() {
 }
 
 #[test]
-fn scalar_output_descriptors_preserve_names_types_and_byte_ranges() {
-    for (ty, literal, scalar) in [
-        ("i32", "-7", ResultScalar::I32),
-        ("u32", "4294967295u32", ResultScalar::U32),
-        ("f32", "2.5", ResultScalar::F32),
-    ] {
-        let program = compile(&format!("entry result() {ty} = {literal}"));
-        assert_eq!(program.interface.source_results[0].name, "result");
-        assert_eq!(
-            program.interface.source_results[0].layout,
-            ResultLayout::Scalar(scalar)
-        );
-        let rust = program.to_rust_wgpu("result.wgsl", ShaderFormat::Wgsl).unwrap();
-        assert!(rust.contains("-> Result<OutputDescriptor, HostError>"), "{rust}");
-        assert!(rust.contains("name: \"result\""));
-        assert!(rust.contains(&format!("ResultLayout::Scalar(ResultScalar::{scalar:?})")));
-        assert!(rust.contains("size: 4u64"));
-        assert!(rust.contains("Buffer::clone("));
-        assert!(rust.contains("pub mod output"));
-        for operation in ["pub fn read_", "map_async", "from_le_bytes"] {
-            assert!(
-                !rust.contains(operation),
-                "output descriptor contains {operation}"
-            );
-        }
-    }
-}
-
-#[test]
 fn record_output_descriptors_preserve_authored_field_names() {
     let program = compile("entry main() {count:i32, gain:f32} = {count=7, gain=2.5}");
     let results = &program.interface.source_results;
@@ -615,33 +493,6 @@ fn rust_buffer_arguments_keep_source_names_in_bindings_sizes_and_results() {
     let rust = program.to_rust_wgpu("echo.wgsl", ShaderFormat::Wgsl).unwrap();
     assert!(rust.contains("samples: &Buffer"));
     assert!(rust.contains("Buffer::clone(&samples)"));
-}
-
-#[test]
-fn rust_generated_results_use_source_fields() {
-    for (ty, value, fields) in [
-        ("[]i32", "xs", &["generated"][..]),
-        ("([]i32, []i32)", "(xs, ys)", &["result_0", "result_1"][..]),
-        (
-            "{ao:[]i32, coarse:[]i32}",
-            "{ao=xs, coarse=ys}",
-            &["ao", "coarse"][..],
-        ),
-    ] {
-        let program = compile(&format!(
-            "entry generated(count:f32) {ty} = let xs = iota(i32(count)) let ys = iota(i32(count+1.0)) in {value}"
-        ));
-        let entry = &program.entries[0];
-        assert!(entry.results.iter().all(|id| !entry.inputs.contains(id)));
-        assert!(entry.results.iter().all(|id| entry.allocations.iter().any(|a| a.resource() == *id)));
-        let rust = program.to_rust_wgpu("results.wgsl", ShaderFormat::Wgsl).unwrap();
-        assert!(rust.contains("count: &ParameterBuffer"));
-        assert!(!rust.contains("count_host: &[u8]"));
-        assert!(!rust.contains("read_gpu_word"));
-        for field in fields {
-            assert!(rust.contains(&format!("name: \"{field}\"")), "{rust}");
-        }
-    }
 }
 
 #[test]

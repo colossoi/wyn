@@ -76,29 +76,31 @@ fn division_and_remainder_used_by_a_condition_are_reused_in_both_arms() {
 
 #[test]
 fn division_and_remainder_are_reused_from_enclosing_loop_scopes() {
-    for source in [
-        r#"entry repro(indices: []i32, width: i32) []i32 =
-  map(|i|
+    let placed = live_instructions(
+        crate::compile_thru_ssa(
+            r#"
+entry case_0(i:i32,width:i32) i32 =
     let pixel = @[i % width, i / width] in
-    loop total = pixel.x + pixel.y for k < 2 do total + pixel.x + pixel.y,
-    indices)"#,
-        // The producer is two lexical loop scopes outside the repeated use.
-        r#"entry repro(indices: []i32, width: i32) []i32 =
-  map(|i|
+    loop total = pixel.x + pixel.y for k < 2 do total + pixel.x + pixel.y
+entry case_1(i:i32,width:i32) i32 =
     let pixel = @[i % width, i / width] in
     loop total = pixel.x + pixel.y for j < 2 do
-      loop inner = total for k < 2 do inner + pixel.x + pixel.y,
-    indices)"#,
-        // An outer iteration's result is available throughout its inner loop.
-        r#"entry repro(indices: []i32, width: i32) []i32 =
-  map(|i|
+      loop inner = total for k < 2 do inner + pixel.x + pixel.y
+entry case_2(i:i32,width:i32) i32 =
     loop total = 0 for j < 2 do
       let pixel = @[(i + j) % width, (i + j) / width] in
       loop inner = total + pixel.x + pixel.y for k < 2 do
-        inner + pixel.x + pixel.y,
-    indices)"#,
-    ] {
-        assert_division_sites(source, 1);
+        inner + pixel.x + pixel.y
+"#,
+        )
+        .unwrap(),
+    );
+    for index in 0..3 {
+        let bodies = reachable_bodies(&placed, &format!("case_{index}"));
+        for op in [BinaryOperator::Divide, BinaryOperator::Remainder] {
+            let sites = bodies.iter().flat_map(|body| body.inner.insts.values()).filter(|node| matches!(&node.data, InstKind::Op { tag: OpTag::BinOp(actual), .. } if *actual == op)).count();
+            assert_eq!(sites, 1, "case {index}: {op:?}");
+        }
     }
 }
 
@@ -365,46 +367,43 @@ entry repro(points: []vec3f32) []vec2i32 = map(pixel, points)
 
 #[test]
 fn partial_intrinsic_reuse_respects_dominance_and_loop_carried_operands() {
-    for (source, expected) in [
-        (
-            r#"entry repro(xs: []f32) []f32 = map(|x|
+    let placed = live_instructions(
+        crate::compile_thru_ssa(
+            r#"
+entry case_0(x:f32) f32 =
           let root = f32.sqrt(x) in
           loop total = root for j < 2 do
-            loop inner = total for k < 2 do inner + f32.sqrt(x), xs)"#,
-            1,
-        ),
-        // A loop header dominates its merge, so its result can be reused.
-        (
-            r#"entry repro(xs: []f32) []f32 = map(|x|
+            loop inner = total for k < 2 do inner + f32.sqrt(x)
+entry case_1(x:f32) f32 =
           let total = loop total = 0.0 while total < f32.sqrt(x) do total + 1.0 in
-          total + f32.sqrt(x), xs)"#,
-            1,
-        ),
-        // The second sqrt's operand changes on every iteration.
-        (
-            r#"entry repro(xs: []f32) []f32 = map(|x|
-          loop total = f32.sqrt(x) for k < 2 do f32.sqrt(total), xs)"#,
-            2,
-        ),
-    ] {
-        assert_partial_intrinsic_sites(source, "f32.sqrt", expected);
-    }
-    let placed = assert_partial_intrinsic_sites(
-        r#"entry repro(xs: []f32, count: i32) []f32 =
-      map(|x| loop total = 0.0 for k < count do total + f32.sqrt(x), xs)"#,
-        "f32.sqrt",
-        1,
+          total + f32.sqrt(x)
+entry case_2(x:f32) f32 =
+          loop total = f32.sqrt(x) for k < 2 do f32.sqrt(total)
+entry case_3(x:f32,count:i32) f32 =  loop total = 0.0 for k < count do total + f32.sqrt(x)
+"#,
+        )
+        .unwrap(),
     );
     let sqrt = intrinsic("f32.sqrt");
-    for body in placed.functions.iter().map(|f| &f.body).chain(placed.entry_points.iter().map(|e| &e.body))
-    {
-        let scopes = LoopScopes::analyze(&body.inner);
-        for node in body.inner.insts.values() {
-            if matches!(&node.data, InstKind::Op { tag, .. } if *tag == sqrt) {
-                assert!(
-                    scopes.scope(node.placement.block().unwrap()).is_some(),
-                    "a possibly empty loop must keep its sqrt guarded"
-                );
+    for (index, expected) in [1, 1, 2, 1].into_iter().enumerate() {
+        let bodies = reachable_bodies(&placed, &format!("case_{index}"));
+        let sites = bodies
+            .iter()
+            .flat_map(|body| body.inner.insts.values())
+            .filter(|node| matches!(&node.data, InstKind::Op { tag, .. } if *tag == sqrt))
+            .count();
+        assert_eq!(sites, expected, "case {index}");
+        if index == 3 {
+            for body in bodies {
+                let scopes = LoopScopes::analyze(&body.inner);
+                for node in body.inner.insts.values() {
+                    if matches!(&node.data, InstKind::Op { tag, .. } if *tag == sqrt) {
+                        assert!(
+                            scopes.scope(node.placement.block().unwrap()).is_some(),
+                            "possibly empty loop must guard sqrt"
+                        );
+                    }
+                }
             }
         }
     }
@@ -462,4 +461,38 @@ fn partial_intrinsics_reuse_guarded_producers_in_nested_branches() {
             1,
         );
     }
+}
+
+// Inspect each case independently even when its producer is retained in a helper.
+fn reachable_bodies<'a>(
+    program: &'a crate::ssa::stage::Placed,
+    entry: &str,
+) -> Vec<&'a crate::ssa::types::FuncBody> {
+    let mut bodies: Vec<_> = program
+        .entry_points
+        .iter()
+        .filter(|e| e.name == entry || e.name.starts_with(&format!("{entry}_")))
+        .map(|e| &e.body)
+        .collect();
+    assert!(!bodies.is_empty(), "missing entry {entry}");
+    let mut seen = crate::LookupSet::default();
+    let mut index = 0;
+    while index < bodies.len() {
+        let mut callees = Vec::new();
+        for node in bodies[index].inner.insts.values() {
+            if let InstKind::Op {
+                tag: OpTag::Call(id), ..
+            } = &node.data
+            {
+                callees.push(*id);
+            }
+        }
+        for id in callees {
+            if seen.insert(id) {
+                bodies.push(&program.functions.iter().find(|f| f.id == id).unwrap().body);
+            }
+        }
+        index += 1;
+    }
+    bodies
 }

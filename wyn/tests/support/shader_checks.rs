@@ -1,12 +1,25 @@
 //! Inspect emitted shader structure, scoped to an entry and its reachable helpers.
 use naga::{AddressSpace, Block, Expression, Function, Handle, Module, ShaderStage, Statement};
 use serde::Deserialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Expectation {
     entry: String,
+    #[serde(default)]
+    targets: Vec<String>,
+    entry_count: Option<usize>,
+    #[serde(default)]
+    binary: BTreeMap<String, usize>,
+    #[serde(default)]
+    math: BTreeMap<String, usize>,
+    #[serde(default)]
+    parameter_loads: BTreeMap<String, usize>,
+    local_array_traffic: Option<[usize; 3]>,
+    workgroup_array_scalar: Option<String>,
+    selects_present: Option<bool>,
+    ifs_present: Option<bool>,
     stage: Option<String>,
     workgroup_size: Option<[u32; 3]>,
     #[serde(default)]
@@ -46,18 +59,25 @@ fn statements(
     }
 }
 
-pub fn check(bytes: &[u8], target: &str, expectations: &[Expectation]) {
+pub fn check(bytes: &[u8], target: &str, expectations: &[Expectation], host: &str) {
+    let host = wyn_host_interp::Program::parse(host).expect("valid shader host ABI");
     let module = match target {
         "spirv" => naga::front::spv::parse_u8_slice(bytes, &Default::default()).expect("SPIR-V module"),
         "wgsl" => naga::front::wgsl::parse_str(std::str::from_utf8(bytes).unwrap()).expect("WGSL module"),
         _ => unreachable!(),
     };
     for expected in expectations {
-        check_module(&module, expected);
+        assert!(
+            expected.targets.iter().all(|target| matches!(target.as_str(), "spirv" | "wgsl")),
+            "unknown shader-check target"
+        );
+        if expected.targets.is_empty() || expected.targets.iter().any(|t| t == target) {
+            check_module(&module, expected, Some(&host));
+        }
     }
 }
 
-fn check_module(module: &Module, expected: &Expectation) {
+fn check_module(module: &Module, expected: &Expectation, host: Option<&wyn_host_interp::Program>) {
     let entries: Vec<_> = module
         .entry_points
         .iter()
@@ -72,6 +92,9 @@ fn check_module(module: &Module, expected: &Expectation) {
         })
         .collect();
     assert!(!entries.is_empty(), "missing shader entry {}", expected.entry);
+    if let Some(count) = expected.entry_count {
+        assert_eq!(entries.len(), count, "{} shader entries", expected.entry);
+    }
     if let Some(size) = expected.workgroup_size {
         assert!(
             entries.iter().any(|entry| entry.workgroup_size == size),
@@ -95,6 +118,139 @@ fn check_module(module: &Module, expected: &Expectation) {
             }
         }
         index += 1;
+    }
+    let mut binary = BTreeMap::<String, usize>::new();
+    let mut math = BTreeMap::<String, usize>::new();
+    let mut loads = BTreeMap::<u32, usize>::new();
+    let mut traffic = [0usize; 3];
+    let mut selects = 0;
+    let mut ifs = 0;
+    let mut workgroup_arrays = BTreeSet::new();
+    for function in &functions {
+        let arrays: BTreeSet<_> = function
+            .local_variables
+            .iter()
+            .filter(|(_, v)| matches!(module.types[v.ty].inner, naga::TypeInner::Array { .. }))
+            .map(|(id, _)| id)
+            .collect();
+        traffic[0] += arrays.len();
+        let whole_array = |pointer| matches!(function.expressions[pointer], Expression::LocalVariable(id) if arrays.contains(&id));
+        for (_, expression) in function.expressions.iter() {
+            match expression {
+                Expression::Binary { op, .. } => *binary.entry(format!("{op:?}")).or_default() += 1,
+                Expression::Math { fun, .. } => *math.entry(format!("{fun:?}")).or_default() += 1,
+                Expression::Select { .. } => selects += 1,
+                Expression::GlobalVariable(id)
+                    if module.global_variables[*id].space == AddressSpace::WorkGroup =>
+                {
+                    workgroup_arrays.insert(*id);
+                }
+                Expression::Load { pointer } => {
+                    if whole_array(*pointer) {
+                        traffic[1] += 1;
+                    }
+                    let mut base = *pointer;
+                    loop {
+                        match function.expressions[base] {
+                            Expression::Access { base: parent, .. }
+                            | Expression::AccessIndex { base: parent, .. } => base = parent,
+                            Expression::GlobalVariable(id) => {
+                                let variable = &module.global_variables[id];
+                                if matches!(variable.space, AddressSpace::Storage { .. }) {
+                                    if let Some(binding) = &variable.binding {
+                                        if binding.group == 0 {
+                                            *loads.entry(binding.binding).or_default() += 1;
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        statements(&function.body, 0, 0, &mut |statement, _, _| match statement {
+            Statement::If { .. } => ifs += 1,
+            Statement::Store { pointer, .. } if whole_array(*pointer) => traffic[2] += 1,
+            _ => {}
+        });
+    }
+    for (op, count) in &expected.binary {
+        assert_eq!(
+            binary.get(op).copied().unwrap_or(0),
+            *count,
+            "{} {op}",
+            expected.entry
+        );
+    }
+    for (op, count) in &expected.math {
+        assert_eq!(
+            math.get(op).copied().unwrap_or(0),
+            *count,
+            "{} {op}",
+            expected.entry
+        );
+    }
+    for (parameter, count) in &expected.parameter_loads {
+        assert_eq!(entries.len(), 1, "parameter-load checks need one shader entry");
+        let host = host.expect("host ABI for parameter loads");
+        let kernel = host
+            .kernels
+            .values()
+            .find(|kernel| kernel.options.get(":entry").unwrap().text().unwrap() == entries[0].name)
+            .expect("shader kernel ABI");
+        let index: usize = parameter.parse().expect("numeric parameter index");
+        let name = &kernel.parameters[index].name;
+        let abi = kernel.options.get(":abi").unwrap().list().unwrap();
+        let binding = abi
+            .iter()
+            .map(|binding| binding.list().unwrap())
+            .find(|binding| binding[0].text().unwrap() == name)
+            .unwrap();
+        assert_eq!(binding[1].text().unwrap(), ":storage");
+        assert_eq!(binding[2].u64().unwrap(), 0);
+        let slot = binding[3].u64().unwrap() as u32;
+        assert_eq!(
+            loads.get(&slot).copied().unwrap_or(0),
+            *count,
+            "{} parameter {parameter} loads",
+            expected.entry
+        );
+    }
+    if let Some(wanted) = expected.local_array_traffic {
+        assert_eq!(traffic, wanted, "{} local array traffic", expected.entry);
+    }
+    if let Some(wanted) = expected.selects_present {
+        assert_eq!(selects > 0, wanted, "{} selects", expected.entry);
+    }
+    if let Some(wanted) = expected.ifs_present {
+        assert_eq!(ifs > 0, wanted, "{} conditionals", expected.entry);
+    }
+    if let Some(scalar) = &expected.workgroup_array_scalar {
+        assert!(
+            !workgroup_arrays.is_empty(),
+            "{} missing workgroup arrays",
+            expected.entry
+        );
+        for id in workgroup_arrays {
+            let naga::TypeInner::Array { base, .. } = module.types[module.global_variables[id].ty].inner
+            else {
+                panic!("workgroup array required");
+            };
+            let wanted = match scalar.as_str() {
+                "u32" => naga::Scalar::U32,
+                _ => panic!("unknown workgroup scalar {scalar}"),
+            };
+            assert_eq!(
+                module.types[base].inner,
+                naga::TypeInner::Scalar(wanted),
+                "{} workgroup element",
+                expected.entry
+            );
+        }
     }
     let mut depths = Vec::new();
     let mut guards = Vec::new();
@@ -158,7 +314,27 @@ fn checks_do_not_count_unrelated_entries() {
     let module = naga::front::wgsl::parse_str("@compute @workgroup_size(1) fn plain() {}\n@compute @workgroup_size(2) fn looping() { loop { break; } }").unwrap();
     let expected: Expectation =
         toml::from_str("entry = 'plain'\nloop_depths = []\nworkgroup_size = [1,1,1]").unwrap();
-    check_module(&module, &expected);
+    check_module(&module, &expected, None);
     let wrong: Expectation = toml::from_str("entry = 'plain'\nloop_depths = [0]").unwrap();
-    assert!(std::panic::catch_unwind(|| check_module(&module, &wrong)).is_err());
+    assert!(std::panic::catch_unwind(|| check_module(&module, &wrong, None)).is_err());
+}
+
+#[test]
+fn parameter_load_checks_follow_host_abi_instead_of_assuming_binding_zero() {
+    let module = naga::front::wgsl::parse_str("@group(0) @binding(7) var<storage, read> input: array<u32>; @compute @workgroup_size(1) fn wanted() { let value = input[0]; }").unwrap();
+    let host = wyn_host_interp::Program::parse(
+        r#"
+(define-host-program :version 1)
+(define-gpu-module 'shaders :format :wgsl :path "unused.wgsl")
+(define-gpu-kernel 'kernel :module 'shaders :entry "wanted"
+  :workgroup-size '(1 1 1)
+  :parameters '((argument-0 :buffer :read :element :u32 :stride 4))
+  :abi '((argument-0 :storage 0 7)))
+"#,
+    )
+    .unwrap();
+    let expected: Expectation = toml::from_str("entry = 'wanted'\nparameter_loads = { '0' = 1 }").unwrap();
+    check_module(&module, &expected, Some(&host));
+    let wrong: Expectation = toml::from_str("entry = 'wanted'\nparameter_loads = { '0' = 2 }").unwrap();
+    assert!(std::panic::catch_unwind(|| check_module(&module, &wrong, Some(&host))).is_err());
 }

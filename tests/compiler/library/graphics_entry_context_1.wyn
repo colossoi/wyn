@@ -1,0 +1,11 @@
+-- Adding an unrelated compute entry must preserve draw's graphics inputs.
+-- Build: wyn build --graphics -O --target-double rust-wgpu --target spirv
+--   testfiles/graphics_compute_entry_bindings.wyn -o tmp/graphics_compute_entry_bindings.spv
+def repro_vertex(positions: []vec4f32, index: u32, _instance: u32, _draw: u32) vertex<()> =
+  vertex_output(positions[i32(index)], ())
+entry draw(positions: []vec4f32, colors: []vec4f32, target: render_target<vec4f32>) ([]vec4f32, render_target<vec4f32>) =
+  let updated = map(|p| p + @[0.0, 0.0, 0.0, 1.0], positions)
+  let fragments = rasterize_triangles(direct_draw(3u32, 1u32), repro_vertex(positions, _, _, _))
+  let image = shade(target, fragments, |_, _, _, _, _| colors[0]) in
+  (updated, image)
+entry compute(xs: []vec4f32, ys: []vec4f32) []vec4f32 = map(|x| x * ys[0], xs)

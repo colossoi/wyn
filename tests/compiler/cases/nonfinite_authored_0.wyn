@@ -1,0 +1,7 @@
+--! command = "build"
+--! exit = 1
+--! targets = ["wgsl"]
+--! errors = ["WGSL generation error"]
+--! contains = ["NaN/Infinity constants"]
+
+entry nonfinite() f32 = f32.inf

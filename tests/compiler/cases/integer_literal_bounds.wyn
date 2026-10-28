@@ -1,0 +1,26 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["wgsl"]
+--! args = []
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"bound_0_minimum\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"bound_1_minimum\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"bound_2_minimum\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"bound_3_bound\""]
+
+
+
+entry bound_0_minimum() i32 = -2147483648
+
+entry bound_1_minimum() i32 = -2147483647 - 1
+
+entry bound_2_minimum() [2]i32 = [-2147483648, 2147483647]
+
+def bound_3_bounds: [2]i32 = [-2147483648, 2147483647] entry bound_3_bound(i:i32) i32 = bound_3_bounds[i]

@@ -212,3 +212,28 @@ Host-contract cases inspect the published loop-completion interface and generate
 Rust allocation/context behavior. Their shared setup lives under
 `wyn-core/tests/support/`, outside the unit suite; source preparation is reused
 across backend/grid variants.
+
+## Instruction and representation checks
+
+`[[spirv]]` selects an `entry` and its reachable helpers. `counts` and `maximum`
+map SPIR-V opcode names to exact/maximum counts; `present` and `absent` require or
+forbid opcodes. `ext_inst = { Sin = 0 }` checks extended instructions.
+`array_traffic = [allocations, loads, stores]` counts function-local whole-array
+traffic. `array_phis`, `array_loads`, and `minimum_array_allocations` provide
+individual checks. `spirv_helpers` counts non-entry functions across the module;
+keep separate fixtures when helper sharing across entries is the property tested.
+`spirv_round_trip = true` re-emits each entry with Naga and rejects explicitly
+laid-out function-local storage. `shader_entries` checks the SPIR-V entry count.
+
+`[[shader]]` also accepts `targets`, `entry_count`, `binary` and `math` operation
+counts, `selects_present`, `ifs_present`, and `local_array_traffic`. For WGSL,
+`parameter_loads = { "0" = 1 }` checks loads through kernel parameter zero,
+resolving its actual binding through emitted WHL, and
+`workgroup_array_scalar = "u32"` requires reachable workgroup arrays with that
+scalar element type. All these checks are scoped to the named entry and reachable
+helpers, so unrelated entries cannot satisfy them.
+
+`wyn-core/tests/emitted_contracts.rs` uses external `.wyn` sources for public host
+layout, Rust-signature, direct-capacity, and render-target resource/use-chain
+contracts that need more than the text fixture assertions. It shares frontend/SSA
+work across backends. The fluid-neighbor case reads the actual package sources.

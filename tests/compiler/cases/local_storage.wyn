@@ -1,0 +1,143 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = []
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"local_7_0_reproduce\""]
+--! [[spirv]]
+--! entry = "local_7_0_reproduce"
+--! array_traffic = [1, 0, 0]
+--! [[shader]]
+--! entry = "local_7_0_reproduce"
+--! targets = ["wgsl"]
+--! local_array_traffic = [1, 0, 0]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"local_14_0_main\""]
+--! [[spirv]]
+--! entry = "local_14_0_main"
+--! array_phis = 0
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"local_18_0_temporary_lifetime\""]
+--! [[spirv]]
+--! entry = "local_18_0_temporary_lifetime"
+--! minimum_array_allocations = 1
+--! array_loads = 0
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"local_20_0_main\""]
+--! [[spirv]]
+--! entry = "local_20_0_main"
+--! array_traffic = [1, 0, 0]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"local_21_0_main\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"local_22_0_map_loop\""]
+--! [[spirv]]
+--! entry = "local_22_0_map_loop"
+--! array_phis = 0
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"local_25_0_map_loop\""]
+--! [[spirv]]
+--! entry = "local_25_0_map_loop"
+--! maximum = { CompositeExtract = 99 }
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"local_3_0_reproduce\""]
+--! [[spirv]]
+--! entry = "local_3_0_reproduce"
+--! array_traffic = [1, 0, 0]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"local_3_1_reproduce\""]
+--! [[spirv]]
+--! entry = "local_3_1_reproduce"
+--! array_traffic = [1, 0, 0]
+
+
+
+-- FIXED with installed compiler dated 2026-10-08 21:11 EDT: one Function
+-- array with element access, no whole-array copies in the loop. All 128
+-- numeric output components pass on GTX 1660 Ti.
+-- Former suspected performance failure: each dynamic queue read/update emits a whole
+-- 1024-element vec2 array store/load in SPIR-V, rather than just element access.
+-- Expected efficient lowering: initialize private queue once, read/write one
+-- element per iteration. Inspect disassembly; numeric output can still pass.
+-- Whether the driver eliminates these copies requires native-code inspection
+-- or timing; this reproducer establishes the emitted SPIR-V pattern only.
+-- CWD: /home/jonah/wyn
+-- wyn build fluid-simulation/test/repro_local_queue_copy.wyn -o /tmp/queue-copy.spv
+-- spirv-dis /tmp/queue-copy.spv -o /tmp/queue-copy.spvasm
+-- For input steps=64, output lane i should be [i+64,64].
+-- extra/viz/target/release/viz pipeline /tmp/queue-copy.spv --push-constant steps:i32=64 --verbose
+-- Verified 2026-10-08 on GTX 1660 Ti: all 128 output components correct.
+def local_7_0_walk(seed: u32, steps: i32) vec2u32 =
+  let initial = replicate(1024,@[0u32,0u32]) with [0] = @[seed,0u32] in
+  let (queue,k) = loop (queue,k) = (initial,0i32) while k < steps do
+    let value = queue[k%1024] in
+    (queue with [(k+1)%1024] = value+@[1u32,1u32],k+1) in
+  queue[k%1024]
+
+entry local_7_0_reproduce(steps: i32) []vec2u32 =
+  map(|i| local_7_0_walk(u32(i),steps),0i32..<64)
+
+def local_14_0_walk(seed:i32,steps:i32) i32 =
+        loop total=0 for outer<3 do
+            let initial=replicate(8,seed+outer) in
+            let queue=loop queue=initial for k<steps do
+                queue with [(k+1)%8]=queue[k%8]+1 in total+queue[steps%8]
+        entry local_14_0_main(steps:i32) []i32=map(|i|local_14_0_walk(i,steps),0i32..<4)
+
+-- Expected 27*seed+111 (300 for seed=7). Each map creates a fresh temporary;
+-- after reduction it is dead before the next iteration allocates another.
+-- Generated code should index its allocation without whole-array snapshots.
+entry local_18_0_temporary_lifetime(seed: i32) i32 =
+  let (total,_k) = loop (total,k) = (0i32,0i32) while k<3 do
+    let values=map(|i| seed+i+k,iota(8)) in
+    (total+reduce((+),0i32,values)+values[0],k+1) in
+  total
+
+def local_20_0_walk(steps:i32) i32 =
+        let initial=replicate(8,0i32) in
+        let state=loop state={queue=initial,k=0i32} while state.k<steps do
+            {queue=if state.k%2==0 then state.queue with [state.k%8]=state.k else state.queue,
+             k=state.k+1} in state.queue[(state.k-1)%8]
+        entry local_20_0_main(steps:i32) []i32=map(|i|local_20_0_walk(steps+i),0i32..<4)
+
+def local_21_0_observe(xs:[8]i32,i:i32) i32=xs[i%8]
+        def local_21_0_walk(seed:i32,steps:i32) i32 =
+            let a=replicate(8,seed) in
+            let (b,k)=loop (b,k)=(a,0i32) while k<steps do
+                let next=b with [k%8]=k in (next,k+1+local_21_0_observe(b,next[k%8])) in b[seed%8]
+        entry local_21_0_main(steps:i32) []i32=map(|i|local_21_0_walk(i,steps),0i32..<4)
+
+-- Expected seed+2. The generated shader must not carry a whole array through
+-- an OpPhi: map-produced loop state should use liveness-proven local storage.
+entry local_22_0_map_loop(seed: i32) i32 =
+  let (values,_j) = loop (values,j) = (replicate(257,seed),0i32) while j<2 do
+    (map(|v| v+1,values),j+1) in
+  values[256]
+
+-- Expected seed+2. The generated shader must not carry a whole array through
+-- an OpPhi: map-produced loop state should use liveness-proven local storage.
+entry local_25_0_map_loop(seed: i32) i32 =
+  let (values,_j) = loop (values,j) = (replicate(4097,seed),0i32) while j<2 do
+    (map(|v| v+1,values),j+1) in
+  values[4096]
+
+def local_3_0_walk(seed:i32, steps:i32) i32 =
+            let initial=replicate(4,0i32) in
+            let (queue,k)=loop (queue,k)=(initial,0i32) while k<steps do
+                (queue with [(k+1)%4]=queue[k%4]+1i32,k+1) in queue[k%4]
+            entry local_3_0_reproduce(steps:i32) []i32=map(|i|local_3_0_walk(i,steps),0i32..<4)
+
+def local_3_1_walk(seed:i32, steps:i32) vec2u32 =
+            let initial=replicate(1024,@[0u32,0u32]) in
+            let (queue,k)=loop (queue,k)=(initial,0i32) while k<steps do
+                (queue with [(k+1)%1024]=queue[k%1024]+@[1u32,1u32],k+1) in queue[k%1024]
+            entry local_3_1_reproduce(steps:i32) []vec2u32=map(|i|local_3_1_walk(i,steps),0i32..<4)

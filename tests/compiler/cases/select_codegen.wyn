@@ -1,0 +1,76 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = []
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"select_0_choose\""]
+--! [[spirv]]
+--! entry = "select_0_choose"
+--! present = ["Select"]
+--! absent = ["SelectionMerge"]
+--! [[shader]]
+--! entry = "select_0_choose"
+--! targets = ["wgsl"]
+--! selects_present = true
+--! ifs_present = false
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"select_1_choose\""]
+--! [[spirv]]
+--! entry = "select_1_choose"
+--! present = ["Select"]
+--! absent = ["SelectionMerge"]
+--! [[shader]]
+--! entry = "select_1_choose"
+--! targets = ["wgsl"]
+--! selects_present = true
+--! ifs_present = false
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"select_2_choose\""]
+--! [[spirv]]
+--! entry = "select_2_choose"
+--! present = ["Select"]
+--! absent = ["SelectionMerge"]
+--! [[shader]]
+--! entry = "select_2_choose"
+--! targets = ["wgsl"]
+--! selects_present = true
+--! ifs_present = false
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"select_3_choose\""]
+--! [[spirv]]
+--! entry = "select_3_choose"
+--! present = ["Select"]
+--! absent = ["SelectionMerge"]
+--! [[shader]]
+--! entry = "select_3_choose"
+--! targets = ["wgsl"]
+--! selects_present = true
+--! ifs_present = false
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"select_4_choose\""]
+--! [[spirv]]
+--! entry = "select_4_choose"
+--! present = ["SelectionMerge"]
+--! absent = ["Select"]
+--! [[shader]]
+--! entry = "select_4_choose"
+--! targets = ["wgsl"]
+--! selects_present = false
+--! ifs_present = true
+
+
+
+entry select_0_choose(c:bool,x:i32,y:i32) i32 = if c then x else y
+
+entry select_1_choose(c:bool) i32 = if c then 1 else 0
+
+entry select_2_choose(c:bool,d:bool,x:i32,y:i32,z:i32) i32 = if c then (if d then x else y) else z
+
+entry select_3_choose(c:bool,x:vec4f32,y:vec4f32) vec4f32 = if c then x else y
+
+entry select_4_choose(c:bool,x:i32,y:i32) i32 = if c then x/y else 0

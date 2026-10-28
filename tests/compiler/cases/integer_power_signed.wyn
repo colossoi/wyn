@@ -1,0 +1,12 @@
+--! command = "build"
+--! exit = 0
+--! spirv_helpers = 1
+--! targets = ["spirv"]
+--! args = []
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"signed\""]
+
+
+
+entry signed(x:i32,y:i32) i32=x**y

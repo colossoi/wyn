@@ -1,0 +1,30 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"scope_0_repro\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"scope_1_repro\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"scope_2_repro\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"scope_3_repro\""]
+
+entry scope_0_repro(xs: []f32) []f32 = map(|x|
+          let root = f32.sqrt(x) in
+          loop total = root for j < 2 do
+            loop inner = total for k < 2 do inner + f32.sqrt(x), xs)
+
+entry scope_1_repro(xs: []f32) []f32 = map(|x|
+          let total = loop total = 0.0 while total < f32.sqrt(x) do total + 1.0 in
+          total + f32.sqrt(x), xs)
+
+entry scope_2_repro(xs: []f32) []f32 = map(|x|
+          loop total = f32.sqrt(x) for k < 2 do f32.sqrt(total), xs)
+
+entry scope_3_repro(xs: []f32, count: i32) []f32 =
+      map(|x| loop total = 0.0 for k < count do total + f32.sqrt(x), xs)

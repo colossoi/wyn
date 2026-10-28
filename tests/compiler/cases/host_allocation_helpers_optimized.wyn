@@ -11,7 +11,19 @@
 --! [[artifacts]]
 --! path = "output.wynhost"
 --! contains = [":source-name \"allocated\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"record_size_0_main\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"record_size_1_main\""]
 
 def quarter(n:i32) i32=(n+3)/4
 def area(w:i32,h:i32) i32=quarter(w)*quarter(h)
 entry allocated(resolution:vec2i32) []i32=map(|i|i+1,iota(area(resolution.x,resolution.y)))
+
+type record_size_0_config = { size: i32, offset: i32 }
+entry record_size_0_main(c:record_size_0_config) []i32 = let next = c with offset = c.offset + 1 in iota(next.size)
+
+type record_size_1_config = { size: i32, offset: i32 }
+entry record_size_1_main(c:record_size_1_config) []i32 = let next = c with size = c.size + 1 in iota(next.size)

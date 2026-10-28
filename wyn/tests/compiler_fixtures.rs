@@ -33,6 +33,12 @@ struct Expectations {
     compare_host: Option<PathBuf>,
     repeat_builds: Option<usize>,
     spirv_min_block_phis: Option<usize>,
+    spirv_helpers: Option<usize>,
+    shader_entries: Option<usize>,
+    #[serde(default)]
+    spirv_round_trip: bool,
+    #[serde(default)]
+    spirv: Vec<spirv_checks::Instructions>,
     #[serde(default)]
     rust_host: bool,
     #[serde(default)]
@@ -105,12 +111,20 @@ fn run_fixture(path: &Path) {
             && !expected.rust_host
             && expected.spirv_array_loads.is_empty()
             && expected.repeat_builds.is_none()
-            && expected.spirv_min_block_phis.is_none())
+            && expected.spirv_min_block_phis.is_none()
+            && expected.spirv_helpers.is_none()
+            && expected.shader_entries.is_none()
+            && !expected.spirv_round_trip
+            && expected.spirv.is_empty())
             || (matches!(expected.command, Action::Build) && expected.exit == 0),
         "host and SPIR-V inspections require a successful build"
     );
     assert!(
-        (expected.spirv_array_loads.is_empty() && expected.spirv_min_block_phis.is_none())
+        (expected.spirv_array_loads.is_empty()
+            && expected.spirv_min_block_phis.is_none()
+            && expected.spirv_helpers.is_none()
+            && expected.spirv.is_empty()
+            && !expected.spirv_round_trip)
             || expected.targets.iter().any(|t| t == "spirv"),
         "array-load inspection requires the SPIR-V target"
     );
@@ -226,13 +240,34 @@ fn run_fixture(path: &Path) {
         if matches!(expected.command, Action::Build) && expected.exit == 0 {
             support::validate_shader(&artifact, target);
             if !expected.shader.is_empty() {
-                shader_checks::check(&fs::read(&artifact).unwrap(), target, &expected.shader);
+                shader_checks::check(
+                    &fs::read(&artifact).unwrap(),
+                    target,
+                    &expected.shader,
+                    &fs::read_to_string(artifact.with_extension("wynhost")).expect("shader host ABI"),
+                );
             }
         }
         if target == "spirv" && !expected.spirv_array_loads.is_empty() {
             spirv_checks::check(&fs::read(&artifact).unwrap(), &expected.spirv_array_loads);
         }
         if target == "spirv" {
+            if !expected.spirv.is_empty() || expected.spirv_helpers.is_some() {
+                spirv_checks::instructions(
+                    &fs::read(&artifact).unwrap(),
+                    &expected.spirv,
+                    expected.spirv_helpers,
+                );
+            }
+            if expected.spirv_round_trip {
+                spirv_checks::round_trip(&fs::read(&artifact).unwrap());
+            }
+            if let Some(count) = expected.shader_entries {
+                let module =
+                    naga::front::spv::parse_u8_slice(&fs::read(&artifact).unwrap(), &Default::default())
+                        .unwrap();
+                assert_eq!(module.entry_points.len(), count, "shader entry count");
+            }
             if let Some(minimum) = expected.spirv_min_block_phis {
                 spirv_checks::check_block_phis(&fs::read(&artifact).unwrap(), minimum);
             }

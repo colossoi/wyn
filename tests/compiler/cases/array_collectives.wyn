@@ -16,6 +16,25 @@
 --! [[artifacts]]
 --! path = "output.wynhost"
 --! contains = [":source-name \"boolean_reduce_0_repro\"", ":source-name \"boolean_reduce_1_repro\"", ":source-name \"boolean_reduce_2_repro\"", ":source-name \"boolean_reduce_3_repro\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"local_capacity_0_check\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"local_capacity_1_check\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"bool_collective_0_check\""]
+--! [[shader]]
+--! entry = "bool_collective_0_check"
+--! targets = ["wgsl"]
+--! workgroup_array_scalar = "u32"
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"bool_collective_1_check\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"bool_collective_2_check\""]
 
 entry handoff_mapped_double(mapped_double_input: []i32) []i32 = map(|x: i32| x * 2, mapped_double_input)
 
@@ -155,3 +174,22 @@ entry boolean_reduce_1_repro(boolean_reduce_1_xs: []i32) []i32 = let any = reduc
 entry boolean_reduce_2_repro(boolean_reduce_2_xs: []i32) []i32 = let any = reduce(|a,b| a || b,false,map(|x| x != 0,boolean_reduce_2_xs)) in [if any then 1i32 else 0i32]
 
 entry boolean_reduce_3_repro(boolean_reduce_3_xs: []i32) []i32 = let any = reduce(|a,b| a || b,false,map(|x| x != 0,boolean_reduce_3_xs)) in [if !any then 1i32 else 0i32]
+
+entry local_capacity_0_check(xs: []f32) []f32 =
+  map(|x: f32|
+    let values = map(|i: i32| x + f32.i32(i), iota(3)) in
+    values[0], xs)
+
+entry local_capacity_1_check(xs: []f32) [3]f32 =
+         reduce(|a: [3]f32, b: [3]f32| map(|(x,y)| x+y, zip(a,b)),
+                [0.0,0.0,0.0], map(|x| [x,x+1.0,x+2.0], xs))
+
+entry bool_collective_0_check(x: f32) []i32 =
+  let positive = reduce(|a: bool, b: bool| a && b, true,
+    map(|v: f32| v > 0.0, [x])) in
+  [if positive then 1 else 0]
+
+entry bool_collective_1_check(xs: []bool) []bool = scan(|a: bool,b: bool| a && b, true, xs)
+
+entry bool_collective_2_check(xs: []i32) (bool,i32) =
+         reduce(|(a,n),(b,m)| (a && b,n+m), (true,0), map(|x| (x>0,1),xs))

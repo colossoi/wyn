@@ -1,0 +1,47 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = []
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"guard_0_main\""]
+--! [[shader]]
+--! entry = "guard_0_main"
+--! targets = ["wgsl"]
+--! binary = { Divide = 1 }
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"guard_1_main\""]
+--! [[shader]]
+--! entry = "guard_1_main"
+--! targets = ["wgsl"]
+--! binary = { Divide = 1 }
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"guard_2_main\""]
+--! [[shader]]
+--! entry = "guard_2_main"
+--! targets = ["wgsl"]
+--! binary = { Divide = 1 }
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"guard_3_main\""]
+--! [[shader]]
+--! entry = "guard_3_main"
+--! targets = ["wgsl"]
+--! binary = { Divide = 1 }
+
+
+
+entry guard_0_main(xs:[]i32) []i32 = map(|n|
+         if n==0 then 7 else if 100/n>2 then 100/n+1 else 100/n+2,xs)
+
+entry guard_1_main(xs:[]i32) []i32 = map(|n|
+         if n==0 then 7 else loop a=100/n for i<2 do a+100/n,xs)
+
+entry guard_2_main(xs:[]i32) []i32 = map(|x|
+         let values=[x,x+1]
+         let i=if x==0 then 0 else 10/x in values[i%2]+i,xs)
+
+entry guard_3_main(xs:[]i32) []i32 =
+         map(|p|p.0+p.1,map(|x|let q=if x==0 then 0 else 100/x in (q+1,q+2),xs))

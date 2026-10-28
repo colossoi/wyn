@@ -1,0 +1,19 @@
+--! command = "build"
+--! exit = 0
+--! shader_entries = 4
+--! targets = ["spirv"]
+--! args = ["--graphics"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"first\"", ":source-name \"second\""]
+
+
+
+entry first(value: f32, target: render_target<f32>) render_target<f32> =
+      let triangle = rasterize_triangles(direct_draw(3u32, 1u32),
+        |_: u32, _: u32, _: u32| vertex_output(@[0.0, 0.0, 0.0, 1.0], ())) in
+      shade(target, triangle, |_, _, _, _, _| value)
+entry second(values: []f32, target: render_target<f32>) render_target<f32> =
+      let triangle = rasterize_triangles(direct_draw(3u32, 1u32),
+        |_: u32, _: u32, _: u32| vertex_output(@[0.0, 0.0, 0.0, 1.0], ())) in
+      shade(target, triangle, |_, _, _, _, _| values[0])

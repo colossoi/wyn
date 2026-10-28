@@ -1,0 +1,1 @@
+entry main(xs:[137]i32) [137]i32 = map(|x:i32|x+1,xs)

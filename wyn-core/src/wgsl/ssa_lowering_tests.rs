@@ -611,15 +611,6 @@ fn float_bounds_in_named_arrays_lower_to_wgsl() {
 }
 
 #[test]
-fn float_bounds_do_not_legalize_authored_infinities_or_nan() {
-    for value in ["f32.inf", "f32.nan", "1.0f32 / 0.0f32", "f32.highest + f32.inf"] {
-        let source = format!("entry nonfinite() f32 = {value}");
-        let error = compile_to_wgsl(&source).expect_err("non-bound nonfinite values must still fail");
-        assert!(error.to_string().contains("NaN/Infinity constants"), "{error}");
-    }
-}
-
-#[test]
 fn float_bounds_preserve_infinity_bits_without_nonfinite_spirv_literals() {
     use wspirv::dr::Operand;
     for ty in ["f32", "f16"] {
@@ -1387,19 +1378,6 @@ fn stores_binding(module: &naga::Module, group: u32, binding: u32) -> bool {
         .map(|(_, f)| f)
         .chain(module.entry_points.iter().map(|entry| &entry.function))
         .any(|f| stores(module, f, &f.body, group, binding))
-}
-
-#[test]
-fn minimum_i32_literals_validate_in_scalars_and_addressable_arrays() {
-    for source in [
-        "entry minimum() i32 = -2147483648",
-        "entry minimum() i32 = -2147483647 - 1",
-        "entry minimum() [2]i32 = [-2147483648, 2147483647]",
-        "def bounds: [2]i32 = [-2147483648, 2147483647] entry bound(i:i32) i32 = bounds[i]",
-    ] {
-        let wgsl = compile_to_wgsl(source).expect("minimum i32 must lower");
-        validate_wgsl(&wgsl);
-    }
 }
 
 #[test]

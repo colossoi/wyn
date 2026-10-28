@@ -1,0 +1,13 @@
+--! command = "build"
+--! exit = 0
+--! spirv_helpers = 0
+--! targets = ["spirv"]
+--! args = []
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"plain\"", ":source-name \"folded\""]
+
+
+
+entry plain(x:i32) i32=x+1
+entry folded(x:i32) i32=x+2**3

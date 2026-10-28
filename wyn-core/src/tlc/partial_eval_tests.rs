@@ -549,39 +549,6 @@ fn vector_math_folds_source_constants_chains_and_scalar_broadcasts() {
     assert_float_vector(partial_definition_body(&program, "named_constant"), &[3.0, 4.0]);
 }
 
-fn validate_math_wgsl(source: &str) {
-    let module = naga::front::wgsl::parse_str(source).unwrap_or_else(|error| panic!("{error}\n{source}"));
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(&module)
-    .unwrap_or_else(|error| panic!("{error:?}\n{source}"));
-}
-
-#[test]
-fn clamp_runtime_vector_broadcast_matches_constant_folding() {
-    for source in [
-        "entry e(v:vec3f32) vec3f32 = clamp(v, 0.0, 1.0)",
-        "entry e(v:vec3i32) vec3i32 = clamp(v, 0i32, 10i32)",
-        "entry e(v:vec3u32) vec3u32 = clamp(v, 0u32, 10u32)",
-    ] {
-        let spirv = crate::compile_thru_spirv(source).expect("SPIR-V");
-        let options = naga::front::spv::Options::default();
-        let module = naga::front::spv::Frontend::new(spirv.spirv.into_iter(), &options)
-            .parse()
-            .unwrap_or_else(|error| panic!("{source}: {error:?}"));
-        naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        )
-        .validate(&module)
-        .unwrap_or_else(|error| panic!("{source}: {error:?}"));
-        let ssa = crate::compile_thru_ssa(source).expect("SSA");
-        validate_math_wgsl(&crate::lower_ssa_to_wgsl(ssa).expect("WGSL"));
-    }
-}
-
 #[test]
 fn generic_integer_math_folds_scalar_and_vector_constants() {
     let source = "entry e(x:i32) vec3i32 = max(abs(@[-2i32, -3i32, 4i32]), @[1i32, 5i32, 2i32])";

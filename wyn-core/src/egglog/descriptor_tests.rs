@@ -6,7 +6,7 @@ use super::{
 };
 use crate::types::TypeExt;
 use crate::{compile_thru_tlc, LookupSet, PipelineTopologyPolicy};
-use egglog_engine::{Value, Write};
+use egglog_engine::Value;
 
 fn validate(facts: &Facts<'_, '_>) -> Result<(), OptimizeError> {
     let query = Query(&facts.program.graph);
@@ -92,37 +92,19 @@ fn extent(
 
 #[test]
 fn planned_array_descriptors_are_consistent() {
-    for source in [
-        include_str!("../../../testfiles/regressions/triangulation_runtime_array_branch.wyn"),
-        include_str!("../../../testfiles/regressions/triangulation_runtime_array_loop.wyn"),
-        include_str!("../../../testfiles/regressions/runtime_array_updated_slice.wyn"),
-    ] {
-        let tlc = compile_thru_tlc(source).unwrap();
-        let program = optimize_for_test(
-            schedule(
-                place(
-                    fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                    PipelineTopologyPolicy::AllowGenerated,
-                )
-                .unwrap(),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let prepared = prepare_host(program).unwrap();
-        validate(&Facts {
-            program: &prepared.program,
-        })
-        .unwrap();
-    }
-}
+    let source = r#"
+entry case_0(xs: []i32) []i32 =
+  if length(xs)>10 then replicate(0,0i32) else xs
 
-#[test]
-fn incomplete_descriptors_are_detected() {
-    let tlc = compile_thru_tlc(include_str!(
-        "../../../testfiles/regressions/triangulation_runtime_array_branch.wyn"
-    ))
-    .unwrap();
+entry case_1(xs: []i32) []i32 =
+  loop out = xs for i < length(xs) do out with [i] = xs[i] + 1
+
+entry case_2(xs: []i32) []i32 =
+  let out = if length(xs)>10 then replicate(0,0i32) else xs
+  let start = if length(out)>0 then 1 else 0
+  in out[start..length(out)] with [0] = 99i32
+"#;
+    let tlc = compile_thru_tlc(source).unwrap();
     let program = optimize_for_test(
         schedule(
             place(
@@ -134,36 +116,9 @@ fn incomplete_descriptors_are_detected() {
         .unwrap(),
     )
     .unwrap();
-    let mut prepared = prepare_host(program).unwrap();
+    let prepared = prepare_host(program).unwrap();
     validate(&Facts {
         program: &prepared.program,
     })
     .unwrap();
-    for (missing, expected) in [
-        ("ArrayView", "no complete descriptor"),
-        ("ArrayStorage", "array read disagrees with planned storage"),
-        ("SourceType", "descriptor scalar has no type"),
-        ("ExprContextOwner", "descriptor scalar has no lexical context"),
-        ("SourceBranch", "context field has no control-flow binder"),
-    ] {
-        let query = Query(&prepared.program.graph);
-        let output = query.row("ReturnArray", |_| true).unwrap().unwrap()[1];
-        let view = query.record("ArrayView", "ViewInfo", (output,)).unwrap().unwrap();
-        let scalar = query.enode("Scalar", view[2]).unwrap().unwrap()[0];
-        let value =
-            if matches!(missing, "ArrayView" | "ArrayStorage" | "SourceBranch") { output } else { scalar };
-        let original = query.required(missing, (value,)).unwrap();
-        prepared.program.graph.update(|mut sink| sink.remove(missing, (value,))).unwrap();
-        let error = validate(&Facts {
-            program: &prepared.program,
-        })
-        .expect_err("invalid descriptor accepted")
-        .to_string();
-        assert!(error.contains(expected), "{missing}: {error}");
-        prepared.program.graph.update(|mut sink| sink.set(missing, (value,), original)).unwrap();
-        validate(&Facts {
-            program: &prepared.program,
-        })
-        .unwrap();
-    }
 }

@@ -1,0 +1,1 @@
+entry main(xs:[]vec3f32,ys:[]i32) []i32=ys

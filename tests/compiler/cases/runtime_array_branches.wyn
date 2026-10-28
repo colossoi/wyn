@@ -10,6 +10,15 @@
 --! [[artifacts]]
 --! path = "output.wynhost"
 --! contains = [":source-name \"runtime_loop_0_main\"", ":source-name \"runtime_loop_1_main\"", ":source-name \"runtime_loop_2_main\"", ":source-name \"runtime_loop_3_main\"", ":source-name \"runtime_loop_4_main\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"device_control_0_main\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"device_control_1_main\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"device_control_2_main\""]
 
 -- Compiler handoff: returning branches with different runtime array extents.
 -- Expected: inputs of length <= 10 are unchanged; longer inputs return [].
@@ -117,3 +126,9 @@ entry runtime_loop_3_main(runtime_loop_3_xs:[]i32) []i32 =
 
 entry runtime_loop_4_main(runtime_loop_4_xs:[]i32) []i32 =
          loop out=runtime_loop_4_xs[1..length(runtime_loop_4_xs)] for i<length(runtime_loop_4_xs)-1 do out with [i]=out[i]+1
+
+entry device_control_0_main(xs: [4]i32, n: i32) [4]i32 = loop acc = xs for k < n do map(|x: i32| x + k, acc)
+
+entry device_control_1_main(xs: [4]i32, n: i32) i32 = loop acc = 0 for k < n do acc + reduce(|a:i32,b:i32|a+b, 0, map(|x:i32|x+k,xs))
+
+entry device_control_2_main(xs: [4]i32, yes: bool) [4]i32 = if yes then map(|x:i32|x+1,xs) else map(|x:i32|x-1,xs)
