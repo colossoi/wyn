@@ -74,7 +74,8 @@ pub(super) fn run(
     let mut scalars = timing::time("egglog scalar / graph projection", || {
         // Retain only the inputs needed by expression import, optimization, and
         // readout. Planning and admission tables stay in the structural graph.
-        let mut scalars = graph.clone();
+        let mut scalars = timing::time("egglog scalar / clone graph", || graph.clone());
+        let _prune = timing::span("egglog scalar / prune graph");
         for name in scalars.get_function_names() {
             if !matches!(
                 name.as_str(),

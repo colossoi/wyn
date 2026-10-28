@@ -9,14 +9,13 @@ use crate::egglog::query::Query;
 use crate::egglog::{timing, OptimizeError, Optimized, Program};
 use crate::{LookupMap, LookupSet};
 use egglog_engine::{EGraph, Read, Term, TermId, Value, Write};
-use wyn_graph::dag_postorder;
+use wyn_graph::{dag_postorder, reachable_targets};
 
 pub(in crate::egglog) struct Evaluation {
     dependencies: Vec<Vec<TermId>>,
     readonly: Vec<bool>,
     total: Vec<bool>,
     targets: LookupMap<(Value, TermId), Value>,
-    enclosing: Vec<Vec<TermId>>,
     owners: Vec<Option<Value>>,
     ordinals: Vec<Option<i64>>,
     before: LookupMap<(Value, Value), Vec<TermId>>,
@@ -36,7 +35,6 @@ impl Evaluation {
             readonly: vec![false; n],
             total: vec![false; n],
             targets: LookupMap::default(),
-            enclosing: vec![Vec::new(); n],
             owners: vec![None; n],
             ordinals: vec![None; n],
             before: LookupMap::default(),
@@ -45,6 +43,7 @@ impl Evaluation {
             common: LookupMap::default(),
         };
         let mut control_edges = vec![Vec::new(); n];
+        let mut expressions = Vec::new();
         let mut leaves = LookupSet::default();
         let mut boundaries = Vec::new();
         let mut pairs = LookupSet::default();
@@ -76,6 +75,7 @@ impl Evaluation {
             ) {
                 continue;
             }
+            expressions.push(term);
             let value = selected.values[term];
             let table = if matches!(name.as_str(), "ExprCons" | "ExprNil") {
                 "ExprArgsReadOnly"
@@ -168,16 +168,46 @@ impl Evaluation {
             );
         }
         drop(inputs);
+        let containment = timing::span("egglog evaluation / binding reachability");
+        let mut contained = reachable_targets(
+            control_edges
+                .iter()
+                .enumerate()
+                .flat_map(|(parent, children)| children.iter().map(move |&child| (parent, child))),
+            leaves.iter().copied(),
+        );
+        let containment_roots: LookupSet<_> = boundaries
+            .iter()
+            .map(|&(_, _, _, term)| term)
+            .chain(pairs.iter().flat_map(|&(a, b)| [a, b]))
+            .collect();
+        let enclosing: LookupMap<_, _> = containment_roots
+            .iter()
+            .map(|&root| {
+                let mut leaves: Vec<_> = contained.remove(&root).unwrap_or_default().into_iter().collect();
+                leaves.sort_unstable();
+                (root, leaves)
+            })
+            .collect();
+        drop(contained);
+        drop(containment);
+        let common_operands = timing::time("egglog evaluation / branch reachability", || {
+            shared_mandatory_operands(&plan.dependencies, &pairs)
+        });
+        if std::env::var_os("WYN_EGGLOG_PROFILE").is_some() {
+            eprintln!(
+                "egglog evaluation reachability: {} contained bindings, {} common operands",
+                enclosing.values().map(Vec::len).sum::<usize>(),
+                common_operands.len()
+            );
+        }
         let schema = timing::span("egglog evaluation / schema");
         let mut graph = EGraph::default();
         graph.parse_and_run_program(None, include_str!("evaluation.egg"))?;
         drop(schema);
         let import = timing::span("egglog evaluation / import facts");
         graph.update(|mut sink| {
-            for (term, children) in control_edges.iter().enumerate() {
-                for &child in children {
-                    sink.add("EvaluationEdge", (term as i64, child as i64))?;
-                }
+            for &term in &expressions {
                 if let Term::App(name, fields) = selected.dag.get(term) {
                     sink.set("ExprScheduleWeight", term as i64, i64::from(name == "ExprChoice"))?;
                     if name != "ExprLeaf" {
@@ -196,33 +226,24 @@ impl Evaluation {
                     sink.add("EvaluationTotal", (term as i64,))?;
                 }
             }
-            for (term, children) in plan.dependencies.iter().enumerate() {
-                for &child in children {
-                    sink.add("EvaluationOperand", (term as i64, child as i64))?;
-                }
+            for &(yes, no, term) in &common_operands {
+                sink.add("EvaluationCommonOperand", (yes as i64, no as i64, term as i64))?;
             }
             for &(a, b) in &pairs {
                 sink.add("EvaluationPair", (a as i64, b as i64))?;
             }
-            for &leaf in &leaves {
-                sink.add("EvaluationLeaf", (leaf as i64,))?;
+            for (&root, leaves) in &enclosing {
+                for &leaf in leaves {
+                    sink.add("EvaluationContains", (root as i64, leaf as i64))?;
+                }
             }
             Ok::<_, egglog_engine::Error>(())
         })?;
         drop(import);
-        timing::time("egglog evaluation / reachability rules", || {
-            graph.parse_and_run_program(None, "(run-schedule (saturate evaluation-reachability))")
-        })?;
         let available = timing::span("egglog evaluation / available facts");
-        Query(&graph).for_each("EvaluationContains", |row| {
-            let root = graph.value_to_base::<i64>(row[0]) as usize;
-            let leaf = graph.value_to_base::<i64>(row[1]) as usize;
-            plan.enclosing[root].push(leaf);
-            Ok(())
-        })?;
         graph.update(|mut sink| {
             for &(_, source, owner, term) in &boundaries {
-                for &leaf in &plan.enclosing[term] {
+                for &leaf in &enclosing[&term] {
                     if plan.owners[leaf].is_some_and(|o| placement.available(leaf, o, owner))
                         && selected.app(leaf).is_ok_and(|(_, f)| selected.values[f[2]] != source)
                     {
@@ -493,6 +514,34 @@ impl Evaluation {
             .map(|(term, _)| *term)
             .collect()
     }
+}
+
+fn shared_mandatory_operands(
+    dependencies: &[Vec<TermId>],
+    pairs: &LookupSet<(TermId, TermId)>,
+) -> Vec<(TermId, TermId, TermId)> {
+    let roots: LookupSet<_> = pairs.iter().flat_map(|&(yes, no)| [yes, no]).collect();
+    let reached_by = reachable_targets(
+        dependencies
+            .iter()
+            .enumerate()
+            .flat_map(|(parent, children)| children.iter().map(move |&child| (child, parent))),
+        roots,
+    );
+    let mut demands = LookupMap::<_, LookupSet<_>>::default();
+    for (term, roots) in reached_by {
+        for root in roots {
+            demands.entry(root).or_default().insert(term);
+        }
+    }
+    let mut common = Vec::new();
+    for &(yes, no) in pairs {
+        if let (Some(yes_terms), Some(no_terms)) = (demands.get(&yes), demands.get(&no)) {
+            common.extend(yes_terms.intersection(no_terms).map(|&term| (yes, no, term)));
+        }
+    }
+    common.sort_unstable();
+    common
 }
 
 #[cfg(test)]

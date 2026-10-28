@@ -17,7 +17,7 @@ pub mod block_interface;
 mod replacement;
 pub use replacement::{ReplacementError, ReplacementForest};
 mod traversal;
-pub use traversal::{dag_postorder, forest_intervals, DfsInterval};
+pub use traversal::{dag_postorder, forest_intervals, reachable_targets, DfsInterval};
 
 /// Which frontier discipline a reachable-node walk should use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

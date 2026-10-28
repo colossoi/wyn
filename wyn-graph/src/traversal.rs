@@ -2,6 +2,38 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
+/// For each node, collect the requested targets reachable along directed edges.
+/// Targets include themselves. Shared paths propagate each (node, target) fact
+/// once; cycles terminate without requiring a topological order.
+pub fn reachable_targets<N, E, T>(edges: E, targets: T) -> HashMap<N, HashSet<N>>
+where
+    N: Copy + Eq + Hash,
+    E: IntoIterator<Item = (N, N)>,
+    T: IntoIterator<Item = N>,
+{
+    let mut parents = HashMap::<N, Vec<N>>::new();
+    for (parent, child) in edges {
+        parents.entry(child).or_default().push(parent);
+    }
+    let mut reachable = HashMap::<N, HashSet<N>>::new();
+    let mut pending = Vec::new();
+    for target in targets {
+        if reachable.entry(target).or_default().insert(target) {
+            pending.push((target, target));
+        }
+    }
+    while let Some((node, target)) = pending.pop() {
+        if let Some(parents) = parents.get(&node) {
+            for &parent in parents {
+                if reachable.entry(parent).or_default().insert(target) {
+                    pending.push((parent, target));
+                }
+            }
+        }
+    }
+    reachable
+}
+
 /// Visit a DAG in dependency-first order, preserving root and child order.
 ///
 /// `complete` prunes nodes whose summaries the caller already has, including

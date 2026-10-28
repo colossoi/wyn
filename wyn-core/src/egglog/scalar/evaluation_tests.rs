@@ -4,6 +4,92 @@ use crate::PipelineTopologyPolicy;
 use egglog_engine::{Core, TermDag};
 
 #[test]
+fn shared_mandatory_operands_match_reference_closure_and_preserve_readonly_guards() {
+    let dependencies = [
+        vec![],
+        vec![0],
+        vec![0],
+        vec![1, 2],
+        vec![5],
+        vec![4, 6],
+        vec![],
+        vec![3, 4],
+        vec![7],
+        vec![3, 6],
+        vec![],
+        vec![10],
+    ];
+    let pairs = [(1, 2), (3, 7), (4, 5), (8, 9), (9, 3), (10, 11)].into_iter().collect();
+    let common = shared_mandatory_operands(&dependencies, &pairs);
+    let mut graph = EGraph::default();
+    graph.parse_and_run_program(None, include_str!("evaluation.egg")).unwrap();
+    graph
+        .parse_and_run_program(
+            None,
+            r#"
+            (relation ReferenceOperand (i64 i64))
+            (relation ReferenceDemand (i64 i64))
+            (relation ReferenceShared (i64 i64 i64))
+            (ruleset reference-reachability)
+            (rule ((EvaluationPair yes no))
+              ((ReferenceDemand yes yes) (ReferenceDemand no no)) :ruleset reference-reachability)
+            (rule ((ReferenceDemand root parent) (ReferenceOperand parent child))
+              ((ReferenceDemand root child)) :ruleset reference-reachability)
+            (rule ((EvaluationPair yes no) (EvaluationReadOnly yes) (EvaluationReadOnly no)
+                   (ReferenceDemand yes term) (ReferenceDemand no term))
+              ((ReferenceShared yes no term)) :ruleset reference-reachability)
+            "#,
+        )
+        .unwrap();
+    graph
+        .update(|mut sink| {
+            for (parent, children) in dependencies.iter().enumerate() {
+                for &child in children {
+                    sink.add("ReferenceOperand", (parent as i64, child as i64))?;
+                }
+                if parent != 9 {
+                    sink.add("EvaluationReadOnly", parent as i64)?;
+                }
+            }
+            for &(yes, no) in &pairs {
+                sink.add("EvaluationPair", (yes as i64, no as i64))?;
+            }
+            for &(yes, no, term) in &common {
+                sink.add("EvaluationCommonOperand", (yes as i64, no as i64, term as i64))?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    graph
+        .parse_and_run_program(
+            None,
+            "(run-schedule (saturate reference-reachability) (saturate evaluation-placement))",
+        )
+        .unwrap();
+    let rows = |table| {
+        let mut rows = LookupSet::default();
+        graph
+            .constructor_enodes(table, |row| {
+                rows.insert((
+                    graph.value_to_base::<i64>(row.children[0]),
+                    graph.value_to_base::<i64>(row.children[1]),
+                    graph.value_to_base::<i64>(row.children[2]),
+                ));
+            })
+            .unwrap();
+        rows
+    };
+    let actual = rows("EvaluationShared");
+    assert_eq!(actual, rows("ReferenceShared"));
+    assert!(actual.contains(&(1, 2, 0)));
+    assert!(
+        actual.contains(&(4, 5, 6)),
+        "cyclic dependencies retain their reachable operand"
+    );
+    assert!(actual.iter().all(|&(yes, no, _)| yes != 9 && no != 9));
+}
+
+#[test]
 fn shared_ranks_preserve_request_ordering_and_choice_boundaries() {
     let mut dag = TermDag::default();
     let leaf = dag.app("ExprLeaf".into(), vec![]);
@@ -22,7 +108,6 @@ fn shared_ranks_preserve_request_ordering_and_choice_boundaries() {
         readonly: vec![true; n],
         total: vec![false; n],
         targets: LookupMap::default(),
-        enclosing: vec![Vec::new(); n],
         owners: vec![None; n],
         ordinals: vec![None; n],
         before: LookupMap::default(),

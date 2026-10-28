@@ -1,18 +1,14 @@
 ; Selected DAG indices are local to this planning graph. Source scopes and
 ; identities stay opaque in the importer; scope dominance is an input proof.
-(relation EvaluationEdge (i64 i64))
-(relation EvaluationLeaf (i64))
 (relation EvaluationReadOnly (i64))
 (relation EvaluationTotal (i64))
 (relation EvaluationContains (i64 i64))
 (relation EvaluationAvailable (i64 i64))
 (relation EvaluationBefore (i64 i64))
 (relation EvaluationHoistable (i64))
-(ruleset evaluation-reachability)
 (ruleset evaluation-placement)
-(rule ((EvaluationLeaf leaf)) ((EvaluationContains leaf leaf)) :ruleset evaluation-reachability)
-(rule ((EvaluationEdge root child) (EvaluationContains child leaf))
-      ((EvaluationContains root leaf)) :ruleset evaluation-reachability)
+; Contained bindings are shared graph reachability facts, imported only for
+; loop boundaries and branch arms. Placement permission is derived below.
 ; Earlier bindings already execute in their enclosing region; this restores
 ; their evaluation without granting permission to speculate their producers.
 (rule ((EvaluationContains boundary leaf) (EvaluationAvailable boundary leaf)
@@ -24,16 +20,12 @@
 
 ; Only branch-arm queries need transitive mandatory-demand sets. Keeping their
 ; roots explicit avoids computing the all-pairs closure of the expression DAG.
-(relation EvaluationOperand (i64 i64))
 (relation EvaluationPair (i64 i64))
-(relation EvaluationDemand (i64 i64))
+(relation EvaluationCommonOperand (i64 i64 i64))
 (relation EvaluationShared (i64 i64 i64))
 (relation EvaluationSharedBinding (i64 i64 i64))
-(rule ((EvaluationPair yes no)) ((EvaluationDemand yes yes) (EvaluationDemand no no)) :ruleset evaluation-reachability)
-(rule ((EvaluationDemand root parent) (EvaluationOperand parent child))
-      ((EvaluationDemand root child)) :ruleset evaluation-reachability)
 (rule ((EvaluationPair yes no) (EvaluationReadOnly yes) (EvaluationReadOnly no)
-       (EvaluationDemand yes term) (EvaluationDemand no term))
+       (EvaluationCommonOperand yes no term))
       ((EvaluationShared yes no term)) :ruleset evaluation-placement)
 (rule ((EvaluationPair yes no) (EvaluationReadOnly yes) (EvaluationReadOnly no)
        (EvaluationContains yes leaf) (EvaluationContains no leaf))

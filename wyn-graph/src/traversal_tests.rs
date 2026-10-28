@@ -1,5 +1,32 @@
-use super::{dag_postorder, forest_intervals, DfsInterval};
+use super::{dag_postorder, forest_intervals, reachable_targets, DfsInterval};
+use crate::{reachable_set, WalkOrder};
 use std::collections::HashSet;
+
+#[test]
+fn target_propagation_matches_individual_walks_through_cycles_and_shared_paths() {
+    let targets: HashSet<_> = [2, 7, 10, 13].into_iter().collect();
+    for seed in 0..64 {
+        let edges: Vec<_> = (0..12)
+            .flat_map(|from| {
+                (0..12).filter_map(move |to| {
+                    ((from * 37 + to * 19 + seed * 11) % 29 < 4).then_some((from, to))
+                })
+            })
+            .collect();
+        let actual = reachable_targets(edges.iter().copied(), [2, 7, 10, 13, 2]);
+        for root in 0..14 {
+            let reached = reachable_set([root], WalkOrder::DepthFirst, |node, out| {
+                out.extend(edges.iter().filter_map(|&(from, to)| (from == node).then_some(to)));
+            });
+            let expected: HashSet<_> = reached.intersection(&targets).copied().collect();
+            assert_eq!(
+                actual.get(&root).cloned().unwrap_or_default(),
+                expected,
+                "seed {seed}, root {root}"
+            );
+        }
+    }
+}
 
 #[test]
 fn shared_dag_is_bottom_up_and_cached_subgraphs_are_not_revisited() {

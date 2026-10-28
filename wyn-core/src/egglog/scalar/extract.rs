@@ -3,7 +3,10 @@ use crate::egglog::{timing, OptimizeError, ScalarOptimization};
 use crate::{LookupMap, LookupSet};
 use egglog_engine::extract::{Cost, CostModel, Extractor};
 use egglog_engine::sort::VecContainer;
-use egglog_engine::{ArcSort, EGraph, Enode, Function, Term, TermDag, TermId, Value};
+use egglog_engine::{
+    ast::FunctionSubtype, ArcSort, Core, EGraph, Enode, Function, RawValues, Read, Term, TermDag, TermId,
+    Value, Write,
+};
 
 // Inlining trades one call for this much scalar work. Representation nodes,
 // already computed inputs, and constants require no additional instructions.
@@ -68,6 +71,9 @@ pub(super) fn select(
     roots: &[Value],
     policy: ScalarOptimization,
 ) -> Result<(TermDag, Vec<TermId>), OptimizeError> {
+    timing::time("egglog scalar / trim extraction metadata", || {
+        trim_metadata(graph)
+    })?;
     let Some(sort) = graph.get_sort_by_name("ExprOutputs").cloned() else {
         return Err(OptimizeError::Output("missing scalar outputs sort".into()));
     };
@@ -142,6 +148,67 @@ pub(super) fn select(
     Ok((dag, roots))
 }
 
+/// Identity constructors do not participate in optimization. Only identities
+/// referenced by extractable constructor children need a finite extraction.
+fn trim_metadata(graph: &mut EGraph) -> Result<(), OptimizeError> {
+    let mut required = LookupSet::default();
+    for name in graph.get_function_names() {
+        if graph.read(|r| r.table_subtype(&name)) != Some(FunctionSubtype::Constructor) {
+            continue;
+        }
+        let Some(function) = graph.get_function(&name) else {
+            return Err(OptimizeError::Output(format!(
+                "missing scalar constructor {name}"
+            )));
+        };
+        let inputs: Vec<_> = function
+            .func_type()
+            .input
+            .iter()
+            .enumerate()
+            .filter(|(_, sort)| sort.name() == "SourceValue" || sort.is_container_sort())
+            .collect();
+        if inputs.is_empty() {
+            continue;
+        }
+        graph.constructor_enodes(&name, |row| {
+            if row.subsumed {
+                return;
+            }
+            for &(index, sort) in &inputs {
+                let value = row.children[index];
+                if sort.name() == "SourceValue" {
+                    required.insert(value);
+                } else if sort.is_container_sort() {
+                    let mut pending = graph.read(|r| sort.inner_values(r.container_values(), value));
+                    while let Some((sort, value)) = pending.pop() {
+                        if sort.name() == "SourceValue" {
+                            required.insert(value);
+                        } else if sort.is_container_sort() {
+                            pending.extend(graph.read(|r| sort.inner_values(r.container_values(), value)));
+                        }
+                    }
+                }
+            }
+        })?;
+    }
+    for name in ["SourceTerm", "SourceFormal", "SourceGlobal"] {
+        let mut unused = Vec::new();
+        graph.constructor_enodes(name, |row| {
+            if !row.subsumed && !required.contains(&row.eclass) {
+                unused.push(row.children.to_vec());
+            }
+        })?;
+        graph.update(|mut sink| {
+            for children in unused {
+                sink.subsume(name, RawValues(children))?;
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
 fn copy_term(
     source: &TermDag,
     term: TermId,
@@ -191,3 +258,7 @@ pub(in crate::egglog) fn operands(name: &str, fields: &[TermId]) -> Vec<TermId> 
         _ => Vec::new(),
     }
 }
+
+#[cfg(test)]
+#[path = "extract_tests.rs"]
+mod tests;

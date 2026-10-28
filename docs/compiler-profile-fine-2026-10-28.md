@@ -1,6 +1,121 @@
 # Detailed CLI compiler timings
 
-## Latest: fusion adjacency reuse
+## Latest: basic scalar extraction and evaluation planning
+
+Both workloads compile without `-O`. Against fusion revision `d284b572`,
+Tinyporto's scalar/evaluation path falls **790.857 -> 664.562 ms (16.0%)**.
+Whole-process medians are **Tinyporto 3.654 -> 3.571 s (2.3%)** and
+**fluid 1.999 -> 1.970 s (1.5%)**. The combined path is measured by summing
+its two parent timers within each run, then taking the median. Individual
+phase medians need not sum to that combined median.
+
+| Work | Tinyporto before ms | Tinyporto after ms | Fluid before ms | Fluid after ms |
+| --- | ---: | ---: | ---: | ---: |
+| Compact extraction costs | 192.027 | 140.629 | 38.029 | 33.002 |
+| Whole basic scalar phase | 525.875 | 477.614 | 148.392 | 144.061 |
+| Evaluation planning | 269.994 | 185.776 | 49.389 | 36.355 |
+| **Combined scalar/evaluation path** | **790.857** | **664.562** | **198.367** | **180.629** |
+| **Whole process** | **3,654.314** | **3,570.750** | **1,999.451** | **1,969.792** |
+
+This pass saves 126 ms in the targeted Tinyporto path; its whole-process
+median saves only 84 ms because other phases vary. Tinyporto remains about
+1.57 s above the two-second goal. Fluid still sometimes exceeds it: its after
+range is 1.954-2.039 s. Neither workload has a demonstrated consistent sub-two-
+second result.
+
+The benchmark uses release CLIs, one warmup per binary/workload, then five
+fresh processes each with before/after order alternating by round. No builds
+or tests run during timing; `WYN_EGGLOG_PROFILE` is unset. Graphics, SPIR-V,
+Tinyporto's Rust/WGPU host, and fluid's subgroups/WHL host are retained. No
+command includes `-O`. Filesystem caches are warm; desktop activity and hash/
+ordering variation remain uncontrolled. Tinyporto ranges are 3.596-3.755 s
+before and 3.494-3.732 s after; fluid ranges are 1.952-2.061 s before and
+1.954-2.039 s after.
+
+Raw samples, binary hashes, source patch, harnesses, diagnostics, and gates are
+in [scalar/evaluation evidence](profiles/2026-10-28-compiler-scalar.json). The
+baseline executable hash matches the previous fusion benchmark's final binary.
+
+### Granularity findings and changes
+
+Expression-level analysis is appropriate. The excess was analysis scope and
+repeated graph work, rather than unnecessary fields in individual expression
+rows. A temporary diagnostic counted 1,003,700 extraction-cost callbacks in
+Tinyporto, including 492,282 visits to `SourceTerm` identity records. Trimming
+identity rows unused by active constructor children reduced callbacks to
+676,216, including 165,480 `SourceTerm` visits. These are diagnostic counts;
+their temporary counter overhead is excluded from the final timings.
+
+Extraction now subsumes unused flat `SourceTerm`, `SourceFormal`, and
+`SourceGlobal` identity rows after rewriting/effect analysis. It retains
+identities referenced through constructors and nested containers. The arithmetic
+schedule, cost model, helper-expansion policy, and finite alternatives for
+actual extracted expressions are unchanged. Metadata trimming costs 6.3 ms in
+Tinyporto; the compact cost calculation falls by 51.4 ms.
+
+Evaluation computes two graph summaries once with the shared `wyn-graph`
+`reachable_targets` helper: contained source bindings through control edges,
+and mandatory operands shared by branch arms. The helper propagates each
+(node, target) fact once and handles cycles. Only the summaries consumed by
+loop boundaries and branch pairs enter Egglog. Read-only, totality, and
+placement/hoisting rules remain in Egglog; lexical availability continues to
+use the existing scope proofs. The two dependency graphs retain their distinct meanings: conditional
+arms and hidden control regions are included for binding containment, while
+mandatory evaluation follows only the original required operands.
+
+Tinyporto's contained-binding relation shrinks **66,620 -> 6,202 facts**.
+Its old mandatory-demand closure has 23,995 facts; the new graph preparation
+imports **7,645 common-operand answers** instead. Fluid imports 230 contained
+bindings and 247 common operands. Schedule-weight facts now cover actual scalar
+expressions/argument nodes, excluding metadata constructors: Tinyporto drops
+from 22,977 to 19,411 rows. Temporary memo tables are discarded after planning;
+the evaluation object no longer retains the unused containment table.
+
+| Evaluation work | Tinyporto before ms | Tinyporto after ms |
+| --- | ---: | ---: |
+| Native contained-binding reachability | - | 12.926 |
+| Native mandatory-branch reachability | - | 9.484 |
+| Import evaluation facts | 50.713 | 36.571 |
+| Egglog reachability closure | 77.743 | removed |
+| Shared schedule-rank rules | 33.760 | 33.246 |
+
+A preliminary forward-walk Egglog experiment was discarded: it produced
+135,772 intermediate walk facts despite fewer final containment answers.
+The final implementation uses shared native summaries and keeps policy checks
+in Egglog.
+
+Graph projection/import was inspected. Projection is still almost entirely
+the **78.1-ms full-graph clone**; table pruning is only 0.5 ms. The scalar and
+structural snapshots remain separate, and scalar source import is unchanged.
+The remaining 141-ms extraction cost calculation and graph clone are further
+opportunities; this patch does not claim to exhaust them.
+
+### Validation and code size
+
+Full gates passed after the final change: workspace formatting/all-target build,
+**1,508 tests passed**, zero failures, 14 existing ignores, all 127 compiler
+fixture files; all seven standalone crates and both parser manifests; WASM
+formatting/browser-target check; **123 SPIR-V**, **122 WGSL** with one expected
+skip; and the package compile/validation runner. Optional GPU execution scripts
+were not run. The existing writable workspace temporary folder and 64-MiB
+Rust stack settings were retained.
+
+New regression cases compare shared propagation with individual walks through
+cyclic/shared graphs, compare mandatory branch facts and read-only guards with
+the previous Egglog closure, and verify identical extraction while preserving
+nested source arguments. Existing arithmetic, effect, totality, and speculation
+fixtures pass.
+
+Tinyporto's final shader is byte-identical. Fluid's disassembly differs only in
+entry-point interface ordering. Both workloads' generated hosts are byte-
+identical, and all four before/after shaders pass `spirv-val`.
+
+Production code is **+145 net lines: 183 added, 38 removed**, including comments
+and the shared graph helper, excluding tests/documentation. No dependency was
+added. This focused optimization pass is complete; the compilation target still
+requires further work.
+
+## Previous: fusion adjacency reuse
 
 Both workloads compile without `-O`. Against frontend/host revision `a18f4149`,
 five paired fresh-process medians are **Tinyporto 3.700 -> 3.613 s** and
