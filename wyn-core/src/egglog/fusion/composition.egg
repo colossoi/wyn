@@ -83,11 +83,15 @@
       ((ResultWalk plan role left offset) (ResultWalk plan role right (+ offset n))) :ruleset fusion-signatures)
 (rule ((ResultWalk plan role (OneResult value ty) offset)) ((PlanResult plan role offset value ty)) :ruleset fusion-signatures)
 (function PlanInternal (FusionPlan SourceValue) bool :merge (or old new))
-(rule ((Current group plan) (PlanMember plan op) (= value (SourceInput op i))) ((set (PlanInternal plan value) false)) :ruleset fusion-signatures)
-(rule ((Current group plan) (PlanMember plan op) (= value (SourceInput op i)) (SourceOrigin value producer) (PlanMember plan producer))
+; Computed captures of plan results must wait for those results as well.
+(rule ((Current group plan) (PlanMember plan producer) (SourceOrigin value producer))
       ((set (PlanInternal plan value) true)) :ruleset fusion-signatures)
+(rule ((SourceComputedUse value child) (= (PlanInternal plan child) true))
+      ((set (PlanInternal plan value) true)) :ruleset fusion-signatures)
+(rule ((= child (SourceAlias value)) (= (PlanInternal plan child) true))
+      ((set (PlanInternal plan value) true)) :ruleset fusion-signatures)
+(rule ((Current group plan) (PlanMember plan op) (= value (SourceInput op i))) ((set (PlanInternal plan value) false)) :ruleset fusion-signatures)
 (rule ((Current group plan) (PlanMember plan op) (SourceOperand op child)) ((set (PlanInternal plan child) false)) :ruleset fusion-signatures)
-(rule ((Current group plan) (PlanMember plan op) (SourceOperand op child) (SourceOrigin child producer) (PlanMember plan producer)) ((set (PlanInternal plan child) true)) :ruleset fusion-signatures)
 
 ; Masked reductions replace length invocations with one shared count slot.
 (relation PlanCountObserver (FusionPlan OperationKey))

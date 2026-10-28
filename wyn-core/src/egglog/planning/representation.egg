@@ -96,6 +96,12 @@
       ((set (ValueRepresentation value) (TupleLayout shape layouts))) :ruleset representations)
 (rule ((= ty (SourceType value)) (SourceArrayElement ty element) (= layout (BoundaryLayout element)))
       ((set (ArrayElementLayout value) layout)) :ruleset representations)
+; Inferred rows retain their element layout across map callback parameters.
+(rule ((= (SourceOperation op) (OperationInfo region "map")) (= input (SourceInput op i))
+       (= body (SourceOperatorBody op)) (= formal (SourceParameter body i))
+       (= ty (SourceType formal)) (= (HasTypeLayout ty) false)
+       (= layout (ArrayElementLayout input)))
+      ((set (ValueRepresentation formal) layout)) :ruleset representations)
 ; A map's row layout comes from its callback result, even when row sizes were inferred.
 (rule ((= (SourceOperation op) (OperationInfo region "map")) (= value (SourceOperationValue op))
        (= body (SourceOperatorBody op)) (= result (SourceResult body))

@@ -12,6 +12,46 @@ use naga::front::spv;
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 
 #[test]
+fn nested_map_scan_rows_flatten_by_index() {
+    for width in [2, 3] {
+        let count = 2 * width;
+        let source = format!(
+            "entry main(xs: [{count}]i32) [{count}]i32 =
+            let rows = map(|b| map(|j| xs[b*{width}+j], iota({width})), iota(2)) in
+            let prefixes = map(|row| scan((+), 0i32, row), rows) in
+            map(|i| prefixes[i/{width}][i%{width}], iota({count}))"
+        );
+        compile(&source);
+        let output = compile_thru_spirv(&source).unwrap();
+        let bytes: Vec<_> = output.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let module = spv::parse_u8_slice(&bytes, &spv::Options::default()).unwrap();
+        Validator::new(ValidationFlags::all(), Capabilities::all()).validate(&module).unwrap();
+    }
+}
+
+#[test]
+fn nested_map_captures_computed_reduction_over_scan() {
+    for source in [
+        "entry main(xs: [2][2]i32) [2][2]i32 =
+        map(|row| let offset = reduce((+), 0i32, row) + 1 in
+            map(|x| x + offset, scan((+), 0i32, row)), xs)",
+        "entry main(xs: [2][2]i32, bias: i32) [2][2]i32 =
+        map(|row| let total = reduce((+), 0i32, row) in
+            let offset = (total + 1) * bias in
+            map(|x| x + offset, scan((+), 0i32, row)), xs)",
+        "entry main(xs: [2][2]i32) [2][2]i32 =
+        map(|row| map(|x| x + reduce((+), 0i32, row) + 1,
+            scan((+), 0i32, row)), xs)",
+    ] {
+        compile(source);
+        let output = compile_thru_spirv(source).unwrap();
+        let bytes: Vec<_> = output.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let module = spv::parse_u8_slice(&bytes, &spv::Options::default()).unwrap();
+        Validator::new(ValidationFlags::all(), Capabilities::all()).validate(&module).unwrap();
+    }
+}
+
+#[test]
 fn fixed_array_scans_expand_local_traversals() {
     let output = pipeline(
         "entry main(xs:[][4]i32) [][4]i32 =
