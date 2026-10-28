@@ -626,8 +626,10 @@ fn build(
     };
     let output_path = output_path(&normalized_input, output, target)?;
     let compilation = wyn_core::timing::with_enabled(verbose, || compile(parsed_modules, options))?;
-    time("write_artifacts", verbose, || {
-        write_artifacts(&output_path, compilation, target_double, verbose)
+    wyn_core::timing::with_enabled(verbose, || {
+        time("write_artifacts", verbose, || {
+            write_artifacts(&output_path, compilation, target_double, verbose)
+        })
     })?;
 
     // Always-on wall-clock summary (per-pass breakdown is available via

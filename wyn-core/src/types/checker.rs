@@ -14,6 +14,7 @@ use crate::scope::{IdentifierKind, ScopeEntry, ScopeStack};
 use crate::semantic_modules;
 use crate::semantic_modules::SemanticModules;
 use crate::ssa;
+use crate::timing;
 use crate::types;
 use crate::{bail_type_at, err_type, err_type_at, err_undef_at, LookupMap, LookupSet, StableMap};
 use log::debug;
@@ -1837,7 +1838,9 @@ impl<'a> TypeChecker<'a> {
         // `globals.user_file_defs` so module function bodies can close
         // over them. No `scope_stack.push_scope()` needed — `GlobalEnv`
         // is keyed independently of the local-scope stack.
-        self.forward_declare_ascribed_file_scope(declarations)?;
+        timing::time("type inference / forward declarations", || {
+            self.forward_declare_ascribed_file_scope(declarations)
+        })?;
 
         // Module bodies can use auto-imported prelude functions. Publish their
         // declared contracts before checking modules; check the bodies below
@@ -1851,15 +1854,17 @@ impl<'a> TypeChecker<'a> {
 
         // Type-check module functions first to populate the module_schemes cache.
         // This must happen before prelude functions since they may reference module functions.
-        self.check_module_functions()?;
+        timing::time("type inference / modules", || self.check_module_functions())?;
 
         // Type-check prelude functions (needed so they're in scope for user code)
-        self.check_prelude_functions()?;
+        timing::time("type inference / prelude", || self.check_prelude_functions())?;
 
         // Process user declarations
+        let user_time = timing::span("type inference / user declarations");
         for decl in declarations {
             self.check_declaration(decl)?;
         }
+        drop(user_time);
 
         self.check_resource_binding_consistency(declarations)?;
 
@@ -1867,6 +1872,7 @@ impl<'a> TypeChecker<'a> {
         self.emit_hole_warnings();
 
         // Apply the context to all types in the type table to resolve type variables
+        let _resolve = timing::span("type inference / resolve table");
         let resolved_table: LookupMap<NodeId, TypeScheme> =
             self.type_table.iter().map(|(node_id, scheme)| (*node_id, self.apply_scheme(scheme))).collect();
 

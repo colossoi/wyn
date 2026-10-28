@@ -4,6 +4,7 @@ use crate::ast::{NodeCounter, SourceImport};
 use crate::error::{CompilationFailure, CompilerError, LoadModulesError, Result};
 use crate::parser::{self, ParsedFile};
 use crate::semantic_modules::{PreElaboratedPrelude, SemanticModules};
+use crate::timing;
 use crate::{
     ast_const_fold, elaborate_modules, err_parse_at, name_resolution, resolve_imports, resolve_opens,
     resolve_placeholders, resolve_resources, types, CompilerOptions,
@@ -50,16 +51,32 @@ impl ParsedModules {
     /// locations without consulting the filesystem.
     pub fn type_check(self) -> std::result::Result<types::run::TypeChecked, CompilationFailure> {
         let options = self.options;
-        let program = resolve_imports::resolve_imports(self)?;
+        let program = timing::time("frontend / resolve imports", || {
+            resolve_imports::resolve_imports(self)
+        })?;
         let source_graph = Arc::clone(&program.source_graph);
         let result = (|| {
-            let program = elaborate_modules::elaborate_modules(program)?;
-            let program = name_resolution::qualify_module_accesses(program);
-            let program = resolve_resources::resolve_resources(program)?;
-            let program = ast_const_fold::fold_constants(program);
-            let program = resolve_placeholders::resolve_type_placeholders(program);
-            let program = resolve_opens::resolve_opens(program)?;
-            types::run::type_check(program, options)
+            let program = timing::time("frontend / elaborate modules", || {
+                elaborate_modules::elaborate_modules(program)
+            })?;
+            let program = timing::time("frontend / qualify accesses", || {
+                name_resolution::qualify_module_accesses(program)
+            });
+            let program = timing::time("frontend / resolve resources", || {
+                resolve_resources::resolve_resources(program)
+            })?;
+            let program = timing::time("frontend / fold constants", || {
+                ast_const_fold::fold_constants(program)
+            });
+            let program = timing::time("frontend / type placeholders", || {
+                resolve_placeholders::resolve_type_placeholders(program)
+            });
+            let program = timing::time("frontend / resolve opens", || {
+                resolve_opens::resolve_opens(program)
+            })?;
+            timing::time("frontend / type checking", || {
+                types::run::type_check(program, options)
+            })
         })();
         result.map_err(|error| CompilationFailure::new(error, source_graph))
     }

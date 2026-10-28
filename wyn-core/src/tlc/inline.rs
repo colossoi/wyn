@@ -15,6 +15,7 @@ use super::{
 use crate::ast::{Span, TypeName};
 use crate::builtins;
 use crate::map_in_place;
+use crate::timing;
 use crate::{LookupMap, LookupSet};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -27,7 +28,9 @@ pub type UnifiedHelpersInlined =
     Program<UnifiedHelpersInlinedTag, super::run::UnpinnedPolymorphic, super::context::TransformedGlobal>;
 
 pub fn inline_unified_helpers(mut program: super::stage::TypesSpecialized) -> UnifiedHelpersInlined {
-    expand_constants(&mut program);
+    timing::time("tlc helpers / expand constants", || {
+        expand_constants(&mut program)
+    });
     inline_helpers_to_fixpoint(&mut program);
     program.assert_flat_apps();
     program.retag()
@@ -102,22 +105,29 @@ where
 {
     // Bound expansion of recursive helpers.
     for _ in 0..16 {
-        let candidates = build_helper_candidates(program);
-        let mut changed = false;
-        map_in_place(&mut program.defs, |def| {
-            let mut inliner = FunctionInliner {
-                candidates: &candidates,
-                term_ids: &mut program.term_ids,
-                expand_values: true,
-            };
-            let (body, inlined) = inliner.rewrite_owned_tracked(def.body);
-            // Helper expansion exposes constant dimensions needed by storage planning.
-            let (body, folded) = super::partial_eval::fold_residual_constants(body, &mut program.term_ids);
-            let (body, normalized) = normalize_values(body, &mut program.term_ids);
-            changed |= inlined || folded || normalized;
-            Def { body, ..def }
+        let candidates = timing::time("tlc helpers / select candidates", || {
+            build_helper_candidates(program)
         });
-        super::dce::eliminate_unreachable_defs(&mut program.defs);
+        let mut changed = false;
+        timing::time("tlc helpers / rewrite", || {
+            map_in_place(&mut program.defs, |def| {
+                let mut inliner = FunctionInliner {
+                    candidates: &candidates,
+                    term_ids: &mut program.term_ids,
+                    expand_values: true,
+                };
+                let (body, inlined) = inliner.rewrite_owned_tracked(def.body);
+                // Helper expansion exposes constant dimensions needed by storage planning.
+                let (body, folded) =
+                    super::partial_eval::fold_residual_constants(body, &mut program.term_ids);
+                let (body, normalized) = normalize_values(body, &mut program.term_ids);
+                changed |= inlined || folded || normalized;
+                Def { body, ..def }
+            })
+        });
+        timing::time("tlc helpers / remove unreachable", || {
+            super::dce::eliminate_unreachable_defs(&mut program.defs)
+        });
         if !changed {
             break;
         }
@@ -132,7 +142,10 @@ where
 {
     let mut callbacks = LookupSet::new();
     for def in &program.defs {
-        let (body, _) = super::extract_lambda_params_ref(&def.body);
+        let mut body = &def.body;
+        while let TermKind::Lambda(lambda) = &body.kind {
+            body = &lambda.body;
+        }
         collect_function_values(body, &mut callbacks);
     }
     let mut candidates = LookupMap::new();
@@ -141,21 +154,30 @@ where
             continue;
         }
         // Entry points are roots, never call sites.
-        let (params, body) = extract_lambda_params(&def.body);
-        if params.is_empty() {
+        let TermKind::Lambda(lambda) = &def.body.kind else {
+            continue;
+        };
+        if lambda.params.is_empty() {
             continue;
         }
+        let body = lambda.body.as_ref();
         // Any helper containing array work is a candidate, control flow or
         // not, so neither a SOAC nor an explicit range/literal producer is
         // reachable behind a call (`verify_array_work_helpers_inlined`).
-        if !contains_array_work(&body)
+        if !contains_array_work(body)
             && !contains_opaque_type(&def.ty)
             && !callbacks.contains(&def.name)
-            && !is_structural_value(&body)
+            && !is_structural_value(body)
         {
             continue;
         }
-        candidates.insert(def.name, InlineBody { params, body });
+        candidates.insert(
+            def.name,
+            InlineBody {
+                params: lambda.params.clone(),
+                body: body.clone(),
+            },
+        );
     }
     candidates
 }

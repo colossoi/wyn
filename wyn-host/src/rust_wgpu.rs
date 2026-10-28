@@ -7,6 +7,7 @@ use syn::visit::{self, Visit};
 use syn::{
     parse2, parse_file, parse_str, Block, ExprPath, File, Item, Macro, PatIdent, Path, UseTree, Visibility,
 };
+use wyn_base::timing;
 
 use crate::{
     Allocation, Binding, BlendMode, BufferUsage, CullMode, DepthTest, DrawCall, DrawCount, Entry, Expr,
@@ -41,11 +42,14 @@ impl Program {
             ShaderFormat::Wgsl => "Generated Wyn host code. Dependency: wgpu 27.",
             ShaderFormat::Spirv => "Generated Wyn host code. Dependency: wgpu 27 with the spirv feature.",
         };
+        let support_time = timing::span("rust host / parse support");
         let support = parse_file(include_str!("rust_support.rs"))?;
         let arithmetic = parse_file(include_str!("arithmetic.rs"))?;
         let result_types = parse_file(include_str!("results.rs"))?;
         let result_types = result_types.items;
         let output_types = parse_file(include_str!("rust_output.rs"))?;
+        drop(support_time);
+        let functions_time = timing::span("rust host / generate functions");
         let mut context = RustContext::default();
         let functions = self
             .entries
@@ -54,15 +58,20 @@ impl Program {
             .map(|(i, e)| self.rust_entry(i, e, format, &mut context))
             .collect::<Result<Vec<_>, _>>()?;
         let context = context.emit(module_path, format);
-        let function_tokens = quote!(#context #(#functions)*);
+        drop(functions_time);
+        let references_time = timing::span("rust host / collect references");
         let mut used = BTreeSet::new();
-        ReferencedNames(&mut used).visit_file(&parse2(function_tokens.clone())?);
+        ReferencedNames(&mut used).visit_file(&parse2(context.clone())?);
+        drop(references_time);
+        let names_time = timing::span("rust host / input names");
         let functions = functions
             .into_iter()
             .zip(&self.entries)
-            .map(|(tokens, entry)| self.rust_input_names(entry, tokens))
+            .map(|(tokens, entry)| self.rust_input_names(entry, tokens, &mut used))
             .collect::<Result<Vec<_>, _>>()?;
         let function_tokens = quote!(#(#functions)*);
+        drop(names_time);
+        let syntax_time = timing::span("rust host / assemble syntax");
         let resource_names = self
             .interface
             .frame_graph
@@ -119,6 +128,8 @@ impl Program {
             #context
             #function_tokens
         })?;
+        drop(syntax_time);
+        let trim_time = timing::span("rust host / trim support");
         for item in &mut syntax.items {
             if let Item::Mod(module) = item {
                 if module.ident == "support" {
@@ -132,12 +143,22 @@ impl Program {
             Item::Use(import) => retain_import(&mut import.tree, &used),
             _ => true,
         });
-        Ok(prettyplease::unparse(&syntax))
+        drop(trim_time);
+        Ok(timing::time("rust host / format", || {
+            prettyplease::unparse(&syntax)
+        }))
     }
 
-    fn rust_input_names(&self, entry: &Entry, tokens: TokenStream) -> Result<TokenStream, HostError> {
+    fn rust_input_names(
+        &self,
+        entry: &Entry,
+        tokens: TokenStream,
+        used: &mut BTreeSet<String>,
+    ) -> Result<TokenStream, HostError> {
+        let syntax: File = parse2(tokens.clone())?;
+        ReferencedNames(used).visit_file(&syntax);
         let mut names = InputNames::default();
-        names.visit_file(&parse2(tokens.clone())?);
+        names.visit_file(&syntax);
         names.used.extend(["RESOURCE_NAMES".into(), "BUFFER_FIELDS".into()]);
         names.used.extend((0..self.entries.len()).map(|i| format!("ENTRY_{i}")));
         let pipelines: BTreeSet<_> = entry

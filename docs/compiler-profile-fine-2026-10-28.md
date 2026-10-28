@@ -1,6 +1,97 @@
 # Detailed CLI compiler timings
 
-Latest analysis: **both workloads without `-O`**, after buffering SPIR-V output
+## Latest: frontend and host generation
+
+Both workloads still compile without `-O`. Against `ac0cfef0`, five paired
+fresh-process medians show **Tinyporto 3.720 -> 3.703 s (0.4% less time)** and
+**fluid 2.207 -> 2.195 s (0.5% less time)**. The targeted Tinyporto phases save
+44 ms, but the whole-process difference is only 17 ms and is smaller than the
+sample spread. Do not attribute the unrelated phase variation to these changes.
+
+| Work | Tinyporto before ms | Tinyporto after ms | Fluid before ms | Fluid after ms |
+| --- | ---: | ---: | ---: | ---: |
+| Helper expansion and cleanup | 167 | 155 | 38 | 34 |
+| Rust host generation | 213 | 181 | 0 | 0 |
+| AST semantic frontend | 303 | 302 | 68 | 68 |
+| Whole process | 3,720 | 3,703 | 2,207 | 2,195 |
+
+One warmup per binary/workload preceded five sequential fresh processes each;
+binary order alternated by round. No builds/tests ran during timing and
+`WYN_EGGLOG_PROFILE` was unset. Tinyporto retains its Rust/WGPU host, graphics,
+and SPIR-V target; fluid retains graphics, subgroups, SPIR-V, and its WHL host.
+Tinyporto ranges were 3.642-3.733 s before and 3.626-3.760 s after; fluid ranges
+were 2.136-2.360 s before and 2.148-2.335 s after. Filesystem caches were warm.
+Raw samples, binary hashes, patch, harnesses, diagnostics, and gate results are in
+[frontend/host evidence](profiles/2026-10-28-compiler-frontend-host.json).
+
+The two behavior-preserving changes are small. Helper candidate selection
+borrows bodies while checking eligibility and clones only selected candidates.
+Its current Tinyporto cost is 14 ms. Rust host generation gathers references and
+input names from one parsed function AST rather than parsing each function twice.
+Fixed support parsing is only 2.7 ms, so it was left alone. Current host work is
+43 ms generating functions, 64 ms parsing/visiting references and input names,
+54 ms assembling the final syntax, and 10 ms formatting.
+
+The quick type-inference check found 174 ms checking Tinyporto user declarations,
+40 ms checking module functions, and 9 ms resolving the final table. The full
+inference parent is 229 ms. No obvious repeated-work issue was established and
+inference behavior is unchanged.
+
+Helper expansion includes four fixed-point rounds of call expansion, constant
+folding, normalization, and dead-definition cleanup. A separate temporary probe
+split rewriting into approximately 54 ms actual call expansion, 38 ms constant
+folding, and 25 ms normalization. These diagnostic clocks were removed before
+full gates; they are not paired performance measurements. Current whole-pass
+median is 155 ms, versus the preliminary single-run 143-ms result.
+
+Full gates passed: workspace formatting/all-target build and **1,504 tests**
+(zero failures, 14 existing ignores), standalone builds/tests for all seven
+non-workspace crates and both parser manifests, WASM formatting/browser-target
+check, **123 SPIR-V** validations, **122 WGSL** validations with one expected
+skip, and the library package compile/validation runner. Timing output is gated
+by `-v`. Final paired shaders and generated hosts are byte-identical for both
+workloads. GPU execution was not run. Test environment uses the same writable
+workspace temporary directory and 64-MiB Rust stack as the previous gates.
+
+Production Rust is **+78 net lines: 128 added, 50 removed**. Of the net increase,
+18 lines implement the two optimizations and 60 add optional phase timing.
+There is one local `wyn-base` dependency entry and two corresponding lockfile
+edges; no external dependency or package version changed.
+
+### Next: fluid fusion reuse
+
+The final paired profile puts fusion at **745 ms** in fluid; the previous
+820-ms figure below belongs to the preceding measurement session. Existing
+separate engine diagnostics show **32 contractions and 33 candidate rounds**.
+Each native path query currently scans its entire edge relation to rebuild
+adjacency. These predicates operate on fusion groups/operations, not scalar AST
+nodes: the saved diagnostic contains 488 source operations and 383 edges in
+each final edge relation. The granularity is appropriate; repeated construction
+and proof demand are the first targets.
+
+1. Share immutable `GroupEdge`/`GroupBefore` adjacency within a candidate round;
+   discard it after every contraction, including absorbed length observers.
+   Scope it to the graph/compilation as well as the round.
+2. Demand `ElementFusion` only for candidate pairs. Its two producers currently
+   cross current groups, and fluid accumulated 8,617 compatibility facts. This
+   is a fact-count finding, not a measured speedup.
+3. Measure path calls, adjacency builds, traversal work, and per-round candidate
+   counts before adding further retention. Immutable plan summaries and result
+   counts already persist. Endpoint-local proofs may be reusable by immutable
+   plan identities, but path/barrier answers need broader invalidation: merging
+   intermediate groups can change reachability between untouched endpoints.
+
+Preserve greedy choice order and compare selected plans and generated outputs.
+The **250-300 ms fusion budget remains a target**, not an established benefit of
+adjacency reuse. No fusion code is part of the frontend/host change.
+
+## Previous structural/output measurements
+
+The snapshot below compares `46e696b5` with `ac0cfef0`. It is retained for the
+structural/output optimization's impact and remaining phase detail; its times
+are from the preceding session, not the latest frontend/host measurements.
+
+Structural/output snapshot: **both workloads without `-O`**, after buffering SPIR-V output
 and reducing structural-planning work. Paired median compilation times are
 **4.445 -> 3.893 s for Tinyporto (12.4% less time)** and
 **2.697 -> 2.392 s for fluid (11.3% less time)**.

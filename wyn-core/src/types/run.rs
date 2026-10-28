@@ -14,6 +14,7 @@ use crate::name_resolution::ResolvedValueRef;
 use crate::resolve_opens;
 use crate::resolve_placeholders;
 use crate::semantic_modules;
+use crate::timing;
 use crate::types::checker::TypeChecker;
 use crate::types::FrontendWarning;
 use crate::{CompilerOptions, LookupMap};
@@ -35,12 +36,14 @@ pub type TypeChecked =
     ast::Program<TypeCheckedTag, TypeCheckedFamily, ast::TypedGlobal<ast::TypedDefinition, ast::TypedTree>>;
 
 pub fn type_check(program: resolve_opens::OpensResolved, options: CompilerOptions) -> Result<TypeChecked> {
-    let name_resolution = name_resolution::resolve_names(
-        &program,
-        &program.global_context.semantic_modules,
-        builtins::catalog(),
-        options,
-    );
+    let name_resolution = timing::time("type checking / resolve names", || {
+        name_resolution::resolve_names(
+            &program,
+            &program.global_context.semantic_modules,
+            builtins::catalog(),
+            options,
+        )
+    });
     let mut checked = program.try_rebuild(|declarations, global_context, _| {
         let resolve_placeholders::PlaceholdersResolvedGlobal {
             semantic_modules,
@@ -54,8 +57,10 @@ pub fn type_check(program: resolve_opens::OpensResolved, options: CompilerOption
             spec_schemes,
             name_resolution,
         );
-        checker.load_builtins()?;
-        let type_table = checker.check_program(&declarations)?;
+        timing::time("type checking / load builtins", || checker.load_builtins())?;
+        let type_table = timing::time("type checking / infer declarations", || {
+            checker.check_program(&declarations)
+        })?;
         let schemes = checker.get_function_schemes();
         let builtin_names = checker.builtin_names();
         let warnings: Vec<_> = checker.warnings().to_vec();
@@ -81,6 +86,7 @@ pub fn type_check(program: resolve_opens::OpensResolved, options: CompilerOption
         let name_resolution = checker.name_resolution().clone();
         drop(checker);
 
+        let _materialize = timing::span("type checking / materialize");
         materialize(
             declarations,
             semantic_modules,
@@ -93,8 +99,12 @@ pub fn type_check(program: resolve_opens::OpensResolved, options: CompilerOption
             name_resolution,
         )
     })?;
-    super::stage_context::validate(&checked)?;
-    let unused = super::warnings::collect_unused(&checked);
+    timing::time("type checking / validate context", || {
+        super::stage_context::validate(&checked)
+    })?;
+    let unused = timing::time("type checking / unused warnings", || {
+        super::warnings::collect_unused(&checked)
+    });
     checked.global_context.warnings.extend(unused);
     Ok(checked)
 }
