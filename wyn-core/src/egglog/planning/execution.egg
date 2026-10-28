@@ -116,9 +116,9 @@
 (rule ((= actual (SourceCapture region formal))
        (= (ValueRepresentation actual) (ArrayLayout count element)))
       ((set (RegionHasOwnedArrayParameter region) true)) :ruleset representations)
-(rule ((= call (SourceInvocation caller function args)) (= region (PlanCallee call))
-       (= formal (SourceParameter region i)) (< i (vec-length args))
-       (= (ValueRepresentation (vec-get args i)) (ArrayLayout count element)))
+(rule ((= region (PlanCallee call)) (= actual (PlanCallArgument call i))
+       (= formal (SourceParameter region i))
+       (= (ValueRepresentation actual) (ArrayLayout count element)))
       ((set (RegionHasOwnedArrayParameter region) true)) :ruleset representations)
 
 ; Recognize associative scalar addition through ordinary function wrappers.

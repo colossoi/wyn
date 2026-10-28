@@ -59,6 +59,9 @@
        (ParameterValue parent)) ((ParameterValue value)) :ruleset residency)
 (rule ((= source (SourceAlias value))) ((ForwardValue value source)) :ruleset planning-import)
 (rule ((= (SourceProjection value) (ProjectionInfo source i))) ((Projection value source i)) :ruleset planning-import)
+(relation SourceProjectionFields (SourceValue SourceValue i64))
+(rule ((= (SourceProjection value) (ProjectionInfo source i)))
+      ((SourceProjectionFields value source i)) :ruleset planning-import)
 
 (rule ((SourceComputedUse value source))
       ((ComputedValue value) (ChildValue value source)) :ruleset planning-import)

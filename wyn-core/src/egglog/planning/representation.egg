@@ -138,7 +138,7 @@
 (function LogicalExtent (SourceValue) Extent :no-merge)
 ; A projected fixed-array value has the same length as its selected SSA
 ; representation. Runtime views keep their separately carried descriptor length.
-(rule ((= (SourceProjection source) (ProjectionInfo parent i))
+(rule ((SourceProjectionFields source parent i)
        (= (SourceLoop parent) (LoopInfo header iteration))
        (= ty (SourceType source)) (= (SourceArraySize ty) (DynamicSize))
        (= (ValueRepresentation source) (ArrayLayout count element)))
@@ -269,7 +269,7 @@
 ; A projection of an array/SoA stream follows indexing. Ordinary tuple fields,
 ; such as a loop state containing arrays and scalars, are projected first.
 (relation ArrayStreamProjection (SourceValue))
-(rule ((= (SourceProjection source) (ProjectionInfo parent i))
+(rule ((SourceProjectionFields source parent i)
        (= ty (SourceType parent)) (= size (SourceArraySize ty)))
       ((ArrayStreamProjection source)) :ruleset readout)
 
@@ -310,10 +310,10 @@
        (= neutral (SourceNeutral op)) (= layout (ValueRepresentation neutral))
        (= value (Temporary owner name i)) (Allocation value extent) (ElementType value ty) (= (HasTypeLayout ty) false))
       ((set (BufferElementLayout value) layout)) :ruleset readout)
-(rule ((= call (SourceInvocation caller function args)) (= callee (PlanCallee call))
-       (= formal (SourceParameter callee i)) (< i (vec-length args))
+(rule ((= callee (PlanCallee call)) (= actual (PlanCallArgument call i))
+       (= formal (SourceParameter callee i))
        (= ty (SourceType formal)) (= (HasTypeLayout ty) false)
-       (= layout (ValueRepresentation (vec-get args i))))
+       (= layout (ValueRepresentation actual)))
       ((set (ValueRepresentation formal) layout)) :ruleset representations)
 ; Indexing a rectangular array exposes one fixed-size row. Equal branch
 ; lengths remain known without evaluating the branch predicate on the host.

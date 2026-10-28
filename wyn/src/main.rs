@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use log::info;
 use std::fs;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -833,10 +833,11 @@ fn write_artifacts(
     };
     match code {
         CompiledCode::Spirv(words) => {
-            let mut file = fs::File::create(output_path)?;
+            let mut file = BufWriter::new(fs::File::create(output_path)?);
             for word in &words {
                 file.write_all(&word.to_le_bytes())?;
             }
+            file.flush()?;
             if verbose {
                 info!(
                     "Wrote {} words of SPIR-V to {}",

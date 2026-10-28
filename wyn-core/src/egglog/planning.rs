@@ -3,6 +3,8 @@ use super::{timing, OptimizeError};
 use crate::PipelineTopologyPolicy;
 use egglog_engine::{EGraph, RawValues, Write};
 
+mod order;
+
 #[cfg(test)]
 #[path = "planning_tests.rs"]
 mod tests;
@@ -77,16 +79,7 @@ pub(super) fn place(graph: &mut EGraph, topology: PipelineTopologyPolicy) -> Res
             "(run-schedule (saturate planning-constants) (saturate planning-import))",
         )
     })?;
-    timing::time("egglog placement / order", || {
-        graph.parse_and_run_program(Some("execution order".into()), include_str!("planning/order.egg"))
-    })?;
-    let mut pending = false;
-    graph.constructor_enodes("OrderPending", |_| pending = true)?;
-    if pending {
-        return Err(OptimizeError::Extraction(
-            "cycle in the fused execution graph".into(),
-        ));
-    }
+    timing::time("egglog placement / order", || order::apply(graph))?;
     graph.parse_and_run_program(
         Some("execution placement".into()),
         include_str!("planning/place.egg"),
