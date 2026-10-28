@@ -1,5 +1,5 @@
 //! Read-only path predicates over native edges, with query-local traversal state.
-use crate::egglog::{parse_program, OptimizeError};
+use crate::egglog::{parse_program, timing, OptimizeError};
 use egglog_engine::ast::Span;
 use egglog_engine::constraint::{SimpleTypeConstraint, TypeConstraint};
 use egglog_engine::prelude::BaseSort;
@@ -99,14 +99,16 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
     )?;
     let commit = parse_program("fusion contraction", "(run-schedule (saturate fusion-record) (saturate fusion-commit) fusion-clear-candidates fusion-union fusion-clear)")?;
     loop {
-        graph.run_program(dependencies.clone())?;
-        graph.run_program(choose.clone())?;
+        timing::time("egglog fusion / dependencies", || {
+            graph.run_program(dependencies.clone())
+        })?;
+        timing::time("egglog fusion / choose", || graph.run_program(choose.clone()))?;
         let mut chosen = false;
         graph.constructor_enodes("Chosen", |_| chosen = true)?;
         if !chosen {
             break;
         }
-        graph.run_program(commit.clone())?;
+        timing::time("egglog fusion / commit", || graph.run_program(commit.clone()))?;
     }
     Ok(())
 }

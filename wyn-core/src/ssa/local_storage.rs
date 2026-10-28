@@ -4,13 +4,14 @@ use super::ir::{Substitutions, ValueDef};
 use super::stage::Reachable;
 use super::storage::is_local_value;
 use super::types::{
-    BlockId, ConstantValue, FuncBody, InstKind, PlaceId, PlaceInfo, PlaceOrigin, Terminator, ValueId,
-    ValueRef,
+    BlockId, ConstantValue, FuncBody, InstId, InstKind, PlaceId, PlaceInfo, PlaceOrigin, Terminator,
+    ValueId, ValueRef,
 };
 use super::{eliminate_dead_pure_instructions, ownership, ValueUses};
 use crate::builtins::catalog;
 use crate::error::{CompilerError, Result};
 use crate::op::OpTag;
+use crate::timing;
 use crate::types::{is_array_variant_composite, Type, TypeExt, TypeName};
 use crate::{BindingRef, FunctionId, LookupMap, LookupSet};
 use egglog_engine::{EGraph, Read, Write};
@@ -19,15 +20,15 @@ use egglog_engine::{EGraph, Read, Write};
 mod validation;
 
 pub(super) fn apply(program: &mut Reachable) -> Result<()> {
-    for body in program
+    for (name, body) in program
         .functions
         .iter_mut()
-        .map(|f| &mut f.body)
-        .chain(program.entry_points.iter_mut().map(|e| &mut e.body))
+        .map(|f| (f.name.as_str(), &mut f.body))
+        .chain(program.entry_points.iter_mut().map(|e| (e.name.as_str(), &mut e.body)))
     {
-        bufferize(body)?;
+        bufferize(name, body)?;
     }
-    ownership::apply(program);
+    timing::time("ssa storage / ownership", || ownership::apply(program));
     Ok(())
 }
 
@@ -222,16 +223,22 @@ fn update(data: &InstKind) -> Option<&[ValueRef]> {
     }
 }
 
-fn bufferize(body: &mut FuncBody) -> Result<()> {
+fn bufferize(name: &str, body: &mut FuncBody) -> Result<()> {
     if !body.inner.values.values().any(|value| contains_local_array(&value.ty)) {
         return Ok(());
     }
-    split_parameters(body);
-    remove_unused_loads(body);
-    let analysis = analyze(body)?;
-    let (places, reused) = allocate(body, &analysis)?;
-    validation::verify(body, &analysis, &places)?;
-    rewrite(body, &analysis.webs, &places, &reused)
+    let label = timing::enabled().then(|| format!("ssa storage body / {name}"));
+    let _body = label.as_deref().and_then(timing::span);
+    timing::time("ssa storage / split parameters", || split_parameters(body));
+    timing::time("ssa storage / remove loads", || remove_unused_loads(body));
+    let analysis = timing::time("ssa storage / analysis", || analyze(body))?;
+    let (places, reused) = timing::time("ssa storage / allocate", || allocate(body, &analysis))?;
+    timing::time("ssa storage / verify", || {
+        validation::verify(body, &analysis, &places)
+    })?;
+    timing::time("ssa storage / rewrite", || {
+        rewrite(body, &analysis.webs, &places, &reused)
+    })
 }
 
 fn remove_unused_loads(body: &mut FuncBody) {
@@ -275,10 +282,83 @@ struct Analysis {
     existing: LookupMap<ValueId, PlaceId>,
 }
 
+const ANALYSIS_SCHEDULE: &str = "(run-schedule (saturate storage-webs) (saturate storage-liveness) (saturate storage-select) (saturate storage-existing) (saturate storage-allocation))";
+
+fn storage_places(body: &FuncBody, arrays: &LookupMap<ValueId, usize>) -> LookupSet<PlaceId> {
+    let mut allocations = LookupSet::default();
+    let mut loads = Vec::new();
+    let mut children = LookupMap::<_, Vec<_>>::default();
+    for node in body.inner.insts.values() {
+        match node.data {
+            InstKind::Alloca { result } => {
+                allocations.insert(result);
+            }
+            InstKind::Load { place } if node.result.is_some_and(|v| arrays.contains_key(&v)) => {
+                loads.push(place);
+            }
+            InstKind::PlaceIndex { place, result, .. } => {
+                children.entry(place).or_default().push(result);
+            }
+            _ => {}
+        }
+    }
+    // Only direct allocation loads can seed Existing; retain every derived alias of those places.
+    loads.retain(|place| allocations.contains(place));
+    let mut places = LookupSet::default();
+    while let Some(place) = loads.pop() {
+        if places.insert(place) {
+            loads.extend(children.get(&place).into_iter().flatten().copied());
+        }
+    }
+    places
+}
+
+fn storage_events(
+    body: &FuncBody,
+    arrays: &LookupMap<ValueId, usize>,
+    places: &LookupSet<PlaceId>,
+) -> LookupMap<BlockId, Vec<Vec<InstId>>> {
+    body.inner
+        .blocks
+        .iter()
+        .map(|(block, data)| {
+            let relevant = data.insts.iter().copied().filter(|&inst| {
+                let node = &body.inner.insts[inst];
+                node.result.is_some_and(|v| arrays.contains_key(&v))
+                    || matches!(node.data, InstKind::Alloca { result } if places.contains(&result))
+                    || node.data.place_uses().iter().any(|p| places.contains(p))
+                    || node
+                        .data
+                        .value_uses()
+                        .iter()
+                        .any(|v| v.as_ssa().is_some_and(|v| arrays.contains_key(&v)))
+            });
+            let mut events: Vec<Vec<InstId>> = Vec::new();
+            let mut previous_boundary = true;
+            for inst in relevant {
+                let node = &body.inner.insts[inst];
+                let boundary = node.result.is_some_and(|v| arrays.contains_key(&v))
+                    || matches!(node.data, InstKind::Alloca { .. });
+                // Accesses between definitions/allocations share one liveness and reachability state.
+                match events.last_mut() {
+                    Some(event) if !boundary && !previous_boundary => event.push(inst),
+                    _ => events.push(vec![inst]),
+                }
+                previous_boundary = boundary;
+            }
+            (block, events)
+        })
+        .collect()
+}
+
 fn analyze(body: &FuncBody) -> Result<Analysis> {
+    let inputs = timing::span("ssa storage analysis / collect inputs");
     let values: Vec<_> =
         body.inner.values.iter().filter_map(|(v, info)| local_array(&info.ty).then_some(v)).collect();
     let indices: LookupMap<_, _> = values.iter().enumerate().map(|(i, v)| (*v, i)).collect();
+    // Contract steps with no storage facts, preserving event order and every CFG edge.
+    let relevant_places = storage_places(body, &indices);
+    let events = storage_events(body, &indices, &relevant_places);
     let places: Vec<_> = body.places.keys().collect();
     let place_ids: LookupMap<_, _> = places.iter().enumerate().map(|(i, p)| (*p, i as i64)).collect();
     let mut next = 0i64;
@@ -286,15 +366,28 @@ fn analyze(body: &FuncBody) -> Result<Analysis> {
         .inner
         .blocks
         .iter()
-        .map(|(b, data)| {
+        .map(|(b, _)| {
             let start = next;
-            next += data.insts.len() as i64 + 1;
+            next += events[&b].len() as i64 + 1;
             (b, (start, next - 1))
         })
         .collect();
+    if timing::enabled() {
+        eprintln!(
+            "ssa storage facts: {} instructions, {} events, {} arrays, {} blocks",
+            body.num_insts(),
+            events.values().map(Vec::len).sum::<usize>(),
+            values.len(),
+            body.num_blocks()
+        );
+    }
+    drop(inputs);
+    let schema = timing::span("ssa storage analysis / schema");
     let mut graph = EGraph::default();
     let map_error = |e: egglog_engine::Error| invalid(&e.to_string());
     graph.parse_and_run_program(None, include_str!("local_storage.egg")).map_err(map_error)?;
+    drop(schema);
+    let import = timing::span("ssa storage analysis / import facts");
     let mut origin_values = Vec::new();
     graph.update(|mut sink| {
         for (i, &v) in values.iter().enumerate() {
@@ -344,49 +437,63 @@ fn analyze(body: &FuncBody) -> Result<Analysis> {
             if let Terminator::Return(Some(ValueRef::Ssa(v))) = block.term {
                 if let Some(&v) = indices.get(&v) { sink.add("Escape", (v as i64,))?; }
             }
-            for (offset, &inst) in block.insts.iter().enumerate() {
+            for (offset, event) in events[&b].iter().enumerate() {
                 let before = entry + offset as i64;
                 let after = before + 1;
-                let node = &body.inner.insts[inst];
-                if let InstKind::Alloca { result, .. } = node.data {
-                    sink.add("AllocationStep", (place_ids[&result], before, after))?;
-                } else {
-                    sink.add("Flow", (before, after))?;
-                }
-                if let Some(&v) = node.result.and_then(|v| indices.get(&v)) {
-                    sink.add("Define", (before, after, v as i64))?;
-                    if !matches!(node.data, InstKind::Op { tag: OpTag::Materialize, .. }) {
-                        sink.add("Write", (after, v as i64))?;
+                for &inst in event {
+                    let node = &body.inner.insts[inst];
+                    if let InstKind::Alloca { result, .. } = node.data {
+                        sink.add("AllocationStep", (place_ids[&result], before, after))?;
+                    } else {
+                        sink.add("Flow", (before, after))?;
                     }
-                    if let InstKind::Load { place } = node.data {
-                        sink.add("OriginLoad", (v as i64, place_ids[&place], after))?;
+                    if let Some(&v) = node.result.and_then(|v| indices.get(&v)) {
+                        sink.add("Define", (before, after, v as i64))?;
+                        if !matches!(node.data, InstKind::Op { tag: OpTag::Materialize, .. }) {
+                            sink.add("Write", (after, v as i64))?;
+                        }
+                        if let InstKind::Load { place } = node.data {
+                            sink.add("OriginLoad", (v as i64, place_ids[&place], after))?;
+                        }
+                    } else { sink.add("Step", (before, after))?; }
+                    for (i, value) in node.data.value_uses().into_iter().enumerate() {
+                        let Some(&v) = value.as_ssa().and_then(|v| indices.get(&v)) else { continue; };
+                        sink.add("Use", (before, v as i64))?;
+                        if i == 0 && matches!(&node.data, InstKind::Op { tag: OpTag::Index | OpTag::DynamicExtract, .. }) {
+                            sink.add("Indexed", (v as i64,))?;
+                        }
+                        let modeled = matches!(&node.data, InstKind::Op { tag: OpTag::Tuple, .. })
+                            || matches!(&node.data,
+                            InstKind::Op { tag: OpTag::Index | OpTag::DynamicExtract | OpTag::Materialize, .. } if i == 0)
+                            || update(&node.data).is_some_and(|_| i == 0)
+                            || matches!(&node.data, InstKind::Op { tag: OpTag::Intrinsic { id, .. }, .. }
+                                if *id == catalog().known().length || *id == catalog().known().storage_len);
+                        if !modeled { sink.add("Escape", (v as i64,))?; }
                     }
-                } else { sink.add("Step", (before, after))?; }
-                for (i, value) in node.data.value_uses().into_iter().enumerate() {
-                    let Some(&v) = value.as_ssa().and_then(|v| indices.get(&v)) else { continue; };
-                    sink.add("Use", (before, v as i64))?;
-                    if i == 0 && matches!(&node.data, InstKind::Op { tag: OpTag::Index | OpTag::DynamicExtract, .. }) {
-                        sink.add("Indexed", (v as i64,))?;
+                    for place in node.data.place_uses().into_iter().filter(|p| relevant_places.contains(p)) {
+                        sink.add("PlaceUse", (before, place_ids[&place]))?;
                     }
-                    let modeled = matches!(&node.data, InstKind::Op { tag: OpTag::Tuple, .. })
-                        || matches!(&node.data,
-                        InstKind::Op { tag: OpTag::Index | OpTag::DynamicExtract | OpTag::Materialize, .. } if i == 0)
-                        || update(&node.data).is_some_and(|_| i == 0)
-                        || matches!(&node.data, InstKind::Op { tag: OpTag::Intrinsic { id, .. }, .. }
-                            if *id == catalog().known().length || *id == catalog().known().storage_len);
-                    if !modeled { sink.add("Escape", (v as i64,))?; }
-                }
-                for place in node.data.place_uses() { sink.add("PlaceUse", (before, place_ids[&place]))?; }
-                match node.data {
-                    InstKind::Alloca { result, .. } => { sink.add("Allocation", (place_ids[&result],))?; }
-                    InstKind::PlaceIndex { place, result, .. } => { sink.add("PlaceIndex", (place_ids[&place], place_ids[&result]))?; }
-                    _ => {}
+                    match node.data {
+                        InstKind::Alloca { result, .. } => { sink.add("Allocation", (place_ids[&result],))?; }
+                        InstKind::PlaceIndex { place, result, .. } => { sink.add("PlaceIndex", (place_ids[&place], place_ids[&result]))?; }
+                        _ => {}
+                    }
                 }
             }
         }
         Ok::<_, egglog_engine::Error>(())
     }).map_err(map_error)?;
-    graph.parse_and_run_program(None, "(run-schedule (saturate storage-webs) (saturate storage-liveness) (saturate storage-select) (saturate storage-allocation))").map_err(map_error)?;
+    drop(import);
+    timing::time("ssa storage analysis / rules", || {
+        graph.parse_and_run_program(None, ANALYSIS_SCHEDULE)
+    })
+    .map_err(map_error)?;
+    if std::env::var_os("WYN_EGGLOG_PROFILE").is_some() {
+        for output in graph.parse_and_run_program(None, "(print-stats)").map_err(map_error)? {
+            eprintln!("{output}");
+        }
+    }
+    let _readout = timing::span("ssa storage analysis / read results");
     let mut roots = LookupMap::default();
     let mut candidates = Vec::new();
     let mut existing = LookupMap::default();

@@ -5,7 +5,7 @@ use super::extract::operands;
 use super::placement::Placement;
 use crate::egglog::facts::Facts;
 use crate::egglog::query::Query;
-use crate::egglog::{OptimizeError, Optimized, Program};
+use crate::egglog::{timing, OptimizeError, Optimized, Program};
 use crate::{LookupMap, LookupSet};
 use egglog_engine::{EGraph, Read, Term, TermId, Value, Write};
 use wyn_graph::dag_postorder;
@@ -25,6 +25,7 @@ pub(in crate::egglog) struct Evaluation {
 }
 impl Evaluation {
     pub fn new(program: &Program<'_, Optimized>, placement: &Placement) -> Result<Self, OptimizeError> {
+        let inputs = timing::span("egglog evaluation / collect facts");
         let selected = &program.stage.selected;
         let facts = Facts { program };
         let scalars = &program.stage.scalars;
@@ -159,8 +160,12 @@ impl Evaluation {
                 }
             }
         }
+        drop(inputs);
+        let schema = timing::span("egglog evaluation / schema");
         let mut graph = EGraph::default();
         graph.parse_and_run_program(None, include_str!("evaluation.egg"))?;
+        drop(schema);
+        let import = timing::span("egglog evaluation / import facts");
         graph.update(|mut sink| {
             for (term, children) in control_edges.iter().enumerate() {
                 for &child in children {
@@ -197,7 +202,11 @@ impl Evaluation {
             }
             Ok::<_, egglog_engine::Error>(())
         })?;
-        graph.parse_and_run_program(None, "(run-schedule (saturate evaluation-reachability))")?;
+        drop(import);
+        timing::time("egglog evaluation / reachability rules", || {
+            graph.parse_and_run_program(None, "(run-schedule (saturate evaluation-reachability))")
+        })?;
+        let available = timing::span("egglog evaluation / available facts");
         Query(&graph).for_each("EvaluationContains", |row| {
             let root = graph.value_to_base::<i64>(row[0]) as usize;
             let leaf = graph.value_to_base::<i64>(row[1]) as usize;
@@ -216,7 +225,11 @@ impl Evaluation {
             }
             Ok::<_, egglog_engine::Error>(())
         })?;
-        graph.parse_and_run_program(None, "(run-schedule (saturate evaluation-placement))")?;
+        drop(available);
+        timing::time("egglog evaluation / placement rules", || {
+            graph.parse_and_run_program(None, "(run-schedule (saturate evaluation-placement))")
+        })?;
+        let sites_time = timing::span("egglog evaluation / site facts");
         let mut schedules = LookupMap::<usize, Vec<usize>>::default();
         Query(&graph).for_each("EvaluationBefore", |row| {
             let root = graph.value_to_base::<i64>(row[0]) as usize;
@@ -290,7 +303,11 @@ impl Evaluation {
             }
             Ok::<_, egglog_engine::Error>(())
         })?;
-        graph.parse_and_run_program(None, "(run-schedule (saturate evaluation-frequency) (saturate evaluation-lifetime) (saturate evaluation-target))")?;
+        drop(sites_time);
+        timing::time("egglog evaluation / target rules", || {
+            graph.parse_and_run_program(None, "(run-schedule (saturate evaluation-frequency) (saturate evaluation-lifetime) (saturate evaluation-target))")
+        })?;
+        let readout = timing::span("egglog evaluation / read targets");
         Query(&graph).for_function("EvaluationTarget", |row, target| {
             let query = graph.value_to_base::<i64>(row[0]) as usize;
             let site = graph.value_to_base::<i64>(target) as usize;
@@ -300,7 +317,10 @@ impl Evaluation {
         for &(a, b) in &pairs {
             plan.plan_common(vec![a], vec![b]);
         }
-        plan.schedule_anchors(program, &mut graph)?;
+        drop(readout);
+        timing::time("egglog evaluation / schedule anchors", || {
+            plan.schedule_anchors(program, &mut graph)
+        })?;
         Ok(plan)
     }
     pub fn schedule(&self, roots: &[TermId]) -> Result<&[Vec<TermId>], OptimizeError> {
@@ -317,7 +337,9 @@ impl Evaluation {
         graph: &mut EGraph,
     ) -> Result<(), OptimizeError> {
         let selected = &program.stage.selected;
-        graph.parse_and_run_program(None, "(run-schedule (saturate schedule-rank))")?;
+        timing::time("egglog anchors / rank rules", || {
+            graph.parse_and_run_program(None, "(run-schedule (saturate schedule-rank))")
+        })?;
         let mut pending: Vec<_> = selected.roots.values().map(|t| vec![*t]).collect();
         pending.extend(selected.extents.values().map(|t| vec![*t]));
         pending.extend((0..selected.dag.size()).filter_map(|term| {
@@ -328,6 +350,7 @@ impl Evaluation {
         pending.extend(self.before.values().flatten().map(|t| vec![*t]));
         let mut next = 0i64;
         while !pending.is_empty() {
+            let requests_time = timing::span("egglog anchors / import requests");
             let mut requests = Vec::new();
             for roots in std::mem::take(&mut pending) {
                 if self.schedules.contains_key(&roots) {
@@ -359,7 +382,11 @@ impl Evaluation {
                 }
                 Ok::<_, egglog_engine::Error>(())
             })?;
-            graph.parse_and_run_program(None, "(run-schedule (saturate schedule-anchors))")?;
+            drop(requests_time);
+            timing::time("egglog anchors / rules", || {
+                graph.parse_and_run_program(None, "(run-schedule (saturate schedule-anchors))")
+            })?;
+            let _readout = timing::span("egglog anchors / read schedules");
             for (id, roots, mut order) in requests {
                 let mut ordering = LookupMap::default();
                 let mut groups = LookupMap::<_, Vec<_>>::default();

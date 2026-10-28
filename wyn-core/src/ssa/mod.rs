@@ -35,6 +35,7 @@ pub mod uses;
 
 use crate::err_spirv;
 use crate::error;
+use crate::timing;
 use crate::CodegenTarget;
 pub use addressable_constants::promote_addressable_constants;
 pub use optimize::optimize;
@@ -79,10 +80,14 @@ pub fn prepare_spirv(mut program: stage::Reachable) -> error::Result<stage::Spir
             "SSA was scheduled for WGSL and cannot be lowered as SPIR-V"
         ));
     }
-    simplify_values(&mut program);
-    local_storage::apply(&mut program)?;
-    texture_sampling::publish_texture_sampling(&mut program);
-    backend_validation::verify_no_abstract_types(&program)?;
+    timing::time("ssa / simplify values", || simplify_values(&mut program));
+    timing::time("ssa / local storage", || local_storage::apply(&mut program))?;
+    timing::time("ssa / texture sampling", || {
+        texture_sampling::publish_texture_sampling(&mut program)
+    });
+    timing::time("ssa / validate types", || {
+        backend_validation::verify_no_abstract_types(&program)
+    })?;
     Ok(program.retag())
 }
 

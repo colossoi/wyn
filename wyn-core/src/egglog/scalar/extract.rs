@@ -87,6 +87,11 @@ pub(super) fn select(
             Model { prefer_inlining },
         );
         drop(costs);
+        let _reconstruct = timing::span(if prefer_inlining {
+            "egglog scalar / reconstruct inlined DAG"
+        } else {
+            "egglog scalar / reconstruct compact DAG"
+        });
         let mut dag = TermDag::default();
         let Some((_, root)) = extractor.extract_best(graph, &mut dag, value) else {
             return Err(OptimizeError::Extraction(
@@ -107,6 +112,7 @@ pub(super) fn select(
     // DAGs exposes sharing hidden behind calls without expanding alternatives.
     let (compact, compact_roots) = extract(false)?;
     if policy == ScalarOptimization::Basic {
+        let _copy = timing::span("egglog scalar / copy selected DAG");
         // Keep only reachable expression terms, excluding the synthetic output
         // vector. Placement resolves every retained term as an engine enode.
         let mut dag = TermDag::default();
@@ -118,6 +124,7 @@ pub(super) fn select(
         return Ok((dag, roots));
     }
     let (inlined, inlined_roots) = extract(true)?;
+    let _choose = timing::span("egglog scalar / compare and copy DAGs");
     let mut dag = TermDag::default();
     let mut compact_copies = LookupMap::default();
     let mut inlined_copies = LookupMap::default();

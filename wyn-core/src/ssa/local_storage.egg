@@ -34,6 +34,7 @@
 (ruleset storage-webs)
 (ruleset storage-liveness)
 (ruleset storage-select)
+(ruleset storage-existing)
 (ruleset storage-allocation)
 (rule ((Array v)) ((set (Web v) v)) :ruleset storage-webs)
 (rule ((Link a b) (= root (Web a))) ((set (Web b) root)) :ruleset storage-webs)
@@ -57,21 +58,23 @@
 
 ; An initializer's place is reusable only if no subsequent reachable access
 ; (including derived element pointers and backedges) can observe its mutation.
-(rule ((OriginLoad v place after))
-      ((AfterOrigin v after) (PlaceAlias place place) (set (AccessedLater v) false)) :ruleset storage-liveness)
-(rule ((PlaceAlias base p) (PlaceIndex p child)) ((PlaceAlias base child)) :ruleset storage-liveness)
-(rule ((AfterOrigin v before) (Flow before after)) ((AfterOrigin v after)) :ruleset storage-liveness)
+; Only selected single-origin webs can reuse an allocation; other loads need no reachability proof.
+(rule ((Reuse root) (OriginLoad v place after) (= root (Web v))
+       (= false (MultipleOrigins root)) (Allocation place))
+      ((AfterOrigin v after) (PlaceAlias place place) (set (AccessedLater v) false)) :ruleset storage-existing)
+(rule ((PlaceAlias base p) (PlaceIndex p child)) ((PlaceAlias base child)) :ruleset storage-existing)
+(rule ((AfterOrigin v before) (Flow before after)) ((AfterOrigin v after)) :ruleset storage-existing)
 ; A fresh execution of the source allocation starts a new lifetime. It can
 ; reuse the place only when no version of the old value remains live there.
 (rule ((OriginLoad v base start) (AfterOrigin v before)
        (AllocationStep other before after) (!= base other))
-      ((AfterOrigin v after)) :ruleset storage-liveness)
+      ((AfterOrigin v after)) :ruleset storage-existing)
 (rule ((OriginLoad v base start) (AfterOrigin v before)
        (AllocationStep base before after) (Live before current)
        (= root (Web v)) (= root (Web current)))
-      ((set (AccessedLater v) true)) :ruleset storage-liveness)
+      ((set (AccessedLater v) true)) :ruleset storage-existing)
 (rule ((OriginLoad v base start) (AfterOrigin v point) (PlaceUse point p) (PlaceAlias base p))
-      ((set (AccessedLater v) true)) :ruleset storage-liveness)
+      ((set (AccessedLater v) true)) :ruleset storage-existing)
 (rule ((Updated v)) ((StorageCandidate v)) :ruleset storage-select)
 ; Locally materialized rows can be indexed through their existing allocation.
 ; Constants and interface memory retain their backend-specific addressing.

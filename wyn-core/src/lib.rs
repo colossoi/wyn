@@ -110,6 +110,7 @@ impl std::fmt::Display for EntryId {
     }
 }
 
+pub use wyn_base::timing;
 pub use wyn_base::Interner;
 
 // =============================================================================
@@ -326,14 +327,16 @@ pub enum PipelineTopologyPolicy {
 
 /// Validate and lower elaborated SSA to SPIR-V.
 pub fn lower_ssa_to_spirv(program: ssa::stage::Elaborated) -> error::Result<Lowered> {
-    let program = ssa::optimize(program);
-    let program = ssa::place_floating(program)?;
-    let program = ssa::filter_reachable(program);
-    let program = ssa::prepare_spirv(program)?;
-    let spirv = spirv::lower_ssa_program(&program)?;
+    let program = timing::time("backend / prepare SSA values", || ssa::optimize(program));
+    let program = timing::time("backend / place SSA", || ssa::place_floating(program))?;
+    let program = timing::time("backend / reachable SSA", || ssa::filter_reachable(program));
+    let program = timing::time("backend / prepare SPIR-V", || ssa::prepare_spirv(program))?;
+    let spirv = timing::time("backend / emit SPIR-V", || spirv::lower_ssa_program(&program))?;
     Ok(Lowered {
         spirv,
-        program: host::Program::new(program.global_context.pipeline)?,
+        program: timing::time("backend / host program", || {
+            host::Program::new(program.global_context.pipeline)
+        })?,
     })
 }
 
