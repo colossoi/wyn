@@ -10,6 +10,10 @@ pub struct Expectation {
     #[serde(default)]
     targets: Vec<String>,
     entry_count: Option<usize>,
+    parallel: Option<bool>,
+    workgroup_arrays_scalar: Option<bool>,
+    maximum_entry_loops: Option<usize>,
+    subgroup_inclusive_add: Option<bool>,
     #[serde(default)]
     binary: BTreeMap<String, usize>,
     #[serde(default)]
@@ -102,6 +106,23 @@ fn check_module(module: &Module, expected: &Expectation, host: Option<&wyn_host_
             expected.entry
         );
     }
+    if let Some(parallel) = expected.parallel {
+        assert_eq!(
+            entries.iter().any(|e| e.workgroup_size[0] > 1),
+            parallel,
+            "{} parallel",
+            expected.entry
+        );
+    }
+    if let Some(maximum) = expected.maximum_entry_loops {
+        for entry in &entries {
+            let mut loops = 0;
+            statements(&entry.function.body, 0, 0, &mut |s, _, _| {
+                loops += usize::from(matches!(s, Statement::Loop { .. }))
+            });
+            assert!(loops <= maximum, "{} has {loops} loops", entry.name);
+        }
+    }
     let mut functions: Vec<&Function> = entries.iter().map(|entry| &entry.function).collect();
     let mut visited: BTreeSet<Handle<Function>> = BTreeSet::new();
     let mut index = 0;
@@ -118,6 +139,22 @@ fn check_module(module: &Module, expected: &Expectation, host: Option<&wyn_host_
             }
         }
         index += 1;
+    }
+    if let Some(wanted) = expected.subgroup_inclusive_add {
+        let mut found = false;
+        for function in &functions {
+            statements(&function.body, 0, 0, &mut |s, _, _| {
+                found |= matches!(
+                    s,
+                    Statement::SubgroupCollectiveOperation {
+                        op: naga::SubgroupOperation::Add,
+                        collective_op: naga::CollectiveOperation::InclusiveScan,
+                        ..
+                    }
+                )
+            });
+        }
+        assert_eq!(found, wanted, "{} subgroup inclusive add", expected.entry);
     }
     let mut binary = BTreeMap::<String, usize>::new();
     let mut math = BTreeMap::<String, usize>::new();
@@ -229,6 +266,19 @@ fn check_module(module: &Module, expected: &Expectation, host: Option<&wyn_host_
     if let Some(wanted) = expected.ifs_present {
         assert_eq!(ifs > 0, wanted, "{} conditionals", expected.entry);
     }
+    if expected.workgroup_arrays_scalar == Some(true) {
+        for &id in &workgroup_arrays {
+            let naga::TypeInner::Array { base, .. } = module.types[module.global_variables[id].ty].inner
+            else {
+                panic!("workgroup array")
+            };
+            assert!(
+                matches!(module.types[base].inner, naga::TypeInner::Scalar(_)),
+                "{} workgroup element",
+                expected.entry
+            );
+        }
+    }
     if let Some(scalar) = &expected.workgroup_array_scalar {
         assert!(
             !workgroup_arrays.is_empty(),
@@ -337,4 +387,22 @@ fn parameter_load_checks_follow_host_abi_instead_of_assuming_binding_zero() {
     check_module(&module, &expected, Some(&host));
     let wrong: Expectation = toml::from_str("entry = 'wanted'\nparameter_loads = { '0' = 2 }").unwrap();
     assert!(std::panic::catch_unwind(|| check_module(&module, &wrong, Some(&host))).is_err());
+}
+
+#[test]
+fn subgroup_checks_distinguish_inclusive_add_from_other_collectives() {
+    for (operation, wanted) in [("subgroupInclusiveAdd", true), ("subgroupMax", false)] {
+        let module = naga::front::wgsl::parse_str(&format!(
+            "@compute @workgroup_size(32) fn wanted() {{ let value = {operation}(1u); }}"
+        ))
+        .unwrap();
+        let expected: Expectation = toml::from_str(&format!(
+            "entry = 'wanted'\nsubgroup_inclusive_add = {wanted}\nparallel = true\nmaximum_entry_loops = 0"
+        ))
+        .unwrap();
+        check_module(&module, &expected, None);
+        let wrong: Expectation =
+            toml::from_str(&format!("entry = 'wanted'\nsubgroup_inclusive_add = {}", !wanted)).unwrap();
+        assert!(std::panic::catch_unwind(|| check_module(&module, &wrong, None)).is_err());
+    }
 }

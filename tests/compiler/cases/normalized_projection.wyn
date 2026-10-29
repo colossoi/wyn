@@ -1,0 +1,19 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = ["-O"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"repro\""]
+--! [[spirv]]
+--! entry = "repro"
+--! counts = { FDiv = 1 }
+--! ext_inst = { Normalize = 1 }
+
+def clampi(v: i32, lo: i32, hi: i32) i32 =
+  if v < lo then lo else if v > hi then hi else v
+def pixel(p: vec3f32) vec2i32 =
+  let n = normalize(p)
+  let projected = n.xy / n.z in
+  @[clampi(i32(projected.x), 0, 63), clampi(i32(projected.y), 0, 63)]
+entry repro(points: []vec3f32) []vec2i32 = map(pixel, points)

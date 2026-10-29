@@ -1,0 +1,2 @@
+entry main(dest:*[128]i32, shape:(i32,i32)) [128]i32 =
+        let indices=iota(shape.0*shape.1) in scatter(dest,indices,map(|i|i+1,indices))

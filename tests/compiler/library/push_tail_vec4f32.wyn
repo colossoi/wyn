@@ -1,0 +1,2 @@
+type params = { direction: vec4f32 }
+entry transform(values:[]f32,frame:params,bias:f32) []f32=map(|value|value*frame.direction.x+bias,values)

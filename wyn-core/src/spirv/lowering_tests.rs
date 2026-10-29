@@ -26,53 +26,6 @@ fn generated_map_length_reuses_the_storage_view_length() {
 }
 
 #[test]
-fn trivial_loop_phis_are_removed_without_losing_loop_state_or_wgsl_scope() {
-    for source in [
-        "entry repro(xs: []f32) []f32 = map(|x| x + 1.0, xs)",
-        "entry repro(xs: []i32, n:i32) []i32 = map(|x| \
-         let result = loop total = x for i < n do total + i in result + x, xs)",
-        "entry repro(xs: []i32, n:i32) []i32 = map(|x| \
-         loop total = x for i < n do \
-           loop inner = total for j < n do inner + j, xs)",
-    ] {
-        let program = crate::compile_thru_ssa(source).unwrap();
-        let words = crate::lower_ssa_to_spirv(program.clone()).unwrap().spirv;
-        let module = wspirv::dr::load_words(&words).unwrap();
-        let phis: Vec<_> = module
-            .functions
-            .iter()
-            .flat_map(|f| &f.blocks)
-            .flat_map(|b| &b.instructions)
-            .filter(|i| i.class.opcode == spirv::Op::Phi)
-            .collect();
-        assert!(!phis.is_empty(), "loop-carried state must remain: {source}");
-        assert!(
-            phis.iter().all(|i| i.operands.len() >= 4),
-            "single-input phi: {source}"
-        );
-        let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
-        let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
-        naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        )
-        .validate(&module)
-        .unwrap();
-
-        // A header value dominates the loop exit in SSA, but WGSL needs an
-        // outer declaration to make that value visible after the loop.
-        let wgsl = crate::lower_ssa_to_wgsl(program).unwrap();
-        let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
-        naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        )
-        .validate(&module)
-        .unwrap();
-    }
-}
-
-#[test]
 fn literal_composite_indices_do_not_emit_unused_constant_ids() {
     let positive = ["x"; 48].join(", ");
     let negative = ["-x"; 48].join(", ");
@@ -365,27 +318,6 @@ fn test_if_expression() {
     let spirv = compile_to_spirv("def f(x) = if x == 0 then 1 else 2").unwrap();
     assert!(!spirv.is_empty());
     assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn folded_branches_do_not_emit_selection_merges_before_unconditional_branches() {
-    for source in [
-        include_str!("../../../testfiles/sum_payload_array.wyn"),
-        include_str!("../../../testfiles/sum_payload_array_construct.wyn"),
-    ] {
-        let words = compile_to_spirv(source).unwrap();
-        let module = wspirv::dr::load_words(words).unwrap();
-        for block in module.functions.iter().flat_map(|f| &f.blocks) {
-            for instructions in block.instructions.windows(2) {
-                if instructions[0].class.opcode == wspirv::spirv::Op::SelectionMerge {
-                    assert!(matches!(
-                        instructions[1].class.opcode,
-                        wspirv::spirv::Op::BranchConditional | wspirv::spirv::Op::Switch
-                    ));
-                }
-            }
-        }
-    }
 }
 
 #[test]
@@ -806,33 +738,4 @@ fn const_array_hoist_is_deduped() {
         n, 1,
         "two indexings of one constant must share one Private global:\n{text}"
     );
-}
-
-#[test]
-fn push_constant_record_tail_padding_precedes_next_parameter() {
-    for vector in ["vec3f32", "vec4f32"] {
-        let source = format!(
-            "type params = {{ direction: {vector} }}\n\
-            entry transform(values: []f32, frame: params, bias: f32) []f32 =\n\
-            map(|value| value * frame.direction.x + bias, values)"
-        );
-        let words = compile_to_spirv(&source).unwrap();
-        let bytes = words.iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<_>>();
-        let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
-        naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        )
-        .validate(&module)
-        .unwrap();
-        let (_, block) = module
-            .global_variables
-            .iter()
-            .find(|(_, global)| global.space == naga::AddressSpace::PushConstant)
-            .unwrap();
-        let naga::TypeInner::Struct { members, .. } = &module.types[block.ty].inner else {
-            panic!("expected push constant struct");
-        };
-        assert_eq!(members[1].offset, 16, "bias follows the padded record");
-    }
 }

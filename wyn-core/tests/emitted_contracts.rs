@@ -1,11 +1,13 @@
 //! Cross-stage contracts on public emitted host/shader artifacts.
 #[path = "support/pipeline.rs"]
 mod pipeline;
+use std::collections::BTreeSet;
 use wyn_core::host::{
-    self, Allocation, Binding, BufferLen, Operation, Pipeline, Program, ResultLayout, ResultScalar,
+    self, Allocation, Binding, BufferLen, Expr, Operation, Pipeline, Program, ResultLayout, ResultScalar,
     ShaderFormat,
 };
 use wyn_core::{lower_ssa_to_spirv, lower_ssa_to_wgsl_with_program, CodegenTarget, PipelineTopologyPolicy};
+use wyn_host_interp::Program as WhlProgram;
 
 fn host_outputs(source: &str) -> [Program; 2] {
     let source = pipeline::source(source);
@@ -501,5 +503,479 @@ fn visit_loop_depths(block: &naga::Block, depth: usize, visit: &mut impl FnMut(&
             }
             _ => {}
         }
+    }
+}
+
+#[test]
+fn generated_compute_captures_are_allocated_by_the_authored_host_entry() {
+    let source = include_str!("../../testfiles/regressions/graphics_computed_stage_inputs.wyn");
+    for (program, format) in host_outputs(source).into_iter().zip([ShaderFormat::Spirv, ShaderFormat::Wgsl])
+    {
+        let [entry] = program.entries.as_slice() else {
+            panic!("one authored entry")
+        };
+        let resources = &program.interface.frame_graph.resources;
+        let inputs: BTreeSet<_> = entry.inputs.iter().map(|id| resources[id.0].name.as_str()).collect();
+        assert_eq!(inputs, BTreeSet::from(["xs", "target"]), "{format:?}");
+        assert!(!entry.inputs.contains(&entry.results[0]));
+        assert!(entry.allocations.iter().any(|a| a.resource() == entry.results[0]));
+        WhlProgram::parse(&program.to_whl("staged", format).unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn resolution_allocation_expressions_keep_cpu_parameters() {
+    let source = include_str!("../../testfiles/rust_host_resolution_sizes.wyn");
+    for (program, format) in host_outputs(source).into_iter().zip([ShaderFormat::Spirv, ShaderFormat::Wgsl])
+    {
+        let entry = &program.entries[0];
+        assert_eq!(entry.results.len(), 4);
+        assert_eq!(entry.host_inputs.len(), 1);
+        let (&frame, &bytes) = entry.host_inputs.first_key_value().unwrap();
+        assert_eq!(program.interface.frame_graph.resources[frame.0].name, "frame");
+        assert_eq!(
+            bytes, 24,
+            "only resolution.x/y are needed at std140 offsets 16/20"
+        );
+        let whl = program.to_whl("resolution_sizes", format).unwrap();
+        assert!(whl.contains(":host-bytes 24"));
+        assert!(whl.contains("host-read-scalar"));
+        assert!(!whl.contains("gpu-read-scalar"));
+        for id in entry.results.iter().take(3) {
+            let Allocation::Buffer { bytes, .. } =
+                entry.allocations.iter().find(|a| a.resource() == *id).unwrap()
+            else {
+                panic!("computed output allocation");
+            };
+            let mut reads = Vec::new();
+            bytes.clone().reads_mut(&mut |_, offset| reads.push(*offset));
+            assert_eq!(reads, [16, 20]);
+        }
+        let rust = program.to_rust_wgpu("resolution_sizes", format).unwrap();
+        assert!(rust.contains("frame: &ParameterBuffer"), "{rust}");
+        assert!(!rust.contains("frame_host: &[u8]"), "{rust}");
+        assert!(rust.contains("frame.upload(device, encoder)"), "{rust}");
+        assert!(rust.contains("pub fn encode_sizes("), "{rust}");
+        for readback in [
+            "read_gpu_word",
+            "map_async",
+            "wait_indefinitely",
+            "support::read_f32",
+        ] {
+            assert!(!rust.contains(readback), "unexpected {readback}: {rust}");
+        }
+    }
+}
+
+#[test]
+fn filter_phase_layout_matches_the_selected_shader_storage_access() {
+    let source = include_str!("../../testfiles/rust_host_storage_access_mismatch.wyn");
+    for (program, format) in host_outputs(source).into_iter().zip([ShaderFormat::Spirv, ShaderFormat::Wgsl])
+    {
+        let read_only = format == ShaderFormat::Spirv;
+        let rust = program.to_rust_wgpu("storage_access", format).unwrap();
+        let [Pipeline::Compute(pipeline)] = program.interface.pipelines.as_slice() else {
+            panic!("compute pipeline")
+        };
+        let (consumer, producers) = pipeline.stages.split_last().unwrap();
+        let shared = consumer
+            .reads
+            .iter()
+            .find(|binding| {
+                !consumer.writes.contains(binding)
+                    && producers.iter().any(|stage| stage.writes.contains(binding))
+            })
+            .unwrap();
+        let Binding::StorageBuffer {
+            set, binding: slot, ..
+        } = pipeline.bindings[*shared]
+        else {
+            panic!("shared storage buffer")
+        };
+        let phase = rust
+            .split("let compute_")
+            .find(|phase| phase.contains(&format!("entry_point: Some({:?})", consumer.entry_point)))
+            .unwrap();
+        let layout = phase.split("let pipeline =").next().unwrap();
+        let binding = layout
+            .split("BindGroupLayoutEntry {")
+            .find(|entry| entry.trim_start().starts_with(&format!("binding: {slot}u32,")))
+            .unwrap();
+        assert!(
+            binding.contains(&format!("read_only: {read_only}")),
+            "{format:?}: {binding}"
+        );
+
+        let whl = WhlProgram::parse(&program.to_whl("storage_access", format).unwrap()).unwrap();
+        let phase = whl
+            .kernels
+            .values()
+            .find(|kernel| kernel.options.text(":entry").unwrap() == consumer.entry_point)
+            .unwrap();
+        let abi = phase.options.get(":abi").unwrap().list().unwrap();
+        let binding = abi
+            .iter()
+            .map(|value| value.list().unwrap())
+            .find(|binding| {
+                binding[1].text().unwrap() == ":storage"
+                    && binding[2].u32().unwrap() == set
+                    && binding[3].u32().unwrap() == slot
+            })
+            .unwrap();
+        let parameter =
+            phase.parameters.iter().find(|parameter| parameter.name == binding[0].text().unwrap()).unwrap();
+        assert_eq!(
+            parameter.access.as_deref(),
+            Some(if read_only { ":read" } else { ":read-write" })
+        );
+    }
+}
+
+#[test]
+fn graphics_compute_helpers_capture_computed_records_and_return_both_arrays() {
+    let source = include_str!("../../testfiles/graphics_computed_record_capture.wyn");
+    for (program, format) in host_outputs(source).into_iter().zip([ShaderFormat::Spirv, ShaderFormat::Wgsl])
+    {
+        let [entry] = program.entries.as_slice() else {
+            panic!("one source entry")
+        };
+        let resources = &program.interface.frame_graph.resources;
+        let inputs: BTreeSet<_> = entry.inputs.iter().map(|id| resources[id.0].name.as_str()).collect();
+        assert_eq!(inputs, BTreeSet::from(["ui", "points", "target"]), "{format:?}");
+        assert_eq!(entry.results.len(), 3);
+        assert_ne!(entry.results[0], entry.results[1]);
+        for result in &entry.results[..2] {
+            assert!(
+                !entry.inputs.contains(result),
+                "computed result must not alias an input"
+            );
+            assert!(entry.allocations.iter().any(
+                |allocation| matches!(allocation, Allocation::Buffer { resource, .. } if resource == result)
+            ));
+        }
+        assert!(entry.operations.iter().any(|op| matches!(op, Operation::Dispatch { .. })));
+        assert!(entry.operations.iter().any(|op| matches!(op, Operation::Draw { .. })));
+        program.to_rust_wgpu("record_capture", format).unwrap();
+    }
+}
+
+#[test]
+fn uniform_sized_maps_launch_from_their_logical_domain() {
+    let source = include_str!("../../testfiles/rust_host_runtime_dispatch.wyn");
+    for (program, format) in host_outputs(source).into_iter().zip([ShaderFormat::Spirv, ShaderFormat::Wgsl])
+    {
+        let [entry] = program.entries.as_slice() else {
+            panic!("one host entry");
+        };
+        let pixels = entry.results[0];
+        assert!(
+            entry.allocations.iter().any(|a| a.resource() == pixels),
+            "host computes and allocates the output capacity"
+        );
+        let [Operation::Dispatch { groups, .. }, Operation::Draw { .. }] = entry.operations.as_slice()
+        else {
+            panic!("one map followed by its consuming draw");
+        };
+        let mut domain = groups[0].clone();
+        let mut sources = Vec::new();
+        domain.reads_mut(&mut |source, _| sources.push(source.clone()));
+        assert!(!sources.is_empty(), "launch reads the source dimensions");
+        assert!(
+            !sources.contains(&host::ScalarSource::Resource(pixels)),
+            "allocation capacity must not determine the logical launch domain"
+        );
+        assert_eq!(&groups[1..], &[Expr::Integer(1), Expr::Integer(1)]);
+        let rust = program.to_rust_wgpu("runtime_dispatch", format).unwrap();
+        let call = rust.split_once("pub fn host_reproduce(").unwrap().1;
+        assert!(call.contains("_bytes"), "{call}");
+        assert!(call.contains("ceiling("), "{call}");
+        let whl = program.to_whl("runtime_dispatch", format).unwrap();
+        assert!(whl.contains(&groups[0].to_whl().unwrap()), "{whl}");
+    }
+}
+
+#[test]
+fn rematerialized_helpers_and_dispatch_extents_publish_their_inputs() {
+    for source in [
+        include_str!("../../testfiles/scalar_setup.wyn"),
+        include_str!("../../testfiles/rust_host_filter.wyn"),
+    ] {
+        let prepared = pipeline::source(source);
+        let ssa = pipeline::lower(&prepared, CodegenTarget::Spirv);
+        let program = lower_ssa_to_spirv(ssa).unwrap().program;
+        let Pipeline::Compute(pipeline) = &program.interface.pipelines[0] else {
+            panic!("compute pipeline");
+        };
+        let push =
+            pipeline.bindings.iter().position(|b| matches!(b, Binding::PushConstant { .. })).unwrap();
+        assert!(pipeline.stages[0].uses.reads.contains(&push), "{source}");
+    }
+}
+
+#[test]
+fn graphics_root_composes_multiple_computations_and_source_results() {
+    let source = include_str!("../../testfiles/rust_host_frame_composition.wyn");
+    for (program, format) in host_outputs(source).into_iter().zip([ShaderFormat::Spirv, ShaderFormat::Wgsl])
+    {
+        let [entry] = program.entries.as_slice() else {
+            panic!(
+                "one source root, got {:?}",
+                program.entries.iter().map(|e| &e.name).collect::<Vec<_>>()
+            );
+        };
+        assert_eq!(entry.name, "reproduce");
+        assert_eq!(entry.inputs.len(), 2);
+        assert_eq!(entry.results.len(), 3);
+        assert_eq!(
+            entry.operations.iter().filter(|op| matches!(op, Operation::Dispatch { .. })).count(),
+            2
+        );
+        let draw = entry.operations.iter().position(|op| matches!(op, Operation::Draw { .. })).unwrap();
+        for &id in &entry.results[..2] {
+            assert!(!entry.inputs.contains(&id));
+            assert!(entry
+                .allocations
+                .iter()
+                .any(|a| matches!(a, Allocation::Buffer { resource, .. } if *resource == id)));
+            assert!(entry.operations.iter().any(|op| {
+                let Operation::Dispatch { pipeline, stage, .. } = op else {
+                    return false;
+                };
+                let Pipeline::Compute(compute) = &program.interface.pipelines[*pipeline] else {
+                    return false;
+                };
+                compute.stages[*stage]
+                    .uses
+                    .writes
+                    .iter()
+                    .any(|&b| program.binding_resource(*pipeline, b).unwrap() == id)
+            }));
+        }
+        let Operation::Draw { pipeline } = entry.operations[draw] else {
+            unreachable!()
+        };
+        assert!(program
+            .parameter_indices(pipeline, None)
+            .iter()
+            .any(|&b| program.binding_resource(pipeline, b).unwrap() == entry.results[0]));
+        assert!(entry.operations[..draw].iter().any(|op| {
+            let Operation::Dispatch { pipeline, stage, .. } = op else {
+                return false;
+            };
+            let Pipeline::Compute(compute) = &program.interface.pipelines[*pipeline] else {
+                return false;
+            };
+            compute.stages[*stage]
+                .uses
+                .writes
+                .iter()
+                .any(|&b| program.binding_resource(*pipeline, b).unwrap() == entry.results[0])
+        }));
+        let results = &program.interface.source_results;
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|r| r.entry == "reproduce"));
+        assert_eq!(
+            results.iter().map(|r| (r.result, r.name.as_str())).collect::<Vec<_>>(),
+            [(0, "result_0"), (1, "result_1")]
+        );
+        let rust = program.to_rust_wgpu("composition", format).unwrap();
+        assert_eq!(rust.matches("pub fn host_").count(), 1);
+        assert_eq!(rust.matches("pass.dispatch_workgroups(").count(), 2);
+        assert_eq!(rust.matches("OutputResource::Buffer {").count(), 2);
+        assert_eq!(rust.matches("OutputResource::Texture(Texture::clone(").count(), 1);
+    }
+}
+
+#[test]
+fn indirect_draw_waits_for_both_count_epilogue_and_compacted_vertices() {
+    let source = include_str!("../../testfiles/rust_host_indirect_epilogue.wyn");
+    for (program, _format) in
+        host_outputs(source).into_iter().zip([ShaderFormat::Spirv, ShaderFormat::Wgsl])
+    {
+        let graph = &program.interface.frame_graph;
+        assert_eq!(graph.passes.len(), 2, "one compaction dispatch and one draw");
+        let [indirect] = graph.indirect_draws.as_slice() else {
+            panic!("one indirect draw")
+        };
+        let writer = graph
+            .passes
+            .iter()
+            .position(|pass| pass.writes.iter().any(|w| w.resource == indirect.buffer_resource))
+            .unwrap();
+        let compact = graph.passes.iter().position(|pass| pass.name.ends_with("compact")).unwrap();
+        assert_eq!(
+            writer, compact,
+            "compaction also publishes the indirect draw command"
+        );
+        let draw = &graph.passes[indirect.draw_pass];
+        assert!(draw.depends_on.contains(&writer));
+        assert!(draw.depends_on.contains(&compact));
+        assert!(graph.passes[compact]
+            .writes
+            .iter()
+            .any(|w| draw.reads.iter().any(|r| r.resource == w.resource)));
+    }
+}
+
+fn wgsl_output(source: &str) -> wyn_core::LoweredWgsl {
+    let source = pipeline::source(source);
+    let output = lower_ssa_to_wgsl_with_program(pipeline::lower(&source, CodegenTarget::Wgsl)).unwrap();
+    validate(naga::front::wgsl::parse_str(&output.wgsl).unwrap());
+    output
+}
+
+#[test]
+fn tuple_projections_keep_result_capacity_on_both_backends() {
+    for program in host_outputs(include_str!(
+        "../../testfiles/regressions/fusion_shared_tuple.wyn"
+    )) {
+        let outputs: Vec<_> = program
+            .interface
+            .pipelines
+            .iter()
+            .flat_map(|p| match p {
+                Pipeline::Compute(p) => &p.bindings,
+                _ => panic!("compute pipeline"),
+            })
+            .filter_map(|b| match b {
+                Binding::StorageBuffer {
+                    usage: host::BufferUsage::Output,
+                    length,
+                    ..
+                } => Some(length),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outputs.len(), 2);
+        assert!(outputs.iter().all(|n| matches!(n, Some(BufferLen::Fixed { bytes: 64 }))));
+    }
+}
+
+#[test]
+fn graphics_stages_preserve_shader_interfaces_and_draw_metadata() {
+    use host::{Pipeline, ShaderStage};
+    let source = include_str!("../../testfiles/unified_triangle.wyn");
+    let output = wgsl_output(source);
+    let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
+    assert_eq!(module.entry_points.len(), 2);
+    assert!(module.entry_points.iter().any(|e| e.stage == naga::ShaderStage::Vertex));
+    assert!(module.entry_points.iter().any(|e| e.stage == naga::ShaderStage::Fragment));
+    let [Pipeline::Graphics(graphics)] = output.program.interface.pipelines.as_slice() else {
+        panic!("one graphics pipeline");
+    };
+    assert_eq!(graphics.stages.len(), 2);
+    assert_eq!(graphics.source_operation, Some(0));
+    assert!(graphics.stages.iter().any(|s| matches!(s.stage, ShaderStage::Vertex)));
+    assert!(graphics.stages.iter().any(|s| matches!(s.stage, ShaderStage::Fragment)));
+    assert!(!graphics.fragment_outputs.is_empty());
+    assert!(output.program.interface.source_results.is_empty());
+}
+
+#[test]
+fn shared_load_helper_publishes_both_results() {
+    let output = wgsl_output(include_str!(
+        "../../tests/compiler/library/shared_load_helper.wyn"
+    ));
+    assert_eq!(output.program.interface.source_results.len(), 2);
+}
+
+#[test]
+fn grouped_entries_keep_storage_and_dispatch_contracts() {
+    let output = wgsl_output(include_str!(
+        "../../tests/compiler/library/host_stage_contracts.wyn"
+    ));
+    let program = &output.program;
+    for entry in &program.entries {
+        let pipeline = entry
+            .operations
+            .iter()
+            .find_map(|op| match op {
+                Operation::Dispatch { pipeline, .. } => Some(*pipeline),
+                _ => None,
+            })
+            .expect("compute dispatch");
+        let Pipeline::Compute(p) = &program.interface.pipelines[pipeline] else {
+            panic!("compute")
+        };
+        let results: Vec<_> =
+            program.interface.source_results.iter().filter(|r| r.entry == entry.name).collect();
+        match entry.name.as_str() {
+            "consuming_map" | "consuming_scan" => {
+                let scan = entry.name == "consuming_scan";
+                let (set, binding) = p
+                    .bindings
+                    .iter()
+                    .find_map(|b| match b {
+                        Binding::StorageBuffer {
+                            set,
+                            binding,
+                            usage: host::BufferUsage::Input,
+                            access: host::Access::ReadWrite,
+                            ..
+                        } => Some((*set, *binding)),
+                        _ => None,
+                    })
+                    .expect("read-write input buffer");
+                assert_eq!((results[0].set, results[0].binding), (set, binding));
+                assert_eq!(p.bindings.len(), if scan { 5 } else { 2 });
+                assert_eq!(p.stages.len(), if scan { 3 } else { 1 });
+            }
+            "observed_scatter" | "captured_scatter" => {
+                assert_eq!(p.bindings.len(), 4);
+                assert_eq!(results.len(), 2);
+                assert_ne!(results[0].binding, results[1].binding);
+            }
+            "buffer_domain" | "scalar_domain" => assert!(matches!(
+                p.stages[0].dispatch_size,
+                host::DispatchSize::Computed {
+                    elements: host::Expr::BufferLength { .. } | host::Expr::Scalar(_),
+                    ..
+                }
+            )),
+            "partial_whole" => assert_eq!(p.stages.len(), 1),
+            "partial_slice" => assert_eq!(p.stages.len(), 2),
+            "scalar_loop" => {
+                assert_eq!(p.stages.len(), 2);
+                assert_eq!(p.stages[0].workgroup_size, (1, 1, 1));
+                assert_eq!(p.stages[1].workgroup_size, (64, 1, 1));
+            }
+            "large_fixed" => {
+                assert_eq!(p.stages.len(), 1);
+                assert_eq!(
+                    p.stages[0].dispatch_size,
+                    host::DispatchSize::Fixed {
+                        x: 65_535,
+                        y: 1,
+                        z: 1,
+                        explicit: true
+                    }
+                );
+            }
+            name => panic!("unexpected entry {name}"),
+        }
+    }
+    assert_eq!(program.entries.len(), 10);
+}
+
+#[test]
+fn push_constant_record_padding_precedes_the_next_parameter() {
+    for source in [
+        include_str!("../../tests/compiler/library/push_tail_vec3f32.wyn"),
+        include_str!("../../tests/compiler/library/push_tail_vec4f32.wyn"),
+    ] {
+        let source = pipeline::source(source);
+        let output = lower_ssa_to_spirv(pipeline::lower(&source, CodegenTarget::Spirv)).unwrap();
+        let module =
+            naga::front::spv::Frontend::new(output.spirv.into_iter(), &Default::default()).parse().unwrap();
+        let (_, block) = module
+            .global_variables
+            .iter()
+            .find(|(_, v)| v.space == naga::AddressSpace::PushConstant)
+            .unwrap();
+        let naga::TypeInner::Struct { members, .. } = &module.types[block.ty].inner else {
+            panic!("push constant struct")
+        };
+        assert_eq!(members[1].offset, 16);
+        validate(module);
     }
 }

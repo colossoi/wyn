@@ -1,0 +1,22 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"increment\"", ":source-name \"loop_exit\"", ":source-name \"nested_loop\""]
+--! [[spirv]]
+--! entry = "increment"
+--! present = ["Phi"]
+--! minimum_phi_inputs = 2
+--! [[spirv]]
+--! entry = "loop_exit"
+--! present = ["Phi"]
+--! minimum_phi_inputs = 2
+--! [[spirv]]
+--! entry = "nested_loop"
+--! present = ["Phi"]
+--! minimum_phi_inputs = 2
+
+entry increment(xs:[]f32) []f32=map(|x|x+1.0,xs)
+entry loop_exit(xs:[]i32,n:i32) []i32=map(|x|let result=loop total=x for i<n do total+i in result+x,xs)
+entry nested_loop(xs:[]i32,n:i32) []i32=map(|x|loop total=x for i<n do loop inner=total for j<n do inner+j,xs)

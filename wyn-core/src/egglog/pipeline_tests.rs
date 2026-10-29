@@ -231,14 +231,6 @@ fn compiler_repro_array_reduce() {
 }
 
 #[test]
-fn compiler_repro_matrix_map() {
-    placement_shaders(
-        include_str!("../../../testfiles/regressions/matrix_map.wyn"),
-        |_| {},
-    );
-}
-
-#[test]
 fn compiler_repro_boolean_record() {
     shaders(include_str!("../../../testfiles/regressions/boolean_record.wyn"));
     shaders(
@@ -271,12 +263,6 @@ fn record_update_survives_to_ssa_and_lowers_in_both_backends() {
         })
         .count();
     assert!(count >= 7, "dependent field updates must survive to SSA");
-    let binary = lower_ssa_to_spirv(program).unwrap();
-    let module = wspirv::dr::load_words(&binary.spirv).unwrap();
-    assert!(module.all_inst_iter().any(|inst| inst.class.opcode == wspirv::spirv::Op::CompositeInsert));
-    shaders(include_str!(
-        "../../../testfiles/regressions/record_update_values.wyn"
-    ));
 }
 
 #[test]
@@ -523,31 +509,6 @@ fn guarded_loops(block: &naga::Block, depth: usize) -> Vec<usize> {
 }
 
 #[test]
-fn grouped_materializations_keep_guarded_availability() {
-    let source = include_str!("../../../testfiles/regressions/sibling_branch_producer.wyn");
-    for (last, loops, unguarded) in [
-        ("if skip then 0.0 else s*3.0", 1, 0),
-        ("if skip then 0.0 else direct+specular", 1, 0),
-        ("s", 1, 1),
-    ] {
-        let source = source.replace(
-            "@[direct,specular,0.0,1.0]",
-            &format!("@[direct,specular,{last},1.0]"),
-        );
-        let module = shaders(&source);
-        let fragment =
-            &module.entry_points.iter().find(|e| e.stage == naga::ShaderStage::Fragment).unwrap().function;
-        let depths = guarded_loops(&fragment.body, 0);
-        assert_eq!(depths.len(), loops, "{source}");
-        assert_eq!(
-            depths.iter().filter(|&&depth| depth == 0).count(),
-            unguarded,
-            "{source}"
-        );
-    }
-}
-
-#[test]
 fn shared_branch_producers_keep_one_guarded_loop() {
     let source = include_str!("../../../testfiles/regressions/shared_branch_producer.wyn");
     for (consumer, loops) in [
@@ -646,18 +607,6 @@ fn resource_records_passed_to_helpers_reach_both_backends() {
 }
 
 #[test]
-fn conditional_tuple_and_zipped_maps_reach_both_backends() {
-    for source in [
-        "entry main(xs:[4]i32,ys:[4]i32,flag:bool) [4](i32,i32) =
-         if flag then map(|x|(x,x+1),xs) else map(|y|(y,y+2),ys)",
-        "entry main(xs:[4]i32,ys:[4]i32,flag:bool) [4]i32 =
-         if flag then map(|(x,y)|x+y,zip(xs,ys)) else map(|(y,x)|y-x,zip(ys,xs))",
-    ] {
-        shaders(source);
-    }
-}
-
-#[test]
 fn scans_and_reductions_use_one_shared_bank_per_phase() {
     let reduce = shaders("entry total(xs:[]i32) i32=reduce((+),0,xs)");
     let scan = shaders("entry prefixes(xs:[]i32) []i32=scan((+),0,xs)");
@@ -715,20 +664,6 @@ fn fused_local_slice_reductions_do_not_allocate_unused_producer_arrays() {
       let values=map(|x|x+1.0,row[1..i32(row[0])]) in
       reduce(|a,b|min(a,b),f32.highest,values)+reduce(|a,b|max(a,b),f32.lowest,values),xs)",
     );
-}
-
-#[test]
-fn owned_scatter_inside_map_keeps_queries_parallel() {
-    for source in [
-        "entry main(xs:[]i32) [][4]i32 = map(|x|scatter(replicate(4,0i32),[x%4],[x]),xs)",
-        "entry main(xs:[]i32) [][4]i32 = map(|x|loop a=replicate(4,0i32) for i<3 do scatter(a,[i],[x+i]),xs)",
-    ] {
-        let module = shaders(source);
-        assert!(
-            module.entry_points.iter().any(|entry| entry.workgroup_size[0] > 1),
-            "independent owned scatter must not serialize the outer map: {source}"
-        );
-    }
 }
 
 #[test]
@@ -1045,15 +980,4 @@ fn narrowing_loop_capacity_requires_bounded_backedge() {
     let source = include_str!("../../../testfiles/regressions/narrowing_loop_capacity.wyn")
         .replace("(mid+1,hi)", "(hi+1,hi)");
     assert!(compile_thru_ssa(&source).is_err());
-}
-
-#[test]
-fn inferred_loop_result_arrays_retain_logical_extents() {
-    let fixture = include_str!("../../../fluid-simulation/test/parity_tree.wyn")
-        .replace("module Tree = import \"../packages/spatial/src/octree\"", "")
-        .replace("Tree.", "");
-    shaders(&format!(
-        "{}\n{fixture}",
-        include_str!("../../../fluid-simulation/packages/spatial/src/octree.wyn")
-    ));
 }

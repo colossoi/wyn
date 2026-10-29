@@ -1,0 +1,2 @@
+entry main(xs:[]i32) []i32 = map(|x:i32|x+1,xs)
+entry echo(xs:[]i32) []i32 = xs

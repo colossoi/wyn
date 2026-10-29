@@ -1,0 +1,12 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"extrema_f16\"", ":source-name \"extrema_f32\""]
+--! [[artifacts]]
+--! path = "output.wgsl"
+--! contains = ["0x1.fffffep+127f", "-0x1.fffffep+127f", "f16(0x1.ffcp+15f)", "-f16(0x1.ffcp+15f)"]
+
+entry extrema_f16(xs:[4]f16) (f16,f16)=(reduce(f16.min,f16.highest,xs),reduce(f16.max,f16.lowest,xs))
+entry extrema_f32(xs:[4]f32) (f32,f32)=(reduce(f32.min,f32.highest,xs),reduce(f32.max,f32.lowest,xs))

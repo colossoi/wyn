@@ -55,23 +55,10 @@ fn representation_lowering_makes_view_updates_explicit_without_selecting_local_r
 
 #[test]
 fn division_and_remainder_used_by_a_condition_are_reused_in_both_arms() {
-    for source in [
-        r#"entry repro(indices: []i32, width: i32) []i32 =
-      map(|i|
-        let q = i / width
-        let r = i % width in
-        if q < r then q - r else q + r,
-        indices)"#,
-        r#"entry repro(indices: []i32, width: i32) []i32 =
-      map(|i|
-        loop total = 0 for j < 3 do
-          let q = (i + j) / width
-          let r = (i + j) % width in
-          total + (if q < r then q - r else q + r),
-        indices)"#,
-    ] {
-        assert_division_sites(source, 1);
-    }
+    assert_case_operations(&[
+        "entry main(i:i32,width:i32) i32=let q=i/width let r=i%width in if q<r then q-r else q+r",
+        "entry main(i:i32,width:i32) i32=loop total=0 for j<3 do let q=(i+j)/width let r=(i+j)%width in total+(if q<r then q-r else q+r)",
+    ], &[OpTag::BinOp(BinaryOperator::Divide), OpTag::BinOp(BinaryOperator::Remainder)], 1);
 }
 
 #[test]
@@ -281,23 +268,7 @@ fn assert_partial_intrinsic_sites(source: &str, name: &str, expected: usize) -> 
         "unexpected {name} count before backend lowering\n{source}\n{}",
         crate::ssa::print::format_program(&placed)
     );
-    let wgsl = crate::lower_ssa_to_wgsl(ssa.clone()).unwrap();
-    let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
-    validate_shader(&module);
-    let spirv = crate::lower_ssa_to_spirv(ssa).unwrap().spirv;
-    let bytes = spirv.iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<_>>();
-    let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
-    validate_shader(&module);
     placed
-}
-
-fn validate_shader(module: &naga::Module) {
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(module)
-    .unwrap();
 }
 
 fn live_instructions(ssa: crate::ssa::stage::Elaborated) -> crate::ssa::stage::Placed {
@@ -346,22 +317,6 @@ entry repro(points: []vec3f32) []vec2i32 = map(pixel, points)
             .count(),
         1,
         "the projection must share the retained normalization"
-    );
-    let spirv = crate::compile_thru_spirv(source).unwrap().spirv;
-    let module = wspirv::dr::load_words(&spirv).unwrap();
-    assert_eq!(
-        module.all_inst_iter().filter(|inst| inst.class.opcode == wspirv::spirv::Op::FDiv).count(),
-        1
-    );
-    assert_eq!(
-        module
-            .all_inst_iter()
-            .filter(|inst| {
-                inst.class.opcode == wspirv::spirv::Op::ExtInst
-                    && inst.operands.get(1) == Some(&wspirv::dr::Operand::LiteralExtInstInteger(69))
-            })
-            .count(),
-        1
     );
 }
 
@@ -434,33 +389,18 @@ fn division_reuse_distinguishes_loop_carried_operands() {
 
 #[test]
 fn partial_math_is_not_reused_between_independent_guards() {
-    for name in ["f32.sqrt", "f32.log"] {
-        assert_partial_intrinsic_sites(
-            &format!(
-                "entry repro(xs:[]f32,first:bool,second:bool) []f32 = map(|x|
-                let a=if first then {name}(x) else 0.0 in
-                let b=if second then {name}(x) else 0.0 in a+b,xs)"
-            ),
-            name,
-            2,
-        );
-    }
+    assert_partial_cases(
+        "let a=if first then OP(x) else 0.0 in let b=if second then OP(x) else 0.0 in a+b",
+        2,
+    );
 }
 
 #[test]
 fn partial_intrinsics_reuse_guarded_producers_in_nested_branches() {
-    for name in ["f32.sqrt", "f32.log"] {
-        assert_partial_intrinsic_sites(
-            &format!(
-                "entry repro(xs:[]f32,outer:bool,inner:bool) []f32 = map(|x|
-                if outer then let value={name}(x) in
-                    value+(if inner then {name}(x)+1.0 else {name}(x)-1.0)
-                else x,xs)"
-            ),
-            name,
-            1,
-        );
-    }
+    assert_partial_cases(
+        "if first then let value=OP(x) in value+(if second then OP(x)+1.0 else OP(x)-1.0) else x",
+        1,
+    );
 }
 
 // Inspect each case independently even when its producer is retained in a helper.
@@ -495,4 +435,51 @@ fn reachable_bodies<'a>(
         index += 1;
     }
     bodies
+}
+
+fn assert_case_operations(sources: &[&str], tags: &[OpTag<BindingRef, FunctionId>], expected: usize) {
+    let source = sources
+        .iter()
+        .enumerate()
+        .map(|(i, source)| source.replacen("entry main(", &format!("entry case_{i}("), 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let placed = live_instructions(crate::compile_thru_ssa(&source).unwrap());
+    for index in 0..sources.len() {
+        let bodies = reachable_bodies(&placed, &format!("case_{index}"));
+        assert!(!bodies.is_empty());
+        for tag in tags {
+            let count = bodies
+                .iter()
+                .flat_map(|body| body.inner.insts.values())
+                .filter(|node| matches!(&node.data, InstKind::Op { tag: actual, .. } if actual == tag))
+                .count();
+            assert_eq!(count, expected, "case {index}: {tag:?}");
+        }
+    }
+}
+
+fn assert_partial_cases(expression: &str, expected: usize) {
+    let names = ["f32.sqrt", "f32.log"];
+    let source = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            format!(
+                "entry case_{index}(x:f32,first:bool,second:bool) f32={}",
+                expression.replace("OP", name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let placed = live_instructions(crate::compile_thru_ssa(&source).unwrap());
+    for (index, name) in names.into_iter().enumerate() {
+        let tag = intrinsic(name);
+        let count = reachable_bodies(&placed, &format!("case_{index}"))
+            .iter()
+            .flat_map(|body| body.inner.insts.values())
+            .filter(|node| matches!(&node.data, InstKind::Op { tag: actual, .. } if *actual == tag))
+            .count();
+        assert_eq!(count, expected, "{name}");
+    }
 }

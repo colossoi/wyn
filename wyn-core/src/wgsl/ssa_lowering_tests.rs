@@ -495,11 +495,6 @@ fn wgsl_scope_tree_owns_loop_exports_and_preserves_state_swaps() {
     );
 }
 
-fn compile_to_wgsl_with_u64_emulation(source: &str) -> error::Result<String> {
-    let program = compile_thru_ssa(source).map_err(|e| err_spirv!("{}", e))?;
-    lower_ssa_to_wgsl_with_options(program, wgsl::WgslOptions::U64_EMULATION)
-}
-
 #[test]
 fn unrelated_entries_preserve_storage_buffer_element_types() {
     use crate::ast::Span;
@@ -582,23 +577,6 @@ fn constant_rng_seed_folds_with_wrapping_arithmetic() {
 }
 
 #[test]
-fn float_bounds_use_exact_finite_hex_literals_in_wgsl_reductions() {
-    for (ty, bound) in [("f32", "0x1.fffffep+127f"), ("f16", "f16(0x1.ffcp+15f)")] {
-        let source = format!(
-            "entry extrema(xs: [4]{ty}) ({ty}, {ty}) =
-              (reduce({ty}.min, {ty}.highest, xs), reduce({ty}.max, {ty}.lowest, xs))"
-        );
-        let wgsl = compile_to_wgsl(&source).expect("floating bounds must lower to WGSL");
-        validate_wgsl(&wgsl);
-        assert!(wgsl.contains(bound), "missing upper bound:\n{wgsl}");
-        assert!(
-            wgsl.contains(&format!("-{bound}")),
-            "missing lower bound:\n{wgsl}"
-        );
-    }
-}
-
-#[test]
 fn float_bounds_in_named_arrays_lower_to_wgsl() {
     let wgsl = compile_to_wgsl(
         "def bounds: [2]f32 = [f32.highest, f32.lowest]
@@ -656,39 +634,6 @@ entry half_vectors(xs: []vec4f16) []vec4f16 =
     assert!(wgsl.contains("enable f16;"));
     assert!(wgsl.contains("1.0h"));
     assert!(wgsl.contains("vec4<f16>"));
-}
-
-#[test]
-fn wgsl_u64_emulation_is_opt_in_and_naga_valid() {
-    let source = r#"
-def rotr16(x: u64) u64 =
-  (x >> 16u64) | (x << 48u64)
-
-entry rotate_and_add(xs: []u32) []u32 =
-  map(|x: u32|
-    let wide = u64.u32(x) + 81985529216486895u64
-    let rotated = rotr16(wide) ^ 18446744073709551615u64
-    let shifted = rotated >> u64.u32(x & 63u32) in
-    if shifted != 0u64 then u32.u64(shifted) else 0u32,
-    xs)
-"#;
-
-    let default_error = compile_to_wgsl(source).expect_err("default WGSL policy must reject u64");
-    assert!(default_error.to_string().contains("64-bit scalars"));
-
-    let wgsl = compile_to_wgsl_with_u64_emulation(source).expect("emulated u64 compile");
-    validate_wgsl(&wgsl);
-    assert!(wgsl.contains("fn _wyn_u64_add"));
-    assert!(!wgsl.contains("fn _wyn_u64_shl"));
-    assert!(wgsl.contains("fn _wyn_u64_shr"));
-    assert!(wgsl.contains("vec2<u32>(2309737967u, 19088743u)"));
-    assert!(
-        !wgsl.lines().any(|line| {
-            line.trim_start().starts_with("var v") && line.contains("vec2<u32>(2309737967u, 19088743u)")
-        }),
-        "residual typed literal should be substituted directly at its uses:\n{wgsl}"
-    );
-    assert!(wgsl.contains("any("));
 }
 
 #[test]

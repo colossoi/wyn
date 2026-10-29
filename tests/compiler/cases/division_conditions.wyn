@@ -1,0 +1,27 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = ["-O"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"condition_0\"", ":source-name \"condition_1\""]
+--! [[spirv]]
+--! entry = "condition_0"
+--! counts = { SDiv = 1, SRem = 1 }
+--! [[spirv]]
+--! entry = "condition_1"
+--! counts = { SDiv = 1, SRem = 1 }
+
+entry condition_0(indices: []i32, width: i32) []i32 =
+      map(|i|
+        let q = i / width
+        let r = i % width in
+        if q < r then q - r else q + r,
+        indices)
+entry condition_1(indices: []i32, width: i32) []i32 =
+      map(|i|
+        loop total = 0 for j < 3 do
+          let q = (i + j) / width
+          let r = (i + j) % width in
+          total + (if q < r then q - r else q + r),
+        indices)

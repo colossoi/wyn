@@ -1,0 +1,31 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = ["-O"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"check\""]
+--! [[spirv]]
+--! entry = "check"
+--! present = ["CompositeInsert"]
+
+type state = {
+  x: f32, low: f32, high: f32, flow: f32, fhigh: f32,
+  previous: f32, fprevious: f32, seed: f32, error: f32, valid: bool
+}
+
+def advance(s: state) state =
+  let a = if s.valid && s.error < 0.0 then s.seed else s.low in
+  let b = if s.valid && s.error >= 0.0 then s.seed else s.x in
+  let fa = if s.valid && s.error < 0.0 then s.error else s.flow in
+  let fb = if s.valid && s.error >= 0.0 then s.error else s.x in
+  let low = if a == b then s.low else a in
+  let high = if a == b then s.x else b in
+  let flow = if a == b then s.flow else fa in
+  let fhigh = if a == b then s.x else fb in
+  let next = high - fhigh * (high - low) / (fhigh - flow) in
+  let s = s with x = next in
+  let s = (((s with low = low) with high = high) with flow = flow) with fhigh = fhigh in
+  (s with previous = high) with fprevious = fhigh
+
+entry check(xs: []state) []state = map(advance, xs)

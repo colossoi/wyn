@@ -1,0 +1,28 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = ["--subgroups", "-O"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"integer_scan\"", ":source-name \"integer_reduce\"", ":source-name \"float_scan\"", ":source-name \"max_scan\""]
+--! [[shader]]
+--! entry = "integer_scan"
+--! targets = ["wgsl"]
+--! subgroup_inclusive_add = true
+--! [[shader]]
+--! entry = "integer_reduce"
+--! targets = ["wgsl"]
+--! subgroup_inclusive_add = true
+--! [[shader]]
+--! entry = "float_scan"
+--! targets = ["wgsl"]
+--! subgroup_inclusive_add = true
+--! [[shader]]
+--! entry = "max_scan"
+--! targets = ["wgsl"]
+--! subgroup_inclusive_add = false
+
+entry integer_scan(integer_scan_input:[3][65]i32) [3][65]i32=map(|r|scan((+),0i32,r),integer_scan_input)
+entry integer_reduce(integer_reduce_input:[3][65]i32) [3]i32=map(|r|reduce((+),0i32,r),integer_reduce_input)
+entry float_scan(float_scan_input:[3][17]f32) [3][17]f32=map(|r|scan((+),0.0,r),float_scan_input)
+entry max_scan(max_scan_input:[3][17]i32) [3][17]i32=map(|r|scan(|a,b|max(a,b),-2147483648,r),max_scan_input)

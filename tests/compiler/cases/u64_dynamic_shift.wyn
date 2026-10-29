@@ -1,0 +1,22 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["wgsl"]
+--! args = ["--wgsl-emulate-u64"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"rotate_and_add\""]
+--! [[artifacts]]
+--! path = "output.wgsl"
+--! contains = ["fn _wyn_u64_add", "fn _wyn_u64_shr", "vec2<u32>(2309737967u, 19088743u)", "any("]
+--! excludes = ["fn _wyn_u64_shl", "= vec2<u32>(2309737967u, 19088743u);"]
+
+def rotr16(x: u64) u64 =
+  (x >> 16u64) | (x << 48u64)
+
+entry rotate_and_add(xs: []u32) []u32 =
+  map(|x: u32|
+    let wide = u64.u32(x) + 81985529216486895u64
+    let rotated = rotr16(wide) ^ 18446744073709551615u64
+    let shifted = rotated >> u64.u32(x & 63u32) in
+    if shifted != 0u64 then u32.u64(shifted) else 0u32,
+    xs)

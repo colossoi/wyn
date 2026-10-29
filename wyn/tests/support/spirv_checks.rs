@@ -158,6 +158,11 @@ pub struct Instructions {
     array_phis: Option<usize>,
     array_loads: Option<usize>,
     minimum_array_allocations: Option<usize>,
+    minimum_phi_inputs: Option<usize>,
+    #[serde(default)]
+    structured_merges: bool,
+    #[serde(default)]
+    aggregate_forwarding: bool,
 }
 
 pub fn instructions(bytes: &[u8], expectations: &[Instructions], helpers: Option<usize>) {
@@ -183,6 +188,8 @@ pub fn instructions(bytes: &[u8], expectations: &[Instructions], helpers: Option
         module.all_inst_iter().filter_map(|i| Some((i.result_id?, i.result_type?))).collect();
     let functions: BTreeMap<_, _> =
         module.functions.iter().map(|f| (f.def.as_ref().unwrap().result_id.unwrap(), f)).collect();
+    let definitions: BTreeMap<_, _> =
+        module.all_inst_iter().filter_map(|i| i.result_id.map(|id| (id, i))).collect();
     for expected in expectations {
         let mut pending = Vec::new();
         for entry in &module.entry_points {
@@ -198,6 +205,9 @@ pub fn instructions(bytes: &[u8], expectations: &[Instructions], helpers: Option
         while let Some(id) = pending.pop() {
             if !visited.insert(id) {
                 continue;
+            }
+            for block in &functions[&id].blocks {
+                check_block_contracts(&block.instructions, &definitions, expected);
             }
             for i in functions[&id].blocks.iter().flat_map(|b| &b.instructions) {
                 if i.class.opcode == Op::FunctionCall {
@@ -230,6 +240,7 @@ pub fn instructions(bytes: &[u8], expectations: &[Instructions], helpers: Option
         for (name, wanted) in &expected.ext_inst {
             let opcode = match name.as_str() {
                 "Sin" => wspirv::spirv::GLOp::Sin as u32,
+                "Normalize" => wspirv::spirv::GLOp::Normalize as u32,
                 _ => panic!("unknown extended instruction {name}"),
             };
             let actual = instructions
@@ -336,4 +347,88 @@ pub fn round_trip(bytes: &[u8]) {
             entry.name
         );
     }
+}
+
+fn check_block_contracts(
+    instructions: &[wspirv::dr::Instruction],
+    definitions: &BTreeMap<u32, &wspirv::dr::Instruction>,
+    expected: &Instructions,
+) {
+    let mut aggregates = BTreeSet::new();
+    for (index, instruction) in instructions.iter().enumerate() {
+        if let Some(minimum) = expected.minimum_phi_inputs {
+            if instruction.class.opcode == Op::Phi {
+                assert!(
+                    instruction.operands.len() >= minimum * 2,
+                    "{} phi inputs",
+                    expected.entry
+                );
+            }
+        }
+        if expected.structured_merges && instruction.class.opcode == Op::SelectionMerge {
+            assert!(
+                instructions
+                    .get(index + 1)
+                    .is_some_and(|i| matches!(i.class.opcode, Op::BranchConditional | Op::Switch)),
+                "{} selection merge successor",
+                expected.entry
+            );
+        }
+        if expected.aggregate_forwarding {
+            if matches!(
+                instruction.class.opcode,
+                Op::CompositeConstruct | Op::CompositeExtract
+            ) {
+                assert!(
+                    aggregates.insert(format!(
+                        "{:?}:{:?}:{:?}",
+                        instruction.class.opcode, instruction.result_type, instruction.operands
+                    )),
+                    "duplicate aggregate operation"
+                );
+            }
+            if instruction.class.opcode == Op::CompositeExtract {
+                let Operand::IdRef(source) = instruction.operands[0] else {
+                    panic!("aggregate source")
+                };
+                assert_ne!(definitions[&source].class.opcode, Op::CompositeConstruct);
+            }
+        }
+    }
+}
+
+#[test]
+fn block_contracts_reject_single_input_phis_bad_merges_and_duplicate_aggregates() {
+    use wspirv::dr::Instruction;
+    let expected: Instructions = toml::from_str(
+        "entry = 'test'\nminimum_phi_inputs = 2\nstructured_merges = true\naggregate_forwarding = true",
+    )
+    .unwrap();
+    let phi =
+        |pairs: usize| Instruction::new(Op::Phi, Some(1), Some(2), vec![Operand::IdRef(3); pairs * 2]);
+    check_block_contracts(&[phi(2)], &BTreeMap::new(), &expected);
+    assert!(
+        std::panic::catch_unwind(|| check_block_contracts(&[phi(1)], &BTreeMap::new(), &expected)).is_err()
+    );
+    let merge = Instruction::new(Op::SelectionMerge, None, None, vec![]);
+    let branch = |op| Instruction::new(op, None, None, vec![]);
+    check_block_contracts(
+        &[merge.clone(), branch(Op::BranchConditional)],
+        &BTreeMap::new(),
+        &expected,
+    );
+    assert!(std::panic::catch_unwind(|| check_block_contracts(
+        &[merge, branch(Op::Branch)],
+        &BTreeMap::new(),
+        &expected
+    ))
+    .is_err());
+    let aggregate = Instruction::new(Op::CompositeConstruct, Some(1), Some(2), vec![Operand::IdRef(3)]);
+    check_block_contracts(&[aggregate.clone()], &BTreeMap::new(), &expected);
+    assert!(std::panic::catch_unwind(|| check_block_contracts(
+        &[aggregate.clone(), aggregate.clone()],
+        &BTreeMap::new(),
+        &expected
+    ))
+    .is_err());
 }

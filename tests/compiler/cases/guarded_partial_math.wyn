@@ -1,0 +1,38 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = ["-O"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"independent_sqrt\"", ":source-name \"independent_log\"", ":source-name \"nested_sqrt\"", ":source-name \"nested_log\""]
+--! [[shader]]
+--! entry = "independent_sqrt"
+--! targets = ["wgsl"]
+--! math = { Sqrt = 2 }
+--! [[shader]]
+--! entry = "independent_log"
+--! targets = ["wgsl"]
+--! math = { Log = 2 }
+--! [[shader]]
+--! entry = "nested_sqrt"
+--! targets = ["wgsl"]
+--! math = { Sqrt = 1 }
+--! [[shader]]
+--! entry = "nested_log"
+--! targets = ["wgsl"]
+--! math = { Log = 1 }
+
+entry independent_sqrt(xs:[]f32,first:bool,second:bool) []f32 = map(|x|
+                let a=if first then f32.sqrt(x) else 0.0 in
+                let b=if second then f32.sqrt(x) else 0.0 in a+b,xs)
+entry independent_log(xs:[]f32,first:bool,second:bool) []f32 = map(|x|
+                let a=if first then f32.log(x) else 0.0 in
+                let b=if second then f32.log(x) else 0.0 in a+b,xs)
+entry nested_sqrt(xs:[]f32,outer:bool,inner:bool) []f32 = map(|x|
+                if outer then let value=f32.sqrt(x) in
+                    value+(if inner then f32.sqrt(x)+1.0 else f32.sqrt(x)-1.0)
+                else x,xs)
+entry nested_log(xs:[]f32,outer:bool,inner:bool) []f32 = map(|x|
+                if outer then let value=f32.log(x) in
+                    value+(if inner then f32.log(x)+1.0 else f32.log(x)-1.0)
+                else x,xs)

@@ -33,23 +33,21 @@ fn planned(source: &str, check: impl FnOnce(&EGraph)) {
 }
 
 // Compile related cases once; keep every assertion tied to its source entry.
-fn planned_cases(sources: &[&str], check: impl Fn(usize, &EGraph, Value)) {
-    let source = sources
+fn cases_source(sources: &[impl AsRef<str>]) -> String {
+    sources
         .iter()
         .enumerate()
-        .map(|(i, source)| source.replacen("entry main(", &format!("entry case_{i}("), 1))
+        .map(|(i, source)| source.as_ref().replacen("entry main(", &format!("entry case_{i}("), 1))
         .collect::<Vec<_>>()
-        .join("\n");
-    let tlc = compile_thru_tlc(&source).unwrap();
-    let program = schedule(
-        place(
-            fuse(from_tlc(&tlc).unwrap()).unwrap(),
-            PipelineTopologyPolicy::AllowGenerated,
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    let mut seen = vec![false; sources.len()];
+        .join("\n")
+}
+
+fn check_entries<Stage>(
+    program: &super::super::Program<'_, Stage>,
+    count: usize,
+    check: impl Fn(usize, &EGraph, Value),
+) {
+    let mut seen = vec![false; count];
     Query(&program.graph)
         .for_each("SourceOriginalEntry", |row| {
             let symbol = program.identities.symbols.resolve(program.graph.value_to_base::<i64>(row[0]));
@@ -61,6 +59,19 @@ fn planned_cases(sources: &[&str], check: impl Fn(usize, &EGraph, Value)) {
         })
         .unwrap();
     assert!(seen.into_iter().all(|present| present));
+}
+
+fn planned_cases(sources: &[impl AsRef<str>], check: impl Fn(usize, &EGraph, Value)) {
+    let tlc = compile_thru_tlc(&cases_source(sources)).unwrap();
+    let program = schedule(
+        place(
+            fuse(from_tlc(&tlc).unwrap()).unwrap(),
+            PipelineTopologyPolicy::AllowGenerated,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    check_entries(&program, sources.len(), check);
 }
 
 fn operations(graph: &EGraph, kind: &str) -> Vec<Value> {
@@ -75,6 +86,15 @@ fn operations(graph: &EGraph, kind: &str) -> Vec<Value> {
         })
         .unwrap();
     operations
+}
+
+fn operations_in(graph: &EGraph, kind: &str, region: Value) -> Vec<Value> {
+    operations(graph, kind)
+        .into_iter()
+        .filter(|&op| {
+            Query(graph).record("SourceOperation", "OperationInfo", (op,)).unwrap().unwrap()[0] == region
+        })
+        .collect()
 }
 
 #[test]
@@ -149,20 +169,22 @@ fn radix_step_has_three_phases() {
 
 #[test]
 fn collective_width_tracks_materialized_accumulator_size() {
-    for (columns, expected) in [(8, 256), (9, 128), (32, 64), (65, 32)] {
-        let source = format!(
+    let cases = [(8, 256), (9, 128), (32, 64), (65, 32)];
+    let sources = cases.map(|(columns, _)| {
+        format!(
             "entry main(xs:[][{columns}]i32) [][{columns}]i32 =
-             scan(|a,b|map2((+),a,b),replicate({columns},0i32),xs)"
-        );
-        planned(&source, |graph| {
-            let query = Query(graph);
-            let scan = operations(graph, "scan")[0];
-            let plan = query.required("SelectedPlan", (scan,)).unwrap();
-            let owner = query.required("Owner", (plan,)).unwrap();
-            let width = query.required("CollectiveChunkWidth", (owner,)).unwrap();
-            assert_eq!(graph.value_to_base::<i64>(width), expected, "{columns} columns");
-        });
-    }
+         scan(|a,b|map2((+),a,b),replicate({columns},0i32),xs)"
+        )
+    });
+    planned_cases(&sources, |index, graph, region| {
+        let query = Query(graph);
+        let scans = operations_in(graph, "scan", region);
+        assert_eq!(scans.len(), 1);
+        let plan = query.required("SelectedPlan", (scans[0],)).unwrap();
+        let owner = query.required("Owner", (plan,)).unwrap();
+        let width = query.required("CollectiveChunkWidth", (owner,)).unwrap();
+        assert_eq!(graph.value_to_base::<i64>(width), cases[index].1, "case {index}");
+    });
 }
 
 #[test]
@@ -204,22 +226,24 @@ fn four_bit_radix_step_has_three_phases() {
 
 #[test]
 fn scan_input_cannot_capture_a_fused_total() {
-    for source in [
-        "entry main(xs:[]i32) []i32 = let t=reduce((+),0,xs) in scan((+),0,map(|x|x+t,xs))",
-        "entry main(xs:[]i32) []i32 = let t=reduce((+),0,xs) in scan((+),t,xs)",
-        "entry main(xs:[]i32) []i32 = let t=reduce((+),0,xs) in scan(|a,b|a+b+t,0,xs)",
-    ] {
-        planned(source, |graph| {
+    planned_cases(
+        &[
+            "entry main(xs:[]i32) []i32 = let t=reduce((+),0,xs) in scan((+),0,map(|x|x+t,xs))",
+            "entry main(xs:[]i32) []i32 = let t=reduce((+),0,xs) in scan((+),t,xs)",
+            "entry main(xs:[]i32) []i32 = let t=reduce((+),0,xs) in scan(|a,b|a+b+t,0,xs)",
+        ],
+        |index, graph, region| {
             let query = Query(graph);
-            let scan = operations(graph, "scan")[0];
-            let reduce = operations(graph, "reduce")[0];
+            let scans = operations_in(graph, "scan", region);
+            let reductions = operations_in(graph, "reduce", region);
+            assert_eq!((scans.len(), reductions.len()), (1, 1));
             assert_ne!(
-                query.required("SelectedPlan", (scan,)).unwrap(),
-                query.required("SelectedPlan", (reduce,)).unwrap(),
-                "{source}"
+                query.required("SelectedPlan", (scans[0],)).unwrap(),
+                query.required("SelectedPlan", (reductions[0],)).unwrap(),
+                "case {index}"
             );
-        });
-    }
+        },
+    );
 }
 
 #[test]
@@ -441,7 +465,7 @@ fn compiler_repro_array_reduce_preserves_effect_barrier() {
 
 #[test]
 fn result_tree_counts_are_available_to_fusion_choices() {
-    for (source, expected) in [
+    let cases = [
         (
             "entry main(xs:[]i32) ([]i32,[]i32)=(map(|x|x+1,xs),map(|x|x*2,xs))",
             vec![(2, false, false)],
@@ -474,27 +498,41 @@ fn result_tree_counts_are_available_to_fusion_choices() {
             "entry main(xs:[]i32) ([]i32,i32)=(scan((+),0,xs),reduce((+),0,xs))",
             vec![(1, true, true)],
         ),
-    ] {
-        let tlc = compile_thru_tlc(source).unwrap();
-        let program = fuse(from_tlc(&tlc).unwrap()).unwrap();
-        let query = Query(&program.graph);
+    ];
+    let sources: Vec<_> = cases.iter().map(|(source, _)| *source).collect();
+    let tlc = compile_thru_tlc(&cases_source(&sources)).unwrap();
+    let program = fuse(from_tlc(&tlc).unwrap()).unwrap();
+    check_entries(&program, cases.len(), |index, graph, region| {
+        let query = Query(graph);
         let mut counts = Vec::new();
         query
             .for_each("Current", |row| {
+                let mut belongs = false;
+                query.for_each("Member", |member| {
+                    if member[0] == row[0] {
+                        belongs |= query.record("SourceOperation", "OperationInfo", (member[1],))?.unwrap()
+                            [0]
+                            == region;
+                    }
+                    Ok(())
+                })?;
+                if !belongs {
+                    return Ok(());
+                }
                 let plan = row[1];
                 if query.contains("ScremaPlan", (plan,))? || query.contains("FilterPlan", (plan,))? {
                     counts.push((
-                        program.graph.value_to_base::<i64>(query.required("ArrayOutputs", (plan,))?),
-                        program.graph.value_to_base::<bool>(query.required("HasScans", (plan,))?),
-                        program.graph.value_to_base::<bool>(query.required("HasReductions", (plan,))?),
+                        graph.value_to_base::<i64>(query.required("ArrayOutputs", (plan,))?),
+                        graph.value_to_base::<bool>(query.required("HasScans", (plan,))?),
+                        graph.value_to_base::<bool>(query.required("HasReductions", (plan,))?),
                     ));
                 }
                 Ok(())
             })
             .unwrap();
         counts.sort();
-        assert_eq!(counts, expected, "{source}");
-    }
+        assert_eq!(counts, cases[index].1, "case {index}");
+    });
 }
 
 #[test]
@@ -1087,41 +1125,45 @@ fn segment_callback_blockers_cover_every_output_of_a_fused_plan() {
 
 #[test]
 fn segmented_collectives_select_workgroups_for_each_outer_coordinate() {
-    for source in [
-        "entry main(xs:[][513]i32) []i32=map(|row|reduce((+),0,row),xs)",
-        "entry main(xs:[][513]i32) [][513]i32=map(|row|scan((+),0,row),xs)",
-        "entry main(xs:[][3][17]i32) [][3]i32=map(|rows|map(|row|reduce((+),0,row),rows),xs)",
-    ] {
-        planned(source, |graph| {
+    planned_cases(
+        &[
+            "entry main(xs:[][513]i32) []i32=map(|row|reduce((+),0,row),xs)",
+            "entry main(xs:[][513]i32) [][513]i32=map(|row|scan((+),0,row),xs)",
+            "entry main(xs:[][3][17]i32) [][3]i32=map(|rows|map(|row|reduce((+),0,row),rows),xs)",
+        ],
+        |index, graph, region| {
             let query = Query(graph);
+            let maps = operations_in(graph, "map", region);
             let mut groups = 0;
             query
-                .for_function("MapSegmented", |_, enabled| {
-                    groups += usize::from(graph.value_to_base::<bool>(enabled));
+                .for_function("MapSegmented", |keys, enabled| {
+                    groups += usize::from(maps.contains(&keys[0]) && graph.value_to_base::<bool>(enabled));
                     Ok(())
                 })
                 .unwrap();
-            assert_eq!(groups, 1, "{source}");
-        });
-    }
+            assert_eq!(groups, 1, "case {index}");
+        },
+    );
 }
 
 #[test]
 fn segmented_collectives_do_not_cross_callback_control_flow() {
-    for source in [
+    let sources = [
         "entry main(xs:[][17]i32) []i32=map(|row|if row[0]>0 then reduce((+),0,row) else 0,xs)",
         "entry main(xs:[][17]i32) []i32=map(|row|loop a=0 for i<2 do a+reduce((+),0,row),xs)",
         "entry main(xs:[]i32) []i32=map(|n|reduce((+),0,iota(n)),xs)",
-    ] {
-        planned(source, |graph| {
-            Query(graph)
-                .for_function("MapSegmented", |_, enabled| {
-                    assert!(!graph.value_to_base::<bool>(enabled), "{source}");
-                    Ok(())
-                })
-                .unwrap();
-        });
-    }
+    ];
+    planned(&cases_source(&sources), |graph| {
+        Query(graph)
+            .for_function("MapSegmented", |_, enabled| {
+                assert!(
+                    !graph.value_to_base::<bool>(enabled),
+                    "all three control-flow cases"
+                );
+                Ok(())
+            })
+            .unwrap();
+    });
 }
 
 #[test]
@@ -1213,50 +1255,40 @@ entry case_2(xs:[][3][17]i32) [][3][17]i32=
 
 #[test]
 fn runtime_segmented_collectives_require_uniform_dimensions() {
-    for (source, cooperative) in [
-        (
+    planned_cases(
+        &[
             "entry main(xs:[]i32,n:i32) []i32=map(|x|reduce((+),0,map(|y|x+y,iota(n))),xs)",
-            true,
-        ),
-        (
             "entry main(xs:[]i32,n:i32) [][]i32=map(|x|scan((+),0,map(|y|x+y,iota(n))),xs)",
-            true,
-        ),
-        (
             "entry main(xs:[]i32) []i32=map(|x|reduce((+),0,iota(x)),xs)",
-            false,
-        ),
-    ] {
-        planned(source, |graph| {
+        ],
+        |index, graph, region| {
             let query = Query(graph);
-            query
-                .for_each("MapPlan", |row| {
-                    if query.flag("MapHost", (row[0],))? {
-                        let actual = query.flag("MapSegmented", (row[1],))?;
-                        assert_eq!(actual, cooperative, "{source}");
-                    }
-                    Ok(())
-                })
-                .unwrap();
-        });
-    }
+            let maps = operations_in(graph, "map", region);
+            assert_eq!(maps.len(), 1);
+            let plan = query.required("SelectedPlan", (maps[0],)).unwrap();
+            assert!(query.flag("MapHost", (plan,)).unwrap());
+            assert_eq!(
+                query.flag("MapSegmented", (maps[0],)).unwrap(),
+                index < 2,
+                "case {index}"
+            );
+        },
+    );
 }
 
 #[test]
 fn subgroup_addition_is_opt_in_and_uses_small_segments() {
+    let tlc =
+        compile_thru_tlc("entry main(xs:[4][32]u32) [4][32]u32 = map(|row|scan((+),0u32,row),xs)").unwrap();
+    let mut placed = place(
+        fuse(from_tlc(&tlc).unwrap()).unwrap(),
+        PipelineTopologyPolicy::AllowGenerated,
+    )
+    .unwrap();
+    let baseline = placed.graph.clone();
     for enabled in [false, true] {
-        let tlc =
-            compile_thru_tlc("entry main(xs:[4][32]u32) [4][32]u32 = map(|row|scan((+),0u32,row),xs)")
-                .unwrap();
-        let program = schedule_with_subgroups(
-            place(
-                fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                PipelineTopologyPolicy::AllowGenerated,
-            )
-            .unwrap(),
-            enabled,
-        )
-        .unwrap();
+        placed.graph = baseline.clone();
+        let program = schedule_with_subgroups(placed, enabled).unwrap();
         let query = Query(&program.graph);
         let scan = operations(&program.graph, "scan")[0];
         assert_eq!(query.contains("SubgroupAddition", (scan,)).unwrap(), enabled);
@@ -1275,30 +1307,31 @@ fn subgroup_addition_is_opt_in_and_uses_small_segments() {
             })
             .unwrap();
         assert_eq!(segments, 1);
+        placed = program.advance(super::super::Placed);
     }
 }
 
 #[test]
 fn tiled_outputs_require_complete_tiles_and_preserve_other_consumers() {
-    for (count, fused) in [(8, true), (7, false)] {
-        for reduced in [false, true] {
-            let metadata = if reduced { "reduce((+),0,map(|r|r[2],rows))" } else { "map(|r|r[2],rows)" };
-            let metadata_type = if reduced { "i32".to_string() } else { format!("[{count}]i32") };
-            let source = format!("def row(i:i32) [3]i32 = [i,i+1,i+2]
-                entry main() ([16]i32,{metadata_type}) =
-                let rows = map(row,iota({count})) in
-                (map(|a|let i=(a/8)*4+a%4 in if i<length(rows) then rows[i][(a%8)/4] else -1,iota(16)), {metadata})");
-            planned(&source, |graph| {
-                let query = Query(graph);
-                let mut destinations = 0;
-                query
-                    .for_function("TiledOutputs", |_, _| {
-                        destinations += 1;
-                        Ok(())
-                    })
-                    .unwrap();
-                assert_eq!(destinations, usize::from(fused), "{source}");
-            });
-        }
-    }
+    let cases = [(8, false), (8, true), (7, false), (7, true)];
+    let sources: Vec<_> = cases.iter().enumerate().map(|(index, (count, reduced))| {
+        let metadata = if *reduced { "reduce((+),0,map(|r|r[2],rows))" } else { "map(|r|r[2],rows)" };
+        let metadata_type = if *reduced { "i32".to_string() } else { format!("[{count}]i32") };
+        format!("def row_{index}(i:i32) [3]i32 = [i,i+1,i+2]
+            entry main() ([16]i32,{metadata_type}) =
+            let rows = map(row_{index},iota({count})) in
+            (map(|a|let i=(a/8)*4+a%4 in if i<length(rows) then rows[i][(a%8)/4] else -1,iota(16)), {metadata})")
+    }).collect();
+    planned_cases(&sources, |index, graph, region| {
+        let query = Query(graph);
+        let mut destinations = 0;
+        query
+            .for_function("TiledOutputs", |keys, _| {
+                let owner = query.record("SourceOperation", "OperationInfo", (keys[0],))?.unwrap()[0];
+                destinations += usize::from(owner == region);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(destinations, usize::from(cases[index].0 == 8), "case {index}");
+    });
 }

@@ -1,0 +1,43 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv"]
+--! args = ["--graphics"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"sum_payload_array_construct\""]
+--! [[spirv]]
+--! entry = "sum_payload_array_construct"
+--! structured_merges = true
+
+-- Exercises constructing a sum-typed value whose active variant
+-- carries an array payload (`#big([1,2,3,4])`). The companion file
+-- `sum_payload_array.wyn` exercises the dead-variant blank-fill path
+-- (constructing `#small` / `#empty`); this file exercises the live
+-- side.
+
+def verts: [3]vec4f32 =
+  [@[-1.0f32, -1.0f32, 0.0f32, 1.0f32],
+   @[3.0f32, -1.0f32, 0.0f32, 1.0f32],
+   @[-1.0f32, 3.0f32, 0.0f32, 1.0f32]]
+
+def vertex_main(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<vec2f32> =
+  vertex_output(verts[i32(vertex_index)], @[0.0, 0.0])
+
+def shade_value(t: #big([4]i32) | #small(i32) | #empty) i32 =
+  match t
+  case #big(arr) -> arr[0] + arr[3]
+  case #small(x) -> x
+  case #empty    -> 0
+
+def fragment_main(_position: vec4f32) vec4f32 =
+  let a = shade_value(#big([1, 2, 3, 4]))
+  let b = shade_value(#small(7))
+  let c = shade_value(#empty) in
+  @[f32.i32(a) / 255.0f32, f32.i32(b) / 255.0f32, f32.i32(c) / 255.0f32, 1.0f32]
+
+entry sum_payload_array_construct(
+    screen: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    vertex_main) in
+  shade(screen, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_main(fragment_position))

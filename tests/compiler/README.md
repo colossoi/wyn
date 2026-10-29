@@ -237,3 +237,20 @@ helpers, so unrelated entries cannot satisfy them.
 layout, Rust-signature, direct-capacity, and render-target resource/use-chain
 contracts that need more than the text fixture assertions. It shares frontend/SSA
 work across backends. The fluid-neighbor case reads the actual package sources.
+
+`[[shader]]` can also require `parallel = true` (some matching entry has more than
+one invocation per workgroup), `subgroup_inclusive_add = true/false` on reachable
+shader functions, `workgroup_arrays_scalar = true`, and
+`maximum_entry_loops = N`. The last check counts loops in each matching entry body.
+`[[spirv]]` supports `minimum_phi_inputs`, `structured_merges = true` (each
+selection merge precedes a conditional branch or switch), and
+`aggregate_forwarding = true` (no repeated aggregate operations within a block or
+extract directly from a constructed aggregate). Extended instruction counts
+support `Normalize` as well as `Sin`.
+
+`wyn-core/tests/host_execution.rs` executes emitted WHL with a tracing backend for
+runtime allocation/length, dispatch, aliasing, and scalar-result contracts. Sources
+live in `tests/compiler/library/` or reuse existing testfiles. Backend variants
+share source preparation and SSA; multiple input values reuse one emitted program.
+It does not execute GPU shaders. `host_stage_contracts.wyn` groups ten related
+storage and dispatch cases under the existing emitted-artifact harness.

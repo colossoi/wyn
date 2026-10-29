@@ -1,0 +1,79 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"tree\""]
+
+-- Cornerstone octree, same split rule and 30-bit key domain as upstream.
+-- Trailing entries are the 2^30 sentinel. The last active boundary is sentinel.
+def sentinel: u32 = 1073741824u32
+
+def lower_bound<[n]>(keys: [n]u32, value: u32) i32 =
+  let (lo,hi) = loop (lo,hi) = (0i32,length(keys)) while lo < hi do
+    let mid = lo+(hi-lo)/2 in
+    if keys[mid] < value then (mid+1,hi) else (lo,mid) in lo
+
+-- Upstream rebalance markers: 8 splits, 1 retains, 0 removes a merged sibling.
+def rebalance<[n],[m]>(keys: [n]u32, corners: [m]u32, slots: [m]i32,
+    ncrit: i32, maintenance: bool) ([m]u32,bool,bool) =
+  let leaves = lower_bound(corners,sentinel) in
+  let active = iota(leaves) in
+  let offsets = map(|key| lower_bound(keys,key),corners[0..leaves+1]) in
+  let ops = map(|i|
+    if i >= leaves then 0i32 else
+    let span = corners[i+1]-corners[i] in
+    let count = offsets[i+1]-offsets[i] in
+    if count > ncrit && span >= 8u32 then 8i32 else
+    if !maintenance || span == sentinel then 1i32 else
+    let parent_span = span << 3u32 in
+    let octant = i32((corners[i] % parent_span)/span) in
+    let first = i-octant in
+    if maintenance && octant != 0 && first >= 0 && first+8 <= leaves then
+      if corners[first]+parent_span == corners[first+8]
+         && offsets[first+8]-offsets[first] <= ncrit then 0i32 else 1i32
+    else 1i32,active) in
+  let ends = scan((+),0i32,ops) in
+  let total = ends[length(ends)-1] in
+  let overflow = total >= length(corners) in
+  let changed = reduce(|a,b| a || b,false,map(|op| op != 1,ops)) in
+  let writes = iota(leaves*8) in
+  let destinations = map(|j|
+    let i=j/8 in let child=j%8 in
+    if i < leaves && child < ops[i] && !overflow then ends[i]-ops[i]+child else -1i32,writes) in
+  let values = map(|j|
+    let i=j/8 in let child=j%8 in
+    if i < leaves && child < ops[i] then
+      corners[i]+u32(child)*((corners[i+1]-corners[i])/u32(ops[i])) else sentinel,writes) in
+  let next = scatter(map(|_| sentinel,slots),destinations,values) in
+  (if overflow then corners else next,overflow,changed)
+
+def split<[n],[m]>(keys: [n]u32, corners: [m]u32, slots: [m]i32, ncrit: i32)
+    ([m]u32,bool) =
+  let (next,overflow,_changed) = rebalance(keys,corners,slots,ncrit,false) in
+  (next,overflow)
+
+-- Upstream bounds construction by ten levels and disables further work once
+-- no marker changes. The simulation uses maintenance=false; callers may merge.
+def build_mode<[n],[m]>(keys: [n]u32, previous: [m]u32, slots: [m]i32,
+    ncrit: i32, maintenance: bool) ([m]u32,bool) =
+  let (tree,overflow,_changed,_level) =
+    loop (tree,overflow,changed,level) = (previous,false,true,0i32)
+    while level < 10 && changed && !overflow do
+      let (next,error,changed) = rebalance(keys,tree,slots,ncrit,maintenance) in
+      (next,error,changed,level+1) in
+  (tree,overflow)
+
+def build<[n],[m]>(keys: [n]u32, previous: [m]u32, slots: [m]i32, ncrit: i32)
+    ([m]u32,bool) = build_mode(keys,previous,slots,ncrit,false)
+
+-- Expected: eight root octants after subdivision; maintenance merges back
+-- to one root. Both overflow flags are false. Regression: a projected
+-- loop-carried tree must retain its logical length during compiler lowering.
+
+entry tree() ([]u32,bool,[]u32,bool) =
+  let slots=iota(17) in
+  let root=map(|i| if i == 0 then 0u32 else sentinel,slots) in
+  let (split,e1)=build([0u32,268435456u32,536870912u32,805306368u32],root,slots,2) in
+  let (merged,e2)=build_mode([0u32],split,slots,2,true) in
+  (split,e1,merged,e2)
