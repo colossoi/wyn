@@ -7,7 +7,7 @@ use crate::ssa::builder::BuilderError;
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::types::{BlockId, FuncBody, InstKind, Terminator};
 use crate::ssa::types::{PlaceId, ValueRef};
-use crate::types::{self, Type, TypeExt, TypeName};
+use crate::types::{self, Type, TypeName};
 use crate::BindingRef;
 use crate::FunctionId;
 use crate::{LookupMap, LookupSet};
@@ -178,22 +178,37 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                 }
                 "ExprExecute" => self.local(scope, selected.values[fields[2]])?,
                 "ExprInstruction" if selected.text(fields[3])? == "index" => {
-                    let [array, index]: [TermId; 2] = selected
+                    let [mut array, mut index]: [TermId; 2] = selected
                         .arguments(fields[4])?
                         .try_into()
                         .map_err(|_| error("index needs two operands"))?;
-                    let (array, path) = selected.projected_array(array)?;
-                    let mut array = self.scalar(scope, array)?;
-                    let mut path = path.into_iter().peekable();
-                    while !array.ty.is_array() && path.peek().is_some() {
-                        array = self.field(array, path.next().unwrap())?;
+                    // Keep a nested read as one access path. Materializing each
+                    // intermediate fixed-size row turns a scalar lookup into a
+                    // whole-row copy per invocation. Respect already evaluated
+                    // values, which may be snapshots across an update.
+                    let mut steps = Vec::new();
+                    loop {
+                        let (base, path) = selected.projected_array(array)?;
+                        array = base;
+                        steps.push((path, index));
+                        if self.available_scalar(array)?.is_some()
+                            || self.compiler.bindings.captures.contains_key(&array)
+                        {
+                            break;
+                        }
+                        let Some((parent, next_index)) = selected.index_operands(array)? else {
+                            break;
+                        };
+                        array = parent;
+                        index = next_index;
                     }
-                    let index = self.scalar(scope, index)?;
-                    let mut value = self.index(array, index)?;
-                    // Stored AoS components are fields of the indexed element.
-                    for field in path {
-                        value = self.field(value, field)?;
-                    }
+                    let array = self.scalar(scope, array)?;
+                    let steps = steps
+                        .into_iter()
+                        .rev()
+                        .map(|(fields, index)| Ok((fields, self.scalar(scope, index)?)))
+                        .collect::<Result<Vec<_>, OptimizeError>>()?;
+                    let value = self.index_path(array, &steps)?;
                     self.cast(value, &ty)?
                 }
                 "ExprInstruction" => {

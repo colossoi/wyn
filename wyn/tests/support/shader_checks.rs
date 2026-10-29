@@ -17,6 +17,8 @@ pub struct Expectation {
     #[serde(default)]
     parameter_loads: BTreeMap<String, usize>,
     local_array_traffic: Option<[usize; 3]>,
+    #[serde(default)]
+    forbidden_local_array_lengths: Vec<u32>,
     workgroup_array_scalar: Option<String>,
     selects_present: Option<bool>,
     ifs_present: Option<bool>,
@@ -127,6 +129,20 @@ fn check_module(module: &Module, expected: &Expectation, host: Option<&wyn_host_
     let mut ifs = 0;
     let mut workgroup_arrays = BTreeSet::new();
     for function in &functions {
+        for (_, variable) in function.local_variables.iter() {
+            if let naga::TypeInner::Array {
+                size: naga::ArraySize::Constant(n),
+                ..
+            } = module.types[variable.ty].inner
+            {
+                assert!(
+                    !expected.forbidden_local_array_lengths.contains(&n.get()),
+                    "{} unexpectedly materializes a local array of {} elements",
+                    expected.entry,
+                    n
+                );
+            }
+        }
         let arrays: BTreeSet<_> = function
             .local_variables
             .iter()

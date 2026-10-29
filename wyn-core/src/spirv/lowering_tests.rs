@@ -159,6 +159,33 @@ fn unrelated_entries_preserve_storage_buffer_element_types() {
 }
 
 #[test]
+fn storage_array_placeholder_and_projected_composite_share_a_type() {
+    use crate::types::{self, Type};
+    let composite = types::sized_array(64, types::i32());
+    let mut placeholder = composite.clone();
+    let Type::Constructed(_, fields) = &mut placeholder else {
+        unreachable!()
+    };
+    fields[1] = Type::Variable(123);
+    for reversed in [false, true] {
+        let mut constructor = super::Constructor::new();
+        let (first, second) =
+            if reversed { (&composite, &placeholder) } else { (&placeholder, &composite) };
+        let first = constructor.storage_polytype_to_spirv(first).unwrap();
+        let second = constructor.storage_polytype_to_spirv(second).unwrap();
+        assert_eq!(
+            first, second,
+            "storage type must not depend on qualifier resolution order"
+        );
+        assert_ne!(
+            first,
+            constructor.polytype_to_spirv(&composite).unwrap(),
+            "storage must retain a distinct decorated type"
+        );
+    }
+}
+
+#[test]
 fn test_simple_constant() {
     let spirv = compile_to_spirv("def x = 42").unwrap();
     assert!(!spirv.is_empty());
