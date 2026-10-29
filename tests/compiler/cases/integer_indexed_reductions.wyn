@@ -24,6 +24,15 @@
 --! entry = "atomic_reduce_4_main"
 --! workgroup_size = [64, 1, 1]
 --! atomic = "Exchange"
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"ranked_bucket_scatter_writes_through_nested_storage_0_main\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"fused_indexed_updates_reach_wgsl_0_main\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"ranked_buckets_preserve_nested_storage_and_atomic_counters_0_bins\""]
 
 
 
@@ -37,3 +46,16 @@ entry atomic_reduce_2_main(atomic_reduce_2_dest:*[3]i32,atomic_reduce_2_xs:[137]
 entry atomic_reduce_3_main(atomic_reduce_3_dest:*[3]i32,atomic_reduce_3_xs:[137]i32) [3]i32=reduce_by_index(atomic_reduce_3_dest,|a:i32,b:i32|a^b,0,map(|x:i32|x%3,atomic_reduce_3_xs),atomic_reduce_3_xs)
 
 entry atomic_reduce_4_main(atomic_reduce_4_dest:*[3]i32,atomic_reduce_4_xs:[137]i32) [3]i32=reduce_by_index(atomic_reduce_4_dest,|a:i32,b:i32|max(a,b),0,map(|x:i32|x%3,atomic_reduce_4_xs),atomic_reduce_4_xs)
+
+-- ranked_bucket_scatter_writes_through_nested_storage
+entry ranked_bucket_scatter_writes_through_nested_storage_0_main(ranked_bucket_scatter_writes_through_nested_storage_dest: *[2][2]i32) ([2][2]i32, [2]u32, u32) =
+        bucket_scatter_2d(ranked_bucket_scatter_writes_through_nested_storage_dest,
+            [[(-1, 9), (0, 10), (0, 11)], [(0, 12), (1, 20), (2, 9)]])
+
+-- fused_indexed_updates_reach_wgsl
+entry fused_indexed_updates_reach_wgsl_0_main(fused_indexed_updates_reach_wgsl_dest: *[3]i32, fused_indexed_updates_reach_wgsl_xs: [5]i32) [3]i32 =
+        reduce_by_index(fused_indexed_updates_reach_wgsl_dest, |a:i32,b:i32|a+b, 0,
+            map(|x:i32|x-1,fused_indexed_updates_reach_wgsl_xs), map(|x:i32|x*3,fused_indexed_updates_reach_wgsl_xs))
+
+-- ranked_buckets_preserve_nested_storage_and_atomic_counters
+entry ranked_buckets_preserve_nested_storage_and_atomic_counters_0_bins(ranked_buckets_preserve_nested_storage_and_atomic_counters_dest:*[2][2]i32) ([2][2]i32,[2]u32,u32)=bucket_scatter_2d(ranked_buckets_preserve_nested_storage_and_atomic_counters_dest,[[(-1,9),(0,10),(0,11)],[(0,12),(1,20),(2,9)]])

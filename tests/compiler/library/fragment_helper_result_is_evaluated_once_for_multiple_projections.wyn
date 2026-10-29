@@ -1,0 +1,9 @@
+def color(x: f32) vec2f32 =
+  if x < 10.0 then @[1.0, 2.0] else @[3.0, 4.0]
+def payload(v: u32) (f32, (f32, f32)) =
+  let c = color(f32(v)) in (c.x, (c.y, f32(v)))
+entry repro(surface: render_target<f32>) render_target<f32> =
+  let triangle = rasterize_triangles(direct_draw(3u32, 1u32),
+    |v, _, _| vertex_output(@[0.0, 0.0, 0.0, 1.0], payload(v))) in
+  shade(surface, triangle, |p, _, _, _, _|
+    let (x, (y, z)) = p in x + y + z)

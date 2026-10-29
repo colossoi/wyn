@@ -979,3 +979,6 @@ fn push_constant_record_padding_precedes_the_next_parameter() {
         validate(module);
     }
 }
+
+#[path = "support/source_contracts.rs"]
+mod source_contracts;

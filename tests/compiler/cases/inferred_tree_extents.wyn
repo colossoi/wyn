@@ -4,6 +4,12 @@
 --! [[artifacts]]
 --! path = "output.wynhost"
 --! contains = [":source-name \"tree\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"branch_loop_state_keeps_inferred_array_layout_0_branch_layout\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"narrowing_loop_bounds_device_sized_allocations_0_main\""]
 
 -- Cornerstone octree, same split rule and 30-bit key domain as upstream.
 -- Trailing entries are the 2^30 sentinel. The last active boundary is sentinel.
@@ -77,3 +83,24 @@ entry tree() ([]u32,bool,[]u32,bool) =
   let (split,e1)=build([0u32,268435456u32,536870912u32,805306368u32],root,slots,2) in
   let (merged,e2)=build_mode([0u32],split,slots,2,true) in
   (split,e1,merged,e2)
+
+-- branch_loop_state_keeps_inferred_array_layout
+-- Expected [6,10] on both GPU backends. Compilation must preserve the inferred
+-- four-element queue layout across the loop's conditional tuple result.
+-- Former failure: "type ... has no selected control-boundary layout".
+entry branch_loop_state_keeps_inferred_array_layout_0_branch_layout() [2]i32 =
+  map(|x|
+    let initial = replicate(4,0i32) in
+    let (queue,j,total) = loop (queue,j,total) = (initial,0i32,0i32) while j<4 do
+      let next = scatter(queue,[j],[x+j]) in
+      if j%2==0 then (next,j+1,total+x+j) else (next,j+1,total+next[j]) in
+    total,[0i32,1i32])
+
+-- narrowing_loop_bounds_device_sized_allocations
+-- Regression: allocation must use a proven search-interval bound instead of
+-- trying to evaluate the GPU-dependent loop on the host. Both backends compile.
+entry narrowing_loop_bounds_device_sized_allocations_0_main(xs:[16]i32, needle:i32) []i32 =
+  let (lo,hi) = loop (lo,hi) = (0i32,length(xs)) while lo < hi do
+    let mid = lo+(hi-lo)/2 in
+    if xs[mid] < needle then (mid+1,hi) else (lo,mid) in
+  scan((+),0i32,map(|i| i*i,iota(lo*2)))

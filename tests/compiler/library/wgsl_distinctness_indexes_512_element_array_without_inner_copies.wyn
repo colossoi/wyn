@@ -1,0 +1,11 @@
+type block = { radius: f32, tint: vec2f32, center: vec2f32 }
+
+entry frame(c: block,
+            target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex_index, instance_index, draw_index| vertex_output(
+      @[0.0, 0.0, 0.0, 1.0],
+      @[0.0, 0.0, 0.0])) in
+  shade(target, covered,
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| @[c.tint.x, c.tint.y, c.radius + c.center.x, 1.0])

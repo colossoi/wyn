@@ -1,0 +1,1 @@
+entry main(xs:[]i32) ([]i32,[2]i32) = let ys=filter(|x:i32|x>0,xs) in (ys,[length(ys),if length(ys)>0 then ys[length(ys)-1] else -1])

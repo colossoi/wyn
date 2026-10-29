@@ -1,0 +1,13 @@
+def replace_state: fragment_state = {
+             depth_test = #disabled, depth_write = false, blend = #replace, color_write = true
+         }
+         entry main(vertices:[3]vec4f32, coords:[137]vec2i32, target:render_target<f32>)
+         ([137]f32,render_target<f32>) =
+         let first = rasterize_triangles(direct_draw(3u32,1u32),
+             |i,_,_|vertex_output(vertices[i32(i)],()))
+         let image = shade_with(replace_state,target,first,|_,_,_,_,_|0.25)
+         let old = map(|coord|target_load(image,coord,0u32),coords)
+         let second = rasterize_triangles(direct_draw(3u32,1u32),
+             |i,_,_|vertex_output(vertices[i32(i)],()))
+         let updated = shade_with(replace_state,image,second,|_,_,_,_,_|0.75)
+         in (old,updated)

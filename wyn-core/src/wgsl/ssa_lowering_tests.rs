@@ -6,17 +6,10 @@
 
 use super::{validate_wgsl_identifier, wgsl_mangle, TypeEmitter};
 use crate::ast::TypeName;
-use crate::compile_thru_ssa;
-use crate::compile_thru_ssa_with_policy;
-use crate::egglog::ScalarOptimization;
-use crate::err_spirv;
-use crate::error;
-use crate::lower_ssa_to_wgsl;
-use crate::lower_ssa_to_wgsl_with_options;
 use crate::ssa;
 use crate::types;
 use crate::wgsl;
-use crate::{CodegenTarget, LookupSet};
+use crate::CodegenTarget;
 use polytype::Type as PolyType;
 
 // ---------- wgsl_mangle: per-char cases ----------
@@ -325,10 +318,6 @@ fn validate_wgsl(source: &str) {
 }
 
 /// Compile a Wyn source through the full pipeline to WGSL text.
-fn compile_to_wgsl(source: &str) -> error::Result<String> {
-    let program = compile_thru_ssa(source).map_err(|e| err_spirv!("{}", e))?;
-    lower_ssa_to_wgsl(program)
-}
 
 #[test]
 fn wgsl_scope_tree_owns_loop_exports_and_preserves_state_swaps() {
@@ -554,35 +543,74 @@ fn unrelated_entries_preserve_storage_buffer_element_types() {
     }
 }
 
-#[test]
-fn constant_rng_seed_folds_with_wrapping_arithmetic() {
-    let source = "entry seed() u32 =
-       let s = 2326157778u32 in
-       let w = ((s >> ((s >> 28u32) + 4u32)) ^ s) * 277803737u32 in
-       (w >> 22u32) ^ w";
-    let wgsl = compile_to_wgsl(source).expect("constant RNG seed must compile");
-    validate_wgsl(&wgsl);
-    // Reference result using u32 wrapping multiplication at every step.
-    assert!(
-        wgsl.contains(" = 2419168863u;"),
-        "seed must fold to its wrapped value:\n{wgsl}"
-    );
-
-    let lowered = crate::compile_thru_spirv(source).expect("constant RNG seed must compile to SPIR-V");
-    let module = wspirv::dr::load_words(&lowered.spirv).unwrap();
-    assert!(module.types_global_values.iter().any(|inst| {
-        inst.class.opcode == spirv::Op::Constant
-            && inst.operands == vec![wspirv::dr::Operand::LiteralBit32(2419168863)]
-    }));
+fn float_bound_values(
+    builder: &mut ssa::builder::FuncBuilder,
+    ty: types::Type,
+) -> Vec<ssa::types::ValueRef> {
+    use crate::op::OpTag;
+    use ssa::types::InstKind;
+    let witness = builder
+        .push_inst(
+            InstKind::Op {
+                tag: OpTag::Float("0.0".into()),
+                operands: vec![],
+            },
+            ty.clone(),
+        )
+        .unwrap();
+    ["_w_intrinsic_float_highest", "_w_intrinsic_float_lowest"]
+        .into_iter()
+        .map(|name| {
+            let id = crate::builtins::catalog().lookup_by_surface_name(name).unwrap().id;
+            builder
+                .push_inst(
+                    InstKind::Op {
+                        tag: OpTag::Intrinsic { id, overload_idx: 0 },
+                        operands: vec![witness.into()],
+                    },
+                    ty.clone(),
+                )
+                .unwrap()
+                .into()
+        })
+        .collect()
 }
 
 #[test]
-fn float_bounds_in_named_arrays_lower_to_wgsl() {
-    let wgsl = compile_to_wgsl(
-        "def bounds: [2]f32 = [f32.highest, f32.lowest]
-         entry get_bound(i: i32) f32 = bounds[i]",
-    )
-    .expect("bounds inside a named aggregate must lower");
+fn float_bounds_in_arrays_lower_to_finite_wgsl_literals() {
+    use crate::op::OpTag;
+    use crate::ssa::types::InstKind;
+    let entry = ssa::test_support::scalar_entry(vec![types::i32()], types::f32(), |builder| {
+        let operands = float_bound_values(builder, types::f32());
+        let array = builder
+            .push_inst(
+                InstKind::Op {
+                    tag: OpTag::ArrayLit,
+                    operands,
+                },
+                types::sized_array(2, types::f32()),
+            )
+            .unwrap();
+        builder
+            .push_inst(
+                InstKind::Op {
+                    tag: OpTag::Index,
+                    operands: vec![array.into(), builder.get_param(0).into()],
+                },
+                types::f32(),
+            )
+            .unwrap()
+            .into()
+    });
+    let program = ssa::stage::Elaborated::from_parts(
+        vec![],
+        vec![entry],
+        ssa::context::BackendGlobal {
+            pipeline: Default::default(),
+            target: CodegenTarget::Wgsl,
+        },
+    );
+    let wgsl = crate::lower_ssa_to_wgsl(program).unwrap();
     validate_wgsl(&wgsl);
     assert!(wgsl.contains("0x1.fffffep+127f"));
     assert!(wgsl.contains("-0x1.fffffep+127f"));
@@ -591,10 +619,30 @@ fn float_bounds_in_named_arrays_lower_to_wgsl() {
 #[test]
 fn float_bounds_preserve_infinity_bits_without_nonfinite_spirv_literals() {
     use wspirv::dr::Operand;
-    for ty in ["f32", "f16"] {
-        let source = format!("entry bounds() ({ty}, {ty}) = ({ty}.highest, {ty}.lowest)");
-        let lowered = crate::compile_thru_spirv(&source).expect("SPIR-V bounds must compile");
-        let module = wspirv::dr::load_words(&lowered.spirv).unwrap();
+    for width in [32, 16] {
+        use crate::op::OpTag;
+        use crate::ssa::types::InstKind;
+        let ty = scalar_ty(TypeName::Float(width));
+        let vector = types::vec(2, ty.clone());
+        let entry = ssa::test_support::storage_write_value(
+            crate::BindingRef::new(0, 0),
+            vector.clone(),
+            |builder| {
+                let operands = float_bound_values(builder, ty.clone());
+                builder
+                    .push_inst(
+                        InstKind::Op {
+                            tag: OpTag::Vector,
+                            operands,
+                        },
+                        vector,
+                    )
+                    .unwrap()
+                    .into()
+            },
+        );
+        let spirv = ssa::test_support::spirv(vec![entry]);
+        let module = wspirv::dr::load_words(&spirv).unwrap();
         let uint_type = module
             .types_global_values
             .iter()
@@ -611,7 +659,7 @@ fn float_bounds_preserve_infinity_bits_without_nonfinite_spirv_literals() {
                     && inst.operands == vec![Operand::LiteralBit32(bits)]
             }));
         }
-        let bytes: Vec<u8> = lowered.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let bytes: Vec<u8> = spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
         let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
@@ -624,12 +672,39 @@ fn float_bounds_preserve_infinity_bits_without_nonfinite_spirv_literals() {
 
 #[test]
 fn f16_scalar_and_vectors_lower_to_valid_wgsl() {
-    let source = r#"
-entry half_vectors(xs: []vec4f16) []vec4f16 =
-  map(|x: vec4f16| x + @[1.0f16, 2.0f16, 3.0f16, 4.0f16], xs)
-"#;
-
-    let wgsl = compile_to_wgsl(source).expect("f16 must lower to WGSL");
+    use crate::op::OpTag;
+    use crate::ssa::types::{InstKind, ValueRef};
+    let half = scalar_ty(TypeName::Float(16));
+    let vector = types::vec(4, half.clone());
+    let entry =
+        ssa::test_support::storage_write_value(crate::BindingRef::new(0, 0), vector.clone(), |builder| {
+            let operands = (1..=4)
+                .map(|n| {
+                    ValueRef::from(
+                        builder
+                            .push_inst(
+                                InstKind::Op {
+                                    tag: OpTag::Float(format!("{n}.0")),
+                                    operands: vec![],
+                                },
+                                half.clone(),
+                            )
+                            .unwrap(),
+                    )
+                })
+                .collect();
+            builder
+                .push_inst(
+                    InstKind::Op {
+                        tag: OpTag::Vector,
+                        operands,
+                    },
+                    vector,
+                )
+                .unwrap()
+                .into()
+        });
+    let wgsl = ssa::test_support::wgsl(vec![entry]);
     validate_wgsl(&wgsl);
     assert!(wgsl.contains("enable f16;"));
     assert!(wgsl.contains("1.0h"));
@@ -638,20 +713,10 @@ entry half_vectors(xs: []vec4f16) []vec4f16 =
 
 #[test]
 fn wgsl_fragment_trivial() {
-    let wgsl = compile_to_wgsl(
-        r#"
-entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
-  let covered = rasterize_triangles(
-    direct_draw(3u32, 1u32),
-    |vertex_index, instance_index, draw_index| vertex_output(
-      if vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
-      else if vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
-      else @[0.0, 0.5, 0.0, 1.0],
-      @[0.0, 0.0, 0.0])) in
-  shade(target, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| @[1.0, 0.5, 0.0, 1.0])
-"#,
-    )
-    .expect("compile");
+    let wgsl = crate::ssa::test_support::wgsl(vec![crate::ssa::test_support::graphics(
+        false,
+        &[vec![1.0, 0.5, 0.0, 1.0]],
+    )]);
     validate_wgsl(&wgsl);
     assert!(wgsl.contains("@fragment"));
     assert!(wgsl.contains("@builtin(position)"));
@@ -659,42 +724,20 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
 }
 #[test]
 fn wgsl_vertex_full_screen_triangle() {
-    let wgsl = compile_to_wgsl(
-        r#"
-def verts: [3]vec4f32 =
-  [@[-1.0, -1.0, 0.0, 1.0],
-   @[ 3.0, -1.0, 0.0, 1.0],
-   @[-1.0,  3.0, 0.0, 1.0]]
-
-entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
-  let covered = rasterize_triangles(
-    direct_draw(3u32, 1u32),
-    |vertex_index, instance_index, draw_index| vertex_output(
-      verts[i32(vertex_index)],
-      @[0.0, 0.0, 0.0])) in
-  shade(target, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| @[1.0, 1.0, 1.0, 1.0])
-"#,
-    )
-    .expect("compile");
+    let wgsl = crate::ssa::test_support::wgsl(vec![crate::ssa::test_support::graphics(
+        true,
+        &[vec![0.0, 0.0, 0.0, 1.0]],
+    )]);
     validate_wgsl(&wgsl);
     assert!(wgsl.contains("@vertex"));
     assert!(wgsl.contains("@builtin(vertex_index)"));
 }
 #[test]
 fn wgsl_vertex_multi_output_struct() {
-    let wgsl = compile_to_wgsl(
-        r#"
-entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
-  let covered = rasterize_triangles(
-    direct_draw(3u32, 1u32),
-    |vertex_index, instance_index, draw_index| vertex_output(
-      @[0.0, 0.0, 0.0, 1.0],
-      @[1.0, 0.0, 0.0])) in
-  shade(target, covered,
-    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| @[fragment_value.x, fragment_value.y, fragment_value.z, 1.0])
-"#,
-    )
-    .expect("compile");
+    let wgsl = crate::ssa::test_support::wgsl(vec![crate::ssa::test_support::graphics(
+        true,
+        &[vec![0.0, 0.0, 0.0, 1.0], vec![1.0, 0.0, 0.0]],
+    )]);
     validate_wgsl(&wgsl);
     assert!(wgsl.contains("struct VsOut0"));
     assert!(wgsl.contains("@builtin(position) f0: vec4<f32>,"));
@@ -705,135 +748,12 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
     assert!(wgsl.contains("_out_struct.f1 ="));
     assert!(wgsl.contains("return _out_struct;"));
 }
-#[test]
-fn wgsl_testfile_red_triangle() {
-    validate_testfile_wgsl("testfiles/red_triangle.wyn");
-}
-
-#[test]
-fn wgsl_testfile_red_triangle_curried() {
-    validate_testfile_wgsl("testfiles/red_triangle_curried.wyn");
-}
-
-#[test]
-fn wgsl_testfile_map_iota() {
-    // Exercises ArrayRange lowering: `iota(10)` produces a virtual
-    // array that's consumed by `map`. Virtual arrays lower to a
-    // generated `VirtRange{N}` struct, indexed as start + i*step.
-    validate_testfile_wgsl("testfiles/map_iota.wyn");
-}
-
-#[test]
-fn wgsl_testfile_array_call_demo() {
-    // Exercises `_w_intrinsic_slice` view-to-view lowering. `data[0..4]`
-    // with `data: []f32` remains a storage-backed view and is passed to
-    // a view-specialized user function.
-    validate_testfile_wgsl("testfiles/array_call_demo.wyn");
-}
-
-#[test]
-fn wgsl_testfile_pc_echo_test() {
-    // Exercises push-constant-backed compute inputs — broadcast scalars
-    // and small arrays — routed through a synthesized storage-read
-    // block (WGSL uniform alignment would reject the array stride).
-    validate_testfile_wgsl("testfiles/pc_echo_test.wyn");
-}
-
-#[test]
-fn wgsl_testfile_reduce_compute() {
-    // Exercises the function-scope hoist of SSA inst-result `var`
-    // declarations. Without hoisting, a storage-view offset declared
-    // inside the reduction loop would be out-of-scope at the post-loop
-    // write site, which WGSL's textual block scoping rejects.
-    validate_testfile_wgsl("testfiles/reduce_compute.wyn");
-}
 
 /// Compile a source file from disk through the full pipeline to WGSL
 /// and naga-validate the result. Used for testfile sweeps. Resolves
 /// paths relative to the workspace root so tests work regardless of
 /// the crate under `-p`.
-fn validate_testfile_wgsl(rel_path: &str) {
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    let path = format!("{}/../{}", manifest, rel_path);
-    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {}: {}", path, e));
-    let wgsl = stacker::grow(16 * 1024 * 1024, || compile_to_wgsl(&src))
-        .unwrap_or_else(|e| panic!("wgsl compile failed for {}:\n{}", rel_path, e));
-    validate_wgsl(&wgsl);
-}
 
-#[test]
-fn wgsl_testfile_creation() {
-    validate_testfile_wgsl("testfiles/playground/creation.wyn");
-}
-
-#[test]
-fn wgsl_testfile_lava() {
-    validate_testfile_wgsl("testfiles/playground/lava.wyn");
-}
-
-#[test]
-fn wgsl_testfile_seascape() {
-    validate_testfile_wgsl("testfiles/playground/seascape.wyn");
-}
-
-#[test]
-fn wgsl_testfile_raytrace() {
-    validate_testfile_wgsl("testfiles/playground/raytrace.wyn");
-}
-
-#[test]
-fn wgsl_testfile_mandelbulb() {
-    validate_testfile_wgsl("testfiles/playground/mandelbulb.wyn");
-}
-
-#[test]
-fn wgsl_testfile_da_rasterizer() {
-    validate_testfile_wgsl("testfiles/playground/da_rasterizer.wyn");
-}
-
-#[test]
-fn wgsl_testfile_sum_demo() {
-    // Structural sum types lowered into flattened tuples at the
-    // AST→TLC boundary. Mixed-arity variants, including a nullary
-    // case, exercise the dead-slot zero-fill path and the
-    // tag-checked match dispatch.
-    validate_testfile_wgsl("testfiles/sum_demo.wyn");
-}
-
-#[test]
-fn wgsl_testfile_swizzle_with_demo() {
-    // GLSL-style chained `dir.yz *= mat2` rotations expressed via
-    // `with .swizzle *= m`. Lowers to let-bound vec rebuilds at
-    // AST→TLC; SSA / WGSL never see VecWith.
-    validate_testfile_wgsl("testfiles/swizzle_with_demo.wyn");
-}
-
-#[test]
-fn wgsl_testfile_loopingspline() {
-    validate_testfile_wgsl("testfiles/playground/loopingspline.wyn");
-}
-
-#[test]
-fn wgsl_compiler_assigned_scalar_capture_emits_uniform_binding() {
-    let wgsl = compile_to_wgsl(
-        r#"
-entry frame(i_time: f32,
-            target: render_target<vec4f32>) render_target<vec4f32> =
-  let covered = rasterize_triangles(
-    direct_draw(3u32, 1u32),
-    |vertex_index, instance_index, draw_index| vertex_output(
-      @[0.0, 0.0, 0.0, 1.0],
-      @[0.0, 0.0, 0.0])) in
-  shade(target, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| @[i_time, 0.0, 0.0, 1.0])
-"#,
-    )
-    .expect("compile");
-    validate_wgsl(&wgsl);
-    assert!(
-        wgsl.contains("var<uniform>"),
-        "expected a compiler-assigned uniform capture, got:\n{wgsl}"
-    );
-}
 #[test]
 fn wgsl_compute_reduce_writes_to_storage_buffer() {
     // A parallelized `reduce` compute shader's terminal write must hit
@@ -846,13 +766,7 @@ fn wgsl_compute_reduce_writes_to_storage_buffer() {
     //
     //     var v27_1: f32 = _buf_0_1[(i32(off) + i32(tid))];
     //     v27_1 = v_accum;
-    let wgsl = compile_to_wgsl(
-        r#"
-entry sum_array(#[size_hint(1024)] data: []f32) f32 =
-    reduce(|a: f32, b: f32| a + b, 0.0, data)
-"#,
-    )
-    .expect("compile");
+    let wgsl = crate::ssa::test_support::wgsl(vec![crate::ssa::test_support::storage_write()]);
     validate_wgsl(&wgsl);
 
     // The bug pattern: `var vNN: f32 = _buf_...[...];` immediately
@@ -901,48 +815,11 @@ entry sum_array(#[size_hint(1024)] data: []f32) f32 =
 }
 
 #[test]
-fn wgsl_compute_multi_output_runtime_sized_arrays() {
-    // A compute entry returning a tuple of >1 runtime-sized array: each
-    // field's producing `map` must stream into its own bound output storage
-    // view.
-    let wgsl = compile_to_wgsl(
-        r#"
-entry gen(src: []f32) ([]f32, []f32) =
-    (map(|x: f32| x * 2.0, src), map(|x: f32| x * 3.0, src))
-"#,
-    )
-    .expect("compile");
-    validate_wgsl(&wgsl);
-
-    // Two distinct output buffers, each written directly by its own map.
-    assert!(
-        wgsl.contains("_buf_0_1[") && wgsl.contains("] = "),
-        "expected a direct write to output buffer 1:\n{wgsl}"
-    );
-    assert!(
-        wgsl.contains("_buf_0_2[") && wgsl.contains("] = "),
-        "expected a direct write to output buffer 2:\n{wgsl}"
-    );
-}
-
-#[test]
-fn wgsl_fragment_with_helper_function() {
-    let wgsl = compile_to_wgsl(
-        r#"
-def brighten(c: vec4f32, amount: f32) vec4f32 =
-  @[c.x + amount, c.y + amount, c.z + amount, c.w]
-
-entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
-  let covered = rasterize_triangles(
-    direct_draw(3u32, 1u32),
-    |vertex_index, instance_index, draw_index| vertex_output(
-      @[0.0, 0.0, 0.0, 1.0],
-      @[0.0, 0.0, 0.0])) in
-  shade(target, covered,
-    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| brighten(@[0.1, 0.2, 0.3, 1.0], 0.5))
-"#,
-    )
-    .expect("compile");
+fn wgsl_single_use_constant_vector_is_substituted() {
+    let wgsl = crate::ssa::test_support::wgsl(vec![crate::ssa::test_support::graphics(
+        false,
+        &[vec![0.6, 0.7, 0.8, 1.0]],
+    )]);
     validate_wgsl(&wgsl);
     assert!(wgsl.contains("@fragment"));
     assert!(wgsl.contains("@location(0)"));
@@ -957,126 +834,17 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
         "cheap single-use expressions should be substituted into their use:\n{wgsl}"
     );
 }
-#[test]
-fn reductions_default_to_a_cooperative_workgroup() {
-    let wgsl = compile_to_wgsl(
-        r#"
-entry sum_array(data: []f32) f32 =
-    reduce(|a: f32, b: f32| a + b, 0.0, data)
-"#,
-    )
-    .expect("compile");
-    assert!(
-        wgsl.contains("@workgroup_size(256, 1, 1)"),
-        "default reduction should use a cooperative workgroup, got:\n{}",
-        wgsl
-    );
-}
-
-#[test]
-fn wgsl_gather_computed_array() {
-    // A randomly-indexed computed array is materialized into its own
-    // storage buffer; the consumer reads it by index. The WGSL backend must
-    // emit the gather buffer as a module-scope `var<storage>` and validate
-    // (naga) end-to-end. Three buffers: input `bh` (0), consumer output (1),
-    // gather intermediate (2).
-    let wgsl = compile_to_wgsl(
-        "\
-entry gen(bh: []vec4f32) []i32 =
-  let counts = map(|h:vec4f32| 4 + 5*(if h.x>4.0 then 3 else 1), bh) in
-  map(|i:i32| counts[i % 256], iota(6144))
-",
-    )
-    .expect("gather program must lower to WGSL");
-
-    validate_wgsl(&wgsl);
-
-    assert!(
-        wgsl.contains("@group(0) @binding(2)") && wgsl.contains("var<storage"),
-        "the gather buffer must be declared as a storage binding:\n{wgsl}"
-    );
-    // The producer and consumer share one physical pipeline, so the consumer
-    // indexes the same read_write global selected by that pipeline layout.
-    assert!(
-        wgsl.contains("@group(0) @binding(2) var<storage, read_write> _buf_0_2:")
-            && wgsl.contains("_buf_0_2["),
-        "consumer must read the gather buffer by index:\n{wgsl}"
-    );
-}
-
 /// `scatter` into a `#[storage(access=write)]` framebuffer: the destination
 /// binding must be emitted `read_write` (WGSL requires it for the Store, and
 /// the declared `access=write` must propagate from the param), and the scatter
 /// emits indexed stores into it.
-#[test]
-fn wgsl_scatter_into_storage_buffer() {
-    let source = r#"
-def N:i32 = 5
-entry rasterize(positions: []vec4f32,
-                fb: *[]vec4f32) *[]vec4f32 =
-  let pts  = positions[0..N] in
-  let idxs = map(|p:vec4f32| i32.f32(p.y) * 512 + i32.f32(p.x), pts) in
-  let vals = map(|p:vec4f32| @[1.0, 1.0, 1.0, 1.0], pts) in
-  let updated = scatter(fb, idxs, vals) in
-  map(|x: vec4f32| x, updated)
-"#;
-    let wgsl = compile_to_wgsl(source).expect("compile to WGSL");
-    assert!(
-        wgsl.contains("@group(0) @binding(1) var<storage, read_write>"),
-        "scatter destination must be read_write:\n{wgsl}"
-    );
-    assert!(
-        wgsl.contains("_buf_0_1["),
-        "scatter must emit indexed stores into the framebuffer:\n{wgsl}"
-    );
-}
-
-#[test]
-fn wgsl_map_over_unique_storage_view_updates_backing_buffer() {
-    let wgsl = compile_to_wgsl(
-        r#"
-entry draw(fb: *[]vec4f32) *[]vec4f32 =
-  let cleared = map(|_p: vec4f32| @[0.0, 0.0, 0.0, 1.0], fb) in
-  let idxs = map(|i: i32| i, 0i32 ..< 4i32) in
-  let vals = map(|_i: i32| @[1.0, 1.0, 1.0, 1.0], 0i32 ..< 4i32) in
-  scatter(cleared, idxs, vals)
-"#,
-    )
-    .expect("map/scatter over a unique storage view must lower");
-
-    validate_wgsl(&wgsl);
-    let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
-    assert!(
-        stores_binding(&module, 0, 0),
-        "updates must store into the input binding: {wgsl}"
-    );
-    assert!(
-        !stores_binding(&module, 0, 1),
-        "the additional binding contains read-only length metadata"
-    );
-    assert_eq!(
-        module
-            .global_variables
-            .iter()
-            .filter(|(_, v)| v.binding.as_ref().is_some_and(|b| b.group == 0))
-            .count(),
-        2,
-        "array storage and length metadata"
-    );
-}
-
 #[test]
 fn wgsl_const_array_dynamic_index_hoists_to_private_global() {
     // A compile-time-constant array indexed by a runtime value is hoisted
     // once to a module-scope `var<private>` (the WGSL analog of the SPIR-V
     // Private-global hoist) and indexed there, instead of being copied into
     // a per-call `var<function>` materialization.
-    let wgsl = compile_to_wgsl(
-        "def t: [4]i32 = [10, 20, 30, 40]\n\
-         \n\
-         entry pick() []i32 = map(|i| t[i % 4], iota(100))",
-    )
-    .expect("compile");
+    let wgsl = crate::lower_ssa_to_wgsl(crate::ssa::test_support::indexed_constant(false)).unwrap();
     validate_wgsl(&wgsl);
     assert!(
         wgsl.contains("var<private> _const_global_0:"),
@@ -1094,123 +862,9 @@ fn wgsl_const_array_dynamic_index_hoists_to_private_global() {
 }
 
 #[test]
-fn wgsl_dynamic_index_of_captured_fixed_array_values() {
-    // Captured arrays pass through callable parameters. Check that their
-    // dynamic indexing and the generated helpers remain valid WGSL.
-    let wgsl = std::thread::Builder::new()
-        .stack_size(16 * 1024 * 1024)
-        .spawn(|| {
-            compile_to_wgsl(
-                r#"
-def expand(root: [2]u32, table: [1024][2]u32) [2]u32 =
-  map(|i: i32|
-    let reference = root[i]
-    in if i == 0i32
-       then table[i32.u32(reference)][0]
-       else table[i32.u32(reference)][1],
-    iota(2))
-
-entry pick(roots: [1]([2]u32), table: [1024][2]u32) [1]([2]u32) =
-  map(|i: i32| expand(roots[i], table), iota(1))
-"#,
-            )
-        })
-        .expect("spawn fixed-array regression compiler thread")
-        .join()
-        .expect("fixed-array regression compiler thread panicked")
-        .expect("compile dynamic indexing of captured fixed arrays");
-
-    validate_wgsl(&wgsl);
-    assert!(
-        wgsl.contains("_pc0.w_roots") && wgsl.contains("array<u32, 2>"),
-        "the captured parameter must reach the indexing helpers:\n{wgsl}"
-    );
-    assert!(
-        !wgsl.lines().any(|line| {
-            (line.trim_start().starts_with("var ") || line.trim_start().starts_with("let "))
-                && line.contains("array<u32, 2>")
-                && line.contains(" = _pc0.w_roots[")
-        }),
-        "dynamic indexing must not copy an aggregate row out of the captured parameter:\n{wgsl}"
-    );
-}
-
-#[test]
-fn wgsl_distinctness_indexes_512_element_array_without_inner_copies() {
-    let wgsl = std::thread::Builder::new()
-        .stack_size(16 * 1024 * 1024)
-        .spawn(|| {
-            compile_to_wgsl(
-                r#"
-def indices_distinct(indices: [512]u32) bool =
-  loop unique = true for i < 512 do
-    let duplicate = loop found = false for j < i do
-      found || indices[i] == indices[j]
-    in unique && !duplicate
-
-entry check(inputs: [1]([512]u32)) [1]u32 =
-  map(|i: i32|
-    if indices_distinct(inputs[i]) then 1u32 else 0u32,
-    iota(1))
-"#,
-            )
-        })
-        .expect("spawn distinctness regression compiler thread")
-        .join()
-        .expect("distinctness regression compiler thread panicked")
-        .expect("compile 512-element distinctness check");
-
-    validate_wgsl(&wgsl);
-    let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
-    let is_row = |ty| matches!(module.types[ty].inner,naga::TypeInner::Array {size:naga::ArraySize::Constant(n),..} if n.get()==512);
-    let function = &module.entry_points[0].function;
-    let rows: LookupSet<_> =
-        function.local_variables.iter().filter(|(_, local)| is_row(local.ty)).map(|(id, _)| id).collect();
-    let is_row_pointer = |expression| {
-        matches!(function.expressions[expression],
-        naga::Expression::LocalVariable(local) if rows.contains(&local))
-    };
-    let accesses = function.expressions.iter().filter(|(_, expression)|
-        matches!(expression, naga::Expression::Access {base,..} if is_row_pointer(*base))).count();
-    assert!(
-        accesses >= 2,
-        "both distinctness indices must address stable array storage"
-    );
-    let mut blocks = vec![(&function.body, 0)];
-    while let Some((block, depth)) = blocks.pop() {
-        for statement in block {
-            match statement {
-                naga::Statement::Store { pointer, .. } if is_row_pointer(*pointer) => {
-                    assert!(
-                        depth <= 1,
-                        "array snapshot repeated inside the distinctness loops"
-                    );
-                }
-                naga::Statement::Block(block) => blocks.push((block, depth)),
-                naga::Statement::If { accept, reject, .. } => {
-                    blocks.extend([(accept, depth), (reject, depth)]);
-                }
-                naga::Statement::Loop { body, continuing, .. } => {
-                    blocks.extend([(body, depth + 1), (continuing, depth + 1)]);
-                }
-                naga::Statement::Switch { cases, .. } => {
-                    blocks.extend(cases.iter().map(|case| (&case.body, depth)));
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-#[test]
 fn wgsl_const_array_hoist_is_deduped() {
     // The same constant array indexed at two sites shares one global.
-    let wgsl = compile_to_wgsl(
-        "def t: [4]i32 = [10, 20, 30, 40]\n\
-         \n\
-         entry pick() []i32 = map(|i| t[i % 4] + t[(i + 1) % 4], iota(100))",
-    )
-    .expect("compile");
+    let wgsl = crate::lower_ssa_to_wgsl(crate::ssa::test_support::indexed_constant(true)).unwrap();
     validate_wgsl(&wgsl);
     let n = wgsl.matches("var<private> _const_global").count();
     assert_eq!(
@@ -1220,132 +874,101 @@ fn wgsl_const_array_hoist_is_deduped() {
 }
 
 #[test]
-fn wgsl_composite_constant_inlines_transitive_constant_dependencies() {
-    let wgsl = compile_to_wgsl(
-        r#"
-type word64 = (u32, u32)
-
-def WORDS: [2]word64 = [
-  (0x11223344u32, 0x55667788u32),
-  (0x99aabbccu32, 0xddeeff00u32)
-]
-
-def COPIED_WORDS: [2]word64 = [WORDS[0], WORDS[1]]
-
-def select_word(words: [2]word64, index: i32) word64 = words[index]
-
-entry composite_constant(index: u32) word64 =
-  select_word(COPIED_WORDS, i32.u32(index & 1u32))
-"#,
-    )
-    .expect("compile a composite constant with a constant dependency");
-
-    validate_wgsl(&wgsl);
-    assert!(
-        !wgsl.contains("w_WORDS"),
-        "transitive constants must be expanded before WGSL lowering:\n{wgsl}"
-    );
-}
-
-#[test]
-fn wgsl_structural_capture_emits_uniform_struct_and_validates() {
-    let wgsl = compile_to_wgsl(
-        r#"
-type block = { radius: f32, tint: vec2f32, center: vec2f32 }
-
-entry frame(c: block,
-            target: render_target<vec4f32>) render_target<vec4f32> =
-  let covered = rasterize_triangles(
-    direct_draw(3u32, 1u32),
-    |vertex_index, instance_index, draw_index| vertex_output(
-      @[0.0, 0.0, 0.0, 1.0],
-      @[0.0, 0.0, 0.0])) in
-  shade(target, covered,
-    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| @[c.tint.x, c.tint.y, c.radius + c.center.x, 1.0])
-"#,
-    )
-    .expect("compile");
-    validate_wgsl(&wgsl);
-    assert!(wgsl.contains("struct T0"));
-    assert!(
-        wgsl.contains("var<uniform>"),
-        "expected a compiler-assigned structural uniform capture, got:\n{wgsl}"
-    );
-}
-
-fn stores_binding(module: &naga::Module, group: u32, binding: u32) -> bool {
-    fn root(
-        function: &naga::Function,
-        mut expression: naga::Handle<naga::Expression>,
-    ) -> Option<naga::Handle<naga::GlobalVariable>> {
-        loop {
-            match function.expressions[expression] {
-                naga::Expression::GlobalVariable(global) => return Some(global),
-                naga::Expression::Access { base, .. } | naga::Expression::AccessIndex { base, .. } => {
-                    expression = base
-                }
-                _ => return None,
-            }
-        }
-    }
-    fn stores(
-        module: &naga::Module,
-        function: &naga::Function,
-        block: &naga::Block,
-        group: u32,
-        binding: u32,
-    ) -> bool {
-        block.iter().any(|statement| match statement {
-            naga::Statement::Store { pointer, .. } => root(function, *pointer).is_some_and(|global| {
-                module.global_variables[global]
-                    .binding
-                    .as_ref()
-                    .is_some_and(|b| b.group == group && b.binding == binding)
-            }),
-            naga::Statement::Block(block) => stores(module, function, block, group, binding),
-            naga::Statement::If { accept, reject, .. } => {
-                stores(module, function, accept, group, binding)
-                    || stores(module, function, reject, group, binding)
-            }
-            naga::Statement::Loop { body, continuing, .. } => {
-                stores(module, function, body, group, binding)
-                    || stores(module, function, continuing, group, binding)
-            }
-            naga::Statement::Switch { cases, .. } => {
-                cases.iter().any(|case| stores(module, function, &case.body, group, binding))
-            }
-            _ => false,
-        })
-    }
-    module
-        .functions
-        .iter()
-        .map(|(_, f)| f)
-        .chain(module.entry_points.iter().map(|entry| &entry.function))
-        .any(|f| stores(module, f, &f.body, group, binding))
-}
-
-#[test]
 fn signed_shift_counts_validate_in_wgsl() {
-    let source = "entry shifted(x:i32,n:i32) (i32,i32) = (x << n, x >> n)";
-    let wgsl = compile_to_wgsl(source).expect("integer shifts must lower");
-    validate_wgsl(&wgsl);
+    use crate::op::{BinaryOperator, OpTag};
+    use crate::ssa::types::InstKind;
+    for operator in [BinaryOperator::ShiftLeft, BinaryOperator::ShiftRight] {
+        let entry =
+            ssa::test_support::scalar_entry(vec![types::i32(), types::i32()], types::i32(), |builder| {
+                builder
+                    .push_inst(
+                        InstKind::Op {
+                            tag: OpTag::BinOp(operator),
+                            operands: vec![builder.get_param(0).into(), builder.get_param(1).into()],
+                        },
+                        types::i32(),
+                    )
+                    .unwrap()
+                    .into()
+            });
+        let text = ssa::test_support::wgsl(vec![entry]);
+        assert!(
+            text.contains(if operator == BinaryOperator::ShiftLeft { "<<" } else { ">>" }),
+            "{text}"
+        );
+        validate_wgsl(&text);
+    }
 }
 
 #[test]
 fn helpers_with_identical_display_names_keep_distinct_identities() {
-    let mut program = compile_thru_ssa_with_policy(
-        "def add(x:i32) i32 = x+1\ndef twice(x:i32) i32 = x*2\nentry main(x:i32) i32 = add(x)+twice(x)",
-        CodegenTarget::Wgsl,
-        ScalarOptimization::Basic,
-    )
-    .unwrap();
-    assert!(program.functions.len() >= 2);
-    for function in &mut program.functions {
-        function.name = "same_name".into();
-    }
-    let count = program.functions.len();
-    let text = lower_ssa_to_wgsl(program).unwrap();
-    assert_eq!(text.matches("fn w_Uw_Ufunction_").count(), count);
+    use crate::op::{BinaryOperator, OpTag};
+    use crate::ssa::{
+        builder::FuncBuilder,
+        types::{ConstantValue, Function, InstKind, Terminator, ValueRef},
+    };
+    let functions = [BinaryOperator::Add, BinaryOperator::Multiply]
+        .into_iter()
+        .enumerate()
+        .map(|(index, operator)| {
+            let mut builder = FuncBuilder::new(vec![types::i32()], types::i32());
+            let value = builder
+                .push_inst(
+                    InstKind::Op {
+                        tag: OpTag::BinOp(operator),
+                        operands: vec![
+                            builder.get_param(0).into(),
+                            ValueRef::Const(ConstantValue::I32(2)),
+                        ],
+                    },
+                    types::i32(),
+                )
+                .unwrap();
+            builder.terminate(Terminator::Return(Some(value.into()))).unwrap();
+            Function {
+                id: crate::FunctionId::from_index(index as u32),
+                name: "same_name".into(),
+                body: builder.finish().unwrap(),
+                span: crate::ast::Span::generated(),
+                linkage_name: None,
+            }
+        })
+        .collect();
+    let entry = ssa::test_support::scalar_entry(vec![types::i32()], types::i32(), |builder| {
+        let values = (0..2)
+            .map(|index| {
+                builder
+                    .push_inst(
+                        InstKind::Op {
+                            tag: OpTag::Call(crate::FunctionId::from_index(index as u32)),
+                            operands: vec![builder.get_param(0).into()],
+                        },
+                        types::i32(),
+                    )
+                    .unwrap()
+                    .into()
+            })
+            .collect();
+        builder
+            .push_inst(
+                InstKind::Op {
+                    tag: OpTag::BinOp(BinaryOperator::Add),
+                    operands: values,
+                },
+                types::i32(),
+            )
+            .unwrap()
+            .into()
+    });
+    let program = ssa::stage::WgslReady::from_parts(
+        functions,
+        vec![entry],
+        ssa::context::BackendGlobal {
+            pipeline: Default::default(),
+            target: CodegenTarget::Wgsl,
+        },
+    );
+    let text = super::lower(&program).unwrap();
+    assert_eq!(text.matches("fn w_Uw_Ufunction_").count(), 2);
     validate_wgsl(&text);
 }

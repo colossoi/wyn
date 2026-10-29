@@ -1,0 +1,10 @@
+def expand(root: [2]u32, table: [1024][2]u32) [2]u32 =
+  map(|i: i32|
+    let reference = root[i]
+    in if i == 0i32
+       then table[i32.u32(reference)][0]
+       else table[i32.u32(reference)][1],
+    iota(2))
+
+entry pick(roots: [1]([2]u32), table: [1024][2]u32) [1]([2]u32) =
+  map(|i: i32| expand(roots[i], table), iota(1))

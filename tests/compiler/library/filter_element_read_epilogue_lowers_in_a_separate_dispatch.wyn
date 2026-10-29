@@ -1,0 +1,1 @@
+entry main(xs: []i32, bias: i32) []i32 = map(|x:i32|x+bias, xs)

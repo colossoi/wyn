@@ -1,0 +1,2 @@
+def draw(n:i32) (u32,u32,u32,u32) = (18u32,u32(n),0u32,0u32)
+entry main(xs:[]i32) ([]i32,(u32,u32,u32,u32)) = let ys=filter(|x:i32|x>0,xs) in (map(|x:i32|x+1,ys),draw(length(ys)))

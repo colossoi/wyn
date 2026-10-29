@@ -1,0 +1,3 @@
+entry main(xs:[]i32) []i32 =
+        let n=reduce((+),0,xs) in
+        loop values=xs for i<n do map(|x|x+1,values)

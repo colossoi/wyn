@@ -1,0 +1,6 @@
+entry scene(count:f32, target:render_target<vec4f32>) render_target<vec4f32> =
+  let vertices = map(|i:i32| @[f32(i), 0.0, 0.0, 1.0], iota(i32(count)))
+  let triangles = rasterize_triangles(direct_draw(3u32, 1u32),
+    |vertex_index:u32, _:u32, _:u32|
+      vertex_output(vertices[i32(vertex_index)], @[1.0, 0.0, 0.0, 1.0])) in
+  shade(target, triangles, |value, _, _, _, _| value)

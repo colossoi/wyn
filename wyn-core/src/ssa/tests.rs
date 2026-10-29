@@ -1,7 +1,6 @@
 #![cfg(test)]
 
 use crate::ast::TypeName;
-use crate::compile_thru_spirv;
 use crate::op;
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::types::{InstKind, Terminator, ValueId, ValueRef};
@@ -364,35 +363,12 @@ fn value_uses_does_not_traverse_places() {
 /// ValueId-keyed place tracking.
 #[test]
 fn spirv_storage_write_chain_lowers_cleanly() {
-    // Minimal compute shader: the map's `[]f32 → []f32` writeback forces
-    // the MapInto path → ViewIndex (place) + Store.
-    let source = "\nentry double(arr: []f32) []f32 = map(|x: f32| x * 2.0, arr)\n";
-
-    let spirv = compile_thru_spirv(source)
-        .expect("SPIR-V lowering of StorageView → ViewIndex → Store chain must succeed");
-
-    assert_eq!(spirv.spirv[0], 0x07230203, "SPIR-V magic number");
-
-    // Confirm the chain actually emitted: OpAccessChain (opcode 65) and
-    // OpStore (opcode 62) must both appear.
-    let mut has_access_chain = false;
-    let mut has_store = false;
-    let mut i = 5; // skip header
-    while i < spirv.spirv.len() {
-        let word = spirv.spirv[i];
-        let op = (word & 0xFFFF) as u16;
-        let len = ((word >> 16) & 0xFFFF) as usize;
-        if op == 65 {
-            has_access_chain = true;
-        }
-        if op == 62 {
-            has_store = true;
-        }
-        if len == 0 {
-            break;
-        }
-        i += len;
+    let words = super::test_support::spirv(vec![super::test_support::storage_write()]);
+    let module = wspirv::dr::load_words(&words).unwrap();
+    for opcode in [spirv::Op::AccessChain, spirv::Op::Store] {
+        assert!(
+            module.all_inst_iter().any(|instruction| instruction.class.opcode == opcode),
+            "missing {opcode:?}"
+        );
     }
-    assert!(has_access_chain, "ViewIndex must lower to OpAccessChain");
-    assert!(has_store, "Store(place) must lower to OpStore");
 }

@@ -1,0 +1,11 @@
+type camera = { target:vec3i32, az:i32, elev:i32, dist:i32, jitter:vec2i32 }
+         type orbit = { target:vec3i32, azimuth:i32, elevation:i32, distance:i32 }
+         def repack(o:camera) orbit = {
+             target=o.target, azimuth=o.az, elevation=o.elev,
+             distance=(o.dist-o.dist)+(o.dist-o.dist)+(o.dist-o.dist)+(o.dist-o.dist) +
+                      (o.dist-o.dist)+(o.dist-o.dist)+(o.dist-o.dist)+(o.dist-o.dist) }
+         def project(o:orbit) i32 =
+             (o.target.x+o.azimuth+o.elevation)*o.distance +
+             (o.target.y+o.azimuth+o.elevation)*o.distance +
+             (o.target.z+o.azimuth+o.elevation)*o.distance
+         entry main(o:camera) i32 = project(repack(o))

@@ -15,6 +15,9 @@
 --! [[artifacts]]
 --! path = "output.wynhost"
 --! contains = [":source-name \"roundtrip_3_main\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"length_queries_lower_without_materializing_array_elements_0_input_length\"", ":source-name \"length_queries_lower_without_materializing_array_elements_0_mapped_length\"", ":source-name \"length_queries_lower_without_materializing_array_elements_0_mapped_slice_length\"", ":source-name \"length_queries_lower_without_materializing_array_elements_0_filtered_length\""]
 
 
 
@@ -37,3 +40,21 @@ entry roundtrip_3_main(n: i32) []i32 =
   loop out = iota(n) for _i < 2 do
     let start = if length(out)>0 then 1 else 0
     in out[start..length(out)]
+
+-- length_queries_lower_without_materializing_array_elements
+-- Lengths observe logical view metadata, even when elements are never stored.
+entry length_queries_lower_without_materializing_array_elements_0_input_length(xs: []i32) []i32 =
+    let n = length(xs) in map(|i| i + n, iota(n))
+
+entry length_queries_lower_without_materializing_array_elements_0_mapped_length(xs: []i32) []i32 =
+    let ys = map(|x:i32| x + 1, xs) in
+    map(|i| i, iota(length(ys)))
+
+entry length_queries_lower_without_materializing_array_elements_0_mapped_slice_length(xs: []i32) []i32 =
+    let ys = map(|x:i32| x + 1, xs) in
+    let view = ys[0..length(ys)] in
+    map(|i| i, iota(length(view)))
+
+entry length_queries_lower_without_materializing_array_elements_0_filtered_length(xs: []i32) []i32 =
+    let ys = filter(|x:i32| x > 0, xs) in
+    map(|i| ys[i] + length(ys), iota(length(ys)))

@@ -1,0 +1,6 @@
+type textures = { image: texture2d, filtering: sampler }
+         def sample(maps: textures, uv: vec2f32) vec4f32 =
+           texture_sample(maps.image, maps.filtering, uv, 0.0)
+         entry main(image: texture2d, filtering: sampler, pixels: []vec2f32) []vec4f32 =
+           let maps = { image = image, filtering = filtering } in
+           map(|uv| sample(maps, uv), pixels)

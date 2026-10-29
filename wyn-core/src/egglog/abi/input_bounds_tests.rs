@@ -1,34 +1,45 @@
 //! Check inferred bounds at the interface that consumes them.
 
-use crate::host::Binding;
 use crate::host::BufferLen;
 
-fn input_length(source: &str, name: &str) -> Option<BufferLen> {
-    let program = crate::compile_thru_ssa(source).expect("compile entry interface");
-    published_input_length(&program, name)
+fn input_lengths(source: &str) -> Vec<(String, Option<BufferLen>)> {
+    use crate::egglog::{from_tlc, fuse, optimize_for_test, place, query::Query, schedule};
+    let tlc = crate::compile_thru_tlc(source).unwrap();
+    let mut program = optimize_for_test(
+        schedule(
+            place(
+                fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                crate::PipelineTopologyPolicy::AllowGenerated,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    crate::egglog::facts::prepare(&mut program).unwrap();
+    let mut lengths = Vec::new();
+    Query(&program.graph)
+        .for_each("SourceOriginalEntry", |row| {
+            let symbol = program.identities.symbols.resolve(program.graph.value_to_base::<i64>(row[0]));
+            let definition = program.source.defs.iter().find(|d| d.name == *symbol).unwrap();
+            let (_, parameters) = crate::tlc::extract_lambda_params_ref(&definition.body);
+            for index in 0..parameters.len() {
+                for input in super::parameter_inputs(&program, row[1], index as i64)? {
+                    lengths.push((input.name, input.host.length));
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    lengths
 }
 
-fn published_input_length(program: &crate::ssa::stage::Elaborated, name: &str) -> Option<BufferLen> {
-    let mut lengths = program
-        .global_context
-        .pipeline
-        .pipelines
-        .iter()
-        .flat_map(|pipeline| match pipeline {
-            crate::host::Pipeline::Compute(p) => &p.bindings,
-            crate::host::Pipeline::Graphics(p) => &p.bindings,
-        })
-        .filter_map(|binding| match binding {
-            Binding::StorageBuffer {
-                name: input, length, ..
-            } if input == name => Some(length.clone()),
-            _ => None,
-        });
-    let first = lengths.next().expect("storage input must be published");
-    for length in lengths {
-        assert_eq!(length, first, "generated stages must agree on the input bound");
-    }
-    first
+fn input_length(source: &str, name: &str) -> Option<BufferLen> {
+    input_lengths(source)
+        .into_iter()
+        .find(|(input, _)| input == name)
+        .expect("storage input must be published")
+        .1
 }
 
 // These cases exercise the prefix proof itself, before shader ABI publication.
@@ -142,12 +153,15 @@ fn other_uses_disqualify_a_prefix_bound() {
 fn input_bounds_are_independent() {
     let source = "entry e(xs:[]i32,ys:[]i32) i32 =
         reduce(|a,b|a+b,0,xs[0..4])+length(ys)";
-    let program = crate::compile_thru_ssa(source).expect("compile entry interface");
+    let lengths = input_lengths(source);
     assert_eq!(
-        published_input_length(&program, "xs"),
+        lengths.iter().find(|(name, _)| name == "xs").unwrap().1.clone(),
         Some(BufferLen::Fixed { bytes: 16 })
     );
-    assert_eq!(published_input_length(&program, "ys"), None);
+    assert_eq!(
+        lengths.iter().find(|(name, _)| name == "ys").unwrap().1.clone(),
+        None
+    );
 }
 
 #[test]
@@ -209,4 +223,18 @@ fn a_return_without_an_operand_use_blocks_the_graph_proof() {
         )
         .unwrap();
     assert!(Query(&program.graph).lookup("ParameterPrefixElements", (scope, 0i64)).unwrap().is_none());
+}
+
+#[test]
+fn generated_buffer_names_do_not_alias_source_inputs_with_the_same_name() {
+    let mut used = std::collections::BTreeSet::from(["main_output".to_owned()]);
+    assert_eq!(
+        super::unique_name("main_output".into(), &mut used),
+        "main_output_2"
+    );
+    assert_eq!(
+        super::unique_name("main_output".into(), &mut used),
+        "main_output_3"
+    );
+    assert_eq!(super::unique_name("other".into(), &mut used), "other");
 }

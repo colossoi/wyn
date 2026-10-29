@@ -109,3 +109,6 @@ pub fn prepare_wgsl(mut program: stage::Reachable) -> error::Result<stage::WgslR
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) mod test_support;

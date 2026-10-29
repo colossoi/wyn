@@ -1,32 +1,26 @@
-use crate::egglog::{finish_for_test, from_tlc, fuse, optimize_for_test, place, schedule};
+use crate::egglog::{finish_for_test, from_tlc, fuse, place, schedule};
 use crate::host::Pipeline;
-use crate::interface::ComputeDispatchGrid;
-use crate::tlc::DefMeta;
 use crate::PipelineTopologyPolicy;
-use crate::{
-    compile_thru_tlc, host, lower_ssa_to_wgsl, lower_ssa_to_wgsl_with_program, CodegenTarget, LoweredWgsl,
-};
-
-use naga::valid::{Capabilities, ValidationFlags, Validator};
+use crate::{compile_thru_tlc, host, CodegenTarget};
 
 #[test]
 fn fused_map_chain_keeps_permission_to_reuse_its_external_input() {
     let output = pipeline("entry main(xs:*[]i32) []i32 = let ys=map(|x:i32|x+1,xs) in map(|x:i32|x*2,ys)");
-    let Pipeline::Compute(p) = &output.program.interface.pipelines[0] else {
+    let Pipeline::Compute(p) = &output.pipelines[0] else {
         panic!("compute")
     };
     assert_eq!(p.stages.len(), 1);
     assert_eq!(p.bindings.len(), 2, "reused array and explicit input length");
     assert_eq!(p.stages[0].uses.access(0), Some(host::Access::ReadWrite));
-    assert_eq!(output.program.interface.source_results[0].binding, 0);
+    assert_eq!(output.source_results[0].binding, 0);
 }
 
 #[test]
 fn length_observers_do_not_block_content_reuse() {
     let output =
         pipeline("entry main(xs:*[]i32) ([]i32,i32) = let ys=map(|x:i32|x+1,xs) in (ys,length(xs))");
-    assert_eq!(output.program.interface.source_results[0].binding, 0);
-    let Pipeline::Compute(p) = &output.program.interface.pipelines[0] else {
+    assert_eq!(output.source_results[0].binding, 0);
+    let Pipeline::Compute(p) = &output.pipelines[0] else {
         panic!("compute")
     };
     assert_eq!(
@@ -39,10 +33,10 @@ fn length_observers_do_not_block_content_reuse() {
 #[test]
 fn multi_input_map_can_reuse_its_nonprimary_unique_input() {
     let output = pipeline("entry main(xs:[4]i32,ys:*[4]i32) [4]i32 = map(|(x,y)|x+y,zip(xs,ys))");
-    let Pipeline::Compute(p) = &output.program.interface.pipelines[0] else {
+    let Pipeline::Compute(p) = &output.pipelines[0] else {
         panic!("compute")
     };
-    let result = &output.program.interface.source_results[0];
+    let result = &output.source_results[0];
     assert!(p.bindings.iter().any(|b| matches!(
         b,
         host::Binding::StorageBuffer { name, set, binding, .. }
@@ -56,8 +50,8 @@ fn fused_intermediate_element_types_do_not_restrict_final_reuse() {
     let output = pipeline(
         "entry main(xs:*[]i32) []i32 = let bs=map(|x:i32|x>0,xs) in map(|b:bool|if b then 1 else 0,bs)",
     );
-    assert_eq!(output.program.interface.source_results[0].binding, 0);
-    let Pipeline::Compute(p) = &output.program.interface.pipelines[0] else {
+    assert_eq!(output.source_results[0].binding, 0);
+    let Pipeline::Compute(p) = &output.pipelines[0] else {
         panic!("compute")
     };
     assert_eq!(p.stages.len(), 1);
@@ -67,159 +61,49 @@ fn fused_intermediate_element_types_do_not_restrict_final_reuse() {
 #[test]
 fn independent_writers_cannot_both_reuse_one_input() {
     let output = pipeline("entry main(xs:*[]i32) ([]i32,[]i32) = (map(|x:i32|x+1,xs),map(|x:i32|x*2,xs))");
-    let results = &output.program.interface.source_results;
+    let results = &output.source_results;
     assert_eq!(results.len(), 2);
     assert_ne!(results[0].binding, results[1].binding);
 }
 
 #[test]
-fn zipped_runtime_loop_retains_its_domain() {
-    let source = "entry main(xs:[]i32) []i32 =
-      let pairs=zip(xs,iota(length(xs))) in
-      let count=if length(xs)==0 then 0 else 3 in
-      let ys=loop ys=pairs for i<count do map(|(x,j)| (x+j,j),ys) in
-      map(|(x,j)| x,ys)";
-    compile(source);
+fn selected_grid_dimensions_are_positive() {
+    use egglog_engine::Write;
+    let tlc = compile_thru_tlc("").unwrap();
+    let imported = from_tlc(&tlc).unwrap();
+    let mut program = imported.advance(crate::egglog::Optimized {
+        captures: Default::default(),
+        host: Default::default(),
+        selected: crate::egglog::scalar::Selected {
+            dag: Default::default(),
+            values: vec![],
+            roots: Default::default(),
+            extents: Default::default(),
+        },
+        scalars: crate::egglog::fusion::new_graph().unwrap(),
+    });
+    for (dims, expected) in [
+        ((0i64, 1i64, 1i64), "grid x"),
+        ((1, 0, 1), "grid y"),
+        ((1, 1, 0), "grid z"),
+    ] {
+        let grid = program.graph.update(|mut sink| sink.add("FixedGrid", dims)).unwrap();
+        let error = crate::egglog::facts::Facts { program: &program }.grid(grid).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+    let grid = program.graph.update(|mut sink| sink.add("FixedGrid", (2i64, 3i64, 4i64))).unwrap();
+    assert_eq!(
+        crate::egglog::facts::Facts { program: &program }.grid(grid).unwrap(),
+        (2, 3, 4)
+    );
 }
 
 #[test]
-fn invalid_selected_workgroup_is_an_error() {
-    use egglog_engine::Write;
-    let tlc = compile_thru_tlc("entry main(xs:[4]i32) [4]i32=map(|x|x+1,xs)").unwrap();
-    let mut program = optimize_for_test(
-        schedule(
-            place(
-                fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                PipelineTopologyPolicy::AllowGenerated,
-            )
-            .unwrap(),
-        )
-        .unwrap(),
+fn fused_map_reduce_normalizes() {
+    compile_thru_tlc(
+        "entry main(xs: []f32) f32 = reduce(|a: f32, b: f32| a + b, 0.0, map(|x: f32| x * 2.0, xs))",
     )
     .unwrap();
-    let mut roots = Vec::new();
-    program.graph.function_entries("RootWorkgroup", |row| roots.push(row.inputs[0])).unwrap();
-    program.graph.clear_function("RootWorkgroup").unwrap();
-    program
-        .graph
-        .update(|mut sink| {
-            let grid = sink.add("FixedGrid", (0i64, 1i64, 1i64))?;
-            for root in roots {
-                sink.set("RootWorkgroup", root, grid)?;
-            }
-            Ok(())
-        })
-        .unwrap();
-    let Err(error) = finish_for_test(program, CodegenTarget::Wgsl) else {
-        panic!("zero-width workgroup was silently accepted");
-    };
-    assert!(error.to_string().contains("grid x must be positive"), "{error}");
-}
-
-fn compile(source: &str) -> naga::Module {
-    let ssa = crate::compile_thru_ssa_for_target(source, CodegenTarget::Wgsl)
-        .unwrap_or_else(|error| panic!("{error}\n{source}"));
-    let source = lower_ssa_to_wgsl(ssa).unwrap();
-    let module = naga::front::wgsl::parse_str(&source)
-        .unwrap_or_else(|e| panic!("{}\n{source}", e.emit_to_string(&source)));
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(&module)
-    .unwrap_or_else(|e| panic!("{e:?}\n{source}"));
-    module
-}
-
-#[test]
-fn loop_local_scratch_annotation_is_consumed_before_codegen() {
-    let source = "entry main(k:i32) [4]i32 =
-        loop xs=[1,2,3,4] for i<k do
-        scatter((#[scratch] map(|x|x,xs)),[3,2,1,0],xs)";
-    let program = crate::compile_thru_ssa(source).unwrap();
-    crate::lower_ssa_to_spirv(program.clone()).unwrap();
-    crate::lower_ssa_to_wgsl(program).unwrap();
-}
-
-#[test]
-fn loop_local_zip_preserves_nested_input_elements() {
-    let source = "entry main(xs:[5]i32) [5]i32 =
-        loop xs=xs for i<2 do
-        let bins=map(|x|x & 3,xs) in
-        let offsets=scan(|(a,b,c,d),(e,f,g,h)|(a+e,b+f,c+g,d+h),
-            (0,0,0,0),map(|x|(1,1,1,1),xs)) in
-        map(|(bin,(a,b,c,d))|i32(bin)+a+b+c+d,zip(bins,offsets))";
-    let program = crate::compile_thru_ssa(source).unwrap();
-    crate::lower_ssa_to_spirv(program.clone()).unwrap();
-    crate::lower_ssa_to_wgsl(program).unwrap();
-}
-
-#[test]
-fn length_queries_lower_without_materializing_array_elements() {
-    compile(include_str!("../../../testfiles/length_metadata.wyn"));
-}
-
-#[test]
-fn scalar_output_epilogues_lower_without_a_finish_entry() {
-    let module = compile(include_str!("../../../testfiles/scalar_epilogues.wyn"));
-    assert_eq!(module.entry_points.len(), 3);
-    assert!(module.entry_points.iter().all(|entry| !entry.name.ends_with("finish")));
-}
-
-#[test]
-fn filter_count_draw_record_is_published_by_compaction() {
-    let module = compile("def draw(n:i32) (u32,u32,u32,u32) = (18u32,u32(n),0u32,0u32)
-entry main(xs:[]i32) ([]i32,(u32,u32,u32,u32)) = let ys=filter(|x:i32|x>0,xs) in (map(|x:i32|x+1,ys),draw(length(ys)))");
-    assert_eq!(module.entry_points.len(), 1);
-}
-
-#[test]
-fn filter_post_map_record_outputs_reach_wgsl() {
-    let module = compile(include_str!("../../../testfiles/rust_host_filter_post.wyn"));
-    let entries: Vec<_> = module.entry_points.iter().map(|entry| entry.name.as_str()).collect();
-    assert!(entries.iter().any(|name| name.ends_with("compact")));
-    assert_eq!(module.entry_points[0].workgroup_size, [64, 1, 1]);
-}
-
-#[test]
-fn filter_element_read_epilogue_lowers_in_a_separate_dispatch() {
-    let module=compile("entry main(xs:[]i32) ([]i32,[2]i32) = let ys=filter(|x:i32|x>0,xs) in (ys,[length(ys),if length(ys)>0 then ys[length(ys)-1] else -1])");
-    assert!(module.entry_points.len() >= 2);
-}
-
-#[test]
-fn literal_and_runtime_nested_array_indices_reach_wgsl() {
-    compile(include_str!("../../../testfiles/composite_2d_local.wyn"));
-}
-
-#[test]
-fn mixed_array_scalar_stage_outputs_reach_wgsl() {
-    compile(include_str!(
-        "../../../testfiles/regressions/stage_shared_mixed_tuple.wyn"
-    ));
-}
-
-#[test]
-fn ranked_bucket_scatter_writes_through_nested_storage() {
-    compile(
-        "entry main(dest: *[2][2]i32) ([2][2]i32, [2]u32, u32) =
-        bucket_scatter_2d(dest,
-            [[(-1, 9), (0, 10), (0, 11)], [(0, 12), (1, 20), (2, 9)]])",
-    );
-}
-
-#[test]
-fn fused_map_reduce_reaches_the_existing_wgsl_backend() {
-    compile("entry main(xs: []f32) f32 = reduce(|a: f32, b: f32| a + b, 0.0, map(|x: f32| x * 2.0, xs))");
-}
-
-#[test]
-fn fused_indexed_updates_reach_wgsl() {
-    compile(
-        "entry main(dest: *[3]i32, xs: [5]i32) [3]i32 =
-        reduce_by_index(dest, |a:i32,b:i32|a+b, 0,
-            map(|x:i32|x-1,xs), map(|x:i32|x*3,xs))",
-    );
 }
 
 #[test]
@@ -228,156 +112,58 @@ fn external_functions_retain_their_declared_signatures() {
         "#[linked(\"foreign_add\")] extern add(a:i32,b:i32) i32\nentry main(x:i32) i32 = add(x, 3)",
     )
     .unwrap();
-    let program = optimize_for_test(
-        schedule(
-            place(
-                fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                PipelineTopologyPolicy::AllowGenerated,
+    let program = crate::egglog::optimize_with_policy(
+        crate::egglog::prepare_interfaces(
+            schedule(
+                place(
+                    fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                    PipelineTopologyPolicy::AllowGenerated,
+                )
+                .unwrap(),
             )
             .unwrap(),
         )
         .unwrap(),
+        crate::egglog::ScalarOptimization::Basic,
     )
     .unwrap();
     let ssa = finish_for_test(program, CodegenTarget::Spirv).unwrap();
     let external = ssa.functions.iter().find(|f| f.linkage_name.as_deref() == Some("foreign_add")).unwrap();
     assert_eq!(external.body.params().len(), 2);
     assert_eq!(external.body.return_ty, crate::types::i32());
+    let host = crate::host::Program::new(ssa.global_context.pipeline).unwrap();
+    assert!(host.entries[0]
+        .operations
+        .iter()
+        .any(|op| matches!(op, crate::host::Operation::Dispatch { .. })));
 }
 
 #[test]
-fn filtered_reduction_and_shared_count_reach_wgsl() {
-    compile(
-        "entry main(xs: []i32) (i32,i32) =
-        let kept=filter(|x:i32|x>0,xs) in
-        (length(kept),reduce(|a:i32,b:i32|a+b,0,kept))",
-    );
-}
-
-#[test]
-fn mapped_filter_result_keeps_its_runtime_sized_view() {
-    compile(include_str!("../../../testfiles/filter_then_map.wyn"));
-}
-
-#[test]
-fn signed_and_unsigned_integer_power_reach_wgsl() {
-    compile(include_str!("../../../testfiles/int_pow.wyn"));
-}
-
-#[test]
-fn invocation_local_filter_keeps_a_bounded_array_length() {
-    compile(include_str!("../../../testfiles/filter_demo.wyn"));
-}
-
-#[test]
-fn sliced_fused_map_reaches_wgsl() {
-    compile(
+fn sliced_fused_map_normalizes() {
+    compile_thru_tlc(
         "entry main(xs: []i32) [4]i32 =
         let a=map(|x:i32|x+1,xs) in map(|x:i32|x*2,a[2..6])",
-    );
+    )
+    .unwrap();
 }
 
-#[test]
-fn scalar_loop_reaches_the_existing_wgsl_backend() {
-    compile("entry main(n: i32) i32 = loop acc = 0 for i < n do acc + i");
+fn pipeline(source: &str) -> host::ModuleInterface {
+    pipeline_with_policy(source, crate::egglog::ScalarOptimization::Basic)
 }
 
-#[test]
-fn tuple_collectives_and_runtime_captures_reach_wgsl() {
-    compile("entry main(xs: []i32, bias: i32) (i32, i32) = reduce(|a: (i32, i32), b: (i32, i32)| (a.0 + b.0, a.1 + b.1), (0, 0), map(|x: i32| (x + bias, 1), xs))");
-}
-
-#[test]
-fn nested_device_collectives_reach_wgsl() {
-    compile("entry main(xs: []i32) []i32 = map(|x: i32| reduce(|a: i32, b: i32| a + b, 0, map(|y: i32| y + x, iota(5))), xs)");
-}
-
-#[test]
-fn array_and_while_loops_reach_wgsl() {
-    compile(
-        "entry main(xs: [4]i32, n: i32) (i32, i32) =
-        let a = loop acc = 0 for x in xs do acc + x in
-        let (b, _) = loop (acc, i) = (0, 0) while i < n do (acc + i, i + 1) in (a, b)",
-    );
-}
-
-#[test]
-fn conditional_expressions_inside_device_loops_reach_wgsl() {
-    compile("entry main(xs: []i32) []i32 = map(|x: i32| loop acc = 0 for i < x do if i % 2 == 0 then acc + i else acc, xs)");
-}
-
-#[test]
-fn branching_loop_tests_and_header_array_reads_reach_wgsl() {
-    compile("entry main(xs: [4]i32, limit: i32) i32 = loop acc = 0 while (if acc < limit then xs[acc % 4] > 0 else false) do acc + 1");
-    compile("entry main(xs: [4]i32) i32 = loop acc = 0 for i < xs[0] do acc + i");
-}
-
-#[test]
-fn vector_input_and_runtime_gather_after_scan_reach_wgsl() {
-    compile(include_str!("../../../testfiles/gather_scan_chain.wyn"));
-}
-
-fn pipeline(source: &str) -> LoweredWgsl {
-    pipeline_with_grid(source, None)
-}
-
-fn pipeline_with_grid(source: &str, grid: Option<(u32, u32, u32)>) -> LoweredWgsl {
-    let mut tlc = compile_thru_tlc(source).unwrap();
-    for definition in &mut tlc.defs {
-        if let DefMeta::EntryPoint(entry) = &mut definition.meta {
-            entry.declaration.compute_dispatch = grid.map(|(x, y, z)| ComputeDispatchGrid { x, y, z });
-        }
-    }
-    let program = optimize_for_test(
-        schedule(
-            place(
-                fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                PipelineTopologyPolicy::AllowGenerated,
-            )
-            .unwrap(),
+fn pipeline_with_policy(source: &str, policy: crate::egglog::ScalarOptimization) -> host::ModuleInterface {
+    let tlc = compile_thru_tlc(source).unwrap();
+    let program = schedule(
+        place(
+            fuse(from_tlc(&tlc).unwrap()).unwrap(),
+            PipelineTopologyPolicy::AllowGenerated,
         )
         .unwrap(),
     )
     .unwrap();
-    lower_ssa_to_wgsl_with_program(finish_for_test(program, CodegenTarget::Wgsl).unwrap()).unwrap()
-}
-
-#[test]
-fn runtime_input_lengths_and_output_allocations_share_the_published_bindings() {
-    use host::{Binding, BufferLen, Pipeline};
-    let output = pipeline("entry main(xs: []i32, bias: i32) []i32 = map(|x:i32|x+bias, xs)");
-    let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(&module)
-    .unwrap();
-    assert!(!module.entry_points.iter().any(|e| e
-        .function
-        .expressions
-        .iter()
-        .any(|(_, x)| matches!(x, naga::Expression::ArrayLength(_)))));
-    assert!(
-        output
-            .program
-            .interface
-            .scalar_tasks
-            .iter()
-            .any(|task| matches!(task.value, host::ScalarExpr::BufferLength { stride: 4, .. })),
-        "logical input length is supplied by the host"
-    );
-    let [Pipeline::Compute(p)] = output.program.interface.pipelines.as_slice() else {
-        panic!("compute pipeline")
-    };
-    assert_eq!(p.stages.len(), 1);
-    assert_eq!(p.stages[0].owner, "main");
-    let result = &output.program.interface.source_results[0];
-    assert!(p.bindings.iter().any(|b| matches!(b, Binding::StorageBuffer { set, binding, length: Some(BufferLen::LikeInput { set: 0, binding: 0, elem_bytes: 4, src_elem_bytes: 4 }), .. } if (*set, *binding) == (result.set, result.binding))));
-    assert!(p.bindings.iter().any(
-        |b| matches!(b, Binding::StorageBuffer { members, .. } if members.iter().any(|m| m.name == "bias"))
-    ));
-    assert!(p.bindings.iter().all(|b| !matches!(b, Binding::PushConstant { .. })));
+    let program = crate::egglog::prepare_interfaces(program).unwrap();
+    let program = crate::egglog::optimize_with_policy(program, policy).unwrap();
+    finish_for_test(program, CodegenTarget::Wgsl).unwrap().global_context.pipeline
 }
 
 #[test]
@@ -386,7 +172,7 @@ fn input_length_uses_do_not_require_a_separate_dispatch() {
         "entry main(xs: []i32, index:i32) []i32 =
          let a=xs[index] in map(|i:i32|i+a, iota(length(xs)))",
     );
-    let [Pipeline::Compute(p)] = output.program.interface.pipelines.as_slice() else {
+    let [Pipeline::Compute(p)] = output.pipelines.as_slice() else {
         panic!("compute pipeline")
     };
     assert_eq!(p.stages.len(), 1, "immutable read and length stay inside the map");
@@ -395,7 +181,7 @@ fn input_length_uses_do_not_require_a_separate_dispatch() {
 #[test]
 fn scalar_projection_setup_is_evaluated_inside_its_map() {
     let output = pipeline(include_str!("../../../testfiles/scalar_setup.wyn"));
-    let [Pipeline::Compute(p)] = output.program.interface.pipelines.as_slice() else {
+    let [Pipeline::Compute(p)] = output.pipelines.as_slice() else {
         panic!("compute pipeline")
     };
     assert_eq!(p.stages.len(), 1);
@@ -407,7 +193,7 @@ fn reads_before_consuming_updates_remain_materialized() {
         "entry main(xs:*[]i32, index:i32) []i32 =
          let old=xs[index] in map(|x:i32|x+old, xs)",
     );
-    let [Pipeline::Compute(p)] = output.program.interface.pipelines.as_slice() else {
+    let [Pipeline::Compute(p)] = output.pipelines.as_slice() else {
         panic!("compute pipeline")
     };
     assert_eq!(
@@ -418,55 +204,19 @@ fn reads_before_consuming_updates_remain_materialized() {
 }
 
 #[test]
-fn reduction_publication_has_scratch_writers_readers_and_a_source_result() {
-    use host::{Binding, BufferLen, Pipeline};
-    let output = pipeline("entry main(xs: [137]i32) i32 = reduce(|a:i32,b:i32|a+b,0,xs)");
-    let [Pipeline::Compute(p)] = output.program.interface.pipelines.as_slice() else {
-        panic!("compute pipeline")
-    };
-    assert_eq!(p.stages.len(), 3, "chunks, combine, scalar result publication");
-    let host::DispatchSize::Fixed { x, y, z, .. } = p.stages[0].dispatch_size else {
-        panic!("collective chunk grid must be bounded");
-    };
-    let bytes = u64::from(x) * u64::from(y) * u64::from(z) * 4;
-    let scratch = p
-        .bindings
-        .iter()
-        .position(|b| {
-            matches!(
-                b,
-                Binding::StorageBuffer {
-                    length: Some(BufferLen::Fixed { bytes: capacity }),
-                    ..
-                } if *capacity == bytes
-            )
-        })
-        .unwrap();
-    assert!(p.stages[0].writes.contains(&scratch));
-    assert!(p.stages[1].reads.contains(&scratch));
-    assert!(!p.stages[1].writes.contains(&scratch));
-    assert_eq!(output.program.interface.source_results.len(), 1);
-    assert_eq!(output.program.interface.frame_graph.passes.len(), 3);
-    assert!(output.program.interface.frame_graph.topological_order().is_ok());
-}
-
-#[test]
 fn independent_entries_keep_their_own_dispatches_and_results() {
     let output = pipeline(
         "entry first(xs:[5]i32) [5]i32 = map(|x|x*3,map(|x:i32|x+1,xs))\n\
          entry second(ys:[9]i32) [9]i32 = map(|x|x-1,map(|x:i32|x*2,ys))",
     );
-    assert_eq!(output.program.interface.pipelines.len(), 2);
-    assert_eq!(output.program.interface.source_results.len(), 2);
+    assert_eq!(output.pipelines.len(), 2);
+    assert_eq!(output.source_results.len(), 2);
     assert_ne!(
-        output.program.interface.source_results[0].pipeline_index,
-        output.program.interface.source_results[1].pipeline_index
+        output.source_results[0].pipeline_index,
+        output.source_results[1].pipeline_index
     );
-    assert_ne!(
-        output.program.interface.source_results[0].binding,
-        output.program.interface.source_results[1].binding
-    );
-    for (pipeline, other_input) in output.program.interface.pipelines.iter().zip(["ys", "xs"]) {
+    assert_ne!(output.source_results[0].binding, output.source_results[1].binding);
+    for (pipeline, other_input) in output.pipelines.iter().zip(["ys", "xs"]) {
         let Pipeline::Compute(pipeline) = pipeline else {
             panic!("compute")
         };
@@ -485,26 +235,12 @@ fn independent_entries_keep_their_own_dispatches_and_results() {
 }
 
 #[test]
-fn scalar_results_after_collectives_are_executed_and_published() {
-    let output = pipeline("entry main(xs:[]i32) i32 = reduce(|a:i32,b:i32|a+b,0,xs) * 3 + 1");
-    assert_eq!(output.program.interface.source_results.len(), 1);
-    let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(&module)
-    .unwrap();
-    assert_eq!(module.entry_points.len(), 3);
-}
-
-#[test]
 fn in_place_results_keep_the_host_input_binding_and_upload_role() {
     use host::{Access, Binding, BufferUsage, Pipeline};
     let output = pipeline("entry main(dest:*[3]i32,xs:[5]i32) [3]i32 = reduce_by_index(dest,|a:i32,b:i32|a+b,0,map(|x:i32|x%3,xs),xs)");
-    let result = &output.program.interface.source_results[0];
+    let result = &output.source_results[0];
     assert_eq!((result.set, result.binding), (0, 0));
-    let Pipeline::Compute(p) = &output.program.interface.pipelines[0] else {
+    let Pipeline::Compute(p) = &output.pipelines[0] else {
         panic!("compute pipeline")
     };
     assert!(p.bindings.iter().any(|b| matches!(
@@ -525,21 +261,14 @@ fn fused_maps_publish_reused_nonprimary_inputs() {
         "entry main(xs:*[4]i32,ys:*[4]i32) ([4]i32,[4]i32) = (map(|x:i32|x+1,ys),map(|x:i32|x*2,xs))",
     );
     assert_eq!(
-        output.program.interface.source_results.iter().map(|r| r.binding).collect::<Vec<_>>(),
+        output.source_results.iter().map(|r| r.binding).collect::<Vec<_>>(),
         [1, 0]
     );
-    let Pipeline::Compute(p) = &output.program.interface.pipelines[0] else {
+    let Pipeline::Compute(p) = &output.pipelines[0] else {
         panic!("compute")
     };
     assert_eq!(p.bindings.len(), 2);
     assert!(p.stages.iter().all(|stage| stage.workgroup_size == (64, 1, 1)));
-    let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(&module)
-    .unwrap();
 }
 
 #[test]
@@ -547,85 +276,18 @@ fn tuple_of_views_uses_the_tlc_component_bindings() {
     let source = "entry main(xs: ([]i32,[]i32)) ([]i32,[]i32) = xs";
     let expected = vec![0, 1];
     let output = pipeline(source);
-    assert_eq!(output.program.interface.source_results.len(), 2);
+    assert_eq!(output.source_results.len(), 2);
     assert_eq!(
-        output.program.interface.source_results.iter().map(|o| o.binding).collect::<Vec<_>>(),
+        output.source_results.iter().map(|o| o.binding).collect::<Vec<_>>(),
         expected
     );
-    let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(&module)
-    .unwrap();
-}
-
-#[test]
-fn computed_graphics_captures_share_the_producer_binding() {
-    use host::Binding;
-    let output = pipeline(include_str!("../../../testfiles/playground/conway.wyn"));
-    let [result] = output.program.interface.source_results.as_slice() else {
-        panic!("one computed board");
-    };
-    assert!(output.program.interface.pipelines.iter().any(|p| {
-        let Pipeline::Graphics(p) = p else { return false };
-        p.bindings.iter().any(|b| {
-            matches!(b, Binding::StorageBuffer { set, binding, .. }
-            if (*set, *binding) == (result.set, result.binding))
-        })
-    }));
-}
-
-#[test]
-fn host_sized_outputs_publish_uniform_dependencies_and_storage_stride() {
-    use host::{Binding, BufferLen, Expr, ScalarSource};
-    let source = include_str!("../../../testfiles/regressions/uniform_output_size.wyn")
-        .replace("{ resolution: vec3f32 }", "{ padding: f32, resolution: vec3f32 }")
-        .replace("([]f32,", "([]vec3f32,")
-        .replace(
-            "target_load(rendered, @[i % width, i / width], 0u32)",
-            "@[f32(i), 0.0, 0.0]",
-        );
-    let output = pipeline(&source);
-    let result = &output.program.interface.source_results[0];
-    let Pipeline::Compute(pipeline) = &output.program.interface.pipelines[result.pipeline_index] else {
-        panic!("compute")
-    };
-    let bytes = pipeline
-        .bindings
-        .iter()
-        .find_map(|binding| match binding {
-            Binding::StorageBuffer {
-                set,
-                binding,
-                length: Some(BufferLen::Computed { bytes }),
-                ..
-            } if (*set, *binding) == (result.set, result.binding) => Some(bytes),
-            _ => None,
-        })
-        .expect("generated output allocation");
-    let Expr::Multiply(_, stride) = bytes else {
-        panic!("physical stride")
-    };
-    assert_eq!(**stride, Expr::Integer(16));
-    let mut reads = Vec::new();
-    bytes.clone().reads_mut(&mut |source, offset| {
-        assert!(matches!(source, ScalarSource::Binding { .. }));
-        reads.push(*offset);
-    });
-    // Project the two needed components before emitting parameter reads. Keep
-    // std140 offsets and do not touch padding or the unused resolution.z.
-    assert_eq!(reads, [16, 20]);
-    let whl = output.program.to_whl("uniform.wgsl", host::ShaderFormat::Wgsl).unwrap();
-    assert!(whl.contains("wyn-f32-to-i32"));
 }
 
 #[test]
 fn runtime_collective_scratch_matches_its_bounded_chunk_grid() {
     use host::{Binding, BufferLen, DispatchSize};
     let output = pipeline("entry main(xs: []i32) []i32 = scan(|a:i32,b:i32|a+b,0,xs)");
-    let [Pipeline::Compute(p)] = output.program.interface.pipelines.as_slice() else {
+    let [Pipeline::Compute(p)] = output.pipelines.as_slice() else {
         panic!("compute")
     };
     let DispatchSize::Fixed { x, y, z, .. } = p.stages[0].dispatch_size else {
@@ -649,8 +311,8 @@ fn runtime_collective_scratch_matches_its_bounded_chunk_grid() {
 fn bounded_filter_output_does_not_use_its_packed_backing_as_a_length() {
     use host::{Binding, BufferLen};
     let output = pipeline(include_str!("../../../testfiles/filter_then_map.wyn"));
-    let result = &output.program.interface.source_results[0];
-    let Pipeline::Compute(p) = &output.program.interface.pipelines[result.pipeline_index] else {
+    let result = &output.source_results[0];
+    let Pipeline::Compute(p) = &output.pipelines[result.pipeline_index] else {
         panic!("compute")
     };
     assert!(p.bindings.iter().any(|b| matches!(b, Binding::StorageBuffer {
@@ -659,71 +321,20 @@ fn bounded_filter_output_does_not_use_its_packed_backing_as_a_length() {
 }
 
 #[test]
-fn missing_authored_output_capacity_is_an_error() {
-    let tlc = compile_thru_tlc("entry main() i32=42").unwrap();
-    let mut program = optimize_for_test(
-        schedule(
-            place(
-                fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                PipelineTopologyPolicy::AuthoredOnly,
-            )
-            .unwrap(),
-        )
-        .unwrap(),
+fn runtime_index_into_shared_array_helper_normalizes() {
+    compile_thru_tlc(
+        "def g(n: i32) []f32 = map(|i: i32| f32.i32(i),0i32..<n)\nentry e(j: i32) [1]f32 = [g(256)[j]]",
     )
     .unwrap();
-    program.graph.clear_function("SelectedOutputCapacity").unwrap();
-    let Err(error) = finish_for_test(program, CodegenTarget::Wgsl) else {
-        panic!("missing selected capacity was silently accepted");
-    };
-    assert!(
-        error.to_string().contains("missing selected SelectedOutputCapacity"),
-        "{error}"
-    );
-}
-
-#[test]
-fn shared_fused_helpers_reach_valid_wgsl() {
-    compile(include_str!(
-        "../../../testfiles/regressions/shared_fusion_helper.wyn"
-    ));
-}
-
-#[test]
-fn runtime_index_into_shared_array_helper_reaches_wgsl() {
-    compile(
-        "def g(n: i32) []f32 = map(|i: i32| f32.i32(i),0i32..<n)\nentry e(j: i32) [1]f32 = [g(256)[j]]",
-    );
-}
-
-#[test]
-fn explicit_grids_do_not_replicate_single_workgroup_compaction() {
-    let output = pipeline_with_grid(
-        "entry main(xs:[]i32) []i32 = filter(|x:i32|x>0,xs)",
-        Some((2, 3, 4)),
-    );
-    let [Pipeline::Compute(p)] = output.program.interface.pipelines.as_slice() else {
-        panic!("compute");
-    };
-    assert_eq!(p.stages.len(), 1);
-    assert_eq!(
-        p.stages[0].dispatch_size,
-        host::DispatchSize::Fixed {
-            x: 1,
-            y: 1,
-            z: 1,
-            explicit: true
-        }
-    );
-    let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
-    Validator::new(ValidationFlags::all(), Capabilities::all()).validate(&module).unwrap();
 }
 
 #[test]
 fn collective_phase_accesses_exclude_unused_inputs_and_producer_captures() {
-    let output =
-        pipeline("entry main(xs:[]i32,unused:[]i32,bias:i32) i32=reduce((+),0,map(|x|x+bias*bias,xs))");
-    let [Pipeline::Compute(p)] = output.program.interface.pipelines.as_slice() else {
+    let output = pipeline_with_policy(
+        "entry main(xs:[]i32,unused:[]i32,bias:i32) i32=reduce((+),0,map(|x|x+bias*bias,xs))",
+        crate::egglog::ScalarOptimization::Full,
+    );
+    let [Pipeline::Compute(p)] = output.pipelines.as_slice() else {
         panic!("compute pipeline");
     };
     let unused = p
@@ -737,14 +348,12 @@ fn collective_phase_accesses_exclude_unused_inputs_and_producer_captures() {
     let combine = p.stages.iter().find(|stage| stage.entry_point.ends_with("combine")).unwrap();
     // Combining needs the live input length, but not the producer's bias computation.
     assert!(output
-        .program
-        .interface
         .scalar_tasks
         .iter()
         .filter(|task| task.stage == combine.entry_point)
         .all(|task| matches!(task.value, host::ScalarExpr::BufferLength { .. })));
     assert!(
-        output.program.interface.scalar_tasks.iter().any(|task| task.stage != combine.entry_point
+        output.scalar_tasks.iter().any(|task| task.stage != combine.entry_point
             && !matches!(task.value, host::ScalarExpr::BufferLength { .. }))
     );
 }

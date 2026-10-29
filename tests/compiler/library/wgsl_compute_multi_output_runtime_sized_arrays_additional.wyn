@@ -1,0 +1,2 @@
+entry gen(src: []f32) ([]f32, []f32) =
+    (map(|x: f32| x * 2.0, src), map(|x: f32| x * 3.0, src))

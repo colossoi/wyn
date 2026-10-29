@@ -5,6 +5,18 @@
 --! [[artifacts]]
 --! path = "output.wynhost"
 --! contains = [":source-name \"check\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"compiler_repro_boolean_record_0_check\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"compiler_repro_boolean_record_1_check\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"record_update_handles_loop_state_and_record_fields_0_main\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"record_update_handles_loop_state_and_record_fields_1_main\""]
 
 type inner = { flag: bool, values: [3]i32 }
 type state = { count: i32, inner: inner }
@@ -17,3 +29,27 @@ entry check(xs: []i32) []i32 =
     old.count + old.inner.values[1] + next.count + next.inner.values[2]
       + last.inner.values[2] + (if old.inner.flag then 1000 else 0)
       + (if next.inner.flag && last.inner.flag then 100 else 0), xs)
+
+-- compiler_repro_boolean_record
+type compiler_repro_boolean_record_0_config = { enabled: bool, scale: f32 }
+
+entry compiler_repro_boolean_record_0_check(compiler_repro_boolean_record_0_config: compiler_repro_boolean_record_0_config, xs: []f32) []f32 =
+  map(|x: f32| if compiler_repro_boolean_record_0_config.enabled then x * compiler_repro_boolean_record_0_config.scale else x, xs)
+
+-- compiler_repro_boolean_record
+type compiler_repro_boolean_record_1_config = { flags: { enabled: bool }, scale: f32 }
+         entry compiler_repro_boolean_record_1_check(compiler_repro_boolean_record_1_config: compiler_repro_boolean_record_1_config, xs: []f32) []f32 =
+           map(|x| if compiler_repro_boolean_record_1_config.flags.enabled then x*compiler_repro_boolean_record_1_config.scale else x, xs)
+
+-- record_update_handles_loop_state_and_record_fields
+type record_update_handles_loop_state_and_record_fields_0_state = { x: i32, pair: { y: i32, z: i32 } }
+        entry record_update_handles_loop_state_and_record_fields_0_main(x: i32) record_update_handles_loop_state_and_record_fields_0_state =
+        loop s = { x = x, pair = { y = 1, z = 2 } } for i < 4 do
+          (s with pair.y = s.pair.y + s.x) with x = s.x + 1
+
+-- record_update_handles_loop_state_and_record_fields
+entry record_update_handles_loop_state_and_record_fields_1_main(xs: [3]i32, ys: [3]i32, n: i32) []i32 =
+        let original = { count = n, data = xs } in
+        let next = original with count = n + 1 in
+        let last = next with data = ys in
+        map(|x: i32| x + next.count + last.count, last.data)

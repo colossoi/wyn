@@ -575,7 +575,13 @@ fn generic_integer_math_folds_scalar_and_vector_constants() {
 #[test]
 fn constant_vectors_remain_valid_arguments_to_polymorphic_helpers() {
     let source = "def pair(x) = (x, x)\ndef p = pair(@[1.0, 2.0])\nentry e() (vec2f32, vec2f32) = p";
-    crate::compile_thru_spirv(source).expect("constant vector through generic helper");
+    let program = partial_source_program(source);
+    let body = partial_definition_body(&program, "e");
+    let TermKind::App { args, .. } = &body.kind else {
+        panic!("expected retained helper call: {body:?}");
+    };
+    assert_eq!(args.len(), 1);
+    assert_float_vector(&args[0], &[1.0, 2.0]);
 }
 
 #[test]
@@ -1547,4 +1553,45 @@ fn signed_literals_keep_signed_range_checks() {
         i64::MAX
     );
     assert!(super::parse_integer_value("18446744073709551615", &ty).is_err());
+}
+
+#[test]
+fn constant_rng_seed_folds_with_wrapping_arithmetic() {
+    let body = partial_source_body(
+        "entry seed() u32 =
+        let s = 2326157778u32 in
+        let w = ((s >> ((s >> 28u32) + 4u32)) ^ s) * 277803737u32 in
+        (w >> 22u32) ^ w",
+        "seed",
+    );
+    assert!(
+        matches!(body.kind, TermKind::IntLit(ref value) if value == "2419168863"),
+        "{body:?}"
+    );
+}
+
+#[test]
+fn lexical_scope_and_helper_arguments_fold_independently() {
+    let program = partial_source_program(
+        "def a(x:i32) i32=x+1
+        def b(x:i32) i32=x-1
+        def aliases(a:i32) i32=let x=a in let y=x+7 in let x=y*2 in x+y
+        module S = { def run(x:i32) i32 = loop x=x for i<8 do x+i }
+        entry alias_value() i32=aliases(3)
+        entry argument_value() i32=a(2)+b(9)
+        entry select_yes() i32=if true then a(2) else b(9)
+        entry select_no() i32=if false then a(2) else b(9)",
+    );
+    for (name, expected) in [
+        ("alias_value", "30"),
+        ("argument_value", "11"),
+        ("select_yes", "3"),
+        ("select_no", "8"),
+    ] {
+        let body = partial_definition_body(&program, name);
+        assert!(
+            matches!(&body.kind, TermKind::IntLit(value) if value == expected),
+            "{name}: {body:?}"
+        );
+    }
 }

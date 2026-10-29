@@ -1,0 +1,6 @@
+entry main(xs:[5]i32) [5]i32 =
+        loop xs=xs for i<2 do
+        let bins=map(|x|x & 3,xs) in
+        let offsets=scan(|(a,b,c,d),(e,f,g,h)|(a+e,b+f,c+g,d+h),
+            (0,0,0,0),map(|x|(1,1,1,1),xs)) in
+        map(|(bin,(a,b,c,d))|i32(bin)+a+b+c+d,zip(bins,offsets))

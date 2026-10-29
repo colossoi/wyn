@@ -1,0 +1,2 @@
+entry main(xs:[]i32) []i32 = if length(xs)>10 then replicate(0,0i32)
+         else if length(xs)>5 then replicate(2,7i32) else xs

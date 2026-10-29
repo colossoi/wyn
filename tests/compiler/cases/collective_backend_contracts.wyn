@@ -10,6 +10,9 @@
 --! [[shader]]
 --! entry = "compact_filter"
 --! entry_count = 1
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"filters_of_tuples_with_boolean_fields_0_kept\""]
 
 entry conditional_array(xs:[]i32,flag:bool) ([]i32,[1]i32)=let n=xs[0] in (map(|x|x+n,xs),if flag then [n] else [n+1])
 entry fixed_array(xs:[]i32) ([]i32,[1]i32)=let n=xs[0] in (map(|x|x+n,xs),[n])
@@ -21,3 +24,6 @@ entry ints(xs:[]i32) i32=reduce(|a:i32,b:i32|a+b,0,xs)
 entry floats(xs:[]f32) f32=reduce(|a:f32,b:f32|a+b,0.0,xs)
 entry prefix_scan(xs:[]i32) []i32=scan(|a:i32,b:i32|a+b,0,xs)
 entry compact_filter(xs:[]i32) ?k.[k]i32=filter(|x:i32|x%3==1,xs)
+
+-- filters_of_tuples_with_boolean_fields
+entry filters_of_tuples_with_boolean_fields_0_kept(xs:[]i32) [](i32,bool)=filter(|(x,b)|b,map(|x|(x,x>0),xs))

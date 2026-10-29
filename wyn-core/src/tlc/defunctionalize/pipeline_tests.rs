@@ -13,9 +13,7 @@ fn unapplied_callback_remains_a_function_value_after_partial_evaluation() {
     let source = "def bits(xs:[]i32,get_bit:i32 -> i32 -> i32,bit:i32) []i32 =
         map(|x|get_bit(bit,x),xs)
         entry main() []i32 = bits([-2147483648,0,2147483647],i32.get_bit,31)";
-    let program = crate::compile_thru_ssa(source).unwrap();
-    crate::lower_ssa_to_spirv(program.clone()).unwrap();
-    crate::lower_ssa_to_wgsl(program).unwrap();
+    assert_callable_program_normalizes(source);
 }
 
 #[test]
@@ -25,9 +23,7 @@ fn integer_get_bit_can_be_passed_through_a_capturing_callback() {
         def signed_bits(xs:[]i32, get_bit:i32 -> i32 -> i32, bit:i32) []i32 =
         bits(xs,|i,x|if i==31 then get_bit(i,x)^1 else get_bit(i,x),bit)
         entry main(xs:[]i32,bit:i32) []i32 = signed_bits(xs,i32.get_bit,bit)";
-    let program = crate::compile_thru_ssa(source).unwrap();
-    crate::lower_ssa_to_spirv(program.clone()).unwrap();
-    crate::lower_ssa_to_wgsl(program).unwrap();
+    assert_callable_program_normalizes(source);
 }
 
 #[test]
@@ -36,9 +32,18 @@ fn multiple_callable_arguments_are_fully_specialized() {
         if x<0 then f(x) else g(x)
         entry main(xs:[]i32,bias:i32) []i32 =
         map(|x|combine(|y|y+bias,|y|y*bias,x),xs)";
-    let program = crate::compile_thru_ssa(source).unwrap();
-    crate::lower_ssa_to_spirv(program.clone()).unwrap();
-    crate::lower_ssa_to_wgsl(program).unwrap();
+    assert_callable_program_normalizes(source);
+}
+
+fn assert_callable_program_normalizes(source: &str) {
+    let program = crate::compile_thru_tlc(source).expect("callable source must normalize");
+    let entry =
+        program.defs.iter().find(|def| matches!(def.meta, DefMeta::EntryPoint(_))).expect("entry retained");
+    let (body, _) = crate::tlc::extract_lambda_params_ref(&entry.body);
+    assert!(
+        !super::hof_specialize::is_arrow_type(&body.ty),
+        "entry result must be a value"
+    );
 }
 
 /// End-to-end runner for the three internal defunctionalization algorithms. Mirrors what
@@ -780,4 +785,31 @@ fn specialized_hof_preserves_diet_order_and_return_with_captures() {
         ],
     );
     assert_eq!(specialized.return_diet, types::Diet::Leaf(true));
+}
+
+#[test]
+fn scalar_control_flow_sources_preserve_entry_parameters() {
+    for (name,source) in [
+        ("loops_with_accumulators_reach_both_backends", "entry sum(n:i32) i32=loop acc=0 for i<n do acc+i"),
+        ("tuples_and_vectors_reach_both_backends", "entry pair(x:i32) (i32,i32)=(x+1,x*2)"),
+        ("nested_loop_invariants_keep_outer_iteration_dependencies", "entry nested(xs:[]i32) []i32 = map(|x:i32| loop a=0 for i<4 do a+(loop b=0 for j<3 do b+x*i+j), xs)"),
+        ("guarded_partial_arithmetic_keeps_its_control_dependency_inside_loops", "entry guarded(xs:[]i32) []i32 = map(|x:i32| loop a=0 for i<7 do a+(if x==0 then i else 120/x+i), xs)"),
+        ("module_counted_loop_counters_have_distinct_types", "module S = { def run(x:i32) i32 = loop x=x for i<8 do x+i }
+        entry main() (i32,i32) = (S.run(1),S.run(2))"),
+        ("scalar_loop_reaches_the_existing_wgsl_backend", "entry main(n: i32) i32 = loop acc = 0 for i < n do acc + i"),
+        ("array_and_while_loops_reach_wgsl", "entry main(xs: [4]i32, n: i32) (i32, i32) =
+        let a = loop acc = 0 for x in xs do acc + x in
+        let (b, _) = loop (acc, i) = (0, 0) while i < n do (acc + i, i + 1) in (a, b)"),
+        ("conditional_expressions_inside_device_loops_reach_wgsl", "entry main(xs: []i32) []i32 = map(|x: i32| loop acc = 0 for i < x do if i % 2 == 0 then acc + i else acc, xs)"),
+        ("branching_loop_tests_and_header_array_reads_reach_wgsl", "entry main(xs: [4]i32, limit: i32) i32 = loop acc = 0 while (if acc < limit then xs[acc % 4] > 0 else false) do acc + 1"),
+        ("branching_loop_tests_and_header_array_reads_reach_wgsl", "entry main(xs: [4]i32) i32 = loop acc = 0 for i < xs[0] do acc + i"),
+    ] {
+        let program=crate::compile_thru_tlc(source).unwrap_or_else(|error|panic!("{name}: {error}"));
+        let entries:Vec<_>=program.defs.iter().filter(|definition|matches!(definition.meta,DefMeta::EntryPoint(_))).collect();
+        assert!(!entries.is_empty(),"{name}: entry was lost during TLC normalization");
+        for entry in entries {
+            let (_,parameters)=tlc::extract_lambda_params_ref(&entry.body);
+            assert_eq!(parameters.len(),entry.arity,"{name}: normalized entry parameter arity");
+        }
+    }
 }

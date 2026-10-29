@@ -196,3 +196,102 @@ fn invalid_return_shape_is_reported_to_backend_cleanup() {
     assert!(program.run("main", &[], &mut backend).is_err());
     assert!(backend.0);
 }
+
+#[test]
+fn scalar_arithmetic_and_short_circuit_values() {
+    for (source, expected) in [
+        (
+            "(let ((n (i32 7))) (wyn-i32-add (wyn-i32-mul n n) (i32 1)))",
+            Number::I32(50),
+        ),
+        (
+            "(let ((x (f32 0.5))) (wyn-f32-add (wyn-f32-sin x) (wyn-f32-mul x x)))",
+            Number::F32(0.5f32.sin() + 0.25),
+        ),
+        (
+            "(let ((n (i32 0))) (if (wyn-i32-eq n (i32 0)) (i32 7) (wyn-i32-div (i32 12) n)))",
+            Number::I32(7),
+        ),
+        (
+            "(if (wyn-f32-ne (wyn-f32-bits (u32 2143289344)) (f32 0)) 1 0)",
+            Number::I32(0),
+        ),
+    ] {
+        assert_eq!(expression(source).unwrap(), Value::Number(expected), "{source}");
+    }
+    for n in [0, 5] {
+        let source = format!("(do ((i (i32 0) (wyn-i32-add i (i32 1))) (acc (i32 0) (wyn-i32-add acc (wyn-i32-mul i i)))) ((wyn-i32-ge i (i32 {n})) acc))");
+        assert_eq!(
+            expression(&source).unwrap(),
+            Value::Number(Number::I32((0..n).map(|i| i * i).sum()))
+        );
+    }
+    for (source, nan) in [
+        ("(wyn-f32-div (f32 1) (f32 0))", false),
+        ("(wyn-f32-sqrt (f32 -1))", true),
+    ] {
+        let Value::Number(Number::F32(value)) = expression(source).unwrap() else {
+            panic!("f32 result");
+        };
+        assert_eq!(value.is_nan(), nan);
+        assert!(value.is_nan() || value.is_infinite());
+    }
+}
+
+#[test]
+fn scalar_calls_bind_independent_invocations_and_loop_scope() {
+    let program = Program::parse(
+        "(define-host-program :version 1)
+        (defun square (n) (wyn-i32-mul n n))
+        (defun twice (n) (wyn-i32-add n n))
+        (defun calls (n) (wyn-i32-add (square n) (square (wyn-i32-add n (i32 1)))))
+        (defun loops (n) (do ((acc (i32 0) (wyn-i32-add (twice acc) (i32 1)))) ((wyn-i32-ge acc n) acc)))",
+    )
+    .unwrap();
+    for (function, argument, expected) in [("calls", 3, 25), ("loops", 10, 15)] {
+        assert_eq!(
+            crate::eval::run(
+                &program,
+                function,
+                &[Value::Number(Number::I32(argument))],
+                &mut Trace::default()
+            )
+            .unwrap()
+            .materialize()
+            .unwrap(),
+            Value::Number(Number::I32(expected))
+        );
+    }
+}
+
+#[test]
+fn packed_scalar_words_preserve_unsigned_and_boolean_values() {
+    let program = Program::parse(
+        "(define-host-program :version 1)
+        (defun difference (buffer)
+          (let ((a (host-read-scalar buffer 0 'u32)) (b (host-read-scalar buffer 4 'u32)))
+            (if (wyn-u32-gt a b) (wyn-u32-sub a b) (wyn-u32-sub b a))))
+        (defun enabled (buffer)
+          (let ((enabled (host-read-scalar buffer 0 'bool)) (n (host-read-scalar buffer 4 'i32)))
+            (if enabled (wyn-i32-mul n n) n)))
+        (defun boolean (buffer) (gpu-write-scalar buffer 0 'bool (wyn-i32-gt (i32 3) (i32 2))))",
+    )
+    .unwrap();
+    for (function, words, expected) in [
+        ("difference", [u32::MAX, 1], Number::U32(u32::MAX - 1)),
+        ("enabled", [1, 3], Number::I32(9)),
+        ("enabled", [0, 3], Number::I32(3)),
+    ] {
+        let mut backend = Trace::default();
+        let buffer = backend.input(words.into_iter().flat_map(u32::to_le_bytes).collect());
+        assert_eq!(
+            crate::eval::run(&program, function, &[buffer], &mut backend).unwrap().materialize().unwrap(),
+            Value::Number(expected)
+        );
+        assert!(backend.device_reads.is_empty());
+    }
+    let mut backend = Trace::default();
+    let buffer = backend.input(vec![0; 4]);
+    crate::eval::run(&program, "boolean", &[buffer.clone()], &mut backend).unwrap();
+    assert_eq!(backend.buffers[&buffer.handle().unwrap()], 1u32.to_le_bytes());
+}

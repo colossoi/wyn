@@ -29,6 +29,12 @@
 --! targets = ["wgsl"]
 --! entry_count = 1
 --! parameter_loads = { "0" = 1 }
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"filtered_reduction_and_shared_count_reach_wgsl_0_main\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"mapped_filter_result_keeps_its_runtime_sized_view_0_filter_then_map\""]
 
 -- Migrated from filter_then_user_helper_static_capacity
 def filter_then_user_helper_static_capacity_sum<[n]>(arr: [n]i32) i32 = reduce(|a: i32, b: i32| a + b, 0, arr)
@@ -83,3 +89,13 @@ entry compaction_0_kept(xs:[]i32) []i32=filter(|x|x>0,map(|x|x*x+17,xs))
 entry compaction_1_kept(xs:[]i32) []{x:i32,y:i32}=filter(|p|p.x>0,map(|x|{x=x,y=x*3+1},xs))
 
 entry compaction_2_kept(xs:[]i32) []{x:i32,keep:bool}=filter(|p|p.keep,map(|x|{x=x,keep=x>0},xs))
+
+-- filtered_reduction_and_shared_count_reach_wgsl
+entry filtered_reduction_and_shared_count_reach_wgsl_0_main(xs: []i32) (i32,i32) =
+        let kept=filter(|x:i32|x>0,xs) in
+        (length(kept),reduce(|a:i32,b:i32|a+b,0,kept))
+
+-- mapped_filter_result_keeps_its_runtime_sized_view
+entry mapped_filter_result_keeps_its_runtime_sized_view_0_filter_then_map() []i32 =
+  let kept = filter(|i| i % 2 == 0, iota(4096)) in
+  map(|i| i + 1, kept)

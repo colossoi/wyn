@@ -1,0 +1,1 @@
+entry main(n:i32) []i32 = iota(n*2+3)

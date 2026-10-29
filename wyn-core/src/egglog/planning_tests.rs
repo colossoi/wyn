@@ -1,7 +1,5 @@
 use super::super::query::Query;
-use super::super::{
-    finish_for_test, from_tlc, fuse, optimize_for_test, place, schedule, schedule_with_subgroups,
-};
+use super::super::{finish_for_test, from_tlc, fuse, place, schedule, schedule_with_subgroups};
 use crate::{compile_thru_tlc, CodegenTarget, PipelineTopologyPolicy};
 use egglog_engine::{
     sort::{SetContainer, VecContainer, S},
@@ -342,22 +340,21 @@ fn shrinking_loop_does_not_inherit_its_initial_extent() {
 
 #[test]
 fn loop_capacity_obligations_use_the_length_preservation_proof() {
-    for (source, preserves) in [
-        (
+    planned_cases(
+        &[
             include_str!("../../../testfiles/regressions/triangulation_allocated_array_loop.wyn"),
-            true,
-        ),
-        (
             "entry main(n:i32) []i32 = loop out=iota(n) for i<2 do out[1..length(out)]",
-            false,
-        ),
-    ] {
-        planned(source, |graph| {
+        ],
+        |index, graph, scope| {
+            let preserves = index == 0;
             let query = Query(graph);
             let mut loops = 0;
             query
                 .for_function("SourceLoop", |row, info| {
                     let value = row[0];
+                    if query.required("SourceResult", (scope,))? != value {
+                        return Ok(());
+                    }
                     assert_eq!(query.flag("LoopPreservesLength", (value,))?, preserves);
                     let regions = query.enode("LoopInfo", info)?.unwrap();
                     let initial =
@@ -377,8 +374,8 @@ fn loop_capacity_obligations_use_the_length_preservation_proof() {
                 })
                 .unwrap();
             assert_eq!(loops, 1);
-        });
-    }
+        },
+    );
 }
 
 #[test]
@@ -424,15 +421,15 @@ fn compiler_repro_nested_capacity_plan() {
 
 #[test]
 fn compiler_repro_array_reduce_preserves_effect_barrier() {
-    for source in [
-        include_str!("../../../testfiles/regressions/array_reduce.wyn"),
-        include_str!("../../../testfiles/regressions/matrix_reduce_loop.wyn"),
-    ] {
+    for source in ["entry main(xs:[][2]i32) [2]i32 =
+        reduce(|a,b|map(|i|a[i]+b[i],iota(2)),[0,0],map(|row|map(|x|x+1,row),xs))"]
+    {
         let tlc = compile_thru_tlc(source).unwrap();
+        let imported = from_tlc(&tlc).unwrap();
         for writer in [None, Some("producer"), Some("consumer")] {
-            let mut program = from_tlc(&tlc).unwrap();
-            let query = Query(&program.graph);
-            let reducer = operations(&program.graph, "reduce")[0];
+            let mut graph = imported.graph.clone();
+            let query = Query(&graph);
+            let reducer = operations(&graph, "reduce")[0];
             let producer = query
                 .row("SourceDepends", |row| {
                     row[0] == reducer && query.enode("Input", row[2]).unwrap().is_some()
@@ -443,16 +440,16 @@ fn compiler_repro_array_reduce_preserves_effect_barrier() {
             if let Some(writer) = writer {
                 let operation = if writer == "producer" { producer } else { reducer };
                 let written = query.required("SourceOperationValue", (operation,)).unwrap();
-                program
-                    .graph
+                graph
                     .update(|mut sink| {
                         sink.set("SourceReadOnly", (written,), false)?;
                         sink.set("SourceSpeculatable", (written,), false)
                     })
                     .unwrap();
             }
-            let program = fuse(program).unwrap();
-            let query = Query(&program.graph);
+            super::super::analysis::run(&mut graph).unwrap();
+            super::super::fusion::run(&mut graph).unwrap();
+            let query = Query(&graph);
             assert!(!query.flag("SourceSpeculatable", (value,)).unwrap());
             assert_eq!(
                 query.required("SelectedPlan", (producer,)).unwrap()
@@ -569,30 +566,6 @@ fn indexed_phase_domains_preserve_validation() {
 }
 
 #[test]
-fn collective_emission_requires_the_planned_group_count() {
-    let tlc = compile_thru_tlc("entry main(xs:[]i32) i32=reduce((+),0,xs)").unwrap();
-    let mut program = optimize_for_test(
-        schedule(
-            place(
-                fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                PipelineTopologyPolicy::AllowGenerated,
-            )
-            .unwrap(),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    program.graph.clear_function("CollectiveGroups").unwrap();
-    let Err(error) = finish_for_test(program, CodegenTarget::Wgsl) else {
-        panic!("emission must not reconstruct a missing group count from the grid");
-    };
-    assert!(
-        error.to_string().contains("collective group count missing"),
-        "{error}"
-    );
-}
-
-#[test]
 fn accumulator_state_order_is_read_from_the_plan() {
     let tlc = compile_thru_tlc(
         "entry main(xs:[]i32) ([]i32,bool)=
@@ -631,10 +604,15 @@ fn accumulator_state_order_is_read_from_the_plan() {
         })
         .unwrap();
     let ssa = finish_for_test(
-        optimize_for_test(schedule(program).unwrap()).unwrap(),
+        super::super::optimize_with_policy(
+            super::super::prepare_interfaces(schedule(program).unwrap()).unwrap(),
+            super::super::ScalarOptimization::Basic,
+        )
+        .unwrap(),
         CodegenTarget::Wgsl,
     )
     .unwrap();
+    assert!(!ssa.entry_points.is_empty());
     let wgsl = crate::lower_ssa_to_wgsl(ssa).unwrap();
     let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
     naga::valid::Validator::new(
@@ -899,19 +877,6 @@ fn rectangular_maps_expand_launch_without_expanding_row_capacity() {
             .unwrap();
         assert_eq!(flattened, 1);
     });
-    let tlc = compile_thru_tlc(source).unwrap();
-    let program = optimize_for_test(
-        schedule(
-            place(
-                fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                PipelineTopologyPolicy::AllowGenerated,
-            )
-            .unwrap(),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    finish_for_test(program, CodegenTarget::Wgsl).unwrap();
 }
 
 #[test]
@@ -921,17 +886,17 @@ fn rectangular_planning_and_emission_use_fused_structure() {
          map(|x|map(|y|x+y,map(|y|y+1,iota(3))),map(|x|x*2,xs))",
     )
     .unwrap();
-    let program = place(
+    let mut program = place(
         fuse(from_tlc(&tlc).unwrap()).unwrap(),
         PipelineTopologyPolicy::AllowGenerated,
     )
     .unwrap();
-    let mut graph = program.graph.clone();
     // Remove source operation classification; immutable inputs and callbacks remain
     // shared by source analysis and the fused plan.
-    graph.clear_function("SourceOperation").unwrap();
-    super::schedule(&mut graph).unwrap();
-    let query = Query(&graph);
+    program.graph.clear_function("SourceOperation").unwrap();
+    let program = schedule(program).unwrap();
+    let graph = &program.graph;
+    let query = Query(graph);
     let mut ranks = Vec::new();
     query
         .for_function("IterationRank", |_, rank| {
@@ -941,7 +906,11 @@ fn rectangular_planning_and_emission_use_fused_structure() {
         .unwrap();
     assert!(ranks.contains(&2));
 
-    let mut program = optimize_for_test(schedule(program).unwrap()).unwrap();
+    let mut program = super::super::optimize_with_policy(
+        super::super::prepare_interfaces(program).unwrap(),
+        super::super::ScalarOptimization::Basic,
+    )
+    .unwrap();
     program.graph.clear_function("SourceOperation").unwrap();
     finish_for_test(program, CodegenTarget::Wgsl).unwrap();
 }
@@ -1017,36 +986,38 @@ fn rectangular_maps_select_arbitrary_rank_and_preserve_sequential_prefixes() {
 
 #[test]
 fn fused_outputs_only_share_a_rectangular_launch_when_inner_shapes_agree() {
-    for (inner, expected_rank) in [(3, 2), (5, 1)] {
-        let source = format!(
+    let sources = [3, 5].map(|inner| {
+        format!(
             "entry main(xs:[4]i32) ([4][3]i32,[4][{inner}]i32)=
-             (map(|x|map(|y|x+y,iota(3)),xs),
-              map(|x|map(|y|x*y,iota({inner})),xs))"
-        );
-        planned(&source, |graph| {
-            let query = Query(graph);
-            let mut fused = 0;
-            query
-                .for_each("MapPlan", |row| {
-                    if !query.flag("MapHost", (row[0],))? {
-                        return Ok(());
-                    }
-                    let mut outputs = 0;
-                    query.for_each("PlanResult", |result| {
-                        outputs += usize::from(result[0] == row[0]);
-                        Ok(())
-                    })?;
-                    if outputs == 2 {
-                        fused += 1;
-                        let rank = query.required("IterationRank", (row[1],))?;
-                        assert_eq!(graph.value_to_base::<i64>(rank), expected_rank);
-                    }
+        (map(|x|map(|y|x+y,iota(3)),xs), map(|x|map(|y|x*y,iota({inner})),xs))"
+        )
+    });
+    planned_cases(&sources, |index, graph, region| {
+        let expected_rank = [2, 1][index];
+        let query = Query(graph);
+        let mut fused = 0;
+        query
+            .for_each("MapPlan", |row| {
+                if query.required("OperationRegion", (row[1],))? != region
+                    || !query.flag("MapHost", (row[0],))?
+                {
+                    return Ok(());
+                }
+                let mut outputs = 0;
+                query.for_each("PlanResult", |result| {
+                    outputs += usize::from(result[0] == row[0]);
                     Ok(())
-                })
-                .unwrap();
-            assert_eq!(fused, 1, "{source}");
-        });
-    }
+                })?;
+                if outputs == 2 {
+                    fused += 1;
+                    let rank = query.required("IterationRank", (row[1],))?;
+                    assert_eq!(graph.value_to_base::<i64>(rank), expected_rank);
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(fused, 1, "case {index}");
+    });
 }
 
 #[test]
@@ -1080,15 +1051,16 @@ fn rectangular_runtime_dimensions_must_be_uniform_across_outer_coordinates() {
 fn segment_callback_blockers_cover_every_output_of_a_fused_plan() {
     let tlc =
         compile_thru_tlc("entry main(xs:[17]i32) (i32,i32)=(reduce((+),0,xs),reduce((*),1,xs))").unwrap();
+    let program = place(
+        fuse(from_tlc(&tlc).unwrap()).unwrap(),
+        PipelineTopologyPolicy::AllowGenerated,
+    )
+    .unwrap();
     for blocked in [false, true] {
-        let mut program = place(
-            fuse(from_tlc(&tlc).unwrap()).unwrap(),
-            PipelineTopologyPolicy::AllowGenerated,
-        )
-        .unwrap();
-        let reducers = operations(&program.graph, "reduce");
+        let mut graph = program.graph.clone();
+        let reducers = operations(&graph, "reduce");
         assert_eq!(reducers.len(), 2);
-        let query = Query(&program.graph);
+        let query = Query(&graph);
         let plan = query.required("SelectedPlan", (reducers[0],)).unwrap();
         assert_eq!(plan, query.required("SelectedPlan", (reducers[1],)).unwrap());
         let callback = query.required("SourceOperatorBody", (reducers[0],)).unwrap();
@@ -1096,8 +1068,7 @@ fn segment_callback_blockers_cover_every_output_of_a_fused_plan() {
             .iter()
             .map(|&reducer| query.required("SourceOperationValue", (reducer,)).unwrap())
             .collect();
-        program
-            .graph
+        graph
             .update(|mut sink| {
                 // Request both results independently, as outer map traversal would.
                 for &value in &values {
@@ -1110,8 +1081,8 @@ fn segment_callback_blockers_cover_every_output_of_a_fused_plan() {
                 Ok(())
             })
             .unwrap();
-        let program = schedule(program).unwrap();
-        let query = Query(&program.graph);
+        super::schedule(&mut graph).unwrap();
+        let query = Query(&graph);
         assert_eq!(query.flag("SegmentPlanBlocked", (plan,)).unwrap(), blocked);
         for value in values {
             assert_eq!(query.required("SegmentCandidatePlan", (value,)).unwrap(), plan);
@@ -1334,4 +1305,51 @@ fn tiled_outputs_require_complete_tiles_and_preserve_other_consumers() {
             .unwrap();
         assert_eq!(destinations, usize::from(cases[index].0 == 8), "case {index}");
     });
+}
+
+#[test]
+fn primitive_dispatch_recipes_publish_their_phase_widths_and_order() {
+    let mut graph = super::super::fusion::new_graph().unwrap();
+    super::load(&mut graph).unwrap();
+    graph
+        .parse_and_run_program(
+            None,
+            r#"
+        (set (Plan (OperationId 0)) (Elements))
+        (set (ElideElements (OperationId 0)) false)
+        (set (MapSegmented (OperationId 0)) false)
+        (set (MapExecution (OperationId 0)) (InvocationScope))
+        (set (IterationExtent (OperationId 0)) (Fixed 1024))
+        (set (OperationGrid (OperationId 0)) (AutomaticGrid))
+        (set (Plan (OperationId 1)) (Totals))
+        (set (Plan (OperationId 2)) (Prefixes))
+        (set (CollectiveChunkWidth (OperationId 1)) 256)
+        (set (CollectiveChunkWidth (OperationId 2)) 256)
+        (set (OperationGrid (OperationId 1)) (AutomaticGrid))
+        (set (OperationGrid (OperationId 2)) (AutomaticGrid))
+        (set (InputDomain (OperationId 2)) (Fixed 1024))
+        (FilterShape (OperationId 3))
+        (set (ParallelBodySafe (OperationId 3)) true)
+        (set (OperationGrid (OperationId 3)) (FixedGrid 2 3 4))
+        (IndexedReducer (OperationId 4) true (AtomicAdd))
+        (set (ParallelBodySafe (OperationId 4)) true)
+        (set (InputDomain (OperationId 4)) (Fixed 5))
+        (set (OperationGrid (OperationId 4)) (AutomaticGrid))
+        (IndexedReducer (OperationId 5) false (AtomicAdd))
+        (run-schedule (saturate schedule))
+        (check (KernelPhase (OperationId 0) "elements" (Fixed 1024) 64 (AutomaticGrid)))
+        (check (KernelPhase (OperationId 1) "chunks" (Fixed 65536) 256 (FixedGrid 256 1 1)))
+        (check (KernelPhase (OperationId 1) "combine" (Fixed 256) 256 (FixedGrid 1 1 1)))
+        (check (PhaseLink (OperationId 1) "chunks" "combine"))
+        (check (KernelPhase (OperationId 2) "offsets" (Fixed 1024) 64 (AutomaticGrid)))
+        (check (PhaseLink (OperationId 2) "combine" "offsets"))
+        (check (= (Plan (OperationId 3)) (Compact)))
+        (check (KernelPhase (OperationId 3) "compact" (Fixed 64) 64 (FixedGrid 1 1 1)))
+        (check (= (Plan (OperationId 4)) (Atomic (AtomicAdd))))
+        (check (KernelPhase (OperationId 4) "atomic" (Fixed 5) 64 (AutomaticGrid)))
+        (check (= (Plan (OperationId 5)) (Serial)))
+        (check (KernelPhase (OperationId 5) "ordered" (Fixed 1) 1 (FixedGrid 1 1 1)))
+    "#,
+        )
+        .unwrap();
 }

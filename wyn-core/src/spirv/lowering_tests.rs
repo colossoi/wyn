@@ -1,16 +1,42 @@
-use crate::compile_thru_spirv;
-use crate::err_spirv;
-use crate::error::Result;
+fn empty_compute_entry(index: usize) -> crate::ssa::types::EntryPoint {
+    use crate::ssa::{
+        builder::FuncBuilder,
+        types::{EntryPoint, Terminator},
+    };
+    let mut builder = FuncBuilder::new(vec![], crate::types::unit());
+    builder.terminate(Terminator::Return(None)).unwrap();
+    EntryPoint {
+        id: crate::EntryId::from_index(index),
+        name: format!("entry_{index}"),
+        body: builder.finish().unwrap(),
+        execution_model: crate::flow::ExecutionModel::Compute {
+            local_size: (1, 1, 1),
+        },
+        inputs: vec![],
+        parameter_inputs: vec![],
+        outputs: vec![],
+        storage_bindings: vec![],
+        stage_descriptor_storage_accesses: Default::default(),
+        pipeline_storage_accesses: Default::default(),
+        span: crate::ast::Span::generated(),
+    }
+}
 
-/// Compile a source string to SPIR-V words. Thin wrapper around the
-/// canonical `compile_thru_spirv` so test failures lift through `.unwrap()`.
-fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
-    compile_thru_spirv(source).map(|l| l.spirv).map_err(|e| err_spirv!("{}", e))
+fn emit_entries(entries: Vec<crate::ssa::types::EntryPoint>) -> Vec<u32> {
+    let program = crate::ssa::stage::SpirvReady::from_parts(
+        vec![],
+        entries,
+        crate::ssa::context::BackendGlobal {
+            pipeline: Default::default(),
+            target: crate::CodegenTarget::Spirv,
+        },
+    );
+    super::lower_ssa_program_impl(&program).unwrap()
 }
 
 #[test]
-fn generated_map_length_reuses_the_storage_view_length() {
-    let words = compile_to_spirv("entry repro(xs: []f32) []f32 = map(|x| x + 1.0, xs)").unwrap();
+fn explicit_storage_view_length_needs_no_array_length() {
+    let words = crate::ssa::test_support::spirv(vec![crate::ssa::test_support::storage_write()]);
     let module = wspirv::dr::load_words(&words).unwrap();
     let lengths: Vec<_> =
         module.all_inst_iter().filter(|i| i.class.opcode == spirv::Op::ArrayLength).collect();
@@ -27,13 +53,31 @@ fn generated_map_length_reuses_the_storage_view_length() {
 
 #[test]
 fn literal_composite_indices_do_not_emit_unused_constant_ids() {
-    let positive = ["x"; 48].join(", ");
-    let negative = ["-x"; 48].join(", ");
-    let source = format!(
-        "def values(x:f32) [48]f32 = if x > 0.0 then [{positive}] else [{negative}]\n\
-         entry at(x:f32) f32 = values(x)[38]"
-    );
-    let module = wspirv::dr::load_words(compile_to_spirv(&source).unwrap()).unwrap();
+    use crate::op::OpTag;
+    use crate::ssa::types::InstKind;
+    let entry =
+        crate::ssa::test_support::scalar_entry(vec![crate::types::f32()], crate::types::f32(), |builder| {
+            let array = builder
+                .push_inst(
+                    InstKind::Op {
+                        tag: OpTag::ArrayLit,
+                        operands: vec![builder.get_param(0).into(); 48],
+                    },
+                    crate::types::sized_array(48, crate::types::f32()),
+                )
+                .unwrap();
+            builder
+                .push_inst(
+                    InstKind::Op {
+                        tag: OpTag::Project { index: 38 },
+                        operands: vec![array.into()],
+                    },
+                    crate::types::f32(),
+                )
+                .unwrap()
+                .into()
+        });
+    let module = wspirv::dr::load_words(crate::ssa::test_support::spirv(vec![entry])).unwrap();
     // Field forwarding can remove the extraction; its literal index must not
     // leave an unused scalar constant in either representation.
     assert!(!module
@@ -45,9 +89,8 @@ fn literal_composite_indices_do_not_emit_unused_constant_ids() {
 
 #[test]
 fn storage_length_descriptors_do_not_emit_unused_constant_ids() {
-    let params = (0..39).map(|i| format!("a{i}: []f32")).collect::<Vec<_>>().join(", ");
-    let source = format!("entry last_buffer({params}) []f32 = map(|x| x + 1.0, a38)");
-    let module = wspirv::dr::load_words(compile_to_spirv(&source).unwrap()).unwrap();
+    let entry = crate::ssa::test_support::storage_write_at(crate::BindingRef::new(0, 38));
+    let module = wspirv::dr::load_words(crate::ssa::test_support::spirv(vec![entry])).unwrap();
     let buffers: Vec<_> = module
         .annotations
         .iter()
@@ -112,152 +155,46 @@ fn unrelated_entries_preserve_storage_buffer_element_types() {
 }
 
 #[test]
-fn test_simple_constant() {
-    let spirv = compile_to_spirv("def x = 42").unwrap();
-    assert!(!spirv.is_empty());
-    // SPIR-V magic number
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_simple_function() {
-    let spirv = compile_to_spirv("def add(x, y) = x + y").unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn fragment_helper_result_is_evaluated_once_for_multiple_projections() {
-    use wspirv::spirv::Op;
-
-    let module = wspirv::dr::load_words(
-        compile_to_spirv(
-            r#"
-def color(x: f32) vec2f32 =
-  if x < 10.0 then @[1.0, 2.0] else @[3.0, 4.0]
-type output = { color: vec2f32, depth: f32 }
-def fragment(_v: (), p: vec4f32, _f: bool, _i: u32, _s: u32) output =
-  let c = color(p.x) in { color = @[c.x, c.y], depth = p.z }
-entry repro(surface: render_target<output>) render_target<output> =
-  let triangle = rasterize_triangles(direct_draw(3u32, 1u32),
-    |v, _, _| vertex_output(
-      @[if v == 1u32 then 3.0 else -1.0,
-        if v == 2u32 then 3.0 else -1.0, 0.0, 1.0], ())) in
-  shade(surface, triangle, fragment)
-"#,
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    let calls = module
-        .functions
-        .iter()
-        .flat_map(|function| &function.blocks)
-        .flat_map(|block| &block.instructions)
-        .filter(|inst| inst.class.opcode == Op::FunctionCall)
-        .count();
-    assert!(calls <= 1, "the fragment must not duplicate its helper");
-    let predicates = module.all_inst_iter().filter(|inst| inst.class.opcode == Op::FOrdLessThan).count();
-    assert_eq!(
-        predicates, 1,
-        "the helper's predicate must be evaluated once, even when inlined"
-    );
-}
-
-#[test]
-fn vertex_conditional_is_evaluated_once_for_nested_varyings() {
-    use wspirv::dr::Operand;
-    use wspirv::spirv::{ExecutionModel, Op};
-
-    let module = wspirv::dr::load_words(
-        compile_to_spirv(
-            r#"
-def color(x: f32) vec2f32 =
-  if x < 10.0 then @[1.0, 2.0] else @[3.0, 4.0]
-def payload(v: u32) (f32, (f32, f32)) =
-  let c = color(f32(v)) in (c.x, (c.y, f32(v)))
-entry repro(surface: render_target<f32>) render_target<f32> =
-  let triangle = rasterize_triangles(direct_draw(3u32, 1u32),
-    |v, _, _| vertex_output(@[0.0, 0.0, 0.0, 1.0], payload(v))) in
-  shade(surface, triangle, |p, _, _, _, _|
-    let (x, (y, z)) = p in x + y + z)
-"#,
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    let entry = module
-        .entry_points
-        .iter()
-        .find(|inst| inst.operands.first() == Some(&Operand::ExecutionModel(ExecutionModel::Vertex)))
-        .unwrap();
-    let Operand::IdRef(vertex_id) = entry.operands[1] else {
-        panic!("vertex function")
-    };
-    let vertex = module
-        .functions
-        .iter()
-        .find(|function| function.def.as_ref().unwrap().result_id == Some(vertex_id))
-        .unwrap();
-    let predicates = vertex
-        .blocks
-        .iter()
-        .flat_map(|block| &block.instructions)
-        .filter(|inst| inst.class.opcode == Op::FOrdLessThan)
-        .count();
-    assert_eq!(
-        predicates, 1,
-        "varying projections must share the predicate even when selecting lanes separately"
-    );
-}
-
-#[test]
-fn fixed_array_output_constructs_only_the_indexed_value() {
-    use std::collections::HashSet;
-    use wspirv::spirv::Op;
-
-    let module = wspirv::dr::load_words(
-        compile_to_spirv(
-            "entry repro(xs: []i32) ([]i32, [1]i32) =
-              let n = xs[0] in (map(|x| x + n, xs), [n])",
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    let arrays: HashSet<_> = module
-        .types_global_values
-        .iter()
-        .filter(|inst| inst.class.opcode == Op::TypeArray)
-        .filter_map(|inst| inst.result_id)
-        .collect();
-    let constructors = module
-        .functions
-        .iter()
-        .flat_map(|function| &function.blocks)
-        .flat_map(|block| &block.instructions)
-        .filter(|inst| {
-            inst.class.opcode == Op::CompositeConstruct
-                && inst.result_type.is_some_and(|ty| arrays.contains(&ty))
-        })
-        .count();
-    assert_eq!(
-        constructors, 0,
-        "a single-element output needs no array constructor"
-    );
-}
-
-#[test]
 fn test_linked_extern_call_uses_structural_function_identity() {
-    let spirv = compile_to_spirv(
-        r#"
-#[linked("external_increment")]
-extern external_increment(x: i32) i32
-
-entry main(x: i32) i32 = external_increment(x)
-"#,
-    )
-    .expect("linked extern call should lower to an import-linked SPIR-V function");
-    assert_eq!(spirv[0], 0x07230203);
+    use crate::ssa::{
+        builder::FuncBuilder,
+        types::{Function, InstKind},
+    };
+    let function = Function {
+        id: crate::FunctionId::from_index(0),
+        name: "display_name".into(),
+        linkage_name: Some("external_increment".into()),
+        span: crate::ast::Span::generated(),
+        body: FuncBuilder::new(vec![crate::types::i32()], crate::types::i32()).finish_unchecked(),
+    };
+    let entry =
+        crate::ssa::test_support::scalar_entry(vec![crate::types::i32()], crate::types::i32(), |builder| {
+            builder
+                .push_inst(
+                    InstKind::Op {
+                        tag: crate::op::OpTag::Call(function.id),
+                        operands: vec![builder.get_param(0).into()],
+                    },
+                    crate::types::i32(),
+                )
+                .unwrap()
+                .into()
+        });
+    let program = crate::ssa::stage::SpirvReady::from_parts(
+        vec![function],
+        vec![entry],
+        crate::ssa::context::BackendGlobal {
+            pipeline: Default::default(),
+            target: crate::CodegenTarget::Spirv,
+        },
+    );
+    let words = super::lower_ssa_program_impl(&program).unwrap();
+    let module = wspirv::dr::load_words(words).unwrap();
+    assert!(module.annotations.iter().any(|instruction| instruction
+        .operands
+        .contains(&wspirv::dr::Operand::LiteralString("external_increment".into()))
+        && instruction.operands.contains(&wspirv::dr::Operand::LinkageType(spirv::LinkageType::Import))));
+    assert!(module.all_inst_iter().any(|instruction| instruction.class.opcode == spirv::Op::FunctionCall));
 }
 
 #[test]
@@ -265,10 +202,29 @@ fn distinct_entry_push_constant_layouts_have_distinct_variables() {
     use std::collections::HashSet;
     use wspirv::dr::Operand;
     use wspirv::spirv::{Op, StorageClass};
-    let module = wspirv::dr::load_words(
-        compile_to_spirv("entry one(x:i32) i32 = x + 1\nentry two(xs:[2]i32,i:i32) i32 = xs[i]").unwrap(),
-    )
-    .unwrap();
+    let entries = [
+        crate::types::i32(),
+        crate::types::sized_array(2, crate::types::i32()),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, ty)| {
+        let mut entry = empty_compute_entry(index);
+        entry.inputs.push(crate::interface::EntryInput {
+            name: "input".into(),
+            ty,
+            host: (),
+            kind: crate::interface::EntryInputKind::PushConstant {
+                slot: crate::interface::PushConstantSlot {
+                    offset: 0,
+                    size: if index == 0 { 4 } else { 8 },
+                },
+            },
+        });
+        entry
+    })
+    .collect();
+    let module = wspirv::dr::load_words(emit_entries(entries)).unwrap();
     let variables: HashSet<_> = module
         .types_global_values
         .iter()
@@ -293,273 +249,11 @@ fn distinct_entry_push_constant_layouts_have_distinct_variables() {
 }
 
 #[test]
-fn test_let_binding() {
-    let spirv = compile_to_spirv("def f = let x = 1 in x + 2").unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_arithmetic() {
-    let spirv = compile_to_spirv("def f(x, y) = x * y + x / y - 1").unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_nested_let() {
-    let spirv = compile_to_spirv("def f = let a = 1 in let b = 2 in a + b").unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_if_expression() {
-    let spirv = compile_to_spirv("def f(x) = if x == 0 then 1 else 2").unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_if_literal_true_lowers() {
-    // `fold_constant_branches` leaves the dead arm in `skeleton.blocks`
-    // without a predecessor. Dominator analysis must ignore that arm when
-    // deciding whether to emit the live path's merge block.
-    let spirv = compile_to_spirv("def f(x) = if true then x + 1 else x + 2").unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_if_literal_false_lowers() {
-    let spirv = compile_to_spirv("def f(x) = if false then x + 1 else x + 2").unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_comparisons() {
-    let spirv = compile_to_spirv("def f(x, y) = if x < y then 1 else if x > y then 2 else 0").unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_tuple_literal() {
-    let spirv = compile_to_spirv("def f = (1, 2, 3)").unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_array_literal() {
-    let spirv = compile_to_spirv("def f = [1, 2, 3]").unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_unary_negation() {
-    let spirv = compile_to_spirv("def f(x) = -x").unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_record_field_access() {
-    let spirv = compile_to_spirv(
-        r#"
-def get_x(r:{x:i32, y:i32}) i32 = r.x
-"#,
-    )
-    .unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_closure_capture_access() {
-    // This test uses tuple_access intrinsic for closure field access
-    let spirv = compile_to_spirv(
-        r#"
-def test(x:i32) i32 =
-    let f = |y:i32| x + y in
-    f(10)
-"#,
-    )
-    .unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_polymorphic_dot2() {
-    // Test polymorphic function with type parameters that need proper instantiation
-    // This reproduces the primitives.wyn issue where Vec type has unresolved size variable
-    let spirv = compile_to_spirv(
-        r#"
-def dot2<E, T>(v: T) E = dot(v, v)
-
-def test_dot2_vec3(v: vec3f32) f32 = dot2(v)
-"#,
-    )
-    .unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_polymorphic_dot2_in_expression() {
-    // Test dot2 used in a more complex expression like in primitives.wyn
-    // sdCappedTorus: f32.sqrt(dot2(p) + ra*ra - 2.0*ra*k) - rb
-    let spirv = compile_to_spirv(
-        r#"
-def dot2<E, T>(v: T) E = dot(v, v)
-
-def sdCappedTorus(p: vec3f32, ra: f32, rb: f32, k: f32) f32 =
-  f32.sqrt(dot2(p) + ra*ra - 2.0*ra*k) - rb
-"#,
-    )
-    .unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_polymorphic_dot2_vec2_and_vec3() {
-    // Test dot2 with both vec2 and vec3 in same program (like primitives.wyn)
-    let spirv = compile_to_spirv(
-        r#"
-def dot2<E, T>(v: T) E = dot(v, v)
-
-def test_vec3(v: vec3f32) f32 = dot2(v)
-def test_vec2(v: vec2f32) f32 = dot2(v)
-def test_both(v3: vec3f32, v2: vec2f32) f32 = dot2(v3) + dot2(v2)
-"#,
-    )
-    .unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_scan_inclusive() {
-    // Inclusive scan (prefix sum): scan (+) 0 [1,2,3] = [1, 3, 6]
-    let spirv = compile_to_spirv(
-        r#"
-def sum_scan(arr: [4]i32) [4]i32 = scan((|a, b| a + b), 0, arr)
-"#,
-    )
-    .unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_scatter_update() {
-    // Scatter: write values to array at given indices
-    let spirv = compile_to_spirv(
-        r#"
-def scatter_test(dest: [5]i32, indices: [2]i32, values: [2]i32) [5]i32 =
-    scatter(dest, indices, values)
-"#,
-    )
-    .unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_reduce_by_index() {
-    // Histogram / reduce_by_index: accumulate values at indices using operator
-    let spirv = compile_to_spirv(
-        r#"
-def hist_test(dest: [3]i32, indices: [4]i32, values: [4]i32) [3]i32 =
-    reduce_by_index(dest, |a, b| a + b, 0, indices, values)
-"#,
-    )
-    .unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_hist() {
-    // hist is an alias for reduce_by_index
-    let spirv = compile_to_spirv(
-        r#"
-def hist_alias_test(dest: [3]i32, indices: [4]i32, values: [4]i32) [3]i32 =
-    hist(dest, |a, b| a + b, 0, indices, values)
-"#,
-    )
-    .unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_reduce_u32() {
-    // Test reduce with u32 types - the initial value 0u32 must generate
-    // an unsigned constant, not a signed one
-    let spirv = compile_to_spirv(
-        r#"
-def sum_u32(arr: [4]u32) u32 =
-    reduce(|a, b| a + b, 0u32, arr)
-"#,
-    )
-    .unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
-fn test_algebraic_simplifications() {
-    // Test all algebraic identity simplifications compile correctly
-    let spirv = compile_to_spirv(
-        r#"
-def test(x: f32) f32 =
-    (0.0 - x) +     -- 0 - x → -x
-    (0.0 + x) +     -- 0 + x → x
-    (x + 0.0) +     -- x + 0 → x
-    (x - 0.0) +     -- x - 0 → x
-    (0.0 * x) +     -- 0 * x → 0
-    (x * 0.0) +     -- x * 0 → 0
-    (1.0 * x) +     -- 1 * x → x
-    (x * 1.0) +     -- x * 1 → x
-    (x / 1.0) +     -- x / 1 → x
-    (-1.0 * x) +    -- -1 * x → -x
-    (x * -1.0)      -- x * -1 → -x
-"#,
-    )
-    .unwrap();
-    assert!(!spirv.is_empty());
-    assert_eq!(spirv[0], 0x07230203);
-}
-
-#[test]
 fn test_two_compute_entries_share_one_global_invocation_id() {
     // VUID-StandaloneSpirv-OpEntryPoint-09658 permits exactly one module-level
     // GlobalInvocationId input variable. Count its BuiltIn decoration to
     // ensure multiple compute entries share that variable.
-    let src = "\
-def verts: [3]vec4f32 =
-  [@[0.0 - 1.0, 0.0 - 1.0, 0.0, 1.0],
-   @[3.0, 0.0 - 1.0, 0.0, 1.0],
-   @[0.0 - 1.0, 3.0, 0.0, 1.0]]
-
-
-entry vertex_main(vid: i32)
-  vec4f32 = verts[vid]
-
-entry a(gid: vec3u32) () = ()
-
-entry b(gid: vec3u32) () = ()
-
-
-entry fragment_main(_p: vec4f32)
-  vec4f32 = @[0.0, 0.0, 0.0, 1.0]
-";
-    let spirv = compile_to_spirv(src).expect("two-compute-entry shader should compile");
+    let spirv = emit_entries(vec![empty_compute_entry(0), empty_compute_entry(1)]);
     // BuiltIn enum value for GlobalInvocationId is 28
     // (spirv::BuiltIn::GlobalInvocationId as u32).
     let global_invocation_id_builtin = spirv::BuiltIn::GlobalInvocationId as u32;
@@ -592,96 +286,10 @@ entry fragment_main(_p: vec4f32)
     );
 }
 
-#[test]
-fn entry_point_interfaces_are_unique_when_storage_input_and_output_alias() {
-    use crate::LookupSet;
-    use wspirv::dr::Operand;
-
-    let spirv = compile_to_spirv(
-        r#"
-type painted = { values: []f32 }
-
-def triangle_vertex(vertex_index: u32, instance_index: u32, draw_index: u32) =
-  vertex_output(
-    @[1.0, 1.0, 0.0, 1.0],
-    ())
-
-def resolve(p: painted, _fragment_value: (), _fragment_position: vec4f32, _fragment_front_facing: bool, _fragment_primitive_index: u32, _fragment_sample_index: u32) =
-  let value = 0.0 in
-  @[value, value, value, 1.0]
-
-entry reproduce(values: []f32, surface: render_target<vec4f32>)
-    ([]f32, render_target<vec4f32>) =
-  let values_next = map(|i| 1.0, iota(0))
-  let painted_scene = { values = values }
-  let raster = rasterize_triangles(
-    direct_draw(3u32, 1u32), triangle_vertex)
-  let surface1 = shade(surface, raster, resolve(painted_scene, _, _, _, _, _)) in
-  (values_next, surface1)
-"#,
-    )
-    .expect("record-array graphics program should compile");
-
-    let module = wspirv::dr::load_words(&spirv).expect("backend emitted parseable SPIR-V");
-    for entry in &module.entry_points {
-        let interface_ids = entry.operands.iter().skip(3).filter_map(|operand| match operand {
-            Operand::IdRef(id) => Some(*id),
-            _ => None,
-        });
-        let mut seen = LookupSet::new();
-        for interface_id in interface_ids {
-            assert!(
-                seen.insert(interface_id),
-                "OpEntryPoint contains duplicate interface %{interface_id}"
-            );
-        }
-    }
-}
-
 /// `scatter` into a `#[storage]` framebuffer lowers end-to-end: the full
 /// `SoacKind::Scatter` → `SoacOp::Scatter` → `egglog::OperationKind::Scatter` →
 /// `build_scatter_loop` path emits indexed `OpStore`s into the destination
 /// view (one indexed store executed by the scatter loop).
-#[test]
-fn scatter_into_storage_buffer_lowers() {
-    let spirv = compile_to_spirv(
-        r#"
-def N:i32 = 5
-entry rasterize(positions: []vec4f32,
-                fb: []vec4f32) () =
-  let pts  = positions[0..N] in
-  let idxs = map(|p:vec4f32| i32.f32(p.y) * 512 + i32.f32(p.x), pts) in
-  let vals = map(|p:vec4f32| @[1.0, 1.0, 1.0, 1.0], pts) in
-  let _ = scatter(fb, idxs, vals) in ()
-"#,
-    )
-    .expect("scatter rasterizer must lower to SPIR-V");
-    assert_eq!(spirv[0], 0x07230203, "SPIR-V magic number");
-    // Parse instruction boundaries: an SSA id whose low bits equal OpStore's
-    // opcode is not a store. The five particles are processed by a loop.
-    let module = wspirv::dr::load_words(&spirv).unwrap();
-    let stores: Vec<_> =
-        module.all_inst_iter().filter(|inst| inst.class.opcode == spirv::Op::Store).collect();
-    assert_eq!(
-        stores.len(),
-        1,
-        "scatter emits one store in its runtime loop\n{}",
-        disasm(&spirv)
-    );
-    let wspirv::dr::Operand::IdRef(pointer) = stores[0].operands[0] else {
-        panic!("store pointer")
-    };
-    let address = module.all_inst_iter().find(|inst| inst.result_id == Some(pointer)).unwrap();
-    assert_eq!(address.class.opcode, spirv::Op::AccessChain);
-    let pointer_type =
-        module.types_global_values.iter().find(|inst| inst.result_id == address.result_type).unwrap();
-    assert_eq!(
-        pointer_type.operands[0],
-        wspirv::dr::Operand::StorageClass(spirv::StorageClass::StorageBuffer)
-    );
-    assert!(module.all_inst_iter().any(|inst| inst.class.opcode == spirv::Op::LoopMerge));
-}
-
 /// Disassemble SPIR-V words to text for instruction-level assertions.
 fn disasm(words: &[u32]) -> String {
     use wspirv::binary::Disassemble;
@@ -694,12 +302,7 @@ fn disasm(words: &[u32]) -> String {
 /// `OpStore`d wholesale into a per-occurrence `Function` array variable.
 #[test]
 fn dynamic_const_array_index_hoists_to_private_global() {
-    let spirv = compile_to_spirv(
-        "def t: [4]i32 = [10, 20, 30, 40]\n\
-         \n\
-         entry pick() []i32 = map(|i| t[i % 4], iota(100))",
-    )
-    .unwrap();
+    let spirv = crate::lower_ssa_to_spirv(crate::ssa::test_support::indexed_constant(false)).unwrap().spirv;
     let text = disasm(&spirv);
     let private_vars: Vec<&str> =
         text.lines().filter(|l| l.contains("OpVariable") && l.contains(" Private ")).collect();
@@ -726,16 +329,107 @@ fn dynamic_const_array_index_hoists_to_private_global() {
 /// two sites collapses to a single `Private` global.
 #[test]
 fn const_array_hoist_is_deduped() {
-    let spirv = compile_to_spirv(
-        "def t: [4]i32 = [10, 20, 30, 40]\n\
-         \n\
-         entry pick() []i32 = map(|i| t[i % 4] + t[(i + 1) % 4], iota(100))",
-    )
-    .unwrap();
+    let spirv = crate::lower_ssa_to_spirv(crate::ssa::test_support::indexed_constant(true)).unwrap().spirv;
     let text = disasm(&spirv);
     let n = text.lines().filter(|l| l.contains("OpVariable") && l.contains(" Private ")).count();
     assert_eq!(
         n, 1,
         "two indexings of one constant must share one Private global:\n{text}"
     );
+}
+
+#[test]
+fn small_source_programs_typecheck() {
+    for (name, source) in [
+        ("test_simple_constant", "def x = 42"),
+        ("test_simple_function", "def add(x, y) = x + y"),
+        ("test_let_binding", "def f = let x = 1 in x + 2"),
+        ("test_arithmetic", "def f(x, y) = x * y + x / y - 1"),
+        ("test_nested_let", "def f = let a = 1 in let b = 2 in a + b"),
+        ("test_if_expression", "def f(x) = if x == 0 then 1 else 2"),
+        (
+            "test_comparisons",
+            "def f(x, y) = if x < y then 1 else if x > y then 2 else 0",
+        ),
+        ("test_tuple_literal", "def f = (1, 2, 3)"),
+        ("test_array_literal", "def f = [1, 2, 3]"),
+        ("test_unary_negation", "def f(x) = -x"),
+        (
+            "test_record_field_access",
+            r#"
+def get_x(r:{x:i32, y:i32}) i32 = r.x
+"#,
+        ),
+        (
+            "test_closure_capture_access",
+            r#"
+def test(x:i32) i32 =
+    let f = |y:i32| x + y in
+    f(10)
+"#,
+        ),
+        (
+            "test_polymorphic_dot2",
+            r#"
+def dot2<E, T>(v: T) E = dot(v, v)
+
+def test_dot2_vec3(v: vec3f32) f32 = dot2(v)
+"#,
+        ),
+        (
+            "test_polymorphic_dot2_in_expression",
+            r#"
+def dot2<E, T>(v: T) E = dot(v, v)
+
+def sdCappedTorus(p: vec3f32, ra: f32, rb: f32, k: f32) f32 =
+  f32.sqrt(dot2(p) + ra*ra - 2.0*ra*k) - rb
+"#,
+        ),
+        (
+            "test_polymorphic_dot2_vec2_and_vec3",
+            r#"
+def dot2<E, T>(v: T) E = dot(v, v)
+
+def test_vec3(v: vec3f32) f32 = dot2(v)
+def test_vec2(v: vec2f32) f32 = dot2(v)
+def test_both(v3: vec3f32, v2: vec2f32) f32 = dot2(v3) + dot2(v2)
+"#,
+        ),
+        (
+            "test_scan_inclusive",
+            r#"
+def sum_scan(arr: [4]i32) [4]i32 = scan((|a, b| a + b), 0, arr)
+"#,
+        ),
+        (
+            "test_scatter_update",
+            r#"
+def scatter_test(dest: [5]i32, indices: [2]i32, values: [2]i32) [5]i32 =
+    scatter(dest, indices, values)
+"#,
+        ),
+        (
+            "test_reduce_by_index",
+            r#"
+def hist_test(dest: [3]i32, indices: [4]i32, values: [4]i32) [3]i32 =
+    reduce_by_index(dest, |a, b| a + b, 0, indices, values)
+"#,
+        ),
+        (
+            "test_hist",
+            r#"
+def hist_alias_test(dest: [3]i32, indices: [4]i32, values: [4]i32) [3]i32 =
+    hist(dest, |a, b| a + b, 0, indices, values)
+"#,
+        ),
+        (
+            "test_reduce_u32",
+            r#"
+def sum_u32(arr: [4]u32) u32 =
+    reduce(|a, b| a + b, 0u32, arr)
+"#,
+        ),
+    ] {
+        crate::compile_thru_frontend(source).unwrap_or_else(|error| panic!("{name}: {error}"));
+    }
 }

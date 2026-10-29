@@ -704,10 +704,6 @@ fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileRe
     }
 }
 
-#[cfg(test)]
-#[path = "lib_tests.rs"]
-mod lib_tests;
-
 /// Get a simple example program to start with
 #[wasm_bindgen]
 pub fn get_example_program() -> String {

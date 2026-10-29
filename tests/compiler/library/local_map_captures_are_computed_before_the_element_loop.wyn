@@ -1,0 +1,4 @@
+entry main(xs:[][32]i32) [][32]i32 =
+          map(|row|let prefixes=scan((+),0i32,row) in
+            let offset=reduce((+),0i32,row)+1i32 in
+            map(|j|prefixes[j%32]+offset,iota(32)),xs)

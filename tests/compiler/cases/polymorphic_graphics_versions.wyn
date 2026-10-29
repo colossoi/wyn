@@ -1,0 +1,22 @@
+--! command = "build"
+--! exit = 0
+--! args = ["--graphics"]
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"reproduce\""]
+--! [[host]]
+--! entry = "reproduce"
+--! calls = { gpu-draw = 2, gpu-alloc = 0 }
+
+def forward<T>(value: T) T = value
+      def vertex<T>(value: T) vertex<T> =
+        vertex_output(@[0.0, 0.0, 0.0, 1.0], value)
+      def draw<T>(target: *render_target<vec4f32>, value: T, color: T -> vec4f32)
+          *render_target<vec4f32> =
+        let fragments = rasterize_triangles(direct_draw(3u32, 1u32),
+          |_, _, _| forward(vertex(value))) in
+        shade(target, forward(fragments), |v, _, _, _, _| color(v))
+      entry reproduce(target: render_target<vec4f32>) render_target<vec4f32> =
+        let first = draw(target, 0.5f32, |v| @[v, v, v, 1.0]) in
+        draw(first, @[0.0, 1.0, 0.0, 1.0], |v| v)

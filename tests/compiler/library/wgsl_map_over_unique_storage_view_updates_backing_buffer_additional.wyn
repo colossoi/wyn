@@ -1,0 +1,5 @@
+entry draw(fb: *[]vec4f32) *[]vec4f32 =
+  let cleared = map(|_p: vec4f32| @[0.0, 0.0, 0.0, 1.0], fb) in
+  let idxs = map(|i: i32| i, 0i32 ..< 4i32) in
+  let vals = map(|_i: i32| @[1.0, 1.0, 1.0, 1.0], 0i32 ..< 4i32) in
+  scatter(cleared, idxs, vals)

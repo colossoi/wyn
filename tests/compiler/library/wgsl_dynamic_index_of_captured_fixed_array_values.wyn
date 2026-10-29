@@ -1,0 +1,10 @@
+def indices_distinct(indices: [512]u32) bool =
+  loop unique = true for i < 512 do
+    let duplicate = loop found = false for j < i do
+      found || indices[i] == indices[j]
+    in unique && !duplicate
+
+entry check(inputs: [1]([512]u32)) [1]u32 =
+  map(|i: i32|
+    if indices_distinct(inputs[i]) then 1u32 else 0u32,
+    iota(1))

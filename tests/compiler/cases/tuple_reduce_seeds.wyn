@@ -4,6 +4,9 @@
 --! [[artifacts]]
 --! path = "output.wynhost"
 --! contains = [":source-name \"loop_seed\"", ":source-name \"plain_seed\"", ":source-name \"constant_combiner\"", ":source-name \"slice_seed\"", ":source-name \"scan_seed\""]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"compiler_repro_array_reduce_0_check\""]
 
 entry loop_seed(xs: []f32) f32 =
   let zero = replicate(3, 0.0) in
@@ -58,3 +61,11 @@ entry scan_seed(xs: []f32) f32 =
       (zero, 0.0),
       map(|x: f32| ([x + value, x, x], x), xs)) in
     let (total, _) = scanned[length(xs) - 1] in total[0]
+
+-- compiler_repro_array_reduce
+entry compiler_repro_array_reduce_0_check(xs: []f32) []f32 =
+  map(|x: f32|
+    let total = reduce(
+      |a: [3]f32, b: [3]f32| map(|i: i32| a[i] + b[i], iota(3)),
+      [0.0, 0.0, 0.0], map(|y: f32| [x * y, y, y * y], xs)) in
+    total[0], xs)

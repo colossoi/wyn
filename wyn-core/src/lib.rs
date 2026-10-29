@@ -678,8 +678,3 @@ mod host_tests;
 
 #[cfg(test)]
 mod graphics_host_tests;
-
-#[cfg(test)]
-mod host_interp_tests;
-#[cfg(test)]
-mod host_scalar_tests;

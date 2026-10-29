@@ -92,90 +92,45 @@ entry case_2(i:i32,width:i32) i32 =
 }
 
 #[test]
-fn loop_header_division_and_remainder_are_reused_after_the_loop() {
-    // The header dominates the merge. WGSL declares these results outside
-    // the loop while evaluating them at their original header positions.
-    assert_division_sites(
-        r#"entry repro(indices: []i32, width: i32) []i32 =
-  map(|i|
-    let total = loop total = 0 while total < i / width + i % width do total + 1 in
-    total + i / width + i % width,
-    indices)"#,
-        1,
+fn division_reuse_respects_loop_dominance_and_carried_values() {
+    let placed = live_instructions(
+        crate::compile_thru_ssa(
+            r#"
+entry header(i:i32,width:i32) i32 =
+  let total = loop total=0 while total<i/width+i%width do total+1 in total+i/width+i%width
+entry body(i:i32,width:i32) i32 = loop total=0 for k<i do total+i/width+i%width
+entry carried(i:i32,width:i32) i32 = loop total=i/width+i%width for k<2 do total/width+total%width
+"#,
+        )
+        .unwrap(),
     );
-}
-
-#[test]
-fn division_and_remainder_in_a_possibly_empty_loop_stay_inside_it() {
-    let placed = assert_division_sites(
-        r#"entry repro(indices: []i32, width: i32) []i32 =
-  map(|i| loop total = 0 for k < i do total + i / width + i % width, indices)"#,
-        1,
-    );
-    for body in placed.functions.iter().map(|f| &f.body).chain(placed.entry_points.iter().map(|e| &e.body))
-    {
-        let scopes = LoopScopes::analyze(&body.inner);
-        for node in body.inner.insts.values() {
-            if matches!(
-                node.data,
-                InstKind::Op {
-                    tag: OpTag::BinOp(BinaryOperator::Divide | BinaryOperator::Remainder),
-                    ..
+    for (name, expected) in [("header", 1), ("body", 1), ("carried", 2)] {
+        let bodies = reachable_bodies(&placed, name);
+        for operator in [BinaryOperator::Divide, BinaryOperator::Remainder] {
+            let count = bodies
+                .iter()
+                .flat_map(|b| b.inner.insts.values())
+                .filter(|n| matches!(n.data, InstKind::Op { tag: OpTag::BinOp(op), .. } if op == operator))
+                .count();
+            assert_eq!(count, expected, "{name}: {operator:?}");
+        }
+        if name == "body" {
+            for body in bodies {
+                let scopes = LoopScopes::analyze(&body.inner);
+                for node in body.inner.insts.values() {
+                    if matches!(
+                        node.data,
+                        InstKind::Op {
+                            tag: OpTag::BinOp(BinaryOperator::Divide | BinaryOperator::Remainder),
+                            ..
+                        }
+                    ) {
+                        assert!(scopes.scope(node.placement.block().unwrap()).is_some());
+                    }
                 }
-            ) {
-                assert!(scopes.scope(node.placement.block().unwrap()).is_some());
             }
         }
     }
-}
-
-fn assert_division_sites(source: &str, expected: usize) -> crate::ssa::stage::Placed {
-    let ssa = crate::compile_thru_ssa(source).unwrap();
-    let placed = live_instructions(ssa.clone());
-    for operator in [BinaryOperator::Divide, BinaryOperator::Remainder] {
-        let sites = placed
-            .functions
-            .iter()
-            .map(|f| &f.body)
-            .chain(placed.entry_points.iter().map(|e| &e.body))
-            .flat_map(|body| body.inner.insts.values())
-            .filter(
-                |node| matches!(node.data, InstKind::Op { tag: OpTag::BinOp(op), .. } if op == operator),
-            )
-            .count();
-        assert_eq!(
-            sites,
-            expected,
-            "unexpected {operator:?} count before backend lowering\n{source}\n{}",
-            crate::ssa::print::format_program(&placed)
-        );
-    }
-    let wgsl = crate::lower_ssa_to_wgsl(ssa.clone()).unwrap();
-    let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(&module)
-    .unwrap();
-    let spirv = crate::lower_ssa_to_spirv(ssa).unwrap().spirv;
-    let module = wspirv::dr::load_words(&spirv).unwrap();
-    for opcode in [wspirv::spirv::Op::SDiv, wspirv::spirv::Op::SRem] {
-        assert_eq!(
-            module.all_inst_iter().filter(|inst| inst.class.opcode == opcode).count(),
-            expected,
-            "unexpected {opcode:?} count"
-        );
-    }
-    let bytes = spirv.iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<_>>();
-    let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(&module)
-    .unwrap();
-    placed
 }
 
 #[test]
@@ -376,15 +331,6 @@ fn dead_instruction_worklist_removes_long_chains() {
     body.inner.blocks[body.inner.entry].term = Terminator::Return(Some(x));
     eliminate_dead_pure_instructions(&mut body);
     assert_eq!(body.num_insts(), 0);
-}
-
-#[test]
-fn division_reuse_distinguishes_loop_carried_operands() {
-    assert_division_sites(
-        "entry repro(xs:[]i32,width:i32) []i32 = map(|x|
-         loop total=x/width+x%width for k<2 do total/width+total%width,xs)",
-        2,
-    );
 }
 
 #[test]
