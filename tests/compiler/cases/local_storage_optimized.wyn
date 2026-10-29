@@ -96,11 +96,16 @@ def local_14_0_walk(seed:i32,steps:i32) i32 =
 -- Expected 27*seed+111 (300 for seed=7). Each map creates a fresh temporary;
 -- after reduction it is dead before the next iteration allocates another.
 -- Generated code should index its allocation without whole-array snapshots.
-entry local_18_0_temporary_lifetime(seed: i32) i32 =
+def local_18_0_walk(seed: i32) i32 =
   let (total,_k) = loop (total,k) = (0i32,0i32) while k<3 do
     let values=map(|i| seed+i+k,iota(8)) in
     (total+reduce((+),0i32,values)+values[0],k+1) in
   total
+
+-- Keep the temporary inside a GPU invocation: host loops now dispatch their
+-- array operations, while this fixture specifically checks local storage.
+entry local_18_0_temporary_lifetime(seed: i32) [1]i32 =
+  map(local_18_0_walk, [seed])
 
 def local_20_0_walk(steps:i32) i32 =
         let initial=replicate(8,0i32) in

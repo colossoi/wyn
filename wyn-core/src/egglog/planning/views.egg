@@ -174,12 +174,3 @@
        (Allocation (Metadata owner) (Fixed count))) :ruleset metadata-allocation)
 (rule ((= count (MetadataCount owner)))
       ((set (AllocationOwner (Metadata owner)) owner)) :ruleset physical-abi)
-
-; Swapped loop buffers must satisfy both kernels' binding capacities even when
-; equivalent live domains have different conservative static bounds.
-(rule ((HostLoop op region initial state index next)
-       (= current (Backing (Source state))) (= result (ValueRef next)) (= following (Backing result))
-       (= a (CapacityExtent current)) (= b (CapacityExtent following))
-       (= na (StaticCapacityBound a)) (= nb (StaticCapacityBound b)) (= bound (Fixed (max na nb))))
-      ((set (AllocationBounds current) (set-of bound))
-       (set (AllocationBounds following) (set-of bound))) :ruleset capacity-bounds)

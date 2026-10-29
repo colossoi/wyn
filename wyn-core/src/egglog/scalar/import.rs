@@ -74,6 +74,17 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
             return Ok(value);
         }
         let ty = self.ty(source)?;
+        let projected_field =
+            if let Some(projection) = self.facts.record("SourceProjection", "ProjectionInfo", (source,))? {
+                self.facts
+                    .row("SourceField", |row| {
+                        row[0] == projection[0] && row[1] == projection[1]
+                    })?
+                    .map(|row| row[2])
+                    .filter(|&field| field != source)
+            } else {
+                None
+            };
         if !self.loading.insert(key) {
             return Err(OptimizeError::Output(
                 "cycle in admitted scalar source DAG".into(),
@@ -88,6 +99,10 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
                 actual,
                 expand && !self.facts.flag("ExprImportDispatchedSource", (actual,))?,
             )?
+        } else if let Some(field) = projected_field {
+            // Import the selected field in this scalar context. Re-evaluating
+            // its containing product would also execute unrelated loop results.
+            self.value(context, field, false)?
         } else if let Some((callee, arguments)) = self.facts.call(source)? {
             let arguments = arguments
                 .iter()

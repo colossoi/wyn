@@ -256,7 +256,8 @@ fn emit_body(
         let phase = lower.compiler.facts.phase_name(stage)?;
         let extent = lower.compiler.phase_extent(stage)?;
         let width = lower.compiler.phase_width(stage)?;
-        kernels::emit(lower, scope, operation, &phase, extent, width)?;
+        kernels::emit(lower, scope, operation, &phase, extent, width)
+            .map_err(|failure| error(format!("phase {operation:?}/{phase}: {failure}")))?;
         lower.op(OpTag::Unit, vec![], types::unit())?
     } else if compute && !original {
         lower.op(OpTag::Unit, vec![], types::unit())?

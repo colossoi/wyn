@@ -28,6 +28,40 @@ fn validate(module: naga::Module) {
 }
 
 #[test]
+fn independent_entries_preserve_same_named_input_lengths() {
+    for (program, format) in host_outputs(
+        "entry first(xs:[33]i32) [33]i32 = scan((+),0,xs)
+         entry second(xs:[255]i32) [255]i32 = scan((+),0,xs)
+         entry third(xs:[33]i32) [33]i32 = map(|x|x+1,xs)",
+    )
+    .into_iter()
+    .zip([ShaderFormat::Spirv, ShaderFormat::Wgsl])
+    {
+        let mut inputs = Vec::new();
+        for (name, bytes) in [("first", 132), ("second", 1020), ("third", 132)] {
+            let entry = program.entries.iter().find(|entry| entry.name == name).unwrap();
+            assert_eq!(entry.inputs.len(), 1);
+            let input = *entry.inputs.first().unwrap();
+            assert!(
+                !inputs.contains(&input),
+                "{format:?}: independent entries alias {name}"
+            );
+            inputs.push(input);
+            let resource = &program.interface.frame_graph.resources[input.0];
+            assert_eq!(resource.name, "xs");
+            assert_eq!(
+                resource.extent,
+                Some(host::FrameResourceExtent::StorageBuffer {
+                    length: Some(BufferLen::Fixed { bytes })
+                })
+            );
+        }
+        wyn_host_interp::Program::parse(&program.to_whl("input_scopes", format).unwrap()).unwrap();
+        program.to_rust_wgpu("input_scopes", format).unwrap();
+    }
+}
+
+#[test]
 fn unrelated_compute_entries_preserve_graphics_inputs_and_resources() {
     for source in [
         include_str!("../../tests/compiler/library/graphics_entry_context_0.wyn"),

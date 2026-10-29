@@ -46,12 +46,39 @@ pub struct DispatchLoop {
     pub setup: usize,
     /// Ordered dispatch indices executed on every iteration.
     pub body: Vec<usize>,
+    /// Predicate dispatches, evaluated before every conditional iteration.
+    pub test: Vec<usize>,
     /// Stage exposing the carried result and performing any required output copies.
     pub completion: usize,
-    pub count: ScalarExpr,
-    pub index: ScalarSource,
-    pub current: ScalarSource,
-    pub next: ScalarSource,
+    pub control: DispatchLoopControl,
+    /// Simultaneous recurrence, represented by independent current/next bindings.
+    pub carried: Vec<(ScalarSource, ScalarSource)>,
+}
+
+#[derive(Debug, Clone)]
+pub enum DispatchLoopControl {
+    Counted {
+        count: ScalarExpr,
+        index: ScalarSource,
+    },
+    While {
+        condition: ScalarExpr,
+    },
+}
+
+impl DispatchLoopControl {
+    pub fn expression(&self) -> &ScalarExpr {
+        match self {
+            Self::Counted { count, .. } => count,
+            Self::While { condition } => condition,
+        }
+    }
+    pub fn expression_mut(&mut self) -> &mut ScalarExpr {
+        match self {
+            Self::Counted { count, .. } => count,
+            Self::While { condition } => condition,
+        }
+    }
 }
 
 /// A descriptor-level frame graph: passes, logical resources, and the
@@ -94,36 +121,70 @@ impl FrameGraph {
             .enumerate()
             .map(|(index, pass)| ((pass.pipeline_index, pass.stage_index), index))
             .collect();
-        let mut units: Vec<_> = (0..self.passes.len()).collect();
-        let mut owners = vec![None; self.passes.len()];
-        for (region, repeated) in loops.iter().enumerate() {
-            let Some(&setup) = indices.get(&(repeated.pipeline, repeated.setup)) else {
-                return Err("loop setup has no published pass".into());
-            };
+        let mut members = Vec::new();
+        let mut starts = Vec::new();
+        for repeated in loops {
+            let setup = *indices
+                .get(&(repeated.pipeline, repeated.setup))
+                .ok_or_else(|| "loop setup has no published pass".to_string())?;
+            starts.push(setup);
+            let mut group = std::collections::BTreeSet::new();
             for stage in std::iter::once(repeated.setup)
+                .chain(repeated.test.iter().copied())
                 .chain(repeated.body.iter().copied())
                 .chain(std::iter::once(repeated.completion))
             {
-                let Some(&index) = indices.get(&(repeated.pipeline, stage)) else {
-                    return Err("loop stage has no published pass".into());
-                };
-                if let Some(previous) = owners[index].replace(region) {
-                    return Err(format!(
-                        "dispatch loop {region} reuses pass {index} already in loop {previous}"
-                    ));
+                group.insert(
+                    *indices
+                        .get(&(repeated.pipeline, stage))
+                        .ok_or_else(|| "loop stage has no published pass".to_string())?,
+                );
+            }
+            members.push(group);
+        }
+        // Close lexical nesting, then reject crossing (non-nested) ownership.
+        loop {
+            let before = members.clone();
+            for outer in 0..loops.len() {
+                for inner in 0..loops.len() {
+                    if outer != inner && before[outer].contains(&starts[inner]) {
+                        members[outer].extend(before[inner].iter().copied());
+                    }
                 }
-                units[index] = setup;
+            }
+            if members == before {
+                break;
             }
         }
-        let grouped = self
-            .order_units(&units)
-            .map_err(|cycle| format!("cyclic dependencies across dispatch loop boundaries: {cycle:?}"))?;
-        let mut position = vec![0; self.passes.len()];
-        for (rank, unit) in grouped.into_iter().enumerate() {
-            position[unit] = rank;
+        for a in 0..members.len() {
+            for b in 0..a {
+                if !members[a].is_disjoint(&members[b])
+                    && (members[a] == members[b]
+                        || (!members[a].is_subset(&members[b]) && !members[b].is_subset(&members[a])))
+                {
+                    return Err(format!(
+                        "dispatch loops {a} and {b} have crossing stage ownership"
+                    ));
+                }
+            }
         }
-        // Stable sorting retains the dependency order within each loop.
-        order.sort_by_key(|&index| position[units[index]]);
+        let mut nesting: Vec<_> = (0..loops.len()).collect();
+        nesting.sort_by_key(|&index| members[index].len());
+        let mut units: Vec<_> = (0..self.passes.len()).collect();
+        for region in nesting {
+            for &index in &members[region] {
+                units[index] = starts[region];
+            }
+            let grouped = self.order_units(&units).map_err(|cycle| {
+                format!("cyclic dependencies across dispatch loop boundaries: {cycle:?}")
+            })?;
+            let mut position = vec![0; self.passes.len()];
+            for (rank, unit) in grouped.into_iter().enumerate() {
+                position[unit] = rank;
+            }
+            // Stable sorting keeps already-grouped inner loops contiguous.
+            order.sort_by_key(|&index| position[units[index]]);
+        }
         Ok(order)
     }
 
@@ -206,7 +267,22 @@ impl FrameGraph {
     }
 
     fn build(pipelines: &[Pipeline]) -> Result<Self, String> {
-        let mut builder = FrameGraphBuilder::default();
+        let mut builder = FrameGraphBuilder {
+            input_scopes: pipelines
+                .iter()
+                .enumerate()
+                .map(|(index, pipeline)| {
+                    let owner = match pipeline {
+                        Pipeline::Compute(p) => p.stages.first().map(|stage| &stage.owner),
+                        Pipeline::Graphics(p) => p.stages.first().map(|stage| &stage.owner),
+                    };
+                    owner.map_or(InputScope::Pipeline(index), |owner| {
+                        InputScope::Entry(owner.clone())
+                    })
+                })
+                .collect(),
+            ..FrameGraphBuilder::default()
+        };
 
         for (pipeline_index, pipeline) in pipelines.iter().enumerate() {
             for (binding_index, binding) in pipeline_bindings(pipeline).iter().enumerate() {
@@ -1012,13 +1088,17 @@ impl Binding {
 /// Identity of a frame-graph resource. A resource is a *logical* buffer/texture,
 /// distinct from any one pipeline's `(set, binding)` contract for it: the same
 /// buffer bound by several pipelines (at possibly different slots) is one
-/// resource. Identity is the logical name for the kinds that are shared across
-/// pipelines (storage buffers, sampled textures); the physical slot is retained
-/// only where it *is* the identity — a sampled view aliasing a compute
+/// resource. Input buffer names are local to their authored entry; explicit
+/// resource names identify shared buffers. The physical slot is retained
+/// where it *is* the identity — a sampled view aliasing a compute
 /// storage-texture keys to that backing slot, and push constants are inherently
 /// per-pipeline.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum ResourceKey {
+    Input {
+        scope: InputScope,
+        name: String,
+    },
     Named {
         kind: FrameResourceKind,
         name: String,
@@ -1035,6 +1115,13 @@ enum ResourceKey {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum InputScope {
+    Entry(String),
+    // An interface without executable stages has no published entry owner.
+    Pipeline(usize),
+}
+
 /// Explicit frame resource accesses of one selected stage.
 #[derive(Default)]
 struct StageAccesses {
@@ -1046,11 +1133,12 @@ struct StageAccesses {
 struct FrameGraphBuilder {
     graph: FrameGraph,
     resources: BTreeMap<ResourceKey, usize>,
+    input_scopes: Vec<InputScope>,
 }
 
 impl FrameGraphBuilder {
     fn ensure_binding(&mut self, pipeline_index: usize, binding_index: usize, binding: &Binding) -> usize {
-        let key = resource_key(pipeline_index, binding);
+        let key = resource_key(pipeline_index, &self.input_scopes[pipeline_index], binding);
         let index = if let Some(&index) = self.resources.get(&key) {
             index
         } else {
@@ -1200,10 +1288,18 @@ fn pipeline_bindings(pipeline: &Pipeline) -> &[Binding] {
     }
 }
 
-fn resource_key(pipeline_index: usize, binding: &Binding) -> ResourceKey {
+fn resource_key(pipeline_index: usize, input_scope: &InputScope, binding: &Binding) -> ResourceKey {
     match binding {
-        // A storage buffer is one logical resource across every pipeline that
-        // binds it, regardless of each pipeline's `(set, binding)` slot.
+        Binding::StorageBuffer {
+            name,
+            resource: None,
+            usage: BufferUsage::Input,
+            ..
+        } => ResourceKey::Input {
+            scope: input_scope.clone(),
+            name: name.clone(),
+        },
+        // An explicit resource name shares storage across entry owners and slots.
         Binding::StorageBuffer { name, resource, .. } => ResourceKey::Named {
             kind: FrameResourceKind::StorageBuffer,
             name: resource.clone().unwrap_or_else(|| name.clone()),
@@ -1276,6 +1372,7 @@ fn resource_key(pipeline_index: usize, binding: &Binding) -> ResourceKey {
 
 fn resource_kind_from_key(key: &ResourceKey) -> FrameResourceKind {
     match key {
+        ResourceKey::Input { .. } => FrameResourceKind::StorageBuffer,
         ResourceKey::Named { kind, .. } | ResourceKey::Descriptor { kind, .. } => *kind,
         ResourceKey::PushConstant { .. } => FrameResourceKind::PushConstant,
     }

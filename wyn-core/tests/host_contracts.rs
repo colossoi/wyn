@@ -4,6 +4,84 @@ use wyn_core::host::{Allocation, Operation, Pipeline, ShaderFormat};
 use wyn_core::{lower_ssa_to_spirv, lower_ssa_to_wgsl_with_program, CodegenTarget};
 
 #[test]
+fn tiny_while_loops_have_no_host_readback_cycle() {
+    let source = pipeline::source(
+        "entry small(xs:[4]i32) ([4]i32,i32) =
+         loop (ys,i)=(xs,0) while i<128 do (map(|x|x+1,ys),i+1)
+         entry nested(xs:[4]i32) ([4]i32,i32) =
+         loop (ys,i)=(xs,0) while i<128 do
+           let next=loop zs=ys for j<2 do map(|x|x+1,zs) in (next,i+1)",
+    );
+    let ssa = pipeline::lower(&source, CodegenTarget::Portable);
+    for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+        let program = match format {
+            ShaderFormat::Spirv => lower_ssa_to_spirv(ssa.clone()).unwrap().program,
+            ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa.clone()).unwrap().program,
+        };
+        assert!(program.interface.dispatch_loops.is_empty());
+        let whl = program.to_whl("small", format).unwrap();
+        wyn_host_interp::Program::parse(&whl).unwrap();
+        program.to_rust_wgpu("small", format).unwrap();
+    }
+}
+
+#[test]
+fn dispatch_loops_share_product_carries_and_control_across_backends() {
+    use wyn_core::host::DispatchLoopControl;
+    let source = pipeline::source(include_str!(
+        "../../tests/compiler/library/dispatch_loop_products.wyn"
+    ));
+    let ssa = pipeline::lower(&source, CodegenTarget::Portable);
+    for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+        let program = match format {
+            ShaderFormat::Spirv => lower_ssa_to_spirv(ssa.clone()).unwrap().program,
+            ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa.clone()).unwrap().program,
+        };
+        let loops = &program.interface.dispatch_loops;
+        assert!(loops
+            .iter()
+            .any(|loop_| matches!(loop_.control, DispatchLoopControl::While { .. })
+                && loop_.carried.len() == 3));
+        assert!(loops.iter().any(
+            |loop_| matches!(loop_.control, DispatchLoopControl::Counted { .. })
+                && loop_.carried.len() == 3
+        ));
+        let nested = program.entries.iter().find(|entry| entry.name == "nested_runtime").unwrap();
+        let Some(Operation::Loop { region, body, .. }) =
+            nested.operations.iter().find(|operation| matches!(operation, Operation::Loop { .. }))
+        else {
+            panic!("runtime outer loop must remain distributed");
+        };
+        assert!(matches!(
+            loops[*region].control,
+            DispatchLoopControl::While { .. }
+        ));
+        let Some(Operation::Loop { region, .. }) =
+            body.iter().find(|operation| matches!(operation, Operation::Loop { .. }))
+        else {
+            panic!("runtime inner loop must remain distributed inside the outer loop");
+        };
+        assert!(matches!(
+            loops[*region].control,
+            DispatchLoopControl::Counted { .. }
+        ));
+        for loop_ in loops {
+            if matches!(loop_.control, DispatchLoopControl::While { .. }) {
+                assert!(!loop_.test.is_empty());
+            }
+            assert!(!loop_.body.is_empty());
+            let Pipeline::Compute(pipeline) = &program.interface.pipelines[loop_.pipeline] else {
+                panic!("compute loop");
+            };
+            assert!(loop_.body.iter().any(|&stage| pipeline.stages[stage].workgroup_size.0 > 1));
+        }
+        let whl = program.to_whl("loop-products", format).unwrap();
+        wyn_host_interp::Program::parse(&whl).unwrap();
+        program.to_rust_wgpu("loop_products", format).unwrap();
+    }
+}
+
+#[test]
 fn tuple_loop_outputs_and_scalar_bounds_reach_host_backends() {
     for source in [
         include_str!("../../tests/compiler/library/local_tuple_collectives.wyn"),

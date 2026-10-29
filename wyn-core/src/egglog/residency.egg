@@ -1,7 +1,7 @@
 ; Only host invocations create launches; scalar callbacks stay invocation-local.
 ; Classify opaque scalar subtrees before deriving host regions and phases.
 (rule ((= r (OperationRegion op)))
-      ((set (ContainsCollective op) false) (set (InvocationBoundary op) false) (set (HostLoopCandidate op) false)) :ruleset structure)
+      ((set (ContainsCollective op) false) (set (InvocationBoundary op) false) (set (HostLoopCandidate op) false) (set (DispatchLoopSelected op) false)) :ruleset structure)
 (rule ((= r (OperationRegion child)) (= true (ContainsCollective child)) (Enters parent r))
       ((set (ContainsCollective parent) true)) :ruleset structure)
 (rule ((= r (OperationRegion op)) (= true (ContainsCollective op))) ((RegionContainsCollective r)) :ruleset structure)
@@ -86,6 +86,7 @@
 (rule ((Needs stage value) (= n (CapacityExtent value))) ((ExtentDemand stage n)) :ruleset residency)
 (rule ((ExtentDemand stage (Scalar e))) ((Demand (InStage stage) e)) :ruleset residency)
 (rule ((ExtentDemand stage (Product a b))) ((ExtentDemand stage a) (ExtentDemand stage b)) :ruleset residency)
+(rule ((ExtentDemand stage (Sum a b))) ((ExtentDemand stage a) (ExtentDemand stage b)) :ruleset residency)
 (rule ((ExtentDemand stage (Difference a b))) ((ExtentDemand stage a) (ExtentDemand stage b)) :ruleset residency)
 (rule ((ExtentDemand stage (Stored value))) ((Needs stage value)) :ruleset residency)
 (rule ((ExtentDemand stage (Length e)) (= n (ViewExtent e))) ((ExtentDemand stage n)) :ruleset residency)
@@ -112,7 +113,3 @@
       ((Materialize value)) :ruleset residency)
 
 (rule ((UninitializedResult op i t n)) ((ResultSlot op i)) :ruleset residency)
-
-(rule ((HostRegion parent) (= parent (OperationRegion op)) (= (ContainsCollective op) true)
-       (CountedArrayLoop op r a s i n))
-      ((HostLoop op r a s i n)) :ruleset residency)

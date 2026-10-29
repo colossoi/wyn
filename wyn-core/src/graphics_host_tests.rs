@@ -24,6 +24,23 @@ fn compile(source: &str, target: &str, optimize: bool) -> Result<String, String>
 }
 
 #[test]
+fn graphics_entry_publishes_scalar_results_alongside_its_target() {
+    let source = r#"
+      entry result(flag: bool, target: render_target<vec4f32>)
+          (bool, render_target<vec4f32>) =
+        let fragments = rasterize_triangles(direct_draw(3u32, 1u32),
+          |_, _, _| vertex_output(@[0.0, 0.0, 0.0, 1.0], 0.5f32)) in
+        let image = shade(target, fragments, |v, _, _, _, _| @[v, v, v, 1.0]) in
+        (flag, image)
+    "#;
+    for target in ["spirv", "wgsl"] {
+        let host = compile(source, target, false).unwrap();
+        assert!(host.contains(":source-name \"result_0\""), "{host}");
+        assert!(host.contains(":value-layout :bool"), "{host}");
+    }
+}
+
+#[test]
 fn graphics_callbacks_preserve_scalar_helpers_for_later_optimization() {
     let source = format!(
         "{}\n{}",

@@ -115,12 +115,14 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         if !self.loading.insert(source) {
             return Err(error("cyclic source evaluation during SSA emission"));
         }
-        let value =
-            if let Some(&term) = self.compiler.program.stage.selected.roots.get(&(self.context, source)) {
-                self.scalar_body(scope, term)?
-            } else {
-                self.boundary(scope, source)?
-            };
+        let value = if self.compiler.facts.contains("HostLoopAggregate", (source,)) {
+            self.local(scope, source)?
+        } else if let Some(&term) = self.compiler.program.stage.selected.roots.get(&(self.context, source))
+        {
+            self.scalar_body(scope, term)?
+        } else {
+            self.boundary(scope, source)?
+        };
         self.loading.remove(&source);
         self.values.insert(source, value.clone());
         Ok(value)

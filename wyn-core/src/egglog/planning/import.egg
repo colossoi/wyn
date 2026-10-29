@@ -72,6 +72,8 @@
       ((set (ViewExtent value) (Scalar length))) :ruleset planning-import)
 (rule ((SourceArrayPart value 0 first))
       ((set (ViewExtent value) (Length first))) :ruleset planning-import)
+(rule ((Projection e tuple i) (SourceArrayPart tuple i field))
+      ((ForwardValue e field)) :ruleset residency)
 
 (rule ((PlannedOperation original owner plan region) (= value (SourceOperationValue original)) (SourceEnters value child)) ((Enters owner child)) :ruleset planning-import)
 (rule ((PlannedOperation original owner plan region) (= child (SourceOperatorBody original))) ((Callback owner child) (DeviceRegion child)) :ruleset planning-import)
@@ -226,14 +228,6 @@
        (= value (SourceResult wrapper)) (= actual (PlanCallee value)))
       ((Callback owner actual) (DeviceRegion actual)) :ruleset planning-import)
 
-(rule ((SourceCountedArrayLoop value) (= value (SourceOperationValue op))
-       (= (SourceLoop value) (LoopInfo header iteration)) (= (SourceLoopInitial header) (LoopInitialInfo state initial))
-       (SourceLoopBackedge header state next) (= index (SourceIterationValue iteration)))
-      ((set (HostLoopCandidate op) true) (CountedArrayLoop op iteration initial state index next)) :ruleset planning-import)
-(rule ((HostLoop op r a state index n) (= ty (SourceType state))
-       (SourceArrayElement ty element) (= it (SourceType index)))
-      ((ElementType (Source state) element) (ElementType (Source index) it)) :ruleset residency)
-
 (rule ((PlannedOperation original owner plan region) (= original owner)
        (= value (SourceOperationValue original)) (SourceScratch value extent))
       ((set (Rematerialize owner) true)) :ruleset classify)
@@ -281,8 +275,3 @@
        (= plan (SelectedPlan op)) (= owner (Owner plan)) (= extent (SourceDomainExtent op)))
       ((set (ElideElements owner) true) (DeviceOperation owner)
        (set (ViewExtent value) extent)) :ruleset planning-import)
-
-; Device-computed trip counts must be published before the host enters the loop.
-(rule ((HostLoop op r a s i n) (= source (SourceOperationValue op))
-       (= (SourceLoopForm source) (ForCount count ty)))
-      ((Demand (InStage (Stage op "loop_enter")) count)) :ruleset schedule)

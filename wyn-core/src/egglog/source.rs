@@ -21,6 +21,7 @@ use wyn_base::{IdSource, Interner};
 
 mod facts;
 mod interface;
+mod loops;
 mod structure;
 mod summary;
 #[cfg(test)]
@@ -559,11 +560,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
         self.sink.add("SourceEnters", (owner, iteration.key))?;
         let info = self.sink.add("LoopInfo", (header.key, iteration.key))?;
         self.sink.set("SourceLoop", owner, info)?;
-        if matches!(kind, LoopKind::ForRange { .. })
-            && (variable_ty.is_array() || crate::types::as_soa_tuple(variable_ty).is_some())
-        {
-            self.sink.add("SourceCountedArrayLoop", owner)?;
-        }
         let checkpoint = self.bindings.checkpoint();
         let accumulator = self.formal(variable, variable_ty, &header)?;
         let info = self.sink.add("LoopInitialInfo", (accumulator, initial))?;
@@ -585,6 +581,19 @@ impl<'source> Import<'_, '_, '_, 'source> {
         }
         let result = self.finish_body(body, &mut iteration)?;
         self.sink.add("SourceLoopBackedge", (header.key, accumulator, result))?;
+        if matches!(kind, LoopKind::ForRange { .. } | LoopKind::While { .. })
+            && loops::supported(variable_ty)
+        {
+            self.sink.add("SourceDispatchLoop", owner)?;
+            let domain =
+                self.loop_carries(owner, variable_ty, initial, accumulator, result, owner, &mut 0)?;
+            self.sink.set("SourceLoopDomain", owner, domain)?;
+            self.sink.set(
+                "SourceLoopDirectCarry",
+                owner,
+                matches!(kind, LoopKind::ForRange { .. }) && variable_ty.is_array(),
+            )?;
+        }
         self.finish_region_summary(&header)?;
         self.enter_summary(owner, header.key, parent)?;
         self.enter_summary(owner, iteration.key, parent)?;

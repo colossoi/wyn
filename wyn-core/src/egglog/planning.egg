@@ -12,6 +12,7 @@
   (Metadata i64)
   (ViewLength SourceValue)
   (LoopStorage SourceValue)
+  (LoopResult OperationKey i64)
   (Result OperationKey i64)
   (Temporary OperationKey String i64))
 (datatype Extent
@@ -117,6 +118,7 @@
 (function MetadataCount (i64) i64 :merge (max old new))
 (function LoopPreservesLength (SourceValue) bool :merge (or old new))
 (function StoredLoopState (SourceValue) bool :merge (or old new))
+(function DispatchLoopValue (SourceValue) bool :merge (or old new))
 ; Allocation bounds are separate from the scalar length carried by a view.
 (sort CapacityBounds (Set Extent))
 (function AllocationBounds (ValueKey) CapacityBounds :merge (set-union old new))
@@ -190,5 +192,12 @@
 (function OutputPinned (i64) bool :merge (or old new))
 
 (function HostLoopCandidate (OperationKey) bool :merge (or old new))
-(relation CountedArrayLoop (OperationKey RegionKey SourceValue SourceValue SourceValue SourceValue))
-(relation HostLoop (OperationKey RegionKey SourceValue SourceValue SourceValue SourceValue))
+(function LoopDispatchProfitable (OperationKey) bool :no-merge)
+(function DispatchLoopSelected (OperationKey) bool :merge (or old new))
+(relation HostLoop (OperationKey RegionKey RegionKey))
+(relation LoopCarry (OperationKey i64 SourceValue SourceValue SourceValue SourceValue bool))
+(relation HostLoopAggregate (SourceValue))
+(function LoopNext (OperationKey i64) ValueKey :no-merge)
+(function LoopCarryExtent (OperationKey i64) Extent :no-merge)
+(relation LoopStage (OperationKey StageKey))
+(relation LoopTestStage (OperationKey StageKey))

@@ -32,6 +32,58 @@ fn planned(source: &str, check: impl FnOnce(&EGraph)) {
     check(&program.graph);
 }
 
+#[test]
+fn loop_placement_accounts_for_iteration_work_before_storage() {
+    for (source, dispatched) in [
+        ("entry main(xs:[4]i32) [4]i32=loop ys=xs for i<128 do map(|x|x+1,ys)", false),
+        ("entry main(xs:[4]i32) ([4]i32,i32)=loop (ys,i)=(xs,0) while i<128 do (map(|x|x+1,ys),i+1)", false),
+        ("entry main(xs:[16]i32) ([16]i32,i32)=loop (ys,i)=(xs,0) while i<128 do (scan((+),0,ys),i+1)", false),
+        ("entry main(xs:[4097]i32) ([4097]i32,i32)=loop (ys,i)=(xs,0) while i<128 do (map(|x|x+1,ys),i+1)", true),
+        ("entry main(xs:[]i32) ([]i32,i32)=loop (ys,i)=(map(|x|x,xs),0) while i<128 do (map(|x|x+1,ys),i+1)", true),
+        ("entry main(xs:[4]i32,big:[65536]i32) ([4]i32,i32)=loop (ys,i)=(xs,0) while i<128 do (map(|x|x+reduce((+),0,big),ys),i+1)", true),
+    ] {
+        planned(source, |graph| {
+            let query = Query(graph);
+            let mut count = 0;
+            query.for_each("SourceDispatchLoop", |row| {
+                let op = query.required("SourceValueOperation", (row[0],))?;
+                assert_eq!(query.flag("DispatchLoopSelected", (op,))?, dispatched, "{source}");
+                assert_eq!(query.flag("InvocationBoundary", (op,))?, !dispatched, "{source}");
+                count += 1;
+                Ok(())
+            }).unwrap();
+            assert_eq!(count, 1, "{source}");
+        });
+    }
+}
+
+#[test]
+fn nested_loop_work_uses_constant_trip_counts() {
+    for (bound, dispatched) in [("0", false), ("2", false), ("65536", true), ("limit", true)] {
+        let source = format!(
+            "entry main(xs:[4]i32,limit:i32) ([4]i32,i32) =
+             loop (ys,i)=(xs,0) while i<128 do
+               let next=loop zs=ys for j<{bound} do map(|x|x+1,zs) in (next,i+1)"
+        );
+        planned(&source, |graph| {
+            let query = Query(graph);
+            let mut checked = 0;
+            query
+                .for_each("SourceDispatchLoop", |row| {
+                    let form = query.required("SourceLoopForm", (row[0],))?;
+                    if query.enode("WhileCondition", form)?.is_some() {
+                        let op = query.required("SourceValueOperation", (row[0],))?;
+                        assert_eq!(query.flag("DispatchLoopSelected", (op,))?, dispatched, "{source}");
+                        checked += 1;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(checked, 1);
+        });
+    }
+}
+
 // Compile related cases once; keep every assertion tied to its source entry.
 fn planned_cases(sources: &[&str], check: impl Fn(usize, &EGraph, Value)) {
     let source = sources
@@ -166,6 +218,68 @@ fn collective_width_tracks_materialized_accumulator_size() {
 }
 
 #[test]
+fn fixed_collective_launches_share_geometry_and_storage() {
+    for (size, groups, combine) in [
+        (0, 1, 32),
+        (1, 1, 32),
+        (257, 2, 32),
+        (8193, 33, 64),
+        (65537, 256, 256),
+    ] {
+        planned(
+            &format!("entry main(xs:[{size}]i32) [{size}]i32=scan((+),0,xs)"),
+            |graph| {
+                let query = Query(graph);
+                let scan = operations(graph, "scan")[0];
+                let plan = query.required("SelectedPlan", (scan,)).unwrap();
+                let owner = query.required("Owner", (plan,)).unwrap();
+                assert_eq!(
+                    graph.value_to_base::<i64>(query.required("CollectiveGroups", (owner,)).unwrap()),
+                    groups
+                );
+                assert_eq!(
+                    graph.value_to_base::<i64>(query.required("CollectiveCombineWidth", (owner,)).unwrap()),
+                    combine
+                );
+                let stage = query.constructor("Stage", (owner, "chunks")).unwrap().unwrap();
+                let grid = query.record("LaunchGrid", "FixedGrid", (stage,)).unwrap().unwrap();
+                assert_eq!(graph.value_to_base::<i64>(grid[0]), groups);
+                for role in ["partial", "offset"] {
+                    let temporary = query.constructor("Temporary", (owner, role, 0i64)).unwrap().unwrap();
+                    let extent = query.record("CapacityExtent", "Fixed", (temporary,)).unwrap().unwrap();
+                    assert_eq!(graph.value_to_base::<i64>(extent[0]), groups, "{role}");
+                }
+            },
+        );
+    }
+}
+
+#[test]
+fn fluid_radix_scan_avoids_empty_groups_and_oversized_carries() {
+    let source = format!(
+        "{}\nentry main(xs:[4320]vec2u32) [4320]vec2u32 = radix_sort_step(xs,|i,p|u32.get_bit(i,p.x),0)",
+        include_str!("../../../pkg/sort/src/four_bit.wyn")
+    );
+    planned(&source, |graph| {
+        let query = Query(graph);
+        let scan = operations(graph, "scan")[0];
+        let plan = query.required("SelectedPlan", (scan,)).unwrap();
+        let owner = query.required("Owner", (plan,)).unwrap();
+        for (fact, expected) in [
+            ("CollectiveChunkWidth", 64),
+            ("CollectiveGroups", 68),
+            ("CollectiveCombineWidth", 128),
+        ] {
+            assert_eq!(
+                graph.value_to_base::<i64>(query.required(fact, (owner,)).unwrap()),
+                expected,
+                "{fact}"
+            );
+        }
+    });
+}
+
+#[test]
 fn four_bit_radix_step_has_three_phases() {
     let source = format!(
         "{}\n entry main(xs: []vec2u32) []vec2u32 = radix_sort_step(xs, |i,p| u32.get_bit(i,p.x), 0)",
@@ -178,6 +292,12 @@ fn four_bit_radix_step_has_three_phases() {
         let owner = query.required("Owner", (plan,)).unwrap();
         let width = query.required("CollectiveChunkWidth", (owner,)).unwrap();
         assert_eq!(graph.value_to_base::<i64>(width), 64);
+        for fact in ["CollectiveGroups", "CollectiveCombineWidth"] {
+            assert_eq!(
+                graph.value_to_base::<i64>(query.required(fact, (owner,)).unwrap()),
+                256
+            );
+        }
         let mut phases = Vec::new();
         query
             .for_each("Phase", |row| {
@@ -892,7 +1012,7 @@ fn rectangular_planning_and_emission_use_fused_structure() {
     // Remove source operation classification; immutable inputs and callbacks remain
     // shared by source analysis and the fused plan.
     graph.clear_function("SourceOperation").unwrap();
-    super::schedule(&mut graph).unwrap();
+    super::schedule(&mut graph, super::super::cost::CostModel::default()).unwrap();
     let query = Query(&graph);
     let mut ranks = Vec::new();
     query

@@ -1,22 +1,5 @@
-; Structural scheduling only. Scalar instruction placement happens during SSA emission.
+; Finish scheduling after Rust selects collective launch sizes.
 (run-schedule (seq
-    (saturate shape-types) (saturate traversal-types) (saturate map-types)
-    (saturate rectangular-discover)
-    (saturate repeatability) (run traversal-proofs) (run traversal-ready)
-    (saturate (seq (run extent-shapes) (run map-shapes)))
-    (saturate extent-dependencies) (run extent-uniformity)
-    (run map-blockers) (saturate map-select) (saturate map-launch)
-    (saturate iteration-domains)
-    (saturate segment-shapes)
-    (saturate extent-dependencies) (run extent-uniformity)
-    (run segment-approve) (run segment-select)
-    (saturate execution-discover) (saturate execution-select) (run execution-finalize)
-    (saturate map-bindings)
-    (saturate storage-shapes)
-    (saturate capacity-identities)
-    (saturate type-layouts)
-    (saturate (seq residency representations))
-    (saturate collective-costs)
     (saturate output-layouts)
     (saturate integer-bounds) (run capacity-select)
     (saturate (seq (run residency) (run representations) (run schedule) (saturate integer-bounds) (run capacity-select) (run allocation) (run dispatch)))

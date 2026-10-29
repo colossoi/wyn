@@ -11,6 +11,14 @@ mod plan;
 pub(super) struct Facts<'a, 'source> {
     pub program: &'a Program<'source, Optimized>,
 }
+
+pub(super) struct LoopCarry {
+    pub slot: i64,
+    pub initial: Value,
+    pub state: Value,
+    pub next: Value,
+    pub array: bool,
+}
 impl<'a, 'source> Facts<'a, 'source> {
     // Access declarations are loaded with this compiler module. Wrong names or
     // arities here are compiler programming errors, never missing user facts.
@@ -90,6 +98,30 @@ impl<'a, 'source> Facts<'a, 'source> {
     }
     pub fn loop_state(&self, value: Value) -> Option<Value> {
         Some(self.record("SourceLoopInitial", "LoopInitialInfo", (value,))?[0])
+    }
+    pub fn loop_carries(&self, operation: Value) -> Result<Vec<LoopCarry>, OptimizeError> {
+        let mut rows = Vec::new();
+        Query(&self.program.graph).for_each("LoopCarry", |row| {
+            if row[0] == operation {
+                rows.push(LoopCarry {
+                    slot: self.integer(row[1]),
+                    initial: row[2],
+                    state: row[3],
+                    next: row[4],
+                    array: self.program.graph.value_to_base::<bool>(row[6]),
+                });
+            }
+            Ok(())
+        })?;
+        rows.sort_by_key(|carry| carry.slot);
+        Ok(rows)
+    }
+    pub fn source_field(&self, parent: Value, index: usize) -> Result<Option<Value>, OptimizeError> {
+        Ok(Query(&self.program.graph)
+            .row("SourceField", |row| {
+                row[0] == parent && self.integer(row[1]) == index as i64
+            })?
+            .map(|row| row[2]))
     }
     pub fn iteration(&self, value: Value) -> Option<Value> {
         self.lookup("SourceIterationValue", (value,))

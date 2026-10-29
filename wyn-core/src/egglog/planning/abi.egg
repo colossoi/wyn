@@ -101,13 +101,6 @@
       ((set (AllocationOwner (Output output)) owner)) :ruleset physical-abi)
 (rule ((Allocation value extent) (= access (RootResource (KernelRoot stage) value)) (> access 0) (PhaseOwner stage owner))
       ((set (AllocationOwner value) owner)) :ruleset physical-abi)
-(rule ((HostLoop op region initial state iteration count) (= parent (OperationRegion op)) (OwnedRegion owner parent))
-      ((set (AllocationOwner (Source state)) owner)
-       (set (AllocationOwner (Source iteration)) owner)) :ruleset physical-abi)
-; Runtime loop state must have an ABI even when no shader reads the index.
-(rule ((HostLoop op region initial state iteration count))
-      ((set (RootResource (KernelRoot (Stage op "loop_exit")) (Source state)) 0)
-       (set (RootResource (KernelRoot (Stage op "loop_exit")) (Source iteration)) 0)) :ruleset physical-abi)
 (datatype LaunchDescription (FixedLaunch DispatchGrid) (BufferLaunch ValueKey i64) (ExtentLaunch Extent i64))
 (function SelectedLaunch (StageKey) LaunchDescription :no-merge)
 (function HasStaticLaunch (StageKey) bool :merge (or old new))

@@ -124,6 +124,7 @@ impl Expr {
                     _ => "depth-or-layers",
                 }
             ),
+            Self::Add(a, b) => format!("(+ {} {})", a.to_whl()?, b.to_whl()?),
             Self::Subtract(a, b) => format!("(- {} {})", a.to_whl()?, b.to_whl()?),
             Self::Multiply(a, b) => format!("(* {} {})", a.to_whl()?, b.to_whl()?),
             Self::Floor(a, b) => format!("(floor {} {})", a.to_whl()?, b.to_whl()?),
@@ -389,16 +390,29 @@ impl Program {
     fn write_operations(&self, out: &mut String, operations: &[Operation]) -> Result<(), HostError> {
         for op in operations {
             match op {
-                Operation::Loop { pipeline, region, setup, body } => {
+                Operation::Loop { pipeline, region, setup, test, body } => {
                     let repeated = &self.interface.dispatch_loops[*region];
-                    let current = resource(self.scalar_resource(*pipeline, &repeated.current)?);
-                    let next = resource(self.scalar_resource(*pipeline, &repeated.next)?);
-                    let index = resource(self.scalar_resource(*pipeline, &repeated.index)?);
                     self.write_operations(out, setup)?;
-                    writeln!(out, "    (dotimes (iteration {})", self.whl_scalar(*pipeline, &repeated.count)?)?;
-                    writeln!(out, "      (gpu-write-scalar {index} 0 'i32 (i32 iteration))")?;
+                    match &repeated.control {
+                        crate::DispatchLoopControl::Counted { count, index } => {
+                            let index = resource(self.scalar_resource(*pipeline, index)?);
+                            writeln!(out, "    (dotimes (iteration {})", self.whl_scalar(*pipeline, count)?)?;
+                            writeln!(out, "      (gpu-write-scalar {index} 0 'i32 (i32 iteration))")?;
+                        }
+                        crate::DispatchLoopControl::While { condition } => {
+                            writeln!(out, "    (do () ((not (progn")?;
+                            self.write_operations(out, test)?;
+                            writeln!(out, "      {})) nil)", self.whl_scalar(*pipeline, condition)?)?;
+                        }
+                    }
                     self.write_operations(out, body)?;
-                    writeln!(out, "      (let ((previous {current})) (setq {current} {next} {next} previous)))")?;
+                    for (current, next) in &repeated.carried {
+                        let current = resource(self.scalar_resource(*pipeline, current)?);
+                        let next = resource(self.scalar_resource(*pipeline, next)?);
+                        if current == next { continue; }
+                        writeln!(out, "      (let ((previous {current})) (setq {current} {next} {next} previous))")?;
+                    }
+                    writeln!(out, "    )")?;
                 }
                 Operation::Scalar { pipeline, task } => writeln!(out, "    {}", self.whl_scalar_task(*pipeline, &self.interface.scalar_tasks[*task])?)?,
                 Operation::Dispatch { pipeline: p, stage: s, groups } => writeln!(out, "    (gpu-dispatch 'kernel-{p}-{s}\n      :groups (list {} {} {})\n      :args (list {}))", groups[0].to_whl()?, groups[1].to_whl()?, groups[2].to_whl()?, self.arguments(*p, Some(*s))?)?,

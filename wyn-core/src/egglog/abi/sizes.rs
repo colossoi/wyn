@@ -149,6 +149,10 @@ pub(in crate::egglog) fn extent(compiler: &Compiler<'_, '_>, key: Value) -> Resu
             },
         ),
         "Product" => Ok(extent(compiler, children[0])?.multiply(extent(compiler, children[1])?)),
+        "Sum" => Ok(Expr::Add(
+            Box::new(extent(compiler, children[0])?),
+            Box::new(extent(compiler, children[1])?),
+        )),
         "Difference" => Ok(Expr::Subtract(
             Box::new(extent(compiler, children[0])?),
             Box::new(extent(compiler, children[1])?),

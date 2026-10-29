@@ -1,4 +1,28 @@
 #[test]
+fn scan_barriers_survive_intermediate_map_contraction() {
+    let source = crate::compile_thru_tlc(
+        "entry main(xs:[64]i32) i32 = reduce((+),0i32,map(|x|x+1,scan((+),0i32,xs)))",
+    )
+    .unwrap();
+    let program = crate::egglog::from_tlc(&source).unwrap();
+    let mut program = crate::egglog::fuse(program).unwrap();
+    program
+        .graph
+        .parse_and_run_program(
+            None,
+            r#"
+        (check (SourceScanDependency scan reduction)
+               (= (SourceOperation scan) (OperationInfo region "scan"))
+               (= (SourceOperation reduction) (OperationInfo region "reduce")))
+        (fail (check (Current group plan) (PlanMember plan scan) (PlanMember plan reduction)
+               (= (SourceOperation scan) (OperationInfo region "scan"))
+               (= (SourceOperation reduction) (OperationInfo region "reduce"))))
+    "#,
+        )
+        .unwrap();
+}
+
+#[test]
 fn source_use_sets_survive_group_initialization_and_merging() {
     let source = crate::compile_thru_tlc("entry main(x:i32) i32 = x").unwrap();
     let (mut graph, _) = crate::egglog::source::import(&source).unwrap();

@@ -2,12 +2,14 @@ use wgpu::{BindGroupLayout, ErrorFilter, MapMode, PollType, PrimitiveTopology, T
 mod bindings;
 mod commands;
 mod draw;
+mod profile;
 #[cfg(test)]
 #[path = "gpu/tests.rs"]
 mod tests;
 
 use crate::{Backend, Error, Options, Parameter, Program, Result, Value};
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
@@ -19,7 +21,7 @@ use wgpu::{
 
 #[derive(Clone)]
 enum Resource {
-    Buffer(Buffer, u64),
+    Buffer(Buffer, u64, bool),
     /// One CPU-owned parameter value and its uploaded shader representation.
     ParameterBuffer {
         buffer: Buffer,
@@ -47,6 +49,11 @@ pub struct WgpuBackend {
     borrowed: BTreeSet<u64>,
     checkpoint: u64,
     next: u64,
+    commands: RefCell<Option<wgpu::CommandEncoder>>,
+    batching: bool,
+    buffer_pool: Vec<Buffer>,
+    pool_bytes: u64,
+    profile: RefCell<profile::Profile>,
     pub dispatch_overrides: BTreeMap<String, [u32; 3]>,
     pub vertex_count: Option<u32>,
     pub topology: Option<PrimitiveTopology>,
@@ -74,6 +81,7 @@ impl WgpuBackend {
     ) -> Result<Self> {
         let mut modules = BTreeMap::new();
         for (name, declaration) in &program.modules {
+            let _trace = profile::Span::new("shader", name);
             let Some(bytes) = sources.get(name) else {
                 return Err(gpu_error(format!("missing shader module {name}")));
             };
@@ -114,6 +122,11 @@ impl WgpuBackend {
             borrowed: BTreeSet::new(),
             checkpoint: 0,
             next: 0,
+            commands: RefCell::new(None),
+            batching: false,
+            buffer_pool: Vec::new(),
+            pool_bytes: 0,
+            profile: RefCell::new(profile::Profile::new()),
             dispatch_overrides: BTreeMap::new(),
             vertex_count: None,
             topology: None,
@@ -134,7 +147,14 @@ impl WgpuBackend {
         if bytes > buffer.size() {
             return Err(gpu_error("logical buffer size exceeds allocation"));
         }
-        Ok(self.insert(Resource::Buffer(buffer, bytes), true))
+        for resource in self.resources.values_mut() {
+            if let Resource::Buffer(other, _, owned) = resource {
+                if *other == buffer {
+                    *owned = false;
+                }
+            }
+        }
+        Ok(self.insert(Resource::Buffer(buffer, bytes, false), true))
     }
     pub fn import_texture(&mut self, texture: Texture) -> Value {
         self.insert(Resource::Texture(texture), true)
@@ -155,7 +175,7 @@ impl WgpuBackend {
         let mut padded = bytes.clone();
         padded.resize(bytes.len().div_ceil(4) * 4, 0);
         if !padded.is_empty() {
-            self.queue.write_buffer(&buffer, 0, &padded);
+            self.upload(&buffer, 0, &padded);
         }
         self.resources.insert(value.handle()?, Resource::ParameterBuffer { buffer, bytes });
         self.imported.insert(value.handle()?);
@@ -194,7 +214,7 @@ impl WgpuBackend {
     }
     pub fn buffer(&self, value: &Value) -> Result<&Buffer> {
         match self.resource(value)? {
-            Resource::Buffer(buffer, _) | Resource::ParameterBuffer { buffer, .. } => Ok(buffer),
+            Resource::Buffer(buffer, _, _) | Resource::ParameterBuffer { buffer, .. } => Ok(buffer),
             _ => Err(gpu_error("expected a device buffer")),
         }
     }
@@ -207,7 +227,7 @@ impl WgpuBackend {
     }
     pub fn buffer_size(&self, value: &Value) -> Result<u64> {
         match self.resource(value)? {
-            Resource::Buffer(_, size) => Ok(*size),
+            Resource::Buffer(_, size, _) => Ok(*size),
             Resource::HostBuffer(bytes) => Ok(bytes.len() as u64),
             Resource::ParameterBuffer { bytes, .. } => Ok(bytes.len() as u64),
             _ => Err(gpu_error("expected a buffer")),
@@ -243,18 +263,14 @@ impl WgpuBackend {
             };
             data.resize(usize::try_from(aligned_end - start).map_err(gpu_error)?, 0);
             data[(offset - start) as usize..(end - start) as usize].copy_from_slice(bytes);
-            self.queue.write_buffer(self.buffer(value)?, start, &data);
+            self.upload(self.buffer(value)?, start, &data);
             self.update_parameter_bytes(value, offset, bytes)?;
             return Ok(());
         }
-        match self.resources.get_mut(&value.handle()?) {
-            Some(Resource::Buffer(buffer, _)) | Some(Resource::ParameterBuffer { buffer, .. }) => {
-                self.queue.write_buffer(buffer, offset, bytes);
-            }
-            Some(Resource::HostBuffer(storage)) => {
-                storage[offset as usize..end as usize].copy_from_slice(bytes)
-            }
-            _ => return Err(gpu_error("expected a buffer")),
+        if let Some(Resource::HostBuffer(storage)) = self.resources.get_mut(&value.handle()?) {
+            storage[offset as usize..end as usize].copy_from_slice(bytes);
+        } else {
+            self.upload(self.buffer(value)?, offset, bytes);
         }
         self.update_parameter_bytes(value, offset, bytes)?;
         Ok(())
@@ -282,14 +298,15 @@ impl WgpuBackend {
             usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let mut encoder = self.take_encoder();
         encoder.copy_buffer_to_buffer(buffer, start, &staging, 0, copy_end - start);
-        self.queue.submit(Some(encoder.finish()));
+        self.submit(encoder);
         let slice = staging.slice(..);
         let (send, receive) = mpsc::sync_channel(1);
         slice.map_async(MapMode::Read, move |result| {
             if send.send(result).is_err() { /* The caller has already returned a device polling error. */ }
         });
+        let _wait = profile::Span::new("readback-wait", "buffer");
         self.device.poll(PollType::wait_indefinitely()).map_err(gpu_error)?;
         receive.recv().map_err(gpu_error)?.map_err(gpu_error)?;
         let mapped = slice.get_mapped_range();
@@ -305,19 +322,116 @@ impl WgpuBackend {
         if physical > self.device.limits().max_buffer_size {
             return Err(gpu_error("buffer exceeds device limit"));
         }
-        let buffer = self.device.create_buffer(&BufferDescriptor {
-            label: Some("WHL buffer"),
-            size: physical,
-            usage: BufferUsages::STORAGE
-                | BufferUsages::UNIFORM
-                | BufferUsages::COPY_SRC
-                | BufferUsages::COPY_DST
-                | BufferUsages::VERTEX
-                | BufferUsages::INDEX
-                | BufferUsages::INDIRECT,
-            mapped_at_creation: false,
+        let buffer =
+            if let Some(index) = self.buffer_pool.iter().position(|buffer| buffer.size() == physical) {
+                let buffer = self.buffer_pool.swap_remove(index);
+                self.pool_bytes -= buffer.size();
+                // Allocation promises zeroed bytes, including padding. Record the
+                // clear after all earlier uses, even when recycling within a batch.
+                let mut encoder = self.take_encoder();
+                encoder.clear_buffer(&buffer, 0, None);
+                self.record(encoder);
+                buffer
+            } else {
+                self.device.create_buffer(&BufferDescriptor {
+                    label: Some("WHL buffer"),
+                    size: physical,
+                    usage: BufferUsages::STORAGE
+                        | BufferUsages::UNIFORM
+                        | BufferUsages::COPY_SRC
+                        | BufferUsages::COPY_DST
+                        | BufferUsages::VERTEX
+                        | BufferUsages::INDEX
+                        | BufferUsages::INDIRECT,
+                    mapped_at_creation: false,
+                })
+            };
+        Ok(self.insert(Resource::Buffer(buffer, bytes, true), false))
+    }
+
+    fn take_encoder(&self) -> wgpu::CommandEncoder {
+        self.commands
+            .borrow_mut()
+            .take()
+            .unwrap_or_else(|| self.device.create_command_encoder(&Default::default()))
+    }
+
+    fn record(&self, encoder: wgpu::CommandEncoder) {
+        if self.batching {
+            *self.commands.borrow_mut() = Some(encoder);
+        } else {
+            self.submit(encoder);
+        }
+    }
+
+    /// Submit everything preceding an external consumer or a CPU readback.
+    pub fn flush(&self) {
+        if let Some(encoder) = self.commands.borrow_mut().take() {
+            self.submit(encoder);
+        }
+    }
+
+    fn submit(&self, mut encoder: wgpu::CommandEncoder) {
+        self.profile.borrow_mut().resolve(&self.device, &mut encoder);
+        self.queue.submit(Some(encoder.finish()));
+    }
+
+    fn timestamp_pass(&self, name: &str) -> Option<profile::Pass> {
+        if self.profile.borrow().full() {
+            self.flush();
+        }
+        self.profile.borrow_mut().pass(&self.device, name)
+    }
+
+    /// Drain optional diagnostic timestamps after a completed frame. Profiling
+    /// is opt-in and is never part of the normal simulation execution path.
+    pub fn profile_frame(&self, frame: u32) -> Result<()> {
+        self.flush();
+        self.profile.borrow_mut().collect(&self.device, self.queue.get_timestamp_period(), frame)
+    }
+
+    fn upload(&self, destination: &Buffer, offset: u64, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        if !self.batching {
+            self.queue.write_buffer(destination, offset, bytes);
+            return;
+        }
+        // Queue writes all precede the next submission. A staging copy instead
+        // preserves uploads between loop iterations in a single command buffer.
+        let staging = self.device.create_buffer(&BufferDescriptor {
+            label: Some("WHL upload"),
+            size: bytes.len() as u64,
+            usage: BufferUsages::COPY_SRC,
+            mapped_at_creation: true,
         });
-        Ok(self.insert(Resource::Buffer(buffer, bytes), false))
+        staging.slice(..).get_mapped_range_mut().copy_from_slice(bytes);
+        staging.unmap();
+        let mut encoder = self.take_encoder();
+        encoder.copy_buffer_to_buffer(&staging, 0, destination, offset, bytes.len() as u64);
+        self.record(encoder);
+    }
+
+    fn release(&mut self, id: u64) {
+        let Some(Resource::Buffer(buffer, _, owned)) = self.resources.remove(&id) else {
+            return;
+        };
+        if !owned
+            || self.resources.values().any(|resource| match resource {
+                Resource::Buffer(other, ..) | Resource::ParameterBuffer { buffer: other, .. } => {
+                    *other == buffer
+                }
+                _ => false,
+            })
+        {
+            return;
+        }
+        let limit = self.device.limits().max_buffer_size.min(256 * 1024 * 1024);
+        if buffer.size() <= limit.saturating_sub(self.pool_bytes) {
+            self.pool_bytes += buffer.size();
+            self.buffer_pool.push(buffer);
+        }
     }
 
     fn roots(&self, values: &[Value]) -> BTreeSet<u64> {
@@ -348,7 +462,10 @@ impl WgpuBackend {
 
     pub fn retain_resources(&mut self, values: &[Value]) {
         let ids = self.roots(values);
-        self.resources.retain(|id, _| ids.contains(id));
+        let retired: Vec<_> = self.resources.keys().filter(|id| !ids.contains(id)).copied().collect();
+        for id in retired {
+            self.release(id);
+        }
         self.imported.retain(|id| ids.contains(id));
     }
 }
@@ -409,11 +526,15 @@ impl Backend for WgpuBackend {
         Ok(())
     }
     fn begin(&mut self, arguments: &[Value]) -> Result<()> {
+        if self.batching {
+            return Err(gpu_error("nested GPU entry invocation"));
+        }
         self.checkpoint = self.next;
         self.borrowed = self.roots(arguments);
         for id in &self.borrowed {
             self.resource(&Value::Resource(*id))?;
         }
+        self.batching = true;
         Ok(())
     }
     fn finish(&mut self, result: &Result<Value>) -> Result<()> {
@@ -421,7 +542,38 @@ impl Backend for WgpuBackend {
             Ok(value) => self.roots(std::slice::from_ref(value)),
             Err(_) => BTreeSet::new(),
         };
-        self.resources.retain(|id, _| *id <= self.checkpoint || retained.contains(id));
+        // Returned buffers may be cloned by callers outside this resource table.
+        // Only invocation-private temporaries are eligible for recycling.
+        let escaped: Vec<_> = retained
+            .iter()
+            .filter_map(|id| match self.resources.get(id) {
+                Some(Resource::Buffer(buffer, ..)) => Some(buffer.clone()),
+                _ => None,
+            })
+            .collect();
+        for resource in self.resources.values_mut() {
+            if let Resource::Buffer(buffer, _, owned) = resource {
+                if escaped.contains(buffer) {
+                    *owned = false;
+                }
+            }
+        }
+        if result.is_ok() {
+            self.flush();
+        } else {
+            self.commands.borrow_mut().take();
+            self.profile.borrow_mut().discard_unsubmitted();
+        }
+        self.batching = false;
+        let retired: Vec<_> = self
+            .resources
+            .keys()
+            .filter(|id| **id > self.checkpoint && !retained.contains(id))
+            .copied()
+            .collect();
+        for id in retired {
+            self.release(id);
+        }
         self.borrowed.clear();
         Ok(())
     }

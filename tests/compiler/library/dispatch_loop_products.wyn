@@ -1,0 +1,36 @@
+-- GPU loops carry independent arrays and scalars; the recurrence is simultaneous.
+entry conditional(limit:i32) ([4]i32,i32,bool) =
+  let (xs,iteration,changed) = loop (xs,iteration,changed) = ([1,2,3,4],0i32,true)
+    while iteration < limit && changed do
+      let next = scan((+),0i32,xs) in
+      (next,iteration+1,reduce(|a,b|a || b,false,map(|x|x < 100,next))) in
+  (xs,iteration,changed)
+
+entry counted(limit:i32) ([4]i32,[4]i32,i32) =
+  loop (a,b,total) = ([1,2,3,4],[10,20,30,40],0i32) for i < limit do
+    (map(|x|x+i,b),map(|x|x+1,a),total+reduce((+),0i32,a))
+
+entry nested(limit:i32) ([4]i32,i32) =
+  loop (xs,iteration) = ([1,2,3,4],0i32) while iteration < limit do
+    let next = loop ys = xs for i < 2 do map(|x|x+i+1,ys) in
+    (next,iteration+1)
+-- Runtime extents must survive initialization, iteration and zero-trip exit.
+entry runtime(xs: []i32, limit: i32) ([]i32, i32) =
+  loop (ys, iteration) = (map(|x| x, xs), 0) while iteration < limit do
+    (map(|x| x + 1, ys), iteration + 1)
+
+-- Unknown extents retain dispatch coverage when tiny fixed loops stay local.
+entry conditional_runtime(xs: []i32, limit: i32) ([]i32, i32, bool) =
+  loop (ys, iteration, changed) = (map(|x| x, xs), 0, true)
+    while iteration < limit && changed do
+      let next = scan((+), 0, ys) in
+      (next, iteration+1, reduce(|a,b| a || b, false, map(|x| x < 100, next)))
+
+entry counted_runtime(xs: []i32, limit: i32) ([]i32, []i32, i32) =
+  loop (a,b,total) = (map(|x| x, xs), map(|x| x*10, xs), 0) for i < limit do
+    (map(|x| x+i, b), map(|x| x+1, a), total+reduce((+), 0, a))
+
+entry nested_runtime(xs: []i32, limit: i32) ([]i32, i32) =
+  loop (ys, iteration) = (map(|x| x, xs), 0) while iteration < limit do
+    let next = loop zs = ys for i < 2 do map(|x| x+i+1, zs) in
+    (next, iteration+1)

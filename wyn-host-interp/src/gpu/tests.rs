@@ -11,6 +11,62 @@ fn backend(source: &str) -> (Program, WgpuBackend) {
 }
 
 #[test]
+fn batching_preserves_upload_copy_order_and_readback_visibility() {
+    let (program, mut gpu) = backend("(define-host-program :version 1)");
+    let input = gpu.allocate_buffer(4).unwrap();
+    let output = gpu.allocate_buffer(8).unwrap();
+    gpu.begin(&[input.clone(), output.clone()]).unwrap();
+    for (offset, value) in [(0u64, 7u32), (4, 19)] {
+        gpu.write_buffer(&input, 0, &value.to_le_bytes()).unwrap();
+        gpu.call(
+            &program,
+            "gpu-copy",
+            &[
+                output.clone(),
+                Value::Number(Number::U64(offset)),
+                input.clone(),
+                Value::Number(Number::U64(0)),
+                Value::Number(Number::U64(4)),
+            ],
+        )
+        .unwrap();
+    }
+    assert!(gpu.commands.borrow().is_some());
+    let expected = [7u32.to_le_bytes(), 19u32.to_le_bytes()].concat();
+    assert_eq!(gpu.read_buffer(&output, 0, 8).unwrap(), expected);
+    assert!(gpu.commands.borrow().is_none());
+    gpu.finish(&Ok(output)).unwrap();
+}
+
+#[test]
+fn temporary_reuse_waits_for_last_alias_and_clears_old_contents() {
+    let (program, mut gpu) = backend("(define-host-program :version 1)");
+    gpu.begin(&[]).unwrap();
+    let temporary = gpu.allocate_buffer(16).unwrap();
+    let physical = gpu.buffer(&temporary).unwrap().clone();
+    gpu.write_buffer(&temporary, 0, &[255; 16]).unwrap();
+    let alias = gpu
+        .call(
+            &program,
+            "gpu-buffer-view",
+            &[temporary.clone(), Value::Number(Number::U32(16))],
+        )
+        .unwrap();
+    gpu.call(&program, "gpu-free", &[temporary]).unwrap();
+    assert!(gpu.buffer_pool.is_empty());
+    gpu.call(&program, "gpu-free", &[alias]).unwrap();
+    let recycled = gpu.allocate_buffer(16).unwrap();
+    assert_eq!(*gpu.buffer(&recycled).unwrap(), physical);
+    assert_eq!(gpu.read_buffer(&recycled, 0, 16).unwrap(), vec![0; 16]);
+    gpu.finish(&Ok(recycled.clone())).unwrap();
+    gpu.retain_resources(&[]);
+    assert!(
+        gpu.buffer_pool.is_empty(),
+        "an escaped output may be held by its caller"
+    );
+}
+
+#[test]
 fn buffer_views_keep_storage_and_logical_size_separate() {
     let (program, mut backend) = backend("(define-host-program :version 1)");
     let storage = backend.allocate_buffer(16).unwrap();

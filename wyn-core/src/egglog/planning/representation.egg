@@ -47,6 +47,7 @@
       ((set (LoopOwnsView value) true)) :ruleset type-layouts)
 (function LoopBoundaryLayout (SourceValue) LocalLayout :no-merge)
 (rule ((= (SourceLoop value) (LoopInfo header iteration)) (= (SourceLoopInitial header) (LoopInitialInfo state initial))
+       (= op (SourceValueOperation value)) (= (DispatchLoopSelected op) false)
        (= layout (ValueRepresentation initial)) (= (LoopOwnsView value) false))
       ((set (LoopBoundaryLayout value) layout)) :ruleset representations)
 (rule ((= (SourceLoop value) (LoopInfo header iteration)) (= (SourceLoopInitial header) (LoopInitialInfo state initial))
@@ -140,6 +141,7 @@
 ; representation. Runtime views keep their separately carried descriptor length.
 (rule ((SourceProjectionFields source parent i)
        (= (SourceLoop parent) (LoopInfo header iteration))
+       (= (DispatchLoopValue source) false)
        (= ty (SourceType source)) (= (SourceArraySize ty) (DynamicSize))
        (= (ValueRepresentation source) (ArrayLayout count element)))
       ((set (ViewExtent source) (Fixed count))) :ruleset residency)

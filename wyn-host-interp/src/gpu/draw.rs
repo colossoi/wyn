@@ -225,6 +225,7 @@ impl WgpuBackend {
         let vertices = vertex_values.iter().map(|v| self.buffer(v).cloned()).collect::<Result<Vec<_>>>()?;
         let key = format!("{name}:{formats:?}:{samples}:{:?}", self.topology);
         if !self.renders.contains_key(&key) {
+            let _trace = super::profile::Span::new("render-pipeline", name);
             let (layouts, pushes) = self.layouts(graphics, ShaderStages::VERTEX_FRAGMENT)?;
             let references = layouts.iter().collect::<Vec<_>>();
             let layout = self.device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -367,13 +368,18 @@ impl WgpuBackend {
             depth_ops: Some(*ops),
             stencil_ops: None,
         });
-        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let stamp = self.timestamp_pass(name);
+        let mut encoder = self.take_encoder();
         {
             let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some(name),
                 color_attachments: &attachments,
                 depth_stencil_attachment: depth_attachment,
-                timestamp_writes: None,
+                timestamp_writes: stamp.as_ref().map(|stamp| wgpu::RenderPassTimestampWrites {
+                    query_set: &stamp.queries,
+                    beginning_of_pass_write_index: Some(stamp.start),
+                    end_of_pass_write_index: Some(stamp.start + 1),
+                }),
                 occlusion_query_set: None,
             });
             pass.set_pipeline(pipeline);
@@ -494,7 +500,7 @@ impl WgpuBackend {
                 }
             }
         }
-        self.queue.submit(Some(encoder.finish()));
+        self.record(encoder);
         Ok(Value::Nil)
     }
 }

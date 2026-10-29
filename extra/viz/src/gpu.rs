@@ -50,8 +50,14 @@ impl GpuContext {
             })
             .await
             .context("request_adapter failed")?;
-        let features =
-            adapter.features() & request.desired_features & !Features::EXPERIMENTAL_PASSTHROUGH_SHADERS;
+        let profiling = if std::env::var_os("WYN_GPU_PROFILE").is_some() {
+            Features::TIMESTAMP_QUERY
+        } else {
+            Features::empty()
+        };
+        let features = adapter.features()
+            & (request.desired_features | profiling)
+            & !Features::EXPERIMENTAL_PASSTHROUGH_SHADERS;
         let mut limits = adapter.limits();
         if let Some(overlay) = request.limits_overlay {
             overlay(&mut limits, &adapter);

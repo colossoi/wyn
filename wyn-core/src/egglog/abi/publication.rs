@@ -12,7 +12,7 @@ use crate::host::{
     ComputePipeline, ComputeStage, DispatchSize, FrameGraph, GraphicsPipeline, GraphicsStage,
     ModuleInterface, Pipeline, ShaderStage,
 };
-use crate::host::{DispatchLoop, ScalarExpr, ScalarSource, ScalarTask, ScalarType};
+use crate::host::{DispatchLoop, DispatchLoopControl, ScalarExpr, ScalarSource, ScalarTask, ScalarType};
 use crate::interface::publish::{reconcile_storage_binding_access, EntryPoint, ModuleInterfacePublish};
 use crate::interface::results::result_layout;
 use crate::interface::{DrawBufferOperand, SourceResult};
@@ -607,42 +607,67 @@ fn publish_loops(
         let Some(source) = compiler.facts.source(operation) else {
             return Err(error("loop source missing"));
         };
-        let Some((header, iteration)) = compiler.facts.loops(source) else {
+        let Some((_header, iteration)) = compiler.facts.loops(source) else {
             return Err(error("loop regions missing"));
         };
-        let Some(form) = compiler
-            .facts
-            .lookup("SourceLoopForm", (source,))
-            .and_then(|form| compiler.facts.enode("ForCount", form))
-        else {
-            return Err(error("host loop has no count recipe"));
-        };
-        let context = crate::egglog::query::Query(&compiler.program.graph)
-            .required("ExprContextForSource", (form[0],))?;
-        let count = host::published_expression(compiler.program, context, form[0], &|resource| {
-            sizes::published_read(compiler, resource)
-        })
-        .map_err(|error| error.required("loop count"))?;
-        let slot = |value: Option<Value>| -> Result<ScalarSource, OptimizeError> {
-            let Some(backing) =
-                value.and_then(|v| compiler.facts.value_ref(v)).and_then(|v| compiler.facts.backing(v))
-            else {
-                return Err(error("loop state has no selected backing"));
-            };
-            let Some((binding, _, _)) = compiler.bindings.buffer(backing)? else {
-                return Err(error("loop state has no selected allocation"));
-            };
+        let slot = |value: Value| -> Result<ScalarSource, OptimizeError> {
+            let backing =
+                compiler.facts.backing(value).ok_or_else(|| error("loop storage has no backing"))?;
+            let (binding, _, _) =
+                compiler.bindings.buffer(backing)?.ok_or_else(|| error("loop allocation missing"))?;
             Ok(ScalarSource::Binding {
                 set: binding.set,
                 binding: binding.binding,
             })
         };
+        let form = compiler
+            .facts
+            .lookup("SourceLoopForm", (source,))
+            .ok_or_else(|| error("loop control missing"))?;
+        let control = if let Some(fields) = compiler.facts.enode("ForCount", form) {
+            let context = crate::egglog::query::Query(&compiler.program.graph)
+                .required("ExprContextForSource", (fields[0],))?;
+            let count = host::published_expression(compiler.program, context, fields[0], &|resource| {
+                sizes::published_read(compiler, resource)
+            })
+            .map_err(|error| error.required("loop count"))?;
+            let index = compiler.facts.iteration(iteration).ok_or_else(|| error("loop index missing"))?;
+            let index =
+                compiler.facts.value_ref(index).ok_or_else(|| error("loop index storage missing"))?;
+            DispatchLoopControl::Counted {
+                count,
+                index: slot(index)?,
+            }
+        } else if compiler.facts.enode("WhileCondition", form).is_some() {
+            let condition = compiler
+                .facts
+                .constructor("Temporary", (operation, "loop_condition", 0i64))
+                .ok_or_else(|| error("loop predicate storage missing"))?;
+            DispatchLoopControl::While {
+                condition: ScalarExpr::Read {
+                    source: slot(condition)?,
+                    offset: 0,
+                    ty: ScalarType::Bool,
+                },
+            }
+        } else {
+            return Err(error("unsupported dispatch loop control"));
+        };
+        let mut carried = Vec::new();
+        for carry in compiler.facts.loop_carries(operation)? {
+            let current =
+                compiler.facts.value_ref(carry.state).ok_or_else(|| error("loop carry missing"))?;
+            let next = crate::egglog::query::Query(&compiler.program.graph)
+                .required("LoopNext", (operation, carry.slot))?;
+            carried.push((slot(current)?, slot(next)?));
+        }
         let Some(pipeline) = associations.iter().position(|ids| ids.contains(&entry.id)) else {
             return Err(error("loop pipeline missing"));
         };
         let mut setup = None;
         let mut completion = None;
         let mut body = Vec::new();
+        let mut test = Vec::new();
         for (index, id) in associations[pipeline].iter().enumerate() {
             let Some((_, Some(candidate))) = compiler.entry_origins.get(id) else {
                 continue;
@@ -657,6 +682,9 @@ fn publish_loops(
                     completion = Some(index);
                 }
             }
+            if compiler.facts.contains("LoopTestStage", (operation, *candidate)) {
+                test.push(index);
+            }
             if compiler.facts.contains("LoopStage", (operation, *candidate)) {
                 body.push(index);
             }
@@ -669,10 +697,9 @@ fn publish_loops(
             setup,
             completion,
             body,
-            count,
-            index: slot(compiler.facts.iteration(iteration))?,
-            current: slot(compiler.facts.loop_state(header))?,
-            next: slot(compiler.facts.result(iteration))?,
+            test,
+            control,
+            carried,
         });
     }
     Ok(())
