@@ -28,6 +28,39 @@ fn validate(module: naga::Module) {
 }
 
 #[test]
+fn output_copies_preserve_views_and_use_parallel_dispatches() {
+    for (program, format) in host_outputs(include_str!("../../tests/compiler/library/output_copies.wyn"))
+        .into_iter()
+        .zip([ShaderFormat::Spirv, ShaderFormat::Wgsl])
+    {
+        let prefix = program.entries.iter().find(|entry| entry.name == "prefix").unwrap();
+        assert_eq!(prefix.results[0], *prefix.inputs.first().unwrap());
+        assert!(prefix.operations.is_empty());
+        for name in ["shifted", "produced", "mixed", "range", "compacted"] {
+            let entry = program.entries.iter().find(|entry| entry.name == name).unwrap();
+            let copies: Vec<_> = entry
+                .operations
+                .iter()
+                .filter_map(|op| {
+                    let Operation::Dispatch { pipeline, stage, .. } = op else {
+                        return None;
+                    };
+                    let Pipeline::Compute(pipeline) = &program.interface.pipelines[*pipeline] else {
+                        panic!()
+                    };
+                    let stage = &pipeline.stages[*stage];
+                    stage.entry_point.ends_with("_finish").then_some(stage)
+                })
+                .collect();
+            assert_eq!(copies.len(), 1, "{format:?}: {name}");
+            assert!(copies[0].workgroup_size.0 > 1, "{format:?}: {name}");
+        }
+        wyn_host_interp::Program::parse(&program.to_whl("copies", format).unwrap()).unwrap();
+        program.to_rust_wgpu("copies", format).unwrap();
+    }
+}
+
+#[test]
 fn independent_entries_preserve_same_named_input_lengths() {
     for (program, format) in host_outputs(
         "entry first(xs:[33]i32) [33]i32 = scan((+),0,xs)

@@ -467,7 +467,8 @@ impl Program {
             if let Some(result) = source_result {
                 write!(out, " :value-layout {}", result.layout.to_whl())?;
             }
-            if entry.inputs.contains(&id) {
+            // A shaped result may create a shorter view with a distinct handle.
+            if entry.inputs.contains(&id) && source_result.is_none_or(|r| r.shape.is_empty()) {
                 write!(out, " :alias {}", resource(id))?;
             }
             write!(out, ")")?;

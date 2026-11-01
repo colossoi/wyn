@@ -25,6 +25,7 @@
   (Stored ValueKey)
   (CallExtent SourceValue Extent))
 (function OperationRegion (OperationKey) RegionKey :no-merge)
+(function ConstantLogicalExtent (Extent) i64 :no-merge)
 ; Shared source structure must be declared before the structural rules load.
 (relation SourceField (SourceValue i64 SourceValue))
 (datatype SourceSliceData (SliceInfo SourceValue SourceValue SourceValue))

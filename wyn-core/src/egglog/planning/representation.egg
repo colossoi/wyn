@@ -326,7 +326,6 @@
        (= extent (ViewExtent a)) (= extent (ViewExtent b)))
       ((set (ViewExtent value) extent)) :ruleset representations)
 
-(function ConstantLogicalExtent (Extent) i64 :no-merge)
 (rule ((Fixed n)) ((set (ConstantLogicalExtent (Fixed n)) n)) :ruleset representations)
 (rule ((Scalar value) (= n (SourceInteger32 value)))
       ((set (ConstantLogicalExtent (Scalar value)) n)) :ruleset representations)

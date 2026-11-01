@@ -293,3 +293,56 @@ numerical checks. The remaining full gates are running under
 `tmp/input-scope-gates`.
 
 Materialization and neighbor optimization remain subsequent work.
+
+## 2026-11-01: reuse finish dispatches for parallel output copies
+
+Required array copies now use the existing finish dispatch, strided SSA copy
+emitter and host launch expressions. There is no new operation identity, copy
+kernel phase, runtime representation or backend-specific implementation.
+Egglog proves eligibility from existing views/ranges and the region's read-only
+summary, then selects a 64-thread finish workgroup when every array output in
+that finish is eligible. Rust derives the grid from the allocated output buffer
+sizes using the existing linear dispatch builder. No device length readback is
+needed for the launch; each invocation checks the actual logical length.
+Scalar outputs execute only in the first invocation. Unsupported or effectful
+finishes retain their existing serial behavior.
+
+Zero-offset views also reuse their existing backing when the normal output
+ownership/binding rules permit it. This extends the existing offset proof to
+constant sums rather than introducing another alias model. Two host-boundary
+repairs were needed for the broader view coverage: shortened borrowed views no
+longer promise exact input-handle identity, and stored unsigned counts convert
+to Wyn's signed length type before host arithmetic.
+
+Paired measurements on the RX580 compare compiler `5273b8d0` with this patch,
+using the same viewer binary, scene, reference-derived tree capacity and 640x480
+rendering. Each variant ran 25 frames, discarding the first five; a second batch
+reversed case and variant order. The table combines the 40 measured frames per
+variant. These are short-run, whole-frame measurements including GPU completion,
+not comparisons against the older long-run numbers above.
+
+| Particles | SPIR-V before → after | Speedup | WGSL before → after | Speedup |
+| --- | --- | --- | --- | --- |
+| 4,320 | 20.40 → 17.33 ms | 1.18x | 20.96 → 17.85 ms | 1.17x |
+| 25,000 | 65.79 → 49.43 ms | 1.33x | 67.97 → 51.39 ms | 1.32x |
+| 100,000 | 255.28 → 184.06 ms | 1.39x | 266.29 → 192.55 ms | 1.38x |
+
+Final positions and velocities matched bit for bit in all twelve pairs; all
+runs passed finite-value, world-bounds, particle-count and overflow checks.
+The first 25k SPIR-V pair's finish kernels fell from 19.82 to 3.46 ms. Some
+serial finish work remains under the conservative eligibility rule; neighbor
+traversal and tree-loop work are unchanged by this patch.
+
+The new regression executes 58 GPU cases across both shader targets: borrowed
+prefixes, nonzero-offset copies, produced and compacted arrays, mixed scalar and
+array results, nested arrays, zero lengths, branch-dependent lengths and
+preserved pre-update values.
+Compiler contracts validate both shader formats and assert parallel finish
+launches; host interpreter checks cover view lifetimes and count arithmetic.
+All 25 full gate commands passed: formatting, workspace build, 1,523 workspace
+tests (14 ignored), clippy, all nine standalone crate builds/tests, wasm32, and
+the shader corpus (123 SPIR-V; 122 WGSL with the existing miner skip). The 116
+loop cases, 40 collective cases, three capacity checks, fluid numerical checks
+and 17 WGPU runtime tests also passed. GPU execution uses the validation-layer
+exception described above; compiler SPIR-V validation remains enabled.
+Temporary benchmark harnesses and raw data are excluded from the changeset.

@@ -88,7 +88,8 @@
 ; Kernel emission looks up these slots; only Allocation facts create storage.
 (ruleset output-backings)
 (relation OutputCanAlias (i64))
-(rule ((ReturnArray output e) (= (ArrayView e) (ViewInfo resource (Fixed 0) length)))
+(rule ((ReturnArray output e) (= (ArrayView e) (ViewInfo resource offset length))
+       (= (ConstantLogicalExtent offset) 0))
       ((OutputCanAlias output)) :ruleset output-backings)
 (rule ((ReturnArray output e) (= (DerivedView e) false))
       ((OutputCanAlias output)) :ruleset output-backings)

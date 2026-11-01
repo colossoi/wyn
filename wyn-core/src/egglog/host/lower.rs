@@ -185,7 +185,21 @@ impl<'a, 'source> Lower<'a, 'source> {
         // Device counts require readback. Capacity bounds are not logical lengths.
         if let Some(fields) = self.facts.enode("Stored", extent) {
             let read = self.device_read.ok_or(Error::Unsupported)?;
-            return read(fields[0])?.ok_or(Error::Unsupported);
+            let count = read(fields[0])?.ok_or(Error::Unsupported)?;
+            // Device counters are u32; Wyn length arithmetic is i32.
+            return Ok(
+                if matches!(
+                    count,
+                    ScalarExpr::Read {
+                        ty: ScalarType::U32,
+                        ..
+                    }
+                ) {
+                    apply("to-i32", ScalarType::U32, vec![count])
+                } else {
+                    count
+                },
+            );
         }
         Err(error("unsupported selected logical extent").into())
     }

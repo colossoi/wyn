@@ -157,12 +157,16 @@ pub(in crate::egglog) fn publish(
                     let Some(grid) = compiler.facts.lookup("OriginalEntryGrid", (symbol,)) else {
                         return Err(error("entry grid missing"));
                     };
-                    let (x, y, z) = compiler.facts.grid(grid)?;
-                    DispatchSize::Fixed {
-                        x,
-                        y,
-                        z,
-                        explicit: declaration.compute_dispatch.is_some(),
+                    if compiler.facts.enode("AutomaticGrid", grid).is_some() {
+                        sizes::finish_dispatch(compiler, *owner, local_size.0)?
+                    } else {
+                        let (x, y, z) = compiler.facts.grid(grid)?;
+                        DispatchSize::Fixed {
+                            x,
+                            y,
+                            z,
+                            explicit: declaration.compute_dispatch.is_some(),
+                        }
                     }
                 };
                 let Pipeline::Compute(pipeline) = &mut module.pipelines[index] else {

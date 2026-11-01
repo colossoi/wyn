@@ -1,0 +1,29 @@
+entry prefix(xs: []i32) [3]i32 = xs[0..3]
+
+entry prefixes(xs: []i32) ([]i32, [3]i32, [5]i32) =
+  (xs, xs[0..3], xs[0..5])
+
+entry shifted(xs: []i32, start: i32, count: i32) []i32 =
+  xs[start..start+count]
+
+entry produced(xs: []i32, start: i32, count: i32) []i32 =
+  let ys = map(|x| x+7, xs) in ys[start..start+count]
+
+entry mixed(xs: []i32, start: i32, count: i32) ([]i32, []i32, i32) =
+  (xs, xs[start..start+count], reduce((+), 0, xs))
+
+entry range(count: i32) []i32 = 0i32..<count
+
+entry compacted(xs: []i32) []i32 =
+  let ys = filter(|x| x%2 == 0, xs) in ys[1..length(ys)]
+
+entry preserve(xs: []i32) ([]i32, []i32) =
+  (xs[1..length(xs)], xs with [0] = -7)
+
+entry rows(xs: [][3]i32, start: i32, count: i32) [][3]i32 =
+  xs[start..start+count]
+
+entry conditional(xs: []i32, cutoff: i32) ([]i32, []i32, []i32) =
+  let out = if length(xs)>cutoff then replicate(0,0i32) else xs
+  let start = if length(out)>0 then 1 else 0
+  in (out, out[0..length(out)], out[start..length(out)])

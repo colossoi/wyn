@@ -6,6 +6,7 @@ use crate::egglog::{facts::Facts, host::lower as host};
 use crate::host::{BufferLen, DispatchSize, Expr, ScalarExpr, ScalarSource};
 use crate::interface::StorageLayout;
 use crate::ssa::layout::storage_elem_stride;
+use crate::types::TypeExt;
 use egglog_engine::{RawValues, Value};
 
 pub(super) fn output_capacity(facts: &Facts<'_, '_>, capacity: Value) -> Result<BufferLen, OptimizeError> {
@@ -83,6 +84,38 @@ pub(in crate::egglog) fn dispatch(
         return Err(error("launch divisor must cover whole workgroups"));
     }
     DispatchSize::linear(elements, divisor).map_err(|e| error(e.to_string()))
+}
+
+pub(super) fn finish_dispatch(
+    compiler: &Compiler<'_, '_>,
+    owner: crate::SymbolId,
+    width: u32,
+) -> Result<DispatchSize, OptimizeError> {
+    let root = compiler.facts.entry_root(owner, None)?;
+    let mut elements = Expr::Integer(1);
+    for output in compiler.facts.outputs(owner)? {
+        if compiler.facts.lookup("OutputWriter", (output,)) != Some(root) {
+            continue;
+        }
+        let (_, ty, resource) = compiler.facts.output(output)?;
+        if !ty.is_array() && crate::types::as_soa_tuple(ty).is_none() {
+            continue;
+        }
+        let Some((binding, _, _)) = compiler.bindings.buffer(resource)? else {
+            return Err(error("parallel output buffer missing"));
+        };
+        let stride = storage_elem_stride(&compiler.bindings.buffer_element(resource)?)
+            .ok_or_else(|| error("parallel output stride missing"))?;
+        let bound = Expr::BufferLength {
+            source: ScalarSource::Binding {
+                set: binding.set,
+                binding: binding.binding,
+            },
+            stride,
+        };
+        elements = Expr::Max(Box::new(elements), Box::new(bound));
+    }
+    DispatchSize::linear(elements, width).map_err(|e| error(e.to_string()))
 }
 
 pub(in crate::egglog) fn capacity(

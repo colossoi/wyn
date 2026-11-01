@@ -56,6 +56,7 @@ fn branch_output_shape_is_read_before_temporary_storage_is_freed() {
     for source in [
         include_str!("../../testfiles/regressions/triangulation_runtime_array_branch.wyn"),
         include_str!("../../testfiles/regressions/triangulation_runtime_array_zip_map.wyn"),
+        "entry main(xs:[]i32) []i32 = let ys=filter(|x|x>0,xs) in ys[0..length(ys)/2]",
     ] {
         let program = generated(source);
         let mut backend = Trace::default();
@@ -134,6 +135,15 @@ fn uses_input_buffer_capacity_and_preserves_returned_aliases() {
         program.run("echo", &[input.clone()], &mut backend).unwrap(),
         input
     );
+
+    let program = generated("entry prefixes(xs:[]i32) ([]i32,[2]i32) = (xs,xs[0..2])");
+    let bytes: Vec<_> = (1i32..=4).flat_map(i32::to_le_bytes).collect();
+    let input = backend.input(bytes.clone());
+    let result = program.run("prefixes", &[input.clone()], &mut backend).unwrap();
+    let results = result.list().unwrap();
+    assert_eq!(results[0], input);
+    assert_eq!(backend.buffers[&results[1].handle().unwrap()], bytes[..8]);
+    assert!(backend.buffers.contains_key(&input.handle().unwrap()));
 }
 
 #[test]
