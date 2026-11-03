@@ -34,3 +34,11 @@ entry nested_runtime(xs: []i32, limit: i32) ([]i32, i32) =
   loop (ys, iteration) = (map(|x| x, xs), 0) while iteration < limit do
     let next = loop zs = ys for i < 2 do map(|x| x+i+1, zs) in
     (next, iteration+1)
+
+-- Scalar branch projections must not materialize the unrelated fixed array.
+entry projected(limit: i32) ([4097]i32, i32, bool) =
+  loop (ys, iteration, changed) = (map(|i| i+1, iota(4097)), 0, true)
+    while iteration < limit && changed do
+      let next = scan((+), 0, ys) in
+      let active = iteration%2 == 0 in
+      (if active then next else ys, iteration+(if active then 1 else 2), active)

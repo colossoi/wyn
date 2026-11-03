@@ -1026,6 +1026,25 @@ fn cooperative_loop_parallel_assignment_preserves_array_sources() {
 }
 
 #[test]
+fn dispatch_branch_scalar_projections_do_not_copy_array_siblings() {
+    let module = shaders(include_str!(
+        "../../../tests/compiler/library/dispatch_loop_products.wyn"
+    ));
+    let steps: Vec<_> = module
+        .entry_points
+        .iter()
+        .filter(|entry| entry.name.starts_with("projected_") && entry.name.ends_with("_loop_step"))
+        .collect();
+    assert_eq!(steps.len(), 1, "fixture must retain a distributed loop");
+    assert!(
+        steps[0].function.local_variables.iter().all(|(_, variable)| {
+            !matches!(module.types[variable.ty].inner, naga::TypeInner::Array { .. })
+        }),
+        "scalar fields must not materialize the carried array"
+    );
+}
+
+#[test]
 fn cooperative_branch_results_stay_shared_across_calls_and_updates() {
     let module = shaders(include_str!(
         "../../../fluid-simulation/test/repro_shared_branch_transfer.wyn"

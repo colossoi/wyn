@@ -127,6 +127,14 @@
 (rule ((CopyOutput output) (ReturnArray output source) (ParallelCopySource source)
        (PlannedOutput output entry source) (HostRoot entry region) (= (SourceRegionReadOnly region) true))
       ((set (ParallelOutput output) true)) :ruleset output-candidates)
+; Other effects in the entry do not serialize an independently read-only copy.
+(rule ((CopyOutput output) (ReturnArray output source) (ParallelCopySource source)
+       (= (SourceReadOnly source) true))
+      ((set (ParallelOutput output) true)) :ruleset output-candidates)
+; Synthetic output fields forward to the actual expression's effect summary.
+(rule ((CopyOutput output) (ReturnArray output source) (ParallelCopySource source)
+       (ForwardValue source original) (= (SourceReadOnly original) true))
+      ((set (ParallelOutput output) true)) :ruleset output-candidates)
 
 (rule ((CopyOutput output) (PlannedOutput output entry e) (References e (Contents value))
        (EpilogueValue stage value)

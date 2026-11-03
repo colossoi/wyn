@@ -23,6 +23,18 @@ def flatten(value):
 
 def reference(entry, limit, values=None):
     entry = entry.removesuffix('_runtime')
+    if entry == 'projected':
+        a, iteration, changed = list(range(1, 4098)), 0, True
+        while iteration < limit and changed:
+            if iteration % 2 == 0:
+                total, next_values = 0, []
+                for x in a:
+                    total += x
+                    next_values.append(total)
+                a, iteration = next_values, iteration+1
+            else:
+                iteration, changed = iteration+2, False
+        return [a, [iteration], [changed]]
     a = [1, 2, 3, 4] if values is None else values
     b, total, changed = [x*10 for x in a], 0, True
     for i in range(limit):
@@ -54,7 +66,7 @@ if __name__ == '__main__':
                             '-t', target, '-o', str(shader)], check=True, timeout=120)
             if target == 'spirv':
                 subprocess.run(['spirv-val', '--target-env', 'vulkan1.3', str(shader)], check=True)
-            for entry in ['conditional', 'counted', 'nested']:
+            for entry in ['conditional', 'counted', 'nested', 'projected']:
                 for limit in ([0, 1, 3, 128] if entry == 'nested' else [0, 1, 3]):
                     expected = reference(entry, limit)
                     outputs = [directory/f'{entry}-{i}.json' for i in range(len(expected))]

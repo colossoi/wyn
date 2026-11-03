@@ -435,3 +435,65 @@ unchanged GPU work, with some variation in whole-frame timings. Final particle
 outputs matched bit for bit in every pair, including the longer runs; all
 finite-value, world-bounds and overflow checks passed. Artifacts are excluded
 from the changeset under `tmp/unified-copy-perf`.
+
+## 2026-11-03: admit loop fields and parallelize stored output copies
+
+Dispatch-loop transfers now admit their initial and next fields as scalar
+optimization roots. Previously the synthetic projections bypassed the existing
+field-selection logic, so reading a boolean or counter could materialize the
+entire containing product. Elementwise branch transfers also admit their
+predicate independently. Both changes extend the existing admission rules;
+scalar optimization and shared SSA emission remain unchanged.
+
+Parallel-output eligibility now follows the copied value. Read-only views and
+ranges qualify independently of other effects in their source region. A stored
+result from a dispatched producer also qualifies: its effects have already
+executed, and the finish kernel only reads the result. Device-local producers
+retain serial evaluation. Existing dependencies order the producer, copy and
+draw; existing finish lowering runs scalar outputs once.
+
+The change adds 22 net core-compiler production lines, all in egglog. No new
+execution representation, Rust lowering, backend exception or fluid-specific
+rule is needed. The 100k shader loses all four private 72,732-element tree
+copies, and renderer index publication changes from one invocation to the
+existing strided parallel copy.
+
+Regressions cover zero/one/multiple loop iterations, both array-choice outcomes,
+scalar siblings of a 4,097-element array, and copies alongside an effectful producer
+with observable sums. The runtime-sized renderer validates both shader formats;
+GPU checks at 3 and 129 particles compare every index and pixel with a CPU
+reference.
+
+Paired RX580 measurements compare `456e8670` with this patch, using the same
+viewer, scene, capacities and 640x480 rendering. Each variant ran 25 frames,
+discarding five; a second batch reversed variant and case order. These are
+whole-frame medians over 40 measured frames per variant. Builds and GPU gates
+were stopped during measurement.
+
+| Particles | SPIR-V before → after | Speedup | WGSL before → after | Speedup |
+| --- | --- | --- | --- | --- |
+| 25,000 | 27.72 → 20.04 ms | 1.38x | 30.49 → 20.10 ms | 1.52x |
+| 100,000 | 93.42 → 56.63 ms | 1.65x | 103.75 → 60.62 ms | 1.71x |
+
+At 100k, the first SPIR-V pair's tree-loop transfer fell from 15.67 to about
+0.005 ms, and renderer index publication from 13.77 to about 0.004 ms. Neighbor
+traversal stayed at 37.45–37.46 ms. The GPU timestamps attribute about 29.44 ms
+of savings to the two targeted phases. Whole-frame timings include host and
+driver waiting, which were not attributed separately. These short-run
+measurements use this RX580 and scene.
+
+Positions and velocities matched bit for bit in all eight pairs. Every run
+passed particle-count, finite-value, world-bounds and overflow checks. Temporary
+measurement scripts and raw data remain excluded from the changeset under
+`tmp/projection-copy-perf`.
+
+All 25 full gate commands passed: formatting, release workspace build, 1,527
+workspace tests (14 ignored), clippy, all nine standalone crate builds/tests,
+wasm32, and the shader corpus (123 SPIR-V; 122 WGSL with the existing miner
+skip). All 11 GPU gate commands passed, covering 122 loop cases, 40 collective
+cases, 78 output-copy cases, three capacity checks, the fluid numerical checks
+and 17 WGPU runtime tests. GPU execution uses the existing viewer-layer
+validation exception; compiler SPIR-V and Naga validation remain enabled.
+Final gate records are under `tmp/projection-copy-verified-gates`. The gate
+run was interrupted for uncontended measurement and resumed from its recorded
+successful checks afterward.

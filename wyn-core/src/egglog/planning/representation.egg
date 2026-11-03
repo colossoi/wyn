@@ -175,6 +175,11 @@
 (datatype BoundaryAccess (StoredRead StorageRead) (RunCollective OperationKey FusionPlan))
 (function SelectedAccess (SourceValue) BoundaryAccess :no-merge)
 (function IsLocalResult (SourceValue) bool :merge (or old new))
+; A dispatched producer's effects have already executed. Copy its stored view,
+; even when the source expression itself writes (for example a scatter).
+(rule ((CopyOutput output) (ReturnArray output source) (= view (ArrayView source))
+       (= read (ValueRead source)) (= (IsLocalResult source) false))
+      ((set (ParallelOutput output) true)) :ruleset output-candidates)
 ; Preserve stored descriptors after all possible fixed value layouts settle.
 (rule ((= (HasValueRepresentation value) false) (= (IsLocalResult value) false)
        (= (RuntimeArrayJoin value) false) (= resource (ArrayStorage value))

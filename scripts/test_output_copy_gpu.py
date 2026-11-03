@@ -30,6 +30,11 @@ def main():
                   ('mixed', params, [values, sliced, [sum(values)]]),
                   ('range', dict(count=count), [list(range(count))])]
     fixtures = [('output_copies', cases),
+                ('output_copy_effects', [
+                    ('effects', dict(flag=flag, start=start, count=count),
+                     [values[start:start+count], [sum(values)+(7 if flag else 13)],
+                      [sum(values)+(18 if flag else 30)]])
+                    for flag in [0, 1] for start, count in [(7, 0), (3, 1), (2, 65), (17, 257)]]),
                 ('nested_component_copies', [
                     ('projected_rows', dict(flag=flag),
                      [[x+flag-1 for x in values], [x+flag+999 for x in values]])
@@ -50,6 +55,8 @@ def main():
                     command = [VIZ, 'pipeline', str(shader), '--entry', entry, '--headless', '--no-config']
                     if entry != 'range':
                         command += ['--input', f'xs:{data}']
+                    if entry == 'effects':
+                        command += ['--input', f'bins:{data}']
                     for key, value in params.items():
                         command += ['--push-constant', f'{key}:i32={value}']
                     for i, path in enumerate(outputs):

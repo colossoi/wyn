@@ -29,14 +29,17 @@ fn validate(module: naga::Module) {
 
 #[test]
 fn output_copies_preserve_views_and_use_parallel_dispatches() {
-    for (program, format) in host_outputs(include_str!("../../tests/compiler/library/output_copies.wyn"))
-        .into_iter()
-        .zip([ShaderFormat::Spirv, ShaderFormat::Wgsl])
+    let source = concat!(
+        include_str!("../../tests/compiler/library/output_copies.wyn"),
+        "\n",
+        include_str!("../../tests/compiler/library/output_copy_effects.wyn")
+    );
+    for (program, format) in host_outputs(source).into_iter().zip([ShaderFormat::Spirv, ShaderFormat::Wgsl])
     {
         let prefix = program.entries.iter().find(|entry| entry.name == "prefix").unwrap();
         assert_eq!(prefix.results[0], *prefix.inputs.first().unwrap());
         assert!(prefix.operations.is_empty());
-        for name in ["shifted", "produced", "mixed", "range", "compacted"] {
+        for name in ["shifted", "produced", "mixed", "range", "compacted", "effects"] {
             let entry = program.entries.iter().find(|entry| entry.name == name).unwrap();
             let copies: Vec<_> = entry
                 .operations
@@ -58,6 +61,11 @@ fn output_copies_preserve_views_and_use_parallel_dispatches() {
         wyn_host_interp::Program::parse(&program.to_whl("copies", format).unwrap()).unwrap();
         program.to_rust_wgpu("copies", format).unwrap();
     }
+}
+
+#[test]
+fn runtime_renderer_publication_reaches_both_backends() {
+    host_outputs(include_str!("../../fluid-simulation/test/renderer_path.wyn"));
 }
 
 #[test]

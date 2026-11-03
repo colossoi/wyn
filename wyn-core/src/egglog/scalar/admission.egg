@@ -52,6 +52,15 @@
       ((set (ExprImportDispatchedSource v) true)) :ruleset scalar-admission)
 (rule ((LoopCarry owner slot initial state next output array))
       ((set (ExprImportDispatchedSource output) true)) :ruleset scalar-admission)
+; Transfer kernels consume individual carry fields, not the source product.
+; Admit those synthetic projections through the same scalar optimizer as TLC.
+(rule ((LoopCarry owner slot initial state next output array) (= r (ExprContextOwner next)))
+      ((ExprImportLocalDemand r next)) :ruleset scalar-demands)
+(rule ((LoopCarry owner slot initial state next output array) (= r (ExprContextOwner initial)))
+      ((ExprImportLocalDemand r initial)) :ruleset scalar-demands)
+; Elementwise branch transfers also read their predicate independently.
+(rule ((= (SourceBranch source) (BranchInfo condition yes no)) (= r (ExprContextOwner source)))
+      ((ExprImportLocalDemand r condition)) :ruleset scalar-demands)
 (rule ((PlannedOperation op owner plan r) (= v (SourceOperationValue op)))
       ((ExprImportDemand op r v)) :ruleset scalar-admission)
 (rule ((PlannedOperation op owner plan r) (SourceOperand op v)) ((ExprImportDemand op r v)) :ruleset scalar-admission)
