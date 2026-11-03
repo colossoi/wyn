@@ -19,6 +19,29 @@ pub(super) struct BoundaryTarget {
 }
 
 impl Body<'_, '_, '_> {
+    pub(super) fn update_shared(
+        &mut self,
+        array: Typed,
+        index: Typed,
+        value: Typed,
+        layout: Value,
+    ) -> Result<Typed, OptimizeError> {
+        let Some(fields) = self.compiler.facts.enode("ArrayLayout", layout) else {
+            return Err(error("shared update requires an array layout"));
+        };
+        let count = self.compiler.facts.unsigned(fields[0], "shared update capacity")?;
+        let element = self.compiler.facts.layout_type(fields[1])?;
+        let output = self.workgroup_array(count, &element)?;
+        self.workgroup_barrier()?;
+        self.materialize_component(array, layout, &[], Some(&BoundaryStorage::Array(output.clone())))?;
+        self.workgroup_barrier()?;
+        let lane = self.local_id()?;
+        let first = self.binary(BinaryOperator::Equal, lane, Self::number(0))?;
+        self.when(first, |body| body.store(output.clone(), index, value))?;
+        self.workgroup_barrier()?;
+        Ok(output)
+    }
+
     pub(in crate::egglog::to_ssa) fn materialize(
         &mut self,
         value: Typed,
@@ -46,7 +69,7 @@ impl Body<'_, '_, '_> {
             };
             let start = self.local_id()?;
             let n = self.length(output.clone())?;
-            self.copy_array_strided(output.clone(), value, n, path, start, Self::number(width))?;
+            self.copy_array_strided((output.clone(), &[]), value, n, path, start, Self::number(width))?;
             return Ok(output.clone());
         }
         if let Some(fields) = self.compiler.facts.enode("ViewLayout", layout) {

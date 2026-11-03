@@ -5,6 +5,7 @@ Numeric success does not assert cooperative scheduling; inspect generated code.
 WYN and VIZ may select binaries. Run from any directory.
 """
 import json
+from itertools import accumulate
 from pathlib import Path
 import random
 import struct
@@ -56,6 +57,17 @@ def main():
             actual, = run(ROOT / 'fluid-simulation/test/repro_branch_array_layout.wyn', directory, target)
             assert actual == [6,10], f'{target}: inferred array boundary: {actual}'
             print(f'{target}: shared loop swaps and inferred array boundaries passed', flush=True)
+            expected_transfer = []
+            for limit in [0, 1, 3]:
+                a, b = [limit]*65, [limit+100]*65
+                for step in range(limit):
+                    next_a = list(accumulate(a))
+                    a, b = (b, next_a) if step % 2 == 0 else (next_a, a)
+                base = a if limit % 2 == 0 else b
+                expected_transfer.extend([2*x for x in base[:64]] + [base[64]-limit])
+            actual, = run(ROOT / 'fluid-simulation/test/repro_shared_branch_transfer.wyn', directory, target)
+            assert actual == expected_transfer, f'{target}: shared branch transfer or old-value preservation differs'
+            print(f'{target}: branch swaps, zero trips and shared functional updates passed', flush=True)
         inputs = directory / 'intersections.bin'
         values = [value for row in rows for value in row]
         inputs.write_bytes(struct.pack(f'<{len(values)}i', *values))

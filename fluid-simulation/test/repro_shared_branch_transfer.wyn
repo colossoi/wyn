@@ -1,0 +1,11 @@
+-- Cooperative state swaps through a branch, including zero trips and old-value reads.
+def swapped(limit:i32) [65]i32 =
+    let (a,b,_step) = loop (a,b,step) = (replicate(65,limit),replicate(65,limit+100),0i32)
+      while step < limit do
+        let next = scan((+),0i32,a) in
+        if step%2 == 0 then (b,next,step+1) else (next,a,step+1) in
+    let base = if limit%2 == 0 then a else b in
+    let changed = base with [64] = -limit in
+    map(|i| changed[i]+base[i],iota(65))
+
+entry transfer() [3][65]i32 = map(swapped,[0i32,1i32,3i32])

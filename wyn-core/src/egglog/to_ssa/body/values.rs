@@ -555,12 +555,12 @@ impl Body<'_, '_, '_> {
     ) -> Result<(), OptimizeError> {
         let zero = self.literal("0", &length.ty)?;
         let one = self.literal("1", &length.ty)?;
-        self.copy_array_strided(destination, source, length, fields, zero, one)
+        self.copy_array_strided((destination, &[]), source, length, fields, zero, one)
     }
 
     pub fn copy_array_strided(
         &mut self,
-        destination: Typed,
+        (destination, indices): (Typed, &[Typed]),
         source: Typed,
         length: Typed,
         fields: &[usize],
@@ -569,15 +569,18 @@ impl Body<'_, '_, '_> {
     ) -> Result<(), OptimizeError> {
         self.counted(start, length, step, vec![], |body, index, _| {
             let mut value = body.index(source.clone(), index.clone())?;
+            let mut path = indices.to_vec();
+            path.push(index);
             if !fields.is_empty() && source.ty.array_rank().is_some_and(|rank| rank > 1) {
-                let target = body.index(destination.clone(), index)?;
                 let length = body.length(value.clone())?;
-                body.copy_array(target, value, length, fields)?;
+                let zero = body.literal("0", &length.ty)?;
+                let one = body.literal("1", &length.ty)?;
+                body.copy_array_strided((destination.clone(), &path), value, length, fields, zero, one)?;
             } else {
                 for &field in fields {
                     value = body.field(value, field)?;
                 }
-                body.store(destination.clone(), index, value)?;
+                body.store_at(destination.clone(), &path, value)?;
             }
             Ok(vec![])
         })?;

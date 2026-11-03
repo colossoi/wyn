@@ -61,6 +61,13 @@ fn output_copies_preserve_views_and_use_parallel_dispatches() {
 }
 
 #[test]
+fn nested_component_copies_reach_both_backends() {
+    host_outputs(include_str!(
+        "../../tests/compiler/library/nested_component_copies.wyn"
+    ));
+}
+
+#[test]
 fn independent_entries_preserve_same_named_input_lengths() {
     for (program, format) in host_outputs(
         "entry first(xs:[33]i32) [33]i32 = scan((+),0,xs)

@@ -1026,6 +1026,25 @@ fn cooperative_loop_parallel_assignment_preserves_array_sources() {
 }
 
 #[test]
+fn cooperative_branch_results_stay_shared_across_calls_and_updates() {
+    let module = shaders(include_str!(
+        "../../../fluid-simulation/test/repro_shared_branch_transfer.wyn"
+    ));
+    assert!(module.entry_points.iter().any(|entry| entry.workgroup_size[0] > 1));
+    assert!(module.global_variables.iter().any(|(_, v)| v.space == naga::AddressSpace::WorkGroup));
+    for function in
+        module.functions.iter().map(|(_, f)| f).chain(module.entry_points.iter().map(|e| &e.function))
+    {
+        assert!(
+            function.local_variables.iter().all(|(_, variable)| {
+                !matches!(module.types[variable.ty].inner, naga::TypeInner::Array { .. })
+            }),
+            "cooperative array results must not be copied into per-lane arrays"
+        );
+    }
+}
+
+#[test]
 fn module_counted_loop_counters_have_distinct_types() {
     shaders(
         "module S = { def run(x:i32) i32 = loop x=x for i<8 do x+i }

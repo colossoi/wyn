@@ -346,3 +346,92 @@ loop cases, 40 collective cases, three capacity checks, fluid numerical checks
 and 17 WGPU runtime tests also passed. GPU execution uses the validation-layer
 exception described above; compiler SPIR-V validation remains enabled.
 Temporary benchmark harnesses and raw data are excluded from the changeset.
+
+## 2026-11-02: retain shared arrays through cooperative traversal
+
+Cooperative maps now demand shared storage for their array results, using the
+existing storage-demand analysis. Demand propagates through helper returns and
+arguments as it already did through captures and control-flow boundaries.
+Shared functional updates use fresh buffers and the existing strided copy
+emitter, preserving reads of the previous value. Scatter initialization and
+array-result publication distribute their copies across the workgroup.
+
+The existing boundary plan also skips a loop's staging copy when its backedge
+is a branch result: the branch has already copied shared fields into fresh
+destinations. Other loop backedges retain staging for parallel assignment.
+Egglog selects storage and proves this transfer condition; common SSA lowering
+emits the selected copies and barriers for both shader targets. The patch adds
+78 net core-compiler production lines without a new scheduling representation.
+
+The 25k traversal shader has zero private array buffers, down from five. The
+regression checks shared results through helper calls, branch swaps, zero/one/
+three iterations, 65-element arrays, and old-value reads after an update. GPU
+checks compare the results with an independent CPU calculation; a compiler
+contract prevents this fixture from silently reverting to private arrays.
+
+Paired RX580 measurements compare `d47b724d` with this patch, using the same
+viewer binary, scene, tree capacities and 640x480 rendering. Each variant ran
+25 frames, discarding five; a second batch reversed case and variant order.
+The medians below combine 40 measured frames per variant. Builds and other GPU
+tests had finished before measurement.
+
+| Particles | SPIR-V before → after | Speedup | WGSL before → after | Speedup |
+| --- | --- | --- | --- | --- |
+| 4,320 | 17.55 → 12.54 ms | 1.40x | 16.99 → 13.61 ms | 1.25x |
+| 25,000 | 48.25 → 28.49 ms | 1.69x | 52.18 → 30.06 ms | 1.74x |
+| 100,000 | 183.40 → 90.43 ms | 2.03x | 194.04 → 99.13 ms | 1.96x |
+
+Final positions and velocities matched bit for bit in all twelve pairs, with
+no overflow, non-finite values or world-bounds failures. In the first SPIR-V
+pairs, traversal fell from 27.09 to 7.29 ms at 25k and from 131.43 to 37.46 ms
+at 100k; tree-loop and finish timings stayed approximately constant. The
+traversal shader's static barrier count increases from 45 to 72, but eliminating
+private array copies and distributing initialization/publication more than pays
+for that synchronization in these runs. These are short-run measurements on
+this RX580, not a claim about every device or scene.
+
+All 25 full gate commands passed: formatting, release workspace build, 1,524
+workspace tests (14 ignored), clippy, all nine standalone crate builds/tests,
+wasm32, and the shader corpus (123 SPIR-V; 122 WGSL with the existing miner
+skip). All 11 GPU gate commands passed, covering 116 loop cases, 40 collective
+cases, 58 output-copy cases, three capacity checks, the fluid numerical checks
+and 17 WGPU runtime tests. GPU execution uses the validation-layer exception
+described above; compiler shader validation remains enabled. Logs and temporary
+measurement tools are under `tmp/boundary-copy-perf` and are not committed.
+
+## 2026-11-03: consolidate output copies
+
+`copy_array_strided` now accepts a destination buffer and index path. Map
+publication uses this existing emitter alongside scatter initialization,
+boundary transfers and finish outputs. Recursive component copies extend the
+path and store directly into the destination; they no longer read an output
+row to obtain a copy target. This removes the map-specific copy loop. The
+complete patch is now +76 net core-compiler production lines, down from +78.
+
+Final validation passed all 25 full gate commands: formatting, release workspace
+build, 1,525 workspace tests (14 ignored), clippy, all nine standalone crate
+builds/tests, wasm32, and both shader corpora (123 SPIR-V; 122 WGSL with the
+existing miner skip). All 11 GPU gate commands passed, covering 116 loop cases,
+40 collective cases, 62 output-copy cases, three capacity checks, the fluid
+numerical checks and 17 WGPU runtime tests. The new fixture checks both branches
+of nested tuple-component copies against CPU results on both shader targets.
+GPU execution uses the existing viewer-layer exception; `spirv-val` remains
+enabled. Final gate logs are under `tmp/shared-array-final-gates`.
+
+An exploratory build combining the new fixture with the other output-copy
+entries exposes an existing SPIR-V layout error: a Function variable's type
+inherits explicit Block layout. The pre-consolidation compiler fails the same
+validation. The new fixture validates and runs independently; that separate
+multi-entry backend issue is not repaired by this consolidation.
+
+The generated traversal WGSL is byte-identical before and after consolidation
+at 4,320, 25k and 100k particles; the 100k SPIR-V host program is also identical.
+Short whole-frame comparisons at 25k/100k on both targets ranged from 1.3% faster
+to 4.3% slower. A longer 100k SPIR-V follow-up used four pairs of 100 frames,
+discarding the first 20 each time: median frame time was 93.74 → 95.02 ms (1.4%
+higher), while median traversal GPU time was 38.234 → 38.227 ms. Tree-loop and
+finish GPU timings were also unchanged to within 0.001 ms. This supports
+unchanged GPU work, with some variation in whole-frame timings. Final particle
+outputs matched bit for bit in every pair, including the longer runs; all
+finite-value, world-bounds and overflow checks passed. Artifacts are excluded
+from the changeset under `tmp/unified-copy-perf`.

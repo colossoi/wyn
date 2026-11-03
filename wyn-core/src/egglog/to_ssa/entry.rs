@@ -364,7 +364,7 @@ fn copy_results<'source>(
                 let length = lower.length(array.clone())?;
                 if parallel {
                     let (start, step) = kernels::invocation(lower, width)?;
-                    lower.copy_array_strided(destination, array, length, &fields, start, step)?;
+                    lower.copy_array_strided((destination, &[]), array, length, &fields, start, step)?;
                 } else {
                     lower.copy_array(destination, array, length, &fields)?;
                 }

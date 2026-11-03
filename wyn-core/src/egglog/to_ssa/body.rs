@@ -222,6 +222,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                         };
                         return self.length(array.clone());
                     }
+                    let mut shared_update = None;
                     if matches!(tag, OpTag::Intrinsic { id, .. }
                         if id == catalog().known().array_with
                             || id == catalog().known().array_with_in_place)
@@ -231,33 +232,50 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                         // not on that descriptor or its shared backing buffer.
                         let layout = self.compiler.facts.value_layout(selected.values[fields[2]])?;
                         if self.compiler.facts.enode("ArrayLayout", layout).is_some() {
-                            arguments[0] = self.materialize(arguments[0].clone(), layout)?;
+                            if !self.invocation_execution
+                                && self.workgroup_width.is_some()
+                                && self.has_shared_storage(selected.values[fields[2]])
+                            {
+                                shared_update = Some(self.update_shared(
+                                    arguments[0].clone(),
+                                    arguments[1].clone(),
+                                    arguments[2].clone(),
+                                    layout,
+                                )?);
+                            } else {
+                                arguments[0] = self.materialize(arguments[0].clone(), layout)?;
+                            }
                         }
                     }
-                    let Some(representation) =
-                        self.compiler.facts.lookup("InstructionResult", (selected.values[fields[2]],))
-                    else {
-                        return Err(error("instruction result representation missing"));
-                    };
-                    let ty = if let Some(fields) =
-                        self.compiler.facts.enode("OperandResult", representation)
-                    {
-                        let index = usize::try_from(self.compiler.facts.integer(fields[0]))
-                            .map_err(|_| error("invalid result operand"))?;
-                        let Some(argument) = arguments.get(index) else {
-                            return Err(error("result operand missing"));
-                        };
-                        argument.ty.clone()
-                    } else if let Some(fields) = self.compiler.facts.enode("SemanticResult", representation)
-                    {
-                        let Some(ty) = self.compiler.facts.ty(fields[0]) else {
-                            return Err(error("instruction result type missing"));
-                        };
-                        ty.clone()
+                    if let Some(value) = shared_update {
+                        value
                     } else {
-                        return Err(error("unknown instruction representation"));
-                    };
-                    self.op(tag, arguments, ty)?
+                        let Some(representation) =
+                            self.compiler.facts.lookup("InstructionResult", (selected.values[fields[2]],))
+                        else {
+                            return Err(error("instruction result representation missing"));
+                        };
+                        let ty = if let Some(fields) =
+                            self.compiler.facts.enode("OperandResult", representation)
+                        {
+                            let index = usize::try_from(self.compiler.facts.integer(fields[0]))
+                                .map_err(|_| error("invalid result operand"))?;
+                            let Some(argument) = arguments.get(index) else {
+                                return Err(error("result operand missing"));
+                            };
+                            argument.ty.clone()
+                        } else if let Some(fields) =
+                            self.compiler.facts.enode("SemanticResult", representation)
+                        {
+                            let Some(ty) = self.compiler.facts.ty(fields[0]) else {
+                                return Err(error("instruction result type missing"));
+                            };
+                            ty.clone()
+                        } else {
+                            return Err(error("unknown instruction representation"));
+                        };
+                        self.op(tag, arguments, ty)?
+                    }
                 }
                 "ExprCall" => {
                     let args = self.arguments(scope, fields[4])?;

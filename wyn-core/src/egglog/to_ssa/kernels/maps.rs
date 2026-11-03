@@ -2,6 +2,7 @@
 use super::super::{error, Body, OptimizeError};
 use super::{coordinates, emit_bindings, invocation, screma, workgroup};
 use crate::op::BinaryOperator;
+use crate::types::TypeExt;
 use crate::LookupMap;
 use egglog_engine::sort::S;
 use egglog_engine::{RawValues, Value};
@@ -111,8 +112,20 @@ pub(super) fn emit(
                         };
                         if group {
                             let lane = body.local_id()?;
-                            let first = body.binary(BinaryOperator::Equal, lane, Body::number(0))?;
-                            body.when(first, |body| body.store_at(output.clone(), &indices, value))?;
+                            if value.ty.is_array() {
+                                let length = body.length(value.clone())?;
+                                body.copy_array_strided(
+                                    (output.clone(), &indices),
+                                    value,
+                                    length,
+                                    &[],
+                                    lane,
+                                    Body::number(width),
+                                )?;
+                            } else {
+                                let first = body.binary(BinaryOperator::Equal, lane, Body::number(0))?;
+                                body.when(first, |body| body.store_at(output.clone(), &indices, value))?;
+                            }
                             body.workgroup_barrier()
                         } else {
                             body.store_at(output.clone(), &indices, value)
