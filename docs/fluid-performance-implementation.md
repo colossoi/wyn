@@ -547,9 +547,9 @@ discards five. Two batches reverse case and variant order; the table combines
 | 25,000 | 20.18 → 15.56 ms | 1.30x | 20.26 → 15.68 ms | 1.29x |
 | 100,000 | 59.12 → 36.35 ms | 1.63x | 60.40 → 37.73 ms | 1.60x |
 
-The first 100k SPIR-V pair's traversal falls from 37.44 to 14.60 ms; sorting's
-5.40 ms partials phase stays unchanged. Positions and velocities match bit for
-bit in all eight pairs. All runs pass particle-count, finite-value, bounds and
+The first 100k SPIR-V pair's traversal falls from 37.44 to 14.60 ms; neighbor
+construction's 5.40 ms partials phase stays unchanged. Positions and velocities
+match bit for bit in all eight pairs. All runs pass particle-count, finite-value, bounds and
 overflow checks. The independent traversal oracle passes 76 queries on each
 backend, and the tiled-output/subgroup checks pass both targets. Temporary
 measurement tools and raw data remain excluded under `tmp/workgroup-reuse-perf`.
@@ -568,3 +568,60 @@ loops, collectives, output copies, capacity and fluid numerical checks, and 17
 WGPU runtime tests. GPU execution uses the existing viewer-layer validation
 exception; compiler SPIR-V and Naga validation remain enabled. Final gate records
 are under `tmp/workgroup-reuse-final-gates`.
+
+## 2026-11-04: defer memory transfers until storage selection
+
+The common array-copy emitter now retains representation-preserving transfers
+between views as SSA copies. Shared updates and control-boundary transfers keep
+their source, destination, extent and worker distribution visible to storage
+planning. The existing interference analysis can then coalesce a full transfer
+when the source contents are dead and earlier cross-lane accesses have finished.
+Live snapshots, partial copies and simultaneous assignments retain the storage
+they need. Other buffers' pending accesses still cross a transfer unchanged.
+
+Selected identity copies disappear before barrier scheduling; retained copies
+expand afterward through one common SSA implementation. Matching element layouts
+are checked in one helper, with no rank restriction. Nested arrays and tuple
+fields use element places recursively, avoiding aggregate row snapshots. Both
+backends consume the resulting loads, stores and structured loops.
+
+View offset/length projections use ordinary SSA constant folding while retaining
+the view's storage identity. Fixed-size parameters and their derived views also
+use the same fixed extent, resolving a pre-existing planning conflict exposed by
+the new nested-array regression. No fusion or backend-specific scheduling change
+is required.
+
+Final paired RX580 measurements compare `00cbc8b6` with this patch, including
+640x480 rendering. Each run uses 25 frames and discards five; two batches reverse
+case and variant order, giving 40 measured frames per variant. Builds and GPU
+gates were stopped during timing. Positions and velocities match bit for bit
+in all eight pairs; count, finite-value, bounds and overflow checks pass.
+
+| Particles | SPIR-V before → after | Speedup | WGSL before → after | Speedup |
+| --- | --- | --- | --- | --- |
+| 25,000 | 14.97 → 12.51 ms | 1.20x | 14.56 → 12.34 ms | 1.18x |
+| 100,000 | 34.79 → 25.76 ms | 1.35x | 35.74 → 26.11 ms | 1.37x |
+
+The first 100k SPIR-V pair's traversal falls from 14.60 to 4.83 ms. Neighbor
+construction remains at 5.56 → 5.51 ms. The final traversal WGSL has 29 static
+barriers, down from 45. A separate unprofiled 100k SPIR-V offscreen run at
+1920x1080 completes 600 frames in 15.98 seconds including startup (37.5 fps),
+with no spatial-index overflow. This measures offscreen throughput rather than
+window presentation pacing.
+
+All 25 full gate commands and 11 GPU gate commands pass on the final source:
+formatting, release workspace build, 1,540 workspace tests (14 ignored), clippy,
+all nine standalone crate builds/tests, wasm32, shader validation (123 SPIR-V;
+122 WGSL with the existing miner skip), and GPU loop, collective, output-copy,
+capacity, fluid numerical and runtime checks. Output-copy coverage includes 82
+cases across both targets, including both branches of a rank-three result.
+GPU execution uses the existing viewer-layer validation exception; compiler
+SPIR-V and Naga validation remain enabled. Final records are under
+`tmp/array-transfer-final-gates`; measurements and temporary tools remain
+excluded under `tmp/array-transfer-perf`.
+
+Excluding test files and inline test items, this patch adds 447 net compiler
+production lines. The branch adds 2,506 net compiler production lines relative
+to `342d62f9`, including this patch: 2,306 in `wyn-core`, 156 in host IR/code
+generation and 44 in the compiler CLI. Runtime, fluid code, documentation,
+configuration and harnesses are excluded from these counts.

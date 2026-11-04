@@ -31,6 +31,15 @@ pub(super) fn apply(program: &mut Reachable) -> Result<()> {
         bufferize(name, body)?;
     }
     workgroup::apply(program)?;
+    for body in program
+        .functions
+        .iter_mut()
+        .map(|f| &mut f.body)
+        .chain(program.entry_points.iter_mut().map(|e| &mut e.body))
+    {
+        super::array_copy::lower(body);
+        super::eliminate_dead_pure_instructions(body);
+    }
     timing::time("ssa storage / ownership", || ownership::apply(program));
     Ok(())
 }

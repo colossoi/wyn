@@ -10,6 +10,70 @@ use wspirv::dr;
 const FIXTURE: &str = include_str!("../../../testfiles/constant_shader_math.wyn");
 
 #[test]
+fn view_metadata_folds_without_erasing_its_storage_identity() {
+    let uint = Type::Constructed(TypeName::UInt(32), vec![]);
+    let view_ty = types::view_array_with_size(
+        &types::i32(),
+        Type::Constructed(TypeName::SizePlaceholder, vec![]),
+        types::no_buffer(),
+    );
+    let result_ty = types::tuple(vec![view_ty.clone(), uint.clone(), uint.clone()]);
+    let mut builder = FuncBuilder::new(vec![uint.clone()], result_ty.clone());
+    let offset: ValueRef = builder.get_param(0).into();
+    let view = builder
+        .push_inst(
+            InstKind::Op {
+                tag: OpTag::StorageView(crate::op::PureViewSource::Workgroup { id: 9, count: 128 }),
+                operands: vec![offset, ValueRef::Const(ConstantValue::U32(65))],
+            },
+            view_ty,
+        )
+        .unwrap();
+    let mut values = vec![view.into()];
+    for index in 0..2 {
+        values.push(
+            builder
+                .push_inst(
+                    InstKind::Op {
+                        tag: OpTag::Project { index },
+                        operands: vec![view.into()],
+                    },
+                    uint.clone(),
+                )
+                .unwrap()
+                .into(),
+        );
+    }
+    let tuple = builder
+        .push_inst(
+            InstKind::Op {
+                tag: OpTag::Tuple,
+                operands: values,
+            },
+            result_ty,
+        )
+        .unwrap();
+    builder.terminate(Terminator::Return(Some(tuple.into()))).unwrap();
+    let mut body = builder.finish().unwrap();
+    fold(&mut body);
+    let tuple = body.inner.inst_of_value(tuple).unwrap();
+    let InstKind::Op { operands, .. } = &body.inner.insts[tuple].data else {
+        panic!("tuple");
+    };
+    assert_eq!(
+        operands,
+        &[view.into(), offset, ValueRef::Const(ConstantValue::U32(65))]
+    );
+    assert!(matches!(
+        body.inner.insts[body.inner.inst_of_value(view).unwrap()].data,
+        InstKind::Op {
+            tag: OpTag::StorageView(crate::op::PureViewSource::Workgroup { id: 9, .. }),
+            ..
+        }
+    ));
+}
+
+#[test]
 fn constant_shader_math_folds_after_inlining_and_preserves_dynamic_depth_order() {
     let program = crate::compile_thru_ssa(FIXTURE).unwrap();
     let placed = ssa::place_floating(ssa::optimize(program.clone())).unwrap();

@@ -36,6 +36,28 @@ pub(super) fn fold(body: &mut FuncBody) {
             continue;
         };
         let ty = &function.values[result].ty;
+        // View identity is opaque, but its offset and length are ordinary SSA
+        // operands. Project those directly without folding away the backing.
+        if let OpTag::Project { index } = tag {
+            let metadata =
+                operands.first().and_then(|v| v.as_ssa()).and_then(|v| function.inst_of_value(v)).and_then(
+                    |inst| match &function.insts[inst].data {
+                        InstKind::Op {
+                            tag: OpTag::StorageView(_),
+                            operands,
+                        } if *index < 2 => operands.get(*index as usize).copied(),
+                        _ => None,
+                    },
+                );
+            if let Some(metadata) = metadata.filter(|v| operand_type(function, *v) == *ty) {
+                if let Some(value) = operand(metadata, &constants) {
+                    constants.insert(result, value);
+                }
+                replacements.insert(result, metadata);
+                function.insts.remove(id);
+                continue;
+            }
+        }
         if matches!(tag, OpTag::Intrinsic { id, overload_idx: 0 } if *id == catalog().known().select)
             && select::supported_type(ty)
         {

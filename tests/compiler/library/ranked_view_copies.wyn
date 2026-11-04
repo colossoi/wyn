@@ -1,0 +1,4 @@
+-- Preserve nested array storage through branch publication.
+entry ranked_rows(xs: [10][3][10]i32, flag: i32) [10][3][10]i32 =
+  if flag>0 then xs
+  else map(|tile| map(|row| map(|x| x+1, row), tile), xs)

@@ -281,3 +281,129 @@ fn a_view_hidden_in_an_escaping_array_blocks_reuse() {
         "the returned view's contents must be published"
     );
 }
+
+fn transfer(body: &mut FuncBody, block: BlockId, destination: ValueRef, source: ValueRef, length: u32) {
+    body.inner.append_void_inst(
+        block,
+        InstKind::Copy {
+            destination,
+            source,
+            length: ValueRef::Const(ConstantValue::U32(length)),
+            start: ValueRef::Const(ConstantValue::U32(0)),
+            step: ValueRef::Const(ConstantValue::U32(1)),
+            collective: true,
+        },
+    );
+}
+
+#[test]
+fn a_full_transfer_consumes_dead_contents_but_preserves_live_snapshots() {
+    for preserve_old in [false, true] {
+        let mut body = FuncBuilder::new(vec![], types::unit()).finish_unchecked();
+        let entry = body.inner.entry;
+        let a = buffer(&mut body, entry, 0, 65);
+        access(&mut body, entry, a, true);
+        body.inner.append_void_inst(entry, InstKind::ControlBarrier);
+        let b = buffer(&mut body, entry, 1, 65);
+        transfer(&mut body, entry, b, a, 65);
+        body.inner.append_void_inst(entry, InstKind::ControlBarrier);
+        access(&mut body, entry, b, true);
+        if preserve_old {
+            access(&mut body, entry, a, false);
+        }
+        apply(&mut body).unwrap();
+        assert_eq!(allocations(&body).len(), if preserve_old { 2 } else { 1 });
+        assert_eq!(
+            body.inner.insts.values().filter(|n| matches!(n.data, InstKind::Copy { .. })).count(),
+            usize::from(preserve_old)
+        );
+    }
+}
+
+#[test]
+fn partial_transfers_and_pending_lane_reads_keep_distinct_storage() {
+    for partial in [false, true] {
+        let mut body = FuncBuilder::new(vec![], types::unit()).finish_unchecked();
+        let entry = body.inner.entry;
+        let a = buffer(&mut body, entry, 0, 65);
+        access(&mut body, entry, a, true);
+        body.inner.append_void_inst(entry, InstKind::ControlBarrier);
+        if !partial {
+            access(&mut body, entry, a, false);
+        }
+        let b = buffer(&mut body, entry, 1, 65);
+        transfer(&mut body, entry, b, a, if partial { 17 } else { 65 });
+        body.inner.append_void_inst(entry, InstKind::ControlBarrier);
+        access(&mut body, entry, b, false);
+        apply(&mut body).unwrap();
+        assert_eq!(allocations(&body).len(), 2);
+        assert!(body.inner.insts.values().any(|n| matches!(n.data, InstKind::Copy { .. })));
+    }
+}
+
+#[test]
+fn loop_transfers_reuse_storage_only_after_old_contents_are_dead() {
+    for preserve_old in [false, true] {
+        let mut body = FuncBuilder::new(vec![], types::unit()).finish_unchecked();
+        let entry = body.inner.entry;
+        let header = body.inner.create_block();
+        let exit = body.inner.create_block();
+        let a = buffer(&mut body, entry, 0, 65);
+        let b = buffer(&mut body, entry, 1, 65);
+        access(&mut body, entry, a, true);
+        body.inner.append_void_inst(entry, InstKind::ControlBarrier);
+        body.inner.blocks[entry].term = Terminator::Branch {
+            target: header,
+            args: vec![],
+        };
+        transfer(&mut body, header, b, a, 65);
+        body.inner.append_void_inst(header, InstKind::ControlBarrier);
+        access(&mut body, header, b, true);
+        if preserve_old {
+            access(&mut body, header, a, false);
+        }
+        body.inner.append_void_inst(header, InstKind::ControlBarrier);
+        transfer(&mut body, header, a, b, 65);
+        body.inner.append_void_inst(header, InstKind::ControlBarrier);
+        body.inner.blocks[header].term = Terminator::CondBranch {
+            cond: ValueRef::Const(ConstantValue::Bool(true)),
+            then_target: header,
+            then_args: vec![],
+            else_target: exit,
+            else_args: vec![],
+        };
+        access(&mut body, exit, a, false);
+        apply(&mut body).unwrap();
+        assert_eq!(allocations(&body).len(), if preserve_old { 2 } else { 1 });
+    }
+}
+
+#[test]
+fn parallel_assignment_keeps_the_temporary_needed_for_a_swap() {
+    let mut body = FuncBuilder::new(vec![], types::unit()).finish_unchecked();
+    let entry = body.inner.entry;
+    let a = buffer(&mut body, entry, 0, 65);
+    let b = buffer(&mut body, entry, 1, 65);
+    access(&mut body, entry, a, true);
+    access(&mut body, entry, b, true);
+    body.inner.append_void_inst(entry, InstKind::ControlBarrier);
+    let next_a = buffer(&mut body, entry, 2, 65);
+    let next_b = buffer(&mut body, entry, 3, 65);
+    transfer(&mut body, entry, next_a, b, 65);
+    transfer(&mut body, entry, next_b, a, 65);
+    body.inner.append_void_inst(entry, InstKind::ControlBarrier);
+    transfer(&mut body, entry, a, next_a, 65);
+    transfer(&mut body, entry, b, next_b, 65);
+    body.inner.append_void_inst(entry, InstKind::ControlBarrier);
+    access(&mut body, entry, a, false);
+    access(&mut body, entry, b, false);
+    apply(&mut body).unwrap();
+    let roots = MemoryRoots::analyze(&body);
+    assert_ne!(roots.value(a), roots.value(b));
+    assert_ne!(
+        roots.value(a),
+        roots.value(next_b),
+        "old a survives the first assignment"
+    );
+    assert!(allocations(&body).len() < 4);
+}

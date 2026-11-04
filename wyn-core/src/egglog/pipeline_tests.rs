@@ -602,6 +602,17 @@ fn storage_input_reads_preserve_the_public_interface() {
 }
 
 #[test]
+fn view_transfers_preserve_nested_array_ranks() {
+    for source in [
+        "entry chosen(xs:[100][3]i32,flag:i32) [100][3]i32 =
+         if flag>0 then xs else map(|row|map(|x|x+1,row),xs)",
+        include_str!("../../../tests/compiler/library/ranked_view_copies.wyn"),
+    ] {
+        shaders(source);
+    }
+}
+
+#[test]
 fn pointwise_map_emits_a_parallel_dispatch() {
     let module = shaders("entry doubled(xs:[]i32) []i32=map(|x:i32|x*2,xs)");
     assert!(module.entry_points.iter().any(|entry| entry.workgroup_size == [64, 1, 1]));

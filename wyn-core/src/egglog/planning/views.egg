@@ -1,4 +1,11 @@
 ; Storage identity travels with a view, including loop state and element updates.
+; Fixed parameters and their derived views use the same canonical extent.
+(rule ((ParameterValue e) (= (DispatchLoopValue e) false)
+       (= ty (SourceType e)) (= (SourceArraySize ty) (FixedSize n)))
+      ((set (ViewExtent e) (Fixed n))) :ruleset residency)
+(rule ((ParameterValue e) (= (DispatchLoopValue e) false)
+       (= ty (SourceType e)) (= (SourceArraySize ty) (DynamicSize)))
+      ((set (ViewExtent e) (Length e))) :ruleset residency)
 (function InputShapeBuffer (RegionKey BindingKey) ValueKey :no-merge)
 (function InputShapeIndex (RegionKey i64) i64 :no-merge)
 (relation InputShapeSource (ValueKey i64 InputStorage))

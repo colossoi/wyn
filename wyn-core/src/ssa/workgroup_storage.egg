@@ -1,11 +1,15 @@
 ; A dead buffer stays occupied until all lanes have passed a barrier.
 (relation UnorderedStep (i64 i64))
+(relation TransferStep (i64 i64 i64))
 (relation Pending (i64 i64))
 (relation PoolPair (i64 i64))
 (relation Interference (i64 i64))
 (ruleset storage-interference)
 (rule ((Use point v)) ((Pending point v)) :ruleset storage-interference)
 (rule ((UnorderedStep before after) (Pending before v)) ((Pending after v)) :ruleset storage-interference)
+; A full identity transfer reads each lane's element before writing it. Other
+; buffers' pending accesses still cross the transfer unchanged.
+(rule ((TransferStep before after source) (Pending before v) (!= source v)) ((Pending after v)) :ruleset storage-interference)
 (rule ((PoolPair a b) (Live point a) (Live point b)) ((Interference a b)) :ruleset storage-interference)
 (rule ((PoolPair a b) (Pending point a) (Live point b)) ((Interference a b)) :ruleset storage-interference)
 (rule ((PoolPair a b) (Live point a) (Pending point b)) ((Interference a b)) :ruleset storage-interference)

@@ -807,6 +807,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 // Void instruction.
                 self.constructor.const_i32(0)
             }
+            InstKind::Copy { .. } => {
+                return Err(err_spirv!("array transfer was not lowered before SPIR-V"))
+            }
             InstKind::ControlBarrier => {
                 // Workgroup execution + memory barrier: synchronize the
                 // workgroup and make workgroup-shared writes visible.

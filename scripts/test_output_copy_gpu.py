@@ -30,6 +30,9 @@ def main():
                   ('mixed', params, [values, sliced, [sum(values)]]),
                   ('range', dict(count=count), [list(range(count))])]
     fixtures = [('output_copies', cases),
+                ('ranked_view_copies', [
+                    ('ranked_rows', dict(flag=flag), [[x+(1 if flag == 0 else 0) for x in values]])
+                    for flag in [0, 1]]),
                 ('output_copy_effects', [
                     ('effects', dict(flag=flag, start=start, count=count),
                      [values[start:start+count], [sum(values)+(7 if flag else 13)],

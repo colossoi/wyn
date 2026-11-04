@@ -65,6 +65,13 @@ impl InstKind {
     /// Classify each operand independently of the result's allocation behavior.
     pub(super) fn storage_use(&self, operand: usize) -> StorageUse {
         match self {
+            Self::Copy { .. } => {
+                if operand == 1 {
+                    StorageUse::Read
+                } else {
+                    StorageUse::Metadata
+                }
+            }
             Self::ViewIndex { .. } => StorageUse::Forward,
             Self::Op { tag, .. } => match tag {
                 OpTag::Materialize | OpTag::Tuple => StorageUse::Forward,
@@ -357,6 +364,12 @@ impl MemoryRoots {
         let place =
             |p| self.places.get(&p).cloned().unwrap_or_else(|| [MemoryRoot::Unknown].into_iter().collect());
         match data {
+            InstKind::Copy {
+                destination, source, ..
+            } => {
+                reads.extend(self.value(*source));
+                writes.extend(self.value(*destination));
+            }
             InstKind::Load { place: p } => reads = place(*p),
             InstKind::Store { place: p, .. } => writes = place(*p),
             InstKind::Atomic { place: p, .. } => {

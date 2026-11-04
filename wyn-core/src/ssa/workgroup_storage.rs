@@ -4,7 +4,7 @@ use super::invalid;
 use crate::error::Result;
 use crate::op::{OpTag, PureViewSource};
 use crate::ssa::storage::{MemoryRoot, MemoryRoots};
-use crate::ssa::types::{BlockId, FuncBody, InstId, InstKind};
+use crate::ssa::types::{BlockId, ConstantValue, FuncBody, InstId, InstKind, ValueRef};
 use crate::types::{Type, TypeExt};
 use crate::{FunctionId, LookupMap, LookupSet, ResourceAccess};
 use egglog_engine::{EGraph, Read, Write};
@@ -36,6 +36,7 @@ struct Step {
     after: usize,
     instruction: Option<InstId>,
     define: Option<u32>,
+    transfer: Option<(u32, u32)>,
     barrier: bool,
     access: Access,
 }
@@ -48,6 +49,28 @@ struct MemoryFlow {
 
 fn shared(root: &MemoryRoot) -> bool {
     matches!(root, MemoryRoot::Workgroup(_) | MemoryRoot::Unknown)
+}
+
+fn integer(value: ValueRef) -> Option<u32> {
+    match value {
+        ValueRef::Const(ConstantValue::U32(n)) => Some(n),
+        ValueRef::Const(ConstantValue::I32(n)) => u32::try_from(n).ok(),
+        _ => None,
+    }
+}
+
+fn whole_view(body: &FuncBody, value: ValueRef, length: u32) -> Option<u32> {
+    let node = &body.inner.insts[body.inner.inst_of_value(value.as_ssa()?)?];
+    if let InstKind::Op {
+        tag: OpTag::StorageView(PureViewSource::Workgroup { id, .. }),
+        operands,
+    } = &node.data
+    {
+        if integer(operands[0]) == Some(0) && integer(operands[1]) == Some(length) {
+            return Some(*id);
+        }
+    }
+    None
 }
 
 impl MemoryFlow {
@@ -85,6 +108,7 @@ impl MemoryFlow {
                     after: next,
                     instruction: Some(inst),
                     define,
+                    transfer: None,
                     barrier,
                     access,
                 });
@@ -97,6 +121,7 @@ impl MemoryFlow {
                     after: next,
                     instruction: None,
                     define: None,
+                    transfer: None,
                     barrier: false,
                     access: Access {
                         reads,
@@ -114,6 +139,7 @@ impl MemoryFlow {
                     after: points[&target].0,
                     instruction: None,
                     define: None,
+                    transfer: None,
                     barrier: false,
                     access: Access::default(),
                 });
@@ -125,11 +151,48 @@ impl MemoryFlow {
             incoming[step.after].push(index);
             outgoing[step.before].push(index);
         }
-        Self {
+        let mut flow = Self {
             steps,
             incoming,
             outgoing,
+        };
+        for i in 0..flow.steps.len() {
+            let step = &flow.steps[i];
+            let Some(inst) = step.instruction else {
+                continue;
+            };
+            let InstKind::Copy {
+                destination,
+                source,
+                length,
+                collective: true,
+                ..
+            } = body.inner.insts[inst].data
+            else {
+                continue;
+            };
+            let Some(length) = integer(length) else {
+                continue;
+            };
+            let (Some(source), Some(destination)) = (
+                whole_view(body, source, length),
+                whole_view(body, destination, length),
+            ) else {
+                continue;
+            };
+            // Only the copy's own elementwise reads can overlap its writes.
+            // Older cross-lane accesses must already have synchronized.
+            let before = flow.until_barrier(step.before, true, &LookupSet::default());
+            if before.reads.iter().chain(&before.writes).any(|root| {
+                matches!(root, MemoryRoot::Unknown)
+                    || *root == MemoryRoot::Workgroup(source)
+                    || *root == MemoryRoot::Workgroup(destination)
+            }) {
+                continue;
+            }
+            flow.steps[i].transfer = Some((source, destination));
         }
+        flow
     }
 
     fn until_barrier(&self, start: usize, backwards: bool, removed: &LookupSet<InstId>) -> Access {
@@ -193,6 +256,27 @@ fn optimize_body(body: &mut FuncBody, calls: &LookupMap<FunctionId, Option<Resou
     let roots = MemoryRoots::analyze(body);
     let flow = MemoryFlow::new(body, &roots, calls);
     pool(body, &buffers, &roots, &flow)?;
+    let selected = MemoryRoots::analyze(body);
+    let mut removed = LookupSet::default();
+    for step in &flow.steps {
+        let Some(inst) = step.instruction else {
+            continue;
+        };
+        if let InstKind::Copy {
+            source, destination, ..
+        } = body.inner.insts[inst].data
+        {
+            if source == destination
+                || (step.transfer.is_some() && selected.value(source) == selected.value(destination))
+            {
+                removed.insert(inst);
+            }
+        }
+    }
+    for block in body.inner.blocks.values_mut() {
+        block.insts.retain(|inst| !removed.contains(inst));
+    }
+    body.inner.insts.retain(|inst, _| !removed.contains(&inst));
     // Pooling introduces aliases; synchronization must see the selected storage.
     let roots = MemoryRoots::analyze(body);
     let flow = MemoryFlow::new(body, &roots, calls);
@@ -265,6 +349,13 @@ fn pool(body: &mut FuncBody, buffers: &[Buffer], roots: &MemoryRoots, flow: &Mem
             }
             for step in &flow.steps {
                 let (before, after) = (step.before as i64, step.after as i64);
+                if let Some((source, destination)) = step.transfer {
+                    sink.add("Define", (before, after, i64::from(destination)))?;
+                    sink.add("Use", (before, i64::from(source)))?;
+                    sink.add("Use", (after, i64::from(destination)))?;
+                    sink.add("TransferStep", (before, after, i64::from(source)))?;
+                    continue;
+                }
                 if let Some(id) = step.define {
                     sink.add("Define", (before, after, i64::from(id)))?;
                 } else {

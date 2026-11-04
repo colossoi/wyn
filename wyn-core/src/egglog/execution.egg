@@ -85,7 +85,6 @@
 ; Keep exact view extents available even when their element slots are unused.
 ; Direct results and forwarding preserve lengths; sliced views keep their own
 ; bounds and must not inherit the backing resource's live length.
-(rule ((ParameterValue e) (= (DispatchLoopValue e) false)) ((set (ViewExtent e) (Length e))) :ruleset residency)
 (rule ((DirectResult e op i) (= (ResultRead op i) (ReadView value)) (= n (LiveLength value))) ((set (ViewExtent e) n)) :ruleset residency)
 (rule ((Projection e tuple i) (ResultTuple tuple op) (ArrayResult op i t) (= n (LiveLength (Result op i))))
       ((set (ViewExtent e) n)) :ruleset residency)

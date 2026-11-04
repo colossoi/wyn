@@ -567,6 +567,28 @@ impl Body<'_, '_, '_> {
         start: Typed,
         step: Typed,
     ) -> Result<(), OptimizeError> {
+        if indices.is_empty()
+            && fields.is_empty()
+            && crate::ssa::array_copy::matching_view_element(&source.ty, &destination.ty).is_some()
+        {
+            let collective = !self.invocation_execution
+                && self
+                    .workgroup_width
+                    .is_some_and(|width| step.value == ValueRef::Const(ConstantValue::U32(width)));
+            let length = self.cast(length, &start.ty)?;
+            let step = self.cast(step, &start.ty)?;
+            self.builder
+                .push_void_inst(InstKind::Copy {
+                    destination: destination.value,
+                    source: source.value,
+                    length: length.value,
+                    start: start.value,
+                    step: step.value,
+                    collective,
+                })
+                .map_err(builder_error)?;
+            return Ok(());
+        }
         self.counted(start, length, step, vec![], |body, index, _| {
             let mut value = body.index(source.clone(), index.clone())?;
             let mut path = indices.to_vec();
