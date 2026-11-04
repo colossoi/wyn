@@ -120,7 +120,16 @@ fn scalar_padding_is_contracted_but_later_alias_access_still_blocks_reuse() {
 #[test]
 fn allocation_reachability_is_limited_to_eligible_webs_and_respects_backedges() {
     let mut graph = EGraph::default();
-    graph.parse_and_run_program(None, include_str!("local_storage.egg")).unwrap();
+    graph
+        .parse_and_run_program(
+            None,
+            concat!(
+                include_str!("storage_liveness.egg"),
+                "\n",
+                include_str!("local_storage.egg")
+            ),
+        )
+        .unwrap();
     graph
         .parse_and_run_program(
             None,

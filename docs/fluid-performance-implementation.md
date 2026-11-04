@@ -497,3 +497,74 @@ validation exception; compiler SPIR-V and Naga validation remain enabled.
 Final gate records are under `tmp/projection-copy-verified-gates`. The gate
 run was interrupted for uncontended measurement and resumed from its recorded
 successful checks afterward.
+
+## 2026-11-03: share storage liveness and reuse workgroup scratch
+
+The existing SSA storage pass now handles cooperative workgroup allocations as
+well as private array versions. Both use the same edge-aware liveness rules,
+including loop backedges. Workgroup interference additionally keeps accesses
+pending until a barrier: a last use by one lane does not free the allocation
+while another lane may still be using it. Rust selects compatible physical
+buffers from these egglog interference facts, using the largest member's
+capacity and retaining each logical view's offset and length.
+
+The storage contracts now describe slices and inherited views as aliases.
+Common provenance queries follow those aliases, aggregate fields, block
+parameters and derived places. Private allocation reuse uses the same place
+provenance. Transitive call effects distinguish scalar helpers from workgroup
+reads/writes; unknown calls and escaped views remain conservative.
+Views nested in arrays or tuples also retain their memory provenance. Returning
+a descriptor publishes its contents, so escape analysis and barrier scheduling
+both account for that read.
+
+Synchronization uses these same physical memory facts after allocation reuse.
+The SSA pass removes a barrier only when the accesses on either side have no
+shared-memory conflict before another retained barrier. Each removal updates
+the subsequent queries, so a chain of redundant barriers retains the required
+producer/consumer ordering. Rebuilding provenance after pooling also preserves
+barriers required by newly aliased buffers. This runs in common SSA preparation
+for SPIR-V and WGSL, within the existing storage stage.
+
+This follows the placement of Futhark's `MemoryBlockMerging`: reuse allocations
+after memory is explicit, then select a coloring of the interference graph.
+Wyn additionally models accesses still pending across lanes and currently pools
+only matching element types. Fixed fusion and source execution planning retain
+their existing stages. No traversal-specific names, capacities or rules are
+part of the implementation.
+
+The traversal shader's shared allocations fall from 31 to 15, using 7,080
+instead of 16,224 bytes. Its static workgroup-barrier count falls from 72 to 45.
+Copies between simultaneously live array versions remain explicit; this change
+reduces their storage pressure and redundant synchronization.
+
+Paired RX580 measurements compare `b876b492` with this patch, using the same
+viewer, scene, capacities and 640x480 rendering. Each run uses 25 frames and
+discards five. Two batches reverse case and variant order; the table combines
+40 measured frames per variant. No builds or other GPU work ran during timing.
+
+| Particles | SPIR-V before → after | Speedup | WGSL before → after | Speedup |
+| --- | --- | --- | --- | --- |
+| 25,000 | 20.18 → 15.56 ms | 1.30x | 20.26 → 15.68 ms | 1.29x |
+| 100,000 | 59.12 → 36.35 ms | 1.63x | 60.40 → 37.73 ms | 1.60x |
+
+The first 100k SPIR-V pair's traversal falls from 37.44 to 14.60 ms; sorting's
+5.40 ms partials phase stays unchanged. Positions and velocities match bit for
+bit in all eight pairs. All runs pass particle-count, finite-value, bounds and
+overflow checks. The independent traversal oracle passes 76 queries on each
+backend, and the tiled-output/subgroup checks pass both targets. Temporary
+measurement tools and raw data remain excluded under `tmp/workgroup-reuse-perf`.
+
+Regressions cover synchronization before reuse, descriptor aliases, cross-block
+dependencies, loop backedges, transitive calls and returned arrays containing
+views. Rebuilt final WGSL shaders at 4,320, 25k and 100k retain the measured
+allocation and barrier counts. Both shader formats validate at all three sizes,
+and their generated host programs remain byte-identical to the measured builds.
+
+All 25 full gate commands passed on the final source: formatting, release
+workspace build, 1,533 workspace tests (14 ignored), clippy, all nine standalone
+crate builds/tests, wasm32, and the shader corpus (123 SPIR-V; 122 WGSL with the
+existing miner skip). All 11 GPU gate commands passed, covering nested dispatch
+loops, collectives, output copies, capacity and fluid numerical checks, and 17
+WGPU runtime tests. GPU execution uses the existing viewer-layer validation
+exception; compiler SPIR-V and Naga validation remain enabled. Final gate records
+are under `tmp/workgroup-reuse-final-gates`.
