@@ -213,14 +213,19 @@ impl<'graph, 'db, 'a, 'source> Importer<'graph, 'db, 'a, 'source> {
         ty: Value,
     ) -> Result<Value, OptimizeError> {
         match &term.kind {
-            TermKind::IntLit(text) => Ok(self.sink.add("ExprLiteral", (context, ty, text.as_str()))?),
-            TermKind::FloatLit(value) => {
-                Ok(self.sink.add("ExprLiteral", (context, ty, value.to_bits().to_string().as_str()))?)
+            TermKind::IntLit(text) => {
+                let bits = text
+                    .parse::<i64>()
+                    .or_else(|_| text.parse::<u64>().map(|v| v as i64))
+                    .map_err(|_| crate::egglog::output_error("invalid integer literal"))?;
+                Ok(self.sink.add("ExprLiteral", (context, ty, bits))?)
             }
-            TermKind::BoolLit(value) => Ok(self.sink.add(
-                "ExprLiteral",
-                (context, ty, if *value { "true" } else { "false" }),
-            )?),
+            TermKind::FloatLit(value) => {
+                Ok(self.sink.add("ExprLiteral", (context, ty, i64::from(value.to_bits())))?)
+            }
+            TermKind::BoolLit(value) => {
+                Ok(self.sink.add("ExprLiteral", (context, ty, i64::from(*value)))?)
+            }
             TermKind::UnitLit => {
                 let args = self.args(context, &[])?;
                 self.sink.add("ExprOperatorTotal", (ty, "unit"))?;

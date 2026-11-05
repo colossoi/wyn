@@ -117,7 +117,7 @@ impl Body<'_, '_, '_> {
                 continue;
             };
             let value = if role == "total" {
-                let zero = self.literal("0", &types::i32())?;
+                let zero = self.literal(0, &types::i32())?;
                 self.index(array, zero)?
             } else {
                 self.local_array_result(array, result)?
@@ -130,7 +130,7 @@ impl Body<'_, '_, '_> {
         if let Some(access) = self.compiler.facts.value_read(source) {
             if let Some(fields) = self.compiler.facts.enode("ReadElement", access) {
                 let array = self.resource(scope, fields[0], 1)?;
-                let zero = self.literal("0", &types::i32())?;
+                let zero = self.literal(0, &types::i32())?;
                 return self.index(array, zero);
             }
             if let Some(fields) = self.compiler.facts.enode("ReadView", access) {

@@ -53,7 +53,7 @@ impl Body<'_, '_, '_> {
             }
             if let Some(fields) = self.compiler.facts.enode("ReadElement", access) {
                 let view = self.resource(scope, fields[0], 1)?;
-                let zero = self.literal("0", &types::i32())?;
+                let zero = self.literal(0, &types::i32())?;
                 let value = self.index(view, zero)?;
                 let Some(ty) = self.compiler.facts.source_type(source).cloned() else {
                     return Err(error("stored value has no semantic type"));
@@ -334,7 +334,7 @@ impl Body<'_, '_, '_> {
                 return Err(error("reused resource source is not a storage view"));
             }
             let length = self.extent(scope, extent)?;
-            let zero = self.literal("0", &types::i32())?;
+            let zero = self.literal(0, &types::i32())?;
             return self.slice(
                 view,
                 zero,
@@ -415,7 +415,7 @@ impl Body<'_, '_, '_> {
         match name {
             "Fixed" => {
                 let n = self.compiler.program.graph.value_to_base::<i64>(children[0]);
-                self.literal(&n.to_string(), &types::i32())
+                self.literal((n) as i64, &types::i32())
             }
             "Length" | "Scalar" => {
                 let source = children[0];
@@ -434,7 +434,7 @@ impl Body<'_, '_, '_> {
             }
             "Stored" => {
                 let view = self.resource(scope, children[0], 1)?;
-                let zero = self.literal("0", &types::i32())?;
+                let zero = self.literal(0, &types::i32())?;
                 self.index(view, zero)
             }
             "Sum" | "Product" | "Difference" => {

@@ -139,8 +139,8 @@ pub(super) fn serial_filter(
         return Err(error("filter domain missing"));
     };
     let n = body.extent(scope, domain)?;
-    let zero = body.literal("0", &types::i32())?;
-    let one = body.literal("1", &types::i32())?;
+    let zero = body.literal(0, &types::i32())?;
+    let one = body.literal(1, &types::i32())?;
     let count = body.counted(
         zero.clone(),
         n,

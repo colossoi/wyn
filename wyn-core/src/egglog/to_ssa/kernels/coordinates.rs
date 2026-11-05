@@ -8,7 +8,7 @@ use crate::LookupMap;
 use egglog_engine::Value;
 
 pub fn length(body: &mut Body<'_, '_, '_>, dimensions: &[Typed]) -> Result<Typed, OptimizeError> {
-    let mut length = body.literal("1", &types::i32())?;
+    let mut length = body.literal(1, &types::i32())?;
     for dimension in dimensions {
         length = body.binary(Multiply, length, dimension.clone())?;
     }
@@ -21,7 +21,7 @@ pub fn decode(
     dimensions: &[Typed],
     index: Typed,
 ) -> Result<Vec<Typed>, OptimizeError> {
-    let zero = body.literal("0", &types::i32())?;
+    let zero = body.literal(0, &types::i32())?;
     let mut coordinates = vec![zero; dimensions.len()];
     let mut remainder = index;
     for i in (0..dimensions.len()).rev() {

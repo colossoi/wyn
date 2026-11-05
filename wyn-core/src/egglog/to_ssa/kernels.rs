@@ -70,7 +70,7 @@ pub(super) fn emit(
             };
             let value = body.value(scope, source)?;
             if let Some(output) = body.slot(scope, operation, "scalar", 0, 2)? {
-                let zero = body.literal("0", &types::i32())?;
+                let zero = body.literal(0, &types::i32())?;
                 body.store(output, zero, value)?;
             }
         }
@@ -137,11 +137,11 @@ fn workgroup(body: &mut Body<'_, '_, '_>) -> Result<(Typed, Typed), OptimizeErro
     if let Some((x, y, z)) = body.grid {
         for (axis, stride) in [(1, u64::from(x)), (2, u64::from(x) * u64::from(y))] {
             let coordinate = body.field(coordinates.clone(), axis)?;
-            let stride = body.literal(&stride.to_string(), &uint)?;
+            let stride = body.literal((stride) as i64, &uint)?;
             let offset = body.binary(BinaryOperator::Multiply, coordinate, stride)?;
             start = body.binary(BinaryOperator::Add, start, offset)?;
         }
-        let groups = body.literal(&(u64::from(x) * u64::from(y) * u64::from(z)).to_string(), &uint)?;
+        let groups = body.literal((u64::from(x) * u64::from(y) * u64::from(z)) as i64, &uint)?;
         return Ok((start, groups));
     }
     let step = body.op(

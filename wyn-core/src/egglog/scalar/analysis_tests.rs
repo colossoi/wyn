@@ -19,7 +19,7 @@ fn graph() -> EGraph {
                 (let $ctx (ExprContextFunction (RegionId 0)))
                 (let $ty (TypeId 0))
                 (let $x (ExprParameter $ctx $ty (RegionId 0) 0))
-                (let $zero (ExprLiteral $ctx $ty "0"))
+                (let $zero (ExprLiteral $ctx $ty 0))
                 (let $nil (ExprNil $ctx))
                 (ExprContextActive $ctx)
                 (set (SourceReadOnly (SourceGlobal 0)) true)

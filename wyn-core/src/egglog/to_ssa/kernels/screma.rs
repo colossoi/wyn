@@ -76,7 +76,7 @@ pub(super) fn screma(
         };
         let neutral = if component.role == "count" {
             let ty = body.compiler.facts.ty(component.ty).ok_or_else(|| error("count type missing"))?;
-            body.literal("0", ty)?
+            body.literal(0, ty)?
         } else {
             let neutral = body.compiler.facts.neutral(operation)?;
             let layout = body.compiler.facts.value_layout(neutral)?;
@@ -91,8 +91,8 @@ pub(super) fn screma(
     };
     let n = body.extent(scope, domain)?;
     if phase == "ordered" {
-        let zero = body.literal("0", &types::i32())?;
-        let one = body.literal("1", &types::i32())?;
+        let zero = body.literal(0, &types::i32())?;
+        let one = body.literal(1, &types::i32())?;
         let state = body.counted(zero.clone(), n, one, initial, |body, index, state| {
             let mut cache = LookupMap::default();
             let mut next = Vec::new();

@@ -331,15 +331,15 @@ impl Body<'_, '_, '_> {
     }
     pub(in crate::egglog::to_ssa) fn literal(
         &mut self,
-        text: &str,
+        bits: i64,
         ty: &Type,
     ) -> Result<Typed, OptimizeError> {
         let tag = match strip_existentials(ty) {
-            Type::Constructed(TypeName::UInt(_), _) => OpTag::Uint(text.into()),
-            Type::Constructed(TypeName::Int(_), _) => OpTag::Int(text.into()),
-            Type::Constructed(TypeName::Bool, _) => OpTag::Bool(text == "true"),
+            Type::Constructed(TypeName::UInt(_), _) => OpTag::Uint((bits as u64).to_string()),
+            Type::Constructed(TypeName::Int(_), _) => OpTag::Int(bits.to_string()),
+            Type::Constructed(TypeName::Bool, _) => OpTag::Bool(bits != 0),
             Type::Constructed(TypeName::Float(_), _) => {
-                let bits: u32 = text.parse().map_err(|_| error("invalid folded float bits"))?;
+                let bits = u32::try_from(bits).map_err(|_| error("invalid folded float bits"))?;
                 if matches!(ty, Type::Constructed(TypeName::Float(32), _)) {
                     return Ok(Typed {
                         value: ValueRef::Const(ConstantValue::F32(bits)),
@@ -355,7 +355,7 @@ impl Body<'_, '_, '_> {
     pub(in crate::egglog::to_ssa) fn length(&mut self, array: Typed) -> Result<Typed, OptimizeError> {
         if array.ty.array_variant().is_some_and(types::is_array_variant_composite) {
             if let Some(Type::Constructed(TypeName::Size(n), _)) = array.ty.array_size() {
-                return self.literal(&n.to_string(), &types::i32());
+                return self.literal(*n as i64, &types::i32());
             }
         }
         if matches!(array.ty, Type::Constructed(TypeName::Tuple(_), _)) {
@@ -414,7 +414,7 @@ impl Body<'_, '_, '_> {
             };
             let output = self.builder.new_place(ty.clone());
             self.builder.push_void_inst(InstKind::Alloca { result: output }).map_err(builder_error)?;
-            let count = self.literal(&n.to_string(), &types::i32())?;
+            let count = self.literal(*n as i64, &types::i32())?;
             self.counted(
                 Self::number(0),
                 count,
@@ -509,8 +509,8 @@ impl Body<'_, '_, '_> {
             && (copy_array || matches!(ty, Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), _)))
         {
             let n = self.length(value.clone())?;
-            let zero = self.literal("0", &types::i32())?;
-            let one = self.literal("1", &types::i32())?;
+            let zero = self.literal(0, &types::i32())?;
+            let one = self.literal(1, &types::i32())?;
             self.counted(zero, n, one, vec![], |body, index, _| {
                 let item = body.index(value.clone(), index.clone())?;
                 body.store_place(place, ty, &[index], item)?;
@@ -553,8 +553,8 @@ impl Body<'_, '_, '_> {
         length: Typed,
         fields: &[usize],
     ) -> Result<(), OptimizeError> {
-        let zero = self.literal("0", &length.ty)?;
-        let one = self.literal("1", &length.ty)?;
+        let zero = self.literal(0, &length.ty)?;
+        let one = self.literal(1, &length.ty)?;
         self.copy_array_strided((destination, &[]), source, length, fields, zero, one)
     }
 
@@ -595,8 +595,8 @@ impl Body<'_, '_, '_> {
             path.push(index);
             if !fields.is_empty() && source.ty.array_rank().is_some_and(|rank| rank > 1) {
                 let length = body.length(value.clone())?;
-                let zero = body.literal("0", &length.ty)?;
-                let one = body.literal("1", &length.ty)?;
+                let zero = body.literal(0, &length.ty)?;
+                let one = body.literal(1, &length.ty)?;
                 body.copy_array_strided((destination.clone(), &path), value, length, fields, zero, one)?;
             } else {
                 for &field in fields {

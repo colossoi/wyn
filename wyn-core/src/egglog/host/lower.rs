@@ -472,13 +472,13 @@ impl<'a, 'source> Lower<'a, 'source> {
                 self.boundary(context, source)?
             }
             "ExprLiteral" => {
-                let text = selected.text(f[2])?;
+                let bits = selected.integer(f[2])?;
                 let malformed = || error("invalid selected host literal");
                 match scalar_type(ty) {
-                    Some(ScalarType::I32) => ScalarExpr::I32(text.parse().map_err(|_| malformed())?),
-                    Some(ScalarType::U32) => ScalarExpr::U32(text.parse().map_err(|_| malformed())?),
-                    Some(ScalarType::F32) => ScalarExpr::F32(text.parse().map_err(|_| malformed())?),
-                    Some(ScalarType::Bool) => ScalarExpr::Bool(text.parse().map_err(|_| malformed())?),
+                    Some(ScalarType::I32) => ScalarExpr::I32(bits.try_into().map_err(|_| malformed())?),
+                    Some(ScalarType::U32) => ScalarExpr::U32(bits.try_into().map_err(|_| malformed())?),
+                    Some(ScalarType::F32) => ScalarExpr::F32(bits.try_into().map_err(|_| malformed())?),
+                    Some(ScalarType::Bool) => ScalarExpr::Bool(bits != 0),
                     None => return Err(Error::Unsupported),
                 }
             }

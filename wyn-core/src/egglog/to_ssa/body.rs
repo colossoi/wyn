@@ -141,8 +141,8 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                 return Err(error("capture type missing"));
             };
             let element = crate::ssa::layout::storage_value_type(&ty);
-            let zero = self.literal("0", &types::i32())?;
-            let one = self.literal("1", &types::i32())?;
+            let zero = self.literal(0, &types::i32())?;
+            let one = self.literal(1, &types::i32())?;
             let view = self.op(
                 OpTag::StorageView(PureViewSource::Storage(binding)),
                 vec![zero.clone(), one],
@@ -296,10 +296,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                     };
                     value
                 }
-                "ExprLiteral" => {
-                    let text = selected.text(fields[2])?;
-                    self.literal(text, &ty)?
-                }
+                "ExprLiteral" => self.literal(selected.integer(fields[2])?, &ty)?,
                 "ExprUnary" | "ExprBinary" | "ExprOp" => {
                     let arguments = selected
                         .operation_arguments(term)?

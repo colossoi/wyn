@@ -74,7 +74,7 @@ impl Body<'_, '_, '_> {
         self.workgroup_barrier()?;
         let mut totals = Vec::new();
         for (i, buffer) in buffers.iter().enumerate() {
-            let zero = self.literal("0", &inclusive[i].ty)?;
+            let zero = self.literal(0, &inclusive[i].ty)?;
             let sums = self.counted(
                 Self::number(0),
                 subgroup.groups.clone(),

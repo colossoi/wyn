@@ -175,7 +175,7 @@ fn bind_parameters(
             };
             if let Some(binding) = input.storage_binding() {
                 let len = if let Some(Type::Constructed(TypeName::Size(n), _)) = input.ty.array_size() {
-                    lower.literal(&n.to_string(), &Type::Constructed(TypeName::UInt(32), vec![]))?
+                    lower.literal(*n as i64, &Type::Constructed(TypeName::UInt(32), vec![]))?
                 } else if let Some(shape) = lower
                     .compiler
                     .facts
@@ -192,17 +192,17 @@ fn bind_parameters(
                         .lookup("InputShapeIndex", (scope, index as i64))
                         .ok_or_else(|| error("input length slot missing"))?;
                     let index =
-                        lower.literal(&lower.compiler.facts.integer(slot).to_string(), &types::i32())?;
+                        lower.literal((lower.compiler.facts.integer(slot)) as i64, &types::i32())?;
                     let shape = lower.resource(scope, shape, 1)?;
                     let length = lower.index(shape, index)?;
                     lower.cast(length, &Type::Constructed(TypeName::UInt(32), vec![]))?
                 } else {
                     let set = lower.literal(
-                        &binding.set.to_string(),
+                        (binding.set) as i64,
                         &Type::Constructed(TypeName::UInt(32), vec![]),
                     )?;
                     let slot = lower.literal(
-                        &binding.binding.to_string(),
+                        (binding.binding) as i64,
                         &Type::Constructed(TypeName::UInt(32), vec![]),
                     )?;
                     lower.op(
@@ -214,7 +214,7 @@ fn bind_parameters(
                         Type::Constructed(TypeName::UInt(32), vec![]),
                     )?
                 };
-                let zero = lower.literal("0", &Type::Constructed(TypeName::UInt(32), vec![]))?;
+                let zero = lower.literal(0, &Type::Constructed(TypeName::UInt(32), vec![]))?;
                 value = lower.op(
                     OpTag::StorageView(PureViewSource::Storage(binding)),
                     vec![zero, len],
@@ -223,7 +223,7 @@ fn bind_parameters(
             }
 
             if scalar_storage {
-                let zero = lower.literal("0", &Type::Constructed(TypeName::UInt(32), vec![]))?;
+                let zero = lower.literal(0, &Type::Constructed(TypeName::UInt(32), vec![]))?;
                 value = lower.index(value, zero)?;
             }
             values.push(value);
@@ -294,9 +294,9 @@ fn write_outputs(
             let len = if value.ty.is_array() {
                 lower.length(value.clone())?
             } else {
-                lower.literal("1", &types::i32())?
+                lower.literal(1, &types::i32())?
             };
-            let zero = lower.literal("0", &types::i32())?;
+            let zero = lower.literal(0, &types::i32())?;
             let view = lower.op(
                 OpTag::StorageView(PureViewSource::Storage(binding)),
                 vec![zero.clone(), len.clone()],
@@ -371,7 +371,7 @@ fn copy_results<'source>(
             } else {
                 let value = lower.value(scope, source)?;
                 let destination = lower.resource(scope, resource, 2)?;
-                let zero = lower.literal("0", &types::i32())?;
+                let zero = lower.literal(0, &types::i32())?;
                 let (place, ty) = lower.index_place(destination, zero)?;
                 let value = lower.cast(value, &ty)?;
                 lower

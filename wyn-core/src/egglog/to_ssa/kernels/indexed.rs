@@ -49,10 +49,7 @@ pub(super) fn indexed(
     };
     let n = body.extent(scope, domain)?;
     let (start, step) = if serial {
-        (
-            body.literal("0", &types::i32())?,
-            body.literal("1", &types::i32())?,
-        )
+        (body.literal(0, &types::i32())?, body.literal(1, &types::i32())?)
     } else {
         if phase == "local" {
             (body.local_id()?, Body::number(phase_width))
@@ -107,7 +104,7 @@ pub(super) fn update(
         }
         (arguments.remove(0), arguments.remove(0))
     };
-    let zero = body.literal("0", &key.ty)?;
+    let zero = body.literal(0, &key.ty)?;
     let length = body.length(output.clone())?;
     let nonnegative = body.binary(BinaryOperator::GreaterEqual, key.clone(), zero)?;
     let below = body.binary(BinaryOperator::Less, key.clone(), length)?;
@@ -208,8 +205,8 @@ pub(super) fn buckets(
     let Some(overflow) = body.slot(scope, phase_owner, "overflow", 0, 2)? else {
         return Err(error("bucket overflow missing"));
     };
-    let zero = body.literal("0", &types::i32())?;
-    let one = body.literal("1", &types::i32())?;
+    let zero = body.literal(0, &types::i32())?;
+    let one = body.literal(1, &types::i32())?;
     let serial = phase == "ordered";
     if serial || phase == "clear" {
         let count = body.length(output.clone())?;
@@ -255,8 +252,8 @@ fn bucket_updates(
     serial: bool,
     width: u32,
 ) -> Result<(), OptimizeError> {
-    let zero = body.literal("0", &types::i32())?;
-    let one = body.literal("1", &types::i32())?;
+    let zero = body.literal(0, &types::i32())?;
+    let one = body.literal(1, &types::i32())?;
     let inputs = body.compiler.facts.inputs(operation)?;
     let dimensions =
         dimensions.iter().map(|&extent| body.extent(scope, extent)).collect::<Result<Vec<_>, _>>()?;
@@ -265,10 +262,7 @@ fn bucket_updates(
         Some(Type::Constructed(TypeName::Size(n), _)) => *n,
         _ => return Err(error("bucket capacity must be static")),
     };
-    let capacity = body.literal(
-        &capacity.to_string(),
-        &Type::Constructed(TypeName::UInt(32), vec![]),
-    )?;
+    let capacity = body.literal((capacity) as i64, &Type::Constructed(TypeName::UInt(32), vec![]))?;
     let bucket_count = body.length(output.clone())?;
     let (start, step) = if serial { (zero.clone(), one.clone()) } else { invocation(body, width)? };
     body.counted(start, n, step, vec![], |body, index, _| {

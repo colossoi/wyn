@@ -196,8 +196,8 @@ impl Body<'_, '_, '_> {
         let Some(parameter) = self.compiler.facts.iteration(iteration_scope) else {
             return Err(error("counted loop has no iteration parameter"));
         };
-        let zero = self.literal("0", &index_ty)?;
-        let one = self.literal("1", &index_ty)?;
+        let zero = self.literal(0, &index_ty)?;
+        let one = self.literal(1, &index_ty)?;
         let results = self.counted_loop(zero, bound, one, vec![initial], |body, index, mut carried| {
             let Some(value) = carried.pop() else {
                 return Err(error("loop state parameter is missing"));
@@ -243,7 +243,7 @@ impl Body<'_, '_, '_> {
                 let types: Vec<_> = initial.iter().map(|value| value.ty.clone()).collect();
                 let mut state = initial;
                 for i in 0..n {
-                    let index = self.literal(&i.to_string(), &start.ty)?;
+                    let index = self.literal((i) as i64, &start.ty)?;
                     let values = self.values.checkpoint();
                     let scopes = self.scopes.checkpoint();
                     let scalar_values = std::mem::take(&mut self.scalar_values);

@@ -100,9 +100,9 @@ impl Body<'_, '_, '_> {
             let element = self.compiler.facts.layout_type(fields[1])?;
             let place = self.builder.new_place(ty.clone());
             self.builder.push_void_inst(InstKind::Alloca { result: place }).map_err(builder_error)?;
-            let zero = self.literal("0", &types::i32())?;
-            let length = self.literal(&n.to_string(), &types::i32())?;
-            let one = self.literal("1", &types::i32())?;
+            let zero = self.literal(0, &types::i32())?;
+            let length = self.literal((n) as i64, &types::i32())?;
+            let one = self.literal(1, &types::i32())?;
             self.counted(zero, length, one, vec![], |body, index, _| {
                 let item = body.index(value.clone(), index.clone())?;
                 let item = body.materialize_component(item, fields[1], path, None)?;

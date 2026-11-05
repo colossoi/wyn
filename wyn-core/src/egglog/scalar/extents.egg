@@ -19,7 +19,7 @@
 (rule ((ExtentExprDemand (Length source)) (= (RectangularExtent (Length source)) (Length source)) (LengthType t))
       ((set (ExtentExprValue (Length source)) (ExprLength (ExprContextDimensions) t source))) :ruleset scalar-extents)
 (rule ((ExtentExprDemand (Fixed n)) (LengthType t))
-      ((set (ExtentExprValue (Fixed n)) (ExprLiteral (ExprContextDimensions) t (to-string n)))) :ruleset scalar-extents)
+      ((set (ExtentExprValue (Fixed n)) (ExprLiteral (ExprContextDimensions) t n))) :ruleset scalar-extents)
 (rule ((ExtentExprDemand (Product a b)) (LengthType t) (= x (ExtentExprValue a)) (= y (ExtentExprValue b)))
       ((set (ExtentExprValue (Product a b)) (ExprBinary (ExprContextDimensions) t "*" x y))) :ruleset scalar-extents)
 (rule ((ExtentExprDemand (Difference a b)) (LengthType t) (= x (ExtentExprValue a)) (= y (ExtentExprValue b)))

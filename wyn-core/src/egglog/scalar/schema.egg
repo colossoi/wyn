@@ -16,7 +16,8 @@
 (constructor ExprCall (ExprContext TypeKey SourceValue RegionKey ExprArgs) Expr)
 (constructor ExprParameter (ExprContext TypeKey RegionKey i64) Expr)
 (constructor ExprLength (ExprContext TypeKey SourceValue) Expr)
-(constructor ExprLiteral (ExprContext TypeKey String) Expr)
+; Literal payloads are native bits interpreted by TypeKey: integers, f32 bits, or boolean 0/1.
+(constructor ExprLiteral (ExprContext TypeKey i64) Expr)
 (constructor ExprUnary (ExprContext TypeKey String Expr) Expr)
 (constructor ExprBinary (ExprContext TypeKey String Expr Expr) Expr)
 (constructor ExprOp (ExprContext TypeKey String ExprArgs) Expr)

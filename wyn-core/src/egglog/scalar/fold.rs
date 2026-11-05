@@ -8,7 +8,7 @@ use crate::types::{Type, TypeName};
 use egglog_engine::ast::Span;
 use egglog_engine::constraint::{SimpleTypeConstraint, TypeConstraint};
 use egglog_engine::prelude::BaseSort;
-use egglog_engine::sort::{StringSort, S};
+use egglog_engine::sort::{I64Sort, StringSort, S};
 use egglog_engine::{Core, EGraph, Primitive, PurePrim, PureState, Value};
 
 pub(super) fn register(graph: &mut EGraph) {
@@ -36,13 +36,12 @@ impl Primitive for ScalarPrimitive {
         };
         let mut sorts = vec![StringSort.to_arcsort(); arity];
         sorts.push(StringSort.to_arcsort());
+        sorts[3..].fill(I64Sort.to_arcsort());
         SimpleTypeConstraint::new(self.name(), sorts, span.clone()).into_box()
     }
 }
 impl PurePrim for ScalarPrimitive {
     fn apply<'a, 'db>(&self, state: PureState<'a, 'db>, args: &[Value]) -> Option<Value> {
-        // Sort constraints guarantee these are strings; this unwrap decodes an
-        // egglog base value, not an Option or Result.
         let string = |v| state.base_values().unwrap::<S>(v);
         let result = match (self, args) {
             (Self::Binary, &[op, input, output, a, b]) => {
@@ -50,8 +49,8 @@ impl PurePrim for ScalarPrimitive {
                 let output = scalar_type(string(output).as_str())?;
                 let value = binary(
                     BinaryOperator::try_from(string(op).as_str()).ok()?,
-                    decode(&input, string(a).as_str())?,
-                    decode(&input, string(b).as_str())?,
+                    decode(&input, state.base_values().unwrap::<i64>(a))?,
+                    decode(&input, state.base_values().unwrap::<i64>(b))?,
                     &input,
                 )?;
                 encode(&output, value)?
@@ -60,11 +59,11 @@ impl PurePrim for ScalarPrimitive {
                 string(op).as_str(),
                 string(input).as_str(),
                 string(output).as_str(),
-                string(a).as_str(),
+                state.base_values().unwrap::<i64>(a),
             )?,
             _ => unreachable!("primitive {} received {} arguments", self.name(), args.len()),
         };
-        Some(state.base_values().get(S::new(result)))
+        Some(state.base_values().get(result))
     }
 }
 
@@ -84,45 +83,42 @@ fn scalar_type(name: &str) -> Option<Type> {
     Some(Type::Constructed(kind, vec![]))
 }
 
-fn decode(ty: &Type, text: &str) -> Option<Scalar> {
+fn decode(ty: &Type, bits: i64) -> Option<Scalar> {
     Some(match ty {
-        Type::Constructed(TypeName::Int(_), _) => Scalar::Int(text.parse().ok()?),
-        Type::Constructed(TypeName::UInt(_), _) => Scalar::Int(text.parse::<u64>().ok()? as i64),
-        Type::Constructed(TypeName::Float(32), _) => {
-            Scalar::Float(f32::from_bits(text.parse().ok()?) as f64)
-        }
-        Type::Constructed(TypeName::Bool, _) => Scalar::Bool(text.parse().ok()?),
+        Type::Constructed(TypeName::Int(_) | TypeName::UInt(_), _) => Scalar::Int(bits),
+        Type::Constructed(TypeName::Float(32), _) => Scalar::Float(f32::from_bits(bits as u32) as f64),
+        Type::Constructed(TypeName::Bool, _) if matches!(bits, 0 | 1) => Scalar::Bool(bits != 0),
         _ => return None,
     })
 }
-fn encode(ty: &Type, value: Scalar) -> Option<String> {
+fn encode(ty: &Type, value: Scalar) -> Option<i64> {
     Some(match (value, ty) {
-        (Scalar::Int(v), Type::Constructed(TypeName::Int(_), _)) => wrap_int(v as i128, ty).to_string(),
-        (Scalar::Int(v), Type::Constructed(TypeName::UInt(_), _)) => {
-            (wrap_int(v as i128, ty) as u64).to_string()
+        (Scalar::Int(v), Type::Constructed(TypeName::Int(_) | TypeName::UInt(_), _)) => {
+            wrap_int(v as i128, ty)
         }
-        (Scalar::Float(v), Type::Constructed(TypeName::Float(32), _)) => (v as f32).to_bits().to_string(),
-        (Scalar::Bool(v), Type::Constructed(TypeName::Bool, _)) => v.to_string(),
+        (Scalar::Float(v), Type::Constructed(TypeName::Float(32), _)) => (v as f32).to_bits() as i64,
+        (Scalar::Bool(v), Type::Constructed(TypeName::Bool, _)) => i64::from(v),
         _ => return None,
     })
 }
 
-fn evaluate_unary(op: &str, input: &str, output: &str, text: &str) -> Option<String> {
+fn evaluate_unary(op: &str, input: &str, output: &str, bits: i64) -> Option<i64> {
     let input = scalar_type(input)?;
     let output = scalar_type(output)?;
     if op == "bitcast" {
-        let bits = match input {
-            Type::Constructed(TypeName::Float(32) | TypeName::UInt(32), _) => text.parse::<u32>().ok()?,
-            Type::Constructed(TypeName::Int(32), _) => text.parse::<i32>().ok()? as u32,
-            _ => return None,
-        };
+        if !matches!(
+            input,
+            Type::Constructed(TypeName::Float(32) | TypeName::UInt(32) | TypeName::Int(32), _)
+        ) {
+            return None;
+        }
         return Some(match output {
-            Type::Constructed(TypeName::Float(32) | TypeName::UInt(32), _) => bits.to_string(),
-            Type::Constructed(TypeName::Int(32), _) => (bits as i32).to_string(),
+            Type::Constructed(TypeName::Float(32) | TypeName::UInt(32), _) => bits as u32 as i64,
+            Type::Constructed(TypeName::Int(32), _) => bits as i32 as i64,
             _ => return None,
         });
     }
-    let value = decode(&input, text)?;
+    let value = decode(&input, bits)?;
     if let Ok(op) = UnaryOperator::try_from(op) {
         return encode(&output, unary(op, value, &input)?);
     }
@@ -158,3 +154,7 @@ fn conversion(op: &str, input: &Type, result: &Type, value: Scalar) -> Option<Sc
     )?
     .as_scalar()
 }
+
+#[cfg(test)]
+#[path = "fold_tests.rs"]
+mod tests;
