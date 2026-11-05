@@ -336,3 +336,146 @@ pub fn pattern_with<From: TreeFamily, To: TreeFamily, A, B, E>(
         kind,
     })
 }
+
+/// In-place source-tree traversal. Override hooks for pass-specific ordering.
+pub(crate) trait VisitorMut: Sized {
+    fn expression(&mut self, e: &mut Expression) {
+        walk_expression(self, e);
+    }
+    fn pattern<A>(&mut self, p: &mut Pattern<super::SourceTree, A>) {
+        walk_pattern(self, p);
+    }
+    fn ty(&mut self, _ty: &mut Type) {}
+}
+
+pub(crate) fn walk_pattern<V: VisitorMut, A>(v: &mut V, p: &mut Pattern<super::SourceTree, A>) {
+    match &mut p.kind {
+        PatternKind::Typed(p, ty) => {
+            v.pattern(p);
+            v.ty(ty);
+        }
+        PatternKind::Attributed(_, p) => v.pattern(p),
+        PatternKind::Tuple(ps) | PatternKind::Vec(ps) | PatternKind::Constructor(_, ps) => {
+            for p in ps {
+                v.pattern(p);
+            }
+        }
+        PatternKind::Record(fs) => {
+            for f in fs {
+                if let RecordPatternTarget::Pattern(p) = &mut f.target {
+                    v.pattern(p);
+                }
+            }
+        }
+        PatternKind::Name(_) | PatternKind::Wildcard | PatternKind::Literal(_) | PatternKind::Unit => {}
+    }
+}
+
+pub(crate) fn walk_expression<V: VisitorMut>(v: &mut V, e: &mut Expression) {
+    match &mut e.kind {
+        ExprKind::Spread(e) | ExprKind::UnaryOp(_, e) | ExprKind::FieldAccess(e, _) => v.expression(e),
+        ExprKind::TypeAscription(e, ty) | ExprKind::TypeCoercion(e, ty) => {
+            v.expression(e);
+            v.ty(ty);
+        }
+        ExprKind::ArrayLiteral(es)
+        | ExprKind::VecMatLiteral(es)
+        | ExprKind::Tuple(es)
+        | ExprKind::Constructor(_, es) => {
+            for e in es {
+                v.expression(e);
+            }
+        }
+        ExprKind::ArrayIndex(a, b) | ExprKind::BinaryOp(_, a, b) => {
+            v.expression(a);
+            v.expression(b);
+        }
+        ExprKind::ArrayWith { array, index, value } => {
+            v.expression(array);
+            v.expression(index);
+            v.expression(value);
+        }
+        ExprKind::VecWith { target, value, .. }
+        | ExprKind::RecordWith {
+            record: target,
+            value,
+            ..
+        } => {
+            v.expression(target);
+            v.expression(value);
+        }
+        ExprKind::RecordLiteral(fs) => {
+            for (_, e) in fs {
+                v.expression(e);
+            }
+        }
+        ExprKind::Lambda(e) => {
+            for p in &mut e.params {
+                v.pattern(p);
+            }
+            v.expression(&mut e.body);
+        }
+        ExprKind::Application(f, args) => {
+            v.expression(f);
+            for a in args {
+                v.expression(a);
+            }
+        }
+        ExprKind::LetIn(e) => {
+            v.pattern(&mut e.pattern);
+            if let Some(ty) = &mut e.ty {
+                v.ty(ty);
+            }
+            v.expression(&mut e.value);
+            v.expression(&mut e.body);
+        }
+        ExprKind::If(e) => {
+            v.expression(&mut e.condition);
+            v.expression(&mut e.then_branch);
+            v.expression(&mut e.else_branch);
+        }
+        ExprKind::Loop(e) => {
+            v.pattern(&mut e.pattern);
+            if let Some(e) = &mut e.init {
+                v.expression(e);
+            }
+            match &mut e.form {
+                LoopForm::For(p, e) | LoopForm::ForIn(p, e) => {
+                    v.pattern(p);
+                    v.expression(e);
+                }
+                LoopForm::While(e) => v.expression(e),
+            }
+            v.expression(&mut e.body);
+        }
+        ExprKind::Match(e) => {
+            v.expression(&mut e.scrutinee);
+            for c in &mut e.cases {
+                v.pattern(&mut c.pattern);
+                v.expression(&mut c.body);
+            }
+        }
+        ExprKind::Range(e) => {
+            v.expression(&mut e.start);
+            if let Some(e) = &mut e.step {
+                v.expression(e);
+            }
+            v.expression(&mut e.end);
+        }
+        ExprKind::Slice(e) => {
+            v.expression(&mut e.array);
+            if let Some(e) = &mut e.start {
+                v.expression(e);
+            }
+            if let Some(e) = &mut e.end {
+                v.expression(e);
+            }
+        }
+        ExprKind::IntLiteral(_)
+        | ExprKind::FloatLiteral(_)
+        | ExprKind::BoolLiteral(_)
+        | ExprKind::Unit
+        | ExprKind::Identifier(_)
+        | ExprKind::TypeHole(_) => {}
+    }
+}

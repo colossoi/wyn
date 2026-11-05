@@ -11,138 +11,26 @@
 //! Prefer these helpers over `expr.clone()` whenever the cloned subtree
 //! will appear alongside the original in the same compilation unit.
 
-use crate::ast;
-use crate::ast::{
-    Decl, ExprKind, Expression, Header, IfExpr, LambdaExpr, LetInExpr, LoopExpr, LoopForm, MatchCase,
-    MatchExpr, Node, NodeCounter, Pattern, RangeExpr, SliceExpr,
-};
+use crate::ast::{self, Decl, Expression, NodeCounter, Pattern};
+use ast::rebuild::VisitorMut;
 
-fn fresh_header(src: &Header, nc: &mut NodeCounter) -> Header {
-    Header {
-        id: nc.next_id(),
-        span: src.span,
+struct FreshIds<'a>(&'a mut NodeCounter);
+impl VisitorMut for FreshIds<'_> {
+    fn expression(&mut self, e: &mut Expression) {
+        e.h.id = self.0.next_id();
+        ast::rebuild::walk_expression(self, e);
+    }
+    fn pattern<A>(&mut self, p: &mut Pattern<ast::SourceTree, A>) {
+        p.h.id = self.0.next_id();
+        ast::rebuild::walk_pattern(self, p);
     }
 }
 
-/// Deep-clone `expr` with every `Header.id` reallocated from `nc`. Span
-/// information is preserved. Recurses through every sub-expression and
-/// pattern.
+/// Clone an expression, preserving spans and refreshing every node ID.
 pub fn clone_expr_fresh_ids(expr: &Expression, nc: &mut NodeCounter) -> Expression {
-    let h = fresh_header(&expr.h, nc);
-    let kind = match &expr.kind {
-        ExprKind::IntLiteral(s) => ExprKind::IntLiteral(s.clone()),
-        ExprKind::FloatLiteral(f) => ExprKind::FloatLiteral(*f),
-        ExprKind::BoolLiteral(b) => ExprKind::BoolLiteral(*b),
-        ExprKind::Unit => ExprKind::Unit,
-        ExprKind::Identifier(identifier) => ExprKind::Identifier(identifier.clone()),
-        ExprKind::TypeHole(hole) => ExprKind::TypeHole(*hole),
-
-        ExprKind::Spread(value) => ExprKind::Spread(Box::new(clone_expr_fresh_ids(value, nc))),
-        ExprKind::ArrayLiteral(es) => {
-            ExprKind::ArrayLiteral(es.iter().map(|e| clone_expr_fresh_ids(e, nc)).collect())
-        }
-        ExprKind::VecMatLiteral(es) => {
-            ExprKind::VecMatLiteral(es.iter().map(|e| clone_expr_fresh_ids(e, nc)).collect())
-        }
-        ExprKind::Tuple(es) => ExprKind::Tuple(es.iter().map(|e| clone_expr_fresh_ids(e, nc)).collect()),
-        ExprKind::ArrayIndex(arr, idx) => ExprKind::ArrayIndex(
-            Box::new(clone_expr_fresh_ids(arr, nc)),
-            Box::new(clone_expr_fresh_ids(idx, nc)),
-        ),
-        ExprKind::ArrayWith { array, index, value } => ExprKind::ArrayWith {
-            array: Box::new(clone_expr_fresh_ids(array, nc)),
-            index: Box::new(clone_expr_fresh_ids(index, nc)),
-            value: Box::new(clone_expr_fresh_ids(value, nc)),
-        },
-        ExprKind::VecWith {
-            target,
-            components,
-            op,
-            value,
-        } => ExprKind::VecWith {
-            target: Box::new(clone_expr_fresh_ids(target, nc)),
-            components: components.clone(),
-            op: op.clone(),
-            value: Box::new(clone_expr_fresh_ids(value, nc)),
-        },
-        ExprKind::RecordWith { record, path, value } => ExprKind::RecordWith {
-            record: Box::new(clone_expr_fresh_ids(record, nc)),
-            path: path.clone(),
-            value: Box::new(clone_expr_fresh_ids(value, nc)),
-        },
-        ExprKind::BinaryOp(op, lhs, rhs) => ExprKind::BinaryOp(
-            op.clone(),
-            Box::new(clone_expr_fresh_ids(lhs, nc)),
-            Box::new(clone_expr_fresh_ids(rhs, nc)),
-        ),
-        ExprKind::UnaryOp(op, inner) => {
-            ExprKind::UnaryOp(op.clone(), Box::new(clone_expr_fresh_ids(inner, nc)))
-        }
-        ExprKind::RecordLiteral(fields) => ExprKind::RecordLiteral(
-            fields.iter().map(|(name, e)| (name.clone(), clone_expr_fresh_ids(e, nc))).collect(),
-        ),
-        ExprKind::Lambda(lam) => ExprKind::Lambda(LambdaExpr {
-            params: lam.params.iter().map(|p| clone_pattern_fresh_ids(p, nc)).collect(),
-            body: Box::new(clone_expr_fresh_ids(&lam.body, nc)),
-        }),
-        ExprKind::Application(func, args) => ExprKind::Application(
-            Box::new(clone_expr_fresh_ids(func, nc)),
-            args.iter().map(|a| clone_expr_fresh_ids(a, nc)).collect(),
-        ),
-        ExprKind::LetIn(let_in) => ExprKind::LetIn(LetInExpr {
-            pattern: clone_pattern_fresh_ids(&let_in.pattern, nc),
-            ty: let_in.ty.clone(),
-            value: Box::new(clone_expr_fresh_ids(&let_in.value, nc)),
-            body: Box::new(clone_expr_fresh_ids(&let_in.body, nc)),
-        }),
-        ExprKind::FieldAccess(obj, field) => {
-            ExprKind::FieldAccess(Box::new(clone_expr_fresh_ids(obj, nc)), field.clone())
-        }
-        ExprKind::If(if_expr) => ExprKind::If(IfExpr {
-            condition: Box::new(clone_expr_fresh_ids(&if_expr.condition, nc)),
-            then_branch: Box::new(clone_expr_fresh_ids(&if_expr.then_branch, nc)),
-            else_branch: Box::new(clone_expr_fresh_ids(&if_expr.else_branch, nc)),
-        }),
-        ExprKind::Loop(loop_expr) => ExprKind::Loop(LoopExpr {
-            pattern: clone_pattern_fresh_ids(&loop_expr.pattern, nc),
-            init: loop_expr.init.as_ref().map(|e| Box::new(clone_expr_fresh_ids(e, nc))),
-            form: clone_loop_form(&loop_expr.form, nc),
-            body: Box::new(clone_expr_fresh_ids(&loop_expr.body, nc)),
-        }),
-        ExprKind::Match(match_expr) => ExprKind::Match(MatchExpr {
-            scrutinee: Box::new(clone_expr_fresh_ids(&match_expr.scrutinee, nc)),
-            cases: match_expr
-                .cases
-                .iter()
-                .map(|case| MatchCase {
-                    pattern: clone_pattern_fresh_ids(&case.pattern, nc),
-                    body: Box::new(clone_expr_fresh_ids(&case.body, nc)),
-                })
-                .collect(),
-        }),
-        ExprKind::Constructor(name, args) => ExprKind::Constructor(
-            name.clone(),
-            args.iter().map(|a| clone_expr_fresh_ids(a, nc)).collect(),
-        ),
-        ExprKind::Range(range) => ExprKind::Range(RangeExpr {
-            start: Box::new(clone_expr_fresh_ids(&range.start, nc)),
-            step: range.step.as_ref().map(|e| Box::new(clone_expr_fresh_ids(e, nc))),
-            end: Box::new(clone_expr_fresh_ids(&range.end, nc)),
-            kind: range.kind.clone(),
-        }),
-        ExprKind::Slice(slice) => ExprKind::Slice(SliceExpr {
-            array: Box::new(clone_expr_fresh_ids(&slice.array, nc)),
-            start: slice.start.as_ref().map(|e| Box::new(clone_expr_fresh_ids(e, nc))),
-            end: slice.end.as_ref().map(|e| Box::new(clone_expr_fresh_ids(e, nc))),
-        }),
-        ExprKind::TypeAscription(inner, ty) => {
-            ExprKind::TypeAscription(Box::new(clone_expr_fresh_ids(inner, nc)), ty.clone())
-        }
-        ExprKind::TypeCoercion(inner, ty) => {
-            ExprKind::TypeCoercion(Box::new(clone_expr_fresh_ids(inner, nc)), ty.clone())
-        }
-    };
-    Node { h, kind }
+    let mut cloned = expr.clone();
+    FreshIds(nc).expression(&mut cloned);
+    cloned
 }
 
 pub fn clone_decl_fresh_ids(decl: &Decl, nc: &mut NodeCounter) -> Decl {
@@ -160,31 +48,68 @@ pub fn clone_decl_fresh_ids(decl: &Decl, nc: &mut NodeCounter) -> Decl {
     }
 }
 
-fn clone_loop_form(form: &LoopForm, nc: &mut NodeCounter) -> LoopForm {
-    match form {
-        LoopForm::While(cond) => LoopForm::While(Box::new(clone_expr_fresh_ids(cond, nc))),
-        LoopForm::For(pattern, bound) => LoopForm::For(
-            clone_pattern_fresh_ids(pattern, nc),
-            Box::new(clone_expr_fresh_ids(bound, nc)),
-        ),
-        LoopForm::ForIn(pat, iter) => LoopForm::ForIn(
-            clone_pattern_fresh_ids(pat, nc),
-            Box::new(clone_expr_fresh_ids(iter, nc)),
-        ),
-    }
+/// Clone a pattern, preserving spans and refreshing every node ID.
+pub fn clone_pattern_fresh_ids(pat: &Pattern, nc: &mut NodeCounter) -> Pattern {
+    let mut cloned = pat.clone();
+    FreshIds(nc).pattern(&mut cloned);
+    cloned
 }
 
-/// Deep-clone `pat` with every `Header.id` reallocated from `nc`.
-pub fn clone_pattern_fresh_ids(pat: &Pattern, nc: &mut NodeCounter) -> Pattern {
-    let rebuilt: std::result::Result<Pattern, std::convert::Infallible> = ast::rebuild::pattern_with(
-        pat.clone(),
-        &mut |header| Ok(fresh_header(&header, nc)),
-        &mut |_header, binding| Ok(binding),
-        &mut Ok,
-        &mut Ok,
-    );
-    match rebuilt {
-        Ok(pattern) => pattern,
-        Err(error) => match error {},
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ast::{ExprKind, Header, LambdaExpr, Node, NodeId, PatternKind, Span};
+
+    #[test]
+    fn cloning_refreshes_nested_expression_and_pattern_ids_in_preorder() {
+        let header = Header {
+            id: NodeId(999),
+            span: Span::generated(),
+        };
+        let original: Expression = Node {
+            h: header.clone(),
+            kind: ExprKind::Lambda(LambdaExpr {
+                params: vec![Node {
+                    h: header.clone(),
+                    kind: PatternKind::Tuple(vec![Node {
+                        h: header.clone(),
+                        kind: PatternKind::Wildcard,
+                    }]),
+                }],
+                body: Box::new(Node {
+                    h: header,
+                    kind: ExprKind::Unit,
+                }),
+            }),
+        };
+        let mut ids = NodeCounter::new();
+        let first = ids.peek_id().0;
+        for offset in [0, 4] {
+            let cloned = clone_expr_fresh_ids(&original, &mut ids);
+            let ExprKind::Lambda(lambda) = &cloned.kind else {
+                panic!()
+            };
+            let PatternKind::Tuple(children) = &lambda.params[0].kind else {
+                panic!()
+            };
+            assert_eq!(
+                [
+                    cloned.h.id.0,
+                    lambda.params[0].h.id.0,
+                    children[0].h.id.0,
+                    lambda.body.h.id.0,
+                ],
+                [
+                    first + offset,
+                    first + offset + 1,
+                    first + offset + 2,
+                    first + offset + 3
+                ]
+            );
+            assert_eq!(cloned.h.span, original.h.span);
+            assert_eq!(lambda.body.h.span, original.h.span);
+        }
+        assert_eq!(original.h.id, NodeId(999));
+        assert_eq!(ids.peek_id().0, first + 8);
     }
 }

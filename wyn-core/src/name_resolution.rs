@@ -87,156 +87,111 @@ pub fn walk_expr<C: ResolveContext>(
     context: &C,
     scope: &mut ScopeStack<()>,
 ) -> error::Result<()> {
-    match &mut expression.kind {
-        ExprKind::Identifier(identifier) => {
-            context.resolve_identifier(&mut identifier.qualifiers, &mut identifier.name, scope);
-        }
-        ExprKind::FieldAccess(object, field) => {
-            let object_was_identifier = matches!(object.kind, ExprKind::Identifier(_));
-            let mut replacement = if let ExprKind::Identifier(identifier) = &object.kind {
-                context.resolve_field_access(&identifier.qualifiers, &identifier.name, field, scope)
-            } else {
-                None
-            };
-            if replacement.is_none() {
-                walk_expr(object, context, scope)?;
-                if !object_was_identifier {
-                    if let ExprKind::Identifier(identifier) = &object.kind {
-                        replacement = context.resolve_field_access(
-                            &identifier.qualifiers,
-                            &identifier.name,
-                            field,
-                            scope,
-                        );
+    ast::rebuild::VisitorMut::expression(&mut ModuleQualifier { context, scope }, expression);
+    Ok(())
+}
+
+struct ModuleQualifier<'a, C> {
+    context: &'a C,
+    scope: &'a mut ScopeStack<()>,
+}
+impl<C: ResolveContext> ast::rebuild::VisitorMut for ModuleQualifier<'_, C> {
+    fn expression(&mut self, expression: &mut Expression) {
+        match &mut expression.kind {
+            ExprKind::Identifier(identifier) => {
+                self.context.resolve_identifier(
+                    &mut identifier.qualifiers,
+                    &mut identifier.name,
+                    self.scope,
+                );
+            }
+            ExprKind::FieldAccess(object, field) => {
+                let object_was_identifier = matches!(object.kind, ExprKind::Identifier(_));
+                let mut replacement = if let ExprKind::Identifier(identifier) = &object.kind {
+                    self.context.resolve_field_access(
+                        &identifier.qualifiers,
+                        &identifier.name,
+                        field,
+                        self.scope,
+                    )
+                } else {
+                    None
+                };
+                if replacement.is_none() {
+                    self.expression(object);
+                    if !object_was_identifier {
+                        if let ExprKind::Identifier(identifier) = &object.kind {
+                            replacement = self.context.resolve_field_access(
+                                &identifier.qualifiers,
+                                &identifier.name,
+                                field,
+                                self.scope,
+                            );
+                        }
                     }
                 }
-            }
-            if let Some(kind) = replacement {
-                expression.kind = kind;
-            }
-        }
-        ExprKind::Application(function, arguments) => {
-            walk_expr(function, context, scope)?;
-            for argument in arguments {
-                walk_expr(argument, context, scope)?;
-            }
-        }
-        ExprKind::Lambda(lambda) => {
-            scope.push_scope();
-            for pattern in &lambda.params {
-                collect_pattern_bindings(pattern, scope);
-            }
-            walk_expr(&mut lambda.body, context, scope)?;
-            scope.pop_scope();
-        }
-        ExprKind::LetIn(let_in) => {
-            walk_expr(&mut let_in.value, context, scope)?;
-            scope.push_scope();
-            collect_pattern_bindings(&let_in.pattern, scope);
-            walk_expr(&mut let_in.body, context, scope)?;
-            scope.pop_scope();
-        }
-        ExprKind::If(if_expr) => {
-            walk_expr(&mut if_expr.condition, context, scope)?;
-            walk_expr(&mut if_expr.then_branch, context, scope)?;
-            walk_expr(&mut if_expr.else_branch, context, scope)?;
-        }
-        ExprKind::BinaryOp(_, left, right) => {
-            walk_expr(left, context, scope)?;
-            walk_expr(right, context, scope)?;
-        }
-        ExprKind::UnaryOp(_, value) | ExprKind::Spread(value) => walk_expr(value, context, scope)?,
-        ExprKind::Tuple(values) | ExprKind::ArrayLiteral(values) | ExprKind::VecMatLiteral(values) => {
-            for value in values {
-                walk_expr(value, context, scope)?;
-            }
-        }
-        ExprKind::ArrayIndex(array, index) => {
-            walk_expr(array, context, scope)?;
-            walk_expr(index, context, scope)?;
-        }
-        ExprKind::ArrayWith { array, index, value } => {
-            walk_expr(array, context, scope)?;
-            walk_expr(index, context, scope)?;
-            walk_expr(value, context, scope)?;
-        }
-        ExprKind::VecWith { target, value, .. } => {
-            walk_expr(target, context, scope)?;
-            walk_expr(value, context, scope)?;
-        }
-        ExprKind::RecordWith { record, value, .. } => {
-            walk_expr(record, context, scope)?;
-            walk_expr(value, context, scope)?;
-        }
-        ExprKind::RecordLiteral(fields) => {
-            for (_, value) in fields {
-                walk_expr(value, context, scope)?;
-            }
-        }
-        ExprKind::Loop(loop_expr) => {
-            // The initializer and iteration domain are evaluated outside the
-            // loop scope. This matters when a loop binder shadows an outer
-            // value, as in `loop x = x ...`.
-            if let Some(init) = &mut loop_expr.init {
-                walk_expr(init, context, scope)?;
-            }
-            match &mut loop_expr.form {
-                ast::LoopForm::For(_, bound) => walk_expr(bound, context, scope)?,
-                ast::LoopForm::ForIn(_, iterable) => walk_expr(iterable, context, scope)?,
-                ast::LoopForm::While(_) => {}
-            }
-
-            scope.push_scope();
-            collect_pattern_bindings(&loop_expr.pattern, scope);
-            match &mut loop_expr.form {
-                ast::LoopForm::While(condition) => walk_expr(condition, context, scope)?,
-                ast::LoopForm::For(pattern, _) | ast::LoopForm::ForIn(pattern, _) => {
-                    collect_pattern_bindings(pattern, scope);
+                if let Some(kind) = replacement {
+                    expression.kind = kind;
                 }
             }
-            walk_expr(&mut loop_expr.body, context, scope)?;
-            scope.pop_scope();
-        }
-        ExprKind::Match(match_expr) => {
-            walk_expr(&mut match_expr.scrutinee, context, scope)?;
-            for case in &mut match_expr.cases {
-                scope.push_scope();
-                collect_pattern_bindings(&case.pattern, scope);
-                walk_expr(&mut case.body, context, scope)?;
-                scope.pop_scope();
+            ExprKind::Lambda(lambda) => {
+                self.scope.push_scope();
+                for pattern in &lambda.params {
+                    collect_pattern_bindings(pattern, self.scope);
+                }
+                self.expression(&mut lambda.body);
+                self.scope.pop_scope();
             }
-        }
-        ExprKind::TypeAscription(value, _) | ExprKind::TypeCoercion(value, _) => {
-            walk_expr(value, context, scope)?;
-        }
-        ExprKind::Range(range) => {
-            walk_expr(&mut range.start, context, scope)?;
-            walk_expr(&mut range.end, context, scope)?;
-            if let Some(step) = &mut range.step {
-                walk_expr(step, context, scope)?;
+            ExprKind::LetIn(let_in) => {
+                self.expression(&mut let_in.value);
+                self.scope.push_scope();
+                collect_pattern_bindings(&let_in.pattern, self.scope);
+                self.expression(&mut let_in.body);
+                self.scope.pop_scope();
             }
-        }
-        ExprKind::Slice(slice) => {
-            walk_expr(&mut slice.array, context, scope)?;
-            if let Some(start) = &mut slice.start {
-                walk_expr(start, context, scope)?;
+            ExprKind::Loop(loop_expr) => {
+                // The initializer and iteration domain are evaluated outside the
+                // loop scope. This matters when a loop binder shadows an outer
+                // value, as in `loop x = x ...`.
+                if let Some(init) = &mut loop_expr.init {
+                    self.expression(init);
+                }
+                match &mut loop_expr.form {
+                    ast::LoopForm::For(_, bound) => self.expression(bound),
+                    ast::LoopForm::ForIn(_, iterable) => self.expression(iterable),
+                    ast::LoopForm::While(_) => {}
+                }
+
+                self.scope.push_scope();
+                collect_pattern_bindings(&loop_expr.pattern, self.scope);
+                match &mut loop_expr.form {
+                    ast::LoopForm::While(condition) => self.expression(condition),
+                    ast::LoopForm::For(pattern, _) | ast::LoopForm::ForIn(pattern, _) => {
+                        collect_pattern_bindings(pattern, self.scope);
+                    }
+                }
+                self.expression(&mut loop_expr.body);
+                self.scope.pop_scope();
             }
-            if let Some(end) = &mut slice.end {
-                walk_expr(end, context, scope)?;
+            ExprKind::Match(match_expr) => {
+                self.expression(&mut match_expr.scrutinee);
+                for case in &mut match_expr.cases {
+                    self.scope.push_scope();
+                    collect_pattern_bindings(&case.pattern, self.scope);
+                    self.expression(&mut case.body);
+                    self.scope.pop_scope();
+                }
             }
-        }
-        ExprKind::Constructor(_, arguments) => {
-            for argument in arguments {
-                walk_expr(argument, context, scope)?;
+            ExprKind::Range(range) => {
+                self.expression(&mut range.start);
+                self.expression(&mut range.end);
+                if let Some(step) = &mut range.step {
+                    self.expression(step);
+                }
             }
+            _ => ast::rebuild::walk_expression(self, expression),
         }
-        ExprKind::IntLiteral(_)
-        | ExprKind::FloatLiteral(_)
-        | ExprKind::BoolLiteral(_)
-        | ExprKind::Unit
-        | ExprKind::TypeHole(_) => {}
     }
-    Ok(())
 }
 
 pub fn rewrite_expr<C: ResolveContext>(

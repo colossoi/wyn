@@ -14,7 +14,8 @@
 //! This pass also builds TypeSchemes for module specs (like f32.sin), so that
 //! the type checker doesn't need to re-convert type parameters to variables.
 
-use crate::ast::{self, Declaration, Expression, Pattern, PatternKind, Program, TypeParam};
+use crate::ast::rebuild::VisitorMut;
+use crate::ast::{self, Declaration, Expression, Program, TypeParam};
 use crate::ast_const_fold;
 use crate::interface;
 use crate::resolve_resources;
@@ -257,7 +258,7 @@ impl PlaceholderResolver {
         }
         // Resolve parameter patterns
         for param in &mut decl.params {
-            self.resolve_pattern(param);
+            self.pattern(param);
         }
 
         // Resolve return type annotation if present
@@ -266,7 +267,7 @@ impl PlaceholderResolver {
         }
 
         // Resolve types in body expression
-        self.resolve_expression(&mut decl.body);
+        self.expression(&mut decl.body);
 
         // Clear bindings after processing this declaration
         self.type_param_bindings.clear();
@@ -287,7 +288,7 @@ impl PlaceholderResolver {
         }
         // Resolve parameter patterns
         for param in &mut entry.params {
-            self.resolve_pattern(param);
+            self.pattern(param);
         }
 
         // Resolve output types
@@ -296,183 +297,10 @@ impl PlaceholderResolver {
         }
 
         // Resolve types in body expression
-        self.resolve_expression(&mut entry.body);
+        self.expression(&mut entry.body);
 
         // Clear bindings after processing this entry
         self.type_param_bindings.clear();
-    }
-
-    fn resolve_pattern<A>(&mut self, pattern: &mut Pattern<ast::SourceTree, A>) {
-        match &mut pattern.kind {
-            PatternKind::Typed(inner, ty) => {
-                self.resolve_pattern(inner);
-                *ty = self.resolve_type(ty);
-            }
-            PatternKind::Tuple(patterns) | PatternKind::Vec(patterns) => {
-                for p in patterns {
-                    self.resolve_pattern(p);
-                }
-            }
-            PatternKind::Attributed(_, inner) => {
-                self.resolve_pattern(inner);
-            }
-            PatternKind::Record(fields) => {
-                for field in fields {
-                    if let ast::RecordPatternTarget::Pattern(pattern) = &mut field.target {
-                        self.resolve_pattern(pattern);
-                    }
-                }
-            }
-            PatternKind::Constructor(_, patterns) => {
-                for p in patterns {
-                    self.resolve_pattern(p);
-                }
-            }
-            PatternKind::Name(_) | PatternKind::Wildcard | PatternKind::Literal(_) | PatternKind::Unit => {
-                // No types to resolve
-            }
-        }
-    }
-
-    fn resolve_expression(&mut self, expr: &mut Expression) {
-        match &mut expr.kind {
-            ast::ExprKind::Lambda(lambda) => {
-                for param in &mut lambda.params {
-                    self.resolve_pattern(param);
-                }
-                self.resolve_expression(&mut lambda.body);
-            }
-            ast::ExprKind::Application(func, args) => {
-                self.resolve_expression(func);
-                for arg in args {
-                    self.resolve_expression(arg);
-                }
-            }
-            ast::ExprKind::LetIn(let_in) => {
-                self.resolve_pattern(&mut let_in.pattern);
-                if let Some(ref mut ty) = let_in.ty {
-                    *ty = self.resolve_type(ty);
-                }
-                self.resolve_expression(&mut let_in.value);
-                self.resolve_expression(&mut let_in.body);
-            }
-            ast::ExprKind::If(if_expr) => {
-                self.resolve_expression(&mut if_expr.condition);
-                self.resolve_expression(&mut if_expr.then_branch);
-                self.resolve_expression(&mut if_expr.else_branch);
-            }
-            ast::ExprKind::BinaryOp(_, left, right) => {
-                self.resolve_expression(left);
-                self.resolve_expression(right);
-            }
-            ast::ExprKind::UnaryOp(_, operand) | ast::ExprKind::Spread(operand) => {
-                self.resolve_expression(operand);
-            }
-            ast::ExprKind::ArrayIndex(array, index) => {
-                self.resolve_expression(array);
-                self.resolve_expression(index);
-            }
-            ast::ExprKind::ArrayWith {
-                array, index, value, ..
-            } => {
-                self.resolve_expression(array);
-                self.resolve_expression(index);
-                self.resolve_expression(value);
-            }
-            ast::ExprKind::VecWith { target, value, .. } => {
-                self.resolve_expression(target);
-                self.resolve_expression(value);
-            }
-            ast::ExprKind::RecordWith { record, value, .. } => {
-                self.resolve_expression(record);
-                self.resolve_expression(value);
-            }
-            ast::ExprKind::Slice(slice) => {
-                self.resolve_expression(&mut slice.array);
-                if let Some(ref mut s) = slice.start {
-                    self.resolve_expression(s);
-                }
-                if let Some(ref mut e) = slice.end {
-                    self.resolve_expression(e);
-                }
-            }
-            ast::ExprKind::ArrayLiteral(elements) => {
-                for elem in elements {
-                    self.resolve_expression(elem);
-                }
-            }
-            ast::ExprKind::VecMatLiteral(elements) => {
-                for elem in elements {
-                    self.resolve_expression(elem);
-                }
-            }
-            ast::ExprKind::Tuple(elements) => {
-                for elem in elements {
-                    self.resolve_expression(elem);
-                }
-            }
-            ast::ExprKind::Constructor(_, args) => {
-                for arg in args {
-                    self.resolve_expression(arg);
-                }
-            }
-            ast::ExprKind::RecordLiteral(fields) => {
-                for (_, value) in fields {
-                    self.resolve_expression(value);
-                }
-            }
-            ast::ExprKind::FieldAccess(expr, _) => {
-                self.resolve_expression(expr);
-            }
-            ast::ExprKind::Range(range) => {
-                self.resolve_expression(&mut range.start);
-                if let Some(ref mut step) = range.step {
-                    self.resolve_expression(step);
-                }
-                self.resolve_expression(&mut range.end);
-            }
-            ast::ExprKind::Match(match_expr) => {
-                self.resolve_expression(&mut match_expr.scrutinee);
-                for case in &mut match_expr.cases {
-                    self.resolve_pattern(&mut case.pattern);
-                    self.resolve_expression(&mut case.body);
-                }
-            }
-            ast::ExprKind::TypeAscription(expr, ty) => {
-                self.resolve_expression(expr);
-                *ty = self.resolve_type(ty);
-            }
-            ast::ExprKind::TypeCoercion(expr, ty) => {
-                self.resolve_expression(expr);
-                *ty = self.resolve_type(ty);
-            }
-            ast::ExprKind::Loop(loop_expr) => {
-                self.resolve_pattern(&mut loop_expr.pattern);
-                if let Some(ref mut init) = loop_expr.init {
-                    self.resolve_expression(init);
-                }
-                match &mut loop_expr.form {
-                    ast::LoopForm::For(_, bound) => {
-                        self.resolve_expression(bound);
-                    }
-                    ast::LoopForm::ForIn(pat, iter) => {
-                        self.resolve_pattern(pat);
-                        self.resolve_expression(iter);
-                    }
-                    ast::LoopForm::While(cond) => {
-                        self.resolve_expression(cond);
-                    }
-                }
-                self.resolve_expression(&mut loop_expr.body);
-            }
-            // Leaf expressions with no nested types
-            ast::ExprKind::Identifier(_)
-            | ast::ExprKind::IntLiteral(_)
-            | ast::ExprKind::FloatLiteral(_)
-            | ast::ExprKind::BoolLiteral(_)
-            | ast::ExprKind::Unit
-            | ast::ExprKind::TypeHole(_) => {}
-        }
     }
 
     /// Resolve placeholders in a type, replacing them with fresh type variables.
@@ -531,5 +359,26 @@ impl PlaceholderResolver {
 impl Default for PlaceholderResolver {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl ast::rebuild::VisitorMut for PlaceholderResolver {
+    fn expression(&mut self, expr: &mut Expression) {
+        // Counted-loop index patterns have no placeholder-resolution step.
+        if let ast::ExprKind::Loop(e) = &mut expr.kind {
+            if let ast::LoopForm::For(_, bound) = &mut e.form {
+                self.pattern(&mut e.pattern);
+                if let Some(init) = &mut e.init {
+                    self.expression(init);
+                }
+                self.expression(bound);
+                self.expression(&mut e.body);
+                return;
+            }
+        }
+        ast::rebuild::walk_expression(self, expr);
+    }
+    fn ty(&mut self, ty: &mut Type<TypeName>) {
+        *ty = self.resolve_type(ty);
     }
 }
