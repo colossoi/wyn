@@ -7,7 +7,7 @@ use crate::ssa::builder::BuilderError;
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::types::{BlockId, FuncBody, InstKind, Terminator};
 use crate::ssa::types::{PlaceId, ValueRef};
-use crate::types::{self, Type, TypeExt, TypeName};
+use crate::types::{self, Type, TypeName};
 use crate::BindingRef;
 use crate::FunctionId;
 use crate::{LookupMap, LookupSet};
@@ -115,12 +115,14 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         if !self.loading.insert(source) {
             return Err(error("cyclic source evaluation during SSA emission"));
         }
-        let value =
-            if let Some(&term) = self.compiler.program.stage.selected.roots.get(&(self.context, source)) {
-                self.scalar_body(scope, term)?
-            } else {
-                self.boundary(scope, source)?
-            };
+        let value = if self.compiler.facts.contains("HostLoopAggregate", (source,)) {
+            self.local(scope, source)?
+        } else if let Some(&term) = self.compiler.program.stage.selected.roots.get(&(self.context, source))
+        {
+            self.scalar_body(scope, term)?
+        } else {
+            self.boundary(scope, source)?
+        };
         self.loading.remove(&source);
         self.values.insert(source, value.clone());
         Ok(value)
@@ -178,22 +180,37 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                 }
                 "ExprExecute" => self.local(scope, selected.values[fields[2]])?,
                 "ExprInstruction" if selected.text(fields[3])? == "index" => {
-                    let [array, index]: [TermId; 2] = selected
+                    let [mut array, mut index]: [TermId; 2] = selected
                         .arguments(fields[4])?
                         .try_into()
                         .map_err(|_| error("index needs two operands"))?;
-                    let (array, path) = selected.projected_array(array)?;
-                    let mut array = self.scalar(scope, array)?;
-                    let mut path = path.into_iter().peekable();
-                    while !array.ty.is_array() && path.peek().is_some() {
-                        array = self.field(array, path.next().unwrap())?;
+                    // Keep a nested read as one access path. Materializing each
+                    // intermediate fixed-size row turns a scalar lookup into a
+                    // whole-row copy per invocation. Respect already evaluated
+                    // values, which may be snapshots across an update.
+                    let mut steps = Vec::new();
+                    loop {
+                        let (base, path) = selected.projected_array(array)?;
+                        array = base;
+                        steps.push((path, index));
+                        if self.available_scalar(array)?.is_some()
+                            || self.compiler.bindings.captures.contains_key(&array)
+                        {
+                            break;
+                        }
+                        let Some((parent, next_index)) = selected.index_operands(array)? else {
+                            break;
+                        };
+                        array = parent;
+                        index = next_index;
                     }
-                    let index = self.scalar(scope, index)?;
-                    let mut value = self.index(array, index)?;
-                    // Stored AoS components are fields of the indexed element.
-                    for field in path {
-                        value = self.field(value, field)?;
-                    }
+                    let array = self.scalar(scope, array)?;
+                    let steps = steps
+                        .into_iter()
+                        .rev()
+                        .map(|(fields, index)| Ok((fields, self.scalar(scope, index)?)))
+                        .collect::<Result<Vec<_>, OptimizeError>>()?;
+                    let value = self.index_path(array, &steps)?;
                     self.cast(value, &ty)?
                 }
                 "ExprInstruction" => {
@@ -205,6 +222,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                         };
                         return self.length(array.clone());
                     }
+                    let mut shared_update = None;
                     if matches!(tag, OpTag::Intrinsic { id, .. }
                         if id == catalog().known().array_with
                             || id == catalog().known().array_with_in_place)
@@ -214,33 +232,50 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                         // not on that descriptor or its shared backing buffer.
                         let layout = self.compiler.facts.value_layout(selected.values[fields[2]])?;
                         if self.compiler.facts.enode("ArrayLayout", layout).is_some() {
-                            arguments[0] = self.materialize(arguments[0].clone(), layout)?;
+                            if !self.invocation_execution
+                                && self.workgroup_width.is_some()
+                                && self.has_shared_storage(selected.values[fields[2]])
+                            {
+                                shared_update = Some(self.update_shared(
+                                    arguments[0].clone(),
+                                    arguments[1].clone(),
+                                    arguments[2].clone(),
+                                    layout,
+                                )?);
+                            } else {
+                                arguments[0] = self.materialize(arguments[0].clone(), layout)?;
+                            }
                         }
                     }
-                    let Some(representation) =
-                        self.compiler.facts.lookup("InstructionResult", (selected.values[fields[2]],))
-                    else {
-                        return Err(error("instruction result representation missing"));
-                    };
-                    let ty = if let Some(fields) =
-                        self.compiler.facts.enode("OperandResult", representation)
-                    {
-                        let index = usize::try_from(self.compiler.facts.integer(fields[0]))
-                            .map_err(|_| error("invalid result operand"))?;
-                        let Some(argument) = arguments.get(index) else {
-                            return Err(error("result operand missing"));
-                        };
-                        argument.ty.clone()
-                    } else if let Some(fields) = self.compiler.facts.enode("SemanticResult", representation)
-                    {
-                        let Some(ty) = self.compiler.facts.ty(fields[0]) else {
-                            return Err(error("instruction result type missing"));
-                        };
-                        ty.clone()
+                    if let Some(value) = shared_update {
+                        value
                     } else {
-                        return Err(error("unknown instruction representation"));
-                    };
-                    self.op(tag, arguments, ty)?
+                        let Some(representation) =
+                            self.compiler.facts.lookup("InstructionResult", (selected.values[fields[2]],))
+                        else {
+                            return Err(error("instruction result representation missing"));
+                        };
+                        let ty = if let Some(fields) =
+                            self.compiler.facts.enode("OperandResult", representation)
+                        {
+                            let index = usize::try_from(self.compiler.facts.integer(fields[0]))
+                                .map_err(|_| error("invalid result operand"))?;
+                            let Some(argument) = arguments.get(index) else {
+                                return Err(error("result operand missing"));
+                            };
+                            argument.ty.clone()
+                        } else if let Some(fields) =
+                            self.compiler.facts.enode("SemanticResult", representation)
+                        {
+                            let Some(ty) = self.compiler.facts.ty(fields[0]) else {
+                                return Err(error("instruction result type missing"));
+                            };
+                            ty.clone()
+                        } else {
+                            return Err(error("unknown instruction representation"));
+                        };
+                        self.op(tag, arguments, ty)?
+                    }
                 }
                 "ExprCall" => {
                     let args = self.arguments(scope, fields[4])?;

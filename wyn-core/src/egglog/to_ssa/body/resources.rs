@@ -70,6 +70,27 @@ impl Body<'_, '_, '_> {
         scope: Value,
         source: Value,
     ) -> Result<Typed, OptimizeError> {
+        if self.compiler.facts.contains("HostLoopAggregate", (source,)) {
+            let ty = self
+                .compiler
+                .facts
+                .source_type(source)
+                .ok_or_else(|| error("loop product type missing"))?;
+            let Type::Constructed(_, fields) = ty else {
+                return Err(error("loop product is not an aggregate"));
+            };
+            let count = fields.len();
+            let mut values = Vec::with_capacity(count);
+            for index in 0..count {
+                let child = self
+                    .compiler
+                    .facts
+                    .source_field(source, index)?
+                    .ok_or_else(|| error("loop product field missing"))?;
+                values.push(self.value(scope, child)?);
+            }
+            return self.tuple(values);
+        }
         if let Some(formal) = self.compiler.facts.enode("SourceFormal", source) {
             if let Some(actual) = self.compiler.facts.lookup("SourceCapture", (formal[0], source)) {
                 let Some(context) = self.compiler.facts.lookup("ExprContextForSource", (actual,)) else {

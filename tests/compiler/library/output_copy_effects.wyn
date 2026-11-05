@@ -1,0 +1,8 @@
+-- Independent output copies may run in parallel while scalar outputs observe
+-- an effectful producer exactly once.
+entry effects(xs: []i32, bins: *[]i32, flag: i32, start: i32, count: i32)
+    ([]i32, i32, i32) =
+  let value = if flag > 0 then 7i32 else 13i32 in
+  let updated = reduce_by_index(bins, (+), 0, [0i32], [value]) in
+  let total = reduce((+), 0, updated) in
+  (xs[start..start+count], total, total+(if flag > 0 then 11 else 17))

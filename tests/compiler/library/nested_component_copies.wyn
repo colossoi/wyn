@@ -1,0 +1,4 @@
+-- Copy nested tuple components into separate output buffers.
+entry projected_rows(xs: [100][3]i32, flag: i32) [100][3](i32,i32) =
+  if flag>0 then map(|row| map(|x| (x,x+1000), row), xs)
+  else map(|row| map(|x| (x-1,x+999), row), xs)

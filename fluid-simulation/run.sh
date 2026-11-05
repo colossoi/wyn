@@ -6,12 +6,16 @@ export RUST_MIN_STACK=${RUST_MIN_STACK:-67108864}
 skip=false
 compile_only=false
 args=()
-for arg in "$@"; do
-    case "$arg" in
+build_args=()
+while (($#)); do
+    case "$1" in
         --skip-build) skip=true ;;
         --compile-only) compile_only=true ;;
-        *) args+=("$arg") ;;
+        --particles|--tree-capacity|--target|--gpu-cost-profile)
+            build_args+=("$1" "$2"); shift ;;
+        *) args+=("$1") ;;
     esac
+    shift
 done
 if [[ $skip == false ]]; then
     cargo build --release --manifest-path "$root/Cargo.toml" -p wyn
@@ -19,8 +23,8 @@ if [[ $skip == false ]]; then
 fi
 out="$root/tmp/fluid-simulation"
 mkdir -p -- "$out"
-"$root/target/release/wyn" build "$root/fluid-simulation" --graphics --subgroups -o "$out/fluid.spv"
-launch=(python3 "$root/fluid-simulation/launch.py" "$out/fluid.spv")
+shader=$(python3 "$root/fluid-simulation/build.py" --output "$out" "${build_args[@]}")
+launch=(python3 "$root/fluid-simulation/launch.py" "$shader")
 if [[ $compile_only == true ]]; then
     "${launch[@]}" --prepare-only
 else

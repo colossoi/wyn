@@ -7,8 +7,8 @@ use std::process::ExitCode;
 use std::time::Instant;
 use thiserror::Error;
 use wyn_core::egglog::{
-    from_tlc, fuse, optimize_with_policy, place, prepare_host, prepare_interfaces, schedule_with_subgroups,
-    to_ssa, with_timings, ScalarOptimization,
+    from_tlc, fuse, optimize_with_policy, place_with_cost_model, prepare_host, prepare_interfaces,
+    schedule_with_cost_model, to_ssa, with_timings, ScalarOptimization,
 };
 use wyn_core::host::{HostError, Program, ShaderFormat};
 use wyn_core::ssa::stage::Elaborated;
@@ -58,6 +58,7 @@ struct CompileOptions {
     direct: bool,
     wgsl_emulate_u64: bool,
     subgroups: bool,
+    gpu_costs: wyn_core::egglog::cost::CostModel,
     fill_holes: bool,
     output_tlc: Option<PathBuf>,
     output_mir: Option<PathBuf>,
@@ -159,6 +160,10 @@ enum Commands {
         /// Enable native subgroup arithmetic (requires GPU subgroup support)
         #[arg(long)]
         subgroups: bool,
+
+        /// TOML hardware rates used to rank legal GPU schedules.
+        #[arg(long)]
+        gpu_cost_profile: Option<PathBuf>,
 
         /// Treat any `???` type hole as a default value of its inferred
         /// type and continue compilation. Default: holes are a hard
@@ -543,6 +548,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             direct,
             wgsl_emulate_u64,
             subgroups,
+            gpu_cost_profile,
             fill_holes,
             max_warnings,
             verbose,
@@ -558,6 +564,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             direct,
             wgsl_emulate_u64,
             subgroups,
+            gpu_cost_profile,
             fill_holes,
             max_warnings,
             verbose,
@@ -583,6 +590,7 @@ fn build(
     direct: bool,
     wgsl_emulate_u64: bool,
     subgroups: bool,
+    gpu_cost_profile: Option<PathBuf>,
     fill_holes: bool,
     warning_limit: usize,
     verbose: bool,
@@ -618,6 +626,7 @@ fn build(
         direct,
         wgsl_emulate_u64,
         subgroups,
+        gpu_costs: read_gpu_costs(gpu_cost_profile.as_deref())?,
         fill_holes,
         output_tlc,
         output_mir,
@@ -725,12 +734,46 @@ fn compile_tlc(modules: ParsedModules, options: &CompileOptions) -> Result<TlcCo
     })
 }
 
+fn read_gpu_costs(path: Option<&Path>) -> Result<wyn_core::egglog::cost::CostModel, DriverError> {
+    let mut costs = wyn_core::egglog::cost::CostModel::default();
+    if let Some(path) = path {
+        let text = fs::read_to_string(path)?;
+        let table: toml::Table = toml::from_str(&text)
+            .map_err(|error| DriverError::InvalidOption(format!("{}: {error}", path.display())))?;
+        for (key, value) in table {
+            let number = value
+                .as_float()
+                .or_else(|| value.as_integer().map(|n| n as f64))
+                .ok_or_else(|| DriverError::InvalidOption(format!("GPU cost {key} must be numeric")))?;
+            match key.as_str() {
+                "compute_ops_per_ns" => costs.compute_ops_per_ns = number,
+                "memory_bytes_per_ns" => costs.memory_bytes_per_ns = number,
+                "barrier_ns" => costs.barrier_ns = number,
+                "launch_ns" => costs.launch_ns = number,
+                "readback_ns" => costs.readback_ns = number,
+                "resident_workgroups"
+                    if number >= 1.0 && number <= u32::MAX as f64 && number.fract() == 0.0 =>
+                {
+                    costs.resident_workgroups = number as u32
+                }
+                _ => {
+                    return Err(DriverError::InvalidOption(format!(
+                        "unknown or invalid GPU cost {key}"
+                    )))
+                }
+            }
+        }
+    }
+    costs.validate().map_err(|message| DriverError::InvalidOption(message.into()))
+}
+
 fn compile_egglog(
     program: &OwnershipApplied,
     target: Target,
     algebra: bool,
     direct: bool,
     subgroups: bool,
+    gpu_costs: wyn_core::egglog::cost::CostModel,
     verbose: bool,
 ) -> Result<Elaborated, DriverError> {
     with_timings(verbose, || -> Result<_, DriverError> {
@@ -741,8 +784,8 @@ fn compile_egglog(
         } else {
             PipelineTopologyPolicy::AllowGenerated
         };
-        let program = place(program, topology)?;
-        let program = schedule_with_subgroups(program, subgroups)?;
+        let program = place_with_cost_model(program, topology, gpu_costs)?;
+        let program = schedule_with_cost_model(program, subgroups, gpu_costs)?;
         let program = prepare_interfaces(program)?;
         let policy = if algebra { ScalarOptimization::Full } else { ScalarOptimization::Basic };
         let program = optimize_with_policy(program, policy)?;
@@ -770,11 +813,12 @@ fn compile(modules: ParsedModules, options: CompileOptions) -> Result<Compilatio
         direct,
         wgsl_emulate_u64,
         subgroups,
+        gpu_costs,
         output_mir,
         verbose,
         ..
     } = options;
-    let ssa = compile_egglog(&program, target, algebra, direct, subgroups, verbose)?;
+    let ssa = compile_egglog(&program, target, algebra, direct, subgroups, gpu_costs, verbose)?;
 
     if let Some(path) = output_mir {
         auxiliary.push(TextArtifact {

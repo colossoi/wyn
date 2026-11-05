@@ -134,6 +134,18 @@ pub enum InstKind<R = BindingRef> {
         value: ValueRef,
     },
 
+    /// Identity transfer between views with matching element layouts.
+    /// Keep the transfer intact until storage planning; workers then copy
+    /// `start..length` with `step`. Collective transfers cover a whole workgroup.
+    Copy {
+        destination: ValueRef,
+        source: ValueRef,
+        length: ValueRef,
+        start: ValueRef,
+        step: ValueRef,
+        collective: bool,
+    },
+
     /// Atomic integer operation. `Load` takes no values. `CompareExchange`
     /// takes `[comparison, replacement]` and returns
     /// `(observed_value, exchanged)`; every other operation takes one value
@@ -196,6 +208,16 @@ impl<R: Clone> InstKind<R> {
             | InstKind::Load { .. }
             | InstKind::ControlBarrier => vec![],
             InstKind::Store { value, .. } => vec![*value],
+            InstKind::Copy {
+                destination,
+                source,
+                length,
+                start,
+                step,
+                ..
+            } => {
+                vec![*destination, *source, *length, *start, *step]
+            }
             InstKind::Atomic { values, .. } => values.clone(),
             InstKind::ViewIndex { view, index, .. } => vec![*view, *index],
             InstKind::PlaceIndex { index, .. } => vec![*index],
@@ -240,6 +262,18 @@ impl<R: Clone> InstKind<R> {
                 }
             }
             InstKind::Store { value, .. } => sub(value),
+            InstKind::Copy {
+                destination,
+                source,
+                length,
+                start,
+                step,
+                ..
+            } => {
+                for value in [destination, source, length, start, step] {
+                    sub(value);
+                }
+            }
             InstKind::Atomic { values, .. } => values.iter_mut().for_each(sub),
             InstKind::ViewIndex { view, index, .. } => {
                 sub(view);
@@ -266,7 +300,7 @@ impl<R: Clone> InstKind<R> {
                 sub(place);
                 sub(result);
             }
-            InstKind::Op { .. } | InstKind::ControlBarrier => {}
+            InstKind::Op { .. } | InstKind::Copy { .. } | InstKind::ControlBarrier => {}
         }
     }
 
@@ -300,6 +334,21 @@ impl<R> InstKind<R> {
             InstKind::Alloca { result } => InstKind::Alloca { result },
             InstKind::Load { place } => InstKind::Load { place },
             InstKind::Store { place, value } => InstKind::Store { place, value },
+            InstKind::Copy {
+                destination,
+                source,
+                length,
+                start,
+                step,
+                collective,
+            } => InstKind::Copy {
+                destination,
+                source,
+                length,
+                start,
+                step,
+                collective,
+            },
             InstKind::Atomic { place, op, values } => InstKind::Atomic { place, op, values },
             InstKind::ViewIndex { view, index, result } => InstKind::ViewIndex { view, index, result },
             InstKind::PlaceIndex { place, index, result } => InstKind::PlaceIndex { place, index, result },

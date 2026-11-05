@@ -117,10 +117,14 @@ impl Constructor {
                 && ty.array_storage().is_some_and(|storage| {
                     matches!(
                         storage.variant,
-                        PolyType::Constructed(TypeName::ArrayVariantComposite, _)
+                        PolyType::Constructed(TypeName::ArrayVariantComposite, _) | PolyType::Variable(_)
                     )
                 }) =>
             {
+                // Nested arrays in an input tuple can retain an unconstrained
+                // representation variable. Like ordinary type lowering, treat
+                // that fixed-size value as composite, but keep its storage
+                // ArrayStride/type identity consistent with projected places.
                 let tensor =
                     ty.as_tensor().ok_or_else(|| err_spirv!("malformed storage array type: {:?}", ty))?;
                 let mut current = self.storage_polytype_to_spirv(tensor.elem)?;

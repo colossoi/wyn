@@ -23,6 +23,11 @@
       ((StorageDemand actual path)) :ruleset local-storage)
 (rule ((StorageDemand formal path) (= (SourceCapture region formal) actual))
       ((StorageDemand actual path)) :ruleset local-storage)
+(rule ((StorageDemand call path) (= callee (PlanCallee call)) (= result (SourceResult callee)))
+      ((StorageDemand result path)) :ruleset local-storage)
+(rule ((StorageDemand formal path) (= callee (PlanCallee call))
+       (= formal (SourceParameter callee i)) (= actual (PlanCallArgument call i)))
+      ((StorageDemand actual path)) :ruleset local-storage)
 (rule ((StorageDemand source path) (= (SourceProjection source) (ProjectionInfo parent i)))
       ((StorageDemand parent (StorageField i path))) :ruleset local-storage)
 (rule ((StorageDemand source (StorageField i path)) (SourceField source i field))
@@ -62,7 +67,7 @@
 (function BoundaryFields (SourceValue StoragePath i64) BoundaryPlans :no-merge)
 (function BoundaryFieldPlan (SourceValue StoragePath) BoundaryPlan :no-merge)
 (function BoundaryFieldShared (SourceValue StoragePath) bool :merge (or old new))
-(function BoundaryTransfer (SourceValue) bool :no-merge)
+(function BoundaryTransfer (SourceValue) bool :merge (and old new))
 (ruleset boundary-select)
 (ruleset boundary-fields)
 (rule ((BoundaryMember source member) (= layout (ValueRepresentation source)))
@@ -110,6 +115,11 @@
 ; Branch destinations are fresh, so they cannot overwrite an incoming source.
 (rule ((= (SourceLoop source) loop)) ((set (BoundaryTransfer source) true)) :ruleset boundary-select)
 (rule ((= (SourceBranch source) branch)) ((set (BoundaryTransfer source) false)) :ruleset boundary-select)
+; A branch has already copied all shared fields into fresh destinations.
+; These cannot alias the enclosing loop's destinations, even for a field swap.
+(rule ((= (SourceLoop source) (LoopInfo header iteration)) (= next (SourceResult iteration))
+       (= branch (SourceBranch next)))
+      ((set (BoundaryTransfer source) false)) :ruleset boundary-select)
 
 (function BoundaryHasShared (BoundaryPlan) bool :merge (or old new))
 (rule ((= plan (BoundaryValue layout))) ((set (BoundaryHasShared plan) false)) :ruleset boundary-fields)

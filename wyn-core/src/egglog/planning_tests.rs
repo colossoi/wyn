@@ -1081,7 +1081,7 @@ fn segment_callback_blockers_cover_every_output_of_a_fused_plan() {
                 Ok(())
             })
             .unwrap();
-        super::schedule(&mut graph).unwrap();
+        super::schedule(&mut graph, super::super::cost::CostModel::default()).unwrap();
         let query = Query(&graph);
         assert_eq!(query.flag("SegmentPlanBlocked", (plan,)).unwrap(), blocked);
         for value in values {
@@ -1284,29 +1284,52 @@ fn subgroup_addition_is_opt_in_and_uses_small_segments() {
 
 #[test]
 fn tiled_outputs_require_complete_tiles_and_preserve_other_consumers() {
-    let cases = [(8, false), (8, true), (7, false), (7, true)];
-    let sources: Vec<_> = cases.iter().enumerate().map(|(index, (count, reduced))| {
-        let metadata = if *reduced { "reduce((+),0,map(|r|r[2],rows))" } else { "map(|r|r[2],rows)" };
-        let metadata_type = if *reduced { "i32".to_string() } else { format!("[{count}]i32") };
-        format!("def row_{index}(i:i32) [3]i32 = [i,i+1,i+2]
-            entry main() ([16]i32,{metadata_type}) =
-            let rows = map(row_{index},iota({count})) in
-            (map(|a|let i=(a/8)*4+a%4 in if i<length(rows) then rows[i][(a%8)/4] else -1,iota(16)), {metadata})")
-    }).collect();
-    planned_cases(&sources, |index, graph, region| {
-        let query = Query(graph);
-        let mut destinations = 0;
-        query
-            .for_function("TiledOutputs", |keys, _| {
-                let owner = query.record("SourceOperation", "OperationInfo", (keys[0],))?.unwrap()[0];
-                destinations += usize::from(owner == region);
-                Ok(())
-            })
-            .unwrap();
-        assert_eq!(destinations, usize::from(cases[index].0 == 8), "case {index}");
-    });
+    for (count, fused) in [(8, true), (7, false)] {
+        for reduced in [false, true] {
+            for retained in [false, true] {
+                let metadata =
+                    if reduced { "reduce((+),0,map(|r|r[2],rows))" } else { "map(|r|r[2],rows)" };
+                let metadata_type = if reduced { "i32".to_string() } else { format!("[{count}]i32") };
+                let row_type = if retained { format!(",[{count}][3]i32") } else { String::new() };
+                let row_result = if retained { ",rows" } else { "" };
+                let source = format!("def row(i:i32) [3]i32 = [i,i+1,i+2]
+                entry main() ([16]i32,{metadata_type}{row_type}) =
+                let rows = map(row,iota({count})) in
+                (map(|a|let i=(a/8)*4+a%4 in if i<length(rows) then rows[i][(a%8)/4] else -1,iota(16)), {metadata}{row_result})");
+                planned(&source, |graph| {
+                    let query = Query(graph);
+                    let mut destinations = 0;
+                    query
+                        .for_function("TiledOutputs", |_, _| {
+                            destinations += 1;
+                            Ok(())
+                        })
+                        .unwrap();
+                    assert_eq!(destinations, usize::from(fused), "{source}");
+                    query
+                        .for_each("TiledOutput", |row| {
+                            let producer = row[0];
+                            let slot = row[1];
+                            let gather = row[2];
+                            query.for_each("KernelPhase", |phase| {
+                                assert_ne!(phase[0], gather, "tiled gather must not launch: {source}");
+                                Ok(())
+                            })?;
+                            let result = query.constructor("Result", (producer, slot))?.unwrap();
+                            let mut allocated = false;
+                            query.for_each("Allocation", |allocation| {
+                                allocated |= allocation[0] == result;
+                                Ok(())
+                            })?;
+                            assert_eq!(allocated, retained, "only observed rows allocate: {source}");
+                            Ok(())
+                        })
+                        .unwrap();
+                });
+            }
+        }
+    }
 }
-
 #[test]
 fn primitive_dispatch_recipes_publish_their_phase_widths_and_order() {
     let mut graph = super::super::fusion::new_graph().unwrap();
@@ -1323,6 +1346,10 @@ fn primitive_dispatch_recipes_publish_their_phase_widths_and_order() {
         (set (OperationGrid (OperationId 0)) (AutomaticGrid))
         (set (Plan (OperationId 1)) (Totals))
         (set (Plan (OperationId 2)) (Prefixes))
+        (set (SelectedCollectiveGroups (OperationId 1)) 256)
+        (set (CollectiveCombineWidth (OperationId 1)) 256)
+        (set (SelectedCollectiveGroups (OperationId 2)) 256)
+        (set (CollectiveCombineWidth (OperationId 2)) 256)
         (set (CollectiveChunkWidth (OperationId 1)) 256)
         (set (CollectiveChunkWidth (OperationId 2)) 256)
         (set (OperationGrid (OperationId 1)) (AutomaticGrid))
@@ -1352,4 +1379,120 @@ fn primitive_dispatch_recipes_publish_their_phase_widths_and_order() {
     "#,
         )
         .unwrap();
+}
+
+#[test]
+fn loop_placement_accounts_for_iteration_work_before_storage() {
+    for (source, dispatched) in [
+        ("entry main(xs:[4]i32) [4]i32=loop ys=xs for i<128 do map(|x|x+1,ys)", false),
+        ("entry main(xs:[4]i32) ([4]i32,i32)=loop (ys,i)=(xs,0) while i<128 do (map(|x|x+1,ys),i+1)", false),
+        ("entry main(xs:[16]i32) ([16]i32,i32)=loop (ys,i)=(xs,0) while i<128 do (scan((+),0,ys),i+1)", false),
+        ("entry main(xs:[4097]i32) ([4097]i32,i32)=loop (ys,i)=(xs,0) while i<128 do (map(|x|x+1,ys),i+1)", true),
+        ("entry main(xs:[]i32) ([]i32,i32)=loop (ys,i)=(map(|x|x,xs),0) while i<128 do (map(|x|x+1,ys),i+1)", true),
+        ("entry main(xs:[4]i32,big:[65536]i32) ([4]i32,i32)=loop (ys,i)=(xs,0) while i<128 do (map(|x|x+reduce((+),0,big),ys),i+1)", true),
+    ] {
+        planned(source, |graph| {
+            let query = Query(graph);
+            let mut count = 0;
+            query.for_each("SourceDispatchLoop", |row| {
+                let op = query.required("SourceValueOperation", (row[0],))?;
+                assert_eq!(query.flag("DispatchLoopSelected", (op,))?, dispatched, "{source}");
+                assert_eq!(query.flag("InvocationBoundary", (op,))?, !dispatched, "{source}");
+                count += 1;
+                Ok(())
+            }).unwrap();
+            assert_eq!(count, 1, "{source}");
+        });
+    }
+}
+
+#[test]
+fn nested_loop_work_uses_constant_trip_counts() {
+    for (bound, dispatched) in [("0", false), ("2", false), ("65536", true), ("limit", true)] {
+        let source = format!(
+            "entry main(xs:[4]i32,limit:i32) ([4]i32,i32) =
+             loop (ys,i)=(xs,0) while i<128 do
+               let next=loop zs=ys for j<{bound} do map(|x|x+1,zs) in (next,i+1)"
+        );
+        planned(&source, |graph| {
+            let query = Query(graph);
+            let mut checked = 0;
+            query
+                .for_each("SourceDispatchLoop", |row| {
+                    let form = query.required("SourceLoopForm", (row[0],))?;
+                    if query.enode("WhileCondition", form)?.is_some() {
+                        let op = query.required("SourceValueOperation", (row[0],))?;
+                        assert_eq!(query.flag("DispatchLoopSelected", (op,))?, dispatched, "{source}");
+                        checked += 1;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(checked, 1);
+        });
+    }
+}
+
+// Compile related cases once; keep every assertion tied to its source entry.
+
+#[test]
+fn fixed_collective_launches_share_geometry_and_storage() {
+    for (size, groups, combine) in [
+        (0, 1, 32),
+        (1, 1, 32),
+        (257, 2, 32),
+        (8193, 33, 64),
+        (65537, 256, 256),
+    ] {
+        planned(
+            &format!("entry main(xs:[{size}]i32) [{size}]i32=scan((+),0,xs)"),
+            |graph| {
+                let query = Query(graph);
+                let scan = operations(graph, "scan")[0];
+                let plan = query.required("SelectedPlan", (scan,)).unwrap();
+                let owner = query.required("Owner", (plan,)).unwrap();
+                assert_eq!(
+                    graph.value_to_base::<i64>(query.required("CollectiveGroups", (owner,)).unwrap()),
+                    groups
+                );
+                assert_eq!(
+                    graph.value_to_base::<i64>(query.required("CollectiveCombineWidth", (owner,)).unwrap()),
+                    combine
+                );
+                let stage = query.constructor("Stage", (owner, "chunks")).unwrap().unwrap();
+                let grid = query.record("LaunchGrid", "FixedGrid", (stage,)).unwrap().unwrap();
+                assert_eq!(graph.value_to_base::<i64>(grid[0]), groups);
+                for role in ["partial", "offset"] {
+                    let temporary = query.constructor("Temporary", (owner, role, 0i64)).unwrap().unwrap();
+                    let extent = query.record("CapacityExtent", "Fixed", (temporary,)).unwrap().unwrap();
+                    assert_eq!(graph.value_to_base::<i64>(extent[0]), groups, "{role}");
+                }
+            },
+        );
+    }
+}
+
+#[test]
+fn fluid_radix_scan_avoids_empty_groups_and_oversized_carries() {
+    let source = format!(
+        "{}\nentry main(xs:[4320]vec2u32) [4320]vec2u32 = radix_sort_step(xs,|i,p|u32.get_bit(i,p.x),0)",
+        include_str!("../../../pkg/sort/src/four_bit.wyn")
+    );
+    planned(&source, |graph| {
+        let query = Query(graph);
+        let scan = operations(graph, "scan")[0];
+        let plan = query.required("SelectedPlan", (scan,)).unwrap();
+        let owner = query.required("Owner", (plan,)).unwrap();
+        for (fact, expected) in [
+            ("CollectiveChunkWidth", 64),
+            ("CollectiveGroups", 68),
+            ("CollectiveCombineWidth", 128),
+        ] {
+            assert_eq!(
+                graph.value_to_base::<i64>(query.required(fact, (owner,)).unwrap()),
+                expected,
+                "{fact}"
+            );
+        }
+    });
 }

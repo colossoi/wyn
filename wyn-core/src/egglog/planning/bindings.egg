@@ -11,6 +11,17 @@
 (function MapOutputBindings (OperationKey i64) MapBinding :no-merge)
 (function MapArguments (FusionPlan OperationKey i64) SourceArguments :no-merge)
 
+; A cooperative map publishes its array result from shared storage.
+(relation WorkgroupOutputBinding (MapBinding))
+(rule ((= (MapExecution owner) (WorkgroupScope)) (= binding (MapOutputBindings owner i)))
+      ((WorkgroupOutputBinding binding)) :ruleset local-storage)
+(rule ((WorkgroupOutputBinding (MapCallBinding caller callee args next)))
+      ((WorkgroupOutputBinding next)) :ruleset local-storage)
+(rule ((WorkgroupOutputBinding (MapIndexBinding caller callee plan args axis next)))
+      ((WorkgroupOutputBinding next)) :ruleset local-storage)
+(rule ((WorkgroupOutputBinding (MapValueBinding value)) (= ty (SourceType value)) (SourceArrayType ty))
+      ((StorageDemand value (StorageRoot))) :ruleset local-storage)
+
 ; Flat fused element producers and selected rectangular outputs share this binding plan.
 (rule ((Current group plan) (PlanMember plan op) (= (PlanMapping op) true)
        (= value (SourceOperationValue op)))

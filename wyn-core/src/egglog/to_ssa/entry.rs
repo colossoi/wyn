@@ -91,7 +91,11 @@ pub(super) fn entry<'source>(
         let Some(grid) = lower.compiler.facts.lookup("OriginalEntryGrid", (token,)) else {
             return Err(error("original entry has no launch grid"));
         };
-        lower.grid = Some(lower.compiler.facts.grid(grid)?);
+        lower.grid = if lower.compiler.facts.enode("AutomaticGrid", grid).is_some() {
+            None
+        } else {
+            Some(lower.compiler.facts.grid(grid)?)
+        };
     }
     let mut inputs = Vec::new();
     let mut parameter_inputs = Vec::new();
@@ -256,7 +260,8 @@ fn emit_body(
         let phase = lower.compiler.facts.phase_name(stage)?;
         let extent = lower.compiler.phase_extent(stage)?;
         let width = lower.compiler.phase_width(stage)?;
-        kernels::emit(lower, scope, operation, &phase, extent, width)?;
+        kernels::emit(lower, scope, operation, &phase, extent, width)
+            .map_err(|failure| error(format!("phase {operation:?}/{phase}: {failure}")))?;
         lower.op(OpTag::Unit, vec![], types::unit())?
     } else if compute && !original {
         lower.op(OpTag::Unit, vec![], types::unit())?
@@ -337,19 +342,32 @@ fn copy_results<'source>(
 ) -> Result<(), OptimizeError> {
     let planned = lower.compiler.facts.outputs(symbol)?;
     let root = lower.compiler.facts.entry_root(symbol, stage)?;
-    let write = |lower: &mut Body<'_, '_, 'source>| -> Result<(), OptimizeError> {
-        for id in planned {
-            if !lower.compiler.facts.contains("CopyOutput", (id,))
-                || lower.compiler.facts.lookup("OutputWriter", (id,)) != Some(root)
-            {
-                continue;
-            }
-            let (source, ty, resource) = lower.compiler.facts.output(id)?;
-            if ty.is_array() || types::as_soa_tuple(ty).is_some() {
+    let grid = lower
+        .compiler
+        .facts
+        .lookup("RootWorkgroup", (root,))
+        .ok_or_else(|| error("output workgroup missing"))?;
+    let width = lower.compiler.facts.grid(grid)?.0;
+    let parallel = stage.is_none() && width > 1;
+    for id in planned {
+        if !lower.compiler.facts.contains("CopyOutput", (id,))
+            || lower.compiler.facts.lookup("OutputWriter", (id,)) != Some(root)
+        {
+            continue;
+        }
+        let (source, ty, resource) = lower.compiler.facts.output(id)?;
+        let array_output = ty.is_array() || types::as_soa_tuple(ty).is_some();
+        let write = |lower: &mut Body<'_, '_, 'source>| -> Result<(), OptimizeError> {
+            if array_output {
                 let (array, fields) = lower.source_array(scope, source)?;
                 let destination = lower.resource(scope, resource, 2)?;
                 let length = lower.length(array.clone())?;
-                lower.copy_array(destination, array, length, &fields)?;
+                if parallel {
+                    let (start, step) = kernels::invocation(lower, width)?;
+                    lower.copy_array_strided((destination, &[]), array, length, &fields, start, step)?;
+                } else {
+                    lower.copy_array(destination, array, length, &fields)?;
+                }
             } else {
                 let value = lower.value(scope, source)?;
                 let destination = lower.resource(scope, resource, 2)?;
@@ -364,28 +382,15 @@ fn copy_results<'source>(
                     })
                     .map_err(builder_error)?;
             }
+            Ok(())
+        };
+        if width > 1 && !(parallel && array_output) {
+            let lane = if parallel { kernels::invocation(lower, width)?.0 } else { lower.local_id()? };
+            let first = lower.binary(BinaryOperator::Equal, lane, Body::number(0))?;
+            lower.when(first, write)?;
+        } else {
+            write(lower)?;
         }
-        Ok(())
-    };
-    if stage
-        .map(|key| lower.compiler.phase_width(key).map(|width| width > 1))
-        .transpose()?
-        .unwrap_or(false)
-    {
-        let uint = Type::Constructed(TypeName::UInt(32), vec![]);
-        let lane = lower.op(
-            OpTag::Intrinsic {
-                id: catalog().known().local_id,
-                overload_idx: 0,
-            },
-            vec![],
-            uint.clone(),
-        )?;
-        let zero = lower.literal("0", &uint)?;
-        let first = lower.binary(BinaryOperator::Equal, lane, zero)?;
-        lower.when(first, write)?;
-    } else {
-        write(lower)?;
     }
     Ok(())
 }

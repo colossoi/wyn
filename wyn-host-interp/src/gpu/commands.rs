@@ -51,7 +51,7 @@ impl WgpuBackend {
                 if matches!(self.resource(&args[0])?, Resource::View { .. }) {
                     return Err(gpu_error("views cannot be freed independently"));
                 }
-                self.resources.remove(&id);
+                self.release(id);
                 Ok(Value::Nil)
             }
             "gpu-buffer-size" => {
@@ -68,7 +68,8 @@ impl WgpuBackend {
                     return Err(gpu_error("view exceeds logical buffer size"));
                 }
                 let buffer = self.buffer(&args[0])?.clone();
-                Ok(self.insert(Resource::Buffer(buffer, bytes), false))
+                let owned = matches!(self.resource(&args[0])?, Resource::Buffer(_, _, true));
+                Ok(self.insert(Resource::Buffer(buffer, bytes, owned), false))
             }
             "gpu-read-scalar" | "host-read-scalar" => {
                 arity(args, 3)?;
@@ -215,7 +216,7 @@ impl WgpuBackend {
                     if src % 4 != 0 || dst % 4 != 0 || size % 4 != 0 {
                         return Err(gpu_error("device copies require four-byte alignment"));
                     }
-                    let mut encoder = self.device.create_command_encoder(&Default::default());
+                    let mut encoder = self.take_encoder();
                     encoder.copy_buffer_to_buffer(
                         self.buffer(source)?,
                         src,
@@ -223,7 +224,7 @@ impl WgpuBackend {
                         dst,
                         size,
                     );
-                    self.queue.submit(Some(encoder.finish()));
+                    self.record(encoder);
                 }
                 Ok(Value::Nil)
             }
@@ -488,6 +489,7 @@ impl WgpuBackend {
             return Ok(Value::Nil);
         }
         if !self.computes.contains_key(name) {
+            let _trace = super::profile::Span::new("compute-pipeline", entry);
             let (layouts, pushes) = self.layouts(kernel, ShaderStages::COMPUTE)?;
             let layout_refs = layouts.iter().collect::<Vec<_>>();
             let layout = self.device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -508,13 +510,18 @@ impl WgpuBackend {
             });
             self.computes.insert(name.into(), (pipeline, layouts));
         }
+        let stamp = self.timestamp_pass(entry);
         let (pipeline, layouts) = &self.computes[name];
         let (bindings, pushes) = self.bind_groups(kernel, o.get(":args")?.list()?, layouts)?;
-        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let mut encoder = self.take_encoder();
         {
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some(entry),
-                timestamp_writes: None,
+                timestamp_writes: stamp.as_ref().map(|stamp| wgpu::ComputePassTimestampWrites {
+                    query_set: &stamp.queries,
+                    beginning_of_pass_write_index: Some(stamp.start),
+                    end_of_pass_write_index: Some(stamp.start + 1),
+                }),
             });
             pass.set_pipeline(pipeline);
             for (set, group) in bindings.iter().enumerate() {
@@ -525,7 +532,7 @@ impl WgpuBackend {
             }
             pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
         }
-        self.queue.submit(Some(encoder.finish()));
+        self.record(encoder);
         Ok(Value::Nil)
     }
 }

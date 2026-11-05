@@ -9,6 +9,22 @@ use crate::types::{
     self, bool_type, is_array_variant_view, is_array_variant_virtual, strip_existentials, Type, TypeExt,
     TypeName,
 };
+
+// Keep aggregate projections addressable until the final scalar read. Loading
+// between a tuple projection and an index would materialize the entire array.
+enum ReadAddress {
+    Value(Typed),
+    Place(PlaceId, Type),
+}
+
+impl ReadAddress {
+    fn ty(&self) -> &Type {
+        match self {
+            Self::Value(value) => &value.ty,
+            Self::Place(_, ty) => ty,
+        }
+    }
+}
 impl Body<'_, '_, '_> {
     pub(in crate::egglog::to_ssa) fn field(
         &mut self,
@@ -133,6 +149,71 @@ impl Body<'_, '_, '_> {
             index
         };
         self.op(OpTag::Index, vec![array, index], ty)
+    }
+
+    pub(super) fn index_path(
+        &mut self,
+        array: Typed,
+        steps: &[(Vec<usize>, Typed)],
+    ) -> Result<Typed, OptimizeError> {
+        let mut address = ReadAddress::Value(array);
+        for (fields, index) in steps {
+            let mut fields = fields.iter().copied().peekable();
+            while !address.ty().is_array() && fields.peek().is_some() {
+                address = self.address_field(address, fields.next().unwrap())?;
+            }
+            address = match address {
+                ReadAddress::Place(place, ty)
+                    if ty.array_variant().is_some_and(types::is_array_variant_composite) =>
+                {
+                    let element = ty.elem_type().cloned().ok_or_else(|| error("array element missing"))?;
+                    ReadAddress::Place(self.child_place(place, index.clone(), &element)?, element)
+                }
+                other => {
+                    let value = self.read_address(other)?;
+                    if (value.ty.array_variant().is_some_and(is_array_variant_view)
+                        && value.ty.array_rank() == Some(1))
+                        || self.local_arrays.contains_key(&value.value)
+                    {
+                        let (place, ty) = self.index_place(value, index.clone())?;
+                        ReadAddress::Place(place, ty)
+                    } else {
+                        ReadAddress::Value(self.index(value, index.clone())?)
+                    }
+                }
+            };
+            // Array-valued projections describe a field of each stored element.
+            for field in fields {
+                address = self.address_field(address, field)?;
+            }
+        }
+        self.read_address(address)
+    }
+
+    fn read_address(&mut self, address: ReadAddress) -> Result<Typed, OptimizeError> {
+        match address {
+            ReadAddress::Value(value) => Ok(value),
+            ReadAddress::Place(place, ty) => self.load_place(place, &ty),
+        }
+    }
+
+    fn address_field(&mut self, address: ReadAddress, index: usize) -> Result<ReadAddress, OptimizeError> {
+        match address {
+            ReadAddress::Value(value) => Ok(ReadAddress::Value(self.field(value, index)?)),
+            ReadAddress::Place(place, ty) => {
+                let element = match &ty {
+                    Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) => {
+                        fields.get(index)
+                    }
+                    Type::Constructed(TypeName::Vec, fields) => fields.first(),
+                    _ => None,
+                }
+                .cloned()
+                .ok_or_else(|| error("invalid address projection"))?;
+                let child = self.child_place(place, Self::number(index as u32), &element)?;
+                Ok(ReadAddress::Place(child, element))
+            }
+        }
     }
     pub(in crate::egglog::to_ssa) fn cast(
         &mut self,
@@ -474,29 +555,54 @@ impl Body<'_, '_, '_> {
     ) -> Result<(), OptimizeError> {
         let zero = self.literal("0", &length.ty)?;
         let one = self.literal("1", &length.ty)?;
-        self.copy_array_strided(destination, source, length, fields, zero, one)
+        self.copy_array_strided((destination, &[]), source, length, fields, zero, one)
     }
 
     pub fn copy_array_strided(
         &mut self,
-        destination: Typed,
+        (destination, indices): (Typed, &[Typed]),
         source: Typed,
         length: Typed,
         fields: &[usize],
         start: Typed,
         step: Typed,
     ) -> Result<(), OptimizeError> {
+        if indices.is_empty()
+            && fields.is_empty()
+            && crate::ssa::array_copy::matching_view_element(&source.ty, &destination.ty).is_some()
+        {
+            let collective = !self.invocation_execution
+                && self
+                    .workgroup_width
+                    .is_some_and(|width| step.value == ValueRef::Const(ConstantValue::U32(width)));
+            let length = self.cast(length, &start.ty)?;
+            let step = self.cast(step, &start.ty)?;
+            self.builder
+                .push_void_inst(InstKind::Copy {
+                    destination: destination.value,
+                    source: source.value,
+                    length: length.value,
+                    start: start.value,
+                    step: step.value,
+                    collective,
+                })
+                .map_err(builder_error)?;
+            return Ok(());
+        }
         self.counted(start, length, step, vec![], |body, index, _| {
             let mut value = body.index(source.clone(), index.clone())?;
+            let mut path = indices.to_vec();
+            path.push(index);
             if !fields.is_empty() && source.ty.array_rank().is_some_and(|rank| rank > 1) {
-                let target = body.index(destination.clone(), index)?;
                 let length = body.length(value.clone())?;
-                body.copy_array(target, value, length, fields)?;
+                let zero = body.literal("0", &length.ty)?;
+                let one = body.literal("1", &length.ty)?;
+                body.copy_array_strided((destination.clone(), &path), value, length, fields, zero, one)?;
             } else {
                 for &field in fields {
                     value = body.field(value, field)?;
                 }
-                body.store(destination.clone(), index, value)?;
+                body.store_at(destination.clone(), &path, value)?;
             }
             Ok(vec![])
         })?;

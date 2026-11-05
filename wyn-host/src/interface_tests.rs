@@ -1,8 +1,9 @@
 use super::{
-    Access, BackingRef, Binding, BufferUsage, ComputePipeline, ComputeStage, DispatchLoop, DispatchSize,
-    FragmentOutput, FrameGraph, FramePass, FramePassKind, FrameResourceExtent, FrameResourceKind,
-    GraphicsInvocation, GraphicsPipeline, GraphicsStage, ModuleInterface, Pipeline, ShaderStage,
-    StageBindingUses, StorageImageFormat, StorageTextureSize, TextureSampleType, TextureViewDimension,
+    Access, BackingRef, Binding, BufferUsage, ComputePipeline, ComputeStage, DispatchLoop,
+    DispatchLoopControl, DispatchSize, FragmentOutput, FrameGraph, FramePass, FramePassKind,
+    FrameResourceExtent, FrameResourceKind, GraphicsInvocation, GraphicsPipeline, GraphicsStage,
+    ModuleInterface, Pipeline, ShaderStage, StageBindingUses, StorageImageFormat, StorageTextureSize,
+    TextureSampleType, TextureViewDimension,
 };
 use crate::{Expr, ScalarExpr, ScalarSource};
 
@@ -29,11 +30,16 @@ fn selected_loops_stay_contiguous_and_wait_for_outer_dependencies() {
         pipeline: 0,
         setup: 0,
         body: vec![1],
+        test: vec![],
         completion: 2,
-        count: ScalarExpr::I32(8),
-        index: ScalarSource::Binding { set: 0, binding: 0 },
-        current: ScalarSource::Binding { set: 0, binding: 1 },
-        next: ScalarSource::Binding { set: 0, binding: 2 },
+        control: DispatchLoopControl::Counted {
+            count: ScalarExpr::I32(8),
+            index: ScalarSource::Binding { set: 0, binding: 0 },
+        },
+        carried: vec![(
+            ScalarSource::Binding { set: 0, binding: 1 },
+            ScalarSource::Binding { set: 0, binding: 2 },
+        )],
     };
     assert_eq!(graph.topological_order().unwrap(), [0, 3, 4, 1, 2, 5]);
     assert_eq!(
@@ -52,6 +58,52 @@ fn selected_loops_stay_contiguous_and_wait_for_outer_dependencies() {
     graph.passes[4].depends_on.push(0);
     assert!(graph.topological_order().is_ok());
     assert!(graph.execution_order(&[repeated]).unwrap_err().contains("across dispatch loop boundaries"));
+}
+
+#[test]
+fn nested_dispatch_loops_keep_inner_and_outer_dependencies() {
+    let dependencies = [vec![], vec![0], vec![1, 6], vec![2], vec![3], vec![4], vec![]];
+    let graph = FrameGraph {
+        passes: dependencies
+            .into_iter()
+            .enumerate()
+            .map(|(index, depends_on)| FramePass {
+                name: format!("stage{index}"),
+                kind: FramePassKind::Compute,
+                pipeline_index: 0,
+                stage_index: index,
+                reads: vec![],
+                writes: vec![],
+                depends_on,
+            })
+            .collect(),
+        ..FrameGraph::default()
+    };
+    let inner = DispatchLoop {
+        pipeline: 0,
+        setup: 1,
+        test: vec![],
+        body: vec![2],
+        completion: 3,
+        control: DispatchLoopControl::While {
+            condition: ScalarExpr::Bool(true),
+        },
+        carried: vec![],
+    };
+    let outer = DispatchLoop {
+        setup: 0,
+        body: vec![1, 3, 4],
+        completion: 5,
+        ..inner.clone()
+    };
+    assert_eq!(
+        graph.execution_order(&[outer.clone(), inner.clone()]).unwrap(),
+        [6, 0, 1, 2, 3, 4, 5]
+    );
+    assert_eq!(
+        graph.execution_order(&[inner, outer]).unwrap(),
+        [6, 0, 1, 2, 3, 4, 5]
+    );
 }
 
 #[test]
@@ -298,6 +350,45 @@ fn producer_consumer_descriptor(producer_first: bool) -> ModuleInterface {
     )
     .unwrap();
     descriptor
+}
+
+#[test]
+fn input_names_are_scoped_to_the_authored_entry() {
+    for (case, lengths, resources) in [
+        ("different entries", [132, 1020], 2),
+        ("same length", [132, 132], 2),
+        ("same entry", [132, 132], 1),
+        ("no stages", [132, 1020], 2),
+    ] {
+        let mut descriptor = producer_consumer_descriptor(true);
+        for (pipeline, bytes) in descriptor.pipelines.iter_mut().zip(lengths) {
+            let Pipeline::Compute(pipeline) = pipeline else {
+                panic!("compute")
+            };
+            pipeline.bindings[0] = Binding::StorageBuffer {
+                set: 0,
+                binding: 0,
+                access: Access::ReadOnly,
+                usage: BufferUsage::Input,
+                name: "xs".into(),
+                resource: None,
+                length: Some(super::BufferLen::Fixed { bytes }),
+                members: vec![],
+            };
+            if case == "same entry" {
+                pipeline.stages[0].owner = "shared_entry".into();
+            } else if case == "no stages" {
+                pipeline.stages.clear();
+            }
+        }
+        let graph = FrameGraph::from_selected_pipelines(&descriptor.pipelines, &[]).unwrap();
+        assert_eq!(graph.resources.len(), resources, "{case}");
+        assert!(graph.resources.iter().all(|resource| resource.name == "xs"));
+        assert_eq!(
+            graph.refresh_resources(&descriptor.pipelines).unwrap().resources.len(),
+            resources
+        );
+    }
 }
 
 #[test]

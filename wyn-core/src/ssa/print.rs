@@ -356,6 +356,24 @@ fn format_inst_kind(out: &mut fmt::Formatter<'_>, kind: &InstKind) -> fmt::Resul
         InstKind::ControlBarrier => {
             write!(out, "control_barrier")?;
         }
+        InstKind::Copy {
+            destination,
+            source,
+            length,
+            start,
+            step,
+            collective,
+        } => {
+            write!(
+                out,
+                "copy {} <- {} length {} start {} step {} collective {collective}",
+                format_ref(destination),
+                format_ref(source),
+                format_ref(length),
+                format_ref(start),
+                format_ref(step)
+            )?;
+        }
     }
     Ok(())
 }

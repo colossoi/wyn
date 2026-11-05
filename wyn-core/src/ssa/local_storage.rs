@@ -18,6 +18,8 @@ use egglog_engine::{EGraph, Read, Write};
 
 #[path = "local_storage_validation.rs"]
 mod validation;
+#[path = "workgroup_storage.rs"]
+mod workgroup;
 
 pub(super) fn apply(program: &mut Reachable) -> Result<()> {
     for (name, body) in program
@@ -27,6 +29,16 @@ pub(super) fn apply(program: &mut Reachable) -> Result<()> {
         .chain(program.entry_points.iter_mut().map(|e| (e.name.as_str(), &mut e.body)))
     {
         bufferize(name, body)?;
+    }
+    workgroup::apply(program)?;
+    for body in program
+        .functions
+        .iter_mut()
+        .map(|f| &mut f.body)
+        .chain(program.entry_points.iter_mut().map(|e| &mut e.body))
+    {
+        super::array_copy::lower(body);
+        super::eliminate_dead_pure_instructions(body);
     }
     timing::time("ssa storage / ownership", || ownership::apply(program));
     Ok(())
@@ -287,7 +299,6 @@ const ANALYSIS_SCHEDULE: &str = "(run-schedule (saturate storage-webs) (saturate
 fn storage_places(body: &FuncBody, arrays: &LookupMap<ValueId, usize>) -> LookupSet<PlaceId> {
     let mut allocations = LookupSet::default();
     let mut loads = Vec::new();
-    let mut children = LookupMap::<_, Vec<_>>::default();
     for node in body.inner.insts.values() {
         match node.data {
             InstKind::Alloca { result } => {
@@ -296,21 +307,22 @@ fn storage_places(body: &FuncBody, arrays: &LookupMap<ValueId, usize>) -> Lookup
             InstKind::Load { place } if node.result.is_some_and(|v| arrays.contains_key(&v)) => {
                 loads.push(place);
             }
-            InstKind::PlaceIndex { place, result, .. } => {
-                children.entry(place).or_default().push(result);
-            }
             _ => {}
         }
     }
     // Only direct allocation loads can seed Existing; retain every derived alias of those places.
     loads.retain(|place| allocations.contains(place));
-    let mut places = LookupSet::default();
-    while let Some(place) = loads.pop() {
-        if places.insert(place) {
-            loads.extend(children.get(&place).into_iter().flatten().copied());
-        }
-    }
-    places
+    let roots = super::storage::MemoryRoots::analyze(body);
+    body.places
+        .keys()
+        .filter(|p| {
+            roots.places.get(p).is_some_and(|xs| {
+                xs.iter().any(
+                    |r| matches!(r, super::storage::MemoryRoot::Allocation(base) if loads.contains(base)),
+                )
+            })
+        })
+        .collect()
 }
 
 fn storage_events(
@@ -385,7 +397,16 @@ fn analyze(body: &FuncBody) -> Result<Analysis> {
     let schema = timing::span("ssa storage analysis / schema");
     let mut graph = EGraph::default();
     let map_error = |e: egglog_engine::Error| invalid(&e.to_string());
-    graph.parse_and_run_program(None, include_str!("local_storage.egg")).map_err(map_error)?;
+    graph
+        .parse_and_run_program(
+            None,
+            concat!(
+                include_str!("storage_liveness.egg"),
+                "\n",
+                include_str!("local_storage.egg")
+            ),
+        )
+        .map_err(map_error)?;
     drop(schema);
     let import = timing::span("ssa storage analysis / import facts");
     let mut origin_values = Vec::new();

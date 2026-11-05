@@ -16,6 +16,55 @@ fn compile_to_spirv_output(source: &str) -> wyn_core::error::Result<wyn_core::Lo
 }
 
 mod source_pipeline {
+    #[test]
+    fn view_transfers_preserve_nested_array_ranks() {
+        for source in [
+            "entry chosen(xs:[100][3]i32,flag:i32) [100][3]i32 =
+         if flag>0 then xs else map(|row|map(|x|x+1,row),xs)",
+            include_str!("../../../tests/compiler/library/ranked_view_copies.wyn"),
+        ] {
+            shaders(source);
+        }
+    }
+
+    #[test]
+    fn dispatch_branch_scalar_projections_do_not_copy_array_siblings() {
+        let module = shaders(include_str!(
+            "../../../tests/compiler/library/dispatch_loop_products.wyn"
+        ));
+        let steps: Vec<_> = module
+            .entry_points
+            .iter()
+            .filter(|entry| entry.name.starts_with("projected_") && entry.name.ends_with("_loop_step"))
+            .collect();
+        assert_eq!(steps.len(), 1, "fixture must retain a distributed loop");
+        assert!(
+            steps[0].function.local_variables.iter().all(|(_, variable)| {
+                !matches!(module.types[variable.ty].inner, naga::TypeInner::Array { .. })
+            }),
+            "scalar fields must not materialize the carried array"
+        );
+    }
+
+    #[test]
+    fn cooperative_branch_results_stay_shared_across_calls_and_updates() {
+        let module = shaders(include_str!(
+            "../../../fluid-simulation/test/repro_shared_branch_transfer.wyn"
+        ));
+        assert!(module.entry_points.iter().any(|entry| entry.workgroup_size[0] > 1));
+        assert!(module.global_variables.iter().any(|(_, v)| v.space == naga::AddressSpace::WorkGroup));
+        for function in
+            module.functions.iter().map(|(_, f)| f).chain(module.entry_points.iter().map(|e| &e.function))
+        {
+            assert!(
+                function.local_variables.iter().all(|(_, variable)| {
+                    !matches!(module.types[variable.ty].inner, naga::TypeInner::Array { .. })
+                }),
+                "cooperative array results must not be copied into per-lane arrays"
+            );
+        }
+    }
+
     use super::*;
     use naga::{Expression, Statement};
     use wyn_core::{lower_ssa_to_spirv, lower_ssa_to_wgsl};

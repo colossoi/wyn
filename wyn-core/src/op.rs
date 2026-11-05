@@ -244,6 +244,8 @@ pub enum PureViewSource<R = BindingRef> {
     /// a module-scope `array<T, count>` in workgroup storage. The element
     /// type comes from the view's result type. Emitted by the
     /// workgroup-parallel reduce phase 2.
+    /// The defining instruction starts an uninitialized logical lifetime;
+    /// storage reuse relies on retaining that instruction's block placement.
     Workgroup {
         id: u32,
         count: u32,

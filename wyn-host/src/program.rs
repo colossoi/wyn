@@ -49,6 +49,7 @@ pub enum Expr {
         source: ScalarSource,
         axis: usize,
     },
+    Add(Box<Expr>, Box<Expr>),
     Subtract(Box<Expr>, Box<Expr>),
     Multiply(Box<Expr>, Box<Expr>),
     Floor(Box<Expr>, Box<Expr>),
@@ -116,7 +117,8 @@ impl Expr {
             Self::Input(name) => {
                 result.scalar_inputs.insert(name.clone());
             }
-            Self::Subtract(a, b)
+            Self::Add(a, b)
+            | Self::Subtract(a, b)
             | Self::Multiply(a, b)
             | Self::Floor(a, b)
             | Self::Ceiling(a, b)
@@ -160,7 +162,8 @@ impl Expr {
             Self::BufferLength { source, .. } | Self::TextureDimension { source, .. } => {
                 visit(source, &mut 0)
             }
-            Self::Subtract(left, right)
+            Self::Add(left, right)
+            | Self::Subtract(left, right)
             | Self::Multiply(left, right)
             | Self::Floor(left, right)
             | Self::Ceiling(left, right)
@@ -208,6 +211,7 @@ pub enum Operation {
         setup: Vec<Operation>,
         pipeline: usize,
         region: usize,
+        test: Vec<Operation>,
         body: Vec<Operation>,
     },
     Scalar {
@@ -378,74 +382,81 @@ impl Program {
         }
         for (_, mut entry) in entries {
             let stages = &entry_stages[&entry.name];
-            let mut loops = BTreeMap::new();
-            let mut members = BTreeSet::new();
-            for (region, repeated) in program.interface.dispatch_loops.iter().enumerate() {
-                let setup = (repeated.pipeline, repeated.setup);
-                let Some(begin) = stages.iter().position(|key| *key == setup) else {
-                    continue;
-                };
-                let completion = (repeated.pipeline, repeated.completion);
-                let end = stages
-                    .iter()
-                    .position(|key| *key == completion)
-                    .ok_or_else(|| HostError::Invalid("loop completion is outside its entry".into()))?;
-                if end <= begin {
-                    return Err(HostError::Invalid("loop completion precedes its setup".into()));
-                }
-                loops.insert(setup, region);
-                let mut previous = begin;
-                for &stage in &repeated.body {
-                    let key = (repeated.pipeline, stage);
-                    let position = stages
-                        .iter()
-                        .position(|candidate| *candidate == key)
-                        .ok_or_else(|| HostError::Invalid("loop body stage is outside its entry".into()))?;
-                    if position <= previous || position >= end {
-                        return Err(HostError::Invalid("loop body is unordered".into()));
-                    }
-                    members.insert(key);
-                    previous = position;
-                }
-                members.insert(completion);
-            }
-            let mut operations = Vec::new();
-            for key in stages {
-                if members.contains(key) {
-                    continue;
-                }
-                if let Some(&region) = loops.get(key) {
-                    let repeated = &program.interface.dispatch_loops[region];
-                    let body = repeated
-                        .body
-                        .iter()
-                        .flat_map(|stage| stage_operations[&(repeated.pipeline, *stage)].iter().cloned())
-                        .collect();
-                    operations.push(Operation::Loop {
-                        setup: stage_operations[key].clone(),
-                        pipeline: repeated.pipeline,
-                        region,
-                        body,
-                    });
-                    let Pipeline::Compute(compute) = &program.interface.pipelines[repeated.pipeline] else {
-                        return Err(HostError::Invalid(
-                            "loop completion must be a compute stage".into(),
-                        ));
-                    };
-                    if !compute.stages[repeated.completion].uses.writes.is_empty() {
-                        operations.extend(
-                            stage_operations[&(repeated.pipeline, repeated.completion)].iter().cloned(),
-                        );
-                    }
-                } else {
-                    operations.extend(stage_operations[key].iter().cloned());
-                }
-            }
-            entry.operations = operations;
+            let positions: BTreeMap<_, _> = stages.iter().enumerate().map(|(i, key)| (*key, i)).collect();
+            entry.operations = program.structured_operations(
+                stages,
+                &stage_operations,
+                &positions,
+                &mut BTreeSet::new(),
+            )?;
             program.prepare_entry(&mut entry)?;
             program.entries.push(entry);
         }
         Ok(program)
+    }
+
+    fn structured_operations(
+        &self,
+        stages: &[(usize, usize)],
+        operations: &BTreeMap<(usize, usize), Vec<Operation>>,
+        positions: &BTreeMap<(usize, usize), usize>,
+        emitted: &mut BTreeSet<(usize, usize)>,
+    ) -> Result<Vec<Operation>, HostError> {
+        let mut result = Vec::new();
+        for &key in stages {
+            if !emitted.insert(key) {
+                continue;
+            }
+            let repeated = self
+                .interface
+                .dispatch_loops
+                .iter()
+                .enumerate()
+                .find(|(_, repeated)| key == (repeated.pipeline, repeated.setup));
+            let Some((region, repeated)) = repeated else {
+                result.extend(operations[&key].iter().cloned());
+                continue;
+            };
+            let completion = (repeated.pipeline, repeated.completion);
+            let begin = positions[&key];
+            let end = *positions
+                .get(&completion)
+                .ok_or_else(|| HostError::Invalid("loop completion is outside its entry".into()))?;
+            if begin >= end {
+                return Err(HostError::Invalid("loop completion precedes its setup".into()));
+            }
+            let ordered = |members: &[usize]| -> Result<Vec<(usize, usize)>, HostError> {
+                let mut keys = members.iter().map(|&stage| (repeated.pipeline, stage)).collect::<Vec<_>>();
+                for key in &keys {
+                    if !positions.get(key).is_some_and(|&position| begin < position && position < end) {
+                        return Err(HostError::Invalid("loop member is outside its boundaries".into()));
+                    }
+                }
+                keys.sort_by_key(|key| positions[key]);
+                Ok(keys)
+            };
+            let test =
+                self.structured_operations(&ordered(&repeated.test)?, operations, positions, emitted)?;
+            let body =
+                self.structured_operations(&ordered(&repeated.body)?, operations, positions, emitted)?;
+            result.push(Operation::Loop {
+                setup: operations[&key].clone(),
+                pipeline: repeated.pipeline,
+                region,
+                test,
+                body,
+            });
+            let Pipeline::Compute(compute) = &self.interface.pipelines[repeated.pipeline] else {
+                return Err(HostError::Invalid(
+                    "loop completion must be a compute stage".into(),
+                ));
+            };
+            if !compute.stages[repeated.completion].uses.writes.is_empty() {
+                result.extend(operations[&completion].iter().cloned());
+            }
+            emitted.insert(completion);
+        }
+        Ok(result)
     }
 
     pub fn depth_target(&self, pipeline: usize) -> Result<ResourceId, HostError> {
@@ -584,12 +595,15 @@ impl Program {
                     pipeline,
                     region,
                     setup,
+                    test,
                     body,
                 } => {
                     let repeated = &self.interface.dispatch_loops[*region];
-                    dependencies
-                        .scalar(&repeated.count, |source| self.scalar_resource(*pipeline, source))?;
+                    dependencies.scalar(repeated.control.expression(), |source| {
+                        self.scalar_resource(*pipeline, source)
+                    })?;
                     operations.extend(setup);
+                    operations.extend(test);
                     operations.extend(body);
                     *pipeline
                 }

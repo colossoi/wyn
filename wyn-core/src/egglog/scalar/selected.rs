@@ -59,6 +59,15 @@ impl Selected {
             term = fields[2];
         }
     }
+    pub fn index_operands(&self, term: TermId) -> Result<Option<(TermId, TermId)>, OptimizeError> {
+        let (name, fields) = self.app(term)?;
+        if name != "ExprInstruction" || self.text(fields[3])? != "index" {
+            return Ok(None);
+        }
+        let [parent, index]: [TermId; 2] =
+            self.arguments(fields[4])?.try_into().map_err(|_| error("index needs two operands"))?;
+        Ok(Some((parent, index)))
+    }
     pub fn operation_arguments(&self, term: TermId) -> Result<Vec<TermId>, OptimizeError> {
         let (name, fields) = self.app(term)?;
         match name {

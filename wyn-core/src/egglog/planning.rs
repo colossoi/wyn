@@ -3,6 +3,8 @@ use super::{timing, OptimizeError};
 use crate::PipelineTopologyPolicy;
 use egglog_engine::{EGraph, RawValues, Write};
 
+mod collectives;
+mod loops;
 mod order;
 
 #[cfg(test)]
@@ -35,7 +37,11 @@ pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
     Ok(())
 }
 
-pub(super) fn place(graph: &mut EGraph, topology: PipelineTopologyPolicy) -> Result<(), OptimizeError> {
+pub(super) fn place(
+    graph: &mut EGraph,
+    topology: PipelineTopologyPolicy,
+    costs: super::cost::CostModel,
+) -> Result<(), OptimizeError> {
     graph.parse_and_run_program(
         Some("planning bridge".into()),
         concat!(
@@ -65,7 +71,9 @@ pub(super) fn place(graph: &mut EGraph, topology: PipelineTopologyPolicy) -> Res
             include_str!("planning/bindings.egg"),
             include_str!("planning/output-layouts.egg"),
             "\n",
-            include_str!("planning/capacity.egg")
+            include_str!("planning/capacity.egg"),
+            "\n",
+            include_str!("planning/loops.egg")
         ),
     )?;
     let policy = match topology {
@@ -80,6 +88,7 @@ pub(super) fn place(graph: &mut EGraph, topology: PipelineTopologyPolicy) -> Res
         )
     })?;
     timing::time("egglog placement / order", || order::apply(graph))?;
+    loops::select(graph, costs)?;
     graph.parse_and_run_program(
         Some("execution placement".into()),
         include_str!("planning/place.egg"),
@@ -87,7 +96,12 @@ pub(super) fn place(graph: &mut EGraph, topology: PipelineTopologyPolicy) -> Res
     Ok(())
 }
 
-pub(super) fn schedule(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(super) fn schedule(graph: &mut EGraph, costs: super::cost::CostModel) -> Result<(), OptimizeError> {
+    graph.parse_and_run_program(
+        Some("schedule inputs".into()),
+        include_str!("planning/prepare-schedule.egg"),
+    )?;
+    collectives::select(graph, costs)?;
     graph.parse_and_run_program(
         Some("structural scheduling".into()),
         include_str!("planning/run.egg"),

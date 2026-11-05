@@ -107,8 +107,17 @@ impl Evaluation {
             if name == "ExprInstruction" && matches!(selected.text(fields[3]), Ok("index")) {
                 if let Ok(args) = selected.arguments(fields[4]) {
                     if let [array, index] = args.as_slice() {
-                        if let Ok((base, _)) = selected.projected_array(*array) {
-                            deps = vec![base, *index];
+                        if let Ok((mut base, _)) = selected.projected_array(*array) {
+                            let mut indices = vec![*index];
+                            while let Some((parent, index)) = selected.index_operands(base)? {
+                                base = selected.projected_array(parent)?.0;
+                                indices.push(index);
+                            }
+                            // The emitter follows this address path directly;
+                            // eagerly scheduling intermediate reads would copy
+                            // whole rows before it has a chance to do so.
+                            deps = vec![base];
+                            deps.extend(indices.into_iter().rev());
                         }
                     }
                 }

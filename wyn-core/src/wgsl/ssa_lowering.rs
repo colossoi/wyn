@@ -3517,7 +3517,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             | InstKind::Load { .. }
             | InstKind::Store { .. }
             | InstKind::Atomic { .. }
-            | InstKind::ControlBarrier => Err(err_wgsl_at!(
+            | InstKind::ControlBarrier
+            | InstKind::Copy { .. } => Err(err_wgsl_at!(
                 self.blame_span(),
                 "internal: {:?} should be handled in emit_nodes",
                 inst.data

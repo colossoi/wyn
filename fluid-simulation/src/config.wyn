@@ -1,0 +1,5 @@
+-- Default specialization. build.py writes the same module for other sizes.
+def count: i32 = 4320
+def tree_capacity: i32 = 4097
+def leaf_threshold: i32 = 32
+def bounds: vec3f32 = @[56.0,35.0,30.0]

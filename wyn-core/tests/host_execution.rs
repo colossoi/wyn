@@ -192,6 +192,13 @@ fn uses_input_buffer_capacity_and_preserves_returned_aliases() {
         program.run("echo", &[input.clone()], &mut backend).unwrap(),
         input
     );
+    let bytes: Vec<_> = (1i32..=4).flat_map(i32::to_le_bytes).collect();
+    let input = backend.input(bytes.clone());
+    let result = program.run("prefixes", &[input.clone()], &mut backend).unwrap();
+    let results = result.list().unwrap();
+    assert_eq!(results[0], input);
+    assert_eq!(backend.buffers[&results[1].handle().unwrap()], bytes[..8]);
+    assert!(backend.buffers.contains_key(&input.handle().unwrap()));
 }
 
 #[test]

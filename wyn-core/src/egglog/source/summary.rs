@@ -54,7 +54,8 @@ impl Summary {
         self.pure &= other.pure;
         self.readonly &= other.readonly;
         self.duplicate &= other.duplicate;
-        self.work = (self.work + other.work).min(65);
+        // Consumers cap inline queries; placement needs the unsaturated sum.
+        self.work = self.work.saturating_add(other.work);
         self.reads.extend(&other.reads);
         self.calls.extend(&other.calls);
         self.regions.extend(&other.regions);

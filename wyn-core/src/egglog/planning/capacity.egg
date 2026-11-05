@@ -104,3 +104,5 @@
       ((set (ConstantLogicalExtent (Length source)) n)) :ruleset representations)
 (rule ((Difference a b) (= x (ConstantLogicalExtent a)) (= y (ConstantLogicalExtent b)))
       ((set (ConstantLogicalExtent (Difference a b)) (- x y))) :ruleset representations)
+(rule ((Sum a b) (= x (ConstantLogicalExtent a)) (= y (ConstantLogicalExtent b)))
+      ((set (ConstantLogicalExtent (Sum a b)) (+ x y))) :ruleset representations)

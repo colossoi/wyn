@@ -1,7 +1,6 @@
 //! Lower local recipes at their selected execution scope using fused kernel algorithms.
 use super::{builder_error, error, Body, OptimizeError, Typed, Value};
 use crate::egglog::to_ssa::kernels;
-use crate::op::BinaryOperator;
 use crate::ssa::types::InstKind;
 use crate::types;
 use egglog_engine::sort::S;
@@ -79,10 +78,9 @@ impl Body<'_, '_, '_> {
                     return Err(error("local destination missing"));
                 };
                 let n = self.length(initial.clone())?;
-                if width.is_some() {
+                if let Some(width) = width {
                     let lane = self.local_id()?;
-                    let first = self.binary(BinaryOperator::Equal, lane, Self::number(0))?;
-                    self.when(first, |body| body.copy_array(output, initial, n, &[]))?;
+                    self.copy_array_strided((output, &[]), initial, n, &[], lane, Self::number(width))?;
                     self.workgroup_barrier()?;
                 } else {
                     self.copy_array(output, initial, n, &[])?;

@@ -26,7 +26,7 @@ pub(super) fn emit(
     phase_extent: Value,
     phase_width: u32,
 ) -> Result<(), OptimizeError> {
-    if matches!(phase, "loop_enter" | "loop_exit") {
+    if matches!(phase, "loop_enter" | "loop_test" | "loop_step" | "loop_exit") {
         return loops::emit(body, scope, phase_owner, phase, phase_width);
     }
     if phase == "view" {

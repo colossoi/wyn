@@ -738,7 +738,7 @@ fn source_results<'a>(
             }
             return;
         }
-        if let Some(leaves) = computed_leaf_types(&term.ty) {
+        if let Some(leaves) = storage_leaf_types(&term.ty) {
             let origin = origins.term_origin(term.id).unwrap_or_else(|| {
                 // Preserve the expression as a result demand, without choosing a
                 // storage binding. Egglog plans its backing and producer work.
@@ -844,6 +844,13 @@ fn shade_app<'a>(
 }
 
 fn computed_leaf_types(ty: &Type) -> Option<Vec<(Vec<usize>, String, Type)>> {
+    let leaves = storage_leaf_types(ty)?;
+    // Scalar bindings remain orchestration expressions. Explicit source results
+    // also use storage_leaf_types, so scalar results are still published.
+    leaves.iter().any(|(_, _, ty)| ty.is_array() || is_indirect_draw_command_type(ty)).then_some(leaves)
+}
+
+fn storage_leaf_types(ty: &Type) -> Option<Vec<(Vec<usize>, String, Type)>> {
     fn collect(
         ty: &Type,
         path: &mut Vec<usize>,
@@ -909,10 +916,7 @@ fn computed_leaf_types(ty: &Type) -> Option<Vec<(Vec<usize>, String, Type)>> {
 
     let mut leaves = Vec::new();
     let supported = collect(ty, &mut Vec::new(), &mut Vec::new(), &mut leaves);
-    // Ordinary scalar root bindings remain orchestration expressions; only
-    // aggregates containing a buffer output introduce a compute stage.
-    let has_buffer = leaves.iter().any(|(_, _, ty)| ty.is_array() || is_indirect_draw_command_type(ty));
-    (supported && has_buffer).then_some(leaves)
+    supported.then_some(leaves)
 }
 
 fn is_indirect_draw_command_type(ty: &Type) -> bool {

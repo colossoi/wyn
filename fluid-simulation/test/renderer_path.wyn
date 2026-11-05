@@ -1,15 +1,15 @@
 -- Rendering-path check: expect two overlapping round particles, never square
 -- corners, with the nearer sphere surface winning even where its quad is behind.
--- A third particle is culled; compute must publish instance_count = 2 and IDs 0,1.
+-- All remaining particles are culled; compute publishes instance_count = 2 and IDs 0,1.
 -- Indices use a let binding as requested while repro_indexed_literal.wyn
 -- retains the inline-array graphics-planning failure.
 -- Regression check: python3 fluid-simulation/test/check_renderer_path.py
 -- Verified on SPIR-V after the 2026-10-07 indirect-draw compiler fix.
 -- Build: wyn build fluid-simulation/test/renderer_path.wyn --graphics -o /tmp/renderer-path.spv
--- Run: extra/viz/target/release/viz pipeline /tmp/renderer-path.spv --headless --size 64x64 --max-frames 1 --uniform shift:f32=0
-entry renderer_path(shift: f32, screen: render_target<vec4f32>)
+-- Run: extra/viz/target/release/viz pipeline /tmp/renderer-path.spv --headless --size 64x64 --max-frames 1 --uniform shift:f32=0 --uniform particle_count:i32=3
+entry renderer_path(particle_count: i32, shift: f32, screen: render_target<vec4f32>)
     (render_target<vec4f32>, []i32, u32) =
-  let ids = 0i32..<3 in
+  let ids = 0i32..<particle_count in
   let particles = map(|i|
     if i == 0 then @[-0.15 + shift, 0.0, 0.55, 0.4]
     else if i == 1 then @[0.15 + shift, 0.0, 0.45, 0.2]
@@ -17,8 +17,8 @@ entry renderer_path(shift: f32, screen: render_target<vec4f32>)
   let visible = map(|p| if abs(p.x) < 1.0 + p.w then 1i32 else 0i32, particles) in
   let offsets = scan(|a,b| a+b, 0i32, visible) in
   let destinations = map(|i| if visible[i] != 0 then offsets[i]-1 else -1i32, ids) in
-  let compacted = scatter(replicate(3, -1i32), destinations, ids) in
-  let count = u32.i32(offsets[2]) in
+  let compacted = scatter(replicate(particle_count, -1i32), destinations, ids) in
+  let count = u32.i32(offsets[particle_count-1]) in
   let indices = [0u32,1u32,2u32,2u32,1u32,3u32] in
   let command = {index_count = 6u32, instance_count = count, first_index = 0u32,
                  vertex_offset = 0i32, first_instance = 0u32} in

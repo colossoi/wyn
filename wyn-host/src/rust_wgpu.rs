@@ -287,6 +287,11 @@ impl Program {
                     _ => quote!(i64::from(#id.depth_or_array_layers())),
                 }
             }
+            Expr::Add(a, b) => {
+                let a = self.rust_expr(a, entry)?;
+                let b = self.rust_expr(b, entry)?;
+                quote!(support::arithmetic::add(#a,#b)?)
+            }
             Expr::Subtract(a, b) => {
                 let a = self.rust_expr(a, entry)?;
                 let b = self.rust_expr(b, entry)?;
@@ -557,14 +562,18 @@ impl Program {
             if let Operation::Loop {
                 pipeline,
                 region,
+                test,
                 body,
                 ..
             } = operation
             {
                 let repeated = &self.interface.dispatch_loops[*region];
-                resources.insert(self.scalar_resource(*pipeline, &repeated.current)?);
-                resources.insert(self.scalar_resource(*pipeline, &repeated.next)?);
+                for (current, next) in &repeated.carried {
+                    resources.insert(self.scalar_resource(*pipeline, current)?);
+                    resources.insert(self.scalar_resource(*pipeline, next)?);
+                }
                 self.loop_resources(body, resources)?;
+                self.loop_resources(test, resources)?;
             }
         }
         Ok(())
@@ -580,25 +589,46 @@ impl Program {
         let mut code = vec![];
         for (ordinal, operation) in operations.iter().enumerate() {
             code.push(match operation {
-                Operation::Loop { pipeline, region, setup, body } => {
+                Operation::Loop { pipeline, region, setup, test, body } => {
                     let repeated = &self.interface.dispatch_loops[*region];
-                    let current = resource(self.scalar_resource(*pipeline, &repeated.current)?);
-                    let next = resource(self.scalar_resource(*pipeline, &repeated.next)?);
-                    let index = resource(self.scalar_resource(*pipeline, &repeated.index)?);
-                    let count = self.rust_scalar(*pipeline, &repeated.count)?;
                     let setup = self.rust_operations(setup, entry, format, context)?;
+                    let test = self.rust_operations(test, entry, format, context)?;
                     let body = self.rust_operations(body, entry, format, context)?;
-                    quote!({
-                        #setup
-                        let iterations = #count;
-                        for iteration in 0..iterations {
-                            // Record the index upload between dispatches, so each
-                            // iteration observes its own value in a batched submission.
-                            support::write_buffer(device, encoder, &#index, 0, &(iteration as i32).to_le_bytes());
-                            #body
-                            std::mem::swap(&mut #current, &mut #next);
+                    let swaps = repeated.carried.iter().map(|(current, next)| {
+                        let current = self.scalar_resource(*pipeline, current)?;
+                        let next = self.scalar_resource(*pipeline, next)?;
+                        if current == next { return Ok(quote!()); }
+                        let current = resource(current);
+                        let next = resource(next);
+                        Ok(quote!(std::mem::swap(&mut #current, &mut #next);))
+                    }).collect::<Result<Vec<_>, HostError>>()?;
+                    match &repeated.control {
+                        crate::DispatchLoopControl::Counted { count, index } => {
+                            let count = self.rust_scalar(*pipeline, count)?;
+                            let index = resource(self.scalar_resource(*pipeline, index)?);
+                            quote!({
+                                #setup
+                                let iterations = #count;
+                                for iteration in 0..iterations {
+                                    support::write_buffer(device, encoder, &#index, 0, &(iteration as i32).to_le_bytes());
+                                    #body
+                                    #(#swaps)*
+                                }
+                            })
                         }
-                    })
+                        crate::DispatchLoopControl::While { condition } => {
+                            let condition = self.rust_scalar(*pipeline, condition)?;
+                            quote!({
+                                #setup
+                                loop {
+                                    #test
+                                    if !(#condition) { break; }
+                                    #body
+                                    #(#swaps)*
+                                }
+                            })
+                        }
+                    }
                 }
                 Operation::Scalar { pipeline, task } => {
                     self.rust_scalar_task(*pipeline, &self.interface.scalar_tasks[*task])?

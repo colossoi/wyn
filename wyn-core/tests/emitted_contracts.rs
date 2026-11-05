@@ -30,6 +30,88 @@ fn validate(module: naga::Module) {
 }
 
 #[test]
+fn output_copies_preserve_views_and_use_parallel_dispatches() {
+    let source = concat!(
+        include_str!("../../tests/compiler/library/output_copies.wyn"),
+        "\n",
+        include_str!("../../tests/compiler/library/output_copy_effects.wyn")
+    );
+    for (program, format) in host_outputs(source).into_iter().zip([ShaderFormat::Spirv, ShaderFormat::Wgsl])
+    {
+        let prefix = program.entries.iter().find(|entry| entry.name == "prefix").unwrap();
+        assert_eq!(prefix.results[0], *prefix.inputs.first().unwrap());
+        assert!(prefix.operations.is_empty());
+        for name in ["shifted", "produced", "mixed", "range", "compacted", "effects"] {
+            let entry = program.entries.iter().find(|entry| entry.name == name).unwrap();
+            let copies: Vec<_> = entry
+                .operations
+                .iter()
+                .filter_map(|op| {
+                    let Operation::Dispatch { pipeline, stage, .. } = op else {
+                        return None;
+                    };
+                    let Pipeline::Compute(pipeline) = &program.interface.pipelines[*pipeline] else {
+                        panic!()
+                    };
+                    let stage = &pipeline.stages[*stage];
+                    stage.entry_point.ends_with("_finish").then_some(stage)
+                })
+                .collect();
+            assert_eq!(copies.len(), 1, "{format:?}: {name}");
+            assert!(copies[0].workgroup_size.0 > 1, "{format:?}: {name}");
+        }
+        wyn_host_interp::Program::parse(&program.to_whl("copies", format).unwrap()).unwrap();
+        program.to_rust_wgpu("copies", format).unwrap();
+    }
+}
+
+#[test]
+fn runtime_renderer_publication_reaches_both_backends() {
+    host_outputs(include_str!("../../fluid-simulation/test/renderer_path.wyn"));
+}
+
+#[test]
+fn nested_component_copies_reach_both_backends() {
+    host_outputs(include_str!(
+        "../../tests/compiler/library/nested_component_copies.wyn"
+    ));
+}
+
+#[test]
+fn independent_entries_preserve_same_named_input_lengths() {
+    for (program, format) in host_outputs(
+        "entry first(xs:[33]i32) [33]i32 = scan((+),0,xs)
+         entry second(xs:[255]i32) [255]i32 = scan((+),0,xs)
+         entry third(xs:[33]i32) [33]i32 = map(|x|x+1,xs)",
+    )
+    .into_iter()
+    .zip([ShaderFormat::Spirv, ShaderFormat::Wgsl])
+    {
+        let mut inputs = Vec::new();
+        for (name, bytes) in [("first", 132), ("second", 1020), ("third", 132)] {
+            let entry = program.entries.iter().find(|entry| entry.name == name).unwrap();
+            assert_eq!(entry.inputs.len(), 1);
+            let input = *entry.inputs.first().unwrap();
+            assert!(
+                !inputs.contains(&input),
+                "{format:?}: independent entries alias {name}"
+            );
+            inputs.push(input);
+            let resource = &program.interface.frame_graph.resources[input.0];
+            assert_eq!(resource.name, "xs");
+            assert_eq!(
+                resource.extent,
+                Some(host::FrameResourceExtent::StorageBuffer {
+                    length: Some(BufferLen::Fixed { bytes })
+                })
+            );
+        }
+        wyn_host_interp::Program::parse(&program.to_whl("input_scopes", format).unwrap()).unwrap();
+        program.to_rust_wgpu("input_scopes", format).unwrap();
+    }
+}
+
+#[test]
 fn unrelated_compute_entries_preserve_graphics_inputs_and_resources() {
     for source in [
         include_str!("../../tests/compiler/library/graphics_entry_context_0.wyn"),
@@ -982,3 +1064,27 @@ fn push_constant_record_padding_precedes_the_next_parameter() {
 
 #[path = "support/source_contracts.rs"]
 mod source_contracts;
+#[test]
+fn graphics_entry_publishes_scalar_results_alongside_its_target() {
+    let source = r#"
+      entry result(flag: bool, target: render_target<vec4f32>)
+          (bool, render_target<vec4f32>) =
+        let fragments = rasterize_triangles(direct_draw(3u32, 1u32),
+          |_, _, _| vertex_output(@[0.0, 0.0, 0.0, 1.0], 0.5f32)) in
+        let image = shade(target, fragments, |v, _, _, _, _| @[v, v, v, 1.0]) in
+        (flag, image)
+    "#;
+    for target in ["spirv", "wgsl"] {
+        let host = host_outputs(source)
+            .into_iter()
+            .nth(usize::from(target == "wgsl"))
+            .unwrap()
+            .to_whl(
+                "graphics",
+                if target == "spirv" { ShaderFormat::Spirv } else { ShaderFormat::Wgsl },
+            )
+            .unwrap();
+        assert!(host.contains(":source-name \"result_0\""), "{host}");
+        assert!(host.contains(":value-layout :bool"), "{host}");
+    }
+}

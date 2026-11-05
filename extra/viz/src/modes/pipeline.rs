@@ -225,6 +225,8 @@ impl Runner {
     }
 
     pub fn run_frame(&mut self, frame: &Frame, screen: Option<Texture>) -> Result<()> {
+        let profile = std::env::var_os("WYN_GPU_PROFILE").is_some();
+        let start = std::time::Instant::now();
         if frame.width != self.width || frame.height != self.height {
             self.width = frame.width;
             self.height = frame.height;
@@ -271,6 +273,16 @@ impl Runner {
             retained.push(indices.clone());
         }
         self.backend.retain_resources(&retained);
+        if profile {
+            self.backend.flush();
+            self.backend.device.poll(wgpu::PollType::wait_indefinitely())?;
+            eprintln!(
+                "WYN_PROFILE_FRAME\t{}\t{}",
+                frame.index,
+                start.elapsed().as_nanos()
+            );
+            self.backend.profile_frame(frame.index)?;
+        }
         Ok(())
     }
 }

@@ -66,24 +66,49 @@ Revisit the sidecar if changing the authored result order.
 
 ## Validation
 
+Build a larger specialization without editing the source:
+
+```bash
+python fluid-simulation/build.py --particles 100000 --target wgsl
+python fluid-simulation/launch.py tmp/fluid-simulation/fluid.wgsl
+```
+
+The generated `.fluid.json` supplies feedback capacities. World dimensions grow
+with the preset so particle spacing stays constant. `--tree-capacity` overrides
+the default allocation; the `overflow` result reports insufficient spatial
+capacity. `run.sh` also accepts `--particles`, `--tree-capacity`, `--target` and
+`--gpu-cost-profile`.
+
+Tree allocation follows upstream's `24 * particles / (leaf_threshold + 1)`
+reserve, rounded up to whole sibling groups plus a sentinel, with at least the
+default scene's 4,097 slots. The simulation uses upstream's split-only update;
+merging is available but disabled in both simulation paths. A spatial overflow
+turns the particles red and stops advancing them. Rebuild older specializations
+to pick up the corrected capacity; the earlier 25k allocation was too small.
+
+Set `WYN_GPU_PROFILE=1` on a viewer invocation to inspect shader compilation,
+per-pass GPU timestamps and host readback waits directly.
+
 ```bash
 python3 fluid-simulation/test/check.py
 python3 fluid-simulation/test/check_neighbors_step.py
 python3 fluid-simulation/test/spatial_check.py
 python3 fluid-simulation/test/check_linked_neighbors.py
 python3 fluid-simulation/test/check_renderer_path.py
+python3 fluid-simulation/test/check_build.py
 ```
 
 Builds both shader targets and compares a headless GPU step with a Python
 reference, including interacting particles and collisions at both bounds.
-Both backends completed four headless frames at 320×240 with identical
-positions and velocities for 4,320 particles. A 120-frame WGSL run through
-block contact retained finite positions and velocities and kept particles
-inside the simulation bounds. This does not establish 100k-particle performance.
+On the RX 580, the complete 640×480 simulation runs at about 20 ms per frame
+for 4,320 particles and 184–196 ms for 100,000 particles across SPIR-V/WGSL.
+Both targets passed particle-count, finite-value, bounds and overflow checks
+through the full scaling ladder. See the
+[implementation and measured results](../docs/fluid-performance-implementation.md)
+for the sampling method, remaining costs and validation-layer limitation.
 
-GPU tests need access to the host GPU. A sandbox without GPU devices falls
-back to llvmpipe, where the 4097-slot octree can stall during pipeline creation.
-Check the selected adapter before interpreting that timeout as a compiler failure.
+GPU tests need access to the host GPU. Check the selected adapter before
+interpreting performance results.
 
 The checks use this checkout's release compiler and viewer by default. Set
 `WYN` and `VIZ` to test alternate builds (for example, `target/debug/wyn` and
