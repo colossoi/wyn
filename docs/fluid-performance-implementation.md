@@ -625,3 +625,63 @@ production lines. The branch adds 2,506 net compiler production lines relative
 to `342d62f9`, including this patch: 2,306 in `wyn-core`, 156 in host IR/code
 generation and 44 in the compiler CLI. Runtime, fluid code, documentation,
 configuration and harnesses are excluded from these counts.
+
+## 2026-11-04: select output layouts before creating dispatches
+
+Direct tiled output was selected after the scheduling preparation pass had
+already created the gather's dispatch. Egglog retains those phase and demand
+facts when the later layout decision sets `ElideElements`: selecting direct
+stores did not retract the gather or its row-buffer requirement. The simulator
+therefore wrote both layouts and launched another kernel to repeat the tiled
+stores.
+
+Output-layout selection now runs after shapes and representations settle and
+before scheduling creates phases. This moves the existing Egglog pass; it adds
+no Rust logic, backend rule or new representation. Unobserved rows no longer
+need storage. Ordinary row consumers retain their allocation, and incomplete
+tiles retain the existing gather and padding. The planning regression now
+checks dispatch absence and allocation demand as well as layout selection,
+with mapped/reduced metadata, retained rows and incomplete tiles.
+
+At 100k particles, the generated simulator drops from 69 to 68 compute entry
+points and removes the 39.2 MB `[100000][98]i32` buffer. Its row writes and the
+gather's 96-column reads accounted for 77.6 MB of duplicate traffic per frame.
+The private array inside each neighbor query remains; this change removes its
+unnecessary global publication and subsequent gather.
+
+Paired RX580 measurements compare `5c9ca0fb` with this patch, including 640x480
+rendering. Each run uses 25 frames and discards five; two batches reverse case
+and variant order, yielding 40 measured frames per variant. The demo, builds
+and other GPU checks were stopped during timing. Positions and velocities
+match bit for bit in all eight pairs, and count, finite-value, bounds and
+spatial-index overflow checks pass.
+
+| Particles | SPIR-V before → after | Speedup | WGSL before → after | Speedup |
+| --- | --- | --- | --- | --- |
+| 25,000 | 13.45 → 13.33 ms | 1.01x | 13.29 → 13.20 ms | 1.01x |
+| 100,000 | 25.58 → 20.26 ms | 1.26x | 25.19 → 20.67 ms | 1.22x |
+
+The first 100k SPIR-V pair's neighbor-construction kernel falls from 5.52 to
+1.47 ms, and the 0.54 ms gather disappears. The padded 25k case retains the
+fallback and shows no meaningful change. Both shader formats rebuild at
+4,320, 25k and 100k; all three SPIR-V modules pass `spirv-val`.
+
+A separate unprofiled SPIR-V comparison at 1920x1080 runs 600 frames per
+version. Elapsed time falls from 16.16 to 13.23 seconds including startup,
+or 37.1 to 45.3 fps. Final positions and velocities are bit-identical, with
+no spatial-index overflow. This measures offscreen throughput, not window
+presentation pacing.
+
+This patch adds one net compiler production line (the moved rule invocation
+and its explanation), excluding tests and documentation. Temporary measurements
+and tools remain excluded under `tmp/output-layout-perf`; gate records are
+under `tmp/output-layout-gates`.
+
+All 25 full gate commands and 12 GPU gate commands pass: formatting, release
+workspace build, 1,540 workspace tests (14 ignored), clippy, nine standalone
+crate builds/tests, wasm32, and shader validation (123 SPIR-V; 122 WGSL with
+the existing miner skip). GPU coverage includes dispatch loops, collectives,
+output copies, fluid numerical/oracle checks, tiled outputs with retained rows
+and padding, native subgroups, rendering and 17 runtime tests. GPU execution
+retains the existing viewer-layer validation exception; compiler SPIR-V and
+Naga validation remain enabled.

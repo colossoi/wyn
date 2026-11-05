@@ -1,6 +1,5 @@
 ; Finish scheduling after Rust selects collective launch sizes.
 (run-schedule (seq
-    (saturate output-layouts)
     (saturate integer-bounds) (run capacity-select)
     (saturate (seq (run residency) (run representations) (run schedule) (saturate integer-bounds) (run capacity-select) (run allocation) (run dispatch)))
     (run runtime-representations) (saturate representations)

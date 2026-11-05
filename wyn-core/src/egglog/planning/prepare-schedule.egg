@@ -16,5 +16,7 @@
     (saturate capacity-identities)
     (saturate type-layouts)
     (saturate (seq residency representations))
+    ; Settle output mappings before schedule creates irreversible phase/demand facts.
+    (saturate output-layouts)
     (saturate collective-costs)
     (saturate schedule)))

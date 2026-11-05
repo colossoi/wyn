@@ -1402,23 +1402,47 @@ fn subgroup_addition_is_opt_in_and_uses_small_segments() {
 fn tiled_outputs_require_complete_tiles_and_preserve_other_consumers() {
     for (count, fused) in [(8, true), (7, false)] {
         for reduced in [false, true] {
-            let metadata = if reduced { "reduce((+),0,map(|r|r[2],rows))" } else { "map(|r|r[2],rows)" };
-            let metadata_type = if reduced { "i32".to_string() } else { format!("[{count}]i32") };
-            let source = format!("def row(i:i32) [3]i32 = [i,i+1,i+2]
-                entry main() ([16]i32,{metadata_type}) =
+            for retained in [false, true] {
+                let metadata =
+                    if reduced { "reduce((+),0,map(|r|r[2],rows))" } else { "map(|r|r[2],rows)" };
+                let metadata_type = if reduced { "i32".to_string() } else { format!("[{count}]i32") };
+                let row_type = if retained { format!(",[{count}][3]i32") } else { String::new() };
+                let row_result = if retained { ",rows" } else { "" };
+                let source = format!("def row(i:i32) [3]i32 = [i,i+1,i+2]
+                entry main() ([16]i32,{metadata_type}{row_type}) =
                 let rows = map(row,iota({count})) in
-                (map(|a|let i=(a/8)*4+a%4 in if i<length(rows) then rows[i][(a%8)/4] else -1,iota(16)), {metadata})");
-            planned(&source, |graph| {
-                let query = Query(graph);
-                let mut destinations = 0;
-                query
-                    .for_function("TiledOutputs", |_, _| {
-                        destinations += 1;
-                        Ok(())
-                    })
-                    .unwrap();
-                assert_eq!(destinations, usize::from(fused), "{source}");
-            });
+                (map(|a|let i=(a/8)*4+a%4 in if i<length(rows) then rows[i][(a%8)/4] else -1,iota(16)), {metadata}{row_result})");
+                planned(&source, |graph| {
+                    let query = Query(graph);
+                    let mut destinations = 0;
+                    query
+                        .for_function("TiledOutputs", |_, _| {
+                            destinations += 1;
+                            Ok(())
+                        })
+                        .unwrap();
+                    assert_eq!(destinations, usize::from(fused), "{source}");
+                    query
+                        .for_each("TiledOutput", |row| {
+                            let producer = row[0];
+                            let slot = row[1];
+                            let gather = row[2];
+                            query.for_each("KernelPhase", |phase| {
+                                assert_ne!(phase[0], gather, "tiled gather must not launch: {source}");
+                                Ok(())
+                            })?;
+                            let result = query.constructor("Result", (producer, slot))?.unwrap();
+                            let mut allocated = false;
+                            query.for_each("Allocation", |allocation| {
+                                allocated |= allocation[0] == result;
+                                Ok(())
+                            })?;
+                            assert_eq!(allocated, retained, "only observed rows allocate: {source}");
+                            Ok(())
+                        })
+                        .unwrap();
+                });
+            }
         }
     }
 }
