@@ -1,7 +1,9 @@
 //! Shared structural flow analysis; arithmetic remains in TLC.
 pub(crate) mod control;
 use super::query::Query;
-use crate::tlc::{self, ArrayExpr, LoopKind, Payload, SoacOp, Term, TermId, TermKind, VarRef};
+use crate::tlc::{
+    self, ArrayExpr, LoopKind, Payload, SoacOp, Term, TermId, TermKind, VarRef, WalkDecision,
+};
 use crate::{LookupMap, LookupSet, StableMap, SymbolId};
 pub(crate) use egglog_engine::Value;
 use egglog_engine::{EGraph, FullState, IntoValues, RawValues, Write};
@@ -158,6 +160,23 @@ impl Dataflow {
         }
     }
 
+    pub fn resolve_projection(&self, symbol: SymbolId, path: &[usize]) -> SymbolPath {
+        self.binding_origin(symbol, path).map_or_else(
+            || (symbol, path.to_vec()),
+            |origin| (origin.producer, origin.path),
+        )
+    }
+
+    pub fn capture_sources<C: Payload, S: Payload>(
+        &self,
+        term: &Term<C, S>,
+    ) -> LookupMap<SymbolPath, LookupSet<SymbolPath>> {
+        let mut sources = LookupMap::<_, LookupSet<_>>::default();
+        for (symbol, path) in reference_paths(term) {
+            sources.entry(self.resolve_projection(symbol, &path)).or_default().insert((symbol, path));
+        }
+        sources
+    }
     pub fn binding_origin(&self, symbol: SymbolId, fields: &[usize]) -> Option<Origin> {
         self.origin(self.bindings.get(&symbol)?.value, fields)
     }
@@ -367,6 +386,40 @@ impl Dataflow {
     }
 }
 
+/// Exact symbol/field occurrences, before semantic forwarding is resolved.
+pub(crate) type SymbolPath = (SymbolId, Vec<usize>);
+
+pub(crate) fn projected_symbol_path<C: Payload, S: Payload>(term: &Term<C, S>) -> Option<SymbolPath> {
+    match &term.kind {
+        TermKind::Var(VarRef::Symbol(symbol)) => Some((*symbol, vec![])),
+        TermKind::TupleProj { tuple, idx } => {
+            let (symbol, mut path) = projected_symbol_path(tuple)?;
+            path.push(*idx);
+            Some((symbol, path))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn reference_paths<C: Payload, S: Payload>(term: &Term<C, S>) -> Vec<SymbolPath> {
+    let mut references = Vec::new();
+    term.walk(&mut |term: &Term<C, S>| {
+        if let Some(path) = projected_symbol_path(term) {
+            references.push(path);
+            return WalkDecision::Prune;
+        }
+        if let TermKind::Soac(
+            SoacOp::Scatter { dest, .. }
+            | SoacOp::BucketScatter { dest, .. }
+            | SoacOp::ReduceByIndex { dest, .. },
+        ) = &term.kind
+        {
+            references.push((dest.id, vec![]));
+        }
+        WalkDecision::Recurse
+    });
+    references
+}
 #[cfg(test)]
 #[path = "dataflow_tests.rs"]
 mod tests;

@@ -17,7 +17,7 @@ use super::{
 use crate::ast;
 use crate::ast::Span;
 use crate::builtins;
-use crate::egglog::dataflow::{Dataflow, Origin};
+use crate::egglog::dataflow::{projected_symbol_path, reference_paths, Dataflow, Origin};
 use crate::err_type_at;
 use crate::error;
 use crate::host;
@@ -948,25 +948,6 @@ fn direct_symbol(term: &Term) -> Option<SymbolId> {
     }
 }
 
-fn projected_symbol_path(term: &Term) -> Option<(SymbolId, Vec<usize>)> {
-    match &term.kind {
-        TermKind::Var(VarRef::Symbol(symbol)) => Some((*symbol, vec![])),
-        TermKind::TupleProj { tuple, idx } => {
-            let (symbol, mut path) = projected_symbol_path(tuple)?;
-            path.push(*idx);
-            Some((symbol, path))
-        }
-        _ => None,
-    }
-}
-
-fn resolve_projection(symbol: SymbolId, suffix: &[usize], origins: &Dataflow) -> (SymbolId, Vec<usize>) {
-    let Some(origin) = origins.binding_origin(symbol, suffix) else {
-        return (symbol, suffix.to_vec());
-    };
-    (origin.producer, origin.path)
-}
-
 fn is_render_target_type(ty: &Type) -> bool {
     matches!(ty, Type::Constructed(TypeName::RenderTarget, _))
 }
@@ -1194,7 +1175,7 @@ fn draw_buffer_source(
     values: &Dataflow,
 ) -> Option<interface::DrawBufferOperand> {
     let (symbol, path) = projected_symbol_path(array)?;
-    let (symbol, path) = resolve_projection(symbol, &path, values);
+    let (symbol, path) = values.resolve_projection(symbol, &path);
     if path.is_empty() {
         if let Some((index, _)) =
             root_lambda.params.iter().enumerate().find(|(_, (candidate, _))| *candidate == symbol)
@@ -1531,8 +1512,8 @@ fn stage_captures(
     // conversion's scope-aware free-variable analysis for its logical capture
     // set; representation lowering below decides how each typed capture crosses
     // the stage ABI.
-    let bound = callback.params.iter().map(|(symbol, _)| *symbol).collect();
-    let used = captured_symbols(callback_values, &bound);
+    let bound: LookupSet<_> = callback.params.iter().map(|(symbol, _)| *symbol).collect();
+    let used = callback_values.free_symbols().filter(|symbol| !bound.contains(symbol)).collect();
     let mut params = Vec::new();
     let mut declarations = Vec::new();
     let mut substitutions = LookupMap::new();
@@ -1565,22 +1546,6 @@ fn stage_captures(
         &mut target_reads,
     )?;
     Some((params, declarations, substitutions, target_reads))
-}
-
-fn captured_symbols(values: &Dataflow, bound: &LookupSet<SymbolId>) -> LookupSet<SymbolId> {
-    values.free_symbols().filter(|symbol| !bound.contains(symbol)).collect()
-}
-
-fn referenced_symbols(term: &Term) -> LookupSet<SymbolId> {
-    let mut referenced = LookupSet::new();
-    let mut visitor = |term: &Term| {
-        if let TermKind::Var(VarRef::Symbol(symbol)) = term.kind {
-            referenced.insert(symbol);
-        }
-        WalkDecision::Recurse
-    };
-    visitor.walk(term);
-    referenced
 }
 
 fn root_parameter_binding(param: &interface::EntryParamDecl) -> Option<u32> {
@@ -1636,26 +1601,7 @@ fn append_computed_captures(
     declarations: &mut Vec<interface::EntryParamDecl>,
     substitutions: &mut ExternalSubstitutions,
 ) {
-    let mut used_sources = LookupMap::<(SymbolId, Vec<usize>), LookupSet<(SymbolId, Vec<usize>)>>::new();
-    let mut visitor = |term: &Term| {
-        // Indexed destinations are symbol references outside the child-term tree.
-        if let TermKind::Soac(
-            SoacOp::Scatter { dest, .. }
-            | SoacOp::BucketScatter { dest, .. }
-            | SoacOp::ReduceByIndex { dest, .. },
-        ) = &term.kind
-        {
-            let resolved = resolve_projection(dest.id, &[], values);
-            used_sources.entry(resolved).or_default().insert((dest.id, vec![]));
-        }
-        if let Some((symbol, path)) = projected_symbol_path(term) {
-            let resolved = resolve_projection(symbol, &path, values);
-            used_sources.entry(resolved).or_default().insert((symbol, path));
-            return WalkDecision::Prune;
-        }
-        WalkDecision::Recurse
-    };
-    visitor.walk(body);
+    let used_sources = values.capture_sources(body);
 
     for value in computed {
         for leaf in &value.leaves {
@@ -1839,7 +1785,7 @@ fn build_compute_stage(
     term_ids: &mut TermIdSource,
 ) -> Option<Def<UnpinnedPolymorphic>> {
     let (body_values, _) = Dataflow::build(operation.rhs);
-    let used = captured_symbols(&body_values, &LookupSet::new());
+    let used = body_values.free_symbols().collect();
     let mut params = Vec::new();
     let mut declarations = Vec::new();
     let mut substitutions = LookupMap::new();
@@ -2103,7 +2049,7 @@ impl TermRewriter<data::Empty, data::Empty> for ExternalValueRewriter<'_> {
         let removable = matches!(
             &term.kind,
             TermKind::Let { name, name_ty, rhs, body }
-                if !referenced_symbols(body).contains(name)
+                if !reference_paths(body).iter().any(|(symbol, _)| symbol == name)
                     && (is_render_target_type(name_ty)
                         || (self.target_bindings.contains(name)
                             && is_trivially_discardable_value(rhs)))
@@ -2451,7 +2397,7 @@ fn build_vertex_stage(
                 .collect(),
         )
     };
-    let used = captured_symbols(callback_values, &LookupSet::new());
+    let used: LookupSet<_> = callback_values.free_symbols().collect();
     let mut invocation_params = Vec::new();
     let mut invocation_decls = Vec::new();
     for (index, (symbol, ty)) in callback.params.iter().enumerate() {
@@ -2703,7 +2649,7 @@ fn build_fragment_stage(
         fragment_output_color_type(&callback.ret_ty).filter(|color| *color == target_color_ty)
     };
     let has_fragment_output = fragment_output.is_some();
-    let referenced = captured_symbols(callback_values, &LookupSet::new());
+    let referenced: LookupSet<_> = callback_values.free_symbols().collect();
     let mut used: Vec<_> = callback.params.iter().map(|(symbol, _)| referenced.contains(symbol)).collect();
     if has_fragment_output {
         used[1] = true;

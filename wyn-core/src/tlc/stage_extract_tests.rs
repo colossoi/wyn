@@ -118,10 +118,10 @@ fn stage_bindings(source: &str) -> Vec<StageBindings> {
                 panic!("stage lambda")
             };
             let (values, _) = Dataflow::build(&lambda.body);
-            let used = captured_symbols(&values, &LookupSet::new());
-            let bound = lambda.params.iter().map(|(symbol, _)| *symbol).collect();
+            let used: LookupSet<_> = values.free_symbols().collect();
+            let bound: LookupSet<_> = lambda.params.iter().map(|(symbol, _)| *symbol).collect();
             assert!(
-                captured_symbols(&values, &bound).is_empty(),
+                values.free_symbols().all(|symbol| bound.contains(&symbol)),
                 "{} retains a capture that is not a stage parameter",
                 entry.declaration.name
             );
