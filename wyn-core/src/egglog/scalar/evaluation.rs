@@ -111,83 +111,63 @@ impl Evaluation {
         }));
         pending.extend(self.shared.values().flatten().map(|(t, _)| vec![*t]));
         pending.extend(self.before.values().flatten().map(|t| vec![*t]));
-        while !pending.is_empty() {
-            let requests_time = timing::span("egglog anchors / import requests");
-            let mut requests = Vec::new();
-            for roots in std::mem::take(&mut pending) {
-                if self.schedules.contains_key(&roots) {
+        let _timing = timing::span("egglog anchors / schedule requests");
+        while let Some(roots) = pending.pop() {
+            if self.schedules.contains_key(&roots) {
+                continue;
+            }
+            let mut result = Ok(());
+            let mut order = dag_postorder(
+                roots.iter().copied(),
+                |_| false,
+                |term, out| {
+                    if !matches!(selected.dag.get(term), Term::App(name, _) if name == "ExprLeaf") {
+                        if result.is_ok() {
+                            result = evaluation_operands(graph, term).map(|children| out.extend(children));
+                        }
+                    }
+                },
+            );
+            result?;
+            let reorderable = roots.iter().all(|t| self.readonly[*t]);
+            let group =
+                |term: TermId| ordering[term].1.map(|condition| if reorderable { condition } else { term });
+            let mut groups = LookupMap::<_, Vec<_>>::default();
+            for &term in &order {
+                if let Some(group) = group(term) {
+                    groups.entry(group).or_default().push(term);
+                }
+            }
+            if reorderable {
+                order.sort_by_key(|t| ordering[*t].0);
+            }
+            let mut schedule = Vec::new();
+            for term in order {
+                let (name, _) = selected.app(term)?;
+                if matches!(name, "ExprCons" | "ExprNil") {
                     continue;
                 }
-                self.schedules.insert(roots.clone(), Vec::new());
-                let mut result = Ok(());
-                let order = dag_postorder(
-                    roots.iter().copied(),
-                    |_| false,
-                    |term, out| {
-                        if !matches!(selected.dag.get(term), Term::App(name, _) if name == "ExprLeaf") {
-                            if result.is_ok() {
-                                result =
-                                    evaluation_operands(graph, term).map(|children| out.extend(children));
-                            }
-                        }
-                    },
-                );
-                result?;
-                requests.push((roots, order));
-            }
-            if std::env::var_os("WYN_EGGLOG_PROFILE").is_some() {
-                let memberships: usize = requests.iter().map(|(_, order)| order.len()).sum();
-                let terms: LookupSet<_> = requests.iter().flat_map(|(_, order)| order.iter()).collect();
-                eprintln!(
-                    "egglog anchor facts: {} requests, {memberships} memberships, {} distinct terms",
-                    requests.len(),
-                    terms.len()
-                );
-            }
-            drop(requests_time);
-            let _readout = timing::span("egglog anchors / read schedules");
-            for (roots, mut order) in requests {
-                let reorderable = roots.iter().all(|t| self.readonly[*t]);
-                let group = |term: TermId| {
-                    ordering[term].1.map(|condition| if reorderable { condition } else { term })
-                };
-                let mut groups = LookupMap::<_, Vec<_>>::default();
-                for &term in &order {
-                    if let Some(group) = group(term) {
-                        groups.entry(group).or_default().push(term);
-                    }
-                }
-                if reorderable {
-                    order.sort_by_key(|t| ordering[*t].0);
-                }
-                let mut schedule = Vec::new();
-                for term in order {
-                    let (name, _) = selected.app(term)?;
-                    if matches!(name, "ExprCons" | "ExprNil") {
+                let terms = if let Some(group) = group(term) {
+                    let Some(terms) = groups.remove(&group) else {
                         continue;
-                    }
-                    let terms = if let Some(group) = group(term) {
-                        let Some(terms) = groups.remove(&group) else {
-                            continue;
-                        };
-                        let arms = [3, 4].map(|arm| {
-                            terms
-                                .iter()
-                                .map(|t| selected.app(*t).map(|(_, f)| f[arm]))
-                                .collect::<Result<Vec<_>, _>>()
-                        });
-                        let [yes, no] = arms;
-                        let (yes, no) = (yes?, no?);
-                        self.plan_common(yes.clone(), no.clone());
-                        pending.extend([yes, no]);
-                        terms
-                    } else {
-                        vec![term]
                     };
-                    schedule.push(terms);
-                }
-                self.schedules.insert(roots, schedule);
+                    let arms = [3, 4].map(|arm| {
+                        terms
+                            .iter()
+                            .map(|t| selected.app(*t).map(|(_, f)| f[arm]))
+                            .collect::<Result<Vec<_>, _>>()
+                    });
+                    let [yes, no] = arms;
+                    let (yes, no) = (yes?, no?);
+                    self.plan_common(yes.clone(), no.clone());
+                    pending.extend([yes, no]);
+                    terms
+                } else {
+                    vec![term]
+                };
+                schedule.push(terms);
             }
+            self.schedules.insert(roots, schedule);
         }
         Ok(())
     }

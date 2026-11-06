@@ -66,7 +66,7 @@ fn work(name: &str) -> u64 {
 }
 
 /// Extract all demanded roots together so egglog reconstructs shared terms once.
-/// Candidate DAGs are temporary; only selected reachable terms enter the output.
+/// Full optimization copies only the chosen candidates into the output DAG.
 pub(super) fn select(
     graph: &mut EGraph,
     roots: &[Value],
@@ -116,16 +116,8 @@ pub(super) fn select(
     // DAGs exposes sharing hidden behind calls without expanding alternatives.
     let (compact, compact_roots) = extract(false)?;
     if policy == ScalarOptimization::Basic {
-        let _copy = timing::span("egglog scalar / copy selected DAG");
-        // Keep only reachable expression terms, excluding the synthetic output
-        // vector. Placement resolves every retained term as an engine enode.
-        let mut dag = TermDag::default();
-        let mut copied = LookupMap::default();
-        let roots = compact_roots
-            .into_iter()
-            .map(|root| copy_term(&compact, root, &mut dag, &mut copied))
-            .collect();
-        return Ok((dag, roots));
+        // The output vector is a container, not an executable expression.
+        return Ok((compact, compact_roots));
     }
     let (inlined, inlined_roots) = extract(true)?;
     let _choose = timing::span("egglog scalar / compare and copy DAGs");
