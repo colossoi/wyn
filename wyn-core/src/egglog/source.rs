@@ -44,7 +44,6 @@ pub(super) fn import(source: &OwnershipApplied) -> Result<(EGraph, Identities<'_
         let mut import = Import {
             sink,
             identities: &mut identities,
-            definitions: source.defs.iter().map(|d| (d.name, &d.body)).collect(),
             globals: source.defs.iter().map(|definition| definition.name).collect(),
             bindings: Bindings::default(),
             regions: IdSource::new(),
@@ -105,7 +104,6 @@ struct Import<'graph, 'db, 'ids, 'source> {
     sink: FullState<'graph, 'db>,
     identities: &'ids mut Identities<'source>,
     globals: LookupSet<SymbolId>,
-    definitions: LookupMap<SymbolId, &'source Term>,
     bindings: Bindings<SymbolId, Value>,
     regions: IdSource<i64>,
     operations: IdSource<i64>,

@@ -144,7 +144,6 @@
        (= (SourceOperation original) (OperationInfo r kind)) (!= kind "scatter"))
       ((UpdatedResult owner 0 destination) (set (ContainsCollective owner) true)) :ruleset planning-import)
 (rule ((PlannedOperation original owner plan region) (= (SourceOperation original) (OperationInfo r "scatter")) (= scans (HasScans plan))) ((IndexedWrite owner scans)) :ruleset planning-import)
-(rule ((PlannedOperation original owner plan region) (SourceIndexedReducer original safe update)) ((IndexedReducer owner safe update)) :ruleset planning-import)
 (rule ((PlannedOperation original owner plan region) (= (SourceOperation original) (OperationInfo r "bucket-scatter"))
        (= destination (SourceDestination original))
        (SourceKnownBucketDomain original known)) ((BucketResult owner destination) (BucketShape owner known)) :ruleset planning-import)

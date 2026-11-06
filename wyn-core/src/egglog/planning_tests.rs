@@ -1256,6 +1256,35 @@ fn runtime_segmented_collectives_require_uniform_dimensions() {
 }
 
 #[test]
+fn indexed_reducers_share_native_recognition_and_keep_cas_fallback() {
+    for (reducer, expected) in [
+        ("|a:i32,b:i32|a+b", "AtomicAdd"),
+        ("|a:i32,b:i32|b+a", "AtomicAdd"),
+        ("|a:i32,b:i32|a&b", "AtomicAnd"),
+        ("|a:i32,b:i32|a|b", "AtomicOr"),
+        ("|a:i32,b:i32|a^b", "AtomicXor"),
+        ("|a:i32,b:i32|a+a", "AtomicCas"),
+        ("|a:i32,b:i32|a-b", "AtomicCas"),
+        ("|a:i32,b:i32|a+b+k", "AtomicCas"),
+        ("|a:i32,b:i32|let unused=1/k in a+b", "AtomicCas"),
+        ("(+)", "AtomicAdd"),
+        ("combine", "AtomicAdd"),
+    ] {
+        let source = format!("def combine(a:i32,b:i32) i32 = a+b\nentry main(dest:*[3]i32,xs:[5]i32,k:i32) [3]i32 = reduce_by_index(dest,{reducer},0,map(|x:i32|x%3,xs),xs)");
+        planned(&source, |graph| {
+            let query = Query(graph);
+            let row = query.row("IndexedReducer", |_| true).unwrap().unwrap();
+            assert!(
+                query.enode(expected, row[2]).unwrap().is_some(),
+                "{reducer}: {expected}"
+            );
+            let recipe = query.record("Plan", "Atomic", (row[0],)).unwrap().unwrap();
+            assert_eq!(recipe[0], row[2], "{reducer}");
+        });
+    }
+}
+
+#[test]
 fn subgroup_addition_is_opt_in_and_uses_small_segments() {
     let tlc =
         compile_thru_tlc("entry main(xs:[4][32]u32) [4][32]u32 = map(|row|scan((+),0u32,row),xs)").unwrap();

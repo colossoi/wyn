@@ -1,12 +1,11 @@
 //! Structural TLC metadata consumed by the retained placement rules.
-use super::{Import, OperatorBody};
+use super::Import;
 use crate::egglog::OptimizeError;
 use crate::interface::{EntryParamBinding, EntryParamBindingKind};
-use crate::op::BinaryOperator;
 use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
-use crate::tlc::{SoacOp, TermKind, VarRef};
+use crate::tlc::SoacOp;
 use crate::types::{Type, TypeExt, TypeName};
-use egglog_engine::{RawValues, Value, Write};
+use egglog_engine::{Value, Write};
 
 impl Import<'_, '_, '_, '_> {
     pub(super) fn entry_binding(&mut self, binding: &EntryParamBinding) -> Result<(), OptimizeError> {
@@ -59,13 +58,12 @@ impl Import<'_, '_, '_, '_> {
         soac: &SoacOp<ExplicitClosurePayload, ExplicitCapturesPayload>,
     ) -> Result<(), OptimizeError> {
         match soac {
-            SoacOp::ReduceByIndex { dest, op, .. } => {
+            SoacOp::ReduceByIndex { dest, .. } => {
                 let safe = matches!(
                     &dest.elem_ty,
                     Type::Constructed(TypeName::Int(32) | TypeName::UInt(32), _)
                 );
-                let update = self.sink.add(reducer_operator(op, &self.definitions), RawValues(vec![]))?;
-                self.sink.add("SourceIndexedReducer", (operation, safe, update))?;
+                self.sink.add("SourceIndexedReducer", (operation, safe))?;
             }
             SoacOp::BucketScatter {
                 inputs,
@@ -122,51 +120,6 @@ impl Import<'_, '_, '_, '_> {
             | SoacOp::Scatter { .. } => {}
         }
         Ok(())
-    }
-}
-
-fn reducer_operator(
-    body: &OperatorBody,
-    definitions: &crate::LookupMap<crate::SymbolId, &super::Term>,
-) -> &'static str {
-    let (term, parameters) = if let TermKind::Var(VarRef::Symbol(symbol)) = body.lam.body.kind {
-        let Some(definition) = definitions.get(&symbol) else {
-            return "AtomicCas";
-        };
-        crate::tlc::extract_lambda_params_ref(definition)
-    } else {
-        (body.lam.body.as_ref(), body.lam.params.clone())
-    };
-    let [a, b] = parameters.as_slice() else {
-        return "AtomicCas";
-    };
-    let TermKind::App { func, args } = &term.kind else {
-        return "AtomicCas";
-    };
-    let [left, right] = args.as_slice() else {
-        return "AtomicCas";
-    };
-    let (TermKind::Var(VarRef::Symbol(left)), TermKind::Var(VarRef::Symbol(right))) =
-        (&left.kind, &right.kind)
-    else {
-        return "AtomicCas";
-    };
-    if !body.data.captures.is_empty()
-        || left == right
-        || ![a.0, b.0].contains(left)
-        || ![a.0, b.0].contains(right)
-    {
-        return "AtomicCas";
-    }
-    let TermKind::BinOp(operator) = &func.kind else {
-        return "AtomicCas";
-    };
-    match operator.op {
-        BinaryOperator::Add => "AtomicAdd",
-        BinaryOperator::BitwiseAnd => "AtomicAnd",
-        BinaryOperator::BitwiseOr => "AtomicOr",
-        BinaryOperator::BitwiseXor => "AtomicXor",
-        _ => "AtomicCas",
     }
 }
 

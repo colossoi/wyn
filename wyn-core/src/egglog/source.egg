@@ -90,7 +90,7 @@
 (relation SourceBlockLayout (TypeKey i64 i64))
 (datatype LoopForm (ForCount SourceValue TypeKey) (ForEach SourceValue) (WhileCondition SourceValue))
 (function SourceLoopForm (SourceValue) LoopForm :no-merge)
-(relation SourceIndexedReducer (OperationKey bool AtomicUpdate))
+(relation SourceIndexedReducer (OperationKey bool))
 (function SourceDomainRank (OperationKey) i64 :no-merge)
 (function SourceDomainAxis (OperationKey i64) Extent :no-merge)
 (relation SourceDomainInputAxis (OperationKey i64 i64))
