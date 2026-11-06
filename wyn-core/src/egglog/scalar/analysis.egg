@@ -29,7 +29,7 @@
 (rule ((ExprContextActive ctx) (= xs (ExprCons ctx x tail)) (= a (ExprReadOnly x)) (= b (ExprArgsReadOnly tail))) ((set (ExprArgsReadOnly xs) (and a b))) :ruleset scalar-effects)
 (rule ((ExprContextActive ctx) (= e (ExprInstruction ctx t source op args)) (= a (SourceReadOnly source)) (= b (ExprArgsReadOnly args))) ((set (ExprReadOnly e) (and a b))) :ruleset scalar-effects)
 (rule ((ExprContextActive ctx) (= e (ExprCall ctx t source region args)) (= a (SourceReadOnly source)) (= b (ExprArgsReadOnly args))) ((set (ExprReadOnly e) (and a b))) :ruleset scalar-effects)
-(rule ((ExprContextActive ctx) (= e (ExprInvoke ctx t region args)) (= a (SourceRegionReadOnly region)) (= b (ExprArgsReadOnly args))) ((set (ExprReadOnly e) (and a b))) :ruleset scalar-effects)
+(rule ((ExprContextActive ctx) (= e (ExprInvoke ctx t region args)) (= a (SourceReadOnly (FlowRegion region))) (= b (ExprArgsReadOnly args))) ((set (ExprReadOnly e) (and a b))) :ruleset scalar-effects)
 (rule ((ExprContextActive ctx) (= e (ExprUnary ctx t op x)) (= readonly (ExprReadOnly x))) ((set (ExprReadOnly e) readonly)) :ruleset scalar-effects)
 (rule ((ExprContextActive ctx) (= e (ExprBinary ctx t op x y)) (= a (ExprReadOnly x)) (= b (ExprReadOnly y))) ((set (ExprReadOnly e) (and a b))) :ruleset scalar-effects)
 (rule ((ExprContextActive ctx) (= e (ExprOp ctx t op xs)) (= readonly (ExprArgsReadOnly xs))) ((set (ExprReadOnly e) readonly)) :ruleset scalar-effects)

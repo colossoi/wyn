@@ -91,7 +91,8 @@ fn evaluation_edges_stay_direct_and_borrowed_values_do_not_repeat_effects() {
             !Query(&graph).flag("SourceReadOnly", (root,)).unwrap(),
             "evaluating must propagate effects"
         );
-        assert!(!Query(&graph).flag("SourceRegionReadOnly", (region,)).unwrap());
+        let region = Query(&graph).constructor("FlowRegion", region).unwrap().unwrap();
+        assert!(!Query(&graph).flag("SourceReadOnly", (region,)).unwrap());
     }
 }
 
@@ -105,11 +106,12 @@ fn indexed_write_effects_distinguish_owned_arrays_from_views() {
         let query = Query(&graph);
         let entry = query.row("SourceOriginalEntry", |_| true).unwrap().unwrap()[1];
         let result = query.required("SourceResult", (entry,)).unwrap();
+        let region = query.constructor("FlowRegion", entry).unwrap().unwrap();
         for (table, key, expected) in [
             ("SourceReadOnly", result, readonly),
-            ("SourceRegionReadOnly", entry, readonly),
+            ("SourceReadOnly", region, readonly),
             ("SourceSpeculatable", result, false),
-            ("SourceRegionSpeculatable", entry, false),
+            ("SourceSpeculatable", region, false),
         ] {
             let value = query.required(table, (key,)).unwrap();
             assert_eq!(graph.value_to_base::<bool>(value), expected, "{ty}: {table}");

@@ -1,4 +1,4 @@
-; Structural scheduling only. Scalar instruction placement happens during SSA emission.
+; Structural scheduling; selected scalar evaluation is planned after extraction.
 (run-schedule (seq
     (saturate shape-types) (saturate traversal-types) (saturate map-types)
     (saturate rectangular-discover)
@@ -13,9 +13,10 @@
     (saturate execution-discover) (saturate execution-select) (run execution-finalize)
     (saturate map-bindings)
     (saturate storage-shapes)
-    (saturate capacity-identities)
-    (saturate type-layouts)
-    (saturate (seq residency representations))
+    (saturate capacity-types)
+    ; Loop layouts introduce fields that share the ordinary forwarding proofs.
+    (saturate (seq flow-structure type-layouts))
+    (saturate (seq flow-structure residency representations))
     ; Settle output mappings before schedule creates irreversible phase/demand facts.
     (saturate output-layouts)
     (saturate collective-costs)

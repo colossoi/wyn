@@ -12,6 +12,8 @@ const SCHEMA: &str = r#"
     (relation EffectWait (OperationKey i64))
     (relation OperationOrderPosition (OperationKey RegionKey i64))
     (relation Consecutive (OperationKey OperationKey))
+    (relation OrderPending (OperationKey RegionKey i64))
+    (ruleset order-import) (ruleset order-select) (ruleset order-emit)
 "#;
 
 type Output = (BTreeSet<(i64, i64, i64)>, BTreeSet<(i64, i64)>);
@@ -54,7 +56,7 @@ fn compare(facts: &str, cycle: bool) -> Output {
     native
         .parse_and_run_program(
             None,
-            include_str!("../execution.egg")
+            include_str!("dispatch.egg")
                 .split("; Select a dependency order within each invocation")
                 .nth(1)
                 .unwrap()

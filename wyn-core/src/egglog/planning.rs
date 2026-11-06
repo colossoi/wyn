@@ -7,25 +7,8 @@ use egglog_engine::{EGraph, RawValues, Write};
 #[path = "planning_tests.rs"]
 mod tests;
 
-pub(super) const RULES: &str = concat!(
-    include_str!("planning.egg"),
-    "\n",
-    include_str!("execution.egg"),
-    "\n",
-    include_str!("schedule.egg"),
-    "\n",
-    include_str!("residency.egg"),
-    "\n",
-    include_str!("allocation.egg"),
-    "\n",
-    include_str!("epilogues.egg"),
-    "\n",
-);
-pub(super) const KEYS: &str = "(datatype TypeKey (TypeId i64))\n";
-
 pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
-    graph.parse_and_run_program(Some("planning keys".into()), KEYS)?;
-    graph.parse_and_run_program(Some("structural planning rules".into()), RULES)?;
+    graph.parse_and_run_program(Some("planner schema".into()), include_str!("planning/schema.egg"))?;
     Ok(())
 }
 
@@ -51,11 +34,7 @@ pub(super) fn place(
             "\n",
             include_str!("planning/shapes.egg"),
             "\n",
-            include_str!("planning/storage.egg"),
-            "\n",
             include_str!("planning/maps.egg"),
-            "\n",
-            include_str!("planning/domains.egg"),
             "\n",
             include_str!("planning/segments.egg"),
             include_str!("planning/execution.egg"),
@@ -65,7 +44,17 @@ pub(super) fn place(
             "\n",
             include_str!("planning/capacity.egg"),
             "\n",
-            include_str!("planning/loops.egg")
+            include_str!("planning/loops.egg"),
+            "\n",
+            include_str!("planning/dispatch.egg"),
+            "\n",
+            include_str!("planning/schedule.egg"),
+            "\n",
+            include_str!("planning/residency.egg"),
+            "\n",
+            include_str!("planning/allocation.egg"),
+            "\n",
+            include_str!("planning/epilogues.egg")
         ),
     )?;
     let policy = match topology {

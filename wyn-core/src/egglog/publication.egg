@@ -43,7 +43,7 @@
       ((RootValueUse (KernelRoot stage) source)) :ruleset publication-uses)
 (rule ((RootUsesRegion root region) (SourceRegionEnters region child))
       ((RootUsesRegion root child)) :ruleset publication-uses)
-(rule ((RootUsesRegion root region) (= readonly (SourceRegionReadOnly region)))
+(rule ((RootUsesRegion root region) (= readonly (SourceReadOnly (FlowRegion region))))
       ((set (RootReadOnly root) readonly)) :ruleset publication-uses)
 (rule ((RootUsesRegion root region) (SourceRegionUse region value))
       ((RootValueUse root value)) :ruleset publication-uses)

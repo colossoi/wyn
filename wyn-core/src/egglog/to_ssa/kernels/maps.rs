@@ -1,6 +1,7 @@
 //! Lower the selected map traversal, retaining nested output storage.
 use super::super::{error, Body, OptimizeError};
 use super::{coordinates, emit_bindings, invocation, screma, workgroup};
+use crate::egglog::query::Query;
 use crate::op::BinaryOperator;
 use crate::types::TypeExt;
 use crate::LookupMap;
@@ -16,7 +17,7 @@ pub(super) fn emit(
     results: &[(String, i64, Value)],
 ) -> Result<(), OptimizeError> {
     let group = body.has_workgroup_scope("MapExecution", owner);
-    if group && body.compiler.facts.contains("NativeSubgroups", RawValues(vec![])) {
+    if group && Query(&body.compiler.program.graph).flag("SubgroupsEnabled", RawValues(vec![]))? {
         body.prepare_subgroups(width)?;
     }
     let extents = body.compiler.facts.iteration_dimensions(owner)?;

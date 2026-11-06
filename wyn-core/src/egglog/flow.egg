@@ -138,3 +138,33 @@
 (rule ((FlowCall parent child)) ((FlowEffect parent child)) :ruleset source-summary)
 (relation FlowReach (SourceValue SourceValue))
 (rule ((FlowReach root parent) (FlowEffect parent child)) ((FlowReach root child)) :ruleset flow-evaluation)
+
+; Structural value proofs are saturated by clients that need exact forwarding.
+(ruleset flow-structure)
+; Forwarding keeps occurrence boundaries: captures are bindings, not aliases.
+; Projection alone does not equate whole values.
+(relation FlowProjection (SourceValue SourceValue i64))
+(relation FlowForward (SourceValue SourceValue))
+(relation SourceArrayPart (SourceValue i64 SourceValue))
+(rule ((= source (SourceAlias value))) ((FlowForward value source)) :ruleset flow-structure)
+(rule ((= (SourceProjection value) (ProjectionInfo source i))) ((FlowProjection value source i)) :ruleset flow-structure)
+(rule ((FlowProjection e tuple i) (SourceArrayPart tuple i field))
+      ((FlowForward e field)) :ruleset flow-structure)
+(rule ((FlowProjection e tuple i) (SourceField tuple i field))
+      ((FlowForward e field)) :ruleset flow-structure)
+(rule ((FlowProjection e tuple i) (FlowForward tuple inner))
+      ((FlowProjection e inner i)) :ruleset flow-structure)
+
+; Canonical values equate captures and resolved fields for shape/bounds proofs.
+; They never merge SourceValue occurrences or grant permission to move evaluation.
+(sort FlowValue)
+(constructor FlowValueOf (SourceValue) FlowValue)
+(relation FlowBinary (FlowValue String FlowValue FlowValue))
+(relation FlowField (FlowValue i64 FlowValue))
+(relation FlowProject (FlowValue FlowValue i64))
+(relation FlowBranch (FlowValue FlowValue FlowValue))
+(rule ((= a (SourceAlias s))) ((union (FlowValueOf s) (FlowValueOf a))) :ruleset flow-structure)
+(rule ((SourceField s i a)) ((FlowField (FlowValueOf s) i (FlowValueOf a))) :ruleset flow-structure)
+(rule ((= (SourceProjection s) (ProjectionInfo a i)))
+      ((FlowProject (FlowValueOf s) (FlowValueOf a) i)) :ruleset flow-structure)
+(rule ((FlowProject s a i) (FlowField a i v)) ((union s v)) :ruleset flow-structure)

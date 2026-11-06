@@ -36,7 +36,10 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
     for table in ["SourceSummaryEnters", "SourceRegionEnters"] {
         query.for_each(table, |row| {
             query.required("SourceRegionWork", (row[1],))?;
-            query.required("SourceRegionDuplicable", (row[1],))?;
+            let Some(region) = query.constructor("FlowRegion", (row[1],))? else {
+                return Err(OptimizeError::Output("region execution node missing".into()));
+            };
+            query.required("SourceDuplicable", (region,))?;
             Ok(())
         })?;
     }

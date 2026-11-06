@@ -1,5 +1,14 @@
 use egglog_engine::EGraph;
 
+fn graph() -> EGraph {
+    let mut graph = super::new_graph().unwrap();
+    let (_, paths) = include_str!("fusion.egg")
+        .split_once("; Demand-limited paths settle before testing absence and clear before union.")
+        .unwrap();
+    graph.parse_and_run_program(None, paths).unwrap();
+    graph
+}
+
 fn settle(graph: &mut EGraph, round: i64) {
     graph.parse_and_run_program(None, &format!(
         "(PlanningRound {round}) (RelevantPair a c) (RelevantPair c a) (RelevantPair a d) (run-schedule (saturate fusion-paths))"
@@ -11,7 +20,7 @@ fn check(graph: &mut EGraph, round: i64, facts: &str) {
 
 #[test]
 fn native_paths_distinguish_direct_edges_barriers_and_contractions() {
-    let mut graph = super::new_graph().unwrap();
+    let mut graph = graph();
     graph
         .parse_and_run_program(
             None,
@@ -55,7 +64,7 @@ fn native_paths_distinguish_direct_edges_barriers_and_contractions() {
 
 #[test]
 fn native_paths_follow_contractions_and_stay_with_their_graph() {
-    let mut graph = super::new_graph().unwrap();
+    let mut graph = graph();
     graph
         .parse_and_run_program(
             None,

@@ -40,10 +40,6 @@
 (rule ((= value (SourceParameter region index)))
       ((set (SourceParameterRegion value) region) (set (SourceParameterIndex value) index)) :ruleset source-summary)
 (rule ((= value (SourceOperationValue op))) ((set (SourceValueOperation value) op)) :ruleset source-summary)
-(function SourceRegionSpeculatable (RegionKey) bool :merge (and old new))
-(function SourceRegionReadOnly (RegionKey) bool :merge (and old new))
-(function SourceRegionRequiresDevice (RegionKey) bool :merge (or old new))
-(function SourceRegionDuplicable (RegionKey) bool :merge (and old new))
 ; Borrowed formals and projections do not re-execute their producers.
 (rule ((= value (SourceFormal region i)))
       ((set (SourceReadOnly value) true)) :ruleset source-summary)
@@ -59,6 +55,7 @@
 (relation SourceEnters (SourceValue RegionKey))
 ; Value-preserving coercions and projections share identity without equating
 ; their execution occurrences. Lexical bindings are resolved during import.
+; Captures stay scope boundaries here; FlowValue equality serves shape/bounds proofs.
 (datatype SourceIdentity (Identity SourceValue))
 (function SourceIdentityToken (SourceIdentity) i64 :merge (min old new))
 (function SourceHasOrigin (SourceValue) bool :merge (or old new))
@@ -210,7 +207,6 @@
 (rule ((= (SourceOutput id) (OutputInfo entry value ty array)))
       ((set (SourceOutputsForEntry entry) (set-of id))) :ruleset source-summary)
 
-
 ; Literal-valued helpers can supply constant array seeds without a GPU producer.
 (function SourceConstantInteger (SourceValue) i64 :no-merge)
 (rule ((= n (SourceInteger32 value))) ((set (SourceConstantInteger value) n)) :ruleset source-summary)
@@ -232,10 +228,32 @@
 (rule ((FlowReference owner value) (= flag (SourceRequiresDevice value))) ((set (SourceRequiresDevice owner) flag)) :ruleset source-summary)
 
 ; Region properties are views of ordinary execution nodes.
-(rule ((= flag (SourceSpeculatable (FlowRegion region)))) ((set (SourceRegionSpeculatable region) flag)) :ruleset source-summary)
-(rule ((= flag (SourceReadOnly (FlowRegion region)))) ((set (SourceRegionReadOnly region) flag)) :ruleset source-summary)
-(rule ((= flag (SourceDuplicable (FlowRegion region)))) ((set (SourceRegionDuplicable region) flag)) :ruleset source-summary)
-(rule ((= flag (SourceRequiresDevice (FlowRegion region)))) ((set (SourceRegionRequiresDevice region) flag)) :ruleset source-summary)
 (rule ((SourceRegionUse region value)) ((FlowReference (FlowRegion region) value)) :ruleset source-summary)
 (rule ((FlowCall owner (FlowRegion region))) ((SourceSummaryEnters owner region)) :ruleset source-summary)
 (rule ((SourceSummaryEnters (FlowRegion owner) region)) ((SourceRegionEnters owner region)) :ruleset source-summary)
+
+(function SourceHasOperation (SourceValue) bool :merge (or old new))
+(rule ((= ty (SourceType value))) ((set (SourceHasOperation value) false)) :ruleset source-summary)
+(rule ((= op (SourceValueOperation value))) ((set (SourceHasOperation value) true)) :ruleset source-summary)
+
+(relation SourceScrema (OperationKey))
+(rule ((= (SourceOperation op) (OperationInfo r "map"))) ((SourceScrema op)) :ruleset source-summary)
+(rule ((= (SourceOperation op) (OperationInfo r "scan"))) ((SourceScrema op)) :ruleset source-summary)
+(rule ((= (SourceOperation op) (OperationInfo r "reduce"))) ((SourceScrema op)) :ruleset source-summary)
+
+(function SourceCallTarget (SourceValue) RegionKey :no-merge)
+(function SourceCallArgument (SourceValue i64) SourceValue :no-merge)
+(relation SourceCallIndex (SourceValue i64))
+(rule ((= value (SourceInvocation scope function args))) ((SourceCallIndex value 0)) :ruleset source-summary)
+(rule ((= value (SourceInvocation scope function args)) (= (SourceCallable function) callee))
+      ((set (SourceCallTarget value) callee)) :ruleset source-summary)
+(rule ((SourceCallIndex value i) (= value (SourceInvocation scope function args)) (< i (vec-length args)))
+      ((set (SourceCallArgument value i) (vec-get args i)) (SourceCallIndex value (+ i 1))) :ruleset source-summary)
+
+; Project source syntax into the shared canonical value graph.
+(rule ((= t (SourceType s))) ((FlowValueOf s)) :ruleset flow-structure)
+(rule ((= a (SourceCapture r s))) ((union (FlowValueOf s) (FlowValueOf a))) :ruleset flow-structure)
+(rule ((SourceBinary s op a b))
+      ((FlowBinary (FlowValueOf s) op (FlowValueOf a) (FlowValueOf b))) :ruleset flow-structure)
+(rule ((= (SourceBranch s) (BranchInfo condition yes no)) (= a (SourceResult yes)) (= b (SourceResult no)))
+      ((FlowBranch (FlowValueOf s) (FlowValueOf a) (FlowValueOf b))) :ruleset flow-structure)

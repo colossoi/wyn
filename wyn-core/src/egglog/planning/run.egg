@@ -1,19 +1,19 @@
-; Finish scheduling after Rust selects collective launch sizes.
+; Finish scheduling after native launch-cost selection.
 (run-schedule (seq
     (saturate integer-bounds) (run capacity-select)
-    (saturate (seq (run residency) (run representations) (run schedule) (saturate integer-bounds) (run capacity-select) (run allocation) (run dispatch)))
+    (saturate (seq (run flow-structure) (run residency) (run representations) (run schedule) (saturate integer-bounds) (run capacity-select) (run allocation) (run dispatch)))
     (run runtime-representations) (saturate representations)
     (saturate (run reuse)) (run reuse-blockers)
     (run reuse-owned-input) (run reuse-input) (saturate (run reuse-output))
     (run select-reuse) (run select-allocation)
-    (saturate (seq (run residency) (run representations) (saturate integer-bounds) (run capacity-select) (run allocation) (run dispatch)))
+    (saturate (seq (run flow-structure) (run residency) (run representations) (saturate integer-bounds) (run capacity-select) (run allocation) (run dispatch)))
     (saturate array-views)
     (saturate (seq (run representations) (run output-backings) (saturate integer-bounds) (run capacity-select) (run allocation)))
     (run materialize-outputs) (saturate integer-bounds) (run capacity-select) (run allocation) (run select-allocation)
     (saturate (seq (saturate integer-bounds) (run capacity-select) (run allocation)))
     (saturate (run output-candidates)) (run output-blockers)
     (run output-select) (run output-fallback)
-    (saturate (seq (run residency) (run representations) (saturate integer-bounds) (run capacity-select) (run allocation) (run dispatch)))
+    (saturate (seq (run flow-structure) (run residency) (run representations) (saturate integer-bounds) (run capacity-select) (run allocation) (run dispatch)))
     (run finish-select)
     (saturate array-views)
     (run metadata-allocation) (saturate integer-bounds) (run capacity-select) (run allocation)

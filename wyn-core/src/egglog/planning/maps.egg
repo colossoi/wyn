@@ -41,7 +41,7 @@
 (rule ((RectangularDemand value) (= actual (SourceAlias value)) (= depth (MapDepth actual))
        (= ty (SourceType value)) (= rank (ArrayTypeRank ty)))
       ((set (MapDepth value) (min rank depth))) :ruleset map-shapes)
-(rule ((RectangularDemand value) (RectangularReady value) (= callee (PlanCallee value)) (= result (SourceResult callee))
+(rule ((RectangularDemand value) (RectangularReady value) (= callee (SourceCallTarget value)) (= result (SourceResult callee))
        (= depth (MapDepth result)) (= ty (SourceType value)) (= rank (ArrayTypeRank ty)))
       ((set (MapDepth value) (min rank depth))) :ruleset map-shapes)
 (rule ((MapCandidate value plan op body) (RectangularReady value) (= result (SourceResult body))

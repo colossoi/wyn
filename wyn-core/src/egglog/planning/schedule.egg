@@ -1,15 +1,6 @@
 ; Select an execution recipe from collective structure and sidecar effect proofs.
 ; No scalar expressions or lambda implementation enter this pass.
-(datatype AtomicUpdate (AtomicAdd) (AtomicAnd) (AtomicOr) (AtomicXor) (AtomicCas))
-(datatype Recipe (Elements) (Totals) (Prefixes) (Compact) (Scatter) (Serial) (Atomic AtomicUpdate) (Buckets))
-(relation FilterShape (OperationKey))
-(relation IndexedWrite (OperationKey bool))
 ; Result indices include preceding totals; the destination's output buffer slot is 0.
-(function DestinationSlot (OperationKey) i64 :no-merge)
-(relation IndexedReducer (OperationKey bool AtomicUpdate))
-(relation BucketShape (OperationKey bool))
-(function Plan (OperationKey) Recipe :no-merge)
-(function ElideElements (OperationKey) bool :merge (or old new))
 (rule ((= r (OperationRegion op))) ((set (ElideElements op) false)) :ruleset structure)
 ; Parallel callbacks may read arrays and contain control flow. They must not
 ; write shared state or call unknown effects. This is weaker than movability.
@@ -18,7 +9,6 @@
       ((set (ParallelSafe op) false) (set (ParallelBodySafe op) false)) :ruleset structure)
 (rule ((Callback op r) (= r (OperationRegion child)) (= (ParallelSafe child) false))
       ((set (ParallelSafe op) false) (set (ParallelBodySafe op) false)) :ruleset structure)
-(ruleset schedule)
 ; Read the selected fusion plan's flags after callback effects have settled.
 (rule ((Current group plan) (= op (Owner plan)) (ScremaPlan plan)
        (= (HasScans plan) false) (= (HasReductions plan) false) (= (ParallelBodySafe op) true))
@@ -47,24 +37,12 @@
 ; Recipes declare logical phases before any kernel body is built. Widths match
 ; the current emitters; PhaseDomain counts invocations, not rounded workgroups.
 ; Iteration axes describe logical coordinates, before cooperative width expansion.
-(function IterationExtent (OperationKey) Extent :no-merge)
-(function IterationRank (OperationKey) i64 :no-merge)
-(function IterationAxis (OperationKey i64) Extent :no-merge)
-(function SubgroupsEnabled () bool :no-merge)
-(relation NativeSubgroups ())
-(rule ((= (SubgroupsEnabled) true)) ((NativeSubgroups)) :ruleset schedule)
-(function SegmentWidth (OperationKey) i64 :merge (min old new))
-(function MapSegmented (OperationKey) bool :merge (or old new))
-(relation KernelPhase (OperationKey String Extent i64 DispatchGrid))
 (rule ((= r (OperationRegion op)) (OwnedRegion entry r) (= grid (EntryGrid entry)))
       ((set (OperationGrid op) grid)) :ruleset schedule)
 ; One choice supplies the chunk launch, scratch capacity, and carry count.
 ; The default bounds the carry scan to one workgroup.
-(let collective-width 256)
 ; Estimate per-lane accumulator storage before selecting a launch. Keep the
 ; chunk bank near 8 KiB, with power-of-two widths between 32 and 256 lanes.
-(ruleset collective-costs)
-(function CollectiveStatePrefix (OperationKey i64) i64 :no-merge)
 (function CollectiveChunkWidth (OperationKey) i64 :merge (min old new))
 (rule ((Accumulator op i ty role slot source))
       ((set (CollectiveStatePrefix op 0) 0)
@@ -72,27 +50,20 @@
 (rule ((= bytes (CollectiveStatePrefix op i)) (= width (CollectiveChunkWidth op))
        (> width 32) (> (* bytes width) 8192))
       ((set (CollectiveChunkWidth op) (/ width 2))) :ruleset collective-costs)
-; Default execution widths: segment collectives retain collective-width;
-; ordinary maps select a width by the scope owning each logical coordinate.
+; Ordinary maps select a width by the scope owning each logical coordinate.
 (function MapScopeWidth (ExecutionScope) i64 :no-merge)
 (set (MapScopeWidth (InvocationScope)) 64)
 (set (MapScopeWidth (WorkgroupScope)) 32)
-(relation ParallelCollective (OperationKey))
 (rule ((= (Plan op) (Totals))) ((ParallelCollective op)) :ruleset schedule)
 (rule ((= (Plan op) (Prefixes))) ((ParallelCollective op)) :ruleset schedule)
 (function CollectiveGrid (OperationKey) DispatchGrid :no-merge)
-(function SelectedCollectiveGroups (OperationKey) i64 :no-merge)
-(function CollectiveCombineWidth (OperationKey) i64 :no-merge)
 (rule ((ParallelCollective op) (= (OperationGrid op) (AutomaticGrid))
        (= groups (SelectedCollectiveGroups op)))
       ((set (CollectiveGrid op) (FixedGrid groups 1 1))) :ruleset schedule)
 (rule ((ParallelCollective op) (= grid (OperationGrid op)) (= grid (FixedGrid x y z)))
       ((set (CollectiveGrid op) grid)) :ruleset schedule)
-(function CollectiveGroups (OperationKey) i64 :no-merge)
 (rule ((= (CollectiveGrid op) (FixedGrid x y z)))
       ((set (CollectiveGroups op) (* x (* y z)))) :ruleset schedule)
-(relation PhaseEnds (OperationKey String String))
-(relation PhaseLink (OperationKey String String))
 ; A scalar execution crossing dispatches runs once and publishes its value.
 ; Its called regions belong to that invocation, not the host launch graph.
 (rule ((InvocationValue op) (DispatchGroupLeader op leader) (= r (OperationRegion leader)) (RegionContainsCollective r))
@@ -114,6 +85,7 @@
        (= n (IterationExtent op)) (= grid (OperationGrid op)))
       ((KernelPhase op "segments" (Product n (Fixed width)) width grid)
        (PhaseEnds op "segments" "segments")) :ruleset schedule)
+(function CollectiveCombineWidth (OperationKey) i64 :no-merge)
 (rule ((ParallelCollective op) (= grid (CollectiveGrid op)) (= groups (CollectiveGroups op))
        (= width (CollectiveChunkWidth op)) (= combine-width (CollectiveCombineWidth op)))
       ((KernelPhase op "chunks" (Fixed (* groups width)) width grid)
@@ -210,7 +182,6 @@
 
 ; Device-local recipes retain only observed outputs; fused intermediates stream
 ; through the recipe without requiring a local allocation.
-(relation LocalObservedBuffer (ValueKey))
 (rule ((= r (OperationRegion op)) (DeviceRegion r)) ((DeviceOperation op)) :ruleset schedule)
 (rule ((DeviceOperation op) (Enters op r)) ((DeviceRegion r)) :ruleset schedule)
 (rule ((Phase (Stage op "scalar") r)) ((DeviceOperation op)) :ruleset schedule)
@@ -223,3 +194,28 @@
 (rule ((= (Plan op) (Scatter)) (UninitializedResult op i t n)) ((PhaseEnds op "scatter" "scatter")) :ruleset schedule)
 
 (rule ((DeviceOperation op) (UninitializedResult op i t n)) ((LocalBuffer op "output" 0 t n)) :ruleset schedule)
+
+(rule ((Phase (Stage leader phase) r) (PlannedOperation op leader plan r)
+       (= callback (SourceOperatorBody op)) (= (SourceOperation op) (OperationInfo origin kind))
+       (!= phase "initialize") (!= phase "clear") (!= phase "loop_enter") (!= phase "loop_exit")
+       (!= phase "combine") (!= phase "chunks"))
+      ((PhaseCallback (Stage leader phase) callback)) :ruleset schedule)
+(rule ((Phase (Stage leader "chunks") r) (PlannedOperation op leader plan r)
+       (= (PlanEarly plan op) true) (= callback (SourceOperatorBody op)))
+      ((PhaseCallback (Stage leader "chunks") callback)) :ruleset schedule)
+(rule ((Phase (Stage leader "chunks") r) (PlannedOperation op leader plan r)
+       (= (HasScans plan) false) (= callback (SourceOperatorBody op)))
+      ((PhaseCallback (Stage leader "chunks") callback)) :ruleset schedule)
+; Combination consumes reducer callbacks, not the producer maps' environments.
+(rule ((Phase (Stage leader "combine") r) (PlannedOperation op leader plan r)
+       (= callback (SourceOperatorBody op)) (= (SourceOperation op) (OperationInfo origin kind))
+       (!= kind "map") (!= kind "filter") (!= kind "scatter") (!= kind "bucket-scatter"))
+      ((PhaseCallback (Stage leader "combine") callback)) :ruleset schedule)
+(rule ((PhaseCallback stage region) (SourceRegionEnters region child))
+      ((PhaseCallback stage child)) :ruleset schedule)
+(rule ((PhaseCallback stage region) (= (SourceCapture region formal) source))
+      ((Demand (InStage stage) source)) :ruleset schedule)
+; Combine phases also evaluate the neutral values.
+(rule ((Phase (Stage leader "combine") region) (PlannedOperation op leader plan region)
+       (= neutral (SourceNeutral op)))
+      ((Demand (InStage (Stage leader "combine")) neutral)) :ruleset schedule)

@@ -4,6 +4,20 @@ use crate::egglog::{from_tlc, fuse, optimize_for_test, place, schedule};
 use crate::PipelineTopologyPolicy;
 use egglog_engine::{Core, Read, TermDag, Write};
 
+// Exercise placement independently of the source-to-selected-syntax projection.
+fn evaluation_graph() -> EGraph {
+    let mut graph = EGraph::default();
+    graph
+        .parse_and_run_program(
+            None,
+            concat!(include_str!("../flow.egg"), "\n(sort ExprContext)\n"),
+        )
+        .unwrap();
+    let (rules, _) = include_str!("evaluation.egg").split_once("; Project exact selected syntax").unwrap();
+    graph.parse_and_run_program(None, rules).unwrap();
+    graph
+}
+
 #[test]
 fn shared_mandatory_operands_match_reference_closure_and_preserve_readonly_guards() {
     let dependencies = [
@@ -21,17 +35,7 @@ fn shared_mandatory_operands_match_reference_closure_and_preserve_readonly_guard
         vec![10],
     ];
     let pairs: LookupSet<_> = [(1, 2), (3, 7), (4, 5), (8, 9), (9, 3), (10, 11)].into_iter().collect();
-    let mut graph = EGraph::default();
-    graph
-        .parse_and_run_program(
-            None,
-            concat!(
-                include_str!("../flow.egg"),
-                "\n(sort ExprContext)\n",
-                include_str!("evaluation.egg")
-            ),
-        )
-        .unwrap();
+    let mut graph = evaluation_graph();
     graph
         .parse_and_run_program(
             None,
@@ -123,17 +127,7 @@ fn shared_ranks_preserve_request_ordering_and_choice_boundaries() {
         common: LookupMap::default(),
     };
     plan.readonly[effectful] = false;
-    let mut graph = EGraph::default();
-    graph
-        .parse_and_run_program(
-            None,
-            concat!(
-                include_str!("../flow.egg"),
-                "\n(sort ExprContext)\n",
-                include_str!("evaluation.egg")
-            ),
-        )
-        .unwrap();
+    let mut graph = evaluation_graph();
     let keys = graph
         .update(|mut sink| {
             for term in 0..n {

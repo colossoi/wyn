@@ -11,9 +11,6 @@
 (function PlanDomain (FusionPlan) OperationKey :no-merge)
 ; Inputs and callbacks use the immutable source tables directly.
 (function PlanMapping (OperationKey) bool :no-merge)
-(function PlanCallee (SourceValue) RegionKey :no-merge)
-(function PlanCallArgument (SourceValue i64) SourceValue :no-merge)
-(relation PlanCallIndex (SourceValue i64))
 (relation PlanJoin (FusionPlan i64 FusionPlan FusionPlan bool))
 
 (rule ((= (SourceOperation op) (OperationInfo region kind)))
@@ -21,11 +18,6 @@
 
 (rule ((= (SourceOperation op) (OperationInfo r "map"))) ((set (PlanMapping op) true)) :ruleset source-fusion)
 (rule ((= (SourceOperation op) (OperationInfo r kind)) (!= kind "map")) ((set (PlanMapping op) false)) :ruleset source-fusion)
-(rule ((= value (SourceInvocation scope function args))) ((PlanCallIndex value 0)) :ruleset source-fusion)
-(rule ((= value (SourceInvocation scope function args)) (= (SourceCallable function) callee))
-      ((set (PlanCallee value) callee)) :ruleset source-fusion)
-(rule ((PlanCallIndex value i) (= value (SourceInvocation scope function args)) (< i (vec-length args)))
-      ((set (PlanCallArgument value i) (vec-get args i)) (PlanCallIndex value (+ i 1))) :ruleset source-fusion)
 (rule ((= rank (SourceDomainRank op))) ((set (PlanDomain (FusionSource op)) op)) :ruleset source-fusion)
 (rule ((= (SourceOperation op) (OperationInfo r "reduce")) (= value (SourceOperationValue op)) (= ty (SourceType value)))
       ((set (PlanTotals (FusionSource op)) (OneResult value ty))) :ruleset source-fusion)

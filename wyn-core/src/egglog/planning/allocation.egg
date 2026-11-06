@@ -8,7 +8,10 @@
       ((set (SelectedDestination op) (DestinationValue source))) :ruleset allocation)
 (rule ((BucketResult op source))
       ((set (SelectedDestination op) (DestinationValue source))) :ruleset allocation)
+(function ReuseSelected (ValueKey) bool :merge (or old new))
 (rule ((FreshValue value)) ((set (ReuseSelected value) false)) :ruleset allocation)
+(datatype StorageChoice (Allocate) (Reuse SourceValue))
+(function StorageFor (ValueKey) StorageChoice :no-merge)
 (rule ((Materialize value) (= (StorageFor value) (Allocate))) ((set (Backing value) value)) :ruleset allocation)
 (rule ((= (StorageFor value) (Reuse e))) ((set (SameBacking value) e)) :ruleset allocation)
 (rule ((Needs stage (Source e))) ((set (Backing (Source e)) (Source e))) :ruleset allocation)
@@ -85,9 +88,9 @@
 (rule ((Needs stage value) (= (LiveLength value) (Stored count)))
       ((Needs stage count)) :ruleset allocation)
 
+(relation OutputCanAlias (i64))
 ; Kernel emission looks up these slots; only Allocation facts create storage.
 (ruleset output-backings)
-(relation OutputCanAlias (i64))
 (rule ((ReturnArray output e) (= (ArrayView e) (ViewInfo resource offset length))
        (= (ConstantLogicalExtent offset) 0))
       ((OutputCanAlias output)) :ruleset output-backings)
@@ -97,10 +100,12 @@
       ((ElementType (Output output) t) (set (CapacityExtent (Output output)) (Fixed 1))
        (FreshValue (Output output)) (Materialize (Output output))
        (set (OutputBacking output) (Output output)) (CopyOutput output)) :ruleset allocation)
+(function OutputHasBacking (i64) bool :merge (or old new))
 (rule ((ReturnArray output e)) ((set (OutputHasBacking output) false)) :ruleset allocation)
 (rule ((= (OutputBacking output) storage)) ((set (OutputHasBacking output) true)) :ruleset allocation)
 ; Run after residency/allocation settles: array literals and other computed
 ; results need their own publication buffer only when no backing already exists.
+(ruleset materialize-outputs)
 (rule ((ReturnedArrayLayout output t n) (= (OutputHasBacking output) false))
       ((ElementType (Output output) t) (set (CapacityExtent (Output output)) n)
        (FreshValue (Output output)) (Materialize (Output output))
@@ -133,47 +138,21 @@
 (rule ((UninitializedResult op i t n) (Requires site (Result op i))) ((Materialize (Result op i))) :ruleset allocation)
 (rule ((UninitializedResult op i t n) (Produces stage (Result op i))) ((Materialize (Result op i))) :ruleset allocation)
 
+; Slices retain offsets that the published result ABI cannot yet describe.
+(relation WholeValue (SourceValue ValueKey))
 ; Storage reuse.
 ; Optional reuse never adds dependencies between independent dispatches.
 ; Finish read/order proofs and blockers before choosing inputs and output slots.
 (ruleset reuse)
-(ruleset reuse-blockers)
-(ruleset reuse-owned-input)
-(ruleset reuse-input)
-(ruleset reuse-output)
-(ruleset select-reuse)
-(ruleset select-allocation)
-(relation WholeValue (SourceValue ValueKey))
-(relation FitsInput (OperationKey SourceValue))
-(function ReuseWriter (OperationKey) StageKey :no-merge)
-(relation ReuseBoundary (StageKey StageKey))
-(relation ReuseResult (OperationKey i64 TypeKey))
-(relation ReuseOperand (OperationKey SourceValue))
-(relation ReuseType (OperationKey TypeKey))
-(relation OwnedInput (OperationKey TypeKey SourceValue))
-(relation ReuseAlias (StageKey SourceValue ValueKey))
-(relation ReuseRead (StageKey SourceValue UseKey))
-(function ReadFinished (StageKey UseKey) bool :merge (or old new))
-(function ReuseBlocked (StageKey SourceValue) bool :merge (or old new))
-(function OwnedInputChoice (OperationKey TypeKey) i64 :merge (min old new))
-(function HasPreferredReuse (ValueKey) bool :merge (or old new))
-(function PreferredInputChoice (ValueKey) i64 :merge (min old new))
-(function PinnedResult (ValueKey) bool :merge (or old new))
-(function ReuseInput (ValueKey) i64 :merge (min old new))
-(function ReuseOutput (ValueKey StageKey) i64 :merge (min old new))
-(function ReuseLost (ValueKey) bool :merge (or old new))
-
-; Slices retain offsets that the published result ABI cannot yet describe.
 (rule ((ParameterValue e)) ((WholeValue e (Source e))) :ruleset reuse)
 (rule ((DirectResult e op i)) ((WholeValue e (Result op i))) :ruleset reuse)
-(rule ((Projection e tuple i) (ResultTuple tuple op) (ResultSlot op i))
+(rule ((FlowProjection e tuple i) (ResultTuple tuple op) (ResultSlot op i))
       ((WholeValue e (Result op i))) :ruleset reuse)
-(rule ((Projection e tuple i) (SourceField tuple i field) (WholeValue field value))
-      ((WholeValue e value)) :ruleset reuse)
-(rule ((ForwardValue e source) (WholeValue source value))
+(rule ((FlowForward e source) (WholeValue source value))
       ((WholeValue e value)) :ruleset reuse)
 
 ; A whole input fits its own domain, or another input with the same live length.
+(relation FitsInput (OperationKey SourceValue))
 (rule ((= (InputDomain op) (Length e))) ((FitsInput op e)) :ruleset reuse)
 (rule ((= (InputDomain op) (Length first)) (FixedInputLength first n)
        (Operand op "input" e) (FixedInputLength e n))
@@ -187,15 +166,19 @@
       ((FitsInput op e)) :ruleset reuse)
 
 ; Scatter can reuse its destination, never an arbitrary update input.
+(relation ReuseResult (OperationKey i64 TypeKey))
 (rule ((ArrayResult op i t)) ((ReuseResult op i t)) :ruleset reuse)
+(relation ReuseOperand (OperationKey SourceValue))
 (rule ((ArrayResult op i t) (Operand op "input" e) (FitsInput op e))
       ((ReuseOperand op e)) :ruleset reuse)
 (rule ((InitializedResult op i t (Length destination)))
       ((ReuseResult op i t) (ReuseOperand op destination)) :ruleset reuse)
 ; Check each writer/input pair once, independently of the number of outputs.
+(relation ReuseType (OperationKey TypeKey))
 (rule ((ReuseResult op i t) (Materialize (Result op i))) ((ReuseType op t)) :ruleset reuse)
 ; Maps load before storing each element. Scans preserve their input through
 ; chunks and combine, then write the final output in the offsets phase.
+(function ReuseWriter (OperationKey) StageKey :no-merge)
 (rule ((= (Plan op) (Elements)) (FirstPhase op writer))
       ((set (ReuseWriter op) writer)) :ruleset reuse)
 (rule ((= (Plan op) (Prefixes)) (LastPhase op writer))
@@ -204,6 +187,10 @@
       ((set (ReuseWriter op) writer)) :ruleset reuse)
 ; Ownership is a property of the input value, not the source operation whose
 ; output may disappear during fusion. Final shape and reads are checked here.
+(function ReuseBlocked (StageKey SourceValue) bool :merge (or old new))
+(relation ReuseAlias (StageKey SourceValue ValueKey))
+(relation OwnedInput (OperationKey TypeKey SourceValue))
+(relation ReuseBoundary (StageKey StageKey))
 (rule ((= writer (ReuseWriter op)) (Phase writer region)
        (ReuseType op t) (ReuseOperand op e) (WholeValue e old)
        (FreshValue old) (ElementType old t) (Produces producer old) (Phase producer region))
@@ -228,6 +215,7 @@
 
 ; Length-only demands do not observe contents. Keep hidden scalar content
 ; dependencies separate from Needs, which also includes descriptor-only uses.
+(relation ReuseRead (StageKey SourceValue UseKey))
 (rule ((ReuseAlias writer e alias)
        (Requires (InStage reader) alias) (!= reader writer))
       ((ReuseRead writer e (InStage reader))) :ruleset reuse)
@@ -236,6 +224,7 @@
       ((ReuseRead writer e (InStage (Stage op "scalar")))) :ruleset reuse)
 (rule ((ReuseAlias writer e alias) (Requires (InOperation op) alias))
       ((ReuseRead writer e (InOperation op))) :ruleset reuse)
+(function ReadFinished (StageKey UseKey) bool :merge (or old new))
 (rule ((ReuseRead writer e site))
       ((set (ReadFinished writer site) false)) :ruleset reuse)
 ; Input-reading phases of this recipe finish before its final writer.
@@ -255,6 +244,7 @@
 (rule ((ReuseRead writer e (InOperation op))
        (ReuseBoundary writer boundary) (DispatchWaitsFor boundary (End op)))
       ((set (ReadFinished writer (InOperation op)) true)) :ruleset reuse)
+(ruleset reuse-blockers)
 (rule ((ReuseRead writer e site)
        (= (ReadFinished writer site) false))
       ((set (ReuseBlocked writer e) true)) :ruleset reuse-blockers)
@@ -274,6 +264,8 @@
       ((set (ReuseBlocked (Stage op name) e) true)) :ruleset reuse)
 ; Explicit output bindings require a separate destination. A surviving result's
 ; original input is a preference only; eliminated producers cannot lose permission.
+(function PinnedResult (ValueKey) bool :merge (or old new))
+(function HasPreferredReuse (ValueKey) bool :merge (or old new))
 (rule ((FreshValue value))
       ((set (PinnedResult value) false) (set (HasPreferredReuse value) false)) :ruleset reuse)
 (rule ((AbiOutputBinding output set binding) (ReturnArray output result) (= (ValueRef result) value))
@@ -282,14 +274,19 @@
 ; Choose one safe owned input per element type before joining output slots.
 ; Additional compatible inputs remain separate rather than growing a Cartesian
 ; product of inputs and outputs to optimize this optional choice.
+(function OwnedInputChoice (OperationKey TypeKey) i64 :merge (min old new))
+(ruleset reuse-owned-input)
 (rule ((OwnedInput op t input) (= id (SourceOrdinal input)) (= writer (ReuseWriter op))
        (= (ReuseBlocked writer input) false))
       ((set (OwnedInputChoice op t) id)) :ruleset reuse-owned-input)
+(function PreferredInputChoice (ValueKey) i64 :merge (min old new))
 (rule ((PreferredReuse (Result op i) input) (ReuseResult op i t) (OwnedInput op t input)
        (= writer (ReuseWriter op)) (= (ReuseBlocked writer input) false)
        (= id (SourceOrdinal input)))
       ((set (PreferredInputChoice (Result op i)) id)
        (set (HasPreferredReuse (Result op i)) true)) :ruleset reuse-owned-input)
+(function ReuseInput (ValueKey) i64 :merge (min old new))
+(ruleset reuse-input)
 (rule ((= id (PreferredInputChoice (Result op i)))
        (Materialize (Result op i)) (= (PinnedResult (Result op i)) false))
       ((set (ReuseInput (Result op i)) id)) :ruleset reuse-input)
@@ -298,13 +295,30 @@
       ((set (ReuseInput (Result op i)) id)) :ruleset reuse-input)
 ; The lowest eligible output slot wins. Reads exclude other writers, so this
 ; aggregation needs no all-pairs conflict join and introduces no ordering.
+(function ReuseLost (ValueKey) bool :merge (or old new))
+(function ReuseOutput (ValueKey StageKey) i64 :merge (min old new))
+(ruleset reuse-output)
 (rule ((= id (ReuseInput (Result op i))) (Produces writer (Result op i))
        (= id (SourceOrdinal input)) (ReuseAlias writer input alias))
       ((set (ReuseOutput alias writer) i) (set (ReuseLost (Result op i)) false)) :ruleset reuse-output)
 (rule ((= id (ReuseInput (Result op i))) (Produces writer (Result op i))
        (= id (SourceOrdinal input)) (ReuseAlias writer input alias) (= winner (ReuseOutput alias writer)) (< winner i))
       ((set (ReuseLost (Result op i)) true)) :ruleset reuse-output)
+(ruleset select-reuse)
 (rule ((= id (ReuseInput value)) (= (ReuseLost value) false) (= id (SourceOrdinal input)))
       ((set (StorageFor value) (Reuse input)) (set (ReuseSelected value) true)) :ruleset select-reuse)
+(ruleset select-allocation)
 (rule ((FreshValue value) (= (ReuseSelected value) false))
       ((set (StorageFor value) (Allocate))) :ruleset select-allocation)
+
+; Inputs and captures must not reread a reused destination.
+(rule ((PlannedOperation original owner plan region) (ScatterReadValue original read)
+       (ReuseAlias (Stage owner name) e alias) (= (ValueRef read) alias))
+      ((set (ReuseBlocked (Stage owner name) e) true)) :ruleset reuse)
+
+(rule ((Allocation value n) (ElementType value (TypeId ty)) (= (HasStorageShape value) false))
+      ((PlannedBuffer value ty n)) :ruleset readout)
+(rule ((Allocation value logical) (= (StorageLayout value) (FlatStorage (TypeId ty) shape n)))
+      ((PlannedBuffer value ty n)) :ruleset readout)
+(rule ((ElementType value ty)) ((set (HasStorageShape value) false)) :ruleset allocation)
+(rule ((= layout (StorageLayout value))) ((set (HasStorageShape value) true)) :ruleset allocation)

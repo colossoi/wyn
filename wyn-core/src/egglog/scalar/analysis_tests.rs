@@ -11,7 +11,6 @@ fn graph() -> EGraph {
                 (datatype TypeKey (TypeId i64))
                 (datatype FusionPlan (FusionSource OperationKey))
                 (function SourceReadOnly (SourceValue) bool :merge (and old new))
-                (function SourceRegionReadOnly (RegionKey) bool :merge (and old new))
                 "#,
                 include_str!("schema.egg"),
                 include_str!("analysis.egg"),
@@ -24,7 +23,7 @@ fn graph() -> EGraph {
                 (ExprContextActive $ctx)
                 (set (SourceReadOnly (SourceGlobal 0)) true)
                 (set (SourceReadOnly (SourceGlobal 1)) false)
-                (set (SourceRegionReadOnly (RegionId 1)) false)
+                (set (SourceReadOnly (FlowRegion (RegionId 1))) false)
                 "#,
             ),
         )

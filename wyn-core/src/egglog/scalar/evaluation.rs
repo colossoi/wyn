@@ -10,10 +10,7 @@ use wyn_graph::dag_postorder;
 
 pub(super) fn prepare(graph: &mut EGraph) -> Result<(), OptimizeError> {
     let _timing = timing::span("egglog evaluation / native projection");
-    graph.parse_and_run_program(
-        None,
-        concat!(include_str!("evaluation.egg"), "\n", include_str!("selected.egg")),
-    )?;
+    graph.parse_and_run_program(None, include_str!("evaluation.egg"))?;
     graph.parse_and_run_program(None, "(run-schedule (saturate selected-shape) (saturate selected-address) (saturate selected-flow) (saturate flow-scopes))")?;
     if Query(graph).contains("EvaluationScopeCycle", RawValues(Vec::new()))? {
         return Err(OptimizeError::Output("cyclic lexical scope forest".into()));

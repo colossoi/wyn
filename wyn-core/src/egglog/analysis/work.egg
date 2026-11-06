@@ -22,5 +22,5 @@
       ((set (WorkOperationCheap op) false)) :ruleset work-select)
 (rule ((= value (SourceOperationValue op)) (= n (wyn-operation-weight op 65)) (<= n 64))
       ((set (WorkOperationCheap op) true)) :ruleset work-select :naive)
-(rule ((= (SourceCallable f) r) (= (SourceRegionDuplicable r) true) (= n (WorkInlineCost r)) (<= n 64))
+(rule ((= (SourceCallable f) r) (= (SourceDuplicable (FlowRegion r)) true) (= n (WorkInlineCost r)) (<= n 64))
       ((WorkInlineEligible r)) :ruleset work-select)

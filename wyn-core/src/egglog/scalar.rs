@@ -35,8 +35,8 @@ pub(super) fn admit(graph: &mut EGraph) -> Result<(), OptimizeError> {
         Some("scalar admission".into()),
         include_str!("scalar/admission.egg"),
     )?;
-    graph.parse_and_run_program(Some("host preferences".into()), include_str!("host.egg"))?;
-    graph.parse_and_run_program(None, "(run-schedule (saturate scalar-admission) (saturate scalar-contexts) (saturate scalar-demands) (saturate host-targets) (saturate scalar-import) (run readout))")?;
+    graph.parse_and_run_program(Some("host preferences".into()), include_str!("scalar/host.egg"))?;
+    graph.parse_and_run_program(None, "(run-schedule (saturate scalar-admission) (saturate scalar-demands) (saturate host-targets) (saturate scalar-import) (run readout))")?;
     Ok(())
 }
 
@@ -87,7 +87,7 @@ pub(super) fn run(
     })?;
     graph.parse_and_run_program(
         Some("scalar host preferences".into()),
-        include_str!("scalar/host.egg"),
+        "(run-schedule (saturate scalar-host))",
     )?;
     graph.clear_function("ExprContextActive")?;
     let selected = extract::select_roots(graph, policy)?;

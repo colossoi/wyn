@@ -123,14 +123,6 @@
       ((BarrierAllowed n p c)) :ruleset fusion-candidates)
 
 ; Stream compatible array outputs; scalar reductions remain visible outputs.
-(rule ((Pair n p a c b)
-       (ScremaPlan a)
-       (ScremaPlan b)
-       (SafePlan a)
-       (SafePlan b)
-       (ClearStream n p c)
-       (BarrierAllowed n p c))
-      ((PlanCandidate n 0 p c)) :ruleset fusion-candidates)
 ; Whole-domain streaming runs both callbacks once. Read-only callbacks may
 ; contain local collectives; ClearStream and BarrierAllowed preserve effect order.
 (rule ((Pair n p a c b) (ScremaPlan a) (ScremaPlan b) (ReadOnlyScremaPlan a) (ReadOnlyScremaPlan b)
@@ -150,11 +142,7 @@
 (relation ElementFusion (FusionPlan FusionPlan))
 ; A completed total may feed a scan's output callback. It must not feed its
 ; input, neutral, or combiner, nor cross an intervening operation/effect.
-(rule ((Pair n p a c b) (SafePlan a) (SafePlan b))
-      ((LateFusionCompatible a b)) :ruleset fusion-candidates)
-(rule ((Pair n p a c b) (ReadOnlyScremaPlan a) (ReadOnlyScremaPlan b))
-      ((LateFusionCompatible a b)) :ruleset fusion-candidates)
-(rule ((Pair n p a c b) (ScremaPlan a) (ScremaPlan b) (LateFusionCompatible a b)
+(rule ((Pair n p a c b) (ScremaPlan a) (ScremaPlan b) (ReadOnlyScremaPlan a) (ReadOnlyScremaPlan b)
        (= (HasScans a) false) (= (HasReductions a) true) (= (HasScans b) true)
        (= (IterationDomain a) (IterationDomain b)) (= (LateFusionBlocked a b) false)
        (= (GroupPath n c p) false)
@@ -185,15 +173,6 @@
        (WholeStreamUse p c) (= (OrderIntermediate n p c) false))
       ((ClearOutputStream n p c)) :ruleset fusion-candidates)
 ; An unobserved prefix can feed a fresh scatter destination in its output phase.
-(rule ((Pair n p a c b)
-       (ScremaPlan a)
-       (ElementPlan b)
-       (SafePlan a)
-       (ElementFusion a b)
-       (OutputActionPlan a)
-       (ClearOutputStream n p c)
-       (= (set-diff (set-diff (GroupUsesOf p) (GroupInternalUseMask p)) (GroupInternalUseMask c)) (set-empty)))
-      ((PlanCandidate n 2 p c)) :ruleset fusion-candidates)
 (rule ((Pair n p a c b) (ScremaPlan a) (ElementPlan b) (ReadOnlyScremaPlan a)
        (ElementFusion a b) (OutputActionPlan a)
        (ClearOutputStream n p c)
@@ -358,9 +337,6 @@
        (SafePlan b))
       ((SafePlan next)) :ruleset fusion-commit)
 (rule ((NewPlan n p c a b next) (Chosen n family p c) (<= family 1)
-       (StreamPlan a) (StreamPlan b))
-      ((StreamPlan next)) :ruleset fusion-commit)
-(rule ((NewPlan n p c a b next) (Chosen n family p c) (<= family 1)
        (ReadOnlyScremaPlan a) (ReadOnlyScremaPlan b))
       ((ReadOnlyScremaPlan next)) :ruleset fusion-commit)
 
@@ -409,3 +385,21 @@
 (rule ((Chosen n f p c) (OrderWalk n from to node external)) ((delete (OrderWalk n from to node external))) :ruleset fusion-clear-paths)
 (rule ((Chosen n f p c) (= result (GroupPath n from to))) ((delete (GroupPath n from to))) :ruleset fusion-clear-paths)
 (rule ((Chosen n f p c) (= result (OrderIntermediate n from to))) ((delete (OrderIntermediate n from to))) :ruleset fusion-clear-paths)
+
+; Demand-limited paths settle before testing absence and clear before union.
+(ruleset fusion-paths)
+(rule ((PlanningRound n) (RelevantPair from to))
+      ((GroupReach n from from) (OrderWalk n from to from false)
+       (set (GroupPath n from to) false) (set (OrderIntermediate n from to) false)) :ruleset fusion-paths)
+(rule ((GroupReach n from node) (GroupEdge node next))
+      ((GroupReach n from next)) :ruleset fusion-paths)
+(rule ((PlanningRound n) (RelevantPair from to) (GroupReach n from to))
+      ((set (GroupPath n from to) true)) :ruleset fusion-paths)
+(rule ((OrderWalk n from to node external) (GroupBefore node from))
+      ((OrderWalk n from to from external)) :ruleset fusion-paths)
+(rule ((OrderWalk n from to node external) (GroupBefore node to))
+      ((OrderWalk n from to to external)) :ruleset fusion-paths)
+(rule ((OrderWalk n from to node external) (GroupBefore node next) (!= next from) (!= next to))
+      ((OrderWalk n from to next true)) :ruleset fusion-paths)
+(rule ((OrderWalk n from to to true))
+      ((set (OrderIntermediate n from to) true)) :ruleset fusion-paths)

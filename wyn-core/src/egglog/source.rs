@@ -1,5 +1,5 @@
 //! Import execution scopes and direct source facts; egglog resolves forwarding.
-//! Arithmetic stays in TLC until import into local optimization graphs.
+//! Demanded arithmetic is admitted later into the same graph.
 use super::{fusion, planning, OptimizeError};
 use crate::binding_layout::{
     extract_io_decoration, extract_sampler_binding, extract_storage_access, extract_storage_binding,
@@ -36,7 +36,7 @@ pub(super) fn import(source: &OwnershipApplied) -> Result<(EGraph, Identities<'_
     graph.parse_and_run_program(Some("source.egg".into()), include_str!("source.egg"))?;
     graph.parse_and_run_program(Some("analysis.egg".into()), include_str!("analysis.egg"))?;
     graph.parse_and_run_program(
-        Some("publication.egg".into()),
+        Some("publication-schema.egg".into()),
         include_str!("publication-schema.egg"),
     )?;
     let mut identities = Identities::default();

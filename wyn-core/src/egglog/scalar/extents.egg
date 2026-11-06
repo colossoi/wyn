@@ -24,7 +24,7 @@
       ((set (ExtentExprValue (Product a b)) (ExprBinary (ExprContextDimensions) t "*" x y))) :ruleset scalar-extents)
 (rule ((ExtentExprDemand (Difference a b)) (LengthType t) (= x (ExtentExprValue a)) (= y (ExtentExprValue b)))
       ((set (ExtentExprValue (Difference a b)) (ExprBinary (ExprContextDimensions) t "-" x y))) :ruleset scalar-extents)
-(rule ((ExtentExprDemand extent) (= extent (CallExtent call inner)) (= region (PlanCallee call)) (= body (ExtentExprValue inner)))
+(rule ((ExtentExprDemand extent) (= extent (CallExtent call inner)) (= region (SourceCallTarget call)) (= body (ExtentExprValue inner)))
       ((set (ExtentExprValue extent) (ExprSub (ExprContextDimensions) body region (ExtentExprArgs extent)))) :ruleset scalar-extents)
 (rule ((ExtentExprDemand extent) (ExtentBinding extent formal actual) (ExtentSource formal source)
        (= i (SourceParameterIndex source)) (= value (ExtentExprValue actual)))

@@ -1,4 +1,8 @@
-; Scheduling inputs describe source structure, not allocation decisions.
+; Shared planner vocabulary, declared before source import and fusion.
+; Private helper relations live with their rules. place.egg and run.egg sequence
+; saturation and selection; loading declarations does not execute those phases.
+(datatype TypeKey (TypeId i64))
+
 ; Stage identities name static launch sites. OperationRegion/Enters retain the
 ; invocation boundaries; a repeated launch is not a cycle in the dispatch DAG.
 (datatype StageKey (Stage OperationKey String))
@@ -26,7 +30,7 @@
   (CallExtent SourceValue Extent))
 (function OperationRegion (OperationKey) RegionKey :no-merge)
 (function ConstantLogicalExtent (Extent) i64 :no-merge)
-; Shared source structure must be declared before the structural rules load.
+
 (datatype SourceSliceData (SliceInfo SourceValue SourceValue SourceValue))
 (function SourceSlice (SourceValue) SourceSliceData :no-merge)
 (relation HostRoot (i64 RegionKey))
@@ -38,6 +42,7 @@
 (relation EffectWait (OperationKey i64))
 (relation OperationDependency (OperationKey OperationKey))
 (relation InvocationScalarCandidate (OperationKey))
+
 ; Includes plain maps and indexed updates, and propagates through entered regions.
 ; This describes array work in the planner, not workgroup synchronization.
 (function ContainsCollective (OperationKey) bool :merge (or old new))
@@ -47,9 +52,11 @@
 (relation RegionContainsCollective (RegionKey))
 (relation InvocationValue (OperationKey))
 (function InputDomain (OperationKey) Extent :no-merge)
+
 ; Output components and collective components are semantic facts, before recipes.
 (relation ArrayResult (OperationKey i64 TypeKey))
 (relation TotalResult (OperationKey i64 TypeKey))
+
 ; State slot, type, result role/slot, and source are shared by scheduling and emission.
 (relation Accumulator (OperationKey i64 TypeKey String i64 SourceValue))
 (relation UpdatedResult (OperationKey i64 SourceValue))
@@ -61,11 +68,7 @@
 (relation ParameterValue (SourceValue))
 (relation ResultTuple (SourceValue OperationKey))
 (relation DirectResult (SourceValue OperationKey i64))
-
-(relation Projection (SourceValue SourceValue i64))
-(relation ForwardValue (SourceValue SourceValue))
 (relation ComputedValue (SourceValue))
-
 (relation HostRegion (RegionKey))
 (ruleset host-regions)
 (relation Phase (StageKey RegionKey))
@@ -75,7 +78,6 @@
 (relation PhaseDomain (StageKey Extent i64))
 (datatype ExecutionScope (InvocationScope) (WorkgroupScope))
 (function MapExecution (OperationKey) ExecutionScope :no-merge)
-(function LocalSupportsWorkgroup (OperationKey) bool :merge (or old new))
 (relation ExtentDemand (StageKey Extent))
 (relation Produces (StageKey ValueKey))
 (relation Needs (StageKey ValueKey))
@@ -90,19 +92,18 @@
 (function HasStorageShape (ValueKey) bool :merge (or old new))
 (function LaunchGrid (StageKey) DispatchGrid :no-merge)
 (relation FreshValue (ValueKey))
-(datatype StorageChoice (Allocate) (Reuse SourceValue))
-(function StorageFor (ValueKey) StorageChoice :no-merge)
-(function ReuseSelected (ValueKey) bool :merge (or old new))
 (relation PreferredReuse (ValueKey SourceValue))
 (relation ReusableSource (SourceValue TypeKey RegionKey))
 (relation FixedInputLength (SourceValue i64))
 (function SameBacking (ValueKey) SourceValue :no-merge)
 (function ValueRef (SourceValue) ValueKey :no-merge)
+
 ; A value crossing a storage boundary is either a descriptor or an element load.
 ; Forwarded values preserve this choice; slices retain their own descriptor bounds.
 (datatype StorageRead (ReadView ValueKey) (ReadElement ValueKey))
 (function ResultRead (OperationKey i64) StorageRead :no-merge)
 (function ValueRead (SourceValue) StorageRead :no-merge)
+
 ; A view's storage identity and logical length are independent of its capacity.
 (function DerivedView (SourceValue) bool :merge (or old new))
 (function HasArrayStorage (SourceValue) bool :merge (or old new))
@@ -114,13 +115,14 @@
 (function RuntimeArrayJoin (SourceValue) bool :merge (or old new))
 (function HasViewStage (SourceValue) bool :merge (or old new))
 (function MetadataIndex (ValueKey) i64 :no-merge)
-(function MetadataCount (i64) i64 :merge (max old new))
 (function LoopPreservesLength (SourceValue) bool :merge (or old new))
 (function StoredLoopState (SourceValue) bool :merge (or old new))
 (function DispatchLoopValue (SourceValue) bool :merge (or old new))
+
 ; Allocation bounds are separate from the scalar length carried by a view.
 (sort CapacityBounds (Set Extent))
 (function AllocationBounds (ValueKey) CapacityBounds :merge (set-union old new))
+
 ; All dependencies share one expression propagation path. A descriptor use
 ; requires the input binding without observing its mutable element contents.
 (datatype ValueReference (Contents ValueKey) (Descriptor SourceValue))
@@ -134,6 +136,7 @@
 (relation Materialize (ValueKey))
 (function Backing (ValueKey) ValueKey :no-merge)
 (relation Allocation (ValueKey Extent))
+
 ; Names identify slots in a kernel recipe, not a second allocation policy.
 (function BufferSlot (OperationKey String i64) ValueKey :no-merge)
 (relation OwnedRegion (i64 RegionKey))
@@ -141,55 +144,46 @@
 (relation ReturnScalar (i64 TypeKey))
 (relation ReturnArray (i64 SourceValue))
 (relation ReturnedArrayLayout (i64 TypeKey Extent))
-(function OutputHasBacking (i64) bool :merge (or old new))
 (relation CopyOutput (i64))
-(ruleset materialize-outputs)
 (function OutputBacking (i64) ValueKey :no-merge)
 (relation Clobbers (StageKey ValueKey))
+
 ; Shared gates keep effect fan-in/fan-out linear in the imported graph.
 (datatype OrderKey (At StageKey) (Start OperationKey) (End OperationKey) (Gate i64))
 (relation OrderEdge (OrderKey OrderKey))
+
 ; Dispatch order is complete before assigning sidecar IDs or building kernels.
 (relation DispatchWaitsFor (StageKey OrderKey))
 (relation DispatchDependency (StageKey StageKey))
 
 ; Final readout joins; Rust assigns arena IDs without reconstructing these joins.
 (relation PlannedBuffer (ValueKey i64 Extent))
+
 ; Logical roots and resources remain independent of backend numbering.
 (datatype RootKey (EntryRoot i64) (KernelRoot StageKey))
 (datatype BindingKey (InputBinding i64 i64))
 (relation DeviceRegion (RegionKey))
 (relation DeviceOperation (OperationKey))
 (relation LocalBuffer (OperationKey String i64 TypeKey Extent))
-
 (relation OperationControl (OperationKey))
 (ruleset readout)
-(rule ((Allocation value n) (ElementType value (TypeId ty)) (= (HasStorageShape value) false))
-      ((PlannedBuffer value ty n)) :ruleset readout)
-(rule ((Allocation value logical) (= (StorageLayout value) (FlatStorage (TypeId ty) shape n)))
-      ((PlannedBuffer value ty n)) :ruleset readout)
-
 (ruleset residency)
 (ruleset structure)
 (ruleset classify)
 (ruleset allocation)
-(rule ((ElementType value ty)) ((set (HasStorageShape value) false)) :ruleset allocation)
-(rule ((= layout (StorageLayout value))) ((set (HasStorageShape value) true)) :ruleset allocation)
 (ruleset dispatch)
+
 ; Binding facts consumed by final interface publication.
 (datatype InputStorage (StorageInput BindingKey i64))
 (function AbiStorage (SourceValue) InputStorage :no-merge)
 (relation AbiOutputBinding (i64 i64 i64))
 (datatype UpdateDestination (DestinationBuffer ValueKey) (DestinationValue SourceValue))
 (function SelectedDestination (OperationKey) UpdateDestination :no-merge)
-
 (relation Callback (OperationKey RegionKey))
-
 (relation UninitializedResult (OperationKey i64 TypeKey Extent))
 
 ; Explicit output bindings cannot be satisfied by borrowing an input buffer.
 (function OutputPinned (i64) bool :merge (or old new))
-
 (function HostLoopCandidate (OperationKey) bool :merge (or old new))
 (function LoopDispatchProfitable (OperationKey) bool :no-merge)
 (function DispatchLoopSelected (OperationKey) bool :merge (or old new))
@@ -200,3 +194,63 @@
 (function LoopCarryExtent (OperationKey i64) Extent :no-merge)
 (relation LoopStage (OperationKey StageKey))
 (relation LoopTestStage (OperationKey StageKey))
+
+(function Rematerialize (OperationKey) bool :merge (or old new))
+(relation InvocationResult (SourceValue OperationKey))
+(relation LengthOperation (OperationKey SourceValue))
+(relation LengthReference (SourceValue SourceValue))
+(function ViewExtent (SourceValue) Extent :no-merge)
+
+(relation PlannedSourcePosition (OperationKey RegionKey i64))
+(function IsScalarGroupCandidate (OperationKey) bool :merge (or old new))
+(ruleset scalar-windows)
+(relation DispatchGroupLeader (OperationKey OperationKey))
+
+(relation OrderPending (OperationKey RegionKey i64))
+(ruleset order-import)
+(ruleset order-select)
+(ruleset order-emit)
+
+(datatype AtomicUpdate (AtomicAdd) (AtomicAnd) (AtomicOr) (AtomicXor) (AtomicCas))
+(datatype Recipe (Elements) (Totals) (Prefixes) (Compact) (Scatter) (Serial) (Atomic AtomicUpdate) (Buckets))
+(relation FilterShape (OperationKey))
+(relation IndexedWrite (OperationKey bool))
+
+; Result indices include preceding totals; the destination's output buffer slot is 0.
+(function DestinationSlot (OperationKey) i64 :no-merge)
+(relation IndexedReducer (OperationKey bool AtomicUpdate))
+(relation BucketShape (OperationKey bool))
+(function Plan (OperationKey) Recipe :no-merge)
+(function ElideElements (OperationKey) bool :merge (or old new))
+(ruleset schedule)
+
+; Recipes declare logical phases before any kernel body is built. Widths match
+; the current emitters; PhaseDomain counts invocations, not rounded workgroups.
+; Iteration axes describe logical coordinates, before cooperative width expansion.
+(function IterationExtent (OperationKey) Extent :no-merge)
+(function IterationRank (OperationKey) i64 :no-merge)
+(function IterationAxis (OperationKey i64) Extent :no-merge)
+(function SubgroupsEnabled () bool :no-merge)
+(function SegmentWidth (OperationKey) i64 :merge (min old new))
+(function MapSegmented (OperationKey) bool :merge (or old new))
+(relation KernelPhase (OperationKey String Extent i64 DispatchGrid))
+
+(ruleset collective-costs)
+(function CollectiveStatePrefix (OperationKey i64) i64 :no-merge)
+(relation ParallelCollective (OperationKey))
+(function SelectedCollectiveGroups (OperationKey) i64 :no-merge)
+(function CollectiveGroups (OperationKey) i64 :no-merge)
+(relation PhaseEnds (OperationKey String String))
+(relation PhaseLink (OperationKey String String))
+
+; Device-local outputs that require storage.
+(relation LocalObservedBuffer (ValueKey))
+
+; Scalar control bodies may capture earlier executions through nested regions.
+(relation DispatchGroupContentNeed (StageKey ValueKey))
+(function OutputWriter (i64) RootKey :no-merge)
+(relation FinishEntry (i64))
+(relation FinishDependency (i64 StageKey))
+(ruleset output-candidates)
+(function ParallelOutput (i64) bool :merge (or old new))
+(function FinishWidth (i64) i64 :merge (max old new))

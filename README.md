@@ -183,8 +183,9 @@ the same point, before the remaining optimization and backend passes.
 
 Egglog combines Datalog's relational reasoning with equivalence graphs (e-graphs).
 Wyn uses structural rules to plan array fusion, execution placement, and dispatches,
-then scalar rules to inline eligible helpers and simplify arithmetic. Rust provides
-source summaries, graph ordering, scope placement, and direct SSA emission.
+then scalar rules to inline eligible helpers and simplify arithmetic. Egglog derives
+ordering, scope placement, and storage decisions; Rust imports syntax, selects
+scalar alternatives, reads the resulting plans, and emits SSA.
 
 A single traversal of TLC resolves lexical bindings and imports semantic identities,
 scopes, operation inputs, effects, and dependency summaries. Fusion, placement,
@@ -193,9 +194,9 @@ execution regions rather than individual arithmetic expressions. Original TLC
 bodies and opaque identity mappings remain available for source metadata and
 computations outside scalar optimization.
 
-After scheduling, the compiler creates a native scalar graph snapshot that retains
-shared identities but clears structural analysis tables. It imports only demanded
-scalar expressions and eligible helper templates. Context keys keep functions,
+After scheduling, native demand rules admit scalar expressions and eligible helper
+templates into the same graph. Structural analysis facts remain available.
+Context keys keep functions,
 fused callbacks, and scalar dispatch groups distinct: batching their rule execution
 does not let expressions in unrelated contexts optimize against one another.
 
@@ -208,13 +209,30 @@ The passes below run in order:
 | `egglog::place` | Import the fused plan, order its execution graph and reject cycles, then choose execution domains, rematerialization, host regions, and scalar dispatch groups under the selected topology policy. |
 | `egglog::schedule` | Resolve shapes, traversal proofs, execution recipes, representations, storage allocation/reuse, output routes, capacity bounds, and local-storage/boundary facts. |
 | `egglog::prepare_interfaces` | Resolve scalar admission, contexts, demands, and host targets, then derive physical ABI, binding, and publication dependency/order facts. |
-| `egglog::optimize_with_policy` / `optimize` | Optimize and extract demanded scalar DAGs under the selected optimization policy. |
+| `egglog::optimize_with_policy` / `optimize` | Optimize and extract demanded scalar DAGs, then project selected occurrences into the shared flow model to derive evaluation placement. |
 | `egglog::prepare_host` | Prepare lowering queries and lower supported host scalar expressions/captures from the selected DAG. |
-| `scalar::plan_evaluation` | Build operand-availability constraints and plan safe scalar hoisting, common-branch work, and evaluation order over the selected DAG. |
-| `egglog::to_ssa` | Lower functions, kernels, control flow, and host interfaces using the evaluation plan. Resolve Egglog facts for sizes, resource accesses, scalar tasks, and dispatch loops during lowering; remove interface-only entries and return shader SSA with its host interface description. |
+| `egglog::to_ssa` | Lower functions, kernels, control flow, and host interfaces using the final evaluation-plan readout. Resolve Egglog facts for sizes, resource accesses, scalar tasks, and dispatch loops during lowering; remove interface-only entries and return shader SSA with its host interface description. |
 
 Egglog infers minimum input-buffer sizes for inputs used only in constant prefix
 slices. Other inputs need sizes from their interface or runtime.
+
+The rule files follow compiler responsibilities. [flow.egg](wyn-core/src/egglog/flow.egg)
+owns shared dependency, scope, liveness, and structural-value relations;
+[analysis.egg](wyn-core/src/egglog/analysis.egg) projects source syntax into them.
+The [planner schema](wyn-core/src/egglog/planning/schema.egg) declares the vocabulary
+needed across source import, fusion, and planning. Private helper relations stay
+beside their rules in the responsibility files. Declarations and rules load before
+execution; [place.egg](wyn-core/src/egglog/planning/place.egg),
+[prepare-schedule.egg](wyn-core/src/egglog/planning/prepare-schedule.egg), and
+[run.egg](wyn-core/src/egglog/planning/run.egg) explicitly sequence fixed points
+and selections. Selections that depend on settled minima or blocker flags run
+after those proofs saturate.
+
+For a quick compile-only check, run `./scripts/smoke_egglog.ps1`. It compiles the
+one-line [smoke program](testfiles/egglog_smoke.wyn), containing two maps, a branch,
+and a reduction, with `-O` to WGSL and checks that a compute entry was emitted.
+It builds the compiler as needed; it does not execute the shader or replace
+coverage of loops, storage reuse, graphics, or other targets.
 
 #### Scalar optimization and computation placement
 
@@ -263,7 +281,7 @@ determines where outputs are written, and orders dispatches. Scalar optimization
 follows these decisions; SSA lowering builds the selected kernels and control flow,
 eliminating SOAC operations from the emitted program.
 
-The [execution recipes](wyn-core/src/egglog/schedule.egg) apply to surviving fused
+The [execution recipes](wyn-core/src/egglog/planning/schedule.egg) apply to surviving fused
 operations. Maps absorbed into a reduction share its traversal; a map after a scan
 runs with offset application. An eligible filtered reduction can use a masked
 collective and avoid compaction altogether. Thus a source operator does not imply

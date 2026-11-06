@@ -1083,7 +1083,8 @@ fn segment_callback_blockers_cover_every_output_of_a_fused_plan() {
                     sink.add("SegmentDemand", (value, 0i64))?;
                 }
                 if blocked {
-                    sink.set("SourceRegionDuplicable", (callback,), false)?;
+                    let region = sink.add("FlowRegion", callback)?;
+                    sink.set("SourceDuplicable", region, false)?;
                 }
                 Ok(())
             })
@@ -1213,8 +1214,8 @@ entry case_2(xs:[][3][17]i32) [][3][17]i32=
         .unwrap();
     for table in [
         "SourceOperatorBody",
-        "PlanCallee",
-        "PlanCallArgument",
+        "SourceCallTarget",
+        "SourceCallArgument",
         "SegmentTerminal",
     ] {
         program.graph.clear_function(table).unwrap();
@@ -1339,9 +1340,14 @@ fn tiled_outputs_require_complete_tiles_and_preserve_other_consumers() {
 }
 #[test]
 fn primitive_dispatch_recipes_publish_their_phase_widths_and_order() {
-    let mut graph = super::super::fusion::new_graph().unwrap();
-    super::load(&mut graph).unwrap();
-    graph
+    let source = compile_thru_tlc("").unwrap();
+    let mut program = place(
+        fuse(from_tlc(&source).unwrap()).unwrap(),
+        PipelineTopologyPolicy::AllowGenerated,
+    )
+    .unwrap();
+    program
+        .graph
         .parse_and_run_program(
             None,
             r#"

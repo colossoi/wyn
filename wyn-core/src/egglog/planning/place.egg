@@ -1,6 +1,6 @@
 ; Execution domains and rematerialization precede physical dispatch recipes.
 (run-schedule
-  (saturate (run planning-import))
+  (saturate (seq flow-structure planning-import))
   (saturate (run structure))
   (saturate (run classify))
   (saturate (run host-regions))

@@ -8,11 +8,10 @@
 (rule ((= value (SourceNeutral consumer)) (= op (SourceValueOperation value))
        (Current group (FusionSource op)) (= (SourceSpeculatable value) true)
        (= (SourceOperation op) (OperationInfo region "map"))
-       (= body (SourceOperatorBody op)) (= result (SourceResult body)) (= (SourceRegionDuplicable body) true)
+       (= body (SourceOperatorBody op)) (= result (SourceResult body)) (= (SourceDuplicable (FlowRegion body)) true)
        (= literal (SourceConstantInteger result)) (= (SourceDomainExtent op) (Scalar size))
        (= count (SourceConstantInteger size)) (>= count 0) (<= count 64))
       ((set (InlineNeutralArray value) true)) :ruleset planning-constants)
-
 
 (relation AllowGeneratedTopology ())
 (relation AuthoredTopology ())
@@ -59,8 +58,6 @@
       ((FixedInputLength value n)) :ruleset planning-import)
 (rule ((= (SourceProjection value) (ProjectionInfo parent i))
        (ParameterValue parent)) ((ParameterValue value)) :ruleset residency)
-(rule ((= source (SourceAlias value))) ((ForwardValue value source)) :ruleset planning-import)
-(rule ((= (SourceProjection value) (ProjectionInfo source i))) ((Projection value source i)) :ruleset planning-import)
 
 (rule ((FlowOperand value source))
       ((ComputedValue value) (FlowReferenceEdge value source)) :ruleset planning-import)
@@ -71,8 +68,6 @@
       ((set (ViewExtent value) (Scalar length))) :ruleset planning-import)
 (rule ((SourceArrayPart value 0 first))
       ((set (ViewExtent value) (Length first))) :ruleset planning-import)
-(rule ((Projection e tuple i) (SourceArrayPart tuple i field))
-      ((ForwardValue e field)) :ruleset residency)
 
 (rule ((PlannedOperation original owner plan region) (= value (SourceOperationValue original)) (SourceEnters value child)) ((Enters owner child)) :ruleset planning-import)
 (rule ((PlannedOperation original owner plan region) (= child (SourceOperatorBody original))) ((Callback owner child) (DeviceRegion child)) :ruleset planning-import)
@@ -116,29 +111,6 @@
        (= (SourceDuplicable value) true) (= (WorkOperationCheap (OperationId op)) true)
        (= (ContainsCollective (OperationId op)) false))
       ((set (Rematerialize (OperationId op)) true)) :ruleset classify)
-
-(rule ((= view (ArrayView source)))
-      ((ParallelCopySource source)) :ruleset output-candidates)
-(rule ((SourceUnitRange source start size))
-      ((ParallelCopySource source)) :ruleset output-candidates)
-(rule ((CopyOutput output) (ReturnArray output source) (ParallelCopySource source)
-       (PlannedOutput output entry source) (HostRoot entry region) (= (SourceRegionReadOnly region) true))
-      ((set (ParallelOutput output) true)) :ruleset output-candidates)
-; Other effects in the entry do not serialize an independently read-only copy.
-(rule ((CopyOutput output) (ReturnArray output source) (ParallelCopySource source)
-       (= (SourceReadOnly source) true))
-      ((set (ParallelOutput output) true)) :ruleset output-candidates)
-; Synthetic output fields forward to the actual expression's effect summary.
-(rule ((CopyOutput output) (ReturnArray output source) (ParallelCopySource source)
-       (ForwardValue source original) (= (SourceReadOnly original) true))
-      ((set (ParallelOutput output) true)) :ruleset output-candidates)
-
-(rule ((CopyOutput output) (PlannedOutput output entry e) (References e (Contents value))
-       (EpilogueValue stage value)
-       (= stage (Stage op name)) (PlannedOperation op op plan region)
-       (= source (SourceOperationValue op)) (= (SourceRequiresDevice source) true)
-       (Phase stage r) (SourceOriginalEntry entry r true))
-      ((set (OutputBlocked output stage) false)) :ruleset output-candidates)
 
 (rule ((Current group plan) (= owner (Owner plan)) (= domain (PlanDomain plan)) (= extent (SourceDomainExtent domain)))
       ((set (InputDomain owner) extent)) :ruleset planning-import)
@@ -216,10 +188,6 @@
        (= destination (SourceDestination original)) (= (SourceStorage destination) true)
        (ScatterReadValue original read) (= (BackingIdentity read) (BackingIdentity destination)))
       ((set (ParallelBodySafe owner) false)) :ruleset planning-import)
-; The destination itself is expected; inputs and captures must not reread it.
-(rule ((PlannedOperation original owner plan region) (ScatterReadValue original read)
-       (ReuseAlias (Stage owner name) e alias) (= (ValueRef read) alias))
-      ((set (ReuseBlocked (Stage owner name) e) true)) :ruleset reuse)
 (rule ((PlannedOperation original owner plan region) (= (SourceOperation original) (OperationInfo r "scatter"))
        (= destination (SourceDestination original)) (= (SourceStorage destination) false)
        (= (Identity destination) (Identity scratch)) (SourceScratch scratch length)
@@ -240,38 +208,12 @@
       ((DirectResult value owner i)) :ruleset planning-import)
 
 (rule ((PlannedOperation original owner plan region) (= wrapper (SourceOperatorBody original))
-       (= value (SourceResult wrapper)) (= actual (PlanCallee value)))
+       (= value (SourceResult wrapper)) (= actual (SourceCallTarget value)))
       ((Callback owner actual) (DeviceRegion actual)) :ruleset planning-import)
 
 (rule ((PlannedOperation original owner plan region) (= original owner)
        (= value (SourceOperationValue original)) (SourceScratch value extent))
       ((set (Rematerialize owner) true)) :ruleset classify)
-
-; Combination consumes reducer callbacks, not the producer maps' environments.
-(rule ((Phase (Stage leader phase) r) (PlannedOperation op leader plan r)
-       (= callback (SourceOperatorBody op)) (= (SourceOperation op) (OperationInfo origin kind))
-       (!= phase "initialize") (!= phase "clear") (!= phase "loop_enter") (!= phase "loop_exit")
-       (!= phase "combine") (!= phase "chunks"))
-      ((PhaseCallback (Stage leader phase) callback)) :ruleset schedule)
-(rule ((Phase (Stage leader "chunks") r) (PlannedOperation op leader plan r)
-       (= (PlanEarly plan op) true) (= callback (SourceOperatorBody op)))
-      ((PhaseCallback (Stage leader "chunks") callback)) :ruleset schedule)
-(rule ((Phase (Stage leader "chunks") r) (PlannedOperation op leader plan r)
-       (= (HasScans plan) false) (= callback (SourceOperatorBody op)))
-      ((PhaseCallback (Stage leader "chunks") callback)) :ruleset schedule)
-(rule ((Phase (Stage leader "combine") r) (PlannedOperation op leader plan r)
-       (= callback (SourceOperatorBody op)) (= (SourceOperation op) (OperationInfo origin kind))
-       (!= kind "map") (!= kind "filter") (!= kind "scatter") (!= kind "bucket-scatter"))
-      ((PhaseCallback (Stage leader "combine") callback)) :ruleset schedule)
-(rule ((PhaseCallback stage region) (SourceRegionEnters region child))
-      ((PhaseCallback stage child)) :ruleset schedule)
-
-; Only the combination callbacks and neutrals are evaluated by a combine phase.
-(rule ((PhaseCallback stage region) (= (SourceCapture region formal) source))
-      ((Demand (InStage stage) source)) :ruleset schedule)
-(rule ((Phase (Stage leader "combine") region) (PlannedOperation op leader plan region)
-       (= neutral (SourceNeutral op)))
-      ((Demand (InStage (Stage leader "combine")) neutral)) :ruleset schedule)
 
 ; A buffer consumer needs the selected view, not just its backing allocation.
 ; Copy slices until the draw ABI can carry their offsets and logical lengths.

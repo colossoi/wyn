@@ -9,10 +9,6 @@
        (set (GroupLengths (Group op)) (set-empty)) (set (GroupDirectLengthUses (Group op)) (set-empty))
        (set (GroupInputs (Group op)) (set-empty))
        (set (InternalInputs (Group op)) (set-empty))) :ruleset source-fusion)
-(relation SourceScrema (OperationKey))
-(rule ((= (SourceOperation op) (OperationInfo r "map"))) ((SourceScrema op)) :ruleset source-fusion)
-(rule ((= (SourceOperation op) (OperationInfo r "scan"))) ((SourceScrema op)) :ruleset source-fusion)
-(rule ((= (SourceOperation op) (OperationInfo r "reduce"))) ((SourceScrema op)) :ruleset source-fusion)
 (rule ((SourceScrema op)) ((ScremaPlan (FusionSource op))) :ruleset source-fusion)
 (rule ((= (SourceOperation op) (OperationInfo r "filter"))) ((FilterPlan (FusionSource op))) :ruleset source-fusion)
 (relation SourceArrayProducer (OperationKey))
@@ -23,11 +19,6 @@
       ((set (PrePure (FusionSource op)) safe) (set (PostPure (FusionSource op)) safe)
        (set (PredicatePure (FusionSource op)) safe)) :ruleset source-fusion)
 (rule ((= value (SourceOperationValue op)) (= (SourceSpeculatable value) true)) ((SafePlan (FusionSource op))) :ruleset source-fusion)
-; Deterministic partial callbacks may stream over the same whole domain. This
-; does not authorize speculation, slicing away evaluations, or indexed reuse.
-(rule ((SourceScrema op) (= body (SourceOperatorBody op)) (= (SourceRegionDuplicable body) true)
-       (= value (SourceOperationValue op)) (= (SourceReadOnly value) true))
-      ((StreamPlan (FusionSource op))) :ruleset source-fusion)
 (rule ((= (SourceOperation op) (OperationInfo r "filter")) (SafePlan (FusionSource op))) ((ElementPlan (FusionSource op))) :ruleset source-fusion)
 (rule ((SourceScrema op) (= value (SourceOperationValue op)) (= (SourceReadOnly value) true)) ((ReadOnlyScremaPlan (FusionSource op))) :ruleset source-fusion)
 (rule ((= (SourceOperation op) (OperationInfo r "filter")) (= value (SourceOperationValue op)) (= (SourceReadOnly value) true)) ((ReadOnlyFilterPlan (FusionSource op))) :ruleset source-fusion)
@@ -55,7 +46,7 @@
 (rule ((SourceScanDependency scan producer) (SourceDepends consumer producer role))
       ((SourceScanDependency scan consumer)) :ruleset source-fusion)
 
-(rule ((= (SourceOperation op) (OperationInfo r kind)) (= body (SourceOperatorBody op)) (= (SourceRegionSpeculatable body) true)
+(rule ((= (SourceOperation op) (OperationInfo r kind)) (= body (SourceOperatorBody op)) (= (SourceSpeculatable (FlowRegion body)) true)
        (!= kind "map") (!= kind "reduce") (!= kind "scan") (!= kind "filter"))
       ((ElementPlan (FusionSource op))) :ruleset source-fusion)
 

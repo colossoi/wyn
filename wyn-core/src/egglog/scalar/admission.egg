@@ -1,6 +1,5 @@
 ; Demand and context selection use operation/region facts, before scalar import.
 (ruleset scalar-admission)
-(ruleset scalar-contexts)
 (ruleset scalar-demands)
 (ruleset scalar-import)
 (function ExprContextBoundary (RegionKey) bool :merge (or old new))
