@@ -161,11 +161,9 @@
 (rule ((= target (SourceAlias value)) (= scratch (SourceScratchValue target))) ((set (SourceScratchValue value) scratch)) :ruleset source-summary)
 
 (function SourceRegionWork (RegionKey) i64 :no-merge)
-(relation SourceSummaryCalls (SourceValue SourceValue))
 (relation SourceSummaryEnters (SourceValue RegionKey))
-(relation SourceRegionCalls (RegionKey SourceValue))
 (relation SourceRegionEnters (RegionKey RegionKey))
-; Read footprints are summarized during the TLC walk. A concrete binding may
+; Read footprints follow evaluation edges. A concrete binding may
 ; be reread only when no authored update or writable declaration can change it.
 (relation SourceBinding (SourceValue i64 i64))
 (relation SourceReadsBinding (SourceValue i64 i64))
@@ -211,7 +209,7 @@
       ((set (SourceRegionDuplicable region) false)) :ruleset source-summary)
 (rule ((SourceEnters value region) (= value (SourceOperationValue op)) (SourceRegionDependency region before) (!= op before))
       ((SourceDepends op before (Other))) :ruleset source-dependencies)
-(rule ((SourceSummaryCalls owner function) (= (SourceCallable function) region))
+(rule ((SourceEnters owner region))
       ((SourceSummaryEnters owner region)) :ruleset source-summary)
 ; A reference carries device requirements, but does not re-execute its effects.
 (rule ((SourceUse value child) (= (SourceRequiresDevice child) true))
@@ -232,7 +230,7 @@
       ((set (SourceDuplicable owner) false)) :ruleset source-summary)
 (rule ((SourceSummaryEnters owner region) (= (SourceRegionRequiresDevice region) true))
       ((set (SourceRequiresDevice owner) true)) :ruleset source-summary)
-(rule ((SourceRegionCalls owner function) (= (SourceCallable function) region))
+(rule ((= value (SourceInvocation owner function args)) (= (SourceCallable function) region))
       ((SourceRegionEnters owner region)) :ruleset source-summary)
 (rule ((SourceRegionEnters owner region) (= (SourceRegionSpeculatable region) false))
       ((set (SourceRegionSpeculatable owner) false)) :ruleset source-summary)
@@ -261,3 +259,13 @@
 (rule ((= value (SourceInvocation caller function args)) (= callee (SourceCallable function))
        (= result (SourceResult callee)) (= n (SourceConstantInteger result)))
       ((set (SourceConstantInteger value) n)) :ruleset source-summary)
+
+; Evaluation edges carry effects; value-reference edges never re-execute them.
+(rule ((FlowEvaluation owner value) (SourceReadsBinding value set binding))
+      ((SourceReadsBinding owner set binding)) :ruleset source-summary)
+(rule ((FlowRegionEvaluation owner value) (SourceReadsBinding value set binding))
+      ((SourceRegionReadsBinding owner set binding)) :ruleset source-summary)
+(rule ((FlowEvaluation owner value) (SourceSummaryEnters value region))
+      ((SourceSummaryEnters owner region)) :ruleset source-summary)
+(rule ((FlowRegionEvaluation owner value) (SourceSummaryEnters value region))
+      ((SourceRegionEnters owner region)) :ruleset source-summary)

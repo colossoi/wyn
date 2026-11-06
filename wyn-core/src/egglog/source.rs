@@ -308,7 +308,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
         let checkpoint = self.bindings.checkpoint();
         self.finish_body(body, &mut scope)?;
         self.bindings.restore(checkpoint);
-        self.enter_summary(owner, scope.key, parent);
         Ok(scope.key)
     }
 
@@ -472,8 +471,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
                     TermKind::Var(VarRef::Symbol(_)) | TermKind::Lambda(_) | TermKind::Closure(_)
                 ) {
                     self.sink.add("SourceApply", (value, function))?;
-                    self.summaries.values.entry(value).or_default().calls.insert(function);
-                    scope.summary.calls.insert(function);
                 }
                 let arguments = args
                     .iter()
@@ -596,8 +593,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
             )?;
         }
         self.finish_region_summary(&header)?;
-        self.enter_summary(owner, header.key, parent);
-        self.enter_summary(owner, iteration.key, parent);
         self.bindings.restore(checkpoint);
         Ok(())
     }
@@ -639,13 +634,11 @@ impl<'source> Import<'_, '_, '_, 'source> {
             let result = self.sink.add("SourceInvocation", (scope.key, function, arguments))?;
             self.value_type(result, ret_ty)?;
             self.sink.set("SourceResult", scope.key, result)?;
-            scope.summary.calls.insert(function);
             self.finish_region_summary(&scope)?;
         } else {
             self.finish_body(body, &mut scope)?;
         }
         self.bindings.restore(checkpoint);
-        self.enter_summary(owner, scope.key, parent);
         Ok(())
     }
 

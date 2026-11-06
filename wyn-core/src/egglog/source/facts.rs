@@ -200,7 +200,10 @@ impl<'source> Import<'_, '_, '_, 'source> {
         self.flags(value, device, pure, readonly, duplicate, work)?;
         if let TermKind::Index { array, .. } = &term.kind {
             if let Some(binding) = array_view_buffer(&array.ty) {
-                self.summaries.values.entry(value).or_default().reads.insert(binding);
+                self.sink.add(
+                    "SourceReadsBinding",
+                    (value, i64::from(binding.set), i64::from(binding.binding)),
+                )?;
             }
         }
         if matches!(term.kind, TermKind::Extern(_)) {
@@ -226,7 +229,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 readonly,
                 duplicate,
                 work,
-                ..Summary::default()
+                evaluations: [value].into_iter().collect(),
             },
         );
         Ok(())

@@ -1,8 +1,7 @@
-//! Transient summaries accumulated by the TLC walk. These contain no executable
-//! expressions. Only operation/region summaries enter structural fixed points.
+//! Local flags and evaluation roots accumulated by the TLC walk.
+//! The shared evaluation graph propagates calls, region entries and buffer reads.
 use super::{Import, Scope};
 use crate::egglog::OptimizeError;
-use crate::BindingRef;
 use crate::{LookupMap, LookupSet};
 use egglog_engine::{RawValues, Value, Write};
 
@@ -13,9 +12,7 @@ pub(super) struct Summary {
     pub readonly: bool,
     pub duplicate: bool,
     pub work: i64,
-    pub reads: LookupSet<BindingRef>,
-    pub calls: LookupSet<Value>,
-    pub regions: LookupSet<Value>,
+    pub evaluations: LookupSet<Value>,
 }
 
 impl Default for Summary {
@@ -26,9 +23,7 @@ impl Default for Summary {
             readonly: true,
             duplicate: true,
             work: 0,
-            reads: LookupSet::default(),
-            calls: LookupSet::default(),
-            regions: LookupSet::default(),
+            evaluations: LookupSet::default(),
         }
     }
 }
@@ -45,9 +40,7 @@ impl Summary {
         self.duplicate &= other.duplicate;
         // Consumers cap inline queries; placement needs the unsaturated sum.
         self.work = self.work.saturating_add(other.work);
-        self.reads.extend(&other.reads);
-        self.calls.extend(&other.calls);
-        self.regions.extend(&other.regions);
+        self.evaluations.extend(&other.evaluations);
     }
 }
 
@@ -76,11 +69,6 @@ impl Import<'_, '_, '_, '_> {
         let owner = self.summaries.owners.get(&target).copied().unwrap_or(unowned);
         self.sink.add("SourceLexicalUse", (scope, target, owner))?;
         Ok(())
-    }
-
-    pub(super) fn enter_summary(&mut self, owner: Value, child: Value, parent: &mut Scope) {
-        self.summaries.values.entry(owner).or_default().regions.insert(child);
-        parent.summary.regions.insert(child);
     }
 
     pub(super) fn finish_summary(&mut self, value: Value, scope: &mut Scope) -> Result<(), OptimizeError> {
@@ -115,8 +103,6 @@ impl Import<'_, '_, '_, '_> {
                 "SourceRegionReadOnly",
                 "SourceRegionDuplicable",
                 "SourceRegionWork",
-                "SourceRegionCalls",
-                "SourceRegionEnters",
             ]
         } else {
             [
@@ -125,8 +111,6 @@ impl Import<'_, '_, '_, '_> {
                 "SourceReadOnly",
                 "SourceDuplicable",
                 "SourceWork",
-                "SourceSummaryCalls",
-                "SourceSummaryEnters",
             ]
         };
         for (name, flag) in
@@ -135,16 +119,11 @@ impl Import<'_, '_, '_, '_> {
             self.sink.set(name, key, flag)?;
         }
         self.sink.set(names[4], key, summary.work)?;
-        for binding in &summary.reads {
+        for &value in &summary.evaluations {
             self.sink.add(
-                if region { "SourceRegionReadsBinding" } else { "SourceReadsBinding" },
-                (key, i64::from(binding.set), i64::from(binding.binding)),
+                if region { "FlowRegionEvaluation" } else { "FlowEvaluation" },
+                (key, value),
             )?;
-        }
-        for (name, values) in names[5..].iter().zip([&summary.calls, &summary.regions]) {
-            for &value in values {
-                self.sink.add(name, (key, value))?;
-            }
         }
         Ok(())
     }

@@ -75,3 +75,7 @@
       ((set (FlowInputAt value path) symbol)) :ruleset source-summary)
 (rule ((= (SourceProjection value) (ProjectionInfo parent i)) (= symbol (FlowInputAt parent (FlowAt i path))))
       ((set (FlowInputAt value path) symbol)) :ruleset source-summary)
+
+; Executing an occurrence is distinct from referring to its resulting value.
+(relation FlowEvaluation (SourceValue SourceValue))
+(relation FlowRegionEvaluation (RegionKey SourceValue))
