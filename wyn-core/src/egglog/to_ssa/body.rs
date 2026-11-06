@@ -331,10 +331,6 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                     let base = self.scalar(scope, fields[2])?;
                     self.field(base, index)?
                 }
-                "ExprCoerce" => {
-                    let value = self.scalar(scope, fields[2])?;
-                    self.cast(value, &ty)?
-                }
                 "ExprChoice" => self.scalar_body(scope, term)?,
                 _ => return Err(error(format!("unresolved selected constructor {name}"))),
             }

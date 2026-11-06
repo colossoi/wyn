@@ -54,7 +54,7 @@ fn dead_fused_outputs_do_not_evaluate_their_elements() {
 }
 
 #[test]
-fn expression_projection_retains_host_capture_inputs_without_admission_tables() {
+fn native_admission_and_selected_evaluation_share_the_source_graph() {
     use super::{from_tlc, fuse, optimize_with_policy, place, schedule, ScalarOptimization};
     use crate::PipelineTopologyPolicy;
 
@@ -90,8 +90,7 @@ fn expression_projection_retains_host_capture_inputs_without_admission_tables() 
         }
         let mut phase_roots = 0;
         program
-            .stage
-            .scalars
+            .graph
             .constructor_enodes("HostEvalPhaseRoot", |row| {
                 phase_roots += 1;
                 assert!(program.stage.selected.roots.contains_key(&(row.children[1], row.children[2])));
@@ -101,13 +100,6 @@ fn expression_projection_retains_host_capture_inputs_without_admission_tables() 
         let mut requests = 0;
         program.graph.constructor_enodes("ExprImportRoot", |_| requests += 1).unwrap();
         assert!(requests > 0);
-        program
-            .stage
-            .scalars
-            .constructor_enodes("ExprImportRoot", |_| {
-                panic!("admission requests must remain in the structural graph")
-            })
-            .unwrap();
     }
 }
 
@@ -118,7 +110,8 @@ fn scalar_policy_controls_optional_templates() {
         crate::compile_thru_tlc("def helper(x:i32) i32=x+1 entry main(x:i32) i32=helper(x)*2").unwrap();
     let program = interfaces_for_test(&tlc);
     for policy in [super::ScalarOptimization::Basic, super::ScalarOptimization::Full] {
-        let (_, scalars) = super::scalar::run(&program.graph, &program.identities, policy).unwrap();
+        let mut scalars = program.graph.clone();
+        super::scalar::run(&mut scalars, &program.identities, policy).unwrap();
         let mut templates = 0;
         scalars.constructor_enodes("ExprTemplateBody", |_| templates += 1).unwrap();
         assert_eq!(templates > 0, policy == super::ScalarOptimization::Full);

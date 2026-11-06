@@ -273,6 +273,15 @@ impl<'source> Import<'_, '_, '_, 'source> {
         Ok(())
     }
 
+    pub(super) fn arguments(&mut self, value: Value, arguments: Vec<Value>) -> Result<(), OptimizeError> {
+        let args = self.sink.container_to_value(VecContainer {
+            data: arguments,
+            do_rebuild: true,
+        });
+        self.sink.set("SourceArgumentsOf", value, args)?;
+        Ok(())
+    }
+
     pub(super) fn application(
         &mut self,
         value: Value,

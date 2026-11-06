@@ -1,16 +1,13 @@
-//! Demand-driven scalar admission followed by an egglog optimization fixed point.
-//! The structural graph remains authoritative for effects and dispatch placement.
+//! Native scalar admission and optimization over the shared source graph.
+//! Selected-expression evaluation stays in this graph through emission.
 use super::query::Query;
 use super::{parse_program, source, timing, OptimizeError, ScalarOptimization};
-use crate::LookupMap;
-use egglog_engine::EGraph;
+use egglog_engine::{EGraph, RawValues, Write};
 
 pub(super) mod evaluation;
 pub(super) mod extract;
 mod fold;
 mod import;
-mod read;
-use import::Importer;
 
 #[cfg(test)]
 #[path = "scalar/analysis_tests.rs"]
@@ -44,10 +41,10 @@ pub(super) fn admit(graph: &mut EGraph) -> Result<(), OptimizeError> {
 }
 
 pub(super) fn run(
-    graph: &EGraph,
+    graph: &mut EGraph,
     identities: &source::Identities<'_>,
     policy: ScalarOptimization,
-) -> Result<(Selected, EGraph), OptimizeError> {
+) -> Result<Selected, OptimizeError> {
     let _timing = timing::span("egglog scalar optimization");
     let schedule = parse_program(
         "scalar fixed point",
@@ -60,103 +57,40 @@ pub(super) fn run(
     for &region in identities.scopes.keys() {
         facts.required("ExprContextForScope", (region,))?;
     }
-    let mut scalars = timing::time("egglog scalar / graph projection", || {
-        // Retain only the inputs needed by expression import, optimization, and
-        // readout. Planning and admission tables stay in the structural graph.
-        let mut scalars = timing::time("egglog scalar / clone graph", || graph.clone());
-        let _prune = timing::span("egglog scalar / prune graph");
-        for name in scalars.get_function_names() {
-            if !matches!(
-                name.as_str(),
-                "SourceParent"
-                    | "ExprContextBoundary"
-                    | "SourceEvaluationPosition"
-                    | "SourceBranch"
-                    | "BranchInfo"
-                    | "SourceResult"
-                    | "SourceLoopInitial"
-                    | "LoopInitialInfo"
-                    | "SourceLoopForm"
-                    | "ForCount"
-                    | "ForEach"
-                    | "WhileCondition"
-                    | "ExprContextFunction"
-                    | "ExprContextKernel"
-                    | "ExprContextDispatch"
-                    | "ExprContextTemplate"
-                    | "ExprContextDimensions"
-                    | "ExprContextForScope"
-                    | "ExprContextForSource"
-                    | "ExprContextOwner"
-                    | "ExprContextHome"
-                    | "ExprContextMember"
-                    | "HostEvalPhaseRoot"
-                    | "HostEvalParameter"
-                    | "HostEvalLeaf"
-                    | "RegionId"
-                    | "OperationId"
-                    | "TypeId"
-                    | "SourceTerm"
-                    | "SourceFormal"
-                    | "SourceGlobal"
-                    | "SourceArrayAtom"
-                    | "SourceProjected"
-                    | "SourceShape"
-                    | "SourceOffset"
-                    | "SourceInvocation"
-                    | "SourceLoop"
-                    | "LoopInfo"
-                    | "SourceReadOnly"
-                    | "SourceRegionReadOnly"
-                    | "FusionSource"
-                    | "Joined"
-                    | "LengthType"
-                    | "Fixed"
-                    | "Length"
-                    | "Scalar"
-                    | "Product"
-                    | "Difference"
-                    | "CallExtent"
-                    | "RectangularExtent"
-                    | "ExtentUniform"
-                    | "ExtentEdge"
-                    | "ExtentBinding"
-                    | "ExtentSource"
-                    | "PlanCallee"
-                    | "SourceCapture"
-                    | "SourceLength"
-                    | "SourceParameterRegion"
-                    | "SourceParameterIndex"
-            ) {
-                scalars.clear_function(&name)?;
-            }
-        }
-        Ok::<_, OptimizeError>(scalars)
-    })?;
-    let mut cache = LookupMap::default();
-    let mut templates = LookupMap::default();
     timing::time("egglog scalar / admission", || {
-        scalars.update(|sink| {
-            let mut importer = Importer::new(sink, identities, facts, &mut cache, &mut templates, policy);
-            Ok(facts.for_each("ExprImportRoot", |r| {
-                importer.root(r[0], r[1], r[2], graph.value_to_base::<bool>(r[3]))
-            }))
-        })?
+        graph.parse_and_run_program(
+            Some("native scalar import".into()),
+            include_str!("scalar/import.egg"),
+        )?;
+        graph.update(|sink| Ok(import::syntax(sink, identities)))??;
+        if policy == ScalarOptimization::Full {
+            graph.update(|mut sink| sink.add("ExprImportInlining", RawValues(vec![])))?;
+        }
+        graph.parse_and_run_program(None, "(run-schedule (saturate scalar-source-flags) (saturate scalar-source-forms) scalar-source-select (saturate (seq (saturate scalar-request) (saturate scalar-build))))")?;
+        for table in ["ExprImportComplete", "ExprTemplateComplete"] {
+            Query(graph).for_function(table, |_, complete| {
+                if graph.value_to_base::<bool>(complete) {
+                    Ok(())
+                } else {
+                    Err(OptimizeError::Output(
+                        "incomplete or cyclic scalar admission".into(),
+                    ))
+                }
+            })?;
+        }
+        Ok::<_, OptimizeError>(())
     })?;
-    scalars.parse_and_run_program(None, "(run-schedule (saturate scalar-extent-sources) (saturate scalar-extents) (saturate (seq scalar-substitute scalar-arguments)))")?;
-    timing::time("egglog scalar / fixed point", || scalars.run_program(schedule))?;
+    graph.parse_and_run_program(None, "(run-schedule (saturate scalar-extent-sources) (saturate scalar-extents) (saturate (seq scalar-substitute scalar-arguments)))")?;
+    timing::time("egglog scalar / fixed point", || graph.run_program(schedule))?;
     timing::time("egglog scalar / effect summaries", || {
-        scalars.parse_and_run_program(None, "(run-schedule (saturate scalar-effects))")
+        graph.parse_and_run_program(None, "(run-schedule (saturate scalar-effects))")
     })?;
-    scalars.parse_and_run_program(
+    graph.parse_and_run_program(
         Some("scalar host preferences".into()),
         include_str!("scalar/host.egg"),
     )?;
-    scalars.clear_function("ExprContextActive")?;
-    let selected = extract::select_roots(&mut scalars, policy)?;
-    evaluation::prepare(&mut scalars)?;
-    if timing::enabled() {
-        eprintln!("egglog scalar admitted values: {}", cache.len());
-    }
-    Ok((selected, scalars))
+    graph.clear_function("ExprContextActive")?;
+    let selected = extract::select_roots(graph, policy)?;
+    evaluation::prepare(graph)?;
+    Ok(selected)
 }

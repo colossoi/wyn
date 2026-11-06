@@ -78,15 +78,7 @@ pub(super) struct Identities<'source> {
     pub(super) symbols: Interner<i64, SymbolId>,
     pub(super) types: Interner<i64, Type>,
     pub(super) scopes: LookupMap<Value, (Option<Value>, Option<&'source Term>)>,
-    pub(super) arrays: LookupMap<
-        Value,
-        (
-            &'source ArrayExpr<ExplicitClosurePayload, ExplicitCapturesPayload>,
-            Value,
-        ),
-    >,
-    pub(super) origins: LookupMap<Value, (&'source Term, Value)>,
-    pub(super) occurrences: LookupMap<(Value, TermId), Value>,
+    pub(super) origins: LookupMap<Value, &'source Term>,
 }
 
 impl<'source> Identities<'source> {
@@ -255,7 +247,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
     fn source_value(&mut self, term: &'source Term, scope: Value) -> Result<Value, OptimizeError> {
         let id = self.identities.term(term)?;
         let value = self.sink.add("SourceTerm", (scope, id))?;
-        self.identities.origins.insert(value, (term, scope));
+        self.identities.origins.insert(value, term);
         self.value_type(value, &term.ty)?;
         Ok(value)
     }
@@ -351,16 +343,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
     }
 
     fn visit(&mut self, term: &'source Term, scope: &mut Scope) -> Result<(Value, i64), OptimizeError> {
-        let result = self.visit_value(term, scope)?;
-        self.identities.occurrences.insert((scope.key, term.id), result.0);
-        Ok(result)
-    }
-
-    fn visit_value(
-        &mut self,
-        term: &'source Term,
-        scope: &mut Scope,
-    ) -> Result<(Value, i64), OptimizeError> {
         // Lexical names and let syntax do not introduce semantic values.
         match &term.kind {
             TermKind::Var(VarRef::Symbol(symbol)) => {
@@ -494,6 +476,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                         (value, arguments[0], index as i64, arguments[2]),
                     )?;
                 }
+                self.arguments(value, arguments)?;
                 if !facts::scalar_application(func, args, &term.ty) {
                     self.operation(value, "call", scope)?;
                 }
@@ -522,13 +505,21 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 self.sink.add("SourceSelect", (value, input, *idx as i64))?;
             }
             TermKind::Tuple(fields) | TermKind::VecLit(fields) => {
+                let mut arguments = Vec::with_capacity(fields.len());
+                self.sink.set(
+                    "SourceConstruct",
+                    value,
+                    if matches!(term.kind, TermKind::Tuple(_)) { "tuple" } else { "vector" },
+                )?;
                 for (index, field) in fields.iter().enumerate() {
                     let field = self.operand(field, value, scope)?;
+                    arguments.push(field);
                     self.sink.add("SourceField", (value, index as i64, field))?;
                     if as_soa_tuple(&term.ty).is_some() {
                         self.sink.add("SourceArrayPart", (value, index as i64, field))?;
                     }
                 }
+                self.arguments(value, arguments)?;
             }
         }
         self.finish_value(value, scope)?;
@@ -668,7 +659,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
             self.owners.insert(value, scope.key);
             value
         };
-        self.identities.arrays.entry(value).or_insert((array, scope.key));
         self.sink.add("SourceDirectUse", (owner, value))?;
         let extent = match array {
             ArrayExpr::Var(VarRef::Symbol(_), _) => self.sink.add("Length", value)?,
@@ -676,28 +666,38 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 return Err(OptimizeError::Output("builtin used as a TLC array input".into()));
             }
             ArrayExpr::Zip(arrays) => {
+                self.sink.set("SourceConstruct", value, "zip")?;
+                let mut arguments = Vec::with_capacity(arrays.len());
                 for (index, array) in arrays.iter().enumerate() {
                     let child = self.array(array, value, scope)?;
                     self.sink.add("SourceArrayPart", (value, index as i64, child))?;
+                    arguments.push(child);
                 }
+                self.arguments(value, arguments)?;
                 self.sink.add("Length", value)?
             }
             ArrayExpr::Literal(elements) => {
                 self.flags(value, false, true, true, true, 0)?;
-                for element in elements {
-                    self.operand(element, value, scope)?;
-                }
+                self.sink.set("SourceConstruct", value, "array")?;
+                let arguments = elements
+                    .iter()
+                    .map(|element| self.operand(element, value, scope))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.arguments(value, arguments)?;
                 self.sink.add("Fixed", elements.len() as i64)?
             }
             ArrayExpr::Range { start, len, step } => {
                 self.flags(value, false, true, true, true, 0)?;
                 let start = self.operand(start, value, scope)?;
                 let length = self.operand(len, value, scope)?;
+                self.sink.set("SourceConstruct", value, "range")?;
+                let mut arguments = vec![start, length];
                 if let Some(step) = step {
-                    self.operand(step, value, scope)?;
+                    arguments.push(self.operand(step, value, scope)?);
                 } else {
                     self.sink.add("SourceUnitRange", (value, start, length))?;
                 }
+                self.arguments(value, arguments)?;
                 self.sink.add("Scalar", length)?
             }
         };

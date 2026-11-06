@@ -128,13 +128,12 @@ pub enum ScalarOptimization {
 }
 
 pub fn optimize_with_policy(
-    program: Program<'_, InterfacesPrepared>,
+    mut program: Program<'_, InterfacesPrepared>,
     policy: ScalarOptimization,
 ) -> Result<Program<'_, Optimized>, OptimizeError> {
-    let (selected, scalars) = scalar::run(&program.graph, &program.identities, policy)?;
+    let selected = scalar::run(&mut program.graph, &program.identities, policy)?;
     Ok(program.advance(Optimized {
         selected,
-        scalars,
         host: LookupMap::default(),
         captures: LookupMap::default(),
     }))
@@ -186,9 +185,6 @@ pub struct Optimized {
     captures: LookupMap<egglog_engine::TermId, host::Capture>,
     host: LookupMap<(Value, Value), ScalarExpr>,
     selected: scalar::Selected,
-    // Shares immutable source/context identities with the structural graph.
-    // Rewrites and placement proofs belong to this scalar snapshot alone.
-    scalars: EGraph,
 }
 
 pub struct HostPrepared<'source> {

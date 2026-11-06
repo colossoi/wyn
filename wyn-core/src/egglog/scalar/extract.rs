@@ -60,7 +60,7 @@ fn work(name: &str) -> u64 {
     match name {
         "ExprInvoke" | "ExprCall" => CALL_WORK,
         "ExprUnary" | "ExprBinary" | "ExprOp" | "ExprChoice" | "ExprTuple" | "ExprVector"
-        | "ExprProject" | "ExprCoerce" | "ExprInstruction" => 1,
+        | "ExprProject" | "ExprInstruction" => 1,
         _ => 0,
     }
 }
@@ -189,7 +189,7 @@ pub(in crate::egglog) fn operands(name: &str, fields: &[TermId]) -> Vec<TermId> 
         "ExprBinary" => fields[3..5].to_vec(),
         "ExprOp" | "ExprInvoke" => vec![fields[3]],
         "ExprInstruction" | "ExprCall" => vec![fields[4]],
-        "ExprTuple" | "ExprVector" | "ExprProject" | "ExprCoerce" => vec![fields[2]],
+        "ExprTuple" | "ExprVector" | "ExprProject" => vec![fields[2]],
         "ExprChoice" => fields[2..5].to_vec(),
         "ExprCons" => fields[1..3].to_vec(),
         _ => Vec::new(),

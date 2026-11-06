@@ -80,7 +80,6 @@ fn selected_grid_dimensions_are_positive() {
             roots: Default::default(),
             extents: Default::default(),
         },
-        scalars: crate::egglog::fusion::new_graph().unwrap(),
     });
     for (dims, expected) in [
         ((0i64, 1i64, 1i64), "grid x"),

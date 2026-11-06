@@ -27,7 +27,6 @@
 (constructor ExprTuple (ExprContext TypeKey ExprArgs) Expr)
 (constructor ExprVector (ExprContext TypeKey ExprArgs) Expr)
 (constructor ExprProject (ExprContext TypeKey Expr i64) Expr)
-(constructor ExprCoerce (ExprContext TypeKey Expr) Expr)
 ; Substitution is a rewrite mechanism, never an executable expression.
 (constructor ExprSub (ExprContext Expr RegionKey ExprArgs) Expr :unextractable)
 (constructor ExprNil (ExprContext) ExprArgs)

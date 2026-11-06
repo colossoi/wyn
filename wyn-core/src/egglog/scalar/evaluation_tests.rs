@@ -223,8 +223,7 @@ fn shared_placement_queries_match_individual_legal_site_selection() {
     };
     let mut members = LookupMap::<_, LookupSet<_>>::default();
     program
-        .stage
-        .scalars
+        .graph
         .constructor_enodes("ExprContextMember", |row| {
             members.entry(row.children[0]).or_default().insert(row.children[1]);
         })
@@ -274,7 +273,7 @@ fn shared_placement_queries_match_individual_legal_site_selection() {
             .map(|(_, site)| site);
         assert_eq!(Some(actual), expected);
         assert!(
-            Query(&program.stage.scalars).contains("ExprTotal", selected.values[term]).unwrap(),
+            Query(&program.graph).contains("ExprTotal", selected.values[term]).unwrap(),
             "non-total expressions cannot share a hoisting decision"
         );
         contexts.insert(context);
@@ -306,7 +305,7 @@ fn unselected_expression_alternatives_do_not_add_evaluation_dependencies() {
     let expression = selected.dag.to_string(term);
     let context = selected.dag.to_string(fields[0]);
     let ty = selected.dag.to_string(fields[1]);
-    let graph = &mut program.stage.scalars;
+    let graph = &mut program.graph;
     // Introduce a valid alternative after selection. Its self-reference would
     // create a dependency cycle if projection followed all equivalent enodes.
     graph

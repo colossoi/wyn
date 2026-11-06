@@ -36,7 +36,7 @@ impl Evaluation {
     pub fn new(program: &Program<'_, Optimized>) -> Result<Self, OptimizeError> {
         let _timing = timing::span("egglog evaluation / final readout");
         let selected = &program.stage.selected;
-        let graph = &program.stage.scalars;
+        let graph = &program.graph;
         let query = Query(graph);
         let term = |value| graph.value_to_base::<i64>(value) as usize;
         let mut plan = Self {

@@ -508,20 +508,6 @@ impl<'a, 'source> Lower<'a, 'source> {
                 self.term(f[2])?,
                 usize::try_from(selected.integer(f[3])?).map_err(|_| error("invalid host field index"))?,
             ),
-            "ExprCoerce" => {
-                let (_, operand) = selected.app(f[2])?;
-                let Some(from) = self.facts.ty(selected.values[operand[1]]) else {
-                    return Err(error("host conversion type missing").into());
-                };
-                if from == ty {
-                    self.term(f[2])?
-                } else {
-                    let (Some(from), Some(to)) = (scalar_type(from), scalar_type(ty)) else {
-                        return Err(Error::Unsupported);
-                    };
-                    apply(&format!("to-{}", to.name()), from, vec![self.term(f[2])?])
-                }
-            }
             "ExprChoice" => ScalarExpr::If {
                 condition: Box::new(self.term(f[2])?),
                 yes: Box::new(self.scope(|lower| lower.term(f[3]))?),

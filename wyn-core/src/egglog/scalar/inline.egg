@@ -30,8 +30,6 @@
          (ExprVector ctx t (ExprSubArgs ctx xs region args)) :when ((ExprContextActive ctx)) :subsume :ruleset scalar-substitute)
 (rewrite (ExprSub ctx (ExprProject original t x i) region args)
          (ExprProject ctx t (ExprSub ctx x region args) i) :when ((ExprContextActive ctx)) :subsume :ruleset scalar-substitute)
-(rewrite (ExprSub ctx (ExprCoerce original t x) region args)
-         (ExprCoerce ctx t (ExprSub ctx x region args)) :when ((ExprContextActive ctx)) :subsume :ruleset scalar-substitute)
 (rewrite (ExprSubArgs ctx (ExprNil original) region args) (ExprNil ctx) :when ((ExprContextActive ctx)) :subsume :ruleset scalar-substitute)
 (rewrite (ExprSubArgs ctx (ExprCons original x xs) region args)
          (ExprCons ctx (ExprSub ctx x region args) (ExprSubArgs ctx xs region args)) :when ((ExprContextActive ctx)) :subsume :ruleset scalar-substitute)

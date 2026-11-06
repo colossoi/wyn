@@ -5,6 +5,10 @@ use crate::{compile_thru_tlc, types};
 use egglog_engine::sort::S;
 use egglog_engine::Write;
 
+fn source_term(identities: &super::Identities<'_>, id: tlc::TermId) -> egglog_engine::Value {
+    *identities.origins.iter().find(|(_, term)| term.id == id).unwrap().0
+}
+
 #[test]
 fn evaluation_edges_stay_direct_and_borrowed_values_do_not_repeat_effects() {
     for depth in [16, 64, 256] {
@@ -29,8 +33,8 @@ fn evaluation_edges_stay_direct_and_borrowed_values_do_not_repeat_effects() {
         let (mut graph, identities) = import(&program).unwrap();
         let query = Query(&graph);
         let region = query.row("SourceOriginalEntry", |_| true).unwrap().unwrap()[1];
-        let scalar = identities.occurrences[&(region, scalar_id)];
-        let root = identities.occurrences[&(region, ids[depth - 1])];
+        let scalar = source_term(&identities, scalar_id);
+        let root = source_term(&identities, ids[depth - 1]);
         let parameter = query.required("SourceParameter", (region, 0i64)).unwrap();
         let mut edges = 0;
         query
@@ -42,7 +46,7 @@ fn evaluation_edges_stay_direct_and_borrowed_values_do_not_repeat_effects() {
         assert!(edges <= depth + 8, "{depth} wrappers produced {edges} edges");
         let mut child = scalar;
         for id in ids {
-            let owner = identities.occurrences[&(region, id)];
+            let owner = source_term(&identities, id);
             let mut children = Vec::new();
             query
                 .for_each("FlowEvaluation", |row| {
@@ -271,8 +275,7 @@ fn source_import_resolves_coerced_tuple_fields_in_their_visible_scope() {
     *lambda.body = projected;
     let (graph, identities) = import(&program).unwrap();
     let query = Query(&graph);
-    let (&(scope, _), &projected) =
-        identities.occurrences.iter().find(|((_, id), _)| *id == projected_id).unwrap();
-    let scalar = identities.occurrences[&(scope, scalar_id)];
+    let projected = source_term(&identities, projected_id);
+    let scalar = source_term(&identities, scalar_id);
     assert_eq!(query.required("SourceAlias", (projected,)).unwrap(), scalar);
 }

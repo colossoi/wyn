@@ -117,3 +117,6 @@
 
 (function SourceIndex (SourceValue) SourceValue :no-merge)
 (relation SourceUnitRange (SourceValue SourceValue SourceValue))
+
+(function SourceArgumentsOf (SourceValue) SourceArguments :no-merge)
+(function SourceConstruct (SourceValue) String :no-merge)

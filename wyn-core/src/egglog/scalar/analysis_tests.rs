@@ -101,3 +101,36 @@ fn eclass_merging_cannot_hide_an_effectful_alternative() {
         )
         .unwrap();
 }
+
+#[test]
+fn scalar_admission_rejects_forwarding_cycles_but_stops_at_parameters() {
+    use crate::egglog::{from_tlc, fuse, place, prepare_interfaces, schedule, ScalarOptimization};
+    use crate::PipelineTopologyPolicy;
+    use egglog_engine::Write;
+    for (body, valid) in [("x", true), ("x + 1", false)] {
+        let tlc = crate::compile_thru_tlc(&format!("entry main(x:i32) i32={body}")).unwrap();
+        let mut program = prepare_interfaces(
+            schedule(
+                place(
+                    fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                    PipelineTopologyPolicy::AllowGenerated,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let query = crate::egglog::query::Query(&program.graph);
+        let region = query.row("SourceOriginalEntry", |_| true).unwrap().unwrap()[1];
+        let root = query.required("SourceResult", region).unwrap();
+        program.graph.update(|mut sink| sink.set("SourceAlias", root, root)).unwrap();
+        let result = super::run(&mut program.graph, &program.identities, ScalarOptimization::Full);
+        if valid {
+            assert!(result.is_ok());
+        } else {
+            assert!(
+                matches!(result, Err(crate::egglog::OptimizeError::Output(message)) if message.contains("cyclic scalar admission"))
+            );
+        }
+    }
+}
