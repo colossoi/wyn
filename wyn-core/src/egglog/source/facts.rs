@@ -280,7 +280,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
         entry: i64,
         value: Value,
         term: &Term,
-        scope: Value,
         outputs: &[crate::interface::EntryOutputDecl<crate::interface::ResolvedAttribute>],
     ) -> Result<(), OptimizeError> {
         let ty = &term.ty;
@@ -303,7 +302,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                     let component = self.sink.add("SourceProjected", (value, index as i64))?;
                     self.value_type(component, field)?;
                     self.use_summary(component, value, false);
-                    self.project_source(component, value, term.id, index, scope)?;
+                    self.sink.add("SourceSelect", (component, value, index as i64))?;
                     self.output_leaf(entry, index, component, field, outputs.get(index))?;
                 }
             }

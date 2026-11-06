@@ -53,7 +53,8 @@ fn repeated_free_references_keep_dependencies_in_sibling_and_nested_regions() {
              else loop acc=produced for i<n do {step}"
         );
         let program = compile_thru_tlc(&source).unwrap();
-        let (graph, identities) = import(&program).unwrap();
+        let (mut graph, identities) = import(&program).unwrap();
+        graph.parse_and_run_program(None, "(run-schedule (saturate source-summary))").unwrap();
         let query = Query(&graph);
         let entry = query.row("SourceOriginalEntry", |_| true).unwrap().unwrap()[1];
         let mut producer = None;

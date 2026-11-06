@@ -7,7 +7,7 @@ fn work_proofs_distinguish_shared_regions_from_repeated_inline_work() {
         .parse_and_run_program(
             None,
             concat!(
-                include_str!("ids.egg"),
+                include_str!("flow.egg"),
                 "\n
         (function SourceWork (SourceValue) i64 :no-merge)
         (function SourceRegionWork (RegionKey) i64 :no-merge)

@@ -7,10 +7,10 @@
 
 use super::{ClosureConverted, Defunctionalized};
 use crate::ast::{Span, TypeName};
+use crate::egglog::dataflow::Dataflow;
 use crate::tlc::data::{
     Empty, ExplicitCaptures, ExplicitCapturesPayload, ExplicitClosure, ExplicitClosurePayload,
 };
-use crate::tlc::value_graph::ValueGraph;
 use crate::tlc::{
     self, ArrayExpr, Def, DefMeta, Lambda, LoopKind, Program, SoacBody, SoacOp, Term, TermIdSource,
     TermKind, VarRef,
@@ -570,7 +570,7 @@ impl ClosureConverter {
         body: &Term<ExplicitClosurePayload, ExplicitCapturesPayload>,
         bound: &LookupSet<SymbolId>,
     ) -> Vec<Term<ExplicitClosurePayload, ExplicitCapturesPayload>> {
-        let (values, _) = ValueGraph::build(body);
+        let (values, _) = Dataflow::build(body);
         values.free_variables(|symbol| {
             bound.contains(&symbol)
                 || self.top_level.contains(&symbol)

@@ -1,4 +1,4 @@
-//! Import execution scopes and source facts, using TLC's value graph for forwarding.
+//! Import execution scopes and direct source facts; egglog resolves forwarding.
 //! Arithmetic stays in TLC until import into local optimization graphs.
 use super::{fusion, planning, OptimizeError};
 use crate::binding_layout::{
@@ -8,7 +8,6 @@ use crate::binding_layout::{
 use crate::interface::{EntryKind, IoDecoration, StorageAccess};
 use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
 use crate::tlc::stage::OwnershipApplied;
-use crate::tlc::value_graph::ValueGraph;
 use crate::tlc::{
     self, extract_lambda_params_ref, ArrayExpr, DefMeta, Lambda, LoopKind, SoacBody, SoacOp, TermId,
     TermKind, VarRef,
@@ -57,13 +56,16 @@ pub(super) fn import(source: &OwnershipApplied) -> Result<(EGraph, Identities<'_
             imported_types: LookupMap::default(),
             source_ordinals: LookupMap::default(),
             summaries: Summaries::default(),
-            values: ValueGraph::default(),
             ownership: &source.global_context.ownership,
         };
         // Native writes report engine errors; source validation also has its
         // own error type. On either failure the whole new graph is discarded.
-        Ok(import.definitions(source).and_then(|()| import.finish_uses()))
+        Ok(import.definitions(source))
     })??;
+    graph.parse_and_run_program(
+        None,
+        "(run-schedule (saturate flow-forward source-forwarding) flow-projections source-projections)",
+    )?;
     Ok((graph, identities))
 }
 
@@ -117,7 +119,6 @@ struct Import<'graph, 'db, 'ids, 'source> {
     imported_types: LookupMap<i64, Value>,
     source_ordinals: LookupMap<Value, i64>,
     summaries: Summaries,
-    values: ValueGraph,
     ownership: &'source tlc::ownership::OwnershipFacts,
 }
 
@@ -129,7 +130,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
         self.sink.add("LengthType", length)?;
         for (ordinal, definition) in source.defs.iter().enumerate() {
             let (body, parameters) = extract_lambda_params_ref(&definition.body);
-            self.values = ValueGraph::build(body).0;
             let mut scope = self.scope(Some(body), None)?;
             let symbol = self.identities.symbols.intern(&definition.name);
             self.sink.set("SourceDefinition", symbol, scope.key)?;
@@ -214,7 +214,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                     self.sink.add("SourceBufferDemand", symbol)?;
                     self.output_leaf(symbol, 0, result, &body.ty, None)?;
                 } else {
-                    self.output(symbol, result, body, scope.key, &entry.declaration.outputs)?;
+                    self.output(symbol, result, body, &entry.declaration.outputs)?;
                 }
             }
             self.bindings.restore(checkpoint);
@@ -291,11 +291,8 @@ impl<'source> Import<'_, '_, '_, 'source> {
     }
 
     fn finish_body(&mut self, body: &'source Term, scope: &mut Scope) -> Result<Value, OptimizeError> {
-        let (result, summary) = self.visit(body, scope)?;
+        let (result, _) = self.visit(body, scope)?;
         self.sink.set("SourceResult", scope.key, result)?;
-        for operation in summary.dependencies {
-            self.sink.add("SourceReturnDependency", (scope.key, operation))?;
-        }
         self.finish_region_summary(scope)?;
         Ok(result)
     }
@@ -311,7 +308,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         let checkpoint = self.bindings.checkpoint();
         self.finish_body(body, &mut scope)?;
         self.bindings.restore(checkpoint);
-        self.enter_summary(owner, scope.key, parent)?;
+        self.enter_summary(owner, scope.key, parent);
         Ok(scope.key)
     }
 
@@ -322,7 +319,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         scope: &mut Scope,
     ) -> Result<Value, OptimizeError> {
         let (value, evaluation) = self.visit(term, scope)?;
-        self.use_value(owner, value)?;
+        self.sink.add("SourceDirectUse", (owner, value))?;
         self.summaries.values.entry(owner).or_default().evaluate(&evaluation);
         Ok(value)
     }
@@ -372,7 +369,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 self.bindings.restore(checkpoint);
                 let (value, body) = result?;
                 evaluation.evaluate(&body);
-                evaluation.dependencies = body.dependencies;
                 return Ok((value, evaluation));
             }
             _ => {}
@@ -467,7 +463,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             TermKind::Soac(soac) => self.soac(value, soac, scope)?,
             TermKind::ArrayExpr(array) => {
                 let array = self.array(array, value, scope)?;
-                self.alias_summary(value, array)?;
+                self.sink.set("SourceAlias", value, array)?;
             }
             TermKind::App { func, args } => {
                 let function = self.operand(func, value, scope)?;
@@ -484,6 +480,12 @@ impl<'source> Import<'_, '_, '_, 'source> {
                     .map(|argument| self.operand(argument, value, scope))
                     .collect::<Result<Vec<_>, _>>()?;
                 self.application(value, func, &arguments)?;
+                if let Some((_, index, _)) = tlc::record_update_parts(term) {
+                    self.sink.add(
+                        "SourceFieldUpdate",
+                        (value, arguments[0], index as i64, arguments[2]),
+                    )?;
+                }
                 if !facts::scalar_application(func, args, &term.ty) {
                     self.operation(value, "call", scope)?;
                 }
@@ -497,7 +499,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             }
             TermKind::Closure(closure) => {
                 let code = self.resolve(closure.code)?;
-                self.use_value(value, code)?;
+                self.sink.add("SourceDirectUse", (value, code))?;
                 self.sink.add("SourceClosureCode", (value, code))?;
                 for capture in &closure.captures {
                     self.operand(capture, value, scope)?;
@@ -505,12 +507,11 @@ impl<'source> Import<'_, '_, '_, 'source> {
             }
             TermKind::Coerce { inner, .. } => {
                 let input = self.operand(inner, value, scope)?;
-                let source = self.graph_source(inner.id, &[], scope.key)?.unwrap_or(input);
-                self.alias_summary(value, source)?;
+                self.sink.set("SourceAlias", value, input)?;
             }
             TermKind::TupleProj { tuple, idx } => {
                 let input = self.operand(tuple, value, scope)?;
-                self.project_source(value, input, tuple.id, *idx, scope.key)?;
+                self.sink.add("SourceSelect", (value, input, *idx as i64))?;
             }
             TermKind::Tuple(fields) | TermKind::VecLit(fields) => {
                 for (index, field) in fields.iter().enumerate() {
@@ -595,8 +596,8 @@ impl<'source> Import<'_, '_, '_, 'source> {
             )?;
         }
         self.finish_region_summary(&header)?;
-        self.enter_summary(owner, header.key, parent)?;
-        self.enter_summary(owner, iteration.key, parent)?;
+        self.enter_summary(owner, header.key, parent);
+        self.enter_summary(owner, iteration.key, parent);
         self.bindings.restore(checkpoint);
         Ok(())
     }
@@ -624,7 +625,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
             let parameter = self.formal(symbol, ty, &scope)?;
             captured.push(parameter);
             self.sink.set("SourceCapture", (scope.key, parameter), argument)?;
-            self.summaries.captures.insert((operation, argument));
         }
         self.parameters(params, &scope)?;
         if matches!(&body.kind, TermKind::Var(VarRef::Symbol(symbol)) if self.globals.contains(symbol)) {
@@ -645,7 +645,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             self.finish_body(body, &mut scope)?;
         }
         self.bindings.restore(checkpoint);
-        self.enter_summary(owner, scope.key, parent)?;
+        self.enter_summary(owner, scope.key, parent);
         Ok(())
     }
 
@@ -665,7 +665,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             value
         };
         self.identities.arrays.entry(value).or_insert((array, scope.key));
-        self.use_value(owner, value)?;
+        self.sink.add("SourceDirectUse", (owner, value))?;
         let extent = match array {
             ArrayExpr::Var(VarRef::Symbol(_), _) => self.sink.add("Length", value)?,
             ArrayExpr::Var(VarRef::Builtin { .. }, _) => {
@@ -699,6 +699,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         };
         self.sink.set("SourceExtent", value, extent)?;
         self.free_reference(value, scope.key)?;
+        self.sink.add("SourceRegionUse", (scope.key, value))?;
         self.use_summary(owner, value, !matches!(array, ArrayExpr::Var(_, _)));
         Ok(value)
     }
@@ -711,13 +712,8 @@ impl<'source> Import<'_, '_, '_, 'source> {
         owner: Value,
         scope: &mut Scope,
     ) -> Result<(), OptimizeError> {
-        let dependencies =
-            self.summaries.values.get(&owner).map(|s| s.dependencies.clone()).unwrap_or_default();
         let value = self.array(array, owner, scope)?;
-        self.summaries.values.entry(owner).or_default().dependencies = dependencies;
         self.sink.set("SourceInput", (operation, index), value)?;
-        self.summaries.inputs.insert((operation, value));
-        self.dependencies(operation, value, "Input")?;
 
         Ok(())
     }
@@ -761,7 +757,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             SoacOp::Filter { input, .. } => self.input(input, operation, 0, value, scope)?,
             SoacOp::Scatter { dest, inputs, .. } | SoacOp::BucketScatter { dest, inputs, .. } => {
                 let destination = self.resolve(dest.id)?;
-                self.use_value(value, destination)?;
+                self.sink.add("SourceDirectUse", (value, destination))?;
                 self.sink.set("SourceDestination", operation, destination)?;
                 self.use_summary(value, destination, false);
                 for (index, input) in inputs.iter().enumerate() {
@@ -776,7 +772,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 ..
             } => {
                 let destination = self.resolve(dest.id)?;
-                self.use_value(value, destination)?;
+                self.sink.add("SourceDirectUse", (value, destination))?;
                 self.sink.set("SourceDestination", operation, destination)?;
                 self.use_summary(value, destination, false);
                 let neutral = self.operand(ne, value, scope)?;

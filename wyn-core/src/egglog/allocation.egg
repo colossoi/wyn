@@ -132,3 +132,179 @@
        (set (BufferSlot op "output" 0) (Result op i))) :ruleset allocation)
 (rule ((UninitializedResult op i t n) (Requires site (Result op i))) ((Materialize (Result op i))) :ruleset allocation)
 (rule ((UninitializedResult op i t n) (Produces stage (Result op i))) ((Materialize (Result op i))) :ruleset allocation)
+
+; Storage reuse.
+; Optional reuse never adds dependencies between independent dispatches.
+; Finish read/order proofs and blockers before choosing inputs and output slots.
+(ruleset reuse)
+(ruleset reuse-blockers)
+(ruleset reuse-owned-input)
+(ruleset reuse-input)
+(ruleset reuse-output)
+(ruleset select-reuse)
+(ruleset select-allocation)
+(relation WholeValue (SourceValue ValueKey))
+(relation FitsInput (OperationKey SourceValue))
+(function ReuseWriter (OperationKey) StageKey :no-merge)
+(relation ReuseBoundary (StageKey StageKey))
+(relation ReuseResult (OperationKey i64 TypeKey))
+(relation ReuseOperand (OperationKey SourceValue))
+(relation ReuseType (OperationKey TypeKey))
+(relation OwnedInput (OperationKey TypeKey SourceValue))
+(relation ReuseAlias (StageKey SourceValue ValueKey))
+(relation ReuseRead (StageKey SourceValue UseKey))
+(function ReadFinished (StageKey UseKey) bool :merge (or old new))
+(function ReuseBlocked (StageKey SourceValue) bool :merge (or old new))
+(function OwnedInputChoice (OperationKey TypeKey) i64 :merge (min old new))
+(function HasPreferredReuse (ValueKey) bool :merge (or old new))
+(function PreferredInputChoice (ValueKey) i64 :merge (min old new))
+(function PinnedResult (ValueKey) bool :merge (or old new))
+(function ReuseInput (ValueKey) i64 :merge (min old new))
+(function ReuseOutput (ValueKey StageKey) i64 :merge (min old new))
+(function ReuseLost (ValueKey) bool :merge (or old new))
+
+; Slices retain offsets that the published result ABI cannot yet describe.
+(rule ((ParameterValue e)) ((WholeValue e (Source e))) :ruleset reuse)
+(rule ((DirectResult e op i)) ((WholeValue e (Result op i))) :ruleset reuse)
+(rule ((Projection e tuple i) (ResultTuple tuple op) (ResultSlot op i))
+      ((WholeValue e (Result op i))) :ruleset reuse)
+(rule ((Projection e tuple i) (SourceField tuple i field) (WholeValue field value))
+      ((WholeValue e value)) :ruleset reuse)
+(rule ((ForwardValue e source) (WholeValue source value))
+      ((WholeValue e value)) :ruleset reuse)
+
+; A whole input fits its own domain, or another input with the same live length.
+(rule ((= (InputDomain op) (Length e))) ((FitsInput op e)) :ruleset reuse)
+(rule ((= (InputDomain op) (Length first)) (FixedInputLength first n)
+       (Operand op "input" e) (FixedInputLength e n))
+      ((FitsInput op e)) :ruleset reuse)
+(rule ((= (InputDomain op) (Fixed n)) (Operand op "input" e) (FixedInputLength e n))
+      ((FitsInput op e)) :ruleset reuse)
+(rule ((= n (InputDomain op)) (Operand op "input" e) (WholeValue e old) (= n (LiveLength old)))
+      ((FitsInput op e)) :ruleset reuse)
+(rule ((= (InputDomain op) (Length first)) (WholeValue first first-value) (= n (LiveLength first-value))
+       (Operand op "input" e) (WholeValue e old) (= n (LiveLength old)))
+      ((FitsInput op e)) :ruleset reuse)
+
+; Scatter can reuse its destination, never an arbitrary update input.
+(rule ((ArrayResult op i t)) ((ReuseResult op i t)) :ruleset reuse)
+(rule ((ArrayResult op i t) (Operand op "input" e) (FitsInput op e))
+      ((ReuseOperand op e)) :ruleset reuse)
+(rule ((InitializedResult op i t (Length destination)))
+      ((ReuseResult op i t) (ReuseOperand op destination)) :ruleset reuse)
+; Check each writer/input pair once, independently of the number of outputs.
+(rule ((ReuseResult op i t) (Materialize (Result op i))) ((ReuseType op t)) :ruleset reuse)
+; Maps load before storing each element. Scans preserve their input through
+; chunks and combine, then write the final output in the offsets phase.
+(rule ((= (Plan op) (Elements)) (FirstPhase op writer))
+      ((set (ReuseWriter op) writer)) :ruleset reuse)
+(rule ((= (Plan op) (Prefixes)) (LastPhase op writer))
+      ((set (ReuseWriter op) writer)) :ruleset reuse)
+(rule ((= (Plan op) (Scatter)) (LastPhase op writer))
+      ((set (ReuseWriter op) writer)) :ruleset reuse)
+; Ownership is a property of the input value, not the source operation whose
+; output may disappear during fusion. Final shape and reads are checked here.
+(rule ((= writer (ReuseWriter op)) (Phase writer region)
+       (ReuseType op t) (ReuseOperand op e) (WholeValue e old)
+       (FreshValue old) (ElementType old t) (Produces producer old) (Phase producer region))
+      ((ReuseAlias writer e old) (set (ReuseBlocked writer e) false)
+       (ReuseBoundary writer writer) (OwnedInput op t e)) :ruleset reuse)
+(rule ((= writer (ReuseWriter op)) (Phase writer region) (ReuseType op t)
+       (ReuseOperand op e) (WholeValue e (Source source))
+       (ReusableSource source t region))
+      ((ReuseAlias writer e (Source source)) (set (ReuseBlocked writer e) false)
+       (ReuseBoundary writer writer) (OwnedInput op t e)) :ruleset reuse)
+; Walk only this recipe's bounded phase graph, not the whole dispatch graph.
+; Finishing before any of these boundaries also finishes before the writer.
+(rule ((ReuseBoundary (Stage op writer) (Stage op after)) (PhaseLink op before after))
+      ((ReuseBoundary (Stage op writer) (Stage op before))) :ruleset reuse)
+
+; Follow authored aliases in both directions, scoped to actual candidates.
+; Every alias and read inherits candidacy, so consumers need no candidate join.
+(rule ((ReuseAlias writer e old) (= source (SameBacking alias)) (= (ValueRef source) old))
+      ((ReuseAlias writer e alias)) :ruleset reuse)
+(rule ((ReuseAlias writer e alias) (= source (SameBacking alias)) (= (ValueRef source) old))
+      ((ReuseAlias writer e old)) :ruleset reuse)
+
+; Length-only demands do not observe contents. Keep hidden scalar content
+; dependencies separate from Needs, which also includes descriptor-only uses.
+(rule ((ReuseAlias writer e alias)
+       (Requires (InStage reader) alias) (!= reader writer))
+      ((ReuseRead writer e (InStage reader))) :ruleset reuse)
+(rule ((ReuseAlias writer e alias)
+       (DispatchGroupContentNeed (Stage op "scalar") alias) (!= (Stage op "scalar") writer))
+      ((ReuseRead writer e (InStage (Stage op "scalar")))) :ruleset reuse)
+(rule ((ReuseAlias writer e alias) (Requires (InOperation op) alias))
+      ((ReuseRead writer e (InOperation op))) :ruleset reuse)
+(rule ((ReuseRead writer e site))
+      ((set (ReadFinished writer site) false)) :ruleset reuse)
+; Input-reading phases of this recipe finish before its final writer.
+(rule ((ReuseRead writer e (InStage reader)) (ReuseBoundary writer reader) (!= reader writer))
+      ((set (ReadFinished writer (InStage reader)) true)) :ruleset reuse)
+; Existing immediate dependencies and complete recipes certify finished reads.
+; Do not build a transitive closure over the dispatch graph.
+(rule ((ReuseRead writer e (InStage reader))
+       (ReuseBoundary writer boundary) (DispatchDependency reader boundary))
+      ((set (ReadFinished writer (InStage reader)) true)) :ruleset reuse)
+(rule ((ReuseRead writer e (InStage (Stage op name)))
+       (LastPhase op last) (ReuseBoundary writer boundary) (DispatchDependency last boundary))
+      ((set (ReadFinished writer (InStage (Stage op name))) true)) :ruleset reuse)
+(rule ((ReuseRead writer e (InStage (Stage op name)))
+       (ReuseBoundary writer boundary) (DispatchWaitsFor boundary (End op)))
+      ((set (ReadFinished writer (InStage (Stage op name))) true)) :ruleset reuse)
+(rule ((ReuseRead writer e (InOperation op))
+       (ReuseBoundary writer boundary) (DispatchWaitsFor boundary (End op)))
+      ((set (ReadFinished writer (InOperation op)) true)) :ruleset reuse)
+(rule ((ReuseRead writer e site)
+       (= (ReadFinished writer site) false))
+      ((set (ReuseBlocked writer e) true)) :ruleset reuse-blockers)
+
+(rule ((ReuseAlias writer e alias) (Escapes alias))
+      ((set (ReuseBlocked writer e) true)) :ruleset reuse)
+; Authored updates may return slices even when the result is a whole value.
+(rule ((ReuseAlias writer e alias) (= source (SameBacking alias)) (= (SourceSlice source) (SliceInfo base start end)))
+      ((set (ReuseBlocked writer e) true)) :ruleset reuse)
+; Captures and shifted input aliases may read elements already overwritten.
+(rule ((ReuseAlias (Stage op name) e alias)
+       (= recipe (Plan op)) (!= recipe (Scatter))
+       (Operand op "environment" capture) (References capture (Contents alias)))
+      ((set (ReuseBlocked (Stage op name) e) true)) :ruleset reuse)
+(rule ((ReuseAlias (Stage op name) e alias)
+       (Operand op "input" other) (!= other e) (References other (Contents alias)))
+      ((set (ReuseBlocked (Stage op name) e) true)) :ruleset reuse)
+; Explicit output bindings require a separate destination. A surviving result's
+; original input is a preference only; eliminated producers cannot lose permission.
+(rule ((FreshValue value))
+      ((set (PinnedResult value) false) (set (HasPreferredReuse value) false)) :ruleset reuse)
+(rule ((AbiOutputBinding output set binding) (ReturnArray output result) (= (ValueRef result) value))
+      ((set (PinnedResult value) true)) :ruleset reuse)
+
+; Choose one safe owned input per element type before joining output slots.
+; Additional compatible inputs remain separate rather than growing a Cartesian
+; product of inputs and outputs to optimize this optional choice.
+(rule ((OwnedInput op t input) (= id (SourceOrdinal input)) (= writer (ReuseWriter op))
+       (= (ReuseBlocked writer input) false))
+      ((set (OwnedInputChoice op t) id)) :ruleset reuse-owned-input)
+(rule ((PreferredReuse (Result op i) input) (ReuseResult op i t) (OwnedInput op t input)
+       (= writer (ReuseWriter op)) (= (ReuseBlocked writer input) false)
+       (= id (SourceOrdinal input)))
+      ((set (PreferredInputChoice (Result op i)) id)
+       (set (HasPreferredReuse (Result op i)) true)) :ruleset reuse-owned-input)
+(rule ((= id (PreferredInputChoice (Result op i)))
+       (Materialize (Result op i)) (= (PinnedResult (Result op i)) false))
+      ((set (ReuseInput (Result op i)) id)) :ruleset reuse-input)
+(rule ((= id (OwnedInputChoice op t)) (ReuseResult op i t) (Materialize (Result op i))
+       (= (HasPreferredReuse (Result op i)) false) (= (PinnedResult (Result op i)) false))
+      ((set (ReuseInput (Result op i)) id)) :ruleset reuse-input)
+; The lowest eligible output slot wins. Reads exclude other writers, so this
+; aggregation needs no all-pairs conflict join and introduces no ordering.
+(rule ((= id (ReuseInput (Result op i))) (Produces writer (Result op i))
+       (= id (SourceOrdinal input)) (ReuseAlias writer input alias))
+      ((set (ReuseOutput alias writer) i) (set (ReuseLost (Result op i)) false)) :ruleset reuse-output)
+(rule ((= id (ReuseInput (Result op i))) (Produces writer (Result op i))
+       (= id (SourceOrdinal input)) (ReuseAlias writer input alias) (= winner (ReuseOutput alias writer)) (< winner i))
+      ((set (ReuseLost (Result op i)) true)) :ruleset reuse-output)
+(rule ((= id (ReuseInput value)) (= (ReuseLost value) false) (= id (SourceOrdinal input)))
+      ((set (StorageFor value) (Reuse input)) (set (ReuseSelected value) true)) :ruleset select-reuse)
+(rule ((FreshValue value) (= (ReuseSelected value) false))
+      ((set (StorageFor value) (Allocate))) :ruleset select-allocation)

@@ -10,7 +10,6 @@
 //! Map inputs and callback parameters already correspond at construction.
 
 use super::data::Empty;
-use super::value_graph::ValueGraph;
 use super::VarRef;
 use super::{
     wrap_let_bindings, ArrayExpr, Bindings, Lambda, LetBinding, RewriteDecision, SoacBody, SoacOp, Term,
@@ -18,6 +17,7 @@ use super::{
 };
 use crate::ast::{Span, TypeName};
 use crate::builtins::{catalog, BuiltinId};
+use crate::egglog::dataflow::Dataflow;
 use crate::op;
 use crate::tlc;
 use crate::types::TypeExt;
@@ -363,15 +363,15 @@ fn prefixes_can_be_hoisted(term: &Term<Empty, Empty>, then_map: &MapBranch, else
         return true;
     }
 
-    if ValueGraph::evaluation_uses(cond, |symbol| names.contains(&symbol)) {
+    if Dataflow::evaluation_uses(cond, |symbol| names.contains(&symbol)) {
         return false;
     }
 
     let then_names: LookupSet<_> = then_map.prefix.iter().map(|prefix| prefix.name).collect();
     let else_names: LookupSet<_> = else_map.prefix.iter().map(|prefix| prefix.name).collect();
     // Include discarded evaluations and SOAC destinations, not just returned values.
-    !ValueGraph::evaluation_uses(else_branch, |symbol| then_names.contains(&symbol))
-        && !ValueGraph::evaluation_uses(then_branch, |symbol| else_names.contains(&symbol))
+    !Dataflow::evaluation_uses(else_branch, |symbol| then_names.contains(&symbol))
+        && !Dataflow::evaluation_uses(then_branch, |symbol| else_names.contains(&symbol))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

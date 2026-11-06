@@ -7,7 +7,7 @@ fn trimming_unused_identities_preserves_extraction_and_nested_source_arguments()
         .parse_and_run_program(
             None,
             concat!(
-                include_str!("../ids.egg"),
+                include_str!("../flow.egg"),
                 r#"
                 (datatype TypeKey (TypeId i64))
                 (datatype FusionPlan (FusionSource OperationKey))

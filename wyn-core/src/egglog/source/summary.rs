@@ -2,8 +2,6 @@
 //! expressions. Only operation/region summaries enter structural fixed points.
 use super::{Import, Scope};
 use crate::egglog::OptimizeError;
-use crate::tlc::value_graph::Source;
-use crate::tlc::TermId;
 use crate::BindingRef;
 use crate::{LookupMap, LookupSet};
 use egglog_engine::{RawValues, Value, Write};
@@ -16,11 +14,8 @@ pub(super) struct Summary {
     pub duplicate: bool,
     pub work: i64,
     pub reads: LookupSet<BindingRef>,
-    pub dependencies: LookupSet<Value>,
     pub calls: LookupSet<Value>,
     pub regions: LookupSet<Value>,
-    pub device_calls: LookupSet<Value>,
-    pub device_regions: LookupSet<Value>,
 }
 
 impl Default for Summary {
@@ -32,11 +27,8 @@ impl Default for Summary {
             duplicate: true,
             work: 0,
             reads: LookupSet::default(),
-            dependencies: LookupSet::default(),
             calls: LookupSet::default(),
             regions: LookupSet::default(),
-            device_calls: LookupSet::default(),
-            device_regions: LookupSet::default(),
         }
     }
 }
@@ -44,9 +36,6 @@ impl Default for Summary {
 impl Summary {
     pub(super) fn use_value(&mut self, other: &Self) {
         self.device |= other.device;
-        self.dependencies.extend(&other.dependencies);
-        self.device_calls.extend(other.calls.iter().chain(&other.device_calls));
-        self.device_regions.extend(other.regions.iter().chain(&other.device_regions));
     }
 
     pub(super) fn evaluate(&mut self, other: &Self) {
@@ -65,45 +54,13 @@ impl Summary {
 #[derive(Default)]
 pub(super) struct Summaries {
     pub values: LookupMap<Value, Summary>,
-    pub pending_uses: Vec<(Value, Value)>,
     pub operations: LookupMap<Value, Value>,
-    pub inputs: LookupSet<(Value, Value)>,
-    pub captures: LookupSet<(Value, Value)>,
     pub regions_with_operations: LookupSet<Value>,
-    pub aliases: LookupSet<Value>,
     pub lengths: LookupMap<Value, Value>,
     pub owners: LookupMap<Value, Value>,
-    pub free: LookupMap<Value, LookupSet<Value>>,
 }
 
 impl Import<'_, '_, '_, '_> {
-    pub(super) fn use_value(&mut self, owner: Value, value: Value) -> Result<(), OptimizeError> {
-        self.sink.add("SourceDirectUse", (owner, value))?;
-        self.summaries.pending_uses.push((owner, value));
-        Ok(())
-    }
-
-    /// Classify uses after operation inputs and captures are known.
-    /// Scalar dependencies remain direct edges rather than transitive sets.
-    pub(super) fn finish_uses(&mut self) -> Result<(), OptimizeError> {
-        for &(value, child) in &self.summaries.pending_uses {
-            if self.summaries.aliases.contains(&value) {
-                continue;
-            }
-            if let Some(&operation) = self.summaries.operations.get(&value) {
-                if self.summaries.inputs.contains(&(operation, child))
-                    && !self.summaries.captures.contains(&(operation, child))
-                {
-                    continue;
-                }
-                self.sink.add("SourceOperand", (operation, child))?;
-            } else {
-                self.sink.add("SourceComputedUse", (value, child))?;
-            }
-        }
-        Ok(())
-    }
-
     pub(super) fn use_summary(&mut self, owner: Value, value: Value, evaluate: bool) {
         let child = self.summaries.values.get(&value).cloned().unwrap_or_default();
         let summary = self.summaries.values.entry(owner).or_default();
@@ -114,110 +71,16 @@ impl Import<'_, '_, '_, '_> {
         }
     }
 
-    pub(super) fn free_reference(&mut self, target: Value, mut scope: Value) -> Result<(), OptimizeError> {
-        let owner = self.summaries.owners.get(&target).copied();
-        while Some(scope) != owner {
-            // Referenced dependencies are settled; the first visit covered all ancestors.
-            if !self.summaries.free.entry(scope).or_default().insert(target) {
-                break;
-            }
-            if let Some(summary) = self.summaries.values.get(&target) {
-                for &before in &summary.dependencies {
-                    self.sink.add("SourceRegionDependency", (scope, before))?;
-                }
-            }
-            let Some((Some(parent), _)) = self.identities.scopes.get(&scope) else {
-                break;
-            };
-            scope = *parent;
-        }
+    pub(super) fn free_reference(&mut self, target: Value, scope: Value) -> Result<(), OptimizeError> {
+        let unowned = self.sink.add("RegionId", -1i64)?;
+        let owner = self.summaries.owners.get(&target).copied().unwrap_or(unowned);
+        self.sink.add("SourceLexicalUse", (scope, target, owner))?;
         Ok(())
     }
 
-    pub(super) fn alias_summary(&mut self, value: Value, target: Value) -> Result<(), OptimizeError> {
-        self.summaries.aliases.insert(value);
-        self.sink.set("SourceAlias", value, target)?;
-        Ok(())
-    }
-
-    pub(super) fn project_source(
-        &mut self,
-        value: Value,
-        tuple: Value,
-        term: TermId,
-        index: usize,
-        scope: Value,
-    ) -> Result<(), OptimizeError> {
-        let Some(field) = self.graph_source(term, &[index], scope)? else {
-            let info = self.sink.add("ProjectionInfo", (tuple, index as i64))?;
-            self.sink.set("SourceProjection", value, info)?;
-            return Ok(());
-        };
-        self.alias_summary(value, field)?;
-        let dependencies =
-            self.summaries.values.get(&field).map(|s| s.dependencies.clone()).unwrap_or_default();
-        self.summaries.values.entry(value).or_default().dependencies = dependencies;
-        Ok(())
-    }
-
-    pub(super) fn graph_source(
-        &mut self,
-        term: TermId,
-        fields: &[usize],
-        mut scope: Value,
-    ) -> Result<Option<Value>, OptimizeError> {
-        let Some(source) = self.values.projected_source(Source::Term(term), fields) else {
-            return Ok(None);
-        };
-        Ok(Some(match source {
-            Source::Input(symbol) => self.resolve(symbol)?,
-            Source::Term(term) => loop {
-                if let Some(&value) = self.identities.occurrences.get(&(scope, term)) {
-                    break value;
-                }
-                let Some((Some(parent), _)) = self.identities.scopes.get(&scope) else {
-                    return Err(OptimizeError::Output(
-                        "projected TLC value has no visible source occurrence".into(),
-                    ));
-                };
-                scope = *parent;
-            },
-        }))
-    }
-
-    pub(super) fn enter_summary(
-        &mut self,
-        owner: Value,
-        child: Value,
-        parent: &mut Scope,
-    ) -> Result<(), OptimizeError> {
+    pub(super) fn enter_summary(&mut self, owner: Value, child: Value, parent: &mut Scope) {
         self.summaries.values.entry(owner).or_default().regions.insert(child);
         parent.summary.regions.insert(child);
-        if let Some(free) = self.summaries.free.get(&child).cloned() {
-            for value in free {
-                self.sink.add("SourceNestedUse", (owner, value))?;
-                self.summaries.pending_uses.push((owner, value));
-                self.use_summary(owner, value, false);
-            }
-        }
-        Ok(())
-    }
-
-    pub(super) fn dependencies(
-        &mut self,
-        operation: Value,
-        value: Value,
-        role: &str,
-    ) -> Result<(), OptimizeError> {
-        if let Some(summary) = self.summaries.values.get(&value) {
-            let role = self.sink.add(role, RawValues(vec![]))?;
-            for &before in &summary.dependencies {
-                if before != operation {
-                    self.sink.add("SourceDepends", (operation, before, role))?;
-                }
-            }
-        }
-        Ok(())
     }
 
     pub(super) fn finish_summary(&mut self, value: Value, scope: &mut Scope) -> Result<(), OptimizeError> {
@@ -227,18 +90,11 @@ impl Import<'_, '_, '_, '_> {
         // Region-local properties were accumulated from each node once. Device
         // requirements additionally follow references to already evaluated values.
         scope.summary.device |= summary.device;
-        scope.summary.device_calls.extend(&summary.device_calls);
-        scope.summary.device_regions.extend(&summary.device_regions);
         if let Some(&operation) = self.summaries.operations.get(&value) {
-            if let Some(&array) = self.summaries.lengths.get(&value) {
-                self.dependencies(operation, array, "LengthUse")?;
-            } else {
-                self.dependencies(operation, value, "Other")?;
-            }
+            let role = if self.summaries.lengths.contains_key(&value) { "LengthUse" } else { "Other" };
+            let role = self.sink.add(role, RawValues(vec![]))?;
+            self.sink.set("SourceOperandRole", operation, role)?;
             self.write_summary(value, &summary, false)?;
-            let result = self.summaries.values.entry(value).or_default();
-            result.dependencies.clear();
-            result.dependencies.insert(operation);
             self.sink.add("ImportedPosition", (operation, scope.position))?;
             if let Some(previous) = scope.previous_operation.replace(operation) {
                 self.sink.add("SourceNextOperation", (previous, operation))?;
@@ -261,8 +117,6 @@ impl Import<'_, '_, '_, '_> {
                 "SourceRegionWork",
                 "SourceRegionCalls",
                 "SourceRegionEnters",
-                "SourceRegionDeviceCalls",
-                "SourceRegionDeviceEnters",
             ]
         } else {
             [
@@ -273,8 +127,6 @@ impl Import<'_, '_, '_, '_> {
                 "SourceWork",
                 "SourceSummaryCalls",
                 "SourceSummaryEnters",
-                "SourceSummaryDeviceCalls",
-                "SourceSummaryDeviceEnters",
             ]
         };
         for (name, flag) in
@@ -289,12 +141,7 @@ impl Import<'_, '_, '_, '_> {
                 (key, i64::from(binding.set), i64::from(binding.binding)),
             )?;
         }
-        for (name, values) in names[5..].iter().zip([
-            &summary.calls,
-            &summary.regions,
-            &summary.device_calls,
-            &summary.device_regions,
-        ]) {
+        for (name, values) in names[5..].iter().zip([&summary.calls, &summary.regions]) {
             for &value in values {
                 self.sink.add(name, (key, value))?;
             }

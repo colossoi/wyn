@@ -298,7 +298,7 @@ fn scatter_envelope_params_count_as_bound_symbols() {
         }),
     };
 
-    let (values, _) = ValueGraph::build(&scatter);
+    let (values, _) = Dataflow::build(&scatter);
     let free = values.free_variables::<ExplicitClosurePayload, ExplicitCapturesPayload>(|_| false);
     assert!(
         !free

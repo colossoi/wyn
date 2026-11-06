@@ -14,6 +14,7 @@ mod abi;
 mod analysis;
 mod bindings;
 pub mod cost;
+pub(crate) mod dataflow;
 mod facts;
 mod fusion;
 mod host;

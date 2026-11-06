@@ -86,7 +86,7 @@
 ; Computed captures of plan results must wait for those results as well.
 (rule ((Current group plan) (PlanMember plan producer) (SourceOrigin value producer))
       ((set (PlanInternal plan value) true)) :ruleset fusion-signatures)
-(rule ((SourceComputedUse value child) (= (PlanInternal plan child) true))
+(rule ((FlowOperand value child) (= (PlanInternal plan child) true))
       ((set (PlanInternal plan value) true)) :ruleset fusion-signatures)
 (rule ((= child (SourceAlias value)) (= (PlanInternal plan child) true))
       ((set (PlanInternal plan value) true)) :ruleset fusion-signatures)

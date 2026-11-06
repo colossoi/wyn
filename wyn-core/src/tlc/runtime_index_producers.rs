@@ -27,11 +27,11 @@ use crate::ast::TypeName;
 use crate::SymbolId;
 
 use super::data::Empty;
-use super::value_graph::{Dependencies, ValueGraph};
 use super::{
     wrap_let_bindings, ArrayExpr, Def, Lambda, LetBinding, SoacBody, SoacOp, Term, TermIdSource, TermKind,
     VarRef,
 };
+use crate::egglog::dataflow::{Dataflow, Dependencies};
 
 #[derive(Debug, Clone, Copy)]
 pub enum RuntimeIndexProducersFloatedTag {}
@@ -167,7 +167,7 @@ fn float_term(
             if !is_int_lit(&index)
                 && is_runtime_sized_array(&array.ty)
                 && is_liftable_array_producer(&array)
-                && !ValueGraph::evaluation_uses(&array, |symbol| blocked.contains(&symbol))
+                && !Dataflow::evaluation_uses(&array, |symbol| blocked.contains(&symbol))
             {
                 let name = symbols.alloc("_runtime_gather".to_string());
                 let name_ty = array.ty.clone();
@@ -271,7 +271,7 @@ fn fuse_ranked_bucket_map(
         leaf: None,
     };
     let mut bound = LookupSet::new();
-    let (values, _) = ValueGraph::build(rhs);
+    let (values, _) = Dataflow::build(rhs);
     extract_ranked_map_level(rhs, 0, *domain_rank, &mut bound, &values, &mut fusion, ids)?;
     let leaf = guard_bucket_leaf(fusion.leaf?, ids, symbols)?;
     let ret_ty = leaf.ty.clone();
@@ -380,7 +380,7 @@ fn extract_ranked_map_level(
     depth: u8,
     rank: u8,
     bound: &mut LookupSet<SymbolId>,
-    values: &ValueGraph,
+    values: &Dataflow,
     fusion: &mut RankedMapFusion,
     ids: &mut TermIdSource,
 ) -> Option<()> {
@@ -424,7 +424,7 @@ fn extract_ranked_map_level(
 /// value wrapper.
 fn peel_ranked_map_lets<'a>(
     mut term: &'a Term<Empty, Empty>,
-    values: &ValueGraph,
+    values: &Dataflow,
     depends: &Dependencies,
     lifted: &mut Vec<LetBinding<Empty, Empty>>,
 ) -> (&'a Term<Empty, Empty>, Vec<LetBinding<Empty, Empty>>) {

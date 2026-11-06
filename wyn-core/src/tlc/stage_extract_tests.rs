@@ -117,7 +117,7 @@ fn stage_bindings(source: &str) -> Vec<StageBindings> {
             let TermKind::Lambda(lambda) = &def.body.kind else {
                 panic!("stage lambda")
             };
-            let (values, _) = ValueGraph::build(&lambda.body);
+            let (values, _) = Dataflow::build(&lambda.body);
             let used = captured_symbols(&values, &LookupSet::new());
             let bound = lambda.params.iter().map(|(symbol, _)| *symbol).collect();
             assert!(

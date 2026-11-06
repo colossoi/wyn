@@ -139,7 +139,7 @@
 (function LogicalExtent (SourceValue) Extent :no-merge)
 ; A projected fixed-array value has the same length as its selected SSA
 ; representation. Runtime views keep their separately carried descriptor length.
-(rule ((SourceProjectionFields source parent i)
+(rule ((= (SourceProjection source) (ProjectionInfo parent i))
        (= (SourceLoop parent) (LoopInfo header iteration))
        (= (DispatchLoopValue source) false)
        (= ty (SourceType source)) (= (SourceArraySize ty) (DynamicSize))
@@ -276,7 +276,7 @@
 ; A projection of an array/SoA stream follows indexing. Ordinary tuple fields,
 ; such as a loop state containing arrays and scalars, are projected first.
 (relation ArrayStreamProjection (SourceValue))
-(rule ((SourceProjectionFields source parent i)
+(rule ((= (SourceProjection source) (ProjectionInfo parent i))
        (= ty (SourceType parent)) (= size (SourceArraySize ty)))
       ((ArrayStreamProjection source)) :ruleset readout)
 

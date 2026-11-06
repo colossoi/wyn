@@ -25,7 +25,6 @@ mod pin_entry_buffers_tests;
 
 use super::data::Empty;
 use super::stage_extract::StagesExtracted;
-use super::value_graph::{Source, ValueGraph};
 use super::{
     apply_type_substitution, data, extract_lambda_params_ref, Def, DefMeta, EntryPoint, Program, Term,
     TermIdSource, TermKind, VarRef,
@@ -35,6 +34,7 @@ use crate::binding_layout::{
     compute_entry_binding_layout, extract_storage_binding, extract_storage_image_binding,
 };
 use crate::builtins;
+use crate::egglog::dataflow::Dataflow;
 use crate::err_type_at;
 use crate::error;
 use crate::interface;
@@ -142,7 +142,7 @@ fn pin_definition(
                 &mut buffer_env,
                 span,
             )?;
-            let (values, _) = ValueGraph::build(&body);
+            let (values, _) = Dataflow::build(&body);
             while collect_view_slice_buffer_subst(&body, &mut subst, &buffer_env, &values) {}
             if !subst.is_empty() {
                 ty = apply_type_substitution(&ty, &subst);
@@ -262,7 +262,7 @@ fn collect_view_slice_buffer_subst(
     term: &Term<Empty, Empty>,
     subst: &mut BufferSubst,
     buffer_env: &LookupMap<SymbolId, Type<TypeName>>,
-    values: &ValueGraph,
+    values: &Dataflow,
 ) -> bool {
     if let TermKind::Let {
         name_ty, rhs, body, ..
@@ -304,7 +304,7 @@ fn view_buffer_for_term(
     term: &Term<Empty, Empty>,
     subst: &BufferSubst,
     buffer_env: &LookupMap<SymbolId, Type<TypeName>>,
-    values: &ValueGraph,
+    values: &Dataflow,
 ) -> Option<Type<TypeName>> {
     if let Some(region @ Type::Constructed(TypeName::Buffer(_), _)) =
         apply_type_substitution(&term.ty, subst).array_buffer().cloned()
@@ -314,9 +314,7 @@ fn view_buffer_for_term(
 
     match &term.kind {
         TermKind::Var(VarRef::Symbol(symbol)) => {
-            let Source::Input(input) = values.projected_source(Source::Input(*symbol), &[])? else {
-                return None;
-            };
+            let input = values.binding_input(*symbol)?;
             buffer_env.get(&input).cloned()
         }
         TermKind::App { func, args } => {

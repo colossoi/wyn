@@ -113,7 +113,7 @@
        (RootValueUse (KernelRoot (Stage leader "scalar")) source)) :ruleset publication-uses)
 (rule ((DispatchGroupLeader op leader) (Phase (Stage leader "scalar") region) (SourceOperand op source))
       ((RootValueUse (KernelRoot (Stage leader "scalar")) source)) :ruleset publication-uses)
-(rule ((RootValueUse root value) (SourceComputedUse value child))
+(rule ((RootValueUse root value) (FlowOperand value child))
       ((RootValueUse root child)) :ruleset publication-uses)
 (rule ((RootValueUse root value) (= value (SourceOperationValue op))
        (= (Rematerialize op) true) (SourceOperand op child))

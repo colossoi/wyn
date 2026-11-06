@@ -44,7 +44,7 @@
        (= (SourceLoopInitial header) (LoopInitialInfo state initial))
        (= resource (LoopViewStorage value)))
       ((set (ArrayStorage value) resource)
-       (ChildValue value initial)) :ruleset residency)
+       (FlowReferenceEdge value initial)) :ruleset residency)
 
 ; Owned loop state must not overwrite another live reference to its initializer.
 (rule ((= (LoopBoundaryLayout value) (ViewLayout (LoopStorage value) element))
@@ -76,7 +76,7 @@
 (rule ((= (RuntimeArrayJoin value) true)
        (= (SourceBranch value) (BranchInfo condition yes no))
        (= a (SourceResult yes)) (= b (SourceResult no)))
-      ((ChildValue value condition) (ChildValue value a) (ChildValue value b)
+      ((FlowReferenceEdge value condition) (FlowReferenceEdge value a) (FlowReferenceEdge value b)
        (set (ArrayStorage value) (Source value))
        (set (ValueRef value) (Source value))
        (set (Backing (Source value)) (Source value))

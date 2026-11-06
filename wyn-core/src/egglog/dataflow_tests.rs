@@ -1,14 +1,14 @@
-use super::{Source, Value, ValueGraph};
+use super::{Dataflow, Value};
 use crate::tlc::{self, DefMeta};
 use crate::{ast_type_holes, compile_thru_frontend, SymbolId, SymbolTable};
 
-fn graph(source: &str) -> (ValueGraph, Value, Vec<SymbolId>, SymbolTable) {
+fn graph(source: &str) -> (Dataflow, Value, Vec<SymbolId>, SymbolTable) {
     let program = compile_thru_frontend(source).expect("typed source");
     let program = ast_type_holes::reject_type_holes(program).expect("resolved types");
     let program = tlc::lower_from_ast(program).expect("TLC");
     let entry = program.defs.iter().find(|def| matches!(def.meta, DefMeta::EntryPoint(_))).expect("entry");
     let (body, parameters) = tlc::extract_lambda_params_ref(&entry.body);
-    let (values, result) = ValueGraph::build(body);
+    let (values, result) = Dataflow::build(body);
     let parameters = parameters.iter().map(|(symbol, _)| *symbol).collect();
     (values, result, parameters, program.symbols)
 }
@@ -26,10 +26,7 @@ fn array_components_keep_parameter_and_constant_origins_through_aliases() {
         match symbols.get(*symbol).map(String::as_str) {
             Some("alias" | "copy" | "x") => {
                 assert!(dependent.contains(symbol));
-                assert!(matches!(
-                    values.projected_source(Source::Input(*symbol), &[]),
-                    Some(Source::Input(input)) if input == parameters[0]
-                ));
+                assert_eq!(values.binding_input(*symbol), Some(parameters[0]));
             }
             Some("y") => assert!(!dependent.contains(symbol)),
             _ => {}
@@ -71,7 +68,7 @@ fn record_update_forwards_fields_but_keeps_operand_evaluation() {
     for parameter in [parameters[0], parameters[2]] {
         assert!(!values.dependent_bindings(|symbol| symbol == parameter).contains(&selected));
         let depends = values.dependencies(|symbol| symbol == parameter);
-        assert!(depends.0[values.bindings[&selected].evaluation.0]);
+        assert!(depends.0.contains(&values.bindings[&selected].evaluation));
     }
 }
 
@@ -83,6 +80,11 @@ fn branch_projections_require_the_same_forwarded_input() {
     );
     assert_eq!(values.input_origin(result, &[0]), Some(parameters[0]));
     assert_eq!(values.input_origin(result, &[1]), None);
+    let (values, result, parameters, _) = graph(
+        "entry main(x: i32, y: i32, choose: bool) i32 =
+           let pair = if choose then (x, x) else (x, y) in pair.0",
+    );
+    assert_eq!(values.input_origin(result, &[]), Some(parameters[0]));
 }
 
 #[test]
@@ -99,7 +101,7 @@ fn a_computed_dependency_is_not_an_unchanged_input() {
     assert!(dependent.contains(computed));
 }
 
-fn binding(values: &ValueGraph, symbols: &SymbolTable, name: &str) -> SymbolId {
+fn binding(values: &Dataflow, symbols: &SymbolTable, name: &str) -> SymbolId {
     *values
         .bindings
         .keys()
@@ -116,7 +118,7 @@ fn hoisting_keeps_dependencies_of_discarded_evaluations() {
         let selected = binding(&values, &symbols, "selected");
         assert!(!values.dependent_bindings(|symbol| symbol == parameters[0]).contains(&selected));
         let depends = values.dependencies(|symbol| symbol == parameters[0]);
-        assert!(depends.0[values.bindings[&selected].evaluation.0]);
+        assert!(depends.0.contains(&values.bindings[&selected].evaluation));
     }
 }
 
@@ -135,15 +137,8 @@ fn producer_paths_survive_aliases_and_nested_projections() {
     let origin = values.binding_origin(selected, &[]).expect("named producer");
     assert_eq!(origin.producer, produced);
     assert_eq!(origin.path, [1, 0]);
-    let field = values.project(values.bindings[&selected].value, &[]).expect("selected field");
-    assert!(
-        matches!(values.sources[field.0], Source::Term(_)),
-        "computed field retains its occurrence"
-    );
-    assert!(matches!(
-        values.projected_source(Source::Input(selected), &[]),
-        Some(Source::Term(_))
-    ));
+
+    assert_eq!(values.binding_input(selected), None);
 }
 
 #[test]
@@ -169,11 +164,12 @@ fn naming_a_forwarded_input_does_not_rename_the_input() {
 
 #[test]
 fn structural_forwarding_does_not_select_a_value_inside_a_branch() {
-    let (values, result, _, _) = graph(
-        "entry main(x: i32, choose: bool) (i32, i32) =
-           if choose then (x, 7) else (x, 8)",
+    let (values, result, parameters, symbols) = graph(
+        "entry main(x: i32, choose: bool) i32 =
+           let selected = if choose then x else x in selected",
     );
-    assert!(values.project(result, &[0]).is_none());
+    assert_eq!(values.input_origin(result, &[]), Some(parameters[0]));
+    assert_eq!(values.binding_input(binding(&values, &symbols, "selected")), None);
 }
 
 #[test]
@@ -217,5 +213,5 @@ fn evaluation_dependencies_include_scatter_destinations() {
     );
     let entry = program.defs.iter().find(|def| matches!(def.meta, DefMeta::EntryPoint(_))).unwrap();
     let (body, parameters) = tlc::extract_lambda_params_ref(&entry.body);
-    assert!(ValueGraph::evaluation_uses(body, |symbol| symbol == parameters[0].0));
+    assert!(Dataflow::evaluation_uses(body, |symbol| symbol == parameters[0].0));
 }

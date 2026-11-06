@@ -22,10 +22,6 @@ pub(super) const RULES: &str = concat!(
     "\n",
     include_str!("allocation.egg"),
     "\n",
-    include_str!("reuse.egg"),
-    "\n",
-    include_str!("dispatch.egg"),
-    "\n",
     include_str!("epilogues.egg"),
     "\n",
 );

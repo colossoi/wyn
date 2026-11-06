@@ -7,7 +7,6 @@
 (relation SourceInterfaceBinding (i64 BindingKey PublicationResource))
 (relation SourceInterfaceFamily (i64 String))
 (relation SourceEntryOrder (i64 i64))
-(relation SourceRegionUse (RegionKey SourceValue))
 (relation SourceDrawRead (i64 PublicationResource))
 (relation RootUsesRegion (RootKey RegionKey))
 (relation RootValueUse (RootKey SourceValue))

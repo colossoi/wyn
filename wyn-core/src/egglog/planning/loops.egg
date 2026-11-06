@@ -39,10 +39,8 @@
       ((set (StoredLoopState value) true)) :ruleset type-layouts)
 (rule ((Projection value tuple index) (SourceField tuple index state) (= (StoredLoopState state) true))
       ((set (StoredLoopState value) true)) :ruleset type-layouts)
-(rule ((HostLoopAggregate value) (ReferenceDemand value) (SourceField value index child))
-      ((ReferenceDemand child)) :ruleset residency)
-(rule ((HostLoopAggregate value) (ReferenceDemand value) (SourceField value index child) (References child resource))
-      ((References value resource)) :ruleset residency)
+(rule ((HostLoopAggregate value) (SourceField value index child))
+      ((FlowReferenceEdge value child)) :ruleset residency)
 ; A structure-of-arrays state also has a stream extent. Its components have
 ; already been split into independent bindings, so retain that extent explicitly.
 (rule ((HostLoopAggregate value) (= ty (SourceType value)) (= size (SourceArraySize ty))

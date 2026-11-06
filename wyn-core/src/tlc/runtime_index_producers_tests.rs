@@ -1,7 +1,7 @@
 use super::float_runtime_index_nested_producers;
 use crate::ast::{Span, TypeName};
+use crate::egglog::dataflow::Dataflow;
 use crate::test_pipeline;
-use crate::tlc::value_graph::ValueGraph;
 use crate::tlc::{
     self, ArrayExpr, Def, DefMeta, Lambda, Place, Program, SoacBody, SoacOp, Term, TermIdSource, TermKind,
     VarRef,
@@ -119,7 +119,7 @@ fn ranked_bucket_scatter_keeps_a_transitive_coordinate_dependency_in_the_leaf() 
         TermKind::Soac(SoacOp::BucketScatter { lam, .. }) => {
             buckets += 1;
             let bound: LookupSet<_> = lam.lam.params.iter().map(|(symbol, _)| *symbol).collect();
-            let (values, _) = ValueGraph::build(&lam.lam.body);
+            let (values, _) = Dataflow::build(&lam.lam.body);
             let captures: Vec<_> = values.free_symbols().filter(|symbol| !bound.contains(symbol)).collect();
             assert!(
                 captures.is_empty(),

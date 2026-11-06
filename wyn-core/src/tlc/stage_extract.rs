@@ -9,7 +9,6 @@
 use super::data;
 use super::inline::UnifiedHelpersInlined;
 use super::run::UnpinnedPolymorphic;
-use super::value_graph::{Origin, ValueGraph};
 use super::{
     clone_term_with_fresh_ids, curried_function_type, Def, DefMeta, EntryPoint, Lambda, Program,
     ProgramParts, RewriteDecision, SoacOp, Term, TermIdSource, TermKind, TermRewriter, TermVisitor, VarRef,
@@ -18,6 +17,7 @@ use super::{
 use crate::ast;
 use crate::ast::Span;
 use crate::builtins;
+use crate::egglog::dataflow::{Dataflow, Origin};
 use crate::err_type_at;
 use crate::error;
 use crate::host;
@@ -171,7 +171,7 @@ struct TargetValue {
 struct RootShape<'a> {
     operations: Vec<RootOperation<'a>>,
     computed: Vec<ComputedValue>,
-    values: ValueGraph,
+    values: Dataflow,
     targets: LookupMap<SymbolId, TargetValue>,
     results: Vec<(Origin, interface::SourceResult)>,
 }
@@ -275,7 +275,7 @@ fn extract_root(
     };
     let mut root_lambda = source_root_lambda.clone();
     root_lambda.body = Box::new(normalize_root_bindings(*root_lambda.body, builtins, term_ids));
-    let (values, _) = ValueGraph::build(&root_lambda.body);
+    let (values, _) = Dataflow::build(&root_lambda.body);
     let root_name = root_entry_name(definition)?;
     // Allocate one module-wide descriptor namespace, shared by all stages
     // of this root and by the later compute buffer allocator.
@@ -415,8 +415,8 @@ fn extract_root(
                     format!("{root_name}__graphics_{graphics_index}")
                 };
 
-                let (vertex_values, _) = ValueGraph::build(&vertex_lambda.body);
-                let (fragment_values, _) = ValueGraph::build(&fragment_lambda.body);
+                let (vertex_values, _) = Dataflow::build(&vertex_lambda.body);
+                let (fragment_values, _) = Dataflow::build(&fragment_lambda.body);
                 let (vertex_external, vertex_external_decls, vertex_substitutions, vertex_target_reads) =
                     stage_captures(
                         &vertex_lambda,
@@ -558,7 +558,7 @@ fn root_shape<'a>(
     root_entry: &EntryPoint<()>,
     root_name: &str,
     builtins: &InvocationBuiltins,
-    mut values: ValueGraph,
+    mut values: Dataflow,
     binding_ids: &mut wyn_base::IdSource<u32>,
     symbols: &mut SymbolTable,
 ) -> Option<RootShape<'a>> {
@@ -706,14 +706,14 @@ fn root_shape<'a>(
 /// Unnamed expressions become unbound output demands in the same planner.
 fn source_results<'a>(
     term: &'a Term,
-    origins: &ValueGraph,
+    origins: &Dataflow,
     root_name: &str,
     operations: &mut Vec<RootOperation<'a>>,
     symbols: &mut SymbolTable,
 ) -> Vec<(Origin, interface::SourceResult)> {
     fn collect<'a>(
         term: &'a Term,
-        origins: &ValueGraph,
+        origins: &Dataflow,
         name: String,
         kind: host::ResultKind,
         index: &mut usize,
@@ -810,7 +810,7 @@ fn graphics_operation<'a>(
 ) -> Option<GraphicsOperation<'a>> {
     let (shade_builtin, shade_args) = shade_app(shade_term, builtins)?;
     let target_index = usize::from(shade_builtin == builtins.shade_with);
-    let (values, target) = ValueGraph::build(shade_args.get(target_index)?);
+    let (values, target) = Dataflow::build(shade_args.get(target_index)?);
     let target_symbol = values.input_origin(target, &[])?;
     let raster_symbol = direct_symbol(shade_args.get(target_index + 1)?)?;
     let target = targets.get(&target_symbol)?;
@@ -960,7 +960,7 @@ fn projected_symbol_path(term: &Term) -> Option<(SymbolId, Vec<usize>)> {
     }
 }
 
-fn resolve_projection(symbol: SymbolId, suffix: &[usize], origins: &ValueGraph) -> (SymbolId, Vec<usize>) {
+fn resolve_projection(symbol: SymbolId, suffix: &[usize], origins: &Dataflow) -> (SymbolId, Vec<usize>) {
     let Some(origin) = origins.binding_origin(symbol, suffix) else {
         return (symbol, suffix.to_vec());
     };
@@ -1191,7 +1191,7 @@ fn draw_buffer_source(
     root_lambda: &Lambda,
     root_entry: &EntryPoint<()>,
     computed: &[ComputedValue],
-    values: &ValueGraph,
+    values: &Dataflow,
 ) -> Option<interface::DrawBufferOperand> {
     let (symbol, path) = projected_symbol_path(array)?;
     let (symbol, path) = resolve_projection(symbol, &path, values);
@@ -1518,11 +1518,11 @@ type StageCaptures = (
 
 fn stage_captures(
     callback: &Lambda,
-    callback_values: &ValueGraph,
+    callback_values: &Dataflow,
     root_lambda: &Lambda,
     root_entry: &EntryPoint<()>,
     computed: &[ComputedValue],
-    values: &ValueGraph,
+    values: &Dataflow,
     targets: &LookupMap<SymbolId, TargetValue>,
     output_target: Option<SymbolId>,
     symbols: &mut SymbolTable,
@@ -1567,7 +1567,7 @@ fn stage_captures(
     Some((params, declarations, substitutions, target_reads))
 }
 
-fn captured_symbols(values: &ValueGraph, bound: &LookupSet<SymbolId>) -> LookupSet<SymbolId> {
+fn captured_symbols(values: &Dataflow, bound: &LookupSet<SymbolId>) -> LookupSet<SymbolId> {
     values.free_symbols().filter(|symbol| !bound.contains(symbol)).collect()
 }
 
@@ -1630,7 +1630,7 @@ fn append_root_captures(
 fn append_computed_captures(
     body: &Term,
     computed: &[ComputedValue],
-    values: &ValueGraph,
+    values: &Dataflow,
     symbols: &mut SymbolTable,
     params: &mut Vec<(SymbolId, Type)>,
     declarations: &mut Vec<interface::EntryParamDecl>,
@@ -1831,14 +1831,14 @@ fn build_compute_stage(
     operation: &ComputeOperation<'_>,
     buffer_demand: bool,
     computed: &[ComputedValue],
-    values: &ValueGraph,
+    values: &Dataflow,
     targets: &LookupMap<SymbolId, TargetValue>,
     results: &[(Origin, interface::SourceResult)],
     builtins: &InvocationBuiltins,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Option<Def<UnpinnedPolymorphic>> {
-    let (body_values, _) = ValueGraph::build(operation.rhs);
+    let (body_values, _) = Dataflow::build(operation.rhs);
     let used = captured_symbols(&body_values, &LookupSet::new());
     let mut params = Vec::new();
     let mut declarations = Vec::new();
@@ -2425,7 +2425,7 @@ fn build_vertex_stage(
     root: &Def<UnpinnedPolymorphic>,
     owner: &str,
     callback: &Lambda,
-    callback_values: &ValueGraph,
+    callback_values: &Dataflow,
     external_params: Vec<(SymbolId, Type)>,
     external_decls: Vec<interface::EntryParamDecl>,
     substitutions: ExternalSubstitutions,
@@ -2679,7 +2679,7 @@ fn build_fragment_stage(
     root: &Def<UnpinnedPolymorphic>,
     owner: &str,
     callback: &Lambda,
-    callback_values: &ValueGraph,
+    callback_values: &Dataflow,
     external_params: Vec<(SymbolId, Type)>,
     external_decls: Vec<interface::EntryParamDecl>,
     substitutions: ExternalSubstitutions,
@@ -2768,7 +2768,7 @@ fn build_fragment_stage(
             term_ids,
         );
     }
-    let (body_values, _) = ValueGraph::build(&body);
+    let (body_values, _) = Dataflow::build(&body);
     let target_bindings =
         body_values.dependent_bindings(|symbol| target_reads.by_symbol.contains_key(&symbol));
     body = ExternalValueRewriter {

@@ -13,7 +13,7 @@ pub(super) fn new_graph() -> Result<EGraph, OptimizeError> {
     let mut graph = EGraph::default();
     graph.parse_and_run_program(
         Some("fusion schema".into()),
-        concat!(include_str!("../ids.egg"), "\n", include_str!("schema.egg")),
+        concat!(include_str!("../flow.egg"), "\n", include_str!("schema.egg")),
     )?;
     reachability::register(&mut graph)?;
     Ok(graph)

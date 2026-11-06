@@ -425,7 +425,14 @@ fn compiler_repro_array_reduce_preserves_effect_barrier() {
         reduce(|a,b|map(|i|a[i]+b[i],iota(2)),[0,0],map(|row|map(|x|x+1,row),xs))"]
     {
         let tlc = compile_thru_tlc(source).unwrap();
-        let imported = from_tlc(&tlc).unwrap();
+        let mut imported = from_tlc(&tlc).unwrap();
+        imported
+            .graph
+            .parse_and_run_program(
+                None,
+                "(run-schedule (saturate source-summary) (saturate source-dependencies))",
+            )
+            .unwrap();
         for writer in [None, Some("producer"), Some("consumer")] {
             let mut graph = imported.graph.clone();
             let query = Query(&graph);
