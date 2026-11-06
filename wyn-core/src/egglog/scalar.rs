@@ -9,9 +9,7 @@ pub(super) mod evaluation;
 pub(super) mod extract;
 mod fold;
 mod import;
-pub(super) mod placement;
 mod read;
-mod scopes;
 use import::Importer;
 
 #[cfg(test)]
@@ -20,15 +18,6 @@ mod analysis_tests;
 
 mod selected;
 pub(super) use selected::Selected;
-
-pub(super) fn plan_evaluation(
-    program: &super::Program<'_, super::Optimized>,
-) -> Result<(placement::Placement, evaluation::Evaluation), OptimizeError> {
-    let _timing = timing::span("egglog evaluation planning");
-    let mut placements = placement::Placement::new(program)?;
-    let evaluations = evaluation::Evaluation::new(program, &mut placements)?;
-    Ok((placements, evaluations))
-}
 
 const RULES: &str = concat!(
     include_str!("scalar/schema.egg"),
@@ -152,7 +141,7 @@ pub(super) fn run(
         include_str!("scalar/host.egg"),
     )?;
     scalars.clear_function("ExprContextActive")?;
-    let selected = placement::select(&mut scalars, policy)?;
+    let selected = extract::select_roots(&mut scalars, policy)?;
     if timing::enabled() {
         eprintln!("egglog scalar admitted values: {}", cache.len());
     }

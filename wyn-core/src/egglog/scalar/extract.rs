@@ -1,11 +1,12 @@
 //! Compare finite egglog extractions by the work in their shared DAGs.
+use super::Selected;
 use crate::egglog::{timing, OptimizeError, ScalarOptimization};
 use crate::{LookupMap, LookupSet};
+use egglog_engine::ast::Literal;
 use egglog_engine::extract::{Cost, CostModel, Extractor};
-use egglog_engine::sort::VecContainer;
+use egglog_engine::sort::{VecContainer, F, S};
 use egglog_engine::{
-    ast::FunctionSubtype, ArcSort, Core, EGraph, Enode, Function, RawValues, Read, Term, TermDag, TermId,
-    Value, Write,
+    ArcSort, Core, EGraph, Enode, Function, RawValues, Read, Term, TermDag, TermId, Value,
 };
 
 // Inlining trades one call for this much scalar work. Representation nodes,
@@ -71,9 +72,6 @@ pub(super) fn select(
     roots: &[Value],
     policy: ScalarOptimization,
 ) -> Result<(TermDag, Vec<TermId>), OptimizeError> {
-    timing::time("egglog scalar / trim extraction metadata", || {
-        trim_metadata(graph)
-    })?;
     let Some(sort) = graph.get_sort_by_name("ExprOutputs").cloned() else {
         return Err(OptimizeError::Output("missing scalar outputs sort".into()));
     };
@@ -148,67 +146,6 @@ pub(super) fn select(
     Ok((dag, roots))
 }
 
-/// Identity constructors do not participate in optimization. Only identities
-/// referenced by extractable constructor children need a finite extraction.
-fn trim_metadata(graph: &mut EGraph) -> Result<(), OptimizeError> {
-    let mut required = LookupSet::default();
-    for name in graph.get_function_names() {
-        if graph.read(|r| r.table_subtype(&name)) != Some(FunctionSubtype::Constructor) {
-            continue;
-        }
-        let Some(function) = graph.get_function(&name) else {
-            return Err(OptimizeError::Output(format!(
-                "missing scalar constructor {name}"
-            )));
-        };
-        let inputs: Vec<_> = function
-            .func_type()
-            .input
-            .iter()
-            .enumerate()
-            .filter(|(_, sort)| sort.name() == "SourceValue" || sort.is_container_sort())
-            .collect();
-        if inputs.is_empty() {
-            continue;
-        }
-        graph.constructor_enodes(&name, |row| {
-            if row.subsumed {
-                return;
-            }
-            for &(index, sort) in &inputs {
-                let value = row.children[index];
-                if sort.name() == "SourceValue" {
-                    required.insert(value);
-                } else if sort.is_container_sort() {
-                    let mut pending = graph.read(|r| sort.inner_values(r.container_values(), value));
-                    while let Some((sort, value)) = pending.pop() {
-                        if sort.name() == "SourceValue" {
-                            required.insert(value);
-                        } else if sort.is_container_sort() {
-                            pending.extend(graph.read(|r| sort.inner_values(r.container_values(), value)));
-                        }
-                    }
-                }
-            }
-        })?;
-    }
-    for name in ["SourceTerm", "SourceFormal", "SourceGlobal"] {
-        let mut unused = Vec::new();
-        graph.constructor_enodes(name, |row| {
-            if !row.subsumed && !required.contains(&row.eclass) {
-                unused.push(row.children.to_vec());
-            }
-        })?;
-        graph.update(|mut sink| {
-            for children in unused {
-                sink.subsume(name, RawValues(children))?;
-            }
-            Ok(())
-        })?;
-    }
-    Ok(())
-}
-
 fn copy_term(
     source: &TermDag,
     term: TermId,
@@ -262,3 +199,73 @@ pub(in crate::egglog) fn operands(name: &str, fields: &[TermId]) -> Vec<TermId> 
 #[cfg(test)]
 #[path = "extract_tests.rs"]
 mod tests;
+
+pub(super) fn select_roots(
+    graph: &mut EGraph,
+    policy: ScalarOptimization,
+) -> Result<Selected, OptimizeError> {
+    let _timing = timing::span("egglog scalar / exit placement");
+    let extraction = timing::span("egglog scalar / extraction");
+    let mut roots = Vec::new();
+    graph.constructor_enodes("ExprRoot", |row| {
+        roots.push((row.children[0], row.children[1], row.children[2], row.children[3]));
+    })?;
+    let mut extents = Vec::new();
+    graph.constructor_enodes("ExtentExprRoot", |row| {
+        extents.push((row.children[0], row.children[1]))
+    })?;
+    let values = roots.iter().map(|r| r.3).chain(extents.iter().map(|r| r.1)).collect::<Vec<_>>();
+    let (dag, terms) = select(graph, &values, policy)?;
+    let selected_extents = extents
+        .into_iter()
+        .zip(terms[roots.len()..].iter().copied())
+        .map(|((extent, _), term)| (extent, term))
+        .collect();
+    let mut selected_roots = LookupMap::default();
+    for ((context, _, source, _), term) in roots.into_iter().zip(terms) {
+        selected_roots.insert((context, source), term);
+    }
+    drop(extraction);
+    // Recover opaque handles for the selected egglog terms without constructing
+    // another expression representation or serializing source identities.
+    let values = graph.update(|mut sink| {
+        let mut values = Vec::with_capacity(dag.size());
+        for id in 0..dag.size() {
+            let value = match dag.get(id) {
+                Term::Lit(literal) => match literal {
+                    Literal::Int(x) => sink.base_to_value(*x),
+                    Literal::Float(x) => sink.base_to_value(F::from(*x)),
+                    Literal::String(x) => sink.base_to_value(S::new(x.clone())),
+                    Literal::Bool(x) => sink.base_to_value(*x),
+                    Literal::Unit => sink.base_to_value(()),
+                },
+                Term::App(name, children) if name == "vec-of" => sink.container_to_value(VecContainer {
+                    data: children.iter().map(|&child| values[child]).collect(),
+                    do_rebuild: true,
+                }),
+                Term::App(name, children) => {
+                    let args = RawValues(children.iter().map(|&child| values[child]).collect());
+                    let Some(value) = sink.eclass_of(name, args)? else {
+                        return Err(egglog_engine::Error::ExtractError(
+                            "selected enode is missing".into(),
+                        ));
+                    };
+                    value
+                }
+                Term::Var(_) => {
+                    return Err(egglog_engine::Error::ExtractError(
+                        "variable in scalar extraction".into(),
+                    ));
+                }
+            };
+            values.push(value);
+        }
+        Ok(values)
+    })?;
+    Ok(Selected {
+        dag,
+        values,
+        roots: selected_roots,
+        extents: selected_extents,
+    })
+}

@@ -16,9 +16,8 @@ use crate::timing;
 use crate::types::{is_array_variant_composite, Type, TypeExt, TypeName};
 use crate::{BindingRef, FunctionId, LookupMap, LookupSet};
 use egglog_engine::{Read, Write};
+use wyn_graph::DominatorTree;
 
-#[path = "local_storage_validation.rs"]
-mod validation;
 #[path = "workgroup_storage.rs"]
 mod workgroup;
 
@@ -183,15 +182,6 @@ fn split_parameters(body: &mut FuncBody) {
     eliminate_dead_pure_instructions(body);
 }
 
-struct Webs {
-    indices: LookupMap<ValueId, usize>,
-    roots: LookupMap<ValueId, ValueId>,
-}
-impl Webs {
-    fn find(&self, value: ValueId) -> ValueId {
-        self.roots[&value]
-    }
-}
 fn update(data: &InstKind) -> Option<&[ValueRef]> {
     let known = catalog().known();
     match data {
@@ -211,13 +201,11 @@ fn bufferize(name: &str, body: &mut FuncBody) -> Result<()> {
     let _body = label.as_deref().and_then(timing::span);
     timing::time("ssa storage / split parameters", || split_parameters(body));
     timing::time("ssa storage / remove loads", || remove_unused_loads(body));
-    let mut analysis = timing::time("ssa storage / analysis", || analyze(body))?;
+    let analysis = timing::time("ssa storage / analysis", || analyze(body))?;
     let (places, reused) = timing::time("ssa storage / allocate", || allocate(body, &analysis))?;
-    timing::time("ssa storage / verify", || {
-        validation::verify(body, &mut analysis, &places)
-    })?;
+    timing::time("ssa storage / verify", || verify(body, &analysis, &places))?;
     timing::time("ssa storage / rewrite", || {
-        rewrite(body, &analysis.webs, &places, &reused)
+        rewrite(body, &analysis.roots, &places, &reused)
     })
 }
 
@@ -256,14 +244,13 @@ fn remove_unused_loads(body: &mut FuncBody) {
 }
 
 struct Analysis {
-    flow: Dataflow,
-    webs: Webs,
+    roots: LookupMap<ValueId, ValueId>,
     origins: LookupMap<ValueId, Vec<ValueId>>,
     candidates: Vec<ValueId>,
     existing: LookupMap<ValueId, PlaceId>,
 }
 
-const ANALYSIS_SCHEDULE: &str = "(run-schedule (saturate storage-webs) (saturate flow-live) (saturate storage-select) (saturate storage-existing) (saturate storage-allocation))";
+const ANALYSIS_SCHEDULE: &str = "(run-schedule (saturate storage-webs) (saturate flow-live) (saturate storage-select) (saturate storage-existing) (saturate storage-allocation) (saturate storage-initialization) (saturate flow-initialization))";
 
 fn storage_places(body: &FuncBody, arrays: &LookupMap<ValueId, usize>) -> LookupSet<PlaceId> {
     let mut allocations = LookupSet::default();
@@ -362,11 +349,13 @@ fn analyze(body: &FuncBody) -> Result<Analysis> {
         edges: control_edges,
         ..
     } = &mut flow;
+
     graph.parse_and_run_program(None, include_str!("local_storage.egg")).map_err(map_error)?;
     drop(schema);
     let import = timing::span("ssa storage analysis / import facts");
     let mut origin_values = Vec::new();
     graph.update(|mut sink| {
+        sink.add("StorageEntry", (points[&body.inner.entry].0, values.len() as i64))?;
         for (i, &v) in values.iter().enumerate() {
             let id = i as i64;
             sink.add("Array", (id,))?;
@@ -414,6 +403,7 @@ fn analyze(body: &FuncBody) -> Result<Analysis> {
                     let node = &body.inner.insts[inst];
                     if let Some(&v) = node.result.and_then(|v| indices.get(&v)) {
                         sink.set("FlowKilled", (before, v as i64), true)?;
+                        sink.add("StorageDefinition", (before, v as i64))?;
                         if !matches!(node.data, InstKind::Op { tag: OpTag::Materialize, .. }) {
                             sink.add("Write", (after, v as i64))?;
                         }
@@ -472,6 +462,9 @@ fn analyze(body: &FuncBody) -> Result<Analysis> {
         roots.insert(v, values[graph.value_to_base::<i64>(root) as usize]);
 
         if graph.read(|r| r.contains("Reuse", (id as i64,))).map_err(map_error)? {
+            if graph.read(|r| r.contains("StorageUninitialized", id as i64)).map_err(map_error)? {
+                return Err(invalid("promoted array is read before initialization"));
+            }
             candidates.push(v);
         }
         if let Some(p) = graph.read(|r| r.lookup("Existing", (id as i64,))).map_err(map_error)? {
@@ -483,8 +476,7 @@ fn analyze(body: &FuncBody) -> Result<Analysis> {
         origins.entry(roots[&v]).or_default().push(v);
     }
     Ok(Analysis {
-        flow,
-        webs: Webs { indices, roots },
+        roots,
         origins,
         candidates,
         existing,
@@ -529,7 +521,7 @@ fn allocate(
 
 fn rewrite(
     body: &mut FuncBody,
-    webs: &Webs,
+    roots: &LookupMap<ValueId, ValueId>,
     places: &LookupMap<ValueId, PlaceId>,
     reused: &LookupSet<ValueId>,
 ) -> Result<()> {
@@ -538,7 +530,7 @@ fn rewrite(
     }
     let blocks: Vec<_> = body.inner.blocks.keys().collect();
     let promoted: LookupMap<_, _> =
-        webs.indices.keys().filter_map(|v| places.get(&webs.find(*v)).map(|p| (*v, *p))).collect();
+        roots.keys().filter_map(|v| places.get(&roots[v]).map(|p| (*v, *p))).collect();
     let mut removed = LookupSet::default();
     let mut substitutions = Substitutions::default();
     for &block in &blocks {
@@ -715,3 +707,50 @@ fn invalid(message: &str) -> CompilerError {
 #[cfg(test)]
 #[path = "local_storage_tests.rs"]
 mod tests;
+
+fn verify(body: &FuncBody, analysis: &Analysis, places: &LookupMap<ValueId, PlaceId>) -> Result<()> {
+    if places.is_empty() {
+        return Ok(());
+    }
+    let dominators = DominatorTree::build(body.inner.entry, |b, out| {
+        out.extend(body.inner.blocks[b].term.successors());
+    });
+    let blocks = dominators.preorder();
+    let mut allocations = LookupMap::default();
+    for &block in blocks {
+        for (position, &inst) in body.inner.blocks[block].insts.iter().enumerate() {
+            if let InstKind::Alloca { result, .. } = body.inner.insts[inst].data {
+                allocations.insert(result, (block, position));
+            }
+        }
+    }
+    let origins: LookupMap<_, _> = analysis
+        .origins
+        .iter()
+        .filter_map(|(root, values)| places.get(root).map(|p| (values, *p)))
+        .flat_map(|(values, p)| values.iter().map(move |v| (*v, p)))
+        .collect();
+    let promoted: LookupMap<_, _> =
+        analysis.roots.keys().filter_map(|v| places.get(&analysis.roots[v]).map(|p| (*v, *p))).collect();
+    for &block in blocks {
+        for (position, &inst) in body.inner.blocks[block].insts.iter().enumerate() {
+            let node = &body.inner.insts[inst];
+            let origin = node.result.and_then(|v| origins.get(&v)).copied();
+            let reads: Vec<_> = node
+                .data
+                .value_uses()
+                .into_iter()
+                .filter_map(|v| v.as_ssa().and_then(|v| promoted.get(&v).copied()))
+                .collect();
+            for place in reads.iter().copied().chain(origin) {
+                let Some(&(allocation, index)) = allocations.get(&place) else {
+                    return Err(invalid("promoted storage has no allocation"));
+                };
+                if !dominators.dominates(allocation, block) || (allocation == block && index >= position) {
+                    return Err(invalid("storage allocation does not dominate its access"));
+                }
+            }
+        }
+    }
+    Ok(())
+}

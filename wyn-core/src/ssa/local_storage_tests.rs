@@ -9,68 +9,41 @@ use egglog_engine::EGraph;
 #[test]
 fn storage_validation_requires_initialization_on_every_incoming_path() {
     for omit_initializer in [false, true] {
-        let mut body = FuncBuilder::new(vec![], i32()).finish_unchecked();
-        let entry = body.inner.entry;
-        let yes = body.inner.create_block();
-        let no = body.inner.create_block();
-        let merge = body.inner.create_block();
-        let array = sized_array(4, i32());
-        let carried = body.inner.add_block_param(merge, array.clone());
-        let zero = ValueRef::Const(ConstantValue::I32(0));
-        let mut values = Vec::new();
-        for block in [yes, no] {
-            let value = body.inner.append_inst(
-                block,
-                InstKind::Op {
-                    tag: OpTag::ArrayLit,
-                    operands: vec![zero; 4],
-                },
-                array.clone(),
-            );
-            values.push(value);
-            body.inner.blocks[block].term = Terminator::Branch {
-                target: merge,
-                args: vec![value.into()],
-            };
+        let mut graph = EGraph::default();
+        graph
+            .parse_and_run_program(
+                None,
+                concat!(
+                    include_str!("../egglog/flow.egg"),
+                    "\n",
+                    include_str!("local_storage.egg")
+                ),
+            )
+            .unwrap();
+        graph
+            .parse_and_run_program(
+                None,
+                r#"
+            (Array 1) (Array 2) (Link 1 2) (Origin 1) (Origin 2) (Updated 1)
+            (StorageEntry (FlowNode 0) 3)
+            (StorageDefinition (FlowNode 1) 1)
+            (FlowNext (FlowNode 0) (FlowNode 1)) (FlowNext (FlowNode 0) (FlowNode 2))
+            (FlowNext (FlowNode 1) (FlowNode 3)) (FlowNext (FlowNode 2) (FlowNode 3))
+            (FlowUse (FlowNode 3) 2)
+            ; Later initialized iterations must not hide an uninitialized first trip.
+            (FlowNext (FlowNode 3) (FlowNode 1)) (FlowNext (FlowNode 3) (FlowNode 2))
+        "#,
+            )
+            .unwrap();
+        if !omit_initializer {
+            graph.parse_and_run_program(None, "(StorageDefinition (FlowNode 2) 2)").unwrap();
         }
-        body.inner.blocks[entry].term = Terminator::CondBranch {
-            cond: ValueRef::Const(ConstantValue::Bool(true)),
-            then_target: yes,
-            then_args: vec![],
-            else_target: no,
-            else_args: vec![],
-        };
-        let read = body.inner.append_inst(
-            merge,
-            InstKind::Op {
-                tag: OpTag::Index,
-                operands: vec![carried.into(), zero],
-            },
-            i32(),
+        graph.parse_and_run_program(None, ANALYSIS_SCHEDULE).unwrap();
+        assert!(graph.read(|r| r.contains("Reuse", 1i64)).unwrap());
+        assert_eq!(
+            graph.read(|r| r.contains("StorageUninitialized", 1i64)).unwrap(),
+            omit_initializer
         );
-        // A later initialized iteration must not hide an uninitialized first trip.
-        body.inner.blocks[merge].term = Terminator::CondBranch {
-            cond: ValueRef::Const(ConstantValue::Bool(false)),
-            then_target: yes,
-            then_args: vec![],
-            else_target: no,
-            else_args: vec![],
-        };
-        let mut analysis = analyze(&body).unwrap();
-        let (places, _) = allocate(&mut body, &analysis).unwrap();
-        assert!(!places.is_empty());
-        if omit_initializer {
-            for origins in analysis.origins.values_mut() {
-                origins.retain(|v| *v != values[1]);
-            }
-        }
-        let result = validation::verify(&body, &mut analysis, &places);
-        if omit_initializer {
-            assert!(result.unwrap_err().to_string().contains("read before initialization"));
-        } else {
-            result.unwrap();
-        }
-        assert!(body.inner.inst_of_value(read).is_some());
     }
 }
 

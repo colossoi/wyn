@@ -1,5 +1,7 @@
 use super::*;
+use crate::LookupMap;
 use std::collections::BTreeSet;
+use wyn_graph::topo_sort_by_dependencies;
 
 const SCHEMA: &str = r#"
     (datatype OperationKey (OperationId i64))
@@ -47,17 +49,21 @@ fn output(graph: &EGraph) -> Output {
 
 fn compare(facts: &str, cycle: bool) -> Output {
     let mut reference = graph(facts);
-    reference.parse_and_run_program(None, include_str!("order_reference.egg")).unwrap();
-    let mut pending = false;
-    Query(&reference)
-        .for_each("OrderPending", |_| {
-            pending = true;
-            Ok(())
-        })
-        .unwrap();
-    assert_eq!(pending, cycle);
+    assert_eq!(reference_order(&mut reference).is_err(), cycle);
     let mut native = graph(facts);
-    let result = apply(&mut native);
+    native
+        .parse_and_run_program(
+            None,
+            include_str!("../execution.egg")
+                .split("; Select a dependency order within each invocation")
+                .nth(1)
+                .unwrap()
+                .split_once("\n")
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+    let result = order(&mut native);
     assert_eq!(result.is_err(), cycle);
     if cycle {
         assert!(result.unwrap_err().to_string().contains("cycle in the fused execution graph"));
@@ -134,4 +140,49 @@ fn order_rejects_dependency_and_effect_cycles() {
     ] {
         compare(&format!("{positions} {cycle}"), true);
     }
+}
+
+fn reference_order(graph: &mut EGraph) -> Result<(), OptimizeError> {
+    let query = Query(graph);
+    let mut regions = LookupMap::<_, Vec<_>>::default();
+    query.for_each("PlannedSourcePosition", |row| {
+        regions.entry(row[1]).or_default().push((graph.value_to_base::<i64>(row[2]), row[0]));
+        Ok(())
+    })?;
+    let mut dependencies = LookupMap::<_, Vec<_>>::default();
+    query.for_each("OperationDependency", |row| {
+        dependencies.entry(row[0]).or_default().push(row[1]);
+        Ok(())
+    })?;
+    let mut effects = LookupMap::<_, Vec<_>>::default();
+    query.for_each("EffectInput", |row| {
+        effects.entry(row[0]).or_default().push(row[1]);
+        Ok(())
+    })?;
+    query.for_each("EffectWait", |row| {
+        dependencies.entry(row[0]).or_default().extend(effects.get(&row[1]).into_iter().flatten());
+        Ok(())
+    })?;
+    let mut orders = Vec::new();
+    for (region, mut positions) in regions {
+        positions.sort();
+        // The supplied universe confines dependency/effect edges to this region.
+        let order = topo_sort_by_dependencies(positions.into_iter().map(|(_, op)| op), |op, out| {
+            out.extend(dependencies.get(&op).into_iter().flatten().copied());
+        })
+        .map_err(|_| OptimizeError::Extraction("cycle in the fused execution graph".into()))?;
+        orders.push((region, order));
+    }
+    graph.update(|mut sink| {
+        for (region, order) in &orders {
+            for (position, &op) in order.iter().enumerate() {
+                sink.add("OperationOrderPosition", (op, *region, position as i64))?;
+            }
+            for pair in order.windows(2) {
+                sink.add("Consecutive", (pair[0], pair[1]))?;
+            }
+        }
+        Ok::<_, egglog_engine::Error>(())
+    })?;
+    Ok(())
 }

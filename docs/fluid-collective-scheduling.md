@@ -13,7 +13,8 @@ contains 64 elements, so only 68 of those workgroups have input.
 
 The existing scheduling pipeline now has an explicit selection point after
 shape/layout facts and recipe discovery, before phase/storage finalization.
-`planning/collectives.rs` reads those facts and selects:
+Native scheduling rules aggregate those facts and use the calibrated arithmetic
+in `egglog/cost.rs` to select:
 
 - At most one workgroup per useful input tile, retaining the existing cap of 256.
 - A power-of-two carry width covering those workgroups, between 32 and 256.

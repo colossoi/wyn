@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn trimming_unused_identities_preserves_extraction_and_nested_source_arguments() {
+fn extraction_preserves_nested_source_arguments_without_unrelated_identities() {
     let mut graph = EGraph::default();
     graph
         .parse_and_run_program(
@@ -46,24 +46,13 @@ fn trimming_unused_identities_preserves_extraction_and_nested_source_arguments()
         dag.to_string(term)
     };
     let before = extract(&graph);
-    trim_metadata(&mut graph).unwrap();
-    assert_eq!(extract(&graph), before);
-    let mut retained = 0;
-    let mut removed = 0;
-    for name in ["SourceTerm", "SourceFormal", "SourceGlobal"] {
-        graph
-            .constructor_enodes(name, |row| {
-                if row.subsumed {
-                    removed += 1;
-                } else {
-                    retained += 1;
-                }
-            })
-            .unwrap();
-    }
-    assert_eq!(removed, 3, "only the unreferenced identity rows are trimmed");
-    assert_eq!(
-        retained, 4,
-        "keep source, nested argument, callable, and branch identity"
+    let (selected, roots) = select(&mut graph, &[root], ScalarOptimization::Basic).unwrap();
+    let actual = selected.to_string(roots[0]);
+    assert_eq!(actual, before);
+    assert!(actual.contains("SourceInvocation"));
+    assert!(actual.contains("SourceFormal"));
+    assert!(
+        !actual.contains("99"),
+        "unrelated identities must not enter the selected DAG"
     );
 }

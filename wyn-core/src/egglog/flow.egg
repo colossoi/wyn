@@ -87,6 +87,16 @@
 (relation FlowScopeRequirement (SourceValue i64))
 (rule ((FlowOperand value child) (FlowScopeRequirement child scope))
       ((FlowScopeRequirement value scope)) :ruleset source-summary)
+; Lexical scope ancestry is shared with placement; scope IDs belong to the importer.
+(ruleset flow-scopes)
+(relation FlowScope (i64))
+(relation FlowScopeParent (i64 i64))
+(relation FlowScopeAncestor (i64 i64))
+(function FlowScopeContains (i64 i64) bool :merge (or old new))
+(rule ((FlowScope scope)) ((FlowScopeAncestor scope scope)) :ruleset flow-scopes)
+(rule ((FlowScopeParent child parent) (FlowScopeAncestor ancestor parent))
+      ((FlowScopeAncestor ancestor child)) :ruleset flow-scopes)
+(rule ((FlowScopeAncestor ancestor scope)) ((set (FlowScopeContains ancestor scope) true)) :ruleset flow-scopes)
 ; Placement adds reference edges without changing the source dependency proofs.
 (relation FlowReferenceEdge (SourceValue SourceValue))
 (relation FlowChoice (SourceValue SourceValue SourceValue))

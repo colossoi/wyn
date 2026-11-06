@@ -13,7 +13,7 @@
        (= count (SourceConstantInteger size)) (>= count 0) (<= count 64))
       ((set (InlineNeutralArray value) true)) :ruleset planning-constants)
 
-(relation PlannedSourcePosition (OperationKey RegionKey i64))
+
 (relation AllowGeneratedTopology ())
 (relation AuthoredTopology ())
 (relation PlannedOperation (OperationKey OperationKey FusionPlan RegionKey))

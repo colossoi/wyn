@@ -4,8 +4,6 @@ use super::timing::{span, time};
 use super::{parse_program, OptimizeError};
 use egglog_engine::EGraph;
 
-mod reachability;
-
 #[cfg(test)]
 mod tests;
 
@@ -15,7 +13,6 @@ pub(super) fn new_graph() -> Result<EGraph, OptimizeError> {
         Some("fusion schema".into()),
         concat!(include_str!("../flow.egg"), "\n", include_str!("schema.egg")),
     )?;
-    reachability::register(&mut graph)?;
     Ok(graph)
 }
 
@@ -30,10 +27,16 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "fusion import",
         "(run-schedule (saturate source-fusion))",
     )?)?;
-    time("egglog fusion / run schedule", || reachability::run(graph))?;
+    time("egglog fusion / run schedule", || {
+        graph.parse_and_run_program(None, "(PlanningRound 0) (run-schedule (saturate (seq (saturate fusion-dependencies) (saturate fusion-paths) (saturate fusion-counts) (saturate fusion-candidates) (saturate fusion-select) fusion-choose (saturate fusion-record) (saturate fusion-commit) fusion-clear-candidates fusion-clear-paths fusion-union fusion-clear)))")
+    })?;
     graph.run_program(parse_program(
         "fusion signatures",
         "(run-schedule (saturate fusion-signatures))",
     )?)?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "reachability_tests.rs"]
+mod reachability_tests;

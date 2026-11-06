@@ -1,6 +1,12 @@
 //! Portable schedule ranking. Facts, candidate enumeration, and hardware rates
 //! are separate so calibration never changes legality or a kernel recipe.
 
+use egglog_engine::ast::Span;
+use egglog_engine::constraint::{SimpleTypeConstraint, TypeConstraint};
+use egglog_engine::prelude::BaseSort;
+use egglog_engine::sort::{BigIntSort, BoolSort, I64Sort, Z};
+use egglog_engine::{Core, EGraph, Primitive, PurePrim, PureState, Value};
+
 #[derive(Clone, Copy, Debug)]
 pub struct CostModel {
     pub compute_ops_per_ns: f64,
@@ -36,29 +42,6 @@ pub struct CollectiveWork {
     pub scan: bool,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct CollectiveLaunch {
-    pub groups: u32,
-    pub chunk_width: u32,
-    pub carry_width: u32,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct CostEstimate {
-    pub compute_ns: f64,
-    pub memory_ns: f64,
-    pub synchronization_ns: f64,
-    pub launch_ns: f64,
-    pub global_bytes: u64,
-    pub temporary_bytes: u64,
-}
-
-impl CostEstimate {
-    pub fn total_ns(self) -> f64 {
-        self.compute_ns.max(self.memory_ns) + self.synchronization_ns + self.launch_ns
-    }
-}
-
 impl CostModel {
     pub fn validate(self) -> Result<Self, &'static str> {
         if !self.compute_ops_per_ns.is_finite()
@@ -88,13 +71,14 @@ impl CostModel {
         local < dispatch
     }
 
-    pub fn estimate(self, work: CollectiveWork, launch: CollectiveLaunch) -> CostEstimate {
-        let groups = u64::from(launch.groups.max(1));
-        let width = u64::from(launch.chunk_width.max(1));
-        let carry = u64::from(launch.carry_width.max(1));
+    pub fn estimate(self, work: CollectiveWork, chunk_width: u32, groups: u32) -> f64 {
+        let carry_width = groups.next_power_of_two().max(32);
+        let groups = u64::from(groups.max(1));
+        let width = u64::from(chunk_width.max(1));
+        let carry = u64::from(carry_width.max(1));
         let n = work.elements;
-        let steps = u64::from(launch.chunk_width.max(1).ilog2());
-        let carry_steps = u64::from(launch.carry_width.max(1).ilog2());
+        let steps = u64::from(chunk_width.max(1).ilog2());
+        let carry_steps = u64::from(carry_width.max(1).ilog2());
         let resident = u64::from(self.resident_workgroups.max(1));
         let occupancy = (groups.min(resident) as f64 / resident as f64).max(1.0 / resident as f64);
         let rounds = n.div_ceil(groups * width).max(1);
@@ -112,15 +96,11 @@ impl CostModel {
             .saturating_add(temporary_bytes.saturating_mul(2));
         let element_ops = n as f64 * (work.map_ops + work.combine_ops * steps.max(1)) as f64;
         let carry_ops = (carry * carry_steps.max(1)) as f64 * work.combine_ops as f64;
-        CostEstimate {
-            compute_ns: element_ops / (self.compute_ops_per_ns * occupancy)
-                + carry_ops / (self.compute_ops_per_ns / resident as f64),
-            memory_ns: global_bytes as f64 / (self.memory_bytes_per_ns * occupancy),
-            synchronization_ns: ((rounds * waves * steps + carry_steps) * 2) as f64 * self.barrier_ns,
-            launch_ns: passes as f64 * self.launch_ns,
-            global_bytes,
-            temporary_bytes,
-        }
+        let compute = element_ops / (self.compute_ops_per_ns * occupancy)
+            + carry_ops / (self.compute_ops_per_ns / resident as f64);
+        let memory = global_bytes as f64 / (self.memory_bytes_per_ns * occupancy);
+        let synchronization = ((rounds * waves * steps + carry_steps) * 2) as f64 * self.barrier_ns;
+        compute.max(memory) + synchronization + passes as f64 * self.launch_ns
     }
 
     pub fn select(
@@ -128,7 +108,7 @@ impl CostModel {
         work: CollectiveWork,
         chunk_width: u32,
         maximum_groups: u32,
-    ) -> Result<CollectiveLaunch, &'static str> {
+    ) -> Result<u32, &'static str> {
         self.validate()?;
         if !chunk_width.is_power_of_two() || maximum_groups == 0 || maximum_groups > 256 {
             return Err("portable collectives require a power-of-two width and 1..=256 carry groups");
@@ -137,108 +117,75 @@ impl CostModel {
             work.elements.div_ceil(u64::from(chunk_width)).max(1).min(u64::from(maximum_groups)) as u32;
         // All candidates use the same portable recipe and fit its carry stage.
         (1..=useful)
-            .map(|groups| CollectiveLaunch {
-                groups,
-                chunk_width,
-                carry_width: groups.next_power_of_two().max(32),
-            })
             .min_by(|a, b| {
-                self.estimate(work, *a)
-                    .total_ns()
-                    .total_cmp(&self.estimate(work, *b).total_ns())
-                    .then_with(|| b.groups.cmp(&a.groups))
+                self.estimate(work, chunk_width, *a)
+                    .total_cmp(&self.estimate(work, chunk_width, *b))
+                    .then_with(|| b.cmp(a))
             })
             .ok_or("no legal collective launch")
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn local_loop_guard_accounts_for_work_memory_and_readbacks() {
-        let model = CostModel::default();
-        assert!(model.prefer_local_loop(80, 20, true));
-        assert!(!model.prefer_local_loop(1_000_000, 20, true));
-        assert!(!model.prefer_local_loop(80, 1_000_000, true));
-        let immediate = CostModel {
-            launch_ns: 0.0,
-            readback_ns: 0.0,
-            ..model
-        };
-        assert!(!immediate.prefer_local_loop(80, 20, true));
-        assert!(CostModel {
-            readback_ns: f64::NAN,
-            ..model
+// Only calibrated arithmetic crosses this boundary; primitives cannot read graph facts.
+pub(super) fn register(graph: &mut EGraph, costs: CostModel, collective: bool) {
+    graph.add_pure_primitive(Rank { costs, collective }, None);
+}
+#[derive(Clone)]
+struct Rank {
+    costs: CostModel,
+    collective: bool,
+}
+impl Primitive for Rank {
+    fn name(&self) -> &str {
+        if self.collective {
+            "wyn-collective-groups"
+        } else {
+            "wyn-local-loop"
         }
-        .validate()
-        .is_err());
     }
-
-    #[test]
-    fn each_cost_component_responds_to_its_inputs() {
-        let model = CostModel::default();
-        let work = CollectiveWork {
-            elements: 8192,
-            input_bytes: 8,
-            output_bytes: 8,
-            state_bytes: 64,
-            map_ops: 16,
-            combine_ops: 8,
-            scan: true,
-        };
-        let launch = CollectiveLaunch {
-            groups: 128,
-            chunk_width: 64,
-            carry_width: 128,
-        };
-        let base = model.estimate(work, launch);
-        assert!(
-            model.estimate(CollectiveWork { map_ops: 64, ..work }, launch).compute_ns > base.compute_ns
-        );
-        assert!(
-            model
-                .estimate(
-                    CollectiveWork {
-                        input_bytes: 64,
-                        ..work
-                    },
-                    launch
-                )
-                .memory_ns
-                > base.memory_ns
-        );
-        assert_eq!(
-            CostModel {
-                barrier_ns: model.barrier_ns * 2.0,
-                ..model
-            }
-            .estimate(work, launch)
-            .synchronization_ns,
-            base.synchronization_ns * 2.0
-        );
-        assert_eq!(
-            CostModel {
-                launch_ns: model.launch_ns * 2.0,
-                ..model
-            }
-            .estimate(work, launch)
-            .launch_ns,
-            base.launch_ns * 2.0
-        );
-        assert!(CostModel {
-            memory_bytes_per_ns: f64::NAN,
-            ..model
+    fn get_type_constraints(&self, span: &Span) -> Box<dyn TypeConstraint> {
+        let mut sorts = vec![BigIntSort.to_arcsort(); if self.collective { 6 } else { 2 }];
+        sorts.push(BoolSort.to_arcsort());
+        if self.collective {
+            sorts.extend([I64Sort.to_arcsort(), I64Sort.to_arcsort()]);
+        } else {
+            sorts.push(BoolSort.to_arcsort());
         }
-        .validate()
-        .is_err());
-        for n in [0, 1, 257, 4320, 100_000] {
-            let choice = model.select(CollectiveWork { elements: n, ..work }, 64, 256).unwrap();
-            assert!(choice.groups >= 1 && choice.groups <= 256);
-            assert!(choice.carry_width.is_power_of_two() && choice.carry_width >= choice.groups);
-        }
-        assert!(model.select(work, 0, 256).is_err());
-        assert!(model.select(work, 64, 0).is_err());
+        SimpleTypeConstraint::new(self.name(), sorts, span.clone()).into_box()
     }
 }
+impl PurePrim for Rank {
+    fn apply<'a, 'db>(&self, state: PureState<'a, 'db>, args: &[Value]) -> Option<Value> {
+        let number = |value| u64::try_from(&*state.value_to_base::<Z>(value)).ok();
+        if self.collective {
+            let &[n, input, output, bytes, map, combine, scan, width] = args else {
+                unreachable!("invalid collective cost arity")
+            };
+            let work = CollectiveWork {
+                elements: number(n)?,
+                input_bytes: number(input)?,
+                output_bytes: number(output)?,
+                state_bytes: number(bytes)?,
+                map_ops: number(map)?,
+                combine_ops: number(combine)?,
+                scan: state.value_to_base(scan),
+            };
+            let width = u32::try_from(state.value_to_base::<i64>(width)).ok()?;
+            let groups = self.costs.select(work, width, 256).ok()?;
+            Some(state.base_to_value(i64::from(groups)))
+        } else {
+            let &[work, bytes, conditional] = args else {
+                unreachable!("invalid loop cost arity")
+            };
+            Some(state.base_to_value(self.costs.prefer_local_loop(
+                number(work)?,
+                number(bytes)?,
+                state.value_to_base(conditional),
+            )))
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "cost_tests.rs"]
+mod tests;

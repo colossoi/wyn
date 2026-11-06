@@ -72,3 +72,16 @@
 (rule ((Reuse root) (OriginLoad v p after) (= root (Web v))
        (= false (MultipleOrigins root)) (= false (AccessedLater v)) (Allocation p))
       ((set (Existing root) p)) :ruleset storage-allocation)
+
+; Initialization is proved on selected version webs before physical allocation.
+(relation StorageEntry (SourceValue i64))
+(relation StorageDefinition (SourceValue i64))
+(relation StorageUninitialized (i64))
+(ruleset storage-initialization)
+(rule ((StorageEntry entry offset) (Reuse root))
+      ((FlowUninitialized entry (+ offset root))) :ruleset storage-initialization)
+(rule ((StorageEntry entry offset) (StorageDefinition point v) (Origin v) (= root (Web v)) (Reuse root))
+      ((set (FlowKilled point (+ offset root)) true)) :ruleset storage-initialization)
+(rule ((StorageEntry entry offset) (FlowUse point v) (= root (Web v)) (Reuse root)
+       (FlowUninitialized point (+ offset root)))
+      ((StorageUninitialized root)) :ruleset flow-initialization)

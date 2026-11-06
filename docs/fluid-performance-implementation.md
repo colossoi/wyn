@@ -41,8 +41,8 @@ not require indirect dispatch, device-wide barriers or backend-specific features
 Collective numeric selection follows shape/layout analysis and recipe discovery,
 before phase storage and dependencies are finalized. Rust reads facts and ranks
 legal group counts; egglog derives geometry and matching temporary capacities.
-The cost module separates workload descriptions, hardware rates, candidate
-geometry and component estimates. It includes compute, global traffic, temporary
+Egglog aggregates workload costs and owns the selected geometry; the Rust cost
+module supplies calibrated arithmetic. It includes compute, global traffic, temporary
 storage, barriers, launch latency and limited group residency. Default rates are
 portable priors, not calibrated RX 580 measurements. Source operation counts are
 coarse summaries; these estimates rank schedules rather than predict frame time.
@@ -50,8 +50,7 @@ coarse summaries; these estimates rank schedules rather than predict frame time.
 `wyn build --gpu-cost-profile rates.toml` supplies measured hardware rates. The
 fields are `compute_ops_per_ns`, `memory_bytes_per_ns`, `barrier_ns`, `launch_ns`,
 `readback_ns` and `resident_workgroups`. Unspecified fields retain their defaults. Invalid or
-unknown values are rejected. `WYN_SCHEDULE_REPORT=1` prints workload, selected
-geometry and cost components. Unknown extents and explicit grids retain their
+unknown values are rejected. Unknown extents and explicit grids retain their
 existing bounded recipes.
 
 The model ranks collective group counts and guards against distributing cheap

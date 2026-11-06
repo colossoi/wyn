@@ -13,6 +13,8 @@ fn work_proofs_distinguish_shared_regions_from_repeated_inline_work() {
         (function SourceRegionWork (RegionKey) i64 :no-merge)
         (function SourceRegionDuplicable (RegionKey) bool :no-merge)
         (function SourceOperationValue (OperationKey) SourceValue :no-merge)
+        (datatype SourceOperationData (OperationInfo RegionKey String))
+        (function SourceOperation (OperationKey) SourceOperationData :no-merge)
         (function WorkOperationCheap (OperationKey) bool :merge (or old new))
         (relation SourceSummaryEnters (SourceValue RegionKey))
         (relation SourceRegionEnters (RegionKey RegionKey))

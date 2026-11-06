@@ -1,6 +1,5 @@
 //! Lower selected egglog expressions and scheduled execution into SSA and host interfaces.
 use super::scalar::evaluation::Evaluation;
-use super::scalar::placement::Placement;
 use super::{timing, OptimizeError, Optimized, Program};
 use crate::interface::publish::EntryPoint;
 use crate::ssa::builder::BuilderError;
@@ -28,7 +27,7 @@ pub(super) fn lower(
     program: &Program<'_, Optimized>,
     target: CodegenTarget,
 ) -> Result<crate::ssa::stage::Elaborated, OptimizeError> {
-    let (placements, evaluations) = super::scalar::plan_evaluation(program)?;
+    let evaluations = Evaluation::new(program)?;
     let _timing = timing::span("egglog to SSA");
     let facts = Facts { program };
     let mut local_buffers = LookupMap::<_, Vec<_>>::default();
@@ -57,7 +56,6 @@ pub(super) fn lower(
         program,
         facts,
         bindings: super::abi::bindings::Bindings::new(program)?,
-        placements,
         evaluations,
         local_buffers,
         phase_domains,
@@ -117,7 +115,6 @@ pub(super) fn lower(
 }
 
 pub(super) struct Compiler<'a, 'source> {
-    placements: Placement,
     evaluations: Evaluation,
     local_buffers: LookupMap<Value, Vec<[Value; 4]>>,
     phase_domains: LookupMap<Value, [Value; 2]>,

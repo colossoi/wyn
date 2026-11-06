@@ -1,11 +1,7 @@
 //! Run execution placement and structural dispatch planning on native facts.
-use super::{timing, OptimizeError};
+use super::{query::Query, timing, OptimizeError};
 use crate::PipelineTopologyPolicy;
 use egglog_engine::{EGraph, RawValues, Write};
-
-mod collectives;
-mod loops;
-mod order;
 
 #[cfg(test)]
 #[path = "planning_tests.rs"]
@@ -83,8 +79,9 @@ pub(super) fn place(
             "(run-schedule (saturate planning-constants) (saturate planning-import))",
         )
     })?;
-    timing::time("egglog placement / order", || order::apply(graph))?;
-    loops::select(graph, costs)?;
+    timing::time("egglog placement / order", || order(graph))?;
+    super::cost::register(graph, costs, false);
+    graph.parse_and_run_program(Some("native loop costs".into()), include_str!("cost.egg"))?;
     graph.parse_and_run_program(
         Some("execution placement".into()),
         include_str!("planning/place.egg"),
@@ -93,11 +90,17 @@ pub(super) fn place(
 }
 
 pub(super) fn schedule(graph: &mut EGraph, costs: super::cost::CostModel) -> Result<(), OptimizeError> {
+    super::cost::register(graph, costs, true);
     graph.parse_and_run_program(
         Some("schedule inputs".into()),
         include_str!("planning/prepare-schedule.egg"),
     )?;
-    collectives::select(graph, costs)?;
+    Query(graph).for_each("ParallelCollective", |row| {
+        if Query(graph).lookup("OperationGrid", (row[0],))?.is_some() {
+            Query(graph).required("SelectedCollectiveGroups", (row[0],))?;
+        }
+        Ok(())
+    })?;
     graph.parse_and_run_program(
         Some("structural scheduling".into()),
         include_str!("planning/run.egg"),
@@ -109,3 +112,19 @@ pub(super) fn schedule(graph: &mut EGraph, costs: super::cost::CostModel) -> Res
     }
     Ok(())
 }
+
+fn order(graph: &mut EGraph) -> Result<(), OptimizeError> {
+    graph.parse_and_run_program(
+        None,
+        "(run-schedule (saturate order-import) (saturate (saturate order-select) order-emit))",
+    )?;
+    Query(graph).for_each("OrderPending", |_| {
+        Err(OptimizeError::Extraction(
+            "cycle in the fused execution graph".into(),
+        ))
+    })
+}
+
+#[cfg(test)]
+#[path = "planning/order_tests.rs"]
+mod order_tests;

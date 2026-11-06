@@ -2,20 +2,18 @@
 //! emitting any function; emission never queries effects or walks hidden source
 //! regions to discover an earlier producer.
 use super::extract::operands;
-use super::placement::Placement;
 use super::Selected;
 use crate::egglog::facts::Facts;
 use crate::egglog::query::Query;
 use crate::egglog::{timing, OptimizeError, Optimized, Program};
-use crate::{LookupMap, LookupSet};
+use crate::{Interner, LookupMap, LookupSet};
 use egglog_engine::{EGraph, Read, Term, TermId, Value, Write};
-use wyn_graph::dag_postorder;
+use wyn_graph::{dag_postorder, topo_sort_by_dependencies};
 
 pub(in crate::egglog) struct Evaluation {
+    available: LookupSet<(TermId, Value)>,
     readonly: Vec<bool>,
-    total: Vec<bool>,
     targets: LookupMap<(Value, TermId), Value>,
-    owners: Vec<Option<Value>>,
     ordinals: Vec<Option<i64>>,
     before: LookupMap<(Value, Value), Vec<TermId>>,
     shared: LookupMap<(TermId, TermId), Vec<(TermId, bool)>>,
@@ -23,7 +21,7 @@ pub(in crate::egglog) struct Evaluation {
     common: LookupMap<(Vec<TermId>, Vec<TermId>), Vec<(TermId, bool)>>,
 }
 impl Evaluation {
-    pub fn new(program: &Program<'_, Optimized>, placement: &mut Placement) -> Result<Self, OptimizeError> {
+    pub fn new(program: &Program<'_, Optimized>) -> Result<Self, OptimizeError> {
         let inputs = timing::span("egglog evaluation / collect facts");
         let selected = &program.stage.selected;
         let facts = Facts { program };
@@ -36,11 +34,45 @@ impl Evaluation {
             concat!(include_str!("../flow.egg"), "\n", include_str!("evaluation.egg")),
         )?;
         drop(schema);
+        let mut scopes: Vec<_> = program.identities.scopes.keys().copied().collect();
+        scopes.sort();
+        let scope_ids: LookupMap<_, _> = scopes.iter().enumerate().map(|(i, &s)| (s, i as i64)).collect();
+        let mut contexts = LookupMap::default();
+        let mut context_scopes = Vec::new();
+        scalars.constructor_enodes("ExprContextMember", |row| {
+            let next = contexts.len() as i64;
+            let context = *contexts.entry(row.children[0]).or_insert(next);
+            if let Some(&scope) = scope_ids.get(&row.children[1]) {
+                context_scopes.push((context, scope));
+            }
+        })?;
+        let source = Query(&program.graph);
+        let mut parents = LookupMap::default();
+        for &scope in &scopes {
+            if !source.flag("ExprContextBoundary", scope)? {
+                if let Some(parent) =
+                    program.identities.scopes[&scope].0.filter(|p| scope_ids.contains_key(p))
+                {
+                    parents.insert(scope, parent);
+                }
+            }
+        }
+        topo_sort_by_dependencies(scopes.iter().copied(), |scope, out| {
+            out.extend(parents.get(&scope).copied())
+        })
+        .map_err(|_| OptimizeError::Output("cyclic lexical scope forest".into()))?;
+        let mut loops = LookupSet::default();
+        source.for_function("SourceLoop", |_, info| {
+            let Some(fields) = source.enode("LoopInfo", info)? else {
+                return Err(OptimizeError::Output("missing loop info".into()));
+            };
+            loops.insert(fields[0]);
+            Ok(())
+        })?;
         let mut plan = Self {
+            available: LookupSet::default(),
             readonly: vec![false; n],
-            total: vec![false; n],
             targets: LookupMap::default(),
-            owners: vec![None; n],
             ordinals: vec![None; n],
             before: LookupMap::default(),
             shared: LookupMap::default(),
@@ -51,8 +83,23 @@ impl Evaluation {
         let mut boundaries = Vec::new();
         let mut pairs = LookupSet::default();
         let mut choices = LookupMap::<TermId, (Vec<TermId>, Vec<TermId>)>::default();
+        let mut sources = Interner::<i64, Value>::new();
         graph.update(|mut sink| {
             Ok((|| -> Result<(), OptimizeError> {
+                for &scope in &scopes {
+                    sink.add("FlowScope", scope_ids[&scope])?;
+                    sink.set(
+                        "EvaluationScopeLoop",
+                        scope_ids[&scope],
+                        i64::from(loops.contains(&scope)),
+                    )?;
+                    if let Some(parent) = parents.get(&scope) {
+                        sink.add("FlowScopeParent", (scope_ids[&scope], scope_ids[parent]))?;
+                    }
+                }
+                for &(context, scope) in &context_scopes {
+                    sink.add("EvaluationContextScope", (context, scope))?;
+                }
                 for term in 0..n {
                     let Term::App(name, fields) = selected.dag.get(term) else {
                         continue;
@@ -81,6 +128,10 @@ impl Evaluation {
                         continue;
                     }
                     let value = selected.values[term];
+                    if let Some(&context) = fields.first().and_then(|f| contexts.get(&selected.values[*f]))
+                    {
+                        sink.add("EvaluationTermContext", (term as i64, context))?;
+                    }
                     let table = if matches!(name.as_str(), "ExprCons" | "ExprNil") {
                         "ExprArgsReadOnly"
                     } else {
@@ -89,7 +140,7 @@ impl Evaluation {
                     plan.readonly[term] = scalars
                         .read(|r| r.lookup(table, value))?
                         .is_some_and(|v| scalars.value_to_base::<bool>(v));
-                    plan.total[term] = scalars.read(|r| r.contains("ExprTotal", value))?;
+                    let total = scalars.read(|r| r.contains("ExprTotal", value))?;
                     let mut deps = operands(name, fields);
                     let node = sink.add("FlowNode", term as i64)?;
                     for &child in &deps {
@@ -103,13 +154,16 @@ impl Evaluation {
                         "ExprParameter" => Some(selected.values[fields[2]]),
                         _ => None,
                     };
-                    if let Some(scope) = owner.and_then(|v| placement.scopes.definition(v)) {
-                        sink.add("FlowScopeRequirement", (node, scope.0 as i64))?;
+                    if let Some(&scope) = owner.and_then(|v| scope_ids.get(&v)) {
+                        sink.add("FlowScopeRequirement", (node, scope))?;
+                        if name == "ExprLeaf" {
+                            sink.add("EvaluationBindingScope", (term as i64, scope))?;
+                        }
                     }
                     if name == "ExprLeaf" {
                         let source = selected.values[fields[2]];
+                        sink.add("EvaluationLeafSource", (term as i64, sources.intern(&source)))?;
                         leaves.insert(term);
-                        plan.owners[term] = facts.lookup("ExprContextOwner", (source,));
                         plan.ordinals[term] =
                             facts.lookup("SourceEvaluationPosition", (source,)).map(|v| facts.integer(v));
                         if let Some(&root) = selected.roots.get(&(selected.values[fields[0]], source)) {
@@ -120,6 +174,9 @@ impl Evaluation {
                     }
                     if name == "ExprChoice" {
                         deps = vec![fields[2]];
+                        for &arm in &fields[3..5] {
+                            sink.add("EvaluationArm", (term as i64, arm as i64))?;
+                        }
                         let arms = choices.entry(fields[2]).or_default();
                         arms.0.push(fields[3]);
                         arms.1.push(fields[4]);
@@ -149,7 +206,7 @@ impl Evaluation {
                     if plan.readonly[term] {
                         sink.add("EvaluationReadOnly", term as i64)?;
                     }
-                    if plan.total[term] {
+                    if total {
                         sink.add("EvaluationTotal", term as i64)?;
                     }
                     let mandatory = deps.len();
@@ -231,6 +288,14 @@ impl Evaluation {
         drop(inputs);
         let import = timing::span("egglog evaluation / import facts");
         graph.update(|mut sink| {
+            for &(_, source, owner, term) in &boundaries {
+                if let Some(&scope) = scope_ids.get(&owner) {
+                    sink.add(
+                        "EvaluationBoundaryScope",
+                        (term as i64, scope, sources.intern(&source)),
+                    )?;
+                }
+            }
             for &(a, b) in &pairs {
                 sink.add("EvaluationPair", (a as i64, b as i64))?;
             }
@@ -250,31 +315,8 @@ impl Evaluation {
         drop(import);
         graph.parse_and_run_program(
             None,
-            "(run-schedule (saturate source-summary) (saturate flow-evaluation))",
+            "(run-schedule (saturate source-summary) (saturate flow-scopes) (saturate flow-evaluation))",
         )?;
-        placement.load_requirements(&graph)?;
-        let mut enclosing = LookupMap::<usize, Vec<usize>>::default();
-        Query(&graph).for_each("EvaluationContains", |row| {
-            enclosing
-                .entry(graph.value_to_base::<i64>(row[0]) as usize)
-                .or_default()
-                .push(graph.value_to_base::<i64>(row[1]) as usize);
-            Ok(())
-        })?;
-        let available = timing::span("egglog evaluation / available facts");
-        graph.update(|mut sink| {
-            for &(_, source, owner, term) in &boundaries {
-                for &leaf in enclosing.get(&term).into_iter().flatten() {
-                    if plan.owners[leaf].is_some_and(|o| placement.available(leaf, o, owner))
-                        && selected.app(leaf).is_ok_and(|(_, f)| selected.values[f[2]] != source)
-                    {
-                        sink.add("EvaluationAvailable", (term as i64, leaf as i64))?;
-                    }
-                }
-            }
-            Ok::<_, egglog_engine::Error>(())
-        })?;
-        drop(available);
         timing::time("egglog evaluation / placement rules", || {
             graph.parse_and_run_program(
                 None,
@@ -282,6 +324,13 @@ impl Evaluation {
             )
         })?;
         let sites_time = timing::span("egglog evaluation / site facts");
+        Query(&graph).for_each("EvaluationCommonAvailable", |row| {
+            plan.available.insert((
+                graph.value_to_base::<i64>(row[0]) as usize,
+                scopes[graph.value_to_base::<i64>(row[1]) as usize],
+            ));
+            Ok(())
+        })?;
         let mut schedules = LookupMap::<usize, Vec<usize>>::default();
         Query(&graph).for_each("EvaluationBefore", |row| {
             let root = graph.value_to_base::<i64>(row[0]) as usize;
@@ -303,97 +352,32 @@ impl Evaluation {
                 Ok(())
             })?;
         }
-        plan.total.fill(false);
-        Query(&graph).for_each("EvaluationHoistable", |row| {
-            plan.total[graph.value_to_base::<i64>(row[0]) as usize] = true;
-            Ok(())
-        })?;
-        let mut queries = LookupSet::default();
-        let mut pending = Vec::new();
+        let mut roots = Vec::new();
         scalars.constructor_enodes("ExprRoot", |row| {
             if let Some(&term) = selected.roots.get(&(row.children[0], row.children[2])) {
-                pending.push((row.children[1], term));
+                if let Some(&scope) = scope_ids.get(&row.children[1]) {
+                    roots.push((scope, term as i64));
+                }
             }
         })?;
-        while let Some((scope, term)) = pending.pop() {
-            if !queries.insert((scope, term)) {
-                continue;
-            }
-            pending.extend(evaluation_operands(&graph, term)?.into_iter().map(|t| (scope, t)));
-            if let Term::App(name, fields) = selected.dag.get(term) {
-                if name == "ExprChoice" {
-                    pending.extend(fields[3..5].iter().map(|t| (scope, *t)));
-                }
-            }
-        }
-        let mut queries: Vec<_> = queries.into_iter().collect();
-        queries.sort();
-        let query_count = queries.len();
-        let mut classes = LookupMap::default();
-        let mut groups = Vec::<Vec<(Value, TermId)>>::new();
-        for (scope, term) in queries {
-            if !plan.total[term] {
-                continue;
-            }
-            let Term::App(_, fields) = selected.dag.get(term) else {
-                continue;
-            };
-            // Equal context, scope, and requirements have the same legal placement sites.
-            let key = (selected.values[fields[0]], scope, placement.required_scopes(term));
-            let group = *classes.entry(key).or_insert_with(|| {
-                groups.push(Vec::new());
-                groups.len() - 1
-            });
-            groups[group].push((scope, term));
-        }
-        let mut sites = Vec::new();
         graph.update(|mut sink| {
-            for (query, members) in groups.iter().enumerate() {
-                let (scope, term) = members[0];
-                let Term::App(_, fields) = selected.dag.get(term) else {
-                    continue;
-                };
-                let context = selected.values[fields[0]];
-                for (site, loops, depth) in placement.sites(context, scope, term) {
-                    let index = sites.len();
-                    sites.push(site);
-                    sink.add(
-                        "EvaluationSite",
-                        (
-                            query as i64,
-                            term as i64,
-                            index as i64,
-                            loops as i64,
-                            depth as i64,
-                        ),
-                    )?;
-                }
+            for root in roots {
+                sink.add("EvaluationRequested", root)?;
             }
             Ok::<_, egglog_engine::Error>(())
         })?;
         drop(sites_time);
-        if std::env::var_os("WYN_EGGLOG_PROFILE").is_some() {
-            eprintln!(
-                "egglog evaluation sites: {query_count} queries, {} classes, {} candidates",
-                groups.len(),
-                sites.len()
-            );
-        }
         timing::time("egglog evaluation / target rules", || {
-            graph.parse_and_run_program(None, "(run-schedule (saturate evaluation-frequency) (saturate evaluation-lifetime) (saturate evaluation-target))")
+            graph.parse_and_run_program(None, "(run-schedule (saturate evaluation-candidates) (saturate evaluation-legality) (saturate evaluation-sites) (saturate evaluation-frequency) (saturate evaluation-lifetime) (saturate evaluation-target))")
         })?;
         let readout = timing::span("egglog evaluation / read targets");
-        Query(&graph).for_function("EvaluationTarget", |row, target| {
-            let query = graph.value_to_base::<i64>(row[0]) as usize;
-            let site = graph.value_to_base::<i64>(target) as usize;
-            for &member in &groups[query] {
-                plan.targets.insert(member, sites[site]);
-            }
+        Query(&graph).for_each("EvaluationPlacement", |row| {
+            let scope = scopes[graph.value_to_base::<i64>(row[0]) as usize];
+            let term = graph.value_to_base::<i64>(row[1]) as usize;
+            let target = scopes[graph.value_to_base::<i64>(row[2]) as usize];
+            plan.targets.insert((scope, term), target);
             Ok(())
         })?;
-        for &(a, b) in &pairs {
-            plan.plan_common(vec![a], vec![b]);
-        }
         drop(readout);
         timing::time("egglog evaluation / schedule anchors", || {
             plan.schedule_anchors(selected, &mut graph)
@@ -532,14 +516,12 @@ impl Evaluation {
         terms.sort_by_key(|(t, _)| (self.ordinals[*t], *t));
         self.common.insert((yes, no), terms);
     }
-    pub fn common(&self, placement: &Placement, scope: Value, arms: [&[TermId]; 2]) -> Vec<TermId> {
+    pub fn common(&self, scope: Value, arms: [&[TermId]; 2]) -> Vec<TermId> {
         self.common
             .get(&(arms[0].to_vec(), arms[1].to_vec()))
             .into_iter()
             .flatten()
-            .filter(|(term, binding)| {
-                !binding || self.owners[*term].is_some_and(|owner| placement.available(*term, owner, scope))
-            })
+            .filter(|(term, binding)| !binding || self.available.contains(&(*term, scope)))
             .map(|(term, _)| *term)
             .collect()
     }

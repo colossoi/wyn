@@ -21,7 +21,7 @@ impl Body<'_, '_, '_> {
     }
 
     pub(super) fn scalar_common(&self, scope: Value, arms: [&[TermId]; 2]) -> Vec<TermId> {
-        self.compiler.evaluations.common(&self.compiler.placements, scope, arms)
+        self.compiler.evaluations.common(scope, arms)
     }
 
     pub(super) fn scalar_roots(

@@ -108,10 +108,9 @@ fn shared_ranks_preserve_request_ordering_and_choice_boundaries() {
     let effectful = dag.app("ExprVector".into(), vec![leaf, leaf, args]);
     let n = dag.size();
     let mut plan = Evaluation {
+        available: LookupSet::default(),
         readonly: vec![true; n],
-        total: vec![false; n],
         targets: LookupMap::default(),
-        owners: vec![None; n],
         ordinals: vec![None; n],
         before: LookupMap::default(),
         shared: LookupMap::default(),
@@ -196,30 +195,81 @@ fn shared_placement_queries_match_individual_legal_site_selection() {
         .unwrap(),
     )
     .unwrap();
-    let mut placement = Placement::new(&program).unwrap();
-    let plan = Evaluation::new(&program, &mut placement).unwrap();
-    let mut classes = LookupSet::default();
+    let plan = Evaluation::new(&program).unwrap();
+    let facts = Query(&program.graph);
+    let selected = &program.stage.selected;
+    let parent = |scope| {
+        (!facts.flag("ExprContextBoundary", scope).unwrap())
+            .then(|| program.identities.scopes.get(&scope).and_then(|s| s.0))
+            .flatten()
+    };
+    let ancestors = |mut scope| {
+        let mut result = vec![scope];
+        while let Some(p) = parent(scope) {
+            result.push(p);
+            scope = p;
+        }
+        result
+    };
+    let mut members = LookupMap::<_, LookupSet<_>>::default();
+    program
+        .stage
+        .scalars
+        .constructor_enodes("ExprContextMember", |row| {
+            members.entry(row.children[0]).or_default().insert(row.children[1]);
+        })
+        .unwrap();
+    let mut loops = LookupSet::default();
+    facts
+        .for_function("SourceLoop", |_, info| {
+            loops.insert(facts.enode("LoopInfo", info)?.unwrap()[0]);
+            Ok(())
+        })
+        .unwrap();
     let mut contexts = LookupSet::default();
     let mut targets = LookupSet::default();
-    let mut repeated = 0;
     for (&(scope, term), &actual) in &plan.targets {
         let (_, fields) = program.stage.selected.app(term).unwrap();
         let context = program.stage.selected.values[fields[0]];
-        let expected = placement
-            .sites(context, scope, term)
-            .into_iter()
-            .min_by_key(|&(_, loops, depth)| (loops, std::cmp::Reverse(depth)))
-            .map(|(site, _, _)| site);
+        // Independently walk the expression operands and source scope chain.
+        let mut pending = vec![term];
+        let mut required = LookupSet::default();
+        while let Some(term) = pending.pop() {
+            let Term::App(name, fields) = selected.dag.get(term) else {
+                continue;
+            };
+            let owner = match name.as_str() {
+                "ExprLeaf" | "ExprExecute" | "ExprInstruction" | "ExprCall" => {
+                    facts.lookup("ExprContextOwner", selected.values[fields[2]]).unwrap()
+                }
+                "ExprParameter" => Some(selected.values[fields[2]]),
+                _ => None,
+            };
+            required.extend(owner);
+            pending.extend(operands(name, fields));
+        }
+        let candidates: Vec<_> =
+            ancestors(scope).into_iter().take_while(|s| members[&context].contains(s)).collect();
+        let expected = candidates
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, site)| required.iter().all(|r| ancestors(*site).contains(r)))
+            .min_by_key(|(distance, site)| {
+                (
+                    ancestors(*site).iter().filter(|s| loops.contains(s)).count(),
+                    *distance,
+                )
+            })
+            .map(|(_, site)| site);
         assert_eq!(Some(actual), expected);
         assert!(
-            plan.total[term],
+            Query(&program.stage.scalars).contains("ExprTotal", selected.values[term]).unwrap(),
             "non-total expressions cannot share a hoisting decision"
         );
         contexts.insert(context);
         targets.insert(actual);
-        repeated += usize::from(!classes.insert((context, scope, placement.required_scopes(term))));
     }
-    assert!(repeated > 0, "exercise expressions sharing a placement class");
     assert!(contexts.len() > 1, "exercise separate entry contexts");
     assert!(targets.len() > 1, "exercise separate lexical placement targets");
 }
