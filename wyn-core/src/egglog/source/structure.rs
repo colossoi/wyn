@@ -12,7 +12,7 @@ impl Import<'_, '_, '_, '_> {
     pub(super) fn entry_binding(&mut self, binding: &EntryParamBinding) -> Result<(), OptimizeError> {
         let value = self.resolve(binding.param_sym)?;
         self.sink.set("SourceStorage", value, true)?;
-        self.summaries.values.entry(value).or_default().device = true;
+        self.sink.set("SourceRequiresDevice", value, true)?;
         match &binding.kind {
             EntryParamBindingKind::Single {
                 binding, elem_bytes, ..

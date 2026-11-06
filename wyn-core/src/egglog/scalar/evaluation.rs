@@ -211,7 +211,9 @@ impl Evaluation {
         graph.update(|mut sink| {
             for &term in &expressions {
                 for &child in &plan.dependencies[term] {
-                    sink.add("FlowNext", (child as i64, term as i64))?;
+                    let parent = sink.add("FlowNode", term as i64)?;
+                    let child = sink.add("FlowNode", child as i64)?;
+                    sink.add("FlowEvaluation", (parent, child))?;
                 }
                 if let Term::App(name, fields) = selected.dag.get(term) {
                     sink.set("ExprScheduleWeight", term as i64, i64::from(name == "ExprChoice"))?;
@@ -259,7 +261,7 @@ impl Evaluation {
         timing::time("egglog evaluation / placement rules", || {
             graph.parse_and_run_program(
                 None,
-                "(run-schedule (saturate flow-live) (saturate evaluation-placement))",
+                "(run-schedule (saturate flow-evaluation) (saturate evaluation-placement))",
             )
         })?;
         let sites_time = timing::span("egglog evaluation / site facts");

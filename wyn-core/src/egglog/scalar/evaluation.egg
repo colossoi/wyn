@@ -21,11 +21,11 @@
 ; Only branch-arm queries need transitive mandatory-demand sets. Keeping their
 ; roots explicit avoids computing the all-pairs closure of the expression DAG.
 (relation EvaluationPair (i64 i64))
-(rule ((EvaluationPair yes no)) ((FlowLive yes yes) (FlowLive no no)) :ruleset flow-live)
+(rule ((EvaluationPair yes no)) ((FlowDemand (FlowNode yes) (FlowNode yes)) (FlowDemand (FlowNode no) (FlowNode no))) :ruleset flow-evaluation)
 (relation EvaluationShared (i64 i64 i64))
 (relation EvaluationSharedBinding (i64 i64 i64))
 (rule ((EvaluationPair yes no) (EvaluationReadOnly yes) (EvaluationReadOnly no)
-       (FlowLive term yes) (FlowLive term no))
+       (FlowDemand (FlowNode yes) (FlowNode term)) (FlowDemand (FlowNode no) (FlowNode term)))
       ((EvaluationShared yes no term)) :ruleset evaluation-placement)
 (rule ((EvaluationPair yes no) (EvaluationReadOnly yes) (EvaluationReadOnly no)
        (EvaluationContains yes leaf) (EvaluationContains no leaf))

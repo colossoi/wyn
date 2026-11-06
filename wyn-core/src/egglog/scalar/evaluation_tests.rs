@@ -50,7 +50,9 @@ fn shared_mandatory_operands_match_reference_closure_and_preserve_readonly_guard
             for (parent, children) in dependencies.iter().enumerate() {
                 for &child in children {
                     sink.add("ReferenceOperand", (parent as i64, child as i64))?;
-                    sink.add("FlowNext", (child as i64, parent as i64))?;
+                    let from = sink.add("FlowNode", parent as i64)?;
+                    let to = sink.add("FlowNode", child as i64)?;
+                    sink.add("FlowEvaluation", (from, to))?;
                 }
                 if parent != 9 {
                     sink.add("EvaluationReadOnly", parent as i64)?;
@@ -65,7 +67,7 @@ fn shared_mandatory_operands_match_reference_closure_and_preserve_readonly_guard
     graph
         .parse_and_run_program(
             None,
-            "(run-schedule (saturate reference-reachability) (saturate flow-live) (saturate evaluation-placement))",
+            "(run-schedule (saturate reference-reachability) (saturate flow-evaluation) (saturate evaluation-placement))",
         )
         .unwrap();
     let rows = |table| {

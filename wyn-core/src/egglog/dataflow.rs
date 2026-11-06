@@ -18,6 +18,8 @@ pub(crate) struct Origin {
 struct Expression {
     value: Value,
     evaluation: Value,
+    // Forwarding may borrow a producer, but must not discard other evaluations.
+    forwarding: Value,
 }
 
 pub(crate) struct Dependencies(LookupSet<Value>);
@@ -49,7 +51,7 @@ impl Dataflow {
         graph
             .parse_and_run_program(
                 None,
-                "(run-schedule (saturate flow-forward) flow-projections (saturate source-summary))",
+                "(run-schedule (saturate flow-forward) flow-projections (saturate source-summary) (saturate flow-evaluation))",
             )
             .expect("valid flow analysis");
         flow.graph = graph;
@@ -81,7 +83,7 @@ impl Dataflow {
             self.bindings.keys().copied().filter(|symbol| selected(*symbol)).collect();
         let mut depends = LookupSet::default();
         Query(&self.graph)
-            .for_each("FlowRead", |row| {
+            .for_each("FlowEvaluationRead", |row| {
                 let symbol = Query(&self.graph).required("FlowInput", (row[1],))?;
                 if selected.contains(&SymbolId(self.graph.value_to_base::<i64>(symbol) as u32)) {
                     depends.insert(row[0]);
@@ -187,9 +189,8 @@ impl Dataflow {
 
     fn forwarding_origin(&self, expr: Expression) -> Option<Origin> {
         let origin = self.origin(expr.value, &[])?;
-        (expr.evaluation == self.bindings.get(&origin.producer)?.evaluation).then_some(origin)
+        (expr.forwarding == self.bindings.get(&origin.producer)?.forwarding).then_some(origin)
     }
-
     fn origin(&self, value: Value, fields: &[usize]) -> Option<Origin> {
         if let Some(&producer) = self.producers.get(&value) {
             return Some(Origin {
@@ -225,15 +226,16 @@ impl Dataflow {
         let expr = Expression {
             value,
             evaluation: value,
+            forwarding: value,
         };
         self.bindings.insert(symbol, expr);
         expr
     }
 
-    fn computed(&mut self, operands: &[Value], sink: &mut FullState<'_, '_>) -> Value {
+    fn computed(&mut self, table: &str, operands: &[Value], sink: &mut FullState<'_, '_>) -> Value {
         let value = self.fresh(sink);
         for &operand in operands {
-            fact(sink, "FlowOperand", (value, operand));
+            fact(sink, table, (value, operand));
         }
         value
     }
@@ -243,17 +245,23 @@ impl Dataflow {
         term: &Term<C, S>,
         sink: &mut FullState<'_, '_>,
     ) -> Expression {
+        let mut body = None;
         match &term.kind {
             TermKind::Let { name, .. } => {
                 self.locals.insert(*name);
             }
-            TermKind::Lambda(lambda) => self.locals.extend(lambda.params.iter().map(|(name, _)| *name)),
+            TermKind::Lambda(lambda) => {
+                self.locals.extend(lambda.params.iter().map(|(name, _)| *name));
+                body = Some(lambda.body.as_ref());
+            }
             TermKind::Loop {
                 loop_var,
                 init_bindings,
                 kind,
+                body: repeated,
                 ..
             } => {
+                body = Some(repeated.as_ref());
                 self.locals.insert(*loop_var);
                 self.locals.extend(init_bindings.iter().map(|(name, _, _)| *name));
                 if let LoopKind::For { var, .. } | LoopKind::ForRange { var, .. } = kind {
@@ -261,7 +269,7 @@ impl Dataflow {
                 }
             }
             TermKind::Soac(soac) => {
-                let body = match soac {
+                let callback = match soac {
                     SoacOp::Map { lam, .. }
                     | SoacOp::Scatter { lam, .. }
                     | SoacOp::BucketScatter { lam, .. } => lam,
@@ -270,7 +278,8 @@ impl Dataflow {
                     | SoacOp::ReduceByIndex { op, .. } => op,
                     SoacOp::Filter { pred, .. } => pred,
                 };
-                self.locals.extend(body.lam.params.iter().map(|(name, _)| *name));
+                self.locals.extend(callback.lam.params.iter().map(|(name, _)| *name));
+                body = Some(callback.lam.body.as_ref());
             }
             _ => {}
         }
@@ -279,14 +288,22 @@ impl Dataflow {
             TermKind::Var(VarRef::Symbol(symbol))
             | TermKind::ArrayExpr(ArrayExpr::Var(VarRef::Symbol(symbol), _)) => {
                 self.references.entry(*symbol).or_insert_with(|| (term.id, term.ty.clone(), term.span));
-                self.symbol(*symbol, sink)
+                let input = self.symbol(*symbol, sink);
+                let evaluation = self.fresh(sink);
+                fact(sink, "FlowReference", (evaluation, input.evaluation));
+
+                Expression {
+                    value: input.value,
+                    evaluation,
+                    forwarding: input.forwarding,
+                }
             }
             TermKind::Coerce { inner, .. } => self.import(inner, sink),
             TermKind::App { .. } if update.is_some() => {
                 let (record, index, replacement) = update.unwrap();
                 let record = self.import(record, sink);
                 let replacement = self.import(replacement, sink);
-                let value = self.computed(&[record.value, replacement.value], sink);
+                let value = self.computed("FlowOperand", &[record.value, replacement.value], sink);
                 fact(
                     sink,
                     "SourceFieldUpdate",
@@ -303,21 +320,26 @@ impl Dataflow {
                     Expression {
                         value,
                         evaluation: rhs.evaluation,
+                        forwarding: rhs.forwarding,
                     },
                 );
                 let body = self.import(body, sink);
-                let evaluation = self.computed(&[rhs.evaluation, body.evaluation], sink);
+                let evaluation = self.computed("FlowEvaluation", &[rhs.evaluation, body.evaluation], sink);
                 Expression {
                     value: body.value,
                     evaluation,
+                    forwarding: evaluation,
                 }
             }
             TermKind::Tuple(fields)
             | TermKind::VecLit(fields)
             | TermKind::ArrayExpr(ArrayExpr::Literal(fields)) => {
                 let fields: Vec<_> = fields.iter().map(|field| self.import(field, sink)).collect();
-                let value =
-                    self.computed(&fields.iter().map(|field| field.value).collect::<Vec<_>>(), sink);
+                let value = self.computed(
+                    "FlowOperand",
+                    &fields.iter().map(|field| field.value).collect::<Vec<_>>(),
+                    sink,
+                );
                 for (index, field) in fields.iter().enumerate() {
                     fact(sink, "SourceField", (value, index as i64, field.value));
                 }
@@ -330,6 +352,7 @@ impl Dataflow {
                 Expression {
                     value,
                     evaluation: input.evaluation,
+                    forwarding: input.forwarding,
                 }
             }
             TermKind::If {
@@ -340,25 +363,41 @@ impl Dataflow {
                 let condition = self.import(cond, sink);
                 let yes = self.import(then_branch, sink);
                 let no = self.import(else_branch, sink);
-                let value = self.computed(&[condition.value, yes.value, no.value], sink);
+                let value = self.computed("FlowOperand", &[condition.value, yes.value, no.value], sink);
                 fact(sink, "FlowChoice", (value, yes.value, no.value));
-                self.evaluated(value, &[condition, yes, no], sink)
+                let expr = self.evaluated(value, &[condition], sink);
+                fact(sink, "FlowCall", (expr.evaluation, yes.evaluation));
+                fact(sink, "FlowCall", (expr.evaluation, no.evaluation));
+                expr
             }
             _ => {
-                let mut inputs = Vec::new();
-                term.for_each_child(&mut |child| inputs.push(self.import(child, sink).evaluation));
+                let value = self.fresh(sink);
+                term.for_each_child(&mut |child| {
+                    let edge = if body.is_some_and(|body| std::ptr::eq(child, body)) {
+                        if matches!(term.kind, TermKind::Lambda(_)) {
+                            "FlowReference"
+                        } else {
+                            "FlowCall"
+                        }
+                    } else {
+                        "FlowEvaluation"
+                    };
+                    let child = self.import(child, sink).evaluation;
+                    fact(sink, edge, (value, child));
+                });
                 if let TermKind::Soac(
                     SoacOp::Scatter { dest, .. }
                     | SoacOp::BucketScatter { dest, .. }
                     | SoacOp::ReduceByIndex { dest, .. },
                 ) = &term.kind
                 {
-                    inputs.push(self.symbol(dest.id, sink).evaluation);
+                    let destination = self.symbol(dest.id, sink).evaluation;
+                    fact(sink, "FlowReference", (value, destination));
                 }
-                let value = self.computed(&inputs, sink);
                 Expression {
                     value,
                     evaluation: value,
+                    forwarding: value,
                 }
             }
         };
@@ -374,15 +413,16 @@ impl Dataflow {
         operands: &[Expression],
         sink: &mut FullState<'_, '_>,
     ) -> Expression {
-        let evaluation = if operands.iter().all(|expr| expr.value == expr.evaluation) {
-            value
-        } else {
-            self.computed(
-                &operands.iter().map(|expr| expr.evaluation).collect::<Vec<_>>(),
-                sink,
-            )
-        };
-        Expression { value, evaluation }
+        let evaluation = self.computed(
+            "FlowEvaluation",
+            &operands.iter().map(|expr| expr.evaluation).collect::<Vec<_>>(),
+            sink,
+        );
+        Expression {
+            value,
+            evaluation,
+            forwarding: evaluation,
+        }
     }
 }
 

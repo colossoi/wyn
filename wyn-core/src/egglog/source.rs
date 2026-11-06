@@ -22,12 +22,10 @@ mod facts;
 mod interface;
 mod loops;
 mod structure;
-mod summary;
 #[cfg(test)]
 #[path = "source_tests.rs"]
 mod tests;
 use super::bindings::Bindings;
-use summary::{Summaries, Summary};
 
 pub(super) type Term = tlc::Term<ExplicitClosurePayload, ExplicitCapturesPayload>;
 type OperatorBody = SoacBody<ExplicitClosurePayload, ExplicitCapturesPayload>;
@@ -55,7 +53,11 @@ pub(super) fn import(source: &OwnershipApplied) -> Result<(EGraph, Identities<'_
             arrays: IdSource::new(),
             imported_types: LookupMap::default(),
             source_ordinals: LookupMap::default(),
-            summaries: Summaries::default(),
+            work: LookupMap::default(),
+            operations_by_value: LookupMap::default(),
+            operation_regions: LookupSet::default(),
+            lengths: LookupMap::default(),
+            owners: LookupMap::default(),
             ownership: &source.global_context.ownership,
         };
         // Native writes report engine errors; source validation also has its
@@ -103,7 +105,8 @@ struct Scope {
     key: Value,
     position: i64,
     previous_operation: Option<Value>,
-    summary: Summary,
+    work: i64,
+    evaluation: Option<Value>,
 }
 
 struct Import<'graph, 'db, 'ids, 'source> {
@@ -118,7 +121,11 @@ struct Import<'graph, 'db, 'ids, 'source> {
     arrays: IdSource<i64>,
     imported_types: LookupMap<i64, Value>,
     source_ordinals: LookupMap<Value, i64>,
-    summaries: Summaries,
+    work: LookupMap<Value, i64>,
+    operations_by_value: LookupMap<Value, Value>,
+    operation_regions: LookupSet<Value>,
+    lengths: LookupMap<Value, Value>,
+    owners: LookupMap<Value, Value>,
     ownership: &'source tlc::ownership::OwnershipFacts,
 }
 
@@ -234,11 +241,14 @@ impl<'source> Import<'_, '_, '_, 'source> {
         } else {
             self.sink.add("SourceRootRegion", key)?;
         }
+        let execution = self.sink.add("FlowRegion", key)?;
+        self.flags(execution, false, true, true, true, 0)?;
         Ok(Scope {
             key,
             position: 0,
             previous_operation: None,
-            summary: Summary::default(),
+            work: 0,
+            evaluation: None,
         })
     }
 
@@ -252,9 +262,9 @@ impl<'source> Import<'_, '_, '_, 'source> {
 
     fn bind(&mut self, symbol: SymbolId, value: Value, scope: &Scope) -> Result<(), OptimizeError> {
         self.bindings.insert(symbol, value);
-        self.summaries.owners.entry(value).or_insert(scope.key);
+        self.owners.entry(value).or_insert(scope.key);
         if self.ownership.reusable.contains(&symbol) {
-            let region = self.summaries.owners[&value];
+            let region = self.owners[&value];
             self.sink.add("SourceReusePermission", (value, region))?;
         }
         Ok(())
@@ -293,7 +303,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
     fn finish_body(&mut self, body: &'source Term, scope: &mut Scope) -> Result<Value, OptimizeError> {
         let (result, _) = self.visit(body, scope)?;
         self.sink.set("SourceResult", scope.key, result)?;
-        self.finish_region_summary(scope)?;
+        self.sink.set("SourceRegionWork", scope.key, scope.work)?;
         Ok(result)
     }
 
@@ -317,9 +327,13 @@ impl<'source> Import<'_, '_, '_, 'source> {
         owner: Value,
         scope: &mut Scope,
     ) -> Result<Value, OptimizeError> {
-        let (value, evaluation) = self.visit(term, scope)?;
+        let parent = scope.evaluation.replace(owner);
+        let result = self.visit(term, scope);
+        scope.evaluation = parent;
+        let (value, work) = result?;
         self.sink.add("SourceDirectUse", (owner, value))?;
-        self.summaries.values.entry(owner).or_default().evaluate(&evaluation);
+        let total = self.work.entry(owner).or_default();
+        *total = total.saturating_add(work);
         Ok(value)
     }
 
@@ -328,15 +342,15 @@ impl<'source> Import<'_, '_, '_, 'source> {
         let info = self.sink.add("OperationInfo", (scope.key, kind))?;
         self.sink.set("SourceOperation", operation, info)?;
         self.sink.set("SourceOperationValue", operation, value)?;
-        self.summaries.operations.insert(value, operation);
-        self.summaries.regions_with_operations.insert(scope.key);
+        self.operations_by_value.insert(value, operation);
+        self.operation_regions.insert(scope.key);
         if matches!(kind, "control" | "call" | "index" | "global") {
             self.sink.set("SourceInputCount", operation, 0i64)?;
         }
         Ok(operation)
     }
 
-    fn visit(&mut self, term: &'source Term, scope: &mut Scope) -> Result<(Value, Summary), OptimizeError> {
+    fn visit(&mut self, term: &'source Term, scope: &mut Scope) -> Result<(Value, i64), OptimizeError> {
         let result = self.visit_value(term, scope)?;
         self.identities.occurrences.insert((scope.key, term.id), result.0);
         Ok(result)
@@ -346,45 +360,42 @@ impl<'source> Import<'_, '_, '_, 'source> {
         &mut self,
         term: &'source Term,
         scope: &mut Scope,
-    ) -> Result<(Value, Summary), OptimizeError> {
+    ) -> Result<(Value, i64), OptimizeError> {
         // Lexical names and let syntax do not introduce semantic values.
         match &term.kind {
             TermKind::Var(VarRef::Symbol(symbol)) => {
                 let target = self.resolve(*symbol)?;
                 self.sink.add("SourceRegionUse", (scope.key, target))?;
                 self.free_reference(target, scope.key)?;
-                let mut evaluation = Summary::default();
-                if let Some(summary) = self.summaries.values.get(&target) {
-                    evaluation.use_value(summary);
-                    scope.summary.use_value(summary);
+                if let Some(owner) = scope.evaluation {
+                    self.sink.add("FlowReference", (owner, target))?;
                 }
-                return Ok((target, evaluation));
+                return Ok((target, 0));
             }
             TermKind::Let { name, rhs, body, .. } => {
-                let (rhs, mut evaluation) = self.visit(rhs, scope)?;
+                let (rhs, work) = self.visit(rhs, scope)?;
                 let checkpoint = self.bindings.checkpoint();
                 self.bind(*name, rhs, scope)?;
                 let result = self.visit(body, scope);
                 self.bindings.restore(checkpoint);
                 let (value, body) = result?;
-                evaluation.evaluate(&body);
-                return Ok((value, evaluation));
+                return Ok((value, work.saturating_add(body)));
             }
             _ => {}
         }
         let value = self.expression(term, scope)?;
-        let Some(evaluation) = self.summaries.values.get(&value) else {
-            return Err(OptimizeError::Output("missing source evaluation summary".into()));
-        };
-        Ok((value, evaluation.clone()))
+        Ok((value, self.work[&value]))
     }
 
     fn expression(&mut self, term: &'source Term, scope: &mut Scope) -> Result<Value, OptimizeError> {
         let value = self.source_value(term, scope.key)?;
         self.properties(term, value)?;
-        if let Some(local) = self.summaries.values.get(&value) {
-            scope.summary.evaluate(local);
-        }
+        scope.work = scope.work.saturating_add(self.work[&value]);
+        let owner = match scope.evaluation {
+            Some(owner) => owner,
+            None => self.sink.add("FlowRegion", scope.key)?,
+        };
+        self.sink.add("FlowEvaluation", (owner, value))?;
         match &term.kind {
             TermKind::Var(VarRef::Symbol(_)) | TermKind::Let { .. } => {
                 return Err(OptimizeError::Output(
@@ -427,8 +438,8 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 let no = self.nested(else_branch, scope, value)?;
                 let info = self.sink.add("BranchInfo", (condition, yes, no))?;
                 self.sink.set("SourceBranch", value, info)?;
-                if self.summaries.regions_with_operations.contains(&yes)
-                    || self.summaries.regions_with_operations.contains(&no)
+                if self.operation_regions.contains(&yes)
+                    || self.operation_regions.contains(&no)
                     || (term.ty.is_array()
                         && !matches!(
                             term.ty.array_size(),
@@ -520,7 +531,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 }
             }
         }
-        self.finish_summary(value, scope)?;
+        self.finish_value(value, scope)?;
         self.sink.set("SourceEvaluationPosition", value, scope.position)?;
         scope.position += 1;
         Ok(value)
@@ -592,7 +603,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 matches!(kind, LoopKind::ForRange { .. }) && variable_ty.is_array(),
             )?;
         }
-        self.finish_region_summary(&header)?;
+        self.sink.set("SourceRegionWork", header.key, header.work)?;
         self.bindings.restore(checkpoint);
         Ok(())
     }
@@ -634,7 +645,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             let result = self.sink.add("SourceInvocation", (scope.key, function, arguments))?;
             self.value_type(result, ret_ty)?;
             self.sink.set("SourceResult", scope.key, result)?;
-            self.finish_region_summary(&scope)?;
+            self.sink.set("SourceRegionWork", scope.key, scope.work)?;
         } else {
             self.finish_body(body, &mut scope)?;
         }
@@ -654,7 +665,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             let value = self.sink.add("SourceArrayAtom", (owner, self.arrays.next_id()))?;
             self.value_type(value, &array.array_type())?;
             self.flags(value, false, true, true, true, 0)?;
-            self.summaries.owners.insert(value, scope.key);
+            self.owners.insert(value, scope.key);
             value
         };
         self.identities.arrays.entry(value).or_insert((array, scope.key));
@@ -693,7 +704,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         self.sink.set("SourceExtent", value, extent)?;
         self.free_reference(value, scope.key)?;
         self.sink.add("SourceRegionUse", (scope.key, value))?;
-        self.use_summary(owner, value, !matches!(array, ArrayExpr::Var(_, _)));
+        self.use_value(owner, value, !matches!(array, ArrayExpr::Var(_, _)))?;
         Ok(value)
     }
 
@@ -752,7 +763,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 let destination = self.resolve(dest.id)?;
                 self.sink.add("SourceDirectUse", (value, destination))?;
                 self.sink.set("SourceDestination", operation, destination)?;
-                self.use_summary(value, destination, false);
+                self.use_value(value, destination, false)?;
                 for (index, input) in inputs.iter().enumerate() {
                     self.input(input, operation, index as i64, value, scope)?;
                 }
@@ -767,7 +778,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 let destination = self.resolve(dest.id)?;
                 self.sink.add("SourceDirectUse", (value, destination))?;
                 self.sink.set("SourceDestination", operation, destination)?;
-                self.use_summary(value, destination, false);
+                self.use_value(value, destination, false)?;
                 let neutral = self.operand(ne, value, scope)?;
                 self.sink.set("SourceNeutral", operation, neutral)?;
                 self.input(indices, operation, 0, value, scope)?;

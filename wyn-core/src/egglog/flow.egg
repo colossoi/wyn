@@ -5,7 +5,9 @@
 (datatype SourceValue
   (SourceTerm RegionKey i64)
   (SourceFormal RegionKey i64)
-  (SourceGlobal i64))
+  (SourceGlobal i64)
+  (FlowNode i64)
+  (FlowRegion RegionKey))
 ; Stable import order is only used for deterministic choices, never as a value wrapper.
 (function SourceOrdinal (SourceValue) i64 :no-merge)
 
@@ -78,4 +80,23 @@
 
 ; Executing an occurrence is distinct from referring to its resulting value.
 (relation FlowEvaluation (SourceValue SourceValue))
-(relation FlowRegionEvaluation (RegionKey SourceValue))
+(relation FlowReference (SourceValue SourceValue))
+; Entering a callee, branch, or repeated body crosses an execution scope.
+(relation FlowCall (SourceValue SourceValue))
+
+; Dependency queries distinguish evaluating an occurrence from borrowing its result.
+(ruleset flow-evaluation)
+(relation FlowEvaluationRead (SourceValue SourceValue))
+(rule ((FlowRead value input)) ((FlowEvaluationRead value input)) :ruleset flow-evaluation)
+(rule ((FlowEvaluation value child) (FlowEvaluationRead child input)) ((FlowEvaluationRead value input)) :ruleset flow-evaluation)
+(rule ((FlowReference value child) (FlowEvaluationRead child input)) ((FlowEvaluationRead value input)) :ruleset flow-evaluation)
+(rule ((FlowCall value child) (FlowEvaluationRead child input)) ((FlowEvaluationRead value input)) :ruleset flow-evaluation)
+(rule ((FlowOperand value child) (FlowEvaluationRead child input)) ((FlowEvaluationRead value input)) :ruleset flow-evaluation)
+(rule ((FlowFrom value child) (FlowEvaluationRead child input)) ((FlowEvaluationRead value input)) :ruleset flow-evaluation)
+
+; Demand follows required evaluation edges, never borrowed producer references.
+(relation FlowDemand (SourceValue SourceValue))
+(rule ((FlowDemand root parent) (FlowEvaluation parent child)) ((FlowDemand root child)) :ruleset flow-evaluation)
+(relation FlowEffect (SourceValue SourceValue))
+(rule ((FlowEvaluation parent child)) ((FlowEffect parent child)) :ruleset source-summary)
+(rule ((FlowCall parent child)) ((FlowEffect parent child)) :ruleset source-summary)

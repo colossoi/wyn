@@ -1,6 +1,36 @@
 use super::{Dataflow, Value};
+use crate::egglog::query::Query;
 use crate::tlc::{self, DefMeta};
 use crate::{ast_type_holes, compile_thru_frontend, SymbolId, SymbolTable};
+use egglog_engine::Write;
+
+#[test]
+fn demand_stops_at_references_and_branch_boundaries_but_dependencies_cross_them() {
+    let (mut values, _, parameters, symbols) = graph(
+        "entry main(x: i32, choose: bool) i32 =
+           let produced = x + 1 in
+           let selected = if choose then produced else x in selected",
+    );
+    let produced = values.bindings[&binding(&values, &symbols, "produced")].evaluation;
+    let selected = values.bindings[&binding(&values, &symbols, "selected")].evaluation;
+    let borrowed = Query(&values.graph).row("FlowReference", |row| row[1] == produced).unwrap().unwrap()[0];
+    values
+        .graph
+        .update(|mut sink| {
+            sink.add("FlowDemand", (borrowed, borrowed))?;
+            sink.add("FlowDemand", (selected, selected))?;
+            Ok(())
+        })
+        .unwrap();
+    values.graph.parse_and_run_program(None, "(run-schedule (saturate flow-evaluation))").unwrap();
+    let query = Query(&values.graph);
+    assert!(!query.contains("FlowDemand", (borrowed, produced)).unwrap());
+    assert!(!query.contains("FlowDemand", (selected, borrowed)).unwrap());
+    assert!(!query.contains("FlowDemand", (selected, produced)).unwrap());
+    let depends = values.dependencies(|symbol| symbol == parameters[0]);
+    assert!(depends.0.contains(&borrowed));
+    assert!(depends.0.contains(&selected));
+}
 
 fn graph(source: &str) -> (Dataflow, Value, Vec<SymbolId>, SymbolTable) {
     let program = compile_thru_frontend(source).expect("typed source");

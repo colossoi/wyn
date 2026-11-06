@@ -50,7 +50,7 @@ impl Import<'_, '_, '_, '_> {
                     self.flags(child, false, true, true, true, 0)?;
                     let projection = self.sink.add("ProjectionInfo", (parent, index as i64))?;
                     self.sink.set("SourceProjection", child, projection)?;
-                    self.use_summary(child, parent, false);
+                    self.use_value(child, parent, false)?;
                     if parent == state || parent == output {
                         self.sink.add("SourceLoopField", (owner, parent, index as i64, child))?;
                     }

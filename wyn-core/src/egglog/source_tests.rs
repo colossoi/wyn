@@ -3,6 +3,93 @@ use crate::egglog::query::Query;
 use crate::tlc::{self, DefMeta, TermKind};
 use crate::{compile_thru_tlc, types};
 use egglog_engine::sort::S;
+use egglog_engine::Write;
+
+#[test]
+fn evaluation_edges_stay_direct_and_borrowed_values_do_not_repeat_effects() {
+    for depth in [16, 64, 256] {
+        let mut program = compile_thru_tlc("entry main(x: i32) i32 = x + 1").unwrap();
+        let ids: Vec<_> = (0..depth).map(|_| program.next_term_id()).collect();
+        let entry = program.defs.iter_mut().find(|def| matches!(def.meta, DefMeta::EntryPoint(_))).unwrap();
+        let TermKind::Lambda(lambda) = &mut entry.body.kind else {
+            panic!("entry lambda")
+        };
+        let scalar_id = lambda.body.id;
+        for &id in &ids {
+            *lambda.body = tlc::Term {
+                id,
+                ty: lambda.body.ty.clone(),
+                span: lambda.body.span,
+                kind: TermKind::Coerce {
+                    inner: lambda.body.clone(),
+                    target_ty: lambda.body.ty.clone(),
+                },
+            };
+        }
+        let (mut graph, identities) = import(&program).unwrap();
+        let query = Query(&graph);
+        let region = query.row("SourceOriginalEntry", |_| true).unwrap().unwrap()[1];
+        let scalar = identities.occurrences[&(region, scalar_id)];
+        let root = identities.occurrences[&(region, ids[depth - 1])];
+        let parameter = query.required("SourceParameter", (region, 0i64)).unwrap();
+        let mut edges = 0;
+        query
+            .for_each("FlowEvaluation", |_| {
+                edges += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert!(edges <= depth + 8, "{depth} wrappers produced {edges} edges");
+        let mut child = scalar;
+        for id in ids {
+            let owner = identities.occurrences[&(region, id)];
+            let mut children = Vec::new();
+            query
+                .for_each("FlowEvaluation", |row| {
+                    if row[0] == owner {
+                        children.push(row[1]);
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                children,
+                [child],
+                "each wrapper evaluates only its immediate child"
+            );
+            child = owner;
+        }
+        graph
+            .update(|mut sink| {
+                sink.add("FlowDemand", (root, root))?;
+                sink.set("SourceReadOnly", parameter, false)?;
+                Ok(())
+            })
+            .unwrap();
+        graph
+            .parse_and_run_program(None, "(run-schedule (saturate source-summary flow-evaluation))")
+            .unwrap();
+        let query = Query(&graph);
+        assert!(query.contains("FlowDemand", (root, scalar)).unwrap());
+        assert!(!query.contains("FlowDemand", (root, parameter)).unwrap());
+        assert!(
+            query.flag("SourceReadOnly", (root,)).unwrap(),
+            "borrowing must not execute effects"
+        );
+        graph
+            .update(|mut sink| {
+                sink.set("SourceReadOnly", scalar, false)?;
+                Ok(())
+            })
+            .unwrap();
+        graph.parse_and_run_program(None, "(run-schedule (saturate source-summary))").unwrap();
+        assert!(
+            !Query(&graph).flag("SourceReadOnly", (root,)).unwrap(),
+            "evaluating must propagate effects"
+        );
+        assert!(!Query(&graph).flag("SourceRegionReadOnly", (region,)).unwrap());
+    }
+}
 
 #[test]
 fn indexed_write_effects_distinguish_owned_arrays_from_views() {

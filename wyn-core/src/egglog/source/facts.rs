@@ -1,5 +1,5 @@
 //! Operation-local facts emitted during the authoritative TLC walk.
-use super::{Import, Summary, Term};
+use super::{Import, Scope, Term};
 use crate::builtins::lowering::PrimOp;
 use crate::builtins::{by_id, catalog, BuiltinLowering, Purity};
 use crate::egglog::OptimizeError;
@@ -13,6 +13,46 @@ use egglog_engine::sort::VecContainer;
 use egglog_engine::{Core, RawValues, Value, Write};
 
 impl<'source> Import<'_, '_, '_, 'source> {
+    pub(super) fn use_value(
+        &mut self,
+        owner: Value,
+        value: Value,
+        evaluate: bool,
+    ) -> Result<(), OptimizeError> {
+        self.sink.add(
+            if evaluate { "FlowEvaluation" } else { "FlowReference" },
+            (owner, value),
+        )?;
+        if evaluate {
+            let work = self.work.get(&value).copied().unwrap_or_default();
+            let total = self.work.entry(owner).or_default();
+            *total = total.saturating_add(work);
+        }
+        Ok(())
+    }
+
+    pub(super) fn free_reference(&mut self, target: Value, scope: Value) -> Result<(), OptimizeError> {
+        let unowned = self.sink.add("RegionId", -1i64)?;
+        let owner = self.owners.get(&target).copied().unwrap_or(unowned);
+        self.sink.add("SourceLexicalUse", (scope, target, owner))?;
+        Ok(())
+    }
+
+    pub(super) fn finish_value(&mut self, value: Value, scope: &mut Scope) -> Result<(), OptimizeError> {
+        self.owners.insert(value, scope.key);
+        if let Some(&operation) = self.operations_by_value.get(&value) {
+            let role = if self.lengths.contains_key(&value) { "LengthUse" } else { "Other" };
+            let role = self.sink.add(role, RawValues(vec![]))?;
+            self.sink.set("SourceOperandRole", operation, role)?;
+            self.sink.set("SourceWork", value, self.work[&value])?;
+            self.sink.add("ImportedPosition", (operation, scope.position))?;
+            if let Some(previous) = scope.previous_operation.replace(operation) {
+                self.sink.add("SourceNextOperation", (previous, operation))?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn register_source(&mut self, value: Value) -> Result<(), OptimizeError> {
         if !self.source_ordinals.contains_key(&value) {
             let ordinal = self.source_ordinals.len() as i64;
@@ -221,17 +261,15 @@ impl<'source> Import<'_, '_, '_, 'source> {
         duplicate: bool,
         work: i64,
     ) -> Result<(), OptimizeError> {
-        self.summaries.values.insert(
-            value,
-            Summary {
-                device,
-                pure,
-                readonly,
-                duplicate,
-                work,
-                evaluations: [value].into_iter().collect(),
-            },
-        );
+        for (name, flag) in [
+            ("SourceRequiresDevice", device),
+            ("SourceSpeculatable", pure),
+            ("SourceReadOnly", readonly),
+            ("SourceDuplicable", duplicate),
+        ] {
+            self.sink.set(name, value, flag)?;
+        }
+        self.work.insert(value, work);
         Ok(())
     }
 
@@ -252,7 +290,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             }
             (TermKind::Var(VarRef::Builtin { id, .. }), &[array]) if *id == catalog().known().length => {
                 self.sink.set("SourceLength", value, array)?;
-                self.summaries.lengths.insert(value, array);
+                self.lengths.insert(value, array);
             }
             (TermKind::Var(VarRef::Builtin { id, .. }), &[array, start, end])
                 if *id == catalog().known().slice =>
@@ -269,7 +307,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             (TermKind::Var(VarRef::Builtin { id, .. }), &[array])
                 if *id == catalog().known().scratch_annotation =>
             {
-                self.summaries.lengths.insert(value, array);
+                self.lengths.insert(value, array);
                 let extent = self.sink.add("Length", array)?;
                 self.sink.add("SourceScratch", (value, extent))?;
             }
@@ -304,7 +342,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 for (index, field) in fields.iter().enumerate() {
                     let component = self.sink.add("SourceProjected", (value, index as i64))?;
                     self.value_type(component, field)?;
-                    self.use_summary(component, value, false);
+                    self.use_value(component, value, false)?;
                     self.sink.add("SourceSelect", (component, value, index as i64))?;
                     self.output_leaf(entry, index, component, field, outputs.get(index))?;
                 }
