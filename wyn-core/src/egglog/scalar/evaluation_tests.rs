@@ -19,10 +19,14 @@ fn shared_mandatory_operands_match_reference_closure_and_preserve_readonly_guard
         vec![],
         vec![10],
     ];
-    let pairs = [(1, 2), (3, 7), (4, 5), (8, 9), (9, 3), (10, 11)].into_iter().collect();
-    let common = shared_mandatory_operands(&dependencies, &pairs);
+    let pairs: LookupSet<_> = [(1, 2), (3, 7), (4, 5), (8, 9), (9, 3), (10, 11)].into_iter().collect();
     let mut graph = EGraph::default();
-    graph.parse_and_run_program(None, include_str!("evaluation.egg")).unwrap();
+    graph
+        .parse_and_run_program(
+            None,
+            concat!(include_str!("../flow.egg"), "\n", include_str!("evaluation.egg")),
+        )
+        .unwrap();
     graph
         .parse_and_run_program(
             None,
@@ -46,6 +50,7 @@ fn shared_mandatory_operands_match_reference_closure_and_preserve_readonly_guard
             for (parent, children) in dependencies.iter().enumerate() {
                 for &child in children {
                     sink.add("ReferenceOperand", (parent as i64, child as i64))?;
+                    sink.add("FlowNext", (child as i64, parent as i64))?;
                 }
                 if parent != 9 {
                     sink.add("EvaluationReadOnly", parent as i64)?;
@@ -54,16 +59,13 @@ fn shared_mandatory_operands_match_reference_closure_and_preserve_readonly_guard
             for &(yes, no) in &pairs {
                 sink.add("EvaluationPair", (yes as i64, no as i64))?;
             }
-            for &(yes, no, term) in &common {
-                sink.add("EvaluationCommonOperand", (yes as i64, no as i64, term as i64))?;
-            }
             Ok(())
         })
         .unwrap();
     graph
         .parse_and_run_program(
             None,
-            "(run-schedule (saturate reference-reachability) (saturate evaluation-placement))",
+            "(run-schedule (saturate reference-reachability) (saturate flow-live) (saturate evaluation-placement))",
         )
         .unwrap();
     let rows = |table| {
@@ -117,7 +119,12 @@ fn shared_ranks_preserve_request_ordering_and_choice_boundaries() {
     };
     plan.readonly[effectful] = false;
     let mut graph = EGraph::default();
-    graph.parse_and_run_program(None, include_str!("evaluation.egg")).unwrap();
+    graph
+        .parse_and_run_program(
+            None,
+            concat!(include_str!("../flow.egg"), "\n", include_str!("evaluation.egg")),
+        )
+        .unwrap();
     let keys = graph
         .update(|mut sink| {
             for term in 0..n {

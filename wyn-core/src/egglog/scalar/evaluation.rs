@@ -200,23 +200,19 @@ impl Evaluation {
             .collect();
         drop(contained);
         drop(containment);
-        let common_operands = timing::time("egglog evaluation / branch reachability", || {
-            shared_mandatory_operands(&plan.dependencies, &pairs)
-        });
-        if std::env::var_os("WYN_EGGLOG_PROFILE").is_some() {
-            eprintln!(
-                "egglog evaluation reachability: {} contained bindings, {} common operands",
-                enclosing.values().map(Vec::len).sum::<usize>(),
-                common_operands.len()
-            );
-        }
         let schema = timing::span("egglog evaluation / schema");
         let mut graph = EGraph::default();
-        graph.parse_and_run_program(None, include_str!("evaluation.egg"))?;
+        graph.parse_and_run_program(
+            None,
+            concat!(include_str!("../flow.egg"), "\n", include_str!("evaluation.egg")),
+        )?;
         drop(schema);
         let import = timing::span("egglog evaluation / import facts");
         graph.update(|mut sink| {
             for &term in &expressions {
+                for &child in &plan.dependencies[term] {
+                    sink.add("FlowNext", (child as i64, term as i64))?;
+                }
                 if let Term::App(name, fields) = selected.dag.get(term) {
                     sink.set("ExprScheduleWeight", term as i64, i64::from(name == "ExprChoice"))?;
                     if name != "ExprLeaf" {
@@ -234,9 +230,6 @@ impl Evaluation {
                 if plan.total[term] {
                     sink.add("EvaluationTotal", (term as i64,))?;
                 }
-            }
-            for &(yes, no, term) in &common_operands {
-                sink.add("EvaluationCommonOperand", (yes as i64, no as i64, term as i64))?;
             }
             for &(a, b) in &pairs {
                 sink.add("EvaluationPair", (a as i64, b as i64))?;
@@ -264,7 +257,10 @@ impl Evaluation {
         })?;
         drop(available);
         timing::time("egglog evaluation / placement rules", || {
-            graph.parse_and_run_program(None, "(run-schedule (saturate evaluation-placement))")
+            graph.parse_and_run_program(
+                None,
+                "(run-schedule (saturate flow-live) (saturate evaluation-placement))",
+            )
         })?;
         let sites_time = timing::span("egglog evaluation / site facts");
         let mut schedules = LookupMap::<usize, Vec<usize>>::default();
@@ -523,34 +519,6 @@ impl Evaluation {
             .map(|(term, _)| *term)
             .collect()
     }
-}
-
-fn shared_mandatory_operands(
-    dependencies: &[Vec<TermId>],
-    pairs: &LookupSet<(TermId, TermId)>,
-) -> Vec<(TermId, TermId, TermId)> {
-    let roots: LookupSet<_> = pairs.iter().flat_map(|&(yes, no)| [yes, no]).collect();
-    let reached_by = reachable_targets(
-        dependencies
-            .iter()
-            .enumerate()
-            .flat_map(|(parent, children)| children.iter().map(move |&child| (child, parent))),
-        roots,
-    );
-    let mut demands = LookupMap::<_, LookupSet<_>>::default();
-    for (term, roots) in reached_by {
-        for root in roots {
-            demands.entry(root).or_default().insert(term);
-        }
-    }
-    let mut common = Vec::new();
-    for &(yes, no) in pairs {
-        if let (Some(yes_terms), Some(no_terms)) = (demands.get(&yes), demands.get(&no)) {
-            common.extend(yes_terms.intersection(no_terms).map(|&term| (yes, no, term)));
-        }
-    }
-    common.sort_unstable();
-    common
 }
 
 #[cfg(test)]
