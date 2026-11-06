@@ -5,7 +5,7 @@ use crate::ssa::types::{ConstantValue, PlaceInfo, PlaceOrigin, Terminator, Value
 use crate::types::{self, TypeName};
 use egglog_engine::RawValues;
 
-fn apply(body: &mut FuncBody) -> Result<()> {
+fn apply(body: &mut FuncBody) -> error::Result<()> {
     super::optimize_body(body, &LookupMap::default())
 }
 
@@ -315,6 +315,7 @@ fn a_full_transfer_consumes_dead_contents_but_preserves_live_snapshots() {
         }
         apply(&mut body).unwrap();
         assert_eq!(allocations(&body).len(), if preserve_old { 2 } else { 1 });
+        assert_eq!(barriers(&body), if preserve_old { 2 } else { 1 });
         assert_eq!(
             body.inner.insts.values().filter(|n| matches!(n.data, InstKind::Copy { .. })).count(),
             usize::from(preserve_old)

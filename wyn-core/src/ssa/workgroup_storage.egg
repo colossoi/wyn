@@ -61,16 +61,14 @@
       ((WorkgroupUnknown point write)) :ruleset workgroup-access)
 
 ; Windows grow monotonically as redundant barriers are opened.
-(function WorkgroupIsBarrier (SourceValue) bool :merge (or old new))
 (relation WorkgroupOpen (SourceValue))
 (relation WorkgroupBefore (SourceValue SourceValue))
 (relation WorkgroupAfter (SourceValue SourceValue))
+(relation MemoryConflict (MemoryRoot MemoryRoot))
 (relation WorkgroupBarrierConflict (SourceValue))
 (ruleset workgroup-open)
 (ruleset workgroup-barriers)
-(rule ((FlowNext before after)) ((set (WorkgroupIsBarrier before) false)) :ruleset workgroup-access)
-(rule ((WorkgroupBarrier point)) ((set (WorkgroupIsBarrier point) true)) :ruleset workgroup-access)
-(rule ((= (WorkgroupIsBarrier point) false)) ((WorkgroupOpen point)) :ruleset workgroup-open)
+(rule ((= (WorkgroupOrdered point) false)) ((WorkgroupOpen point)) :ruleset workgroup-open)
 (rule ((WorkgroupBarrier barrier) (FlowNext before barrier) (WorkgroupOpen before))
       ((WorkgroupBefore barrier before)) :ruleset workgroup-barriers)
 (rule ((WorkgroupBefore barrier point) (FlowNext before point) (WorkgroupOpen before))
@@ -80,5 +78,20 @@
 (rule ((WorkgroupAfter barrier point) (WorkgroupOpen point) (FlowNext point after))
       ((WorkgroupAfter barrier after)) :ruleset workgroup-barriers)
 (rule ((WorkgroupBefore barrier before) (WorkgroupAfter barrier after) (WorkgroupOpen after)
-       (WorkgroupAccess before id a) (WorkgroupAccess after id b) (= true (or a b)))
+       (MemoryAt left before) (MemoryAt right after) (MemoryAccess left x a) (MemoryAccess right y b)
+       (MemoryConflict x y) (= true (or a b)))
       ((WorkgroupBarrierConflict barrier)) :ruleset workgroup-barriers)
+
+; Selection changes physical identity in place; pre-pool liveness uses logical IDs.
+(rule ((= root (MemoryWorkgroup id)))
+      ((MemoryConflict root root) (MemoryConflict root (MemoryUnknown)) (MemoryConflict (MemoryUnknown) root)) :ruleset workgroup-open)
+(rule ((= root (MemoryUnknown))) ((MemoryConflict root root)) :ruleset workgroup-open)
+
+; Greedy choice consults conflicts with every member of an already selected pool.
+(relation PoolMember (i64 i64))
+(relation PoolBlocked (i64 i64))
+(ruleset storage-pools)
+(rule ((PoolMember member pool) (Interference member candidate)) ((PoolBlocked candidate pool)) :ruleset storage-pools)
+(rule ((PoolMember member pool) (Interference candidate member)) ((PoolBlocked candidate pool)) :ruleset storage-pools)
+
+(rule ((WorkgroupCopy before after source destination)) ((WorkgroupOpen before)) :ruleset workgroup-open)

@@ -18,13 +18,6 @@
 ; Backward resource liveness over sequenced execution points.
 (ruleset flow-live)
 (relation FlowNext (SourceValue SourceValue))
-; Optional native indexes for clients walking immediate execution neighbors.
-(sort FlowPoints (Set SourceValue))
-(function FlowSuccessors (SourceValue) FlowPoints :merge (set-union old new))
-(function FlowPredecessors (SourceValue) FlowPoints :merge (set-union old new))
-(ruleset flow-control-index)
-(rule ((FlowNext before after))
-      ((set (FlowSuccessors before) (set-of after)) (set (FlowPredecessors after) (set-of before))) :ruleset flow-control-index)
 (relation FlowLive (SourceValue i64))
 (relation FlowLiveOut (SourceValue i64))
 (relation FlowExecution (SourceValue SourceValue SourceValue))
