@@ -4,6 +4,75 @@ use super::*;
 use crate::op::BinaryOperator;
 use crate::ssa::builder::FuncBuilder;
 use crate::types::{i32, sized_array};
+use egglog_engine::EGraph;
+
+#[test]
+fn storage_validation_requires_initialization_on_every_incoming_path() {
+    for omit_initializer in [false, true] {
+        let mut body = FuncBuilder::new(vec![], i32()).finish_unchecked();
+        let entry = body.inner.entry;
+        let yes = body.inner.create_block();
+        let no = body.inner.create_block();
+        let merge = body.inner.create_block();
+        let array = sized_array(4, i32());
+        let carried = body.inner.add_block_param(merge, array.clone());
+        let zero = ValueRef::Const(ConstantValue::I32(0));
+        let mut values = Vec::new();
+        for block in [yes, no] {
+            let value = body.inner.append_inst(
+                block,
+                InstKind::Op {
+                    tag: OpTag::ArrayLit,
+                    operands: vec![zero; 4],
+                },
+                array.clone(),
+            );
+            values.push(value);
+            body.inner.blocks[block].term = Terminator::Branch {
+                target: merge,
+                args: vec![value.into()],
+            };
+        }
+        body.inner.blocks[entry].term = Terminator::CondBranch {
+            cond: ValueRef::Const(ConstantValue::Bool(true)),
+            then_target: yes,
+            then_args: vec![],
+            else_target: no,
+            else_args: vec![],
+        };
+        let read = body.inner.append_inst(
+            merge,
+            InstKind::Op {
+                tag: OpTag::Index,
+                operands: vec![carried.into(), zero],
+            },
+            i32(),
+        );
+        // A later initialized iteration must not hide an uninitialized first trip.
+        body.inner.blocks[merge].term = Terminator::CondBranch {
+            cond: ValueRef::Const(ConstantValue::Bool(false)),
+            then_target: yes,
+            then_args: vec![],
+            else_target: no,
+            else_args: vec![],
+        };
+        let mut analysis = analyze(&body).unwrap();
+        let (places, _) = allocate(&mut body, &analysis).unwrap();
+        assert!(!places.is_empty());
+        if omit_initializer {
+            for origins in analysis.origins.values_mut() {
+                origins.retain(|v| *v != values[1]);
+            }
+        }
+        let result = validation::verify(&body, &mut analysis, &places);
+        if omit_initializer {
+            assert!(result.unwrap_err().to_string().contains("read before initialization"));
+        } else {
+            result.unwrap();
+        }
+        assert!(body.inner.inst_of_value(read).is_some());
+    }
+}
 
 #[test]
 fn scalar_padding_is_contracted_but_later_alias_access_still_blocks_reuse() {
@@ -124,7 +193,7 @@ fn allocation_reachability_is_limited_to_eligible_webs_and_respects_backedges() 
         .parse_and_run_program(
             None,
             concat!(
-                include_str!("storage_liveness.egg"),
+                include_str!("../egglog/flow.egg"),
                 "\n",
                 include_str!("local_storage.egg")
             ),
@@ -134,24 +203,26 @@ fn allocation_reachability_is_limited_to_eligible_webs_and_respects_backedges() 
         .parse_and_run_program(
             None,
             r#"
-        (Array 1) (Origin 1) (Updated 1) (OriginLoad 1 10 100) (Allocation 10)
-        (Flow 100 101)
-        (Array 2) (Origin 2) (OriginLoad 2 20 200) (Allocation 20)
-        (Flow 200 201)
-        (Array 3) (Origin 3) (Updated 3) (OriginLoad 3 30 300) (Allocation 30)
-        (Array 4) (Origin 4) (Link 3 4) (Flow 300 301)
-        (Array 5) (Origin 5) (Updated 5) (OriginLoad 5 50 500) (Allocation 50)
-        (Flow 500 501) (AllocationStep 50 501 502) (Use 501 5)
-        (Array 6) (Origin 6) (Updated 6) (OriginLoad 6 60 600) (Allocation 60)
-        (Escape 6) (Flow 600 601)
+        (Array 1) (Origin 1) (Updated 1) (OriginLoad 1 10 (FlowNode 100)) (Allocation 10)
+        (FlowNext (FlowNode 100) (FlowNode 101))
+        (Array 2) (Origin 2) (OriginLoad 2 20 (FlowNode 200)) (Allocation 20)
+        (FlowNext (FlowNode 200) (FlowNode 201))
+        (Array 3) (Origin 3) (Updated 3) (OriginLoad 3 30 (FlowNode 300)) (Allocation 30)
+        (Array 4) (Origin 4) (Link 3 4) (FlowNext (FlowNode 300) (FlowNode 301))
+        (Array 5) (Origin 5) (Updated 5) (OriginLoad 5 50 (FlowNode 500)) (Allocation 50)
+        (FlowNext (FlowNode 500) (FlowNode 501)) (set (AllocationBoundary (FlowNode 501) 50) true) (FlowUse (FlowNode 501) 5)
+        (Array 6) (Origin 6) (Updated 6) (OriginLoad 6 60 (FlowNode 600)) (Allocation 60)
+        (Escape 6) (FlowNext (FlowNode 600) (FlowNode 601))
     "#,
         )
         .unwrap();
     graph.parse_and_run_program(None, ANALYSIS_SCHEDULE).unwrap();
     let existing = graph.read(|r| r.lookup("Existing", (1i64,))).unwrap().unwrap();
     assert_eq!(graph.value_to_base::<i64>(existing), 10);
-    assert!(graph.read(|r| r.contains("AfterOrigin", (1i64, 101i64))).unwrap());
+    let point = graph.read(|r| r.eclass_of("FlowNode", 101i64)).unwrap().unwrap();
+    assert!(graph.read(|r| r.contains("AfterOrigin", (1i64, point))).unwrap());
     for (value, point) in [(2i64, 200i64), (3, 300), (6, 600)] {
+        let point = graph.read(|r| r.eclass_of("FlowNode", point)).unwrap().unwrap();
         assert!(!graph.read(|r| r.contains("AfterOrigin", (value, point))).unwrap());
         assert!(graph.read(|r| r.lookup("Existing", (value,))).unwrap().is_none());
     }

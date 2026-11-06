@@ -5,7 +5,7 @@ use egglog_engine::Value;
 use wyn_graph::{forest_intervals, DfsInterval};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(super) struct Scope(usize);
+pub(super) struct Scope(pub usize);
 
 struct Node {
     value: Value,

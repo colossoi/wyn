@@ -2,12 +2,13 @@
 use super::{invalid, Analysis};
 use crate::error::Result;
 use crate::ssa::types::{FuncBody, InstKind, PlaceId, ValueId};
-use crate::{LookupMap, LookupSet};
+use crate::LookupMap;
+use egglog_engine::{Read, Write};
 use wyn_graph::DominatorTree;
 
 pub(super) fn verify(
     body: &FuncBody,
-    analysis: &Analysis,
+    analysis: &mut Analysis,
     places: &LookupMap<ValueId, PlaceId>,
 ) -> Result<()> {
     if places.is_empty() {
@@ -17,12 +18,8 @@ pub(super) fn verify(
         out.extend(body.inner.blocks[b].term.successors());
     });
     let blocks = dominators.preorder();
-    let mut predecessors = LookupMap::<_, Vec<_>>::default();
     let mut allocations = LookupMap::default();
     for &block in blocks {
-        for next in body.inner.blocks[block].term.successors() {
-            predecessors.entry(next).or_default().push(block);
-        }
         for (position, &inst) in body.inner.blocks[block].insts.iter().enumerate() {
             if let InstKind::Alloca { result, .. } = body.inner.insts[inst].data {
                 allocations.insert(result, (block, position));
@@ -41,39 +38,28 @@ pub(super) fn verify(
         .keys()
         .filter_map(|v| places.get(&analysis.webs.find(*v)).map(|p| (*v, *p)))
         .collect();
-    // Definite initialization is an intersection over incoming paths. Starting
-    // non-entry blocks at top handles backedges without assuming a first trip.
-    let all: LookupSet<_> = places.values().copied().collect();
-    let mut outputs: LookupMap<_, _> = blocks.iter().map(|b| (*b, all.clone())).collect();
-    let incoming = |block, outputs: &LookupMap<_, LookupSet<_>>| {
-        let mut state = if block == body.inner.entry { LookupSet::default() } else { all.clone() };
-        if let Some(preds) = predecessors.get(&block) {
-            for pred in preds {
-                state.retain(|p| outputs[pred].contains(p));
+    let map_error = |e: egglog_engine::Error| invalid(&e.to_string());
+    let flow = &mut analysis.flow;
+    // Place resources are disjoint from the array-version resources already in this graph.
+    let ids: LookupMap<_, _> =
+        places.values().enumerate().map(|(i, &p)| (p, (i + analysis.webs.indices.len()) as i64)).collect();
+    flow.graph
+        .update(|mut sink| {
+            for &id in ids.values() {
+                sink.add("FlowUninitialized", (flow.blocks[&body.inner.entry].0, id))?;
             }
-        }
-        state
-    };
-    loop {
-        let mut changed = false;
-        for &block in blocks {
-            let mut state = incoming(block, &outputs);
-            for &inst in &body.inner.blocks[block].insts {
+            for (&inst, &(before, _)) in &flow.instructions {
                 if let Some(place) = body.inner.insts[inst].result.and_then(|v| origins.get(&v)) {
-                    state.insert(*place);
+                    sink.set("FlowKilled", (before, ids[place]), true)?;
                 }
             }
-            if outputs[&block] != state {
-                outputs.insert(block, state);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
+            Ok::<_, egglog_engine::Error>(())
+        })
+        .map_err(map_error)?;
+    flow.graph
+        .parse_and_run_program(None, "(run-schedule (saturate flow-initialization))")
+        .map_err(map_error)?;
     for &block in blocks {
-        let mut initialized = incoming(block, &outputs);
         for (position, &inst) in body.inner.blocks[block].insts.iter().enumerate() {
             let node = &body.inner.insts[inst];
             let origin = node.result.and_then(|v| origins.get(&v)).copied();
@@ -91,11 +77,14 @@ pub(super) fn verify(
                     return Err(invalid("storage allocation does not dominate its access"));
                 }
             }
-            if reads.iter().any(|p| !initialized.contains(p)) {
-                return Err(invalid("promoted array is read before initialization"));
-            }
-            if let Some(place) = origin {
-                initialized.insert(place);
+            for place in reads {
+                if flow
+                    .graph
+                    .read(|r| r.contains("FlowUninitialized", (flow.instructions[&inst].0, ids[&place])))
+                    .map_err(map_error)?
+                {
+                    return Err(invalid("promoted array is read before initialization"));
+                }
             }
         }
     }

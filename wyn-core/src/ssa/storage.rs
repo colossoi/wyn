@@ -309,18 +309,7 @@ impl MemoryRoots {
                 }
             }
             for block in body.inner.blocks.values() {
-                let edges: Vec<_> = match &block.term {
-                    Terminator::Branch { target, args } => vec![(*target, args)],
-                    Terminator::CondBranch {
-                        then_target,
-                        then_args,
-                        else_target,
-                        else_args,
-                        ..
-                    } => vec![(*then_target, then_args), (*else_target, else_args)],
-                    _ => vec![],
-                };
-                for (target, args) in edges {
+                for (target, args) in block.term.edges() {
                     for (&v, &arg) in body.inner.blocks[target].params.iter().zip(args) {
                         if contains_view(body.get_value_type(v)) {
                             let roots = result.value(arg);

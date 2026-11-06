@@ -3,11 +3,13 @@
 use super::invalid;
 use crate::error::Result;
 use crate::op::{OpTag, PureViewSource};
+use crate::ssa::dataflow::Dataflow;
 use crate::ssa::storage::{MemoryRoot, MemoryRoots};
-use crate::ssa::types::{BlockId, ConstantValue, FuncBody, InstId, InstKind, ValueRef};
+use crate::ssa::types::{ConstantValue, FuncBody, InstId, InstKind, ValueRef};
 use crate::types::{Type, TypeExt};
 use crate::{FunctionId, LookupMap, LookupSet, ResourceAccess};
-use egglog_engine::{EGraph, Read, Write};
+use egglog_engine::sort::SetContainer;
+use egglog_engine::{Read, Value, Write};
 
 #[derive(Default, Clone)]
 struct Access {
@@ -31,9 +33,8 @@ impl Access {
     }
 }
 
+#[derive(Default)]
 struct Step {
-    before: usize,
-    after: usize,
     instruction: Option<InstId>,
     define: Option<u32>,
     transfer: Option<(u32, u32)>,
@@ -41,10 +42,149 @@ struct Step {
     access: Access,
 }
 
-struct MemoryFlow {
-    steps: Vec<Step>,
-    incoming: Vec<Vec<usize>>,
-    outgoing: Vec<Vec<usize>>,
+struct Accesses {
+    flow: Dataflow,
+    steps: LookupMap<(Value, Value), Step>,
+}
+
+impl Accesses {
+    fn new(
+        body: &FuncBody,
+        roots: &MemoryRoots,
+        calls: &LookupMap<FunctionId, Option<ResourceAccess>>,
+    ) -> Result<Self> {
+        let mut accesses = LookupMap::default();
+        for (inst, node) in &body.inner.insts {
+            let (reads, writes) = roots.access(&node.data, calls);
+            let step = Step {
+                instruction: Some(inst),
+                define: match node.data {
+                    InstKind::Op {
+                        tag: OpTag::StorageView(PureViewSource::Workgroup { id, .. }),
+                        ..
+                    } => Some(id),
+                    _ => None,
+                },
+                barrier: matches!(node.data, InstKind::ControlBarrier),
+                access: Access {
+                    reads: reads.into_iter().filter(shared).collect(),
+                    writes: writes.into_iter().filter(shared).collect(),
+                },
+                ..Step::default()
+            };
+            if step.define.is_some()
+                || step.barrier
+                || !step.access.reads.is_empty()
+                || !step.access.writes.is_empty()
+            {
+                accesses.insert(inst, step);
+            }
+        }
+        let events = body
+            .inner
+            .blocks
+            .iter()
+            .map(|(b, data)| {
+                (
+                    b,
+                    data.insts
+                        .iter()
+                        .filter(|inst| accesses.contains_key(inst))
+                        .map(|&inst| vec![inst])
+                        .collect(),
+                )
+            })
+            .collect();
+        let mut flow = Dataflow::new(body, &events).map_err(|e| invalid(&e.to_string()))?;
+        flow.graph
+            .parse_and_run_program(None, "(run-schedule (saturate flow-control-index))")
+            .map_err(|e| invalid(&e.to_string()))?;
+        let steps = accesses.into_iter().map(|(inst, access)| (flow.instructions[&inst], access)).collect();
+        let mut result = Self { flow, steps };
+        for (block, data) in &body.inner.blocks {
+            let returned = Access {
+                reads: roots.returned(&data.term).into_iter().filter(shared).collect(),
+                writes: LookupSet::default(),
+            };
+            if !returned.reads.is_empty() {
+                result.steps.insert(
+                    result.flow.terminators[&block],
+                    Step {
+                        access: returned,
+                        ..Step::default()
+                    },
+                );
+            }
+        }
+        let points: Vec<_> = result.steps.keys().copied().collect();
+        for point in points {
+            let Some(inst) = result.steps[&point].instruction else {
+                continue;
+            };
+            let InstKind::Copy {
+                destination,
+                source,
+                length,
+                collective: true,
+                ..
+            } = body.inner.insts[inst].data
+            else {
+                continue;
+            };
+            let Some(length) = integer(length) else {
+                continue;
+            };
+            let (Some(source), Some(destination)) = (
+                whole_view(body, source, length),
+                whole_view(body, destination, length),
+            ) else {
+                continue;
+            };
+            let before = result.until_barrier(point.0, true, &LookupSet::default())?;
+            if !before.reads.iter().chain(&before.writes).any(|root| {
+                matches!(root, MemoryRoot::Unknown)
+                    || *root == MemoryRoot::Workgroup(source)
+                    || *root == MemoryRoot::Workgroup(destination)
+            }) {
+                if let Some(step) = result.steps.get_mut(&point) {
+                    step.transfer = Some((source, destination));
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    fn until_barrier(&self, start: Value, backwards: bool, removed: &LookupSet<InstId>) -> Result<Access> {
+        let mut access = Access::default();
+        let mut visited = LookupSet::default();
+        let mut pending = vec![start];
+        while let Some(point) = pending.pop() {
+            if !visited.insert(point) {
+                continue;
+            }
+            let graph = &self.flow.graph;
+            let table = if backwards { "FlowPredecessors" } else { "FlowSuccessors" };
+            let Some(neighbors) =
+                graph.read(|r| r.lookup(table, point)).map_err(|e| invalid(&e.to_string()))?
+            else {
+                continue;
+            };
+            let Some(neighbors) = graph.value_to_container::<SetContainer>(neighbors) else {
+                return Err(invalid("invalid control-flow neighbor set"));
+            };
+            for &next in &neighbors.data {
+                let edge = if backwards { (next, point) } else { (point, next) };
+                if let Some(step) = self.steps.get(&edge) {
+                    if step.barrier && !step.instruction.is_some_and(|inst| removed.contains(&inst)) {
+                        continue;
+                    }
+                    access.extend(&step.access);
+                }
+                pending.push(next);
+            }
+        }
+        Ok(access)
+    }
 }
 
 fn shared(root: &MemoryRoot) -> bool {
@@ -71,149 +211,6 @@ fn whole_view(body: &FuncBody, value: ValueRef, length: u32) -> Option<u32> {
         }
     }
     None
-}
-
-impl MemoryFlow {
-    fn new(
-        body: &FuncBody,
-        roots: &MemoryRoots,
-        calls: &LookupMap<FunctionId, Option<ResourceAccess>>,
-    ) -> Self {
-        let mut steps = Vec::new();
-        let mut points = LookupMap::<BlockId, (usize, usize)>::default();
-        let mut next = 0;
-        for (block, data) in &body.inner.blocks {
-            let entry = next;
-            next += 1;
-            for &inst in &data.insts {
-                let data = &body.inner.insts[inst].data;
-                let define = match data {
-                    InstKind::Op {
-                        tag: OpTag::StorageView(PureViewSource::Workgroup { id, .. }),
-                        ..
-                    } => Some(*id),
-                    _ => None,
-                };
-                let barrier = matches!(data, InstKind::ControlBarrier);
-                let (reads, writes) = roots.access(data, calls);
-                let access = Access {
-                    reads: reads.into_iter().filter(shared).collect(),
-                    writes: writes.into_iter().filter(shared).collect(),
-                };
-                if define.is_none() && !barrier && access.reads.is_empty() && access.writes.is_empty() {
-                    continue;
-                }
-                steps.push(Step {
-                    before: next - 1,
-                    after: next,
-                    instruction: Some(inst),
-                    define,
-                    transfer: None,
-                    barrier,
-                    access,
-                });
-                next += 1;
-            }
-            let reads: LookupSet<_> = roots.returned(&data.term).into_iter().filter(shared).collect();
-            if !reads.is_empty() {
-                steps.push(Step {
-                    before: next - 1,
-                    after: next,
-                    instruction: None,
-                    define: None,
-                    transfer: None,
-                    barrier: false,
-                    access: Access {
-                        reads,
-                        writes: LookupSet::default(),
-                    },
-                });
-                next += 1;
-            }
-            points.insert(block, (entry, next - 1));
-        }
-        for (block, data) in &body.inner.blocks {
-            for target in data.term.successors() {
-                steps.push(Step {
-                    before: points[&block].1,
-                    after: points[&target].0,
-                    instruction: None,
-                    define: None,
-                    transfer: None,
-                    barrier: false,
-                    access: Access::default(),
-                });
-            }
-        }
-        let mut incoming = vec![Vec::new(); next];
-        let mut outgoing = vec![Vec::new(); next];
-        for (index, step) in steps.iter().enumerate() {
-            incoming[step.after].push(index);
-            outgoing[step.before].push(index);
-        }
-        let mut flow = Self {
-            steps,
-            incoming,
-            outgoing,
-        };
-        for i in 0..flow.steps.len() {
-            let step = &flow.steps[i];
-            let Some(inst) = step.instruction else {
-                continue;
-            };
-            let InstKind::Copy {
-                destination,
-                source,
-                length,
-                collective: true,
-                ..
-            } = body.inner.insts[inst].data
-            else {
-                continue;
-            };
-            let Some(length) = integer(length) else {
-                continue;
-            };
-            let (Some(source), Some(destination)) = (
-                whole_view(body, source, length),
-                whole_view(body, destination, length),
-            ) else {
-                continue;
-            };
-            // Only the copy's own elementwise reads can overlap its writes.
-            // Older cross-lane accesses must already have synchronized.
-            let before = flow.until_barrier(step.before, true, &LookupSet::default());
-            if before.reads.iter().chain(&before.writes).any(|root| {
-                matches!(root, MemoryRoot::Unknown)
-                    || *root == MemoryRoot::Workgroup(source)
-                    || *root == MemoryRoot::Workgroup(destination)
-            }) {
-                continue;
-            }
-            flow.steps[i].transfer = Some((source, destination));
-        }
-        flow
-    }
-
-    fn until_barrier(&self, start: usize, backwards: bool, removed: &LookupSet<InstId>) -> Access {
-        let mut access = Access::default();
-        let mut visited = LookupSet::default();
-        let mut pending = vec![start];
-        while let Some(point) = pending.pop() {
-            if !visited.insert(point) {
-                continue;
-            }
-            for &edge in if backwards { &self.incoming[point] } else { &self.outgoing[point] } {
-                let step = &self.steps[edge];
-                if step.barrier && !step.instruction.is_some_and(|inst| removed.contains(&inst)) {
-                    continue;
-                }
-                access.extend(&step.access);
-                pending.push(if backwards { step.before } else { step.after });
-            }
-        }
-        access
-    }
 }
 
 struct Buffer {
@@ -254,11 +251,11 @@ fn optimize_body(body: &mut FuncBody, calls: &LookupMap<FunctionId, Option<Resou
         return Ok(());
     }
     let roots = MemoryRoots::analyze(body);
-    let flow = MemoryFlow::new(body, &roots, calls);
-    pool(body, &buffers, &roots, &flow)?;
+    let mut flow = Accesses::new(body, &roots, calls)?;
+    pool(body, &buffers, &roots, &mut flow)?;
     let selected = MemoryRoots::analyze(body);
     let mut removed = LookupSet::default();
-    for step in &flow.steps {
+    for step in flow.steps.values() {
         let Some(inst) = step.instruction else {
             continue;
         };
@@ -279,16 +276,17 @@ fn optimize_body(body: &mut FuncBody, calls: &LookupMap<FunctionId, Option<Resou
     body.inner.insts.retain(|inst, _| !removed.contains(&inst));
     // Pooling introduces aliases; synchronization must see the selected storage.
     let roots = MemoryRoots::analyze(body);
-    let flow = MemoryFlow::new(body, &roots, calls);
+    let flow = Accesses::new(body, &roots, calls)?;
     let mut removed = LookupSet::default();
-    for step in &flow.steps {
-        if !step.barrier {
+    for inst in body.inner.blocks.values().flat_map(|b| b.insts.iter()) {
+        if !matches!(body.inner.insts[*inst].data, InstKind::ControlBarrier) {
             continue;
         }
-        let before = flow.until_barrier(step.before, true, &removed);
-        let after = flow.until_barrier(step.after, false, &removed);
+        let (before, after) = flow.flow.instructions[inst];
+        let before = flow.until_barrier(before, true, &removed)?;
+        let after = flow.until_barrier(after, false, &removed)?;
         if !before.conflicts(&after) {
-            removed.insert(step.instruction.expect("barrier instruction"));
+            removed.insert(*inst);
         }
     }
     for data in body.inner.blocks.values_mut() {
@@ -298,7 +296,7 @@ fn optimize_body(body: &mut FuncBody, calls: &LookupMap<FunctionId, Option<Resou
     Ok(())
 }
 
-fn pool(body: &mut FuncBody, buffers: &[Buffer], roots: &MemoryRoots, flow: &MemoryFlow) -> Result<()> {
+fn pool(body: &mut FuncBody, buffers: &[Buffer], roots: &MemoryRoots, flow: &mut Accesses) -> Result<()> {
     let mut escaped = LookupSet::default();
     for node in body.inner.insts.values() {
         for (operand, value) in node.data.value_uses().into_iter().enumerate() {
@@ -328,50 +326,41 @@ fn pool(body: &mut FuncBody, buffers: &[Buffer], roots: &MemoryRoots, flow: &Mem
         return Ok(());
     }
     let map_error = |e: egglog_engine::Error| invalid(&e.to_string());
-    let mut graph = EGraph::default();
+    let graph = &mut flow.flow.graph;
+    graph.parse_and_run_program(None, include_str!("workgroup_storage.egg")).map_err(map_error)?;
+    let mut edges = Vec::new();
     graph
-        .parse_and_run_program(
-            None,
-            concat!(
-                include_str!("storage_liveness.egg"),
-                "\n",
-                include_str!("workgroup_storage.egg")
-            ),
-        )
+        .constructor_enodes("FlowNext", |row| edges.push((row.children[0], row.children[1])))
         .map_err(map_error)?;
     graph
         .update(|mut sink| {
-            for buffer in buffers {
-                sink.add("NonParameter", (i64::from(buffer.id),))?;
-            }
             for &(a, b) in &pairs {
                 sink.add("PoolPair", (i64::from(a), i64::from(b)))?;
             }
-            for step in &flow.steps {
-                let (before, after) = (step.before as i64, step.after as i64);
+            for &(before, after) in &edges {
+                if !flow.steps.get(&(before, after)).is_some_and(|s| s.barrier || s.transfer.is_some()) {
+                    sink.add("UnorderedStep", (before, after))?;
+                }
+            }
+            for (&(before, after), step) in &flow.steps {
                 if let Some((source, destination)) = step.transfer {
-                    sink.add("Define", (before, after, i64::from(destination)))?;
-                    sink.add("Use", (before, i64::from(source)))?;
-                    sink.add("Use", (after, i64::from(destination)))?;
+                    sink.set("FlowKilled", (before, i64::from(destination)), true)?;
+                    sink.add("FlowUse", (before, i64::from(source)))?;
+                    sink.add("FlowUse", (after, i64::from(destination)))?;
                     sink.add("TransferStep", (before, after, i64::from(source)))?;
                     continue;
                 }
                 if let Some(id) = step.define {
-                    sink.add("Define", (before, after, i64::from(id)))?;
-                } else {
-                    sink.add("Step", (before, after))?;
-                }
-                if !step.barrier {
-                    sink.add("UnorderedStep", (before, after))?;
+                    sink.set("FlowKilled", (before, i64::from(id)), true)?;
                 }
                 for root in step.access.reads.iter().chain(&step.access.writes) {
                     match root {
                         MemoryRoot::Workgroup(id) => {
-                            sink.add("Use", (before, i64::from(*id)))?;
+                            sink.add("FlowUse", (before, i64::from(*id)))?;
                         }
                         MemoryRoot::Unknown => {
                             for buffer in buffers {
-                                sink.add("Use", (before, i64::from(buffer.id)))?;
+                                sink.add("FlowUse", (before, i64::from(buffer.id)))?;
                             }
                         }
                         _ => {}
@@ -384,7 +373,7 @@ fn pool(body: &mut FuncBody, buffers: &[Buffer], roots: &MemoryRoots, flow: &Mem
     graph
         .parse_and_run_program(
             None,
-            "(run-schedule (saturate storage-liveness) (saturate storage-interference))",
+            "(run-schedule (saturate flow-live) (saturate storage-interference))",
         )
         .map_err(map_error)?;
     let mut conflicts = LookupSet::default();

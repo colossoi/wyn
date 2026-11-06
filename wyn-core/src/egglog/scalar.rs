@@ -25,8 +25,8 @@ pub(super) fn plan_evaluation(
     program: &super::Program<'_, super::Optimized>,
 ) -> Result<(placement::Placement, evaluation::Evaluation), OptimizeError> {
     let _timing = timing::span("egglog evaluation planning");
-    let placements = placement::Placement::new(program)?;
-    let evaluations = evaluation::Evaluation::new(program, &placements)?;
+    let mut placements = placement::Placement::new(program)?;
+    let evaluations = evaluation::Evaluation::new(program, &mut placements)?;
     Ok((placements, evaluations))
 }
 

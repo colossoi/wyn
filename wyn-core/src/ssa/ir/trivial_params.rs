@@ -1,6 +1,6 @@
 //! Substitute forwarding block parameters without changing control flow.
 
-use super::{Function, Substitutions, Terminator, ValueDef, ValueRef, VisitValues};
+use super::{Function, Substitutions, ValueDef, ValueRef, VisitValues};
 use crate::LookupMap;
 use wyn_graph::DominatorTree;
 
@@ -18,20 +18,8 @@ pub(crate) fn eliminate_single_input_params<I: VisitValues, T>(function: &mut Fu
         incoming.entry(target).and_modify(|args| *args = None).or_insert_with(|| Some(args.to_vec()));
     };
     for block in function.blocks.values() {
-        match &block.term {
-            Terminator::Branch { target, args } => edge(*target, args),
-            Terminator::CondBranch {
-                then_target,
-                then_args,
-                else_target,
-                else_args,
-                ..
-            } => {
-                // Two edges from the same predecessor can pass different values.
-                edge(*then_target, then_args);
-                edge(*else_target, else_args);
-            }
-            Terminator::Return(_) | Terminator::Unreachable => {}
+        for (target, args) in block.term.edges() {
+            edge(target, args);
         }
     }
     let dominators = DominatorTree::build(function.entry, |block, successors| {
@@ -79,19 +67,8 @@ pub(crate) fn eliminate_single_input_params<I: VisitValues, T>(function: &mut Fu
                 function.values[param].def = ValueDef::Param { block, index };
             }
         }
-        match &mut data.term {
-            Terminator::Branch { target, args } => retain_args(*target, args),
-            Terminator::CondBranch {
-                then_target,
-                then_args,
-                else_target,
-                else_args,
-                ..
-            } => {
-                retain_args(*then_target, then_args);
-                retain_args(*else_target, else_args);
-            }
-            Terminator::Return(_) | Terminator::Unreachable => {}
+        for (target, args) in data.term.edges_mut() {
+            retain_args(target, args);
         }
     }
     replacements.finish(function);

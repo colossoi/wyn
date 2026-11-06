@@ -1,6 +1,6 @@
 //! Plan lexical and guarded materializations over the selected native DAG.
 //! SSA emission queries dependency requirements while constructing control flow.
-use super::extract::{self, operands};
+use super::extract;
 use super::scopes::{Forest, Scope, Scopes};
 use super::Selected;
 use crate::egglog::query::Query;
@@ -78,7 +78,7 @@ pub(super) fn select(graph: &mut EGraph, policy: ScalarOptimization) -> Result<S
 }
 
 pub(in crate::egglog) struct Placement {
-    scopes: Scopes,
+    pub(super) scopes: Scopes,
     requirements: Vec<Vec<Scope>>,
 }
 
@@ -90,7 +90,6 @@ impl Placement {
         let identities = &program.identities;
         let selected = &program.stage.selected;
         let dag = &selected.dag;
-        let values = &selected.values;
         let parent = |scope| {
             if facts.flag("ExprContextBoundary", (scope,))? {
                 Ok(None)
@@ -116,37 +115,28 @@ impl Placement {
             Ok(())
         })?;
         let scopes = Scopes::new(definitions, contexts, loops);
-        // Requirements summarize definitions used by the selected DAG. This is a
-        // dependency summary, not a second implementation of semantic safety.
-        let mut requirements: Vec<Vec<Scope>> = Vec::with_capacity(dag.size());
-        for id in 0..dag.size() {
-            let mut required = Vec::new();
-            if let Term::App(name, fields) = dag.get(id) {
-                match name.as_str() {
-                    "ExprLeaf" | "ExprExecute" | "ExprInstruction" | "ExprCall" => {
-                        if let Some(owner) = facts
-                            .lookup("ExprContextOwner", (values[fields[2]],))?
-                            .and_then(|v| scopes.definition(v))
-                        {
-                            scopes.require(&mut required, owner);
-                        }
-                    }
-                    "ExprParameter" => {
-                        if let Some(owner) = scopes.definition(values[fields[2]]) {
-                            scopes.require(&mut required, owner);
-                        }
-                    }
-                    _ => {}
-                }
-                for child in operands(name, fields) {
-                    for &scope in &requirements[child] {
-                        scopes.require(&mut required, scope);
-                    }
-                }
-            }
-            requirements.push(required);
+        Ok(Self {
+            scopes,
+            requirements: vec![Vec::new(); dag.size()],
+        })
+    }
+
+    pub(super) fn load_requirements(&mut self, graph: &EGraph) -> Result<(), OptimizeError> {
+        let query = Query(graph);
+        query.for_each("FlowScopeRequirement", |row| {
+            let Some(node) = query.enode("FlowNode", row[0])? else {
+                return Err(crate::egglog::output_error("missing selected node"));
+            };
+            self.scopes.require(
+                &mut self.requirements[graph.value_to_base::<i64>(node[0]) as usize],
+                Scope(graph.value_to_base::<i64>(row[1]) as usize),
+            );
+            Ok(())
+        })?;
+        for required in &mut self.requirements {
+            required.sort_by_key(|s| s.0);
         }
-        Ok(Self { scopes, requirements })
+        Ok(())
     }
 
     pub fn available(&self, term: TermId, owner: Value, scope: Value) -> bool {

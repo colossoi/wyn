@@ -20,6 +20,7 @@ pub(crate) mod array_copy;
 pub mod backend_validation;
 pub mod builder;
 mod constant_folding;
+mod dataflow;
 mod if_conversion;
 pub mod ir;
 pub mod layout;

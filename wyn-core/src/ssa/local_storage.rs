@@ -1,5 +1,6 @@
 //! Function-local bufferization. Logical array versions remain immutable until
 //! edge-aware liveness proves that a web can share one physical allocation.
+use super::dataflow::Dataflow;
 use super::ir::{Substitutions, ValueDef};
 use super::stage::Reachable;
 use super::storage::is_local_value;
@@ -14,7 +15,7 @@ use crate::op::OpTag;
 use crate::timing;
 use crate::types::{is_array_variant_composite, Type, TypeExt, TypeName};
 use crate::{BindingRef, FunctionId, LookupMap, LookupSet};
-use egglog_engine::{EGraph, Read, Write};
+use egglog_engine::{Read, Write};
 
 #[path = "local_storage_validation.rs"]
 mod validation;
@@ -104,39 +105,6 @@ fn flatten_param(body: &mut FuncBody, block: BlockId, ty: &Type) -> ValueRef {
         body.inner.add_block_param(block, ty.clone()).into()
     }
 }
-fn edges(term: &Terminator) -> Vec<(BlockId, Vec<ValueRef>)> {
-    match term {
-        Terminator::Branch { target, args } => vec![(*target, args.clone())],
-        Terminator::CondBranch {
-            then_target,
-            then_args,
-            else_target,
-            else_args,
-            ..
-        } => vec![
-            (*then_target, then_args.clone()),
-            (*else_target, else_args.clone()),
-        ],
-        _ => vec![],
-    }
-}
-fn map_edges(term: &mut Terminator, mut f: impl FnMut(BlockId, &mut Vec<ValueRef>)) {
-    match term {
-        Terminator::Branch { target, args } => f(*target, args),
-        Terminator::CondBranch {
-            then_target,
-            then_args,
-            else_target,
-            else_args,
-            ..
-        } => {
-            f(*then_target, then_args);
-            f(*else_target, else_args);
-        }
-        _ => {}
-    }
-}
-
 /// Expose array components without changing function signatures. Reconstruction
 /// instructions are retained only if an aggregate actually escapes.
 fn split_parameters(body: &mut FuncBody) {
@@ -165,7 +133,7 @@ fn split_parameters(body: &mut FuncBody) {
     substitutions.finish(&mut body.inner);
     for block in blocks {
         let mut term = body.inner.blocks[block].term.clone();
-        map_edges(&mut term, |target, args| {
+        for (target, args) in term.edges_mut() {
             if let Some(types) = shapes.get(&target) {
                 let mut flat = Vec::new();
                 for (&arg, ty) in args.iter().zip(types) {
@@ -173,7 +141,7 @@ fn split_parameters(body: &mut FuncBody) {
                 }
                 *args = flat;
             }
-        });
+        }
         body.inner.blocks[block].term = term;
     }
     // Projection chains may cross block storage order. Resolve to a fixed point.
@@ -243,10 +211,10 @@ fn bufferize(name: &str, body: &mut FuncBody) -> Result<()> {
     let _body = label.as_deref().and_then(timing::span);
     timing::time("ssa storage / split parameters", || split_parameters(body));
     timing::time("ssa storage / remove loads", || remove_unused_loads(body));
-    let analysis = timing::time("ssa storage / analysis", || analyze(body))?;
+    let mut analysis = timing::time("ssa storage / analysis", || analyze(body))?;
     let (places, reused) = timing::time("ssa storage / allocate", || allocate(body, &analysis))?;
     timing::time("ssa storage / verify", || {
-        validation::verify(body, &analysis, &places)
+        validation::verify(body, &mut analysis, &places)
     })?;
     timing::time("ssa storage / rewrite", || {
         rewrite(body, &analysis.webs, &places, &reused)
@@ -288,13 +256,14 @@ fn remove_unused_loads(body: &mut FuncBody) {
 }
 
 struct Analysis {
+    flow: Dataflow,
     webs: Webs,
     origins: LookupMap<ValueId, Vec<ValueId>>,
     candidates: Vec<ValueId>,
     existing: LookupMap<ValueId, PlaceId>,
 }
 
-const ANALYSIS_SCHEDULE: &str = "(run-schedule (saturate storage-webs) (saturate storage-liveness) (saturate storage-select) (saturate storage-existing) (saturate storage-allocation))";
+const ANALYSIS_SCHEDULE: &str = "(run-schedule (saturate storage-webs) (saturate flow-live) (saturate storage-select) (saturate storage-existing) (saturate storage-allocation))";
 
 fn storage_places(body: &FuncBody, arrays: &LookupMap<ValueId, usize>) -> LookupSet<PlaceId> {
     let mut allocations = LookupSet::default();
@@ -373,17 +342,6 @@ fn analyze(body: &FuncBody) -> Result<Analysis> {
     let events = storage_events(body, &indices, &relevant_places);
     let places: Vec<_> = body.places.keys().collect();
     let place_ids: LookupMap<_, _> = places.iter().enumerate().map(|(i, p)| (*p, i as i64)).collect();
-    let mut next = 0i64;
-    let points: LookupMap<_, _> = body
-        .inner
-        .blocks
-        .iter()
-        .map(|(b, _)| {
-            let start = next;
-            next += events[&b].len() as i64 + 1;
-            (b, (start, next - 1))
-        })
-        .collect();
     if timing::enabled() {
         eprintln!(
             "ssa storage facts: {} instructions, {} events, {} arrays, {} blocks",
@@ -395,18 +353,16 @@ fn analyze(body: &FuncBody) -> Result<Analysis> {
     }
     drop(inputs);
     let schema = timing::span("ssa storage analysis / schema");
-    let mut graph = EGraph::default();
     let map_error = |e: egglog_engine::Error| invalid(&e.to_string());
-    graph
-        .parse_and_run_program(
-            None,
-            concat!(
-                include_str!("storage_liveness.egg"),
-                "\n",
-                include_str!("local_storage.egg")
-            ),
-        )
-        .map_err(map_error)?;
+    let mut flow = Dataflow::new(body, &events).map_err(map_error)?;
+    let Dataflow {
+        graph,
+        blocks: points,
+        instructions,
+        edges: control_edges,
+        ..
+    } = &mut flow;
+    graph.parse_and_run_program(None, include_str!("local_storage.egg")).map_err(map_error)?;
     drop(schema);
     let import = timing::span("ssa storage analysis / import facts");
     let mut origin_values = Vec::new();
@@ -415,13 +371,11 @@ fn analyze(body: &FuncBody) -> Result<Analysis> {
             let id = i as i64;
             sink.add("Array", (id,))?;
             match body.inner.values[v].def {
-                ValueDef::Param { block, .. } => { sink.add("Parameter", (points[&block].0, id))?; }
+                ValueDef::Param { block, .. } => { sink.add("FlowParameter", (points[&block].0, id))?; }
                 ValueDef::FunctionParam { .. } => {
-                    sink.add("NonParameter", (id,))?;
                     sink.add("Escape", (id,))?;
                 }
                 ValueDef::Inst { inst } => {
-                    sink.add("NonParameter", (id,))?;
                     let data = &body.inner.insts[inst].data;
                     let forwarded = match data {
                         InstKind::Op { tag: OpTag::Materialize, operands } => Some(operands.as_slice()),
@@ -439,47 +393,37 @@ fn analyze(body: &FuncBody) -> Result<Analysis> {
                 }
             }
         }
-        let mut edge = 0i64;
         for (b, block) in &body.inner.blocks {
-            let (entry, exit) = points[&b];
-            for (target, args) in edges(&block.term) {
-                sink.add("Edge", (edge, exit, points[&target].0))?;
-                sink.add("Flow", (exit, points[&target].0))?;
+            for (index, (target, args)) in block.term.edges().into_iter().enumerate() {
+                let edge = control_edges[&(b, index)];
                 for (&param, arg) in body.inner.blocks[target].params.iter().zip(args) {
                     if let Some(&param) = indices.get(&param) {
                         if let Some(&arg) = arg.as_ssa().and_then(|v| indices.get(&v)) {
-                            sink.add("Argument", (edge, param as i64, arg as i64))?;
+                            sink.add("FlowArgument", (edge, param as i64, arg as i64))?;
                             sink.add("Link", (param as i64, arg as i64))?;
                         } else { sink.add("Escape", (param as i64,))?; }
                     }
                 }
-                edge += 1;
             }
             if let Terminator::Return(Some(ValueRef::Ssa(v))) = block.term {
                 if let Some(&v) = indices.get(&v) { sink.add("Escape", (v as i64,))?; }
             }
-            for (offset, event) in events[&b].iter().enumerate() {
-                let before = entry + offset as i64;
-                let after = before + 1;
+            for event in &events[&b] {
                 for &inst in event {
+                    let (before, after) = instructions[&inst];
                     let node = &body.inner.insts[inst];
-                    if let InstKind::Alloca { result, .. } = node.data {
-                        sink.add("AllocationStep", (place_ids[&result], before, after))?;
-                    } else {
-                        sink.add("Flow", (before, after))?;
-                    }
                     if let Some(&v) = node.result.and_then(|v| indices.get(&v)) {
-                        sink.add("Define", (before, after, v as i64))?;
+                        sink.set("FlowKilled", (before, v as i64), true)?;
                         if !matches!(node.data, InstKind::Op { tag: OpTag::Materialize, .. }) {
                             sink.add("Write", (after, v as i64))?;
                         }
                         if let InstKind::Load { place } = node.data {
                             sink.add("OriginLoad", (v as i64, place_ids[&place], after))?;
                         }
-                    } else { sink.add("Step", (before, after))?; }
+                    }
                     for (i, value) in node.data.value_uses().into_iter().enumerate() {
                         let Some(&v) = value.as_ssa().and_then(|v| indices.get(&v)) else { continue; };
-                        sink.add("Use", (before, v as i64))?;
+                        sink.add("FlowUse", (before, v as i64))?;
                         if i == 0 && matches!(&node.data, InstKind::Op { tag: OpTag::Index | OpTag::DynamicExtract, .. }) {
                             sink.add("Indexed", (v as i64,))?;
                         }
@@ -495,7 +439,10 @@ fn analyze(body: &FuncBody) -> Result<Analysis> {
                         sink.add("PlaceUse", (before, place_ids[&place]))?;
                     }
                     match node.data {
-                        InstKind::Alloca { result, .. } => { sink.add("Allocation", (place_ids[&result],))?; }
+                        InstKind::Alloca { result, .. } => {
+                            sink.add("Allocation", (place_ids[&result],))?;
+                            sink.set("AllocationBoundary", (before, place_ids[&result]), true)?;
+                        }
                         InstKind::PlaceIndex { place, result, .. } => { sink.add("PlaceIndex", (place_ids[&place], place_ids[&result]))?; }
                         _ => {}
                     }
@@ -536,6 +483,7 @@ fn analyze(body: &FuncBody) -> Result<Analysis> {
         origins.entry(roots[&v]).or_default().push(v);
     }
     Ok(Analysis {
+        flow,
         webs: Webs { indices, roots },
         origins,
         candidates,
@@ -733,14 +681,14 @@ fn rewrite(
         for (index, &v) in data.params.iter().enumerate() {
             body.inner.values[v].def = ValueDef::Param { block: b, index };
         }
-        map_edges(&mut data.term, |target, args| {
+        for (target, args) in data.term.edges_mut() {
             let mut index = 0;
             args.retain(|_| {
                 let keep = masks[&target][index];
                 index += 1;
                 keep
             });
-        });
+        }
     }
     for id in removed {
         body.inner.insts.remove(id);

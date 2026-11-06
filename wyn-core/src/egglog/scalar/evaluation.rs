@@ -23,7 +23,7 @@ pub(in crate::egglog) struct Evaluation {
     common: LookupMap<(Vec<TermId>, Vec<TermId>), Vec<(TermId, bool)>>,
 }
 impl Evaluation {
-    pub fn new(program: &Program<'_, Optimized>, placement: &Placement) -> Result<Self, OptimizeError> {
+    pub fn new(program: &Program<'_, Optimized>, placement: &mut Placement) -> Result<Self, OptimizeError> {
         let inputs = timing::span("egglog evaluation / collect facts");
         let selected = &program.stage.selected;
         let facts = Facts { program };
@@ -91,6 +91,21 @@ impl Evaluation {
                         .is_some_and(|v| scalars.value_to_base::<bool>(v));
                     plan.total[term] = scalars.read(|r| r.contains("ExprTotal", value))?;
                     let mut deps = operands(name, fields);
+                    let node = sink.add("FlowNode", term as i64)?;
+                    for &child in &deps {
+                        let child = sink.add("FlowNode", child as i64)?;
+                        sink.add("FlowOperand", (node, child))?;
+                    }
+                    let owner = match name.as_str() {
+                        "ExprLeaf" | "ExprExecute" | "ExprInstruction" | "ExprCall" => {
+                            facts.lookup("ExprContextOwner", (selected.values[fields[2]],))
+                        }
+                        "ExprParameter" => Some(selected.values[fields[2]]),
+                        _ => None,
+                    };
+                    if let Some(scope) = owner.and_then(|v| placement.scopes.definition(v)) {
+                        sink.add("FlowScopeRequirement", (node, scope.0 as i64))?;
+                    }
                     if name == "ExprLeaf" {
                         let source = selected.values[fields[2]];
                         leaves.insert(term);
@@ -237,6 +252,7 @@ impl Evaluation {
             None,
             "(run-schedule (saturate source-summary) (saturate flow-evaluation))",
         )?;
+        placement.load_requirements(&graph)?;
         let mut enclosing = LookupMap::<usize, Vec<usize>>::default();
         Query(&graph).for_each("EvaluationContains", |row| {
             enclosing

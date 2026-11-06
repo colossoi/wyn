@@ -29,14 +29,40 @@ pub enum Terminator<C, A, R> {
 
 impl<C, A, R> Terminator<C, A, R> {
     pub fn successors(&self) -> SmallVec<[BlockId; 2]> {
+        self.edges().into_iter().map(|(target, _)| target).collect()
+    }
+
+    /// Preserve each edge occurrence, even when both arms target the same block.
+    pub fn edges(&self) -> SmallVec<[(BlockId, &[A]); 2]> {
         match self {
             Self::Return(_) | Self::Unreachable => SmallVec::new(),
-            Self::Branch { target, .. } => smallvec![*target],
+            Self::Branch { target, args } => smallvec![(*target, args.as_slice())],
             Self::CondBranch {
                 then_target,
+                then_args,
                 else_target,
+                else_args,
                 ..
-            } => smallvec![*then_target, *else_target],
+            } => smallvec![
+                (*then_target, then_args.as_slice()),
+                (*else_target, else_args.as_slice())
+            ],
+        }
+    }
+
+    pub fn edges_mut(&mut self) -> SmallVec<[(BlockId, &mut Vec<A>); 2]> {
+        match self {
+            Self::Return(_) | Self::Unreachable => SmallVec::new(),
+            Self::Branch { target, args } => smallvec![(*target, args)],
+            Self::CondBranch {
+                then_target,
+                then_args,
+                else_target,
+                else_args,
+                ..
+            } => {
+                smallvec![(*then_target, then_args), (*else_target, else_args)]
+            }
         }
     }
 

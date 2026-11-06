@@ -196,8 +196,8 @@ fn shared_placement_queries_match_individual_legal_site_selection() {
         .unwrap(),
     )
     .unwrap();
-    let placement = Placement::new(&program).unwrap();
-    let plan = Evaluation::new(&program, &placement).unwrap();
+    let mut placement = Placement::new(&program).unwrap();
+    let plan = Evaluation::new(&program, &mut placement).unwrap();
     let mut classes = LookupSet::default();
     let mut contexts = LookupSet::default();
     let mut targets = LookupSet::default();

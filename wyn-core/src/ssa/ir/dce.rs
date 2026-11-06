@@ -37,23 +37,14 @@ fn sweep_values<I: VisitValues, T>(function: &mut Function<I, T>, is_discardable
         }
     };
     for block in function.blocks.values() {
+        for (target, args) in block.term.edges() {
+            edge(target, args);
+        }
         match &block.term {
-            Terminator::Branch { target, args } => edge(*target, args),
-            Terminator::CondBranch {
-                cond,
-                then_target,
-                then_args,
-                else_target,
-                else_args,
-            } => {
-                // Conditions remain live even for loops without used results:
-                // removing them could change whether the program terminates.
-                pending.push(*cond);
-                edge(*then_target, then_args);
-                edge(*else_target, else_args);
-            }
+            // Loop conditions remain live even without used results: they determine termination.
+            Terminator::CondBranch { cond, .. } => pending.push(*cond),
             Terminator::Return(value) => pending.extend(value),
-            Terminator::Unreachable => {}
+            Terminator::Branch { .. } | Terminator::Unreachable => {}
         }
     }
 
@@ -111,19 +102,8 @@ fn sweep_values<I: VisitValues, T>(function: &mut Function<I, T>, is_discardable
         for (index, &value) in block.params.iter().enumerate() {
             function.values[value].def = ValueDef::Param { block: id, index };
         }
-        match &mut block.term {
-            Terminator::Branch { target, args } => retain_args(*target, args),
-            Terminator::CondBranch {
-                then_target,
-                then_args,
-                else_target,
-                else_args,
-                ..
-            } => {
-                retain_args(*then_target, then_args);
-                retain_args(*else_target, else_args);
-            }
-            Terminator::Return(_) | Terminator::Unreachable => {}
+        for (target, args) in block.term.edges_mut() {
+            retain_args(target, args);
         }
     }
 }

@@ -1,6 +1,6 @@
 use super::*;
 use crate::flow::ControlHeader;
-use crate::ssa::ir::ConstantValue;
+use crate::ssa::ir::{ConstantValue, Terminator};
 
 #[derive(Clone)]
 struct Instruction(Vec<ValueRef>);

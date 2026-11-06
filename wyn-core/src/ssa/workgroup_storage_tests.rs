@@ -1,5 +1,6 @@
 use super::*;
 use crate::ssa::builder::FuncBuilder;
+use crate::ssa::types::BlockId;
 use crate::ssa::types::{ConstantValue, PlaceInfo, PlaceOrigin, Terminator, ValueRef};
 use crate::types::{self, TypeName};
 
