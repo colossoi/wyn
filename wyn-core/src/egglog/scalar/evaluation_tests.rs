@@ -1,7 +1,8 @@
+use super::super::extract::operands;
 use super::*;
 use crate::egglog::{from_tlc, fuse, optimize_for_test, place, schedule};
 use crate::PipelineTopologyPolicy;
-use egglog_engine::{Core, TermDag};
+use egglog_engine::{Core, Read, TermDag, Write};
 
 #[test]
 fn shared_mandatory_operands_match_reference_closure_and_preserve_readonly_guards() {
@@ -24,7 +25,11 @@ fn shared_mandatory_operands_match_reference_closure_and_preserve_readonly_guard
     graph
         .parse_and_run_program(
             None,
-            concat!(include_str!("../flow.egg"), "\n", include_str!("evaluation.egg")),
+            concat!(
+                include_str!("../flow.egg"),
+                "\n(sort ExprContext)\n",
+                include_str!("evaluation.egg")
+            ),
         )
         .unwrap();
     graph
@@ -122,7 +127,11 @@ fn shared_ranks_preserve_request_ordering_and_choice_boundaries() {
     graph
         .parse_and_run_program(
             None,
-            concat!(include_str!("../flow.egg"), "\n", include_str!("evaluation.egg")),
+            concat!(
+                include_str!("../flow.egg"),
+                "\n(sort ExprContext)\n",
+                include_str!("evaluation.egg")
+            ),
         )
         .unwrap();
     let keys = graph
@@ -161,7 +170,8 @@ fn shared_ranks_preserve_request_ordering_and_choice_boundaries() {
         roots: LookupMap::default(),
         extents: [(keys[0], pure), (keys[1], effectful)].into_iter().collect(),
     };
-    plan.schedule_anchors(&selected, &mut graph).unwrap();
+    graph.parse_and_run_program(None, "(run-schedule (saturate schedule-rank))").unwrap();
+    plan.schedule_anchors(&selected, &graph).unwrap();
     let pure_order = plan.schedule(&[pure]).unwrap();
     assert_eq!(pure_order, &[vec![leaf], vec![a, b], vec![nested], vec![pure]]);
     assert_eq!(
@@ -272,4 +282,53 @@ fn shared_placement_queries_match_individual_legal_site_selection() {
     }
     assert!(contexts.len() > 1, "exercise separate entry contexts");
     assert!(targets.len() > 1, "exercise separate lexical placement targets");
+}
+
+#[test]
+fn unselected_expression_alternatives_do_not_add_evaluation_dependencies() {
+    let tlc = crate::compile_thru_tlc("entry main(x:i32) i32=x").unwrap();
+    let mut program = optimize_for_test(
+        schedule(
+            place(
+                fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                PipelineTopologyPolicy::AllowGenerated,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let selected = &program.stage.selected;
+    let term = (0..selected.dag.size()).find(|&term| {
+        matches!(selected.dag.get(term), Term::App(name, _) if matches!(name.as_str(), "ExprParameter" | "ExprLeaf"))
+    }).unwrap();
+    let (_, fields) = selected.app(term).unwrap();
+    let expression = selected.dag.to_string(term);
+    let context = selected.dag.to_string(fields[0]);
+    let ty = selected.dag.to_string(fields[1]);
+    let graph = &mut program.stage.scalars;
+    // Introduce a valid alternative after selection. Its self-reference would
+    // create a dependency cycle if projection followed all equivalent enodes.
+    graph
+        .parse_and_run_program(
+            None,
+            &format!(
+        "(union {expression} (ExprBinary {context} {ty} \"+\" {expression} (ExprLiteral {context} {ty} 0)))
+         (run-schedule (saturate selected-shape) (saturate selected-address) (saturate selected-flow))"
+    ),
+        )
+        .unwrap();
+    let query = Query(graph);
+    let value = query.required("SelectedExpr", term as i64).unwrap();
+    let mut has_binary = false;
+    graph.read(|r| r.enodes_for_eclass("ExprBinary", value, |_| has_binary = true)).unwrap();
+    assert!(has_binary, "the alternative must remain present in the e-class");
+    let node = query.constructor("FlowNode", term as i64).unwrap().unwrap();
+    assert!(evaluation_operands(graph, term).unwrap().is_empty());
+    query
+        .for_each("FlowOperand", |row| {
+            assert_ne!(row[0], node, "an unselected alternative leaked an operand");
+            Ok(())
+        })
+        .unwrap();
 }

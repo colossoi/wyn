@@ -68,7 +68,19 @@ pub(super) fn run(
         for name in scalars.get_function_names() {
             if !matches!(
                 name.as_str(),
-                "ExprContextFunction"
+                "SourceParent"
+                    | "ExprContextBoundary"
+                    | "SourceEvaluationPosition"
+                    | "SourceBranch"
+                    | "BranchInfo"
+                    | "SourceResult"
+                    | "SourceLoopInitial"
+                    | "LoopInitialInfo"
+                    | "SourceLoopForm"
+                    | "ForCount"
+                    | "ForEach"
+                    | "WhileCondition"
+                    | "ExprContextFunction"
                     | "ExprContextKernel"
                     | "ExprContextDispatch"
                     | "ExprContextTemplate"
@@ -142,6 +154,7 @@ pub(super) fn run(
     )?;
     scalars.clear_function("ExprContextActive")?;
     let selected = extract::select_roots(&mut scalars, policy)?;
+    evaluation::prepare(&mut scalars)?;
     if timing::enabled() {
         eprintln!("egglog scalar admitted values: {}", cache.len());
     }

@@ -84,15 +84,15 @@
       ((set (FlowStructuralInput value) symbol)) :ruleset source-summary)
 (relation FlowOperand (SourceValue SourceValue))
 ; Selected-value dependencies carry lexical requirements independently of execution.
-(relation FlowScopeRequirement (SourceValue i64))
+(relation FlowScopeRequirement (SourceValue RegionKey))
 (rule ((FlowOperand value child) (FlowScopeRequirement child scope))
       ((FlowScopeRequirement value scope)) :ruleset source-summary)
-; Lexical scope ancestry is shared with placement; scope IDs belong to the importer.
+; Lexical scope ancestry uses the source graph's region identities.
 (ruleset flow-scopes)
-(relation FlowScope (i64))
-(relation FlowScopeParent (i64 i64))
-(relation FlowScopeAncestor (i64 i64))
-(function FlowScopeContains (i64 i64) bool :merge (or old new))
+(relation FlowScope (RegionKey))
+(relation FlowScopeParent (RegionKey RegionKey))
+(relation FlowScopeAncestor (RegionKey RegionKey))
+(function FlowScopeContains (RegionKey RegionKey) bool :merge (or old new))
 (rule ((FlowScope scope)) ((FlowScopeAncestor scope scope)) :ruleset flow-scopes)
 (rule ((FlowScopeParent child parent) (FlowScopeAncestor ancestor parent))
       ((FlowScopeAncestor ancestor child)) :ruleset flow-scopes)

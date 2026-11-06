@@ -6,7 +6,7 @@ use egglog_engine::ast::Literal;
 use egglog_engine::extract::{Cost, CostModel, Extractor};
 use egglog_engine::sort::{VecContainer, F, S};
 use egglog_engine::{
-    ArcSort, Core, EGraph, Enode, Function, RawValues, Read, Term, TermDag, TermId, Value,
+    ArcSort, Core, EGraph, Enode, Function, RawValues, Read, Term, TermDag, TermId, Value, Write,
 };
 
 // Inlining trades one call for this much scalar work. Representation nodes,
@@ -258,7 +258,35 @@ pub(super) fn select_roots(
                     ));
                 }
             };
+            match dag.get(id) {
+                Term::App(name, children) if name != "vec-of" => {
+                    let table = match sink.constructor_schema(name)?.output.name() {
+                        "Expr" => Some("SelectedExpr"),
+                        "ExprArgs" => Some("SelectedArgs"),
+                        "ExprContext" => Some("SelectedContext"),
+                        "SourceValue" => Some("SelectedSource"),
+                        "RegionKey" => Some("SelectedRegion"),
+                        _ => None,
+                    };
+                    if let Some(table) = table {
+                        sink.set(table, id as i64, value)?;
+                    }
+                    if matches!(table, Some("SelectedExpr" | "SelectedArgs")) {
+                        sink.set("SelectedHead", id as i64, name.as_str())?;
+                        for (index, &child) in children.iter().enumerate() {
+                            sink.set("SelectedField", (id as i64, index as i64), child as i64)?;
+                        }
+                    }
+                }
+                Term::Lit(Literal::String(_)) => {
+                    sink.set("SelectedString", id as i64, value)?;
+                }
+                _ => {}
+            }
             values.push(value);
+        }
+        for (&(context, source), &term) in &selected_roots {
+            sink.set("SelectedRoot", (context, source), term as i64)?;
         }
         Ok(values)
     })?;

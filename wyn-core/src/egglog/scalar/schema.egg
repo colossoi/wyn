@@ -59,3 +59,15 @@
 (function ExprTemplateSafe (RegionKey) bool :merge (and old new))
 (relation ExprContextActive (ExprContext))
 (relation ExprContextMember (ExprContext RegionKey))
+
+; Exact extracted syntax: child indices identify selected occurrences, not every
+; alternative in an e-class. Native rules project their evaluation dependencies.
+(function SelectedHead (i64) String :no-merge)
+(function SelectedField (i64 i64) i64 :no-merge)
+(function SelectedExpr (i64) Expr :no-merge)
+(function SelectedArgs (i64) ExprArgs :no-merge)
+(function SelectedContext (i64) ExprContext :no-merge)
+(function SelectedSource (i64) SourceValue :no-merge)
+(function SelectedRegion (i64) RegionKey :no-merge)
+(function SelectedString (i64) String :no-merge)
+(function SelectedRoot (ExprContext SourceValue) i64 :no-merge)
