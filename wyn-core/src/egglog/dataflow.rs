@@ -1,4 +1,5 @@
 //! Shared structural flow analysis; arithmetic remains in TLC.
+pub(crate) mod control;
 use super::query::Query;
 use crate::tlc::{self, ArrayExpr, LoopKind, Payload, SoacOp, Term, TermId, TermKind, VarRef};
 use crate::{LookupMap, LookupSet, StableMap, SymbolId};

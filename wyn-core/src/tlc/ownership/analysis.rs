@@ -7,9 +7,9 @@
 //!    parameter). Record per-term `uses`, `kills`, and `defs` sets.
 //!    Variables that *alias* an existing owner share its `OwnerId`.
 //!
-//! 2. **Liveness** — backward dataflow over the structured TLC tree,
-//!    with fixed-point iteration over loops and SOAC bodies. Records
-//!    per-term `live_out`.
+//! 2. **Liveness** — the shared evaluation graph propagates owner uses
+//!    backward through control flow, including loop and callback backedges.
+//!    Records per-term `live_out`.
 //!
 //! 3. **Use** — validation and provenance export read the model:
 //!    - use-after-move checking: an owner in `kills[T] ∩ live_out[T]`
@@ -20,6 +20,8 @@
 
 use crate::builtins;
 use crate::builtins::catalog;
+use crate::egglog::dataflow::control::{Action, ControlFlow};
+use crate::egglog::OptimizeError;
 use crate::tlc;
 use crate::tlc::var_term_builtin_id;
 use crate::tlc::VarRef;
@@ -237,10 +239,20 @@ impl AnalysisState {
 /// `live_out` populated for every term reachable from a function body.
 pub(super) fn analyze<Tag, F: Family, GlobalContext>(
     program: &Program<Tag, F, GlobalContext>,
-) -> AnalysisState {
+) -> Result<AnalysisState, OptimizeError> {
     let mut model = build(program);
-    super::liveness::solve(program, &mut model);
-    model
+    model.live_out = ControlFlow::build(program).live_out(|action| match action {
+        Action::Evaluate(term) => (
+            model.uses.get(&term).cloned().unwrap_or_default(),
+            model.kills.get(&term).cloned().unwrap_or_default(),
+        ),
+        Action::Define(term) => (
+            LookupSet::default(),
+            model.defs.get(&term).cloned().unwrap_or_default(),
+        ),
+        Action::Read(symbol) => (model.aliases_of(symbol), LookupSet::default()),
+    })?;
+    Ok(model)
 }
 
 /// Walk the program and populate the model's effect sets, leaving

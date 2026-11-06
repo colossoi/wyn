@@ -32,7 +32,7 @@ pub fn validate_ownership(program: Transformed) -> error::Result<OwnershipValida
 /// graphics orchestration calls and before partial evaluation can erase
 /// source-level consumption boundaries.
 pub fn check(program: &Transformed) -> error::Result<()> {
-    let model = analyze(program);
+    let model = analyze(program).map_err(|error| CompilerError::Internal(error.to_string()))?;
     if let Some(err) = check_shade_target_capture(program, &model) {
         return Err(err);
     }

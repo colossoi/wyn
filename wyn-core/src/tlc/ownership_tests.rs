@@ -396,7 +396,7 @@ fn liveness_dead_after_array_with_when_source_is_last_use() {
 def f(a: *[4]i32) *[4]i32 = a with [0] = 1
 "#,
     );
-    let model = analyze(&program);
+    let model = analyze(&program).unwrap();
 
     let def = find_def(&program, "f");
     let lam = match &def.body.kind {
@@ -429,7 +429,7 @@ def f(a: [4]i32, k: i32) [4]i32 =
     if k > 0 then b else a
 "#,
     );
-    let model = analyze(&program);
+    let model = analyze(&program).unwrap();
 
     let def = find_def(&program, "f");
     let lam = match &def.body.kind {
@@ -464,7 +464,7 @@ def f(cond: bool, a: *[4]i32) i32 =
     if cond then a[0] else consume(a)
 "#,
     );
-    let model = analyze(&program);
+    let model = analyze(&program).unwrap();
 
     let def = find_def(&program, "f");
     let lam = match &def.body.kind {
@@ -498,7 +498,7 @@ def f(a: [4]i32, n: i32) i32 =
         acc + a[i]
 "#,
     );
-    let model = analyze(&program);
+    let model = analyze(&program).unwrap();
 
     let def = find_def(&program, "f");
     let lam = match &def.body.kind {
@@ -1561,7 +1561,7 @@ fn soac_with_populated_captures_detects_capture_kill() {
     // SOAC body that consumes a capture across hypothetical re-invocations
     // is a use-after-move.
     let program = synth_program_with_populated_soac_captures();
-    let model = super::analyze(&program);
+    let model = super::analyze(&program).unwrap();
     let outer_sym = program
         .symbols
         .iter()
@@ -1730,7 +1730,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
         },
     );
 
-    let model = super::analyze(&program);
+    let model = super::analyze(&program).unwrap();
     assert!(
         model.live_out.contains_key(&capture_term_id),
         "capture term's TermId should appear in live_out after analyze — \

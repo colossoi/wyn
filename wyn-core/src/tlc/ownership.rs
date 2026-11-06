@@ -3,7 +3,6 @@
 mod analysis;
 mod apply;
 mod facts;
-mod liveness;
 mod validate;
 
 pub use apply::{apply_ownership, OwnershipApplied, OwnershipGlobal};
