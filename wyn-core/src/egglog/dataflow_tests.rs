@@ -1,8 +1,28 @@
-use super::{Dataflow, Value};
+use super::{reference_paths, Dataflow, Value};
 use crate::egglog::query::Query;
 use crate::tlc::{self, DefMeta};
 use crate::{ast_type_holes, compile_thru_frontend, SymbolId, SymbolTable};
 use egglog_engine::Write;
+
+#[test]
+fn imported_reference_occurrences_match_authored_paths_in_every_subtree() {
+    let source = "entry main(x: (i32, (i32, i32)), choose: bool) i32 =
+        let alias = x in let ignored = (alias.1).0 in
+        if choose then (alias.1).1 else let pair = (x.0, (alias.1).0) in pair.0";
+    let program = compile_thru_frontend(source).unwrap();
+    let program = ast_type_holes::reject_type_holes(program).unwrap();
+    let program = tlc::lower_from_ast(program).unwrap();
+    let entry = program.defs.iter().find(|def| matches!(def.meta, DefMeta::EntryPoint(_))).unwrap();
+    let (body, _) = tlc::extract_lambda_params_ref(&entry.body);
+    let (flow, _) = Dataflow::build(body);
+    body.walk(&mut |term: &tlc::Term| {
+        let expected: crate::LookupSet<_> = reference_paths(term).into_iter().collect();
+        let actual: crate::LookupSet<_> =
+            flow.capture_sources(&flow, term.id).unwrap_or_default().into_values().flatten().collect();
+        assert_eq!(actual, expected, "reference paths for {:?}", term.id);
+        tlc::WalkDecision::Recurse
+    });
+}
 
 #[test]
 fn demand_stops_at_references_and_branch_boundaries_but_dependencies_cross_them() {

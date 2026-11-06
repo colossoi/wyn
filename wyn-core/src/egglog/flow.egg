@@ -15,15 +15,18 @@
 (ruleset flow-forward)
 (ruleset flow-projections)
 (ruleset source-summary)
-; Backward resource liveness over explicit evaluation edges.
+; Backward resource liveness over sequenced execution points.
 (ruleset flow-live)
-(relation FlowNext (i64 i64))
-(relation FlowLive (i64 i64))
-(relation FlowLiveOut (i64 i64))
-(function FlowKilled (i64 i64) bool :merge (or old new))
+(relation FlowNext (SourceValue SourceValue))
+(relation FlowLive (SourceValue i64))
+(relation FlowLiveOut (SourceValue i64))
+(relation FlowExecution (SourceValue SourceValue SourceValue))
+(relation FlowLiveAfter (SourceValue i64))
+(function FlowKilled (SourceValue i64) bool :merge (or old new))
 (rule ((FlowNext point next) (FlowLive next resource)) ((FlowLiveOut point resource)) :ruleset flow-live)
 (rule ((FlowLiveOut point resource)) ((set (FlowKilled point resource) false)) :ruleset flow-live)
 (rule ((FlowLiveOut point resource) (= (FlowKilled point resource) false)) ((FlowLive point resource)) :ruleset flow-live)
+(rule ((FlowExecution expression enter exit) (FlowLiveOut exit resource)) ((FlowLiveAfter expression resource)) :ruleset flow-live)
 (function SourceAlias (SourceValue) SourceValue :no-merge)
 (relation SourceField (SourceValue i64 SourceValue))
 (datatype SourceProjectionData (ProjectionInfo SourceValue i64))
@@ -80,6 +83,8 @@
 
 ; Executing an occurrence is distinct from referring to its resulting value.
 (relation FlowEvaluation (SourceValue SourceValue))
+(function FlowEvaluationOperand (SourceValue i64) SourceValue :no-merge)
+(rule ((= child (FlowEvaluationOperand parent index))) ((FlowEvaluation parent child)) :ruleset source-summary)
 (relation FlowReference (SourceValue SourceValue))
 ; Entering a callee, branch, or repeated body crosses an execution scope.
 (relation FlowCall (SourceValue SourceValue))
@@ -100,3 +105,5 @@
 (relation FlowEffect (SourceValue SourceValue))
 (rule ((FlowEvaluation parent child)) ((FlowEffect parent child)) :ruleset source-summary)
 (rule ((FlowCall parent child)) ((FlowEffect parent child)) :ruleset source-summary)
+(relation FlowReach (SourceValue SourceValue))
+(rule ((FlowReach root parent) (FlowEffect parent child)) ((FlowReach root child)) :ruleset flow-evaluation)

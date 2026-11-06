@@ -108,7 +108,6 @@ fn shared_ranks_preserve_request_ordering_and_choice_boundaries() {
     let effectful = dag.app("ExprVector".into(), vec![leaf, leaf, args]);
     let n = dag.size();
     let mut plan = Evaluation {
-        dependencies: vec![Vec::new(); n],
         readonly: vec![true; n],
         total: vec![false; n],
         targets: LookupMap::default(),
@@ -134,10 +133,12 @@ fn shared_ranks_preserve_request_ordering_and_choice_boundaries() {
                     unreachable!()
                 };
                 let deps = if name == "ExprChoice" { vec![fields[2]] } else { operands(name, fields) };
-                for &child in &deps {
+                let parent = sink.add("FlowNode", term as i64)?;
+                for (index, &child) in deps.iter().enumerate() {
+                    let node = sink.add("FlowNode", child as i64)?;
+                    sink.set("FlowEvaluationOperand", (parent, index as i64), node)?;
                     sink.add("ExprScheduleOperand", (term as i64, child as i64))?;
                 }
-                plan.dependencies[term] = deps;
                 sink.set("ExprScheduleWeight", term as i64, i64::from(name == "ExprChoice"))?;
                 if name == "ExprChoice" {
                     sink.set("ExprScheduleCondition", term as i64, fields[2] as i64)?;
@@ -147,7 +148,14 @@ fn shared_ranks_preserve_request_ordering_and_choice_boundaries() {
         })
         .unwrap();
     // Producers behind leaves have separate anchors, even when their ranks are shared.
-    plan.dependencies[leaf] = vec![nested];
+    graph
+        .update(|mut sink| {
+            let parent = sink.add("FlowNode", leaf as i64)?;
+            let child = sink.add("FlowNode", nested as i64)?;
+            sink.set("FlowEvaluationOperand", (parent, 0i64), child)?;
+            Ok(())
+        })
+        .unwrap();
     let selected = Selected {
         dag,
         values: Vec::new(),

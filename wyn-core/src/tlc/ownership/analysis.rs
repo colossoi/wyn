@@ -20,7 +20,7 @@
 
 use crate::builtins;
 use crate::builtins::catalog;
-use crate::egglog::dataflow::control::{Action, ControlFlow};
+use crate::egglog::dataflow::{Action, Dataflow};
 use crate::egglog::OptimizeError;
 use crate::tlc;
 use crate::tlc::var_term_builtin_id;
@@ -241,7 +241,7 @@ pub(super) fn analyze<Tag, F: Family, GlobalContext>(
     program: &Program<Tag, F, GlobalContext>,
 ) -> Result<AnalysisState, OptimizeError> {
     let mut model = build(program);
-    model.live_out = ControlFlow::build(program).live_out(|action| match action {
+    model.live_out = Dataflow::live_out(program, |action| match action {
         Action::Evaluate(term) => (
             model.uses.get(&term).cloned().unwrap_or_default(),
             model.kills.get(&term).cloned().unwrap_or_default(),

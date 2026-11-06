@@ -1,12 +1,14 @@
 //! Shared structural flow analysis; arithmetic remains in TLC.
-pub(crate) mod control;
 use super::query::Query;
+use super::OptimizeError;
 use crate::tlc::{
-    self, ArrayExpr, LoopKind, Payload, SoacOp, Term, TermId, TermKind, VarRef, WalkDecision,
+    self, ArrayExpr, Family, LoopKind, Payload, Program, SoacOp, Term, TermId, TermKind, VarRef,
+    WalkDecision,
 };
-use crate::{LookupMap, LookupSet, StableMap, SymbolId};
+use crate::{Interner, LookupMap, LookupSet, StableMap, SymbolId};
 pub(crate) use egglog_engine::Value;
 use egglog_engine::{EGraph, FullState, IntoValues, RawValues, Write};
+use std::hash::Hash;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Origin {
@@ -20,6 +22,35 @@ struct Expression {
     evaluation: Value,
     // Forwarding may borrow a producer, but must not discard other evaluations.
     forwarding: Value,
+    control: (Value, Value),
+    references: (usize, usize),
+    reference: Option<usize>,
+}
+
+impl Expression {
+    fn new(value: Value, evaluation: Value) -> Self {
+        Self {
+            value,
+            evaluation,
+            forwarding: evaluation,
+            control: (evaluation, evaluation),
+            references: (0, 0),
+            reference: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Action {
+    Evaluate(TermId),
+    Define(TermId),
+    Read(SymbolId),
+}
+
+// Authored reference paths share their prefixes; semantic aliases remain in egglog.
+enum Reference {
+    Name(SymbolId),
+    Field(usize, usize),
 }
 
 pub(crate) struct Dependencies(LookupSet<Value>);
@@ -33,6 +64,9 @@ pub(crate) struct Dataflow {
     producers: LookupMap<Value, SymbolId>,
     references: StableMap<SymbolId, (TermId, crate::types::Type, crate::ast::Span)>,
     locals: LookupSet<SymbolId>,
+    actions: LookupMap<Value, Action>,
+    // Postorder occurrences let capture queries select subtrees without walking TLC again.
+    reference_occurrences: Vec<Reference>,
 }
 
 fn fact(sink: &mut FullState<'_, '_>, name: &str, args: impl IntoValues) -> Value {
@@ -40,6 +74,45 @@ fn fact(sink: &mut FullState<'_, '_>, name: &str, args: impl IntoValues) -> Valu
 }
 
 impl Dataflow {
+    pub fn live_out<Tag, F: Family, G, R: Copy + Eq + Hash>(
+        program: &Program<Tag, F, G>,
+        mut transfer: impl FnMut(Action) -> (LookupSet<R>, LookupSet<R>),
+    ) -> Result<LookupMap<TermId, LookupSet<R>>, OptimizeError> {
+        let mut graph = EGraph::default();
+        graph.parse_and_run_program(None, include_str!("flow.egg"))?;
+        let mut flow = Self::default();
+        let mut resources = Interner::<i64, R>::new();
+        graph.update(|mut sink| {
+            for def in &program.defs {
+                let body = match &def.body.kind {
+                    TermKind::Lambda(lam) => &lam.body,
+                    _ => &def.body,
+                };
+                flow.import(body, &mut sink);
+            }
+            for (&point, &action) in &flow.actions {
+                let (uses, kills) = transfer(action);
+                for resource in uses {
+                    sink.add("FlowLive", (point, resources.intern(&resource)))?;
+                }
+                for resource in kills {
+                    sink.set("FlowKilled", (point, resources.intern(&resource)), true)?;
+                }
+            }
+            Ok(())
+        })?;
+        graph.parse_and_run_program(None, "(run-schedule (saturate flow-live))")?;
+        let mut live = LookupMap::<_, LookupSet<_>>::default();
+        Query(&graph).for_each("FlowLiveAfter", |row| {
+            live.entry(row[0]).or_default().insert(*resources.resolve(graph.value_to_base::<i64>(row[1])));
+            Ok(())
+        })?;
+        Ok(flow
+            .terms
+            .iter()
+            .map(|(&term, expr)| (term, live.get(&expr.evaluation).cloned().unwrap_or_default()))
+            .collect())
+    }
     pub fn build<C: Payload, S: Payload>(term: &Term<C, S>) -> (Self, Value) {
         let mut graph = EGraph::default();
         graph
@@ -169,16 +242,31 @@ impl Dataflow {
         )
     }
 
-    pub fn capture_sources<C: Payload, S: Payload>(
+    /// Read authored names from the callback's import and resolve producers in its enclosing scope.
+    pub fn capture_sources(
         &self,
-        term: &Term<C, S>,
-    ) -> LookupMap<SymbolPath, LookupSet<SymbolPath>> {
+        occurrences: &Self,
+        term: TermId,
+    ) -> Option<LookupMap<SymbolPath, LookupSet<SymbolPath>>> {
+        let expr = occurrences.terms.get(&term)?;
+        let (start, mut end) = expr.references;
         let mut sources = LookupMap::<_, LookupSet<_>>::default();
-        for (symbol, path) in reference_paths(term) {
-            sources.entry(self.resolve_projection(symbol, &path)).or_default().insert((symbol, path));
+        while end > start {
+            let mut index = end - 1;
+            let mut path = Vec::new();
+            while let Reference::Field(parent, field) = occurrences.reference_occurrences[index] {
+                path.push(field);
+                index = parent;
+            }
+            if let Reference::Name(symbol) = occurrences.reference_occurrences[index] {
+                path.reverse();
+                sources.entry(self.resolve_projection(symbol, &path)).or_default().insert((symbol, path));
+            }
+            end = index;
         }
-        sources
+        Some(sources)
     }
+
     pub fn binding_origin(&self, symbol: SymbolId, fields: &[usize]) -> Option<Origin> {
         self.origin(self.bindings.get(&symbol)?.value, fields)
     }
@@ -223,11 +311,7 @@ impl Dataflow {
         }
         let value = fact(sink, "SourceGlobal", i64::from(symbol.0));
         sink.set("FlowInput", value, i64::from(symbol.0)).expect("valid input");
-        let expr = Expression {
-            value,
-            evaluation: value,
-            forwarding: value,
-        };
+        let expr = Expression::new(value, value);
         self.bindings.insert(symbol, expr);
         expr
     }
@@ -245,7 +329,10 @@ impl Dataflow {
         term: &Term<C, S>,
         sink: &mut FullState<'_, '_>,
     ) -> Expression {
+        let first_reference = self.reference_occurrences.len();
+        let mut children = Vec::new();
         let mut body = None;
+        let mut captures = 0;
         match &term.kind {
             TermKind::Let { name, .. } => {
                 self.locals.insert(*name);
@@ -280,11 +367,12 @@ impl Dataflow {
                 };
                 self.locals.extend(callback.lam.params.iter().map(|(name, _)| *name));
                 body = Some(callback.lam.body.as_ref());
+                S::for_each(&callback.data, &mut |_| captures += 1);
             }
             _ => {}
         }
         let update = tlc::record_update_parts(term);
-        let expr = match &term.kind {
+        let mut expr = match &term.kind {
             TermKind::Var(VarRef::Symbol(symbol))
             | TermKind::ArrayExpr(ArrayExpr::Var(VarRef::Symbol(symbol), _)) => {
                 self.references.entry(*symbol).or_insert_with(|| (term.id, term.ty.clone(), term.span));
@@ -292,17 +380,27 @@ impl Dataflow {
                 let evaluation = self.fresh(sink);
                 fact(sink, "FlowReference", (evaluation, input.evaluation));
 
+                let reference = self.reference_occurrences.len();
+                self.reference_occurrences.push(Reference::Name(*symbol));
                 Expression {
-                    value: input.value,
                     evaluation,
-                    forwarding: input.forwarding,
+                    reference: Some(reference),
+                    ..input
                 }
             }
-            TermKind::Coerce { inner, .. } => self.import(inner, sink),
+            TermKind::Coerce { inner, .. } => {
+                let input = self.child(inner, sink, &mut children);
+                let evaluation = self.computed("FlowEvaluation", &[input.evaluation], sink);
+                Expression {
+                    evaluation,
+                    reference: None,
+                    ..input
+                }
+            }
             TermKind::App { .. } if update.is_some() => {
                 let (record, index, replacement) = update.unwrap();
-                let record = self.import(record, sink);
-                let replacement = self.import(replacement, sink);
+                let record = self.child(record, sink, &mut children);
+                let replacement = self.child(replacement, sink, &mut children);
                 let value = self.computed("FlowOperand", &[record.value, replacement.value], sink);
                 fact(
                     sink,
@@ -312,29 +410,19 @@ impl Dataflow {
                 self.evaluated(value, &[record, replacement], sink)
             }
             TermKind::Let { name, rhs, body, .. } => {
-                let rhs = self.import(rhs, sink);
+                let rhs = self.child(rhs, sink, &mut children);
                 let value = self.fresh(sink);
                 sink.set("SourceAlias", value, rhs.value).expect("valid binding");
-                self.bindings.insert(
-                    *name,
-                    Expression {
-                        value,
-                        evaluation: rhs.evaluation,
-                        forwarding: rhs.forwarding,
-                    },
-                );
-                let body = self.import(body, sink);
+                self.bindings.insert(*name, Expression { value, ..rhs });
+                let body = self.child(body, sink, &mut children);
                 let evaluation = self.computed("FlowEvaluation", &[rhs.evaluation, body.evaluation], sink);
-                Expression {
-                    value: body.value,
-                    evaluation,
-                    forwarding: evaluation,
-                }
+                Expression::new(body.value, evaluation)
             }
             TermKind::Tuple(fields)
             | TermKind::VecLit(fields)
             | TermKind::ArrayExpr(ArrayExpr::Literal(fields)) => {
-                let fields: Vec<_> = fields.iter().map(|field| self.import(field, sink)).collect();
+                let fields: Vec<_> =
+                    fields.iter().map(|field| self.child(field, sink, &mut children)).collect();
                 let value = self.computed(
                     "FlowOperand",
                     &fields.iter().map(|field| field.value).collect::<Vec<_>>(),
@@ -346,13 +434,20 @@ impl Dataflow {
                 self.evaluated(value, &fields, sink)
             }
             TermKind::TupleProj { tuple, idx } => {
-                let input = self.import(tuple, sink);
+                let input = self.child(tuple, sink, &mut children);
                 let value = self.fresh(sink);
                 fact(sink, "SourceSelect", (value, input.value, *idx as i64));
+                let reference = input.reference.map(|parent| {
+                    let reference = self.reference_occurrences.len();
+                    self.reference_occurrences.push(Reference::Field(parent, *idx));
+                    reference
+                });
+                let evaluation = self.computed("FlowEvaluation", &[input.evaluation], sink);
                 Expression {
                     value,
-                    evaluation: input.evaluation,
-                    forwarding: input.forwarding,
+                    evaluation,
+                    reference,
+                    ..input
                 }
             }
             TermKind::If {
@@ -360,9 +455,9 @@ impl Dataflow {
                 then_branch,
                 else_branch,
             } => {
-                let condition = self.import(cond, sink);
-                let yes = self.import(then_branch, sink);
-                let no = self.import(else_branch, sink);
+                let condition = self.child(cond, sink, &mut children);
+                let yes = self.child(then_branch, sink, &mut children);
+                let no = self.child(else_branch, sink, &mut children);
                 let value = self.computed("FlowOperand", &[condition.value, yes.value, no.value], sink);
                 fact(sink, "FlowChoice", (value, yes.value, no.value));
                 let expr = self.evaluated(value, &[condition], sink);
@@ -382,7 +477,7 @@ impl Dataflow {
                     } else {
                         "FlowEvaluation"
                     };
-                    let child = self.import(child, sink).evaluation;
+                    let child = self.child(child, sink, &mut children).evaluation;
                     fact(sink, edge, (value, child));
                 });
                 if let TermKind::Soac(
@@ -393,14 +488,18 @@ impl Dataflow {
                 {
                     let destination = self.symbol(dest.id, sink).evaluation;
                     fact(sink, "FlowReference", (value, destination));
+                    self.reference_occurrences.push(Reference::Name(dest.id));
                 }
-                Expression {
-                    value,
-                    evaluation: value,
-                    forwarding: value,
-                }
+                Expression::new(value, value)
             }
         };
+        expr.references = (first_reference, self.reference_occurrences.len());
+        expr.control = self.control(term, &children, captures, sink);
+        fact(
+            sink,
+            "FlowExecution",
+            (expr.evaluation, expr.control.0, expr.control.1),
+        );
         if term.id != TermId::SYNTHETIC {
             self.terms.insert(term.id, expr);
         }
@@ -418,10 +517,107 @@ impl Dataflow {
             &operands.iter().map(|expr| expr.evaluation).collect::<Vec<_>>(),
             sink,
         );
-        Expression {
-            value,
-            evaluation,
-            forwarding: evaluation,
+        Expression::new(value, evaluation)
+    }
+
+    fn child<C: Payload, S: Payload>(
+        &mut self,
+        term: &Term<C, S>,
+        sink: &mut FullState<'_, '_>,
+        children: &mut Vec<Expression>,
+    ) -> Expression {
+        let expr = self.import(term, sink);
+        children.push(expr);
+        expr
+    }
+
+    fn sequence(
+        &mut self,
+        children: &[Expression],
+        mut after: Value,
+        sink: &mut FullState<'_, '_>,
+    ) -> Value {
+        for child in children.iter().rev() {
+            fact(sink, "FlowNext", (child.control.1, after));
+            after = child.control.0;
+        }
+        after
+    }
+
+    fn control<C: Payload, S: Payload>(
+        &mut self,
+        term: &Term<C, S>,
+        children: &[Expression],
+        captures: usize,
+        sink: &mut FullState<'_, '_>,
+    ) -> (Value, Value) {
+        let exit = self.fresh(sink);
+        match &term.kind {
+            TermKind::Coerce { .. } => children[0].control,
+            TermKind::Let { .. } => {
+                self.actions.insert(exit, Action::Define(term.id));
+                fact(sink, "FlowNext", (children[0].control.1, exit));
+                fact(sink, "FlowNext", (exit, children[1].control.0));
+                (children[0].control.0, children[1].control.1)
+            }
+            TermKind::If { .. } => {
+                for arm in &children[1..] {
+                    fact(sink, "FlowNext", (children[0].control.1, arm.control.0));
+                    fact(sink, "FlowNext", (arm.control.1, exit));
+                }
+                (children[0].control.0, exit)
+            }
+            TermKind::Lambda(_) | TermKind::Soac(_) => {
+                let repeat = self.fresh(sink);
+                if matches!(term.kind, TermKind::Soac(_)) {
+                    self.actions.insert(repeat, Action::Define(term.id));
+                }
+                fact(sink, "FlowNext", (repeat, children[0].control.0));
+                fact(sink, "FlowNext", (children[0].control.1, repeat));
+                let enter = self.fresh(sink);
+                fact(sink, "FlowNext", (enter, repeat));
+                fact(sink, "FlowNext", (enter, exit));
+                let enter = self.sequence(&children[1..1 + captures], enter, sink);
+                (self.sequence(&children[1 + captures..], enter, sink), exit)
+            }
+            TermKind::Loop { kind, .. } => {
+                self.actions.insert(exit, Action::Evaluate(term.id));
+                let define = self.fresh(sink);
+                self.actions.insert(define, Action::Define(term.id));
+                let body = children[children.len() - 1];
+                let enter = if matches!(kind, LoopKind::While { .. }) {
+                    let condition = children[children.len() - 2];
+                    fact(sink, "FlowNext", (define, condition.control.0));
+                    fact(sink, "FlowNext", (condition.control.1, body.control.0));
+                    fact(sink, "FlowNext", (condition.control.1, exit));
+                    fact(sink, "FlowNext", (body.control.1, define));
+                    self.sequence(&children[..children.len() - 2], define, sink)
+                } else {
+                    let repeat = self.fresh(sink);
+                    fact(sink, "FlowNext", (repeat, define));
+                    fact(sink, "FlowNext", (repeat, exit));
+                    fact(sink, "FlowNext", (define, body.control.0));
+                    fact(sink, "FlowNext", (body.control.1, repeat));
+                    self.sequence(&children[..children.len() - 1], repeat, sink)
+                };
+                (enter, exit)
+            }
+            _ => {
+                let action = match term.kind {
+                    TermKind::Var(VarRef::Symbol(symbol)) if term.id == TermId::SYNTHETIC => {
+                        Action::Read(symbol)
+                    }
+                    _ => Action::Evaluate(term.id),
+                };
+                self.actions.insert(exit, action);
+                let children = if matches!(&term.kind, TermKind::TupleProj { tuple, .. } if matches!(tuple.kind, TermKind::Var(VarRef::Symbol(_))))
+                {
+                    &[]
+                } else {
+                    children
+                };
+                (self.sequence(children, exit, sink), exit)
+            }
         }
     }
 }

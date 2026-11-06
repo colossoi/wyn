@@ -11,8 +11,8 @@ use super::inline::UnifiedHelpersInlined;
 use super::run::UnpinnedPolymorphic;
 use super::{
     clone_term_with_fresh_ids, curried_function_type, Def, DefMeta, EntryPoint, Lambda, Program,
-    ProgramParts, RewriteDecision, SoacOp, Term, TermIdSource, TermKind, TermRewriter, TermVisitor, VarRef,
-    WalkDecision,
+    ProgramParts, RewriteDecision, SoacOp, Term, TermId, TermIdSource, TermKind, TermRewriter, TermVisitor,
+    VarRef, WalkDecision,
 };
 use crate::ast;
 use crate::ast::Span;
@@ -1528,14 +1528,15 @@ fn stage_captures(
         &mut substitutions,
     );
     append_computed_captures(
-        &callback.body,
+        callback_values,
+        callback.body.id,
         computed,
         values,
         symbols,
         &mut params,
         &mut declarations,
         &mut substitutions,
-    );
+    )?;
     append_target_captures(
         &used,
         targets,
@@ -1593,15 +1594,16 @@ fn append_root_captures(
 }
 
 fn append_computed_captures(
-    body: &Term,
+    occurrences: &Dataflow,
+    body: TermId,
     computed: &[ComputedValue],
     values: &Dataflow,
     symbols: &mut SymbolTable,
     params: &mut Vec<(SymbolId, Type)>,
     declarations: &mut Vec<interface::EntryParamDecl>,
     substitutions: &mut ExternalSubstitutions,
-) {
-    let used_sources = values.capture_sources(body);
+) -> Option<()> {
+    let used_sources = values.capture_sources(occurrences, body)?;
 
     for value in computed {
         for leaf in &value.leaves {
@@ -1629,6 +1631,7 @@ fn append_computed_captures(
             }
         }
     }
+    Some(())
 }
 
 fn append_target_captures(
@@ -1800,14 +1803,15 @@ fn build_compute_stage(
         &mut substitutions,
     );
     append_computed_captures(
-        operation.rhs,
+        &body_values,
+        operation.rhs.id,
         computed,
         values,
         symbols,
         &mut params,
         &mut declarations,
         &mut substitutions,
-    );
+    )?;
     append_target_captures(
         &used,
         targets,

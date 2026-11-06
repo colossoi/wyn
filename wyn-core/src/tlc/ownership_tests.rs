@@ -569,6 +569,26 @@ def main(arr: *[4]i32) i32 =
 }
 
 #[test]
+fn while_conditions_observe_captured_values_on_each_iteration() {
+    let program = compile_to_tlc("def main(a: [4]i32) i32 = loop i = 0 while a[0] > i do i + 1");
+    let model = analyze(&program).unwrap();
+    let (body, parameters) = tlc::extract_lambda_params_ref(&find_def(&program, "main").body);
+    let owner = model.owner_of(parameters[0].0).unwrap();
+    let mut checked = false;
+    body.walk(&mut |term: &Term| {
+        if let TermKind::Loop { body, .. } = &term.kind {
+            assert!(
+                model.live_out[&body.id].contains(&owner),
+                "the next condition still needs a"
+            );
+            checked = true;
+        }
+        tlc::WalkDecision::Recurse
+    });
+    assert!(checked);
+}
+
+#[test]
 fn consuming_call_rejects_observing_parameter_origin() {
     // Shape checking alone cannot distinguish a fresh local array from an
     // observing parameter of the same `T`. The ownership model can: a

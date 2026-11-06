@@ -3,12 +3,14 @@
 (relation EvaluationReadOnly (i64))
 (relation EvaluationTotal (i64))
 (relation EvaluationContains (i64 i64))
+(relation EvaluationBinding (i64))
+(rule ((FlowReach (FlowNode root) (FlowNode leaf)) (EvaluationBinding leaf))
+      ((EvaluationContains root leaf)) :ruleset flow-evaluation)
 (relation EvaluationAvailable (i64 i64))
 (relation EvaluationBefore (i64 i64))
 (relation EvaluationHoistable (i64))
 (ruleset evaluation-placement)
-; Contained bindings are shared graph reachability facts, imported only for
-; loop boundaries and branch arms. Placement permission is derived below.
+; Containment follows evaluation and scope edges for requested loop/branch roots.
 ; Earlier bindings already execute in their enclosing region; this restores
 ; their evaluation without granting permission to speculate their producers.
 (rule ((EvaluationContains boundary leaf) (EvaluationAvailable boundary leaf)
