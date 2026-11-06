@@ -1,13 +1,16 @@
 //! Concrete SSA storage semantics for representation lowering and local reuse.
 
+use super::dataflow::Dataflow;
 use super::ir::ValueDef;
-use super::types::{FuncBody, InstKind, PlaceId, Terminator, ValueId, ValueRef};
+use super::types::{FuncBody, InstKind, Terminator, ValueRef};
 use crate::builtins::catalog;
 use crate::op::{OpTag, PureViewSource};
 use crate::types::{
     is_array_variant_bounded, is_array_variant_composite, is_array_variant_view, Type, TypeExt, TypeName,
 };
-use crate::{FunctionId, LookupMap, LookupSet, ResourceAccess};
+use crate::{FunctionId, LookupMap, ResourceAccess};
+use egglog_engine::{EGraph, FullState, RawValues, Read, Value, Write};
+use slotmap::Key;
 
 /// How an instruction obtains storage for an array-containing result.
 pub(super) enum ResultStorage {
@@ -131,50 +134,253 @@ pub(super) fn is_local_value(ty: &Type) -> bool {
     }
 }
 
-/// Physical provenance shared by allocation reuse and memory synchronization.
-/// Unknown descriptors may name shared memory; external bindings cannot.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(super) enum MemoryRoot {
-    Allocation(PlaceId),
-    Workgroup(u32),
-    External,
-    Unknown,
+pub(super) fn memory_id(key: impl Key) -> i64 {
+    key.data().as_ffi() as i64
 }
 
-/// Transitive workgroup effects keep scalar helpers transparent to memory
-/// analysis. Unknown callees retain conservative read/write effects.
+pub(super) fn local_array(ty: &Type) -> bool {
+    ty.is_array()
+        && is_local_value(ty)
+        && ty.array_variant().is_some_and(is_array_variant_composite)
+        && matches!(ty.array_size(), Some(Type::Constructed(TypeName::Size(_), _)))
+}
+
+fn contains_view(ty: &Type) -> bool {
+    ty.array_variant().is_some_and(is_array_variant_view)
+        || ty.elem_type().is_some_and(contains_view)
+        || matches!(ty, Type::Constructed(TypeName::Tuple(_), xs) if xs.iter().any(contains_view))
+}
+
+impl Dataflow {
+    pub fn memory(body: &FuncBody) -> Result<Self, egglog_engine::Error> {
+        let mut graph = EGraph::default();
+        graph.parse_and_run_program(None, include_str!("../egglog/flow.egg"))?;
+        graph.parse_and_run_program(None, include_str!("storage.egg"))?;
+        graph.update(|mut sink| {
+            for (v, info) in &body.inner.values {
+                if !contains_view(&info.ty) {
+                    continue;
+                }
+                let value = sink.add("SsaValue", memory_id(v))?;
+                sink.add("MemoryObject", value)?;
+                let root = match info.def {
+                    ValueDef::Inst { inst } => match &body.inner.insts[inst].data {
+                        InstKind::Op {
+                            tag: OpTag::StorageView(PureViewSource::Workgroup { id, .. }),
+                            ..
+                        } => Some(sink.add("MemoryWorkgroup", i64::from(*id))?),
+                        InstKind::Op {
+                            tag: OpTag::StorageView(PureViewSource::Storage(_)),
+                            ..
+                        } => Some(sink.add("MemoryExternal", RawValues(vec![]))?),
+                        InstKind::Op { operands, .. } => {
+                            let storage = body.inner.insts[inst].data.result_storage();
+                            for (i, operand) in operands.iter().enumerate() {
+                                if storage.aliases_operand(i) {
+                                    if let Some(v) = operand.as_ssa() {
+                                        let parent = sink.add("SsaValue", memory_id(v))?;
+                                        sink.add("FlowFrom", (value, parent))?;
+                                    }
+                                }
+                            }
+                            None
+                        }
+                        _ => None,
+                    },
+                    ValueDef::FunctionParam { .. }
+                        if crate::types::array_view_buffer(&info.ty).is_some() =>
+                    {
+                        Some(sink.add("MemoryExternal", RawValues(vec![]))?)
+                    }
+                    _ => None,
+                };
+                if let Some(root) = root {
+                    sink.add("MemoryOrigin", (value, root))?;
+                }
+            }
+            for place in body.places.keys() {
+                let value = sink.add("SsaPlace", memory_id(place))?;
+                sink.add("MemoryObject", value)?;
+            }
+            for node in body.inner.insts.values() {
+                if let InstKind::Load { place } = node.data {
+                    if node.result.is_some_and(|v| local_array(body.get_value_type(v))) {
+                        let place = sink.add("SsaPlace", memory_id(place))?;
+                        sink.add("MemoryLoaded", place)?;
+                    }
+                }
+                match node.data {
+                    InstKind::Alloca { result } | InstKind::OutputSlot { result, .. } => {
+                        let place = sink.add("SsaPlace", memory_id(result))?;
+                        let root = if matches!(node.data, InstKind::Alloca { .. }) {
+                            sink.add("MemoryAllocation", memory_id(result))?
+                        } else {
+                            sink.add("MemoryExternal", RawValues(vec![]))?
+                        };
+                        sink.add("MemoryOrigin", (place, root))?;
+                    }
+                    InstKind::ViewIndex { view, result, .. } => {
+                        if let Some(view) = view.as_ssa() {
+                            let parent = sink.add("SsaValue", memory_id(view))?;
+                            let place = sink.add("SsaPlace", memory_id(result))?;
+                            sink.add("FlowFrom", (place, parent))?;
+                        }
+                    }
+                    InstKind::PlaceIndex { place, result, .. } => {
+                        let parent = sink.add("SsaPlace", memory_id(place))?;
+                        let place = sink.add("SsaPlace", memory_id(result))?;
+                        sink.add("FlowFrom", (place, parent))?;
+                    }
+                    _ => {}
+                }
+            }
+            for block in body.inner.blocks.values() {
+                for (target, args) in block.term.edges() {
+                    for (&v, arg) in body.inner.blocks[target].params.iter().zip(args) {
+                        if contains_view(body.get_value_type(v)) {
+                            if let Some(arg) = arg.as_ssa() {
+                                let value = sink.add("SsaValue", memory_id(v))?;
+                                let parent = sink.add("SsaValue", memory_id(arg))?;
+                                sink.add("FlowFrom", (value, parent))?;
+                            }
+                        }
+                    }
+                }
+            }
+            Ok::<_, egglog_engine::Error>(())
+        })?;
+        graph.parse_and_run_program(
+            None,
+            "(run-schedule (saturate memory-origins) memory-unknown (saturate memory-origins) memory-loaded)",
+        )?;
+        Ok(Self {
+            graph,
+            ..Self::default()
+        })
+    }
+
+    pub fn memory_accesses(
+        &mut self,
+        body: &FuncBody,
+        calls: &LookupMap<FunctionId, Option<ResourceAccess>>,
+    ) -> Result<(), egglog_engine::Error> {
+        self.graph.update(|mut sink| {
+            for (inst, node) in &body.inner.insts {
+                let point = sink.add("SsaInstruction", memory_id(inst))?;
+                let mut value_access =
+                    |value: ValueRef, access: ResourceAccess| -> Result<(), egglog_engine::Error> {
+                        if let Some(value) = value.as_ssa() {
+                            let value = sink.add("SsaValue", memory_id(value))?;
+                            memory_use(&mut sink, point, value, access)?;
+                        }
+                        Ok(())
+                    };
+                match &node.data {
+                    InstKind::Copy {
+                        destination, source, ..
+                    } => {
+                        value_access(*source, ResourceAccess::Read)?;
+                        value_access(*destination, ResourceAccess::Write)?;
+                    }
+                    InstKind::Op {
+                        tag: OpTag::Index | OpTag::DynamicExtract | OpTag::Materialize,
+                        operands,
+                    } => value_access(operands[0], ResourceAccess::Read)?,
+                    InstKind::Op {
+                        tag: OpTag::Intrinsic { id, .. },
+                        operands,
+                    } if *id != catalog().known().length
+                        && *id != catalog().known().storage_len
+                        && *id != catalog().known().slice =>
+                    {
+                        for &v in operands {
+                            value_access(v, ResourceAccess::ReadWrite)?;
+                        }
+                    }
+                    InstKind::Op {
+                        tag: OpTag::Call(callee),
+                        ..
+                    } => {
+                        if let Some(access) =
+                            calls.get(callee).copied().unwrap_or(Some(ResourceAccess::ReadWrite))
+                        {
+                            let root = sink.add("MemoryUnknown", RawValues(vec![]))?;
+                            if access.reads() {
+                                sink.add("MemoryAccess", (point, root, false))?;
+                            }
+                            if access.writes() {
+                                sink.add("MemoryAccess", (point, root, true))?;
+                            }
+                        }
+                    }
+                    InstKind::Load { place }
+                    | InstKind::Store { place, .. }
+                    | InstKind::Atomic { place, .. } => {
+                        let value = sink.add("SsaPlace", memory_id(*place))?;
+                        let access = match node.data {
+                            InstKind::Load { .. } => ResourceAccess::Read,
+                            InstKind::Store { .. } => ResourceAccess::Write,
+                            _ => ResourceAccess::ReadWrite,
+                        };
+                        memory_use(&mut sink, point, value, access)?;
+                    }
+                    _ => {}
+                }
+                for (operand, value) in node.data.value_uses().into_iter().enumerate() {
+                    if matches!(node.data.storage_use(operand), StorageUse::Escape) {
+                        if let Some(value) = value.as_ssa() {
+                            let value = sink.add("SsaValue", memory_id(value))?;
+                            sink.add("MemoryEscapes", value)?;
+                        }
+                    }
+                }
+            }
+            for (block, data) in &body.inner.blocks {
+                if let Terminator::Return(Some(value)) = data.term {
+                    if let Some(value) = value.as_ssa() {
+                        let point = sink.add("SsaReturn", memory_id(block))?;
+                        let value = sink.add("SsaValue", memory_id(value))?;
+                        memory_use(&mut sink, point, value, ResourceAccess::Read)?;
+                        sink.add("MemoryEscapes", value)?;
+                    }
+                }
+            }
+            Ok::<_, egglog_engine::Error>(())
+        })?;
+        self.graph.parse_and_run_program(None, "(run-schedule (saturate memory-access))")?;
+        Ok(())
+    }
+}
+
+fn memory_use(
+    sink: &mut FullState<'_, '_>,
+    point: Value,
+    value: Value,
+    access: ResourceAccess,
+) -> Result<(), egglog_engine::Error> {
+    if access.reads() {
+        sink.add("MemoryUse", (point, value, false))?;
+    }
+    if access.writes() {
+        sink.add("MemoryUse", (point, value, true))?;
+    }
+    Ok(())
+}
+
+/// Transitive workgroup effects keep scalar helpers transparent to memory analysis.
 pub(super) fn workgroup_call_effects<Tag, Context>(
     program: &super::types::Program<Tag, Context>,
-) -> LookupMap<FunctionId, Option<ResourceAccess>> {
+) -> Result<LookupMap<FunctionId, Option<ResourceAccess>>, egglog_engine::Error> {
     let mut effects = LookupMap::default();
+    let no_calls = program.functions.iter().map(|f| (f.id, None)).collect();
     for function in &program.functions {
-        let roots = MemoryRoots::analyze(&function.body);
+        let mut flow = Dataflow::memory(&function.body)?;
+        flow.memory_accesses(&function.body, &no_calls)?;
         let mut access = function.linkage_name.as_ref().map(|_| ResourceAccess::ReadWrite);
-        for node in function.body.inner.insts.values() {
-            if matches!(
-                node.data,
-                InstKind::Op {
-                    tag: OpTag::Call(_),
-                    ..
-                }
-            ) {
-                continue;
+        for (write, effect) in [(false, ResourceAccess::Read), (true, ResourceAccess::Write)] {
+            if flow.graph.read(|r| r.contains("MemorySharedAccess", write))? {
+                access = Some(access.map_or(effect, |old| old.merge(effect)));
             }
-            let (reads, writes) = roots.access(&node.data, &LookupMap::default());
-            for (xs, effect) in [(reads, ResourceAccess::Read), (writes, ResourceAccess::Write)] {
-                if xs.iter().any(|r| matches!(r, MemoryRoot::Workgroup(_) | MemoryRoot::Unknown)) {
-                    access = Some(access.map_or(effect, |old| old.merge(effect)));
-                }
-            }
-        }
-        // Returning a descriptor publishes its contents to the caller.
-        if function.body.inner.blocks.values().any(|block| {
-            roots
-                .returned(&block.term)
-                .iter()
-                .any(|r| matches!(r, MemoryRoot::Workgroup(_) | MemoryRoot::Unknown))
-        }) {
-            access = Some(access.map_or(ResourceAccess::Read, |old| old.merge(ResourceAccess::Read)));
         }
         effects.insert(function.id, access);
     }
@@ -199,204 +405,7 @@ pub(super) fn workgroup_call_effects<Tag, Context>(
             }
         }
         if !changed {
-            return effects;
+            return Ok(effects);
         }
-    }
-}
-
-#[derive(Default)]
-pub(super) struct MemoryRoots {
-    values: LookupMap<ValueId, LookupSet<MemoryRoot>>,
-    pub places: LookupMap<PlaceId, LookupSet<MemoryRoot>>,
-}
-
-fn contains_view(ty: &Type) -> bool {
-    ty.array_variant().is_some_and(is_array_variant_view)
-        || ty.elem_type().is_some_and(contains_view)
-        || matches!(ty, Type::Constructed(TypeName::Tuple(_), xs) if xs.iter().any(contains_view))
-}
-
-fn extend<K: Copy + Eq + std::hash::Hash>(
-    map: &mut LookupMap<K, LookupSet<MemoryRoot>>,
-    key: K,
-    roots: impl IntoIterator<Item = MemoryRoot>,
-) -> bool {
-    let entry = map.entry(key).or_default();
-    let old = entry.len();
-    entry.extend(roots);
-    entry.len() != old
-}
-
-impl MemoryRoots {
-    pub fn analyze(body: &FuncBody) -> Self {
-        let mut result = Self::default();
-        for (v, info) in &body.inner.values {
-            if !contains_view(&info.ty) {
-                continue;
-            }
-            let root = match info.def {
-                ValueDef::Inst { inst } => match body.inner.insts[inst].data {
-                    InstKind::Op {
-                        tag: OpTag::StorageView(PureViewSource::Workgroup { id, .. }),
-                        ..
-                    } => Some(MemoryRoot::Workgroup(id)),
-                    InstKind::Op {
-                        tag: OpTag::StorageView(PureViewSource::Storage(_)),
-                        ..
-                    } => Some(MemoryRoot::External),
-                    InstKind::Load { .. } => Some(MemoryRoot::Unknown),
-                    _ => None,
-                },
-                ValueDef::FunctionParam { .. } => {
-                    Some(if crate::types::array_view_buffer(&info.ty).is_some() {
-                        MemoryRoot::External
-                    } else {
-                        MemoryRoot::Unknown
-                    })
-                }
-                _ => None,
-            };
-            if let Some(root) = root {
-                extend(&mut result.values, v, [root]);
-            }
-        }
-        for node in body.inner.insts.values() {
-            match node.data {
-                InstKind::Alloca { result: place } => {
-                    extend(&mut result.places, place, [MemoryRoot::Allocation(place)]);
-                }
-                InstKind::OutputSlot { result: place, .. } => {
-                    extend(&mut result.places, place, [MemoryRoot::External]);
-                }
-                _ => {}
-            }
-        }
-        // Resolve descriptor joins and derived places together, including loop backedges.
-        loop {
-            let mut changed = false;
-            for node in body.inner.insts.values() {
-                if let Some(v) = node.result.filter(|v| contains_view(body.get_value_type(*v))) {
-                    if let InstKind::Op { tag, operands } = &node.data {
-                        let storage = node.data.result_storage();
-                        if matches!(storage, ResultStorage::Unknown)
-                            && !matches!(tag, OpTag::StorageView(_))
-                        {
-                            changed |= extend(&mut result.values, v, [MemoryRoot::Unknown]);
-                        }
-                        let roots: Vec<_> = operands
-                            .iter()
-                            .enumerate()
-                            .filter(|(i, _)| storage.aliases_operand(*i))
-                            .flat_map(|(_, v)| result.value(*v))
-                            .collect();
-                        changed |= extend(&mut result.values, v, roots);
-                    }
-                }
-                let derived = match node.data {
-                    InstKind::ViewIndex {
-                        view, result: place, ..
-                    } => Some((place, result.value(view))),
-                    InstKind::PlaceIndex {
-                        place, result: child, ..
-                    } => Some((
-                        child,
-                        result.places.get(&place).into_iter().flatten().copied().collect(),
-                    )),
-                    _ => None,
-                };
-                if let Some((place, roots)) = derived {
-                    changed |= extend(&mut result.places, place, roots);
-                }
-            }
-            for block in body.inner.blocks.values() {
-                for (target, args) in block.term.edges() {
-                    for (&v, &arg) in body.inner.blocks[target].params.iter().zip(args) {
-                        if contains_view(body.get_value_type(v)) {
-                            let roots = result.value(arg);
-                            changed |= extend(&mut result.values, v, roots);
-                        }
-                    }
-                }
-            }
-            if !changed {
-                for (v, info) in &body.inner.values {
-                    if contains_view(&info.ty) && result.values.get(&v).is_none_or(|xs| xs.is_empty()) {
-                        changed |= extend(&mut result.values, v, [MemoryRoot::Unknown]);
-                    }
-                }
-                if !changed {
-                    break;
-                }
-            }
-        }
-        result
-    }
-
-    pub fn value(&self, value: ValueRef) -> Vec<MemoryRoot> {
-        value.as_ssa().and_then(|v| self.values.get(&v)).into_iter().flatten().copied().collect()
-    }
-
-    pub fn returned(&self, term: &Terminator) -> Vec<MemoryRoot> {
-        match term {
-            Terminator::Return(Some(value)) => self.value(*value),
-            _ => Vec::new(),
-        }
-    }
-
-    pub fn access(
-        &self,
-        data: &InstKind,
-        calls: &LookupMap<FunctionId, Option<ResourceAccess>>,
-    ) -> (LookupSet<MemoryRoot>, LookupSet<MemoryRoot>) {
-        let mut reads = LookupSet::default();
-        let mut writes = LookupSet::default();
-        let place =
-            |p| self.places.get(&p).cloned().unwrap_or_else(|| [MemoryRoot::Unknown].into_iter().collect());
-        match data {
-            InstKind::Copy {
-                destination, source, ..
-            } => {
-                reads.extend(self.value(*source));
-                writes.extend(self.value(*destination));
-            }
-            InstKind::Load { place: p } => reads = place(*p),
-            InstKind::Store { place: p, .. } => writes = place(*p),
-            InstKind::Atomic { place: p, .. } => {
-                reads = place(*p);
-                writes = reads.clone();
-            }
-            InstKind::Op {
-                tag: OpTag::Index | OpTag::DynamicExtract | OpTag::Materialize,
-                operands,
-            } => reads.extend(self.value(operands[0])),
-            InstKind::Op {
-                tag: OpTag::Call(callee),
-                ..
-            } => {
-                if let Some(access) = calls.get(callee).copied().unwrap_or(Some(ResourceAccess::ReadWrite))
-                {
-                    if access.reads() {
-                        reads.insert(MemoryRoot::Unknown);
-                    }
-                    if access.writes() {
-                        writes.insert(MemoryRoot::Unknown);
-                    }
-                }
-            }
-            InstKind::Op {
-                tag: OpTag::Intrinsic { id, .. },
-                operands,
-            } if *id != catalog().known().length
-                && *id != catalog().known().storage_len
-                && *id != catalog().known().slice =>
-            {
-                for &v in operands {
-                    reads.extend(self.value(v));
-                }
-                writes = reads.clone();
-            }
-            _ => {}
-        }
-        (reads, writes)
     }
 }

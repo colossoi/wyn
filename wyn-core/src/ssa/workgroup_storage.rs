@@ -4,80 +4,59 @@ use super::invalid;
 use crate::error::Result;
 use crate::op::{OpTag, PureViewSource};
 use crate::ssa::dataflow::Dataflow;
-use crate::ssa::storage::{MemoryRoot, MemoryRoots};
+use crate::ssa::storage::memory_id;
 use crate::ssa::types::{ConstantValue, FuncBody, InstKind, ValueRef};
 use crate::types::{Type, TypeExt};
 use crate::{FunctionId, LookupMap, LookupSet, ResourceAccess};
-use egglog_engine::sort::SetContainer;
-use egglog_engine::{Read, Value, Write};
-
-#[derive(Default)]
-struct Access {
-    reads: LookupSet<i64>,
-    writes: LookupSet<i64>,
-}
-impl Access {
-    fn conflicts(&self, other: &Self) -> bool {
-        !self.writes.is_disjoint(&other.reads)
-            || !self.writes.is_disjoint(&other.writes)
-            || !self.reads.is_disjoint(&other.writes)
-    }
-}
+use egglog_engine::{Read, Write};
 
 impl Dataflow {
-    fn workgroup(
-        body: &FuncBody,
-        roots: &MemoryRoots,
-        calls: &LookupMap<FunctionId, Option<ResourceAccess>>,
-    ) -> Result<Self> {
-        let mut accesses = LookupMap::default();
-        for (inst, node) in &body.inner.insts {
-            let (mut reads, mut writes) = roots.access(&node.data, calls);
-            reads.retain(shared);
-            writes.retain(shared);
-            if !reads.is_empty()
-                || !writes.is_empty()
-                || matches!(
-                    node.data,
-                    InstKind::ControlBarrier
-                        | InstKind::Op {
-                            tag: OpTag::StorageView(PureViewSource::Workgroup { .. }),
-                            ..
-                        }
-                )
-            {
-                accesses.insert(inst, (reads, writes));
-            }
-        }
+    fn workgroup(body: &FuncBody, calls: &LookupMap<FunctionId, Option<ResourceAccess>>) -> Result<Self> {
+        let map_error = |e: egglog_engine::Error| invalid(&e.to_string());
+        let mut flow = Dataflow::memory(body).map_err(map_error)?;
+        flow.memory_accesses(body, calls).map_err(map_error)?;
+        let mut shared = LookupSet::default();
+        flow.graph
+            .read(|r| {
+                r.constructor_enodes_while("MemorySharedInstruction", |row| {
+                    shared.insert(flow.graph.value_to_base::<i64>(row.children[0]));
+                    true
+                })
+            })
+            .map_err(map_error)?;
         let events = body
             .inner
             .blocks
             .iter()
-            .map(|(b, data)| {
+            .map(|(block, data)| {
                 (
-                    b,
-                    data.insts.iter().filter(|i| accesses.contains_key(i)).map(|&i| vec![i]).collect(),
+                    block,
+                    data.insts
+                        .iter()
+                        .filter(|&&inst| {
+                            shared.contains(&memory_id(inst))
+                                || matches!(
+                                    body.inner.insts[inst].data,
+                                    InstKind::ControlBarrier
+                                        | InstKind::Op {
+                                            tag: OpTag::StorageView(PureViewSource::Workgroup { .. }),
+                                            ..
+                                        }
+                                )
+                        })
+                        .map(|&inst| vec![inst])
+                        .collect(),
                 )
             })
             .collect();
-        let map_error = |e: egglog_engine::Error| invalid(&e.to_string());
-        let mut flow = Dataflow::new(body, &events).map_err(map_error)?;
+        flow.control(body, &events).map_err(map_error)?;
         flow.graph.parse_and_run_program(None, include_str!("workgroup_storage.egg")).map_err(map_error)?;
-        let mut accesses: LookupMap<_, _> =
-            accesses.into_iter().map(|(inst, access)| (flow.instructions[&inst].0, access)).collect();
-        for (block, data) in &body.inner.blocks {
-            accesses.insert(
-                flow.terminators[&block].0,
-                (
-                    roots.returned(&data.term).into_iter().filter(shared).collect(),
-                    LookupSet::default(),
-                ),
-            );
-        }
         flow.graph
             .update(|mut sink| {
                 for (&inst, &(before, after)) in &flow.instructions {
                     let instruction = &body.inner.insts[inst].data;
+                    let source = sink.add("SsaInstruction", memory_id(inst))?;
+                    sink.add("MemoryAt", (source, before))?;
                     if matches!(instruction, InstKind::ControlBarrier) {
                         sink.add("WorkgroupBarrier", before)?;
                     }
@@ -95,20 +74,9 @@ impl Dataflow {
                         )?;
                     }
                 }
-                for (point, (reads, writes)) in &accesses {
-                    for (write, roots) in [(false, reads), (true, writes)] {
-                        for root in roots {
-                            match root {
-                                MemoryRoot::Workgroup(id) => {
-                                    sink.add("WorkgroupAccess", (*point, i64::from(*id), write))?;
-                                }
-                                MemoryRoot::Unknown => {
-                                    sink.add("WorkgroupUnknown", (*point, write))?;
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
+                for (&block, &(before, _)) in &flow.terminators {
+                    let source = sink.add("SsaReturn", memory_id(block))?;
+                    sink.add("MemoryAt", (source, before))?;
                 }
                 Ok::<_, egglog_engine::Error>(())
             })
@@ -118,50 +86,6 @@ impl Dataflow {
         ).map_err(map_error)?;
         Ok(flow)
     }
-
-    fn until_barrier(&self, start: Value, backwards: bool, removed: &LookupSet<Value>) -> Result<Access> {
-        let mut access = Access::default();
-        let mut visited = LookupSet::default();
-        let mut pending = vec![start];
-        let graph = &self.graph;
-        let map_error = |e: egglog_engine::Error| invalid(&e.to_string());
-        while let Some(point) = pending.pop() {
-            if !visited.insert(point) {
-                continue;
-            }
-            let table = if backwards { "FlowPredecessors" } else { "FlowSuccessors" };
-            let Some(neighbors) = graph.read(|r| r.lookup(table, point)).map_err(map_error)? else {
-                continue;
-            };
-            let Some(neighbors) = graph.value_to_container::<SetContainer>(neighbors) else {
-                return Err(invalid("invalid control-flow neighbor set"));
-            };
-            for &next in &neighbors.data {
-                let before = if backwards { next } else { point };
-                if graph.read(|r| r.contains("WorkgroupBarrier", before)).map_err(map_error)?
-                    && !removed.contains(&before)
-                {
-                    continue;
-                }
-                for (write, output) in [(false, &mut access.reads), (true, &mut access.writes)] {
-                    if let Some(values) =
-                        graph.read(|r| r.lookup("WorkgroupAccesses", (before, write))).map_err(map_error)?
-                    {
-                        let Some(values) = graph.value_to_container::<SetContainer>(values) else {
-                            return Err(invalid("invalid workgroup access set"));
-                        };
-                        output.extend(values.data.iter().map(|&v| graph.value_to_base::<i64>(v)));
-                    }
-                }
-                pending.push(next);
-            }
-        }
-        Ok(access)
-    }
-}
-
-fn shared(root: &MemoryRoot) -> bool {
-    matches!(root, MemoryRoot::Workgroup(_) | MemoryRoot::Unknown)
 }
 
 fn integer(value: ValueRef) -> Option<u32> {
@@ -211,7 +135,8 @@ struct Buffer {
 }
 
 pub(super) fn apply(program: &mut crate::ssa::stage::Reachable) -> Result<()> {
-    let calls = crate::ssa::storage::workgroup_call_effects(program);
+    let calls =
+        crate::ssa::storage::workgroup_call_effects(program).map_err(|e| invalid(&e.to_string()))?;
     for body in program
         .functions
         .iter_mut()
@@ -241,10 +166,8 @@ fn optimize_body(body: &mut FuncBody, calls: &LookupMap<FunctionId, Option<Resou
     if buffers.is_empty() {
         return Ok(());
     }
-    let roots = MemoryRoots::analyze(body);
-    let mut flow = Dataflow::workgroup(body, &roots, calls)?;
-    pool(body, &buffers, &roots, &mut flow)?;
-    let selected = MemoryRoots::analyze(body);
+    let mut flow = Dataflow::workgroup(body, calls)?;
+    pool(body, &buffers, &mut flow)?;
     let mut removed = LookupSet::default();
     for (&inst, &(before, _)) in &flow.instructions {
         if let InstKind::Copy {
@@ -256,7 +179,7 @@ fn optimize_body(body: &mut FuncBody, calls: &LookupMap<FunctionId, Option<Resou
                     .graph
                     .read(|r| r.contains("TransferStepAt", before))
                     .map_err(|e| invalid(&e.to_string()))?
-                    && selected.value(source) == selected.value(destination))
+                    && whole_transfer(body, &body.inner.insts[inst].data).is_some_and(|(a, b)| a == b))
             {
                 removed.insert(inst);
             }
@@ -267,17 +190,27 @@ fn optimize_body(body: &mut FuncBody, calls: &LookupMap<FunctionId, Option<Resou
     }
     body.inner.insts.retain(|inst, _| !removed.contains(&inst));
     // Pooling introduces aliases; synchronization must see the selected storage.
-    let flow = Dataflow::workgroup(body, &selected, calls)?;
+    let mut flow = Dataflow::workgroup(body, calls)?;
     let mut removed = LookupSet::default();
     for inst in body.inner.blocks.values().flat_map(|b| b.insts.iter()) {
         if !matches!(body.inner.insts[*inst].data, InstKind::ControlBarrier) {
             continue;
         }
-        let (before, after) = flow.instructions[inst];
-        let point = before;
-        let before = flow.until_barrier(before, true, &removed)?;
-        let after = flow.until_barrier(after, false, &removed)?;
-        if !before.conflicts(&after) {
+        flow.graph
+            .parse_and_run_program(
+                None,
+                "(run-schedule workgroup-open (saturate workgroup-barriers))",
+            )
+            .map_err(|e| invalid(&e.to_string()))?;
+        let point = flow.instructions[inst].0;
+        if !flow
+            .graph
+            .read(|r| r.contains("WorkgroupBarrierConflict", point))
+            .map_err(|e| invalid(&e.to_string()))?
+        {
+            flow.graph
+                .update(|mut sink| sink.add("WorkgroupOpen", point))
+                .map_err(|e| invalid(&e.to_string()))?;
             removed.insert(point);
         }
     }
@@ -290,25 +223,19 @@ fn optimize_body(body: &mut FuncBody, calls: &LookupMap<FunctionId, Option<Resou
     Ok(())
 }
 
-fn pool(body: &mut FuncBody, buffers: &[Buffer], roots: &MemoryRoots, flow: &mut Dataflow) -> Result<()> {
+fn pool(body: &mut FuncBody, buffers: &[Buffer], flow: &mut Dataflow) -> Result<()> {
+    let map_error = |e: egglog_engine::Error| invalid(&e.to_string());
     let mut escaped = LookupSet::default();
-    for node in body.inner.insts.values() {
-        for (operand, value) in node.data.value_uses().into_iter().enumerate() {
-            if matches!(
-                node.data.storage_use(operand),
-                crate::ssa::storage::StorageUse::Escape
-            ) {
-                escaped.extend(roots.value(value));
-            }
-        }
-    }
-    for data in body.inner.blocks.values() {
-        escaped.extend(roots.returned(&data.term));
-    }
+    flow.graph
+        .read(|r| {
+            r.constructor_enodes_while("MemoryEscapedWorkgroup", |row| {
+                escaped.insert(flow.graph.value_to_base::<i64>(row.children[0]) as u32);
+                true
+            })
+        })
+        .map_err(map_error)?;
     let eligible = |buffer: &Buffer| {
-        !escaped.contains(&MemoryRoot::Unknown)
-            && !escaped.contains(&MemoryRoot::Workgroup(buffer.id))
-            && buffers.iter().filter(|other| other.id == buffer.id).count() == 1
+        !escaped.contains(&buffer.id) && buffers.iter().filter(|other| other.id == buffer.id).count() == 1
     };
     let mut pairs = Vec::new();
     for (i, a) in buffers.iter().enumerate().filter(|(_, b)| eligible(b)) {
@@ -319,7 +246,6 @@ fn pool(body: &mut FuncBody, buffers: &[Buffer], roots: &MemoryRoots, flow: &mut
     if pairs.is_empty() {
         return Ok(());
     }
-    let map_error = |e: egglog_engine::Error| invalid(&e.to_string());
     let graph = &mut flow.graph;
 
     graph

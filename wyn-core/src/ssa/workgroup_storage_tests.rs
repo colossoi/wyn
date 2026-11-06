@@ -3,6 +3,7 @@ use crate::ssa::builder::FuncBuilder;
 use crate::ssa::types::BlockId;
 use crate::ssa::types::{ConstantValue, PlaceInfo, PlaceOrigin, Terminator, ValueRef};
 use crate::types::{self, TypeName};
+use egglog_engine::RawValues;
 
 fn apply(body: &mut FuncBody) -> Result<()> {
     super::optimize_body(body, &LookupMap::default())
@@ -224,7 +225,7 @@ fn transitive_call_effects_distinguish_scalar_helpers_from_shared_memory() {
         ],
         vec![],
     );
-    let effects = crate::ssa::storage::workgroup_call_effects(&program);
+    let effects = crate::ssa::storage::workgroup_call_effects(&program).unwrap();
     assert_eq!(effects[&scalar], None);
     assert_eq!(effects[&wrapper], None);
     assert_eq!(effects[&writer], Some(ResourceAccess::Write));
@@ -399,12 +400,50 @@ fn parallel_assignment_keeps_the_temporary_needed_for_a_swap() {
     access(&mut body, entry, a, false);
     access(&mut body, entry, b, false);
     apply(&mut body).unwrap();
-    let roots = MemoryRoots::analyze(&body);
-    assert_ne!(roots.value(a), roots.value(b));
+    assert_ne!(whole_view(&body, a, 65), whole_view(&body, b, 65));
     assert_ne!(
-        roots.value(a),
-        roots.value(next_b),
+        whole_view(&body, a, 65),
+        whole_view(&body, next_b, 65),
         "old a survives the first assignment"
     );
     assert!(allocations(&body).len() < 4);
+}
+
+#[test]
+fn provenance_joins_backedges_and_marks_unresolved_cycles_unknown() {
+    let mut body = FuncBuilder::new(vec![], types::unit()).finish_unchecked();
+    let entry = body.inner.entry;
+    let a = buffer(&mut body, entry, 0, 65);
+    let b = buffer(&mut body, entry, 1, 65);
+    let view = body.get_value_type(a.as_ssa().unwrap()).clone();
+    let header = body.inner.create_block();
+    let joined = body.inner.add_block_param(header, view.clone());
+    body.inner.blocks[entry].term = Terminator::Branch {
+        target: header,
+        args: vec![a],
+    };
+    body.inner.blocks[header].term = Terminator::Branch {
+        target: header,
+        args: vec![b],
+    };
+    access(&mut body, header, joined.into(), false);
+    let cycle = body.inner.create_block();
+    let unknown = body.inner.add_block_param(cycle, view);
+    body.inner.blocks[cycle].term = Terminator::Branch {
+        target: cycle,
+        args: vec![unknown.into()],
+    };
+    access(&mut body, cycle, unknown.into(), true);
+    let flow = Dataflow::workgroup(&body, &LookupMap::default()).unwrap();
+    flow.graph.read(|r| {
+        let joined = r.eclass_of("SsaValue", memory_id(joined)).unwrap().unwrap();
+        for id in [0i64, 1] {
+            let root = r.eclass_of("MemoryWorkgroup", id).unwrap().unwrap();
+            assert!(r.contains("MemoryOrigin", (joined, root)).unwrap());
+        }
+        let unknown = r.eclass_of("SsaValue", memory_id(unknown)).unwrap().unwrap();
+        let root = r.eclass_of("MemoryUnknown", RawValues(vec![])).unwrap().unwrap();
+        assert!(r.contains("MemoryOrigin", (unknown, root)).unwrap());
+        assert!(!r.contains("MemoryOrigin", (joined, root)).unwrap());
+    });
 }

@@ -4,6 +4,7 @@ use super::types::{BlockId, FuncBody, InstId};
 use crate::LookupMap;
 use egglog_engine::{EGraph, Value, Write};
 
+#[derive(Default)]
 pub(super) struct Dataflow {
     pub graph: EGraph,
     pub blocks: LookupMap<BlockId, (Value, Value)>,
@@ -13,16 +14,19 @@ pub(super) struct Dataflow {
 }
 
 impl Dataflow {
-    pub fn new(
+    pub fn control(
+        &mut self,
         body: &FuncBody,
         events: &LookupMap<BlockId, Vec<Vec<InstId>>>,
-    ) -> Result<Self, egglog_engine::Error> {
-        let mut graph = EGraph::default();
-        graph.parse_and_run_program(None, include_str!("../egglog/flow.egg"))?;
-        let mut blocks = LookupMap::default();
-        let mut instructions = LookupMap::default();
-        let mut terminators = LookupMap::default();
-        let mut edges = LookupMap::default();
+    ) -> Result<(), egglog_engine::Error> {
+        let graph = &mut self.graph;
+        let Self {
+            blocks,
+            instructions,
+            terminators,
+            edges,
+            ..
+        } = self;
         graph.update(|mut sink| {
             let mut next = 0i64;
             for (block, _) in &body.inner.blocks {
@@ -56,12 +60,6 @@ impl Dataflow {
             }
             Ok::<_, egglog_engine::Error>(())
         })?;
-        Ok(Self {
-            graph,
-            blocks,
-            instructions,
-            terminators,
-            edges,
-        })
+        Ok(())
     }
 }

@@ -3,7 +3,7 @@
 use super::dataflow::Dataflow;
 use super::ir::{Substitutions, ValueDef};
 use super::stage::Reachable;
-use super::storage::is_local_value;
+use super::storage::{local_array, memory_id};
 use super::types::{
     BlockId, ConstantValue, FuncBody, InstId, InstKind, PlaceId, PlaceInfo, PlaceOrigin, Terminator,
     ValueId, ValueRef,
@@ -13,7 +13,7 @@ use crate::builtins::catalog;
 use crate::error::{CompilerError, Result};
 use crate::op::OpTag;
 use crate::timing;
-use crate::types::{is_array_variant_composite, Type, TypeExt, TypeName};
+use crate::types::{Type, TypeExt, TypeName};
 use crate::{BindingRef, FunctionId, LookupMap, LookupSet};
 use egglog_engine::{Read, Write};
 use wyn_graph::DominatorTree;
@@ -49,12 +49,6 @@ fn fields(ty: &Type) -> Option<&[Type]> {
         Type::Constructed(TypeName::Tuple(_), xs) => Some(xs),
         _ => None,
     }
-}
-fn local_array(ty: &Type) -> bool {
-    ty.is_array()
-        && is_local_value(ty)
-        && ty.array_variant().is_some_and(is_array_variant_composite)
-        && matches!(ty.array_size(), Some(Type::Constructed(TypeName::Size(_), _)))
 }
 fn contains_local_array(ty: &Type) -> bool {
     local_array(ty) || fields(ty).is_some_and(|xs| xs.iter().any(contains_local_array))
@@ -252,35 +246,6 @@ struct Analysis {
 
 const ANALYSIS_SCHEDULE: &str = "(run-schedule (saturate storage-webs) (saturate flow-live) (saturate storage-select) (saturate storage-existing) (saturate storage-allocation) (saturate storage-initialization) (saturate flow-initialization))";
 
-fn storage_places(body: &FuncBody, arrays: &LookupMap<ValueId, usize>) -> LookupSet<PlaceId> {
-    let mut allocations = LookupSet::default();
-    let mut loads = Vec::new();
-    for node in body.inner.insts.values() {
-        match node.data {
-            InstKind::Alloca { result } => {
-                allocations.insert(result);
-            }
-            InstKind::Load { place } if node.result.is_some_and(|v| arrays.contains_key(&v)) => {
-                loads.push(place);
-            }
-            _ => {}
-        }
-    }
-    // Only direct allocation loads can seed Existing; retain every derived alias of those places.
-    loads.retain(|place| allocations.contains(place));
-    let roots = super::storage::MemoryRoots::analyze(body);
-    body.places
-        .keys()
-        .filter(|p| {
-            roots.places.get(p).is_some_and(|xs| {
-                xs.iter().any(
-                    |r| matches!(r, super::storage::MemoryRoot::Allocation(base) if loads.contains(base)),
-                )
-            })
-        })
-        .collect()
-}
-
 fn storage_events(
     body: &FuncBody,
     arrays: &LookupMap<ValueId, usize>,
@@ -325,7 +290,17 @@ fn analyze(body: &FuncBody) -> Result<Analysis> {
         body.inner.values.iter().filter_map(|(v, info)| local_array(&info.ty).then_some(v)).collect();
     let indices: LookupMap<_, _> = values.iter().enumerate().map(|(i, v)| (*v, i)).collect();
     // Contract steps with no storage facts, preserving event order and every CFG edge.
-    let relevant_places = storage_places(body, &indices);
+    let mut flow = Dataflow::memory(body).map_err(|e| invalid(&e.to_string()))?;
+    let mut relevant_places = LookupSet::default();
+    for place in body.places.keys() {
+        if flow
+            .graph
+            .read(|r| r.contains("MemoryStoragePlace", memory_id(place)))
+            .map_err(|e| invalid(&e.to_string()))?
+        {
+            relevant_places.insert(place);
+        }
+    }
     let events = storage_events(body, &indices, &relevant_places);
     let places: Vec<_> = body.places.keys().collect();
     let place_ids: LookupMap<_, _> = places.iter().enumerate().map(|(i, p)| (*p, i as i64)).collect();
@@ -341,7 +316,7 @@ fn analyze(body: &FuncBody) -> Result<Analysis> {
     drop(inputs);
     let schema = timing::span("ssa storage analysis / schema");
     let map_error = |e: egglog_engine::Error| invalid(&e.to_string());
-    let mut flow = Dataflow::new(body, &events).map_err(map_error)?;
+    flow.control(body, &events).map_err(map_error)?;
     let Dataflow {
         graph,
         blocks: points,

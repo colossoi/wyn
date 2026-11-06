@@ -142,7 +142,12 @@ fn scalar_padding_is_contracted_but_later_alias_access_still_blocks_reuse() {
         }
         body.inner.blocks[exit].term = Terminator::Return(Some(result.into()));
         let arrays = [(initial, 0), (snapshot, 1)].into_iter().collect();
-        let places = storage_places(&body, &arrays);
+        let flow = Dataflow::memory(&body).unwrap();
+        let places = body
+            .places
+            .keys()
+            .filter(|&p| flow.graph.read(|r| r.contains("MemoryStoragePlace", memory_id(p))).unwrap())
+            .collect();
         assert_eq!(places, [base, element].into_iter().collect());
         let events = storage_events(&body, &arrays, &places);
         assert!(events[&middle].is_empty());
