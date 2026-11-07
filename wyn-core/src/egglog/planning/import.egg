@@ -56,7 +56,10 @@
       ((ReusableSource value element region)) :ruleset planning-import)
 (rule ((= ty (SourceType value)) (= (SourceArraySize ty) (FixedSize n)))
       ((FixedInputLength value n)) :ruleset planning-import)
+; Structural parameters can expose independently bound fields. Vector lanes
+; remain reads of their containing value and never own an external binding.
 (rule ((= (SourceProjection value) (ProjectionInfo parent i))
+       (= fields (SourceTypeFields (SourceType parent)))
        (ParameterValue parent)) ((ParameterValue value)) :ruleset residency)
 
 (rule ((FlowOperand value source))

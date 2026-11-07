@@ -57,6 +57,17 @@
 (rule ((ReferenceDemand e) (FlowReferenceEdge e child)) ((ReferenceDemand child)) :ruleset residency)
 (rule ((FlowForward e child)) ((FlowReferenceEdge e child)) :ruleset residency)
 (rule ((FlowProjection e tuple i) (ComputedValue tuple)) ((FlowReferenceEdge e tuple)) :ruleset residency)
+; Nested projections of one stored aggregate read that aggregate's backing.
+; Carry only its storage identity, rather than demanding unrelated sibling fields.
+(relation ProjectionStorage (SourceValue ValueKey))
+(rule ((FlowProjection e parent i) (= (ValueRead parent) (ReadElement storage)))
+      ((ProjectionStorage e storage)) :ruleset residency)
+(rule ((FlowProjection e parent i) (= (ValueRead parent) (ReadView storage)))
+      ((ProjectionStorage e storage)) :ruleset residency)
+(rule ((FlowProjection e parent i) (ProjectionStorage parent storage))
+      ((ProjectionStorage e storage)) :ruleset residency)
+(rule ((ReferenceDemand e) (ProjectionStorage e storage))
+      ((References e (Contents storage))) :ruleset residency)
 (rule ((= (SourceSlice e) (SliceInfo source start end)))
       ((FlowReferenceEdge e source) (FlowReferenceEdge e start) (FlowReferenceEdge e end)) :ruleset residency)
 (rule ((ReferenceDemand e) (= (ValueRef e) value)) ((References e (Contents value))) :ruleset residency)

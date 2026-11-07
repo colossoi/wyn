@@ -1137,3 +1137,22 @@ fn composed_generated_array_extent_reaches_both_backends() {
         program.to_rust_wgpu("composed_extent", format).unwrap();
     }
 }
+
+#[test]
+fn selected_state_vector_lanes_read_their_containing_storage_binding() {
+    host_outputs(
+        r#"
+        type state = {p:[2]vec4f32,grab:{target:vec3f32,count:i32}}
+        def reset(x:f32) state = {p=replicate(2,@[x,0.0,0.0,1.0]),grab={target=@[0.0,0.0,0.0],count=0i32}}
+        def unpack(previous:[]vec4f32) state =
+          let c = previous[2] in {p=map(|i| previous[i],iota(2)),grab={target=c.xyz,count=i32.f32(c.w)}}
+        def pack(s:state) [2]vec4f32 =
+          let tail = [@[s.grab.target...,f32.i32(s.grab.count)],@[0.0,0.0,0.0,0.0]] in
+          map(|i| tail[i],iota(2))
+        entry repro(previous:[]vec4f32,frame:u32,screen:render_target<vec4f32>) ([2]vec4f32,render_target<vec4f32>) =
+          let s = if frame == 0u32 then reset(0.0) else unpack(previous) in
+          let triangles = rasterize_triangles(direct_draw(3u32,1u32),|i,_,_| vertex_output(s.p[i32.u32(i)%2],0.0)) in
+          let image = shade(screen,triangles,|_,_,_,_,_| @[1.0,0.0,0.0,1.0]) in (pack(s),image)
+    "#,
+    );
+}
