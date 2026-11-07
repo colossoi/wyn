@@ -258,14 +258,47 @@ impl<'a, 'source> Lower<'a, 'source> {
         if let Some(actual) = self.facts.alias(array) {
             return self.array_element(context, actual, index);
         }
-        if let Some(range) =
-            Query(&self.facts.program.graph).row("SourceUnitRange", |row| row[0] == array)?
-        {
-            if self.facts.source_type(range[1]).and_then(scalar_type) != Some(ScalarType::I32) {
-                return Err(Error::Unsupported);
+        if let Some((base, start, _)) = self.facts.slice(array) {
+            let start = self.source(context, start)?;
+            let index = apply("add", ScalarType::I32, vec![start, index]);
+            return self.array_element(context, base, index);
+        }
+        if let Some(kind) = self.facts.lookup("SourceConstruct", (array,)) {
+            let kind = self.facts.program.graph.value_to_base::<egglog_engine::sort::S>(kind);
+            if matches!(kind.as_str(), "array" | "range" | "zip") {
+                let Some(arguments) = self.facts.lookup("SourceArgumentsOf", (array,)) else {
+                    return Err(error("host array arguments missing").into());
+                };
+                let arguments = self.facts.vector(arguments)?;
+                match kind.as_str() {
+                    "array" => return self.literal_element(context, &arguments, index),
+                    "zip" => {
+                        return Ok(ScalarExpr::Tuple(
+                            arguments
+                                .into_iter()
+                                .map(|input| self.array_element(context, input, index.clone()))
+                                .collect::<Result<_>>()?,
+                        ))
+                    }
+                    "range" => {
+                        let [start, _, rest @ ..] = arguments.as_slice() else {
+                            return Err(error("host range arguments missing").into());
+                        };
+                        if self.facts.source_type(*start).and_then(scalar_type) != Some(ScalarType::I32) {
+                            return Err(Error::Unsupported);
+                        }
+                        let start = self.source(context, *start)?;
+                        let offset = if let Some(step) = rest.first() {
+                            let step = self.source(context, *step)?;
+                            apply("mul", ScalarType::I32, vec![index, step])
+                        } else {
+                            index
+                        };
+                        return Ok(apply("add", ScalarType::I32, vec![start, offset]));
+                    }
+                    _ => unreachable!(),
+                }
             }
-            let start = self.source(context, range[1])?;
-            return Ok(apply("add", ScalarType::I32, vec![start, index]));
         }
         let Some(operation) = self.facts.operation(array) else {
             return Err(Error::Unsupported);
@@ -300,6 +333,37 @@ impl<'a, 'source> Lower<'a, 'source> {
             }
             lower.region(body)
         })
+    }
+    fn literal_element(
+        &mut self,
+        context: Value,
+        elements: &[Value],
+        index: ScalarExpr,
+    ) -> Result<ScalarExpr> {
+        let Some((&last, prefix)) = elements.split_last() else {
+            return Err(Error::Unsupported);
+        };
+        // Keep each element in its own branch: an unselected element may trap
+        // or perform work that cannot be speculated on the host.
+        let mut result = self.scope(|lower| lower.source(context, last))?;
+        for (ordinal, element) in prefix.iter().enumerate().rev() {
+            let yes = self.scope(|lower| lower.source(context, *element))?;
+            result = ScalarExpr::If {
+                condition: Box::new(apply(
+                    "eq",
+                    ScalarType::I32,
+                    vec![
+                        index.clone(),
+                        ScalarExpr::I32(
+                            ordinal.try_into().map_err(|_| error("host literal index too large"))?,
+                        ),
+                    ],
+                )),
+                yes: Box::new(yes),
+                no: Box::new(result),
+            };
+        }
+        Ok(result)
     }
     fn boundary(&mut self, context: Value, source: Value) -> Result<ScalarExpr> {
         if let Some(value) = self.values.get(&source) {
@@ -426,6 +490,13 @@ impl<'a, 'source> Lower<'a, 'source> {
                 ));
             }
             return Err(Error::Unsupported);
+        }
+        if let (Some(array), Some(index)) = (
+            self.facts.lookup("SourceIndexedArray", (source,)),
+            self.facts.lookup("SourceIndex", (source,)),
+        ) {
+            let index = self.source(context, index)?;
+            return self.array_element(context, array, index);
         }
         // Stored GPU values and collective results cannot be read back implicitly.
         if self.stored(source) {

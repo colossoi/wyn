@@ -1119,3 +1119,21 @@ fn generated_array_element_can_determine_dynamic_output_extent() {
         program.to_rust_wgpu("generated_extent", format).unwrap();
     }
 }
+
+#[test]
+fn composed_generated_array_extent_reaches_both_backends() {
+    let source = r#"
+        def read(values:[]i32) i32 = values[1]
+        def forward(values:[]i32) []i32 = values
+        entry repro(x:i32) []i32 =
+          let literal = [x+1,x+3,x+5,x+7] in
+          let stepped = x..2..<x+8 in
+          let values = map(|(a,b)| a+b,zip(map(|v|v+1,stepped),literal)) in
+          iota(read(forward(values[1..3])))
+    "#;
+    for (program, format) in host_outputs(source).into_iter().zip([ShaderFormat::Spirv, ShaderFormat::Wgsl])
+    {
+        WhlProgram::parse(&program.to_whl("composed_extent", format).unwrap()).unwrap();
+        program.to_rust_wgpu("composed_extent", format).unwrap();
+    }
+}

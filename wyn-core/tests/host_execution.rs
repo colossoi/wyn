@@ -530,3 +530,73 @@ fn generated_array_reads_determine_output_lengths_on_the_host() {
         }
     }
 }
+
+#[test]
+fn generated_array_extent_sources_compose_on_the_host() {
+    let cases: &[(&str, &str, fn(i32) -> i32)] = &[
+        (
+            "literal",
+            "let values = [x+4,x+9] in values[x%2]",
+            |x| x + if x % 2 == 0 { 4 } else { 9 },
+        ),
+        (
+            "stepped_range",
+            "let values = x..2..<x+8 in values[2]",
+            |x| x + 4,
+        ),
+        (
+            "descending_range",
+            "let values = (x+8)..(-2)..<x in values[2]",
+            |x| x + 4,
+        ),
+        (
+            "slice",
+            "let values = map(|i|x+i,iota(5)) in let sliced = values[x%2..x%2+2] in sliced[1]",
+            |x| x + x % 2 + 1,
+        ),
+        (
+            "nested_slice",
+            "let values = map(|i|x+i,iota(6)) in let outer = values[1..5] in let inner = outer[1..3] in inner[1]",
+            |x| x + 3,
+        ),
+        (
+            "nested_map",
+            "let values = map(|v|v*2,map(|i|x+i,iota(3))) in values[1]",
+            |x| (x + 1) * 2,
+        ),
+        (
+            "zip",
+            "let values = map(|(a,b)|a+b,zip(map(|i|x+i,iota(3)),[2,4,6])) in values[1]",
+            |x| x + 5,
+        ),
+        (
+            "forwarded_helper",
+            "let values = forward(map(|i|x+i,iota(3))) in count(values)",
+            |x| x + 1,
+        ),
+    ];
+    for &(name, expression, expected) in cases {
+        let program = generated(&format!(
+            "def forward(values:[]i32) []i32 = values
+             def count(values:[]i32) i32 = values[1]
+             entry repro(x:i32) []i32 = iota({expression})"
+        ));
+        for x in [0i32, 1, 5] {
+            let mut backend = Trace::default();
+            let inputs = program
+                .entry("repro")
+                .unwrap()
+                .parameters
+                .iter()
+                .map(|_| backend.input(x.to_le_bytes().to_vec()))
+                .collect::<Vec<_>>();
+            let result = program.run("repro", &inputs, &mut backend).unwrap();
+            assert_eq!(
+                backend.buffers[&result.handle().unwrap()].len(),
+                expected(x) as usize * 4,
+                "{name}, x={x}"
+            );
+            assert!(backend.device_reads.is_empty(), "{name}: no device readback");
+        }
+    }
+}
