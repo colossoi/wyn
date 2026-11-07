@@ -1,10 +1,13 @@
--- Issue: a scalar branch selecting traversal direction prevents local array
--- reuse in nested update loops, leaving whole-array transfers in WGSL.
--- Compile only; no GPU execution is needed to inspect this issue.
+--! # Issue: a scalar branch selecting traversal direction prevents local array
+--! # reuse in nested update loops, leaving whole-array transfers in WGSL.
+--! # Compile only; no GPU execution is needed to inspect this issue.
 --! command = "build"
 --! exit = 0
 --! targets = ["spirv", "wgsl"]
 --! args = ["-O"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"reverse_updates\""]
 --! [[spirv]]
 --! entry = "reverse_updates"
 --! array_traffic = [1, 0, 0]
