@@ -5,6 +5,20 @@ use crate::{ast_type_holes, compile_thru_frontend, SymbolId, SymbolTable};
 use egglog_engine::Write;
 
 #[test]
+fn import_returns_engine_errors_instead_of_panicking() {
+    let program = compile_thru_frontend("entry main(x:i32) i32=x+1").unwrap();
+    let program = ast_type_holes::reject_type_holes(program).unwrap();
+    let program = tlc::lower_from_ast(program).unwrap();
+    let entry = program.defs.iter().find(|def| matches!(def.meta, DefMeta::EntryPoint(_))).unwrap();
+    let (body, _) = tlc::extract_lambda_params_ref(&entry.body);
+    let mut graph = egglog_engine::EGraph::default();
+    let mut flow = Dataflow::default();
+    // Missing schema makes the engine reject the first imported fact.
+    let result = graph.update(|mut sink| flow.import(body, &mut sink));
+    assert!(result.is_err());
+}
+
+#[test]
 fn imported_reference_occurrences_match_authored_paths_in_every_subtree() {
     let source = "entry main(x: (i32, (i32, i32)), choose: bool) i32 =
         let alias = x in let ignored = (alias.1).0 in

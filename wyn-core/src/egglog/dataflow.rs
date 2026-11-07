@@ -7,7 +7,7 @@ use crate::tlc::{
 };
 use crate::{Interner, LookupMap, LookupSet, StableMap, SymbolId};
 pub(crate) use egglog_engine::Value;
-use egglog_engine::{EGraph, FullState, IntoValues, RawValues, Write};
+use egglog_engine::{EGraph, Error, FullState, RawValues, Write};
 use std::hash::Hash;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,10 +69,6 @@ pub(crate) struct Dataflow {
     reference_occurrences: Vec<Reference>,
 }
 
-fn fact(sink: &mut FullState<'_, '_>, name: &str, args: impl IntoValues) -> Value {
-    sink.add(name, args).expect("valid dataflow fact")
-}
-
 impl Dataflow {
     pub fn live_out<Tag, F: Family, G, R: Copy + Eq + Hash>(
         program: &Program<Tag, F, G>,
@@ -88,7 +84,7 @@ impl Dataflow {
                     TermKind::Lambda(lam) => &lam.body,
                     _ => &def.body,
                 };
-                flow.import(body, &mut sink);
+                flow.import(body, &mut sink)?;
             }
             for (&point, &action) in &flow.actions {
                 let (uses, kills) = transfer(action);
@@ -120,7 +116,7 @@ impl Dataflow {
             .expect("valid flow rules");
         let mut flow = Self::default();
         let result =
-            graph.update(|mut sink| Ok(flow.import(term, &mut sink).value)).expect("valid flow import");
+            graph.update(|mut sink| Ok(flow.import(term, &mut sink)?.value)).expect("valid flow import");
         graph
             .parse_and_run_program(
                 None,
@@ -298,37 +294,42 @@ impl Dataflow {
         )
     }
 
-    fn fresh(&mut self, sink: &mut FullState<'_, '_>) -> Value {
-        let region = fact(sink, "RegionId", 0i64);
-        let value = fact(sink, "SourceTerm", (region, self.next));
+    fn fresh(&mut self, sink: &mut FullState<'_, '_>) -> Result<Value, Error> {
+        let region = sink.add("RegionId", 0i64)?;
+        let value = sink.add("SourceTerm", (region, self.next))?;
         self.next += 1;
-        value
+        Ok(value)
     }
 
-    fn symbol(&mut self, symbol: SymbolId, sink: &mut FullState<'_, '_>) -> Expression {
+    fn symbol(&mut self, symbol: SymbolId, sink: &mut FullState<'_, '_>) -> Result<Expression, Error> {
         if let Some(&expr) = self.bindings.get(&symbol) {
-            return expr;
+            return Ok(expr);
         }
-        let value = fact(sink, "SourceGlobal", i64::from(symbol.0));
-        sink.set("FlowInput", value, i64::from(symbol.0)).expect("valid input");
+        let value = sink.add("SourceGlobal", i64::from(symbol.0))?;
+        sink.set("FlowInput", value, i64::from(symbol.0))?;
         let expr = Expression::new(value, value);
         self.bindings.insert(symbol, expr);
-        expr
+        Ok(expr)
     }
 
-    fn computed(&mut self, table: &str, operands: &[Value], sink: &mut FullState<'_, '_>) -> Value {
-        let value = self.fresh(sink);
+    fn computed(
+        &mut self,
+        table: &str,
+        operands: &[Value],
+        sink: &mut FullState<'_, '_>,
+    ) -> Result<Value, Error> {
+        let value = self.fresh(sink)?;
         for &operand in operands {
-            fact(sink, table, (value, operand));
+            sink.add(table, (value, operand))?;
         }
-        value
+        Ok(value)
     }
 
     fn import<C: Payload, S: Payload>(
         &mut self,
         term: &Term<C, S>,
         sink: &mut FullState<'_, '_>,
-    ) -> Expression {
+    ) -> Result<Expression, Error> {
         let first_reference = self.reference_occurrences.len();
         let mut children = Vec::new();
         let mut body = None;
@@ -376,9 +377,9 @@ impl Dataflow {
             TermKind::Var(VarRef::Symbol(symbol))
             | TermKind::ArrayExpr(ArrayExpr::Var(VarRef::Symbol(symbol), _)) => {
                 self.references.entry(*symbol).or_insert_with(|| (term.id, term.ty.clone(), term.span));
-                let input = self.symbol(*symbol, sink);
-                let evaluation = self.fresh(sink);
-                fact(sink, "FlowReference", (evaluation, input.evaluation));
+                let input = self.symbol(*symbol, sink)?;
+                let evaluation = self.fresh(sink)?;
+                sink.add("FlowReference", (evaluation, input.evaluation))?;
 
                 let reference = self.reference_occurrences.len();
                 self.reference_occurrences.push(Reference::Name(*symbol));
@@ -389,8 +390,8 @@ impl Dataflow {
                 }
             }
             TermKind::Coerce { inner, .. } => {
-                let input = self.child(inner, sink, &mut children);
-                let evaluation = self.computed("FlowEvaluation", &[input.evaluation], sink);
+                let input = self.child(inner, sink, &mut children)?;
+                let evaluation = self.computed("FlowEvaluation", &[input.evaluation], sink)?;
                 Expression {
                     evaluation,
                     reference: None,
@@ -399,50 +400,52 @@ impl Dataflow {
             }
             TermKind::App { .. } if update.is_some() => {
                 let (record, index, replacement) = update.unwrap();
-                let record = self.child(record, sink, &mut children);
-                let replacement = self.child(replacement, sink, &mut children);
-                let value = self.computed("FlowOperand", &[record.value, replacement.value], sink);
-                fact(
-                    sink,
+                let record = self.child(record, sink, &mut children)?;
+                let replacement = self.child(replacement, sink, &mut children)?;
+                let value = self.computed("FlowOperand", &[record.value, replacement.value], sink)?;
+                sink.add(
                     "SourceFieldUpdate",
                     (value, record.value, index as i64, replacement.value),
-                );
-                self.evaluated(value, &[record, replacement], sink)
+                )?;
+                self.evaluated(value, &[record, replacement], sink)?
             }
             TermKind::Let { name, rhs, body, .. } => {
-                let rhs = self.child(rhs, sink, &mut children);
-                let value = self.fresh(sink);
-                sink.set("SourceAlias", value, rhs.value).expect("valid binding");
+                let rhs = self.child(rhs, sink, &mut children)?;
+                let value = self.fresh(sink)?;
+                sink.set("SourceAlias", value, rhs.value)?;
                 self.bindings.insert(*name, Expression { value, ..rhs });
-                let body = self.child(body, sink, &mut children);
-                let evaluation = self.computed("FlowEvaluation", &[rhs.evaluation, body.evaluation], sink);
+                let body = self.child(body, sink, &mut children)?;
+                let evaluation =
+                    self.computed("FlowEvaluation", &[rhs.evaluation, body.evaluation], sink)?;
                 Expression::new(body.value, evaluation)
             }
             TermKind::Tuple(fields)
             | TermKind::VecLit(fields)
             | TermKind::ArrayExpr(ArrayExpr::Literal(fields)) => {
-                let fields: Vec<_> =
-                    fields.iter().map(|field| self.child(field, sink, &mut children)).collect();
+                let fields: Vec<_> = fields
+                    .iter()
+                    .map(|field| self.child(field, sink, &mut children))
+                    .collect::<Result<_, _>>()?;
                 let value = self.computed(
                     "FlowOperand",
                     &fields.iter().map(|field| field.value).collect::<Vec<_>>(),
                     sink,
-                );
+                )?;
                 for (index, field) in fields.iter().enumerate() {
-                    fact(sink, "SourceField", (value, index as i64, field.value));
+                    sink.add("SourceField", (value, index as i64, field.value))?;
                 }
-                self.evaluated(value, &fields, sink)
+                self.evaluated(value, &fields, sink)?
             }
             TermKind::TupleProj { tuple, idx } => {
-                let input = self.child(tuple, sink, &mut children);
-                let value = self.fresh(sink);
-                fact(sink, "SourceSelect", (value, input.value, *idx as i64));
+                let input = self.child(tuple, sink, &mut children)?;
+                let value = self.fresh(sink)?;
+                sink.add("SourceSelect", (value, input.value, *idx as i64))?;
                 let reference = input.reference.map(|parent| {
                     let reference = self.reference_occurrences.len();
                     self.reference_occurrences.push(Reference::Field(parent, *idx));
                     reference
                 });
-                let evaluation = self.computed("FlowEvaluation", &[input.evaluation], sink);
+                let evaluation = self.computed("FlowEvaluation", &[input.evaluation], sink)?;
                 Expression {
                     value,
                     evaluation,
@@ -455,55 +458,59 @@ impl Dataflow {
                 then_branch,
                 else_branch,
             } => {
-                let condition = self.child(cond, sink, &mut children);
-                let yes = self.child(then_branch, sink, &mut children);
-                let no = self.child(else_branch, sink, &mut children);
-                let value = self.computed("FlowOperand", &[condition.value, yes.value, no.value], sink);
-                fact(sink, "FlowChoice", (value, yes.value, no.value));
-                let expr = self.evaluated(value, &[condition], sink);
-                fact(sink, "FlowCall", (expr.evaluation, yes.evaluation));
-                fact(sink, "FlowCall", (expr.evaluation, no.evaluation));
+                let condition = self.child(cond, sink, &mut children)?;
+                let yes = self.child(then_branch, sink, &mut children)?;
+                let no = self.child(else_branch, sink, &mut children)?;
+                let value = self.computed("FlowOperand", &[condition.value, yes.value, no.value], sink)?;
+                sink.add("FlowChoice", (value, yes.value, no.value))?;
+                let expr = self.evaluated(value, &[condition], sink)?;
+                sink.add("FlowCall", (expr.evaluation, yes.evaluation))?;
+                sink.add("FlowCall", (expr.evaluation, no.evaluation))?;
                 expr
             }
             _ => {
-                let value = self.fresh(sink);
+                let value = self.fresh(sink)?;
+                let mut result: Result<(), Error> = Ok(());
                 term.for_each_child(&mut |child| {
-                    let edge = if body.is_some_and(|body| std::ptr::eq(child, body)) {
-                        if matches!(term.kind, TermKind::Lambda(_)) {
-                            "FlowReference"
+                    if result.is_err() {
+                        return;
+                    }
+                    result = (|| {
+                        let edge = if body.is_some_and(|body| std::ptr::eq(child, body)) {
+                            if matches!(term.kind, TermKind::Lambda(_)) {
+                                "FlowReference"
+                            } else {
+                                "FlowCall"
+                            }
                         } else {
-                            "FlowCall"
-                        }
-                    } else {
-                        "FlowEvaluation"
-                    };
-                    let child = self.child(child, sink, &mut children).evaluation;
-                    fact(sink, edge, (value, child));
+                            "FlowEvaluation"
+                        };
+                        let child = self.child(child, sink, &mut children)?.evaluation;
+                        sink.add(edge, (value, child))?;
+                        Ok(())
+                    })();
                 });
+                result?;
                 if let TermKind::Soac(
                     SoacOp::Scatter { dest, .. }
                     | SoacOp::BucketScatter { dest, .. }
                     | SoacOp::ReduceByIndex { dest, .. },
                 ) = &term.kind
                 {
-                    let destination = self.symbol(dest.id, sink).evaluation;
-                    fact(sink, "FlowReference", (value, destination));
+                    let destination = self.symbol(dest.id, sink)?.evaluation;
+                    sink.add("FlowReference", (value, destination))?;
                     self.reference_occurrences.push(Reference::Name(dest.id));
                 }
                 Expression::new(value, value)
             }
         };
         expr.references = (first_reference, self.reference_occurrences.len());
-        expr.control = self.control(term, &children, captures, sink);
-        fact(
-            sink,
-            "FlowExecution",
-            (expr.evaluation, expr.control.0, expr.control.1),
-        );
+        expr.control = self.control(term, &children, captures, sink)?;
+        sink.add("FlowExecution", (expr.evaluation, expr.control.0, expr.control.1))?;
         if term.id != TermId::SYNTHETIC {
             self.terms.insert(term.id, expr);
         }
-        expr
+        Ok(expr)
     }
 
     fn evaluated(
@@ -511,13 +518,13 @@ impl Dataflow {
         value: Value,
         operands: &[Expression],
         sink: &mut FullState<'_, '_>,
-    ) -> Expression {
+    ) -> Result<Expression, Error> {
         let evaluation = self.computed(
             "FlowEvaluation",
             &operands.iter().map(|expr| expr.evaluation).collect::<Vec<_>>(),
             sink,
-        );
-        Expression::new(value, evaluation)
+        )?;
+        Ok(Expression::new(value, evaluation))
     }
 
     fn child<C: Payload, S: Payload>(
@@ -525,10 +532,10 @@ impl Dataflow {
         term: &Term<C, S>,
         sink: &mut FullState<'_, '_>,
         children: &mut Vec<Expression>,
-    ) -> Expression {
-        let expr = self.import(term, sink);
+    ) -> Result<Expression, Error> {
+        let expr = self.import(term, sink)?;
         children.push(expr);
-        expr
+        Ok(expr)
     }
 
     fn sequence(
@@ -536,12 +543,12 @@ impl Dataflow {
         children: &[Expression],
         mut after: Value,
         sink: &mut FullState<'_, '_>,
-    ) -> Value {
+    ) -> Result<Value, Error> {
         for child in children.iter().rev() {
-            fact(sink, "FlowNext", (child.control.1, after));
+            sink.add("FlowNext", (child.control.1, after))?;
             after = child.control.0;
         }
-        after
+        Ok(after)
     }
 
     fn control<C: Payload, S: Payload>(
@@ -550,55 +557,55 @@ impl Dataflow {
         children: &[Expression],
         captures: usize,
         sink: &mut FullState<'_, '_>,
-    ) -> (Value, Value) {
-        let exit = self.fresh(sink);
-        match &term.kind {
+    ) -> Result<(Value, Value), Error> {
+        let exit = self.fresh(sink)?;
+        Ok(match &term.kind {
             TermKind::Coerce { .. } => children[0].control,
             TermKind::Let { .. } => {
                 self.actions.insert(exit, Action::Define(term.id));
-                fact(sink, "FlowNext", (children[0].control.1, exit));
-                fact(sink, "FlowNext", (exit, children[1].control.0));
+                sink.add("FlowNext", (children[0].control.1, exit))?;
+                sink.add("FlowNext", (exit, children[1].control.0))?;
                 (children[0].control.0, children[1].control.1)
             }
             TermKind::If { .. } => {
                 for arm in &children[1..] {
-                    fact(sink, "FlowNext", (children[0].control.1, arm.control.0));
-                    fact(sink, "FlowNext", (arm.control.1, exit));
+                    sink.add("FlowNext", (children[0].control.1, arm.control.0))?;
+                    sink.add("FlowNext", (arm.control.1, exit))?;
                 }
                 (children[0].control.0, exit)
             }
             TermKind::Lambda(_) | TermKind::Soac(_) => {
-                let repeat = self.fresh(sink);
+                let repeat = self.fresh(sink)?;
                 if matches!(term.kind, TermKind::Soac(_)) {
                     self.actions.insert(repeat, Action::Define(term.id));
                 }
-                fact(sink, "FlowNext", (repeat, children[0].control.0));
-                fact(sink, "FlowNext", (children[0].control.1, repeat));
-                let enter = self.fresh(sink);
-                fact(sink, "FlowNext", (enter, repeat));
-                fact(sink, "FlowNext", (enter, exit));
-                let enter = self.sequence(&children[1..1 + captures], enter, sink);
-                (self.sequence(&children[1 + captures..], enter, sink), exit)
+                sink.add("FlowNext", (repeat, children[0].control.0))?;
+                sink.add("FlowNext", (children[0].control.1, repeat))?;
+                let enter = self.fresh(sink)?;
+                sink.add("FlowNext", (enter, repeat))?;
+                sink.add("FlowNext", (enter, exit))?;
+                let enter = self.sequence(&children[1..1 + captures], enter, sink)?;
+                (self.sequence(&children[1 + captures..], enter, sink)?, exit)
             }
             TermKind::Loop { kind, .. } => {
                 self.actions.insert(exit, Action::Evaluate(term.id));
-                let define = self.fresh(sink);
+                let define = self.fresh(sink)?;
                 self.actions.insert(define, Action::Define(term.id));
                 let body = children[children.len() - 1];
                 let enter = if matches!(kind, LoopKind::While { .. }) {
                     let condition = children[children.len() - 2];
-                    fact(sink, "FlowNext", (define, condition.control.0));
-                    fact(sink, "FlowNext", (condition.control.1, body.control.0));
-                    fact(sink, "FlowNext", (condition.control.1, exit));
-                    fact(sink, "FlowNext", (body.control.1, define));
-                    self.sequence(&children[..children.len() - 2], define, sink)
+                    sink.add("FlowNext", (define, condition.control.0))?;
+                    sink.add("FlowNext", (condition.control.1, body.control.0))?;
+                    sink.add("FlowNext", (condition.control.1, exit))?;
+                    sink.add("FlowNext", (body.control.1, define))?;
+                    self.sequence(&children[..children.len() - 2], define, sink)?
                 } else {
-                    let repeat = self.fresh(sink);
-                    fact(sink, "FlowNext", (repeat, define));
-                    fact(sink, "FlowNext", (repeat, exit));
-                    fact(sink, "FlowNext", (define, body.control.0));
-                    fact(sink, "FlowNext", (body.control.1, repeat));
-                    self.sequence(&children[..children.len() - 1], repeat, sink)
+                    let repeat = self.fresh(sink)?;
+                    sink.add("FlowNext", (repeat, define))?;
+                    sink.add("FlowNext", (repeat, exit))?;
+                    sink.add("FlowNext", (define, body.control.0))?;
+                    sink.add("FlowNext", (body.control.1, repeat))?;
+                    self.sequence(&children[..children.len() - 1], repeat, sink)?
                 };
                 (enter, exit)
             }
@@ -616,9 +623,9 @@ impl Dataflow {
                 } else {
                     children
                 };
-                (self.sequence(children, exit, sink), exit)
+                (self.sequence(children, exit, sink)?, exit)
             }
-        }
+        })
     }
 }
 
