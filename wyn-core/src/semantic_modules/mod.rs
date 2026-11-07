@@ -935,13 +935,14 @@ impl SemanticModules {
             }
             ModuleExpression::Name(name) => {
                 // Look up an existing elaborated module by name
-                if let Some(param_module) = param_bindings.get(name) {
-                    Ok(clone_items_fresh_ids(&param_module.items, node_counter))
-                } else if let Some(source_name) = self
-                    .resolve_module_name(module_name, name)
-                    .filter(|name| self.elaborated_modules.contains_key(name))
-                {
-                    let elaborated = &self.elaborated_modules[&source_name];
+                let source_name = self.resolve_module_name(module_name, name);
+                let elaborated = param_bindings
+                    .get(name)
+                    .or_else(|| source_name.as_ref().and_then(|name| self.elaborated_modules.get(name)));
+                if let Some(elaborated) = elaborated {
+                    // Parameters retain the actual module's name, so aliases
+                    // follow the same provenance as ordinary named re-exports.
+                    let source_name = &elaborated.name;
                     for item in &elaborated.items {
                         let ElaboratedItem::Spec(Spec::Sig(member, _, _)) = item else {
                             continue;

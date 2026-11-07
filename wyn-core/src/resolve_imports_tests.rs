@@ -46,6 +46,18 @@ fn imported_builtin_can_be_reexported_and_called_by_qualified_name() {
 }
 
 #[test]
+fn imported_builtin_can_be_reexported_through_a_functor_parameter() {
+    assert_imported_callback_normalizes(
+        "module type Root = { sig sqrt(x:f32) f32 }
+         module Helper = import \"dependency\"
+         functor Export(M:Root) = { open M }
+         module Again = Export(Helper)
+         entry repro(x:f32) f32 = Again.sqrt(x)",
+        "open f32",
+    );
+}
+
+#[test]
 fn imported_definition_shadows_opened_builtin() {
     assert_imported_callback_normalizes(
         "module Helper = import \"dependency\"\nentry repro(x:bool) bool = Helper.sqrt(x)",
