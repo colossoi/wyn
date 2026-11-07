@@ -37,6 +37,7 @@ use crate::builtins;
 use crate::egglog::dataflow::Dataflow;
 use crate::err_type_at;
 use crate::error;
+use crate::error::CompilerError;
 use crate::interface;
 use crate::interface::lowering::AUTO_STORAGE_SET;
 use crate::interface::{EntryDecl, EntryParamBindingKind};
@@ -142,7 +143,8 @@ fn pin_definition(
                 &mut buffer_env,
                 span,
             )?;
-            let (values, _) = Dataflow::build(&body);
+            let (values, _) =
+                Dataflow::try_build(&body).map_err(|error| CompilerError::Internal(error.to_string()))?;
             while collect_view_slice_buffer_subst(&body, &mut subst, &buffer_env, &values) {}
             if !subst.is_empty() {
                 ty = apply_type_substitution(&ty, &subst);

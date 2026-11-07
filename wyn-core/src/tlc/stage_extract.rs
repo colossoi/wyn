@@ -20,6 +20,7 @@ use crate::builtins;
 use crate::egglog::dataflow::{projected_symbol_path, reference_paths, Dataflow, Origin};
 use crate::err_type_at;
 use crate::error;
+use crate::error::CompilerError;
 use crate::host;
 use crate::interface::lowering::AUTO_STORAGE_SET;
 use crate::interface::{self, Attribute, EntryKind};
@@ -225,8 +226,24 @@ fn extract(
         }
 
         let mut root_binding_ids = binding_ids.clone();
-        if let Some(stages) = extract_root(&definition, &builtins, symbols, term_ids, &mut root_binding_ids)
-        {
+        let stages = if let TermKind::Lambda(lambda) = &definition.body.kind {
+            let mut root = lambda.clone();
+            root.body = Box::new(normalize_root_bindings(*root.body, &builtins, term_ids));
+            let (values, _) = Dataflow::try_build(&root.body)
+                .map_err(|error| CompilerError::Internal(error.to_string()))?;
+            extract_root(
+                &definition,
+                root,
+                values,
+                &builtins,
+                symbols,
+                term_ids,
+                &mut root_binding_ids,
+            )
+        } else {
+            None
+        };
+        if let Some(stages) = stages {
             *binding_ids = root_binding_ids;
             extracted.extend(stages);
             continue;
@@ -258,6 +275,8 @@ fn extract(
 
 fn extract_root(
     definition: &Def<UnpinnedPolymorphic>,
+    root_lambda: Lambda,
+    values: Dataflow,
     builtins: &InvocationBuiltins,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
@@ -270,12 +289,6 @@ fn extract_root(
         return None;
     }
 
-    let TermKind::Lambda(source_root_lambda) = &definition.body.kind else {
-        return None;
-    };
-    let mut root_lambda = source_root_lambda.clone();
-    root_lambda.body = Box::new(normalize_root_bindings(*root_lambda.body, builtins, term_ids));
-    let (values, _) = Dataflow::build(&root_lambda.body);
     let root_name = root_entry_name(definition)?;
     // Allocate one module-wide descriptor namespace, shared by all stages
     // of this root and by the later compute buffer allocator.

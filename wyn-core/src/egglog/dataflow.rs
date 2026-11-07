@@ -110,21 +110,20 @@ impl Dataflow {
             .collect())
     }
     pub fn build<C: Payload, S: Payload>(term: &Term<C, S>) -> (Self, Value) {
+        Self::try_build(term).expect("valid flow analysis")
+    }
+
+    pub fn try_build<C: Payload, S: Payload>(term: &Term<C, S>) -> Result<(Self, Value), OptimizeError> {
         let mut graph = EGraph::default();
-        graph
-            .parse_and_run_program(Some("dataflow".into()), include_str!("flow.egg"))
-            .expect("valid flow rules");
+        graph.parse_and_run_program(Some("dataflow".into()), include_str!("flow.egg"))?;
         let mut flow = Self::default();
-        let result =
-            graph.update(|mut sink| Ok(flow.import(term, &mut sink)?.value)).expect("valid flow import");
-        graph
-            .parse_and_run_program(
-                None,
-                "(run-schedule (saturate flow-forward) flow-projections (saturate source-summary) (saturate flow-evaluation))",
-            )
-            .expect("valid flow analysis");
+        let result = graph.update(|mut sink| Ok(flow.import(term, &mut sink)?.value))?;
+        graph.parse_and_run_program(
+            None,
+            "(run-schedule (saturate flow-forward) flow-projections (saturate source-summary) (saturate flow-evaluation))",
+        )?;
         flow.graph = graph;
-        (flow, result)
+        Ok((flow, result))
     }
 
     pub fn free_variables<C: Payload, S: Payload>(

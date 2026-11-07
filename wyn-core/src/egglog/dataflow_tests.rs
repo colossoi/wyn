@@ -72,7 +72,7 @@ fn graph(source: &str) -> (Dataflow, Value, Vec<SymbolId>, SymbolTable) {
     let program = tlc::lower_from_ast(program).expect("TLC");
     let entry = program.defs.iter().find(|def| matches!(def.meta, DefMeta::EntryPoint(_))).expect("entry");
     let (body, parameters) = tlc::extract_lambda_params_ref(&entry.body);
-    let (values, result) = Dataflow::build(body);
+    let (values, result) = Dataflow::try_build(body).unwrap();
     let parameters = parameters.iter().map(|(symbol, _)| *symbol).collect();
     (values, result, parameters, program.symbols)
 }
