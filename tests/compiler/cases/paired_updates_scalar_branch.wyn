@@ -1,0 +1,23 @@
+-- Issue: a scalar branch selecting traversal direction prevents local array
+-- reuse in nested update loops, leaving whole-array transfers in WGSL.
+-- Compile only; no GPU execution is needed to inspect this issue.
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = ["-O"]
+--! [[spirv]]
+--! entry = "reverse_updates"
+--! array_traffic = [1, 0, 0]
+--! [[shader]]
+--! entry = "reverse_updates"
+--! targets = ["wgsl"]
+--! local_array_traffic = [1, 0, 0]
+
+entry reverse_updates(input: [32]vec4f32, pairs: []vec2i32) [32]vec4f32 =
+  loop positions = map(|p| p,input) for iteration < 4 do
+    loop current = positions for k < length(pairs) do
+      let n = if iteration % 2 == 1 then length(pairs)-1-k else k in
+      let a = pairs[n].x in
+      let b = pairs[n].y in
+      let next = current with [a] = current[a] + 1.0 in
+      next with [b] = current[b] - 1.0

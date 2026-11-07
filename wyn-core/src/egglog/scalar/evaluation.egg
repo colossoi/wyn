@@ -189,7 +189,10 @@
 (rule ((= (SelectedHead term) "ExprChoice") (= arm (SelectedField term i)) (>= i 3) (<= i 4))
       ((EvaluationArm term arm) (FlowCall (FlowNode term) (FlowNode arm))) :ruleset selected-flow)
 (rule ((= (SelectedHead term) "ExprChoice")) ((set (ExprScheduleWeight term) 1)) :ruleset selected-shape)
-(rule ((= head (SelectedHead term)) (!= head "ExprLeaf") (= (FlowEvaluationOperand (FlowNode term) i) (FlowNode child)))
+; A binding remains an independent emission anchor, but materializing it can
+; execute its producer's choices. Inherit that rank so a branch-dependent
+; update binding cannot jump ahead of the old-element reads ordered before it.
+(rule ((= (FlowEvaluationOperand (FlowNode term) i) (FlowNode child)))
       ((ExprScheduleOperand term child)) :ruleset selected-flow)
 (rule ((= (SelectedHead a) "ExprChoice") (= (SelectedHead b) "ExprChoice") (= condition (SelectedField a 2))
        (= condition (SelectedField b 2)) (= yes (SelectedField a 3)) (= no (SelectedField b 4)))
