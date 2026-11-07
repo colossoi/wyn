@@ -500,3 +500,33 @@ fn source_ssa(source: &str) -> wyn_core::error::Result<wyn_core::ssa::stage::Ela
         wyn_core::PipelineTopologyPolicy::AllowGenerated,
     ))
 }
+
+#[test]
+fn generated_array_reads_determine_output_lengths_on_the_host() {
+    for index in [0, 1] {
+        let program = generated(&format!(
+            "def count(values:[2]i32) i32 = values[{index}]
+             entry repro(x:i32) []i32 =
+               let values = map(|i| x+i,iota(2)) in iota(count(values))"
+        ));
+        for x in [0i32, 1, 65] {
+            let mut backend = Trace::default();
+            let inputs = program
+                .entry("repro")
+                .unwrap()
+                .parameters
+                .iter()
+                .map(|_| backend.input(x.to_le_bytes().to_vec()))
+                .collect::<Vec<_>>();
+            let result = program.run("repro", &inputs, &mut backend).unwrap();
+            assert_eq!(
+                backend.buffers[&result.handle().unwrap()].len(),
+                (x as usize + index) * 4
+            );
+            assert!(
+                backend.device_reads.is_empty(),
+                "pure generated elements use host parameters"
+            );
+        }
+    }
+}

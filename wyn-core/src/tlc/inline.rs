@@ -16,6 +16,7 @@ use crate::ast::{Span, TypeName};
 use crate::builtins;
 use crate::map_in_place;
 use crate::timing;
+use crate::types::TypeExt;
 use crate::{LookupMap, LookupSet};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -168,6 +169,7 @@ where
             && !contains_opaque_type(&def.ty)
             && !callbacks.contains(&def.name)
             && !is_structural_value(body)
+            && !(body.ty.is_scalar() && contains_array_read(body))
         {
             continue;
         }
@@ -224,6 +226,17 @@ pub(super) fn contains_array_work<C: Payload, S: Payload>(term: &Term<C, S>) -> 
             found = contains_array_work(c);
         }
     });
+    found
+}
+
+// Scalar helpers reading generated arrays must expose their element demand
+// before planning so host extents can rematerialize the producing expression.
+fn contains_array_read(term: &Term) -> bool {
+    if matches!(&term.kind, TermKind::Index { array, .. } if array.ty.is_array()) {
+        return true;
+    }
+    let mut found = false;
+    term.for_each_child(&mut |child| found |= contains_array_read(child));
     found
 }
 

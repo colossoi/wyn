@@ -252,11 +252,64 @@ impl<'a, 'source> Lower<'a, 'source> {
         };
         self.source(context, source)
     }
+    /// Rematerialize one element of a pure generated array, without allocating
+    /// or copying the array on the host. Required sizes may depend on this value.
+    fn array_element(&mut self, context: Value, array: Value, index: ScalarExpr) -> Result<ScalarExpr> {
+        if let Some(actual) = self.facts.alias(array) {
+            return self.array_element(context, actual, index);
+        }
+        if let Some(range) =
+            Query(&self.facts.program.graph).row("SourceUnitRange", |row| row[0] == array)?
+        {
+            if self.facts.source_type(range[1]).and_then(scalar_type) != Some(ScalarType::I32) {
+                return Err(Error::Unsupported);
+            }
+            let start = self.source(context, range[1])?;
+            return Ok(apply("add", ScalarType::I32, vec![start, index]));
+        }
+        let Some(operation) = self.facts.operation(array) else {
+            return Err(Error::Unsupported);
+        };
+        if self.facts.operation_kind(operation)? != "map"
+            || !self
+                .facts
+                .lookup("SourceReadOnly", (array,))
+                .is_some_and(|value| self.facts.program.graph.value_to_base::<bool>(value))
+        {
+            return Err(Error::Unsupported);
+        }
+        let Some(body) = self.facts.lookup("SourceOperatorBody", (operation,)) else {
+            return Err(error("host map body missing").into());
+        };
+        let Some(count) = self.facts.lookup("SourceInputCount", (operation,)) else {
+            return Err(error("host map inputs missing").into());
+        };
+        let mut arguments = Vec::new();
+        for ordinal in 0..self.facts.integer(count) {
+            let Some(input) = self.facts.lookup("SourceInput", (operation, ordinal)) else {
+                return Err(error("host map input missing").into());
+            };
+            arguments.push(self.array_element(context, input, index.clone())?);
+        }
+        self.scope(|lower| {
+            for (ordinal, argument) in arguments.into_iter().enumerate() {
+                let Some(formal) = lower.facts.parameter(body, ordinal as i64) else {
+                    return Err(error("host map parameter missing").into());
+                };
+                lower.values.insert(formal, argument);
+            }
+            lower.region(body)
+        })
+    }
     fn boundary(&mut self, context: Value, source: Value) -> Result<ScalarExpr> {
         if let Some(value) = self.values.get(&source) {
             return Ok(value.clone());
         }
-        if let Some(fields) = self.facts.record("ValueRead", "ReadElement", (source,)) {
+        if let Some(fields) = self
+            .facts
+            .lookup("ValueRead", (source,))
+            .and_then(|access| self.facts.enode("ReadElement", access))
+        {
             if let Some(read) = self.device_read {
                 if let Some(value) = read(fields[0])? {
                     return Ok(value);
@@ -538,10 +591,19 @@ impl<'a, 'source> Lower<'a, 'source> {
                 })?
             }
             "ExprInstruction" => {
-                let Some(array) = self.facts.lookup("SourceLength", (selected.values[f[2]],)) else {
-                    return Err(Error::Unsupported);
-                };
-                self.length(array)?
+                let source = selected.values[f[2]];
+                if let (Some(array), Some(index)) = (
+                    self.facts.lookup("SourceIndexedArray", (source,)),
+                    self.facts.lookup("SourceIndex", (source,)),
+                ) {
+                    let index = self.source(context, index)?;
+                    self.array_element(context, array, index)?
+                } else {
+                    let Some(array) = self.facts.lookup("SourceLength", (source,)) else {
+                        return Err(Error::Unsupported);
+                    };
+                    self.length(array)?
+                }
             }
             _ => return Err(error(format!("unresolved selected host constructor {name}")).into()),
         };

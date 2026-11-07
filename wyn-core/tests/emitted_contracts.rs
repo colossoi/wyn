@@ -1103,3 +1103,19 @@ fn graphics_callbacks_capture_nested_settings_from_a_record_with_an_array() {
     "#,
     );
 }
+
+#[test]
+fn generated_array_element_can_determine_dynamic_output_extent() {
+    let source = r#"
+        def count(values:[2]i32) i32 = values[0]
+        entry repro(x:i32) []i32 =
+          let values = map(|i| x+i,iota(2)) in
+          iota(count(values))
+    "#;
+    for (program, format) in host_outputs(source).into_iter().zip([ShaderFormat::Spirv, ShaderFormat::Wgsl])
+    {
+        let whl = program.to_whl("generated_extent", format).unwrap();
+        WhlProgram::parse(&whl).unwrap();
+        program.to_rust_wgpu("generated_extent", format).unwrap();
+    }
+}
