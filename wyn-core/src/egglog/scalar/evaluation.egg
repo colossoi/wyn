@@ -134,6 +134,7 @@
 (function SelectedArgument (i64 i64) i64 :no-merge)
 (function SelectedBase (i64) i64 :no-merge)
 (function SelectedIsIndex (i64) bool :merge (or old new))
+(function SelectedIsUpdate (i64) bool :merge (or old new))
 (relation SelectedIndex (i64 i64 i64))
 (function SelectedAddressBase (i64) i64 :no-merge)
 (function SelectedAddressDepth (i64) i64 :no-merge)
@@ -149,7 +150,7 @@
 (rule ((= args (SelectedArgs term))) ((SelectedExecutable term)) :ruleset selected-shape)
 (rule ((SelectedExecutable term) (= context (SelectedContext (SelectedField term 0))))
       ((FlowNode term) (EvaluationTermContext term context)
-       (set (SelectedIsIndex term) false)) :ruleset selected-shape)
+       (set (SelectedIsIndex term) false) (set (SelectedIsUpdate term) false)) :ruleset selected-shape)
 (rule ((SelectedExecutable term) (= head (SelectedHead term)) (!= head "ExprChoice"))
       ((set (ExprScheduleWeight term) 0)) :ruleset selected-shape)
 (rule ((= expr (SelectedExpr term)) (= (ExprReadOnly expr) true)) ((EvaluationReadOnly term)) :ruleset selected-shape)
@@ -179,7 +180,8 @@
 (rule ((SelectedExecutable term) (= child (SelectedField term i)) (SelectedExecutable child))
       ((FlowOperand (FlowNode term) (FlowNode child))) :ruleset selected-flow)
 (rule ((= head (SelectedHead term)) (!= head "ExprChoice") (= start (SelectedOperandStart term))
-       (= (SelectedIsIndex term) false) (= child (SelectedField term i)) (SelectedExecutable child))
+       (= (SelectedIsIndex term) false) (= (SelectedIsUpdate term) false)
+       (= child (SelectedField term i)) (SelectedExecutable child))
       ((set (FlowEvaluationOperand (FlowNode term) (- i start)) (FlowNode child))) :ruleset selected-flow)
 (rule ((= (SelectedHead term) "ExprChoice") (= condition (SelectedField term 2)))
       ((set (FlowEvaluationOperand (FlowNode term) 0) (FlowNode condition))
@@ -218,6 +220,19 @@
       ((set (FlowEvaluationOperand (FlowNode term) 0) (FlowNode base))) :ruleset selected-flow)
 (rule ((= index (SelectedAddressIndex term i)))
       ((set (FlowEvaluationOperand (FlowNode term) i) (FlowNode index))) :ruleset selected-flow)
+
+; Compute an owned update's replacement before its base: chained updates can
+; retain old elements rather than whole-array snapshots. Read-only operands
+; may reorder within this demand, but never across guards or mutable effects.
+(rule ((= (SelectedHead term) "ExprInstruction") (= source (SelectedSource (SelectedField term 2)))
+       (= (SourceBuiltin source) "_w_intrinsic_array_with") (= ty (SourceType source))
+       (SourceOwnedArrayType ty) (EvaluationReadOnly term))
+      ((set (SelectedIsUpdate term) true)) :ruleset selected-shape)
+(rule ((= (SelectedIsUpdate term) true) (= args (SelectedField term 4))
+       (= array (SelectedArgument args 0)) (= index (SelectedArgument args 1)) (= value (SelectedArgument args 2)))
+      ((set (FlowEvaluationOperand (FlowNode term) 0) (FlowNode index))
+       (set (FlowEvaluationOperand (FlowNode term) 1) (FlowNode value))
+       (set (FlowEvaluationOperand (FlowNode term) 2) (FlowNode array))) :ruleset selected-flow)
 
 ; Executing a source boundary includes its selected branch/loop roots, while
 ; ordinary references remain anchors for independently scheduled definitions.

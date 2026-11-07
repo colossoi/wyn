@@ -1,0 +1,22 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = ["-O"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"update_pairs\""]
+--! [[spirv]]
+--! entry = "update_pairs"
+--! array_traffic = [1, 0, 0]
+--! [[shader]]
+--! entry = "update_pairs"
+--! targets = ["wgsl"]
+--! local_array_traffic = [1, 0, 0]
+
+-- Both replacements read the old positions, including when a == b.
+entry update_pairs(input: [32]vec4f32, pairs: []vec2i32) [32]vec4f32 =
+  loop positions = map(|p| p,input) for k < length(pairs) do
+    let a = pairs[k].x in
+    let b = pairs[k].y in
+    let next = positions with [a] = positions[a] + 1.0 in
+    next with [b] = positions[b] - 1.0

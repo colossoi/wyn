@@ -317,6 +317,106 @@ fn validate_wgsl(source: &str) {
         .unwrap_or_else(|e| panic!("naga validation failed:\n{:?}\n\n--- source ---\n{}", e, source));
 }
 
+#[test]
+fn paired_updates_snapshot_elements_before_writing_even_when_indices_match() {
+    use crate::egglog::ScalarOptimization;
+    use naga::{BinaryOperator, Expression, Literal, Statement, TypeInner};
+
+    let source = include_str!("../../../tests/compiler/cases/paired_array_updates.wyn");
+    for same_index in [false, true] {
+        let source =
+            if same_index { source.replace("let b = pairs[k].y", "let b = a") } else { source.into() };
+        for policy in [ScalarOptimization::Basic, ScalarOptimization::Full] {
+            let ssa = crate::compile_thru_ssa_with_policy(&source, CodegenTarget::Wgsl, policy).unwrap();
+            let text = crate::lower_ssa_to_wgsl(ssa).unwrap();
+            validate_wgsl(&text);
+            let module = naga::front::wgsl::parse_str(&text).unwrap();
+            let mut checked = 0;
+            for entry in &module.entry_points {
+                let function = &entry.function;
+                let array_pointer = |pointer| {
+                    matches!(function.expressions[pointer], Expression::LocalVariable(v)
+                        if matches!(module.types[function.local_variables[v].ty].inner, TypeInner::Array { .. }))
+                };
+                for (_, expression) in function.expressions.iter() {
+                    assert!(
+                        !matches!(expression, Expression::Load { pointer } if array_pointer(*pointer)),
+                        "whole-array snapshot: {text}"
+                    );
+                }
+                let element = |pointer| match function.expressions[pointer] {
+                    Expression::Access { base, index } if array_pointer(base) => Some((base, index)),
+                    _ => None,
+                };
+                for statement in entry.function.body.iter() {
+                    let Statement::Loop { body, .. } = statement else {
+                        continue;
+                    };
+                    let stores: Vec<_> = body
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(at, statement)| {
+                            let Statement::Store { pointer, value } = *statement else {
+                                return None;
+                            };
+                            element(pointer).map(|address| (at, address, value))
+                        })
+                        .collect();
+                    let Some(&(_, _, last)) = stores.last() else {
+                        continue;
+                    };
+                    if !matches!(
+                        function.expressions[last],
+                        Expression::Binary {
+                            op: BinaryOperator::Subtract,
+                            ..
+                        }
+                    ) {
+                        continue;
+                    }
+                    checked += 1;
+                    assert!(stores.len() == 2 || (same_index && stores.len() == 1));
+                    let first_write = stores[0].0;
+                    for (i, &(_, address, value)) in stores.iter().enumerate() {
+                        let Expression::Binary { op, left, right } = function.expressions[value] else {
+                            panic!("update arithmetic")
+                        };
+                        assert_eq!(
+                            op,
+                            if i + 1 == stores.len() {
+                                BinaryOperator::Subtract
+                            } else {
+                                BinaryOperator::Add
+                            }
+                        );
+                        let Expression::Splat { value: one, .. } = function.expressions[right] else {
+                            panic!("vector update")
+                        };
+                        assert_eq!(function.expressions[one], Expression::Literal(Literal::F32(1.0)));
+                        let Expression::Load { pointer } = function.expressions[left] else {
+                            panic!("old element read")
+                        };
+                        assert_eq!(
+                            element(pointer),
+                            Some(address),
+                            "replacement reads its original element"
+                        );
+                        assert!(
+                            body.iter().take(first_write).any(|s| matches!(s,
+                            Statement::Emit(range) if range.clone().any(|e| e == left))),
+                            "both old elements must be read before either write: {text}"
+                        );
+                    }
+                    if same_index && stores.len() == 2 {
+                        assert_eq!(stores[0].1, stores[1].1, "exercise aliasing indices");
+                    }
+                }
+            }
+            assert_eq!(checked, 1, "must inspect the update loop: {text}");
+        }
+    }
+}
+
 /// Compile a Wyn source through the full pipeline to WGSL text.
 
 #[test]
