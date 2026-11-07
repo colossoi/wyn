@@ -18,7 +18,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='fold-parity-') as directory:
         directory=Path(directory)
         subprocess.run(['node',str(ROOT/'test/fixtures.mjs'),str(directory)],check=True)
-        for name in ['hanging','contact-grab-walls','retirement']:
+        for name in ['hanging','contact-grab-walls','retirement','weighted-contact','full-hanging']:
             case=directory/name
             subprocess.run([sys.executable,str(ROOT/'run.py'),'--headless','--fixture',str(case)],check=True)
             expected=json.loads((case/'expected.json').read_text())

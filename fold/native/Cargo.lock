@@ -2471,6 +2471,7 @@ name = "wyn-fold"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "cc",
  "image",
  "pollster",
  "serde",

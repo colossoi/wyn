@@ -7,4 +7,4 @@ publish = false
 [workspace]
 
 [dependencies]
-naga = { version = "27.0", features = ["wgsl-in"] }
+naga = { version = "27.0", features = ["wgsl-in", "spv-out", "msl-out"] }

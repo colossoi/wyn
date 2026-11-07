@@ -98,6 +98,11 @@ impl State {
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Wyn Fold native"),
                 required_limits: adapter.limits(),
+                required_features: if std::env::args().any(|a| a == "--profile") {
+                    adapter.features() & wgpu::Features::TIMESTAMP_QUERY
+                } else {
+                    wgpu::Features::empty()
+                },
                 ..Default::default()
             })
             .await
@@ -167,7 +172,9 @@ impl State {
         }
     }
     fn step(&mut self) -> Result<(), String> {
+        let started = Instant::now();
         self.sim.prepare(self.settings.speed, self.settings.thickness);
+        let prepared = Instant::now();
         if self.sim.active > 0 {
             self.solver.solve(
                 &self.device,
@@ -178,9 +185,18 @@ impl State {
             )?;
             self.sim.finish();
         }
+        if std::env::args().any(|a| a == "--profile") {
+            eprintln!(
+                "PROFILE step particles={} prepare_ms={:.3} solver_ms={:.3}",
+                self.sim.active * 13,
+                (prepared - started).as_secs_f64() * 1000.0,
+                prepared.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         Ok(())
     }
     fn draw(&mut self, advance: bool) -> Result<(), String> {
+        let profile = std::env::args().any(|a| a == "--profile");
         let now = Instant::now();
         let delta = (now - self.last).as_secs_f64().min(0.05);
         self.last = now;
@@ -191,7 +207,9 @@ impl State {
                 self.sim.accumulator -= DT;
             }
         }
+        let mesh_start = Instant::now();
         self.mesh.update(&self.sim, self.settings.thickness);
+        let render_start = Instant::now();
         if self.frames == 0 {
             eprintln!("Submitting native render passes");
         }
@@ -231,6 +249,14 @@ impl State {
             output.present();
         }
         self.frames += 1;
+        if profile {
+            self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| e.to_string())?;
+            eprintln!(
+                "PROFILE frame mesh_ms={:.3} render_and_wait_ms={:.3}",
+                (render_start - mesh_start).as_secs_f64() * 1000.0,
+                render_start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         Ok(())
     }
     fn resize(&mut self, width: u32, height: u32) {
@@ -344,6 +370,7 @@ struct App {
     state: Option<State>,
     snapshot: Option<PathBuf>,
     max_frames: Option<u32>,
+    size: u32,
 }
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -355,7 +382,7 @@ impl ApplicationHandler for App {
                 .create_window(
                     Window::default_attributes()
                         .with_title("Wyn Fold")
-                        .with_inner_size(winit::dpi::LogicalSize::new(900, 900)),
+                        .with_inner_size(winit::dpi::LogicalSize::new(self.size, self.size)),
                 )
                 .expect("native window"),
         );
@@ -421,8 +448,9 @@ fn main() {
     let value = |key: &str| args.iter().position(|s| s == key).and_then(|i| args.get(i + 1));
     let snapshot = value("--snapshot").map(PathBuf::from);
     let max_frames = value("--frames").map(|s| s.parse::<u32>().expect("frame count"));
+    let size =
+        value("--size").map(|s| s.parse::<u32>().expect("image size")).unwrap_or(900).clamp(64, 4096);
     if args.iter().any(|s| s == "--headless") {
-        let size = value("--size").map(|s| s.parse::<u32>().expect("image size")).unwrap_or(900);
         let mut state = pollster::block_on(State::new(None, size, size));
         if args.iter().any(|s| s == "--no-ao") {
             state.settings.ao = false;
@@ -462,6 +490,7 @@ fn main() {
                 state: None,
                 snapshot,
                 max_frames,
+                size,
             })
             .expect("native app");
     }

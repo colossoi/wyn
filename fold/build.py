@@ -6,13 +6,14 @@ import subprocess
 import tempfile
 from lower_serial import audit_hash_construction
 from spill import spill
+from cpu import native_cpp
 ROOT=Path(__file__).resolve().parent
 OUT=ROOT/'generated'
 def build():
     OUT.mkdir(exist_ok=True)
     compiler=os.environ.get('WYN',str(ROOT.parent/'target/release/wyn'))
     # Never leave a previous, unsafe artifact available after a failed build.
-    for name in ['constraints.wgsl', 'constraints.wynhost', 'bindings.json']:
+    for name in ['constraints.wgsl', 'constraints.wynhost', 'bindings.json', 'constraints.cpp', 'constraints-cpu.metal']:
         (OUT/name).unlink(missing_ok=True)
     with tempfile.TemporaryDirectory(prefix='wyn-fold-') as directory:
         temporary=Path(directory)/'constraints.wgsl'
@@ -39,6 +40,11 @@ def publish(temporary):
     # Driver-private arrays exceed what the AMD Metal compiler can compile.
     # Use one explicit scratch allocation; no aliases or equation rewrites.
     path.write_text(spill(code))
+    validator=ROOT/'tools/validate-wgsl/target/release/fold-validate-wgsl'
+    subprocess.run(['cargo','build','--release','--manifest-path',str(ROOT/'tools/validate-wgsl/Cargo.toml')],check=True)
+    metal=OUT/'constraints-cpu.metal'
+    subprocess.run([str(validator),str(temporary),'--msl',str(metal)],check=True)
+    (OUT/'constraints.cpp').write_text(native_cpp(metal.read_text()))
     print(f'Built {path}')
 def audit_native_hash_construction(code):
     # Derive local-array aliases from types before auditing loop placement.

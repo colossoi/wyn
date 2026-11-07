@@ -6,24 +6,26 @@ import {ClothSimulation} from '../upstream/cloth-simulation.js';
 const directory = process.argv[2];
 if (!directory) throw new Error('Expected output directory');
 mkdirSync(directory, {recursive:true});
-for (const name of ['hanging','contact-grab-walls','retirement']) {
+for (const name of ['hanging','contact-grab-walls','retirement','weighted-contact','full-hanging']) {
   const sim = new ClothSimulation();
-  sim.activeRows = 12;
+  const hanging=name.endsWith('hanging');
+  sim.activeRows = name==='full-hanging' ? 191 : 12;
   sim.retainedRows = name === 'retirement' ? 14 : 191;
   sim.feed = 0.13;
   sim.weights.fill(1);
   sim.weights.fill(0,0,26);
+  if(name==='weighted-contact')for(let i=26;i<sim.count;i++)sim.weights[i]=[0.25,0.5,1.5][i%3];
   const count = sim.activeRows*sim.stride;
   for (let i=0;i<count;i++) {
     const row=Math.floor(i/13), col=i%13;
     sim.positions.set([
       col*sim.spacing-1.9,
-      name==='hanging' ? 3-row*sim.spacing : 0.12+(row%4)*0.14,
-      name==='hanging' ? 0.01*Math.sin(row+col) : 0.04*Math.floor(row/4)+0.01*Math.sin(col)
+      hanging ? (name==='full-hanging'?65:3)-row*sim.spacing : 0.12+(row%4)*0.14,
+      hanging ? 0.01*Math.sin(row+col) : 0.04*Math.floor(row/4)+0.01*Math.sin(col)
     ],i*3);
   }
   sim.previous.set(sim.positions);
-  if (name!=='hanging') {
+  if (!hanging) {
     sim.setViewportWalls(new Float64Array([0,0,1,0.18,0,0,-1,0.18,0,1,0,0]));
     sim.beginGrab(6*13+6);
     sim.moveGrab([0.2,0.7,0.1]);

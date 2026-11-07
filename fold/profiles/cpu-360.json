@@ -1,0 +1,9 @@
+{
+  "exit": 0,
+  "frames": 60,
+  "elapsed_after_ready_s": 1.1048918920023425,
+  "observed_fps": 54.30395537726762,
+  "mean_step_ms": 1.2768249999999999,
+  "mean_mesh_ms": 0.9923166666666667,
+  "mean_render_wait_ms": 12.4472
+}

@@ -3,3 +3,6 @@ __pycache__/
 tools/validate-wgsl/target/
 native/target/
 *.png
+profiles/*.metal
+profiles/*.spvasm
+profiles/*.log
