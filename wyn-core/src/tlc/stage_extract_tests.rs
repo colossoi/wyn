@@ -288,3 +288,21 @@ fn graphics_aliases_preserve_projected_map_input_identity() {
     assert_producer_chain(&control, &[2, 1]);
     assert_eq!(stage_bindings(&aliased), control, "projected map input");
 }
+
+#[test]
+fn nested_record_argument_captures_match_direct_scalar_reads() {
+    let source = r#"
+        type settings = {x:f32,y:f32}
+        def color(s:settings) vec4f32 = @[s.x,s.y,0.0,1.0]
+        entry repro(x:f32,screen:render_target<vec4f32>) render_target<vec4f32> =
+          let s = {p=replicate(3,@[x,0.0,0.0,1.0]),settings={x=x,y=x+1.0}} in
+          let triangles = rasterize_triangles(direct_draw(3u32,1u32),
+            |i,_,_| vertex_output(s.p[i32.u32(i)],0.0)) in
+          shade(screen,triangles,|_,_,_,_,_| color(s.settings))
+    "#;
+    let direct = source.replace("color(s.settings)", "@[s.settings.x,s.settings.y,0.0,1.0]");
+    let actual = stage_bindings(source);
+    assert_eq!(actual, stage_bindings(&direct));
+    let fragment = actual.iter().find(|stage| stage.kind == EntryKind::Fragment).unwrap();
+    assert_eq!(fragment.inputs.len(), 2, "both scalar fields must be captured");
+}

@@ -1088,3 +1088,18 @@ fn graphics_entry_publishes_scalar_results_alongside_its_target() {
         assert!(host.contains(":value-layout :bool"), "{host}");
     }
 }
+
+#[test]
+fn graphics_callbacks_capture_nested_settings_from_a_record_with_an_array() {
+    host_outputs(
+        r#"
+        type settings = {x:f32}
+        def color(s:settings) vec4f32 = @[s.x,0.0,0.0,1.0]
+        entry repro(x:f32,screen:render_target<vec4f32>) render_target<vec4f32> =
+          let s = {p=replicate(3,@[x,0.0,0.0,1.0]),settings={x=x}} in
+          let triangles = rasterize_triangles(direct_draw(3u32,1u32),
+            |i,_,_| vertex_output(s.p[i32.u32(i)],0.0)) in
+          shade(screen,triangles,|_,_,_,_,_| color(s.settings))
+    "#,
+    );
+}

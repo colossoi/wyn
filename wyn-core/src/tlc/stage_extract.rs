@@ -1621,9 +1621,22 @@ fn append_computed_captures(
     for value in computed {
         for leaf in &value.leaves {
             let resolved = (value.symbol, leaf.path.clone());
-            let Some(source_paths) = used_sources.get(&resolved) else {
+            let source_paths = used_sources
+                .iter()
+                .filter_map(|((symbol, path), sources)| {
+                    (*symbol == value.symbol && leaf.path.starts_with(path)).then_some((path, sources))
+                })
+                .flat_map(|(path, sources)| {
+                    sources.iter().map(move |(symbol, source_path)| {
+                        let mut expanded = source_path.clone();
+                        expanded.extend_from_slice(&leaf.path[path.len()..]);
+                        (*symbol, expanded)
+                    })
+                })
+                .collect::<Vec<_>>();
+            if source_paths.is_empty() {
                 continue;
-            };
+            }
             append_external_param(
                 value.symbol,
                 &leaf.path,
@@ -1640,7 +1653,7 @@ fn append_computed_captures(
                 .cloned()
                 .expect("computed capture substitution was just inserted");
             for source_path in source_paths {
-                substitutions.insert(source_path.clone(), replacement.clone());
+                substitutions.insert(source_path, replacement.clone());
             }
         }
     }
@@ -1993,6 +2006,43 @@ fn flatten_compute_output_many(
     ))
 }
 
+// Captures cross stage boundaries as leaves. Rebuild an aggregate argument
+// (such as `s.settings`) from those leaves before visiting its source symbol.
+fn rebuild_external_value(
+    symbol: SymbolId,
+    path: &[usize],
+    ty: &Type,
+    span: Span,
+    substitutions: &ExternalSubstitutions,
+    term_ids: &mut TermIdSource,
+) -> Option<Term> {
+    if let Some((replacement, ty)) = substitutions.get(&(symbol, path.to_vec())) {
+        return Some(Term::fresh(
+            term_ids,
+            ty.clone(),
+            span,
+            TermKind::Var(VarRef::Symbol(*replacement)),
+        ));
+    }
+    let Type::Constructed(TypeName::Record(_) | TypeName::Tuple(_), components) = ty else {
+        return None;
+    };
+    let mut fields = Vec::new();
+    for (index, component) in components.iter().enumerate() {
+        let mut field_path = path.to_vec();
+        field_path.push(index);
+        fields.push(rebuild_external_value(
+            symbol,
+            &field_path,
+            component,
+            span,
+            substitutions,
+            term_ids,
+        )?);
+    }
+    Some(Term::fresh(term_ids, ty.clone(), span, TermKind::Tuple(fields)))
+}
+
 struct ExternalValueRewriter<'a> {
     term_ids: &'a mut TermIdSource,
     substitutions: ExternalSubstitutions,
@@ -2022,10 +2072,15 @@ impl TermRewriter<data::Empty, data::Empty> for ExternalValueRewriter<'_> {
             }
         }
         if let Some(key) = projected_symbol_path(&term) {
-            if let Some((replacement, ty)) = self.substitutions.get(&key) {
-                term.ty = ty.clone();
-                term.kind = TermKind::Var(VarRef::Symbol(*replacement));
-                return (term, RewriteDecision::Changed);
+            if let Some(replacement) = rebuild_external_value(
+                key.0,
+                &key.1,
+                &term.ty,
+                term.span,
+                &self.substitutions,
+                self.term_ids,
+            ) {
+                return (replacement, RewriteDecision::Changed);
             }
         }
         let TermKind::App { func, args } = &term.kind else {
