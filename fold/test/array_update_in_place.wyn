@@ -1,0 +1,6 @@
+-- Issue under investigation: whole-array WGSL copies for multiple indexed
+-- updates reading old state. This control uses one update per iteration and
+-- reuses the local array without copies inside the generated update loop.
+entry update(input: [32]vec4f32, indices: []i32) [32]vec4f32 =
+  loop positions = map(|p| p,input) for k < length(indices) do
+    positions with [indices[k]] = positions[indices[k]] + 1.0

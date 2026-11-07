@@ -1,0 +1,7 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+exports/
+dist/
+# Local reference videos and rendered output are not application dependencies.
+*.mp4

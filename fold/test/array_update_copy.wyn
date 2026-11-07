@@ -1,0 +1,10 @@
+-- Issue: two indexed updates that read the old loop-carried array cause
+-- whole-array value copies inside the emitted WGSL update loop.
+-- Fixed on master at a066284b; retained as a compile-only regression case.
+-- Compile only; no GPU execution is needed to reproduce the emitted copies.
+entry update_pairs(input: [32]vec4f32, pairs: []vec2i32) [32]vec4f32 =
+  loop positions = map(|p| p,input) for k < length(pairs) do
+    let a = pairs[k].x in
+    let b = pairs[k].y in
+    let next = positions with [a] = positions[a] + 1.0 in
+    next with [b] = positions[b] - 1.0

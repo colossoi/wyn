@@ -1,0 +1,89 @@
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #e9e6df;
+  color: #464741;
+  font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+main { position: fixed; inset: 0; }
+canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: grab;
+}
+canvas.grabbing { cursor: grabbing; }
+
+header {
+  position: fixed;
+  z-index: 2;
+  top: 24px;
+  left: 28px;
+  right: 28px;
+  letter-spacing: .16em;
+  pointer-events: none;
+}
+header, .lil-gui.root { mix-blend-mode: color-burn; }
+.instructions { margin: 6px 0 0; color: #55564f; letter-spacing: normal; }
+#status {
+  position: fixed;
+  inset: 50% 20px auto;
+  text-align: center;
+  pointer-events: none;
+}
+
+.lil-gui.root {
+  top: 20px;
+  right: 28px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100dvh - 120px);
+  display: flex;
+  flex-direction: column;
+  --background-color: #eeece6ed;
+  --text-color: #464741;
+  --title-background-color: #dedbd3;
+  --widget-color: #d5d2ca;
+  --hover-color: #c8c6be;
+  --focus-color: #bcbab1;
+  --number-color: #427e85;
+  --string-color: #427e85;
+  --font-size: 11px;
+}
+.lil-gui.root, .lil-gui.root * { text-transform: uppercase; }
+.lil-gui.root .title { color: #464741; text-align: center; }
+.lil-gui.root > .title { flex-shrink: 0; }
+.lil-gui.root > .children {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* Nested folders define their own theme variables; inherit the light palette. */
+.lil-gui.root .lil-gui {
+  --background-color: inherit;
+  --text-color: inherit;
+  --title-background-color: inherit;
+  --widget-color: inherit;
+  --hover-color: inherit;
+  --focus-color: inherit;
+  --number-color: inherit;
+  --string-color: inherit;
+}
+
+@media (max-width: 600px) {
+  header { left: 16px; right: 16px; }
+  .instructions { font-size: 9px; }
+  .lil-gui.root { top: 80px; right: 16px; }
+}
+@media (max-height: 480px) {
+  header { top: 12px; }
+  .lil-gui.root { top: 8px; max-height: calc(100dvh - 76px); }
+}
+@media (max-height: 480px) and (max-width: 600px) {
+  .lil-gui.root { top: 68px; }
+}

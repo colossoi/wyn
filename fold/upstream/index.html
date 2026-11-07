@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#e9e6df">
+  <title>Codevember 2006 / 01 / Fold</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+  <script type="importmap">
+    { "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.webgpu.js",
+      "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.webgpu.js",
+      "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.tsl.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.187.0/examples/jsm/"
+    } }
+  </script>
+</head>
+<body>
+  <header>
+    <div><span>CODEVEMBER 2026 / 01 / FOLD</span><p class="instructions">Drag the cloth · Space to pause</p></div>
+  </header>
+  <main aria-label="An endless translucent plastic sheet folding onto itself"><canvas id="canvas"></canvas></main>
+  <div id="status" role="status">Preparing plastic…</div>
+  <script type="module" src="main.js"></script>
+</body>
+</html>

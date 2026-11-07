@@ -1,0 +1,10 @@
+[package]
+name = "fold-validate-wgsl"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+naga = { version = "27.0", features = ["wgsl-in"] }

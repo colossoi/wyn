@@ -1,0 +1,5 @@
+generated/
+__pycache__/
+tools/validate-wgsl/target/
+native/target/
+*.png

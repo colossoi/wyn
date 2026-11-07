@@ -1,0 +1,145 @@
+-- MIT, Copyright (c) 2026 mrdoob. See ../LICENSE.
+-- Port of 01/cloth-simulation.js at the revision in ../REVISION.
+-- Sequential Gauss-Seidel XPBD: preserve edge and contact traversal order.
+-- p.w carries inverse mass; first two feed rows have zero inverse mass.
+open f32
+
+def spacing: f32 = 3.8 / 12.0
+
+def fade(row: i32, feed: f32, retained: f32) f32 =
+  let x = clamp((f32.i32(row) + feed / spacing - (retained - 10.0)) / 7.0,0.0,1.0) in
+  1.0 - x*x*(3.0 - 2.0*x)
+
+def recycle(row: i32, feed: f32, retained: f32) f32 =
+  let x = clamp((f32.i32(row) + feed / spacing - (retained - 22.0)) / 20.0,0.0,1.0) in
+  x*x*(3.0 - 2.0*x)
+
+def hash(x: i32, y: i32, z: i32) i32 =
+  i32.u32(((u32.i32(x)*73856093u32) ^ (u32.i32(y)*19349663u32) ^ (u32.i32(z)*83492791u32)) & 8191u32)
+
+-- Host supplies the same ordered edges as upstream (13,880 at default size).
+-- config: count, dt, thickness, stiffness / feed, retained, wallCount, unused.
+-- grabs: up to nine index/compliance/offset records; anchor is already smoothed.
+entry constraints(input_p: [2483]vec4f32, old: [2483]vec4f32,
+                  edges: [13880]vec4f32, planes: [3]vec4f32,
+                  config: [3]vec4f32, grabs: [9]vec4f32,
+                  grab_info: [9]vec2f32)
+                  [2483]vec4f32 =
+  let anchor = config[2].xyz in
+  let grab_count = i32.f32(config[2].w) in
+  let count = i32.f32(config[0].x) in
+  let dt = config[0].y in
+  let thickness = config[0].z in
+  let bend = 0.00002 * pow(10.0,(1.0 - config[0].w)*3.0) in
+  let feed = config[1].x in
+  let retained = config[1].y in
+  let wall_count = i32.f32(config[1].z) in
+  let zero_lambdas: [13880]f32 = replicate(13880,0.0) in
+  let zero_grab: [9]vec3f32 = replicate(9,@[0.0,0.0,0.0]) in
+  let initial: [2483]vec4f32 = map(|v| v,input_p) in
+  let (result,_,_) = loop (p,lambdas,grab_lambda) =
+    (initial,zero_lambdas,zero_grab) for iteration < 4 do
+    let (p1,lambdas1) = loop (ps,ls) = (p,lambdas) for k < length(edges) do
+      let n = if iteration % 2 == 1 then length(edges)-1-k else k in
+      let e = edges[n] in
+      let a = i32.f32(e.x) in
+      let b = i32.f32(e.y) in
+      if a >= count || b >= count || ps[a].w + ps[b].w == 0.0 then (ps,ls)
+      else
+        let delta = ps[a].xyz - ps[b].xyz in
+        let distance = magnitude(delta) in
+        if distance < 1.0e-9 then (ps,ls)
+        else
+          let alpha = (if e.w == 2.0 then bend else if e.w == 1.0 then 0.0000005 else 0.0000001) / (dt*dt) in
+          let dl = (-(distance-e.z)-alpha*ls[n]) / (ps[a].w+ps[b].w+alpha) in
+          let pa = ps[a] with .xyz = ps[a].xyz + delta*(dl*ps[a].w/distance) in
+          let pb = ps[b] with .xyz = ps[b].xyz - delta*(dl*ps[b].w/distance) in
+          let next = ps with [a] = pa in
+          (next with [b] = pb,ls with [n] = ls[n]+dl)
+    in
+    let (p2,grab_lambda1) = loop (ps,ls) = (p1,grab_lambda) for k < grab_count do
+      let index = i32.f32(grab_info[k].x) in
+      if index >= count then (ps,ls)
+      else
+        let weight = ps[index].w in
+        let alpha = grab_info[k].y / (dt*dt) in
+        let error = ps[index].xyz - anchor - grabs[k].xyz in
+        let dl = (-error - alpha*ls[k]) / (weight + alpha) in
+        (ps with [index] = (ps[index] with .xyz = ps[index].xyz + weight*dl),
+         ls with [k] = ls[k] + dl)
+    in
+    let p3 = if iteration % 2 == 0 then p2 else
+      let separation = max(thickness,spacing*0.85) in
+      let excluded = i32.f32(max(2.0,ceil(thickness/spacing))) in
+      let (next,heads,cells) = loop (next,heads,cells) =
+        (replicate(2483,-1i32),replicate(8192,-1i32),replicate(2483,@[0i32,0i32,0i32])) for i < count do
+          let q = p2[i].xyz / separation in
+          let cell = @[i32.f32(floor(q.x)),i32.f32(floor(q.y)),i32.f32(floor(q.z))] in
+          let bucket = hash(cell.x,cell.y,cell.z) in
+          (next with [i] = heads[bucket],heads with [bucket] = i,cells with [i] = cell)
+      in
+      -- Carry the hash through the particle loop. Capturing its constructor as
+      -- a pure expression lets the compiler sink construction into each query.
+      let (contact_result,_,_,_) =
+        loop (ps,contact_next,contact_heads,contact_cells) = (p2,next,heads,cells)
+        for ai < count-26 do
+        let a = ai+26 in
+        let row = a/13 in
+        let col = a%13 in
+        let updated = loop qs = ps for x0 < 3 do
+          loop rs = qs for y0 < 3 do
+            loop ss = rs for z0 < 3 do
+              let cell = contact_cells[a] + @[x0-1,y0-1,z0-1] in
+              -- A valid upstream chain has at most count links. Bound traversal
+              -- even if storage is corrupted; negative feed weight reports a
+              -- malformed chain to the host instead of dispatching forever.
+              let (last,out,_) = loop (b,ts,visited) =
+                (contact_heads[hash(cell.x,cell.y,cell.z)],ss,0i32)
+                while b != -1 && b >= 0 && b < count && visited < count do
+                let skip = b <= a || (i32.abs(row-b/13) <= excluded && i32.abs(col-b%13) <= excluded)
+                  || contact_cells[b].x != cell.x || contact_cells[b].y != cell.y || contact_cells[b].z != cell.z in
+                if skip then (contact_next[b],ts,visited+1)
+                else
+                  let delta0 = ts[a].xyz - ts[b].xyz in
+                  let squared = dot(delta0,delta0) in
+                  let contact = separation*min(fade(row,feed,retained),fade(b/13,feed,retained)) in
+                  if squared >= separation*separation || squared >= contact*contact then (contact_next[b],ts,visited+1)
+                  else
+                    let distance0 = sqrt(squared) in
+                    let tiny = distance0 < 1.0e-8 in
+                    let delta = if tiny then @[0.0,1.0,0.0] else delta0 in
+                    let distance = if tiny then 1.0 else distance0 in
+                    let penetration = if tiny then contact else contact-distance in
+                    let correction = penetration/(distance*(ts[a].w+ts[b].w)) in
+                    let ta = ts[a] with .xyz = ts[a].xyz + delta*(correction*ts[a].w) in
+                    let tb = ts[b] with .xyz = ts[b].xyz - delta*(correction*ts[b].w) in
+                    let nt = ts with [a] = ta in
+                    (contact_next[b],nt with [b] = tb,visited+1)
+              in if last == -1 then out else out with [0] = (out[0] with .w = -1.0)
+        in (updated,contact_next,contact_heads,contact_cells)
+      in contact_result
+    in
+    let p4 = loop ps = p3 for k < count-26 do
+      let i = k+26 in
+      let amount = recycle(i/13,feed,retained) in
+      let floor_y = thickness*0.5 - amount*1.5 in
+      let q = ps[i] with .y = ps[i].y - (if amount > 0.0 then amount*0.001 else 0.0) in
+      let q1 = if q.y < floor_y then
+        @[old[i].x+(q.x-old[i].x)*0.7,floor_y,old[i].z+(q.z-old[i].z)*0.7,q.w] else q in
+      ps with [i] = q1
+    in
+    let p5 = loop ps = p4 for k < count-26 do
+      let i = k+26 in
+      let pos = loop q = ps[i] for _sweep < 2 do
+        loop r = q for wall < wall_count+2 do
+          if wall == 2 && wall < wall_count && recycle(i/13,feed,retained) > 0.0 then r
+          else
+            let plane = if wall >= wall_count then
+              @[if wall == wall_count then 1.0 else -1.0,0.0,0.0,2.85] else planes[wall] in
+            let distance = dot(r.xyz,plane.xyz)+plane.w in
+            let correction = max(thickness*0.5+0.025-distance,0.0) in
+            r with .xyz = r.xyz + plane.xyz*correction
+      in ps with [i] = pos
+    in
+    (p5,lambdas1,grab_lambda1)
+  in result
