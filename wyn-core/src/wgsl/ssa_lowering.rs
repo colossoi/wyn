@@ -141,6 +141,12 @@ pub fn wgsl_mangle(name: &str) -> String {
     out
 }
 
+/// Positional members use a namespace that cannot collide with WGSL type names
+/// such as `f16` and `f32`. Declarations and all accesses share this mapping.
+fn generated_field_name(index: impl std::fmt::Display) -> String {
+    format!("field_{index}")
+}
+
 /// Validate that a host-contract name is a legal WGSL identifier.
 pub fn validate_wgsl_identifier(name: &str) -> core::result::Result<(), String> {
     if name.is_empty() {
@@ -407,8 +413,8 @@ pub struct TypeEmitter {
     tuple_counter: usize,
     /// Virtual-array range structs, cached by element type string. A
     /// virtual array (produced by `ArrayRange`) lowers to a struct
-    /// `{ f0: T, f1: T, f2: T }` holding `(start, step, len)`. The `fN`
-    /// names match `Project`'s `.f{index}` emission so start/step/len
+    /// `{ field_0: T, field_1: T, field_2: T }` holding `(start, step, len)`.
+    /// The member names match `Project`'s `.field_{index}` emission so start/step/len
     /// project naturally; `Index` and `_w_intrinsic_length` have
     /// dedicated handling.
     virtual_range_cache: LookupMap<String, String>,
@@ -809,8 +815,11 @@ impl<'a> LowerCtx<'a> {
         }
         let name = format!("VsOut{}", self.output_struct_counter);
         self.output_struct_counter += 1;
-        let numbered: Vec<(String, String, String)> =
-            fields.into_iter().enumerate().map(|(i, (attr, ty))| (format!("f{}", i), attr, ty)).collect();
+        let numbered: Vec<(String, String, String)> = fields
+            .into_iter()
+            .enumerate()
+            .map(|(i, (attr, ty))| (generated_field_name(i), attr, ty))
+            .collect();
         self.output_structs.insert(sig, (name.clone(), numbered));
         name
     }
@@ -894,8 +903,10 @@ impl<'a> LowerCtx<'a> {
         };
         let mut fields = Vec::with_capacity(components.len());
         for (field, component_ty) in components.iter().enumerate() {
-            let projected =
-                elements.iter().map(|element| format!("({element}).f{field}")).collect::<Vec<_>>();
+            let projected = elements
+                .iter()
+                .map(|element| format!("({element}).{}", generated_field_name(field)))
+                .collect::<Vec<_>>();
             fields.push(self.addressable_composite_expr(component_ty, &projected)?);
         }
         let wgsl_ty = self.type_emitter.type_to_wgsl(ty)?;
@@ -976,7 +987,7 @@ impl<'a> LowerCtx<'a> {
         for (name, field_types) in structs {
             writeln!(output, "struct {} {{", name)?;
             for (i, ft) in field_types.iter().enumerate() {
-                writeln!(output, "    f{}: {},", i, ft)?;
+                writeln!(output, "    {}: {},", generated_field_name(i), ft)?;
             }
             writeln!(output, "}}")?;
             writeln!(output)?;
@@ -984,26 +995,26 @@ impl<'a> LowerCtx<'a> {
 
         // Virtual-array range struct declarations (from ArrayRange
         // creation sites / `type_to_wgsl` on `Array[_, _, Virtual]`).
-        // Field layout mirrors the tuple layout (`f0`/`f1`/`f2`) so
-        // `Project` can emit `.fN` without special-casing, matching
+        // Field layout mirrors the tuple layout (`field_0`/`field_1`/`field_2`) so
+        // `Project` can emit `.field_N` without special-casing, matching
         // SPIR-V's `composite_extract` indices 0/1/2 for start/step/len.
         for (name, elem) in &self.type_emitter.virtual_range_structs {
             writeln!(output, "struct {} {{", name)?;
-            writeln!(output, "    f0: {},", elem)?;
-            writeln!(output, "    f1: {},", elem)?;
-            writeln!(output, "    f2: {},", elem)?;
+            for index in 0..3 {
+                writeln!(output, "    {}: {},", generated_field_name(index), elem)?;
+            }
             writeln!(output, "}}")?;
             writeln!(output)?;
         }
 
         // Bounded-array struct declarations. Field layout mirrors the
-        // tuple `f0`/`f1` convention so `Project` reaches buffer/len via
-        // `.f0`/`.f1` without special-casing, matching SPIR-V's
+        // tuple `field_0`/`field_1` convention so `Project` reaches buffer/len via
+        // `.field_0`/`.field_1` without special-casing, matching SPIR-V's
         // `composite_extract` indices 0/1.
         for (name, elem, n) in &self.type_emitter.bounded_structs {
             writeln!(output, "struct {} {{", name)?;
-            writeln!(output, "    f0: array<{}, {}>,", elem, n)?;
-            writeln!(output, "    f1: i32,")?;
+            writeln!(output, "    {}: array<{}, {}>,", generated_field_name(0), elem, n)?;
+            writeln!(output, "    {}: i32,", generated_field_name(1))?;
             writeln!(output, "}}")?;
             writeln!(output)?;
         }
@@ -1601,12 +1612,13 @@ impl<'a> LowerCtx<'a> {
                         field_specs.push((attr, ty_str));
                     }
                     let struct_name = self.get_or_create_output_struct(field_specs);
-                    // Field names (`f0`, `f1`, ...) are assigned in
+                    // Field names (`field_0`, `field_1`, ...) are assigned in
                     // `get_or_create_output_struct` by struct-field
                     // position, which mirrors the order we pushed above
                     // (i.e. the order of `non_storage_outputs`).
                     for (pos, (orig_index, _)) in non_storage_outputs.iter().enumerate() {
-                        index_to_field.insert(*orig_index, format!("_out_struct.f{}", pos));
+                        index_to_field
+                            .insert(*orig_index, format!("_out_struct.{}", generated_field_name(pos)));
                     }
                     multi_output_struct = Some((struct_name.clone(), index_to_field));
                     (struct_name, false)
@@ -1910,7 +1922,7 @@ struct BodyLowerCtx<'a, 'b> {
     /// an index is present here, that name is used as the store target;
     /// otherwise the default `_out{index}` is used. Populated by
     /// `lower_entry_point` when it's packing outputs into a struct —
-    /// then the name is `_out_struct.f{index}`.
+    /// then the name is `_out_struct.field_{index}`.
     output_target_names: LookupMap<usize, String>,
     /// Span of the instruction currently being lowered.
     current_span: Option<Span>,
@@ -2076,8 +2088,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 
         let mut fields = Vec::with_capacity(components.len());
         for (field, component_ty) in components.iter().enumerate() {
-            let projected =
-                elements.iter().map(|element| format!("({element}).f{field}")).collect::<Vec<_>>();
+            let projected = elements
+                .iter()
+                .map(|element| format!("({element}).{}", generated_field_name(field)))
+                .collect::<Vec<_>>();
             fields.push(self.array_literal_expr(component_ty, &projected)?);
         }
         let wgsl_ty = self.ctx.type_emitter.type_to_wgsl(result_ty)?;
@@ -2354,7 +2368,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                         "aggregate place requires a constant field"
                                     ));
                                 };
-                                format!("{parent}.f{field}")
+                                format!("{parent}.{}", generated_field_name(field))
                             } else {
                                 let idx = self.get_value(*index)?;
                                 format!("{parent}[{idx}]")
@@ -2546,7 +2560,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                         if i == index as usize {
                                             replacement.clone()
                                         } else {
-                                            format!("{original}.f{i}")
+                                            format!("{original}.{}", generated_field_name(i))
                                         }
                                     })
                                     .collect();
@@ -2561,10 +2575,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             let result = self.emit_mutable_binding(output, result_id, &ty, &original)?;
                             writeln!(
                                 output,
-                                "{}{}.f{} = {};",
+                                "{}{}.{} = {};",
                                 self.ctx.indent_str(),
                                 result,
-                                index,
+                                generated_field_name(index),
                                 replacement
                             )?;
                             continue;
@@ -3050,10 +3064,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     ) {
                         // A Composite array is a WGSL `array<T, N>`: project by
                         // subscript. (View/Bounded/Virtual variants are emitted
-                        // as structs, so they keep the `.fN` field access below.)
+                        // as structs, so they keep the `.field_N` field access below.)
                         Ok(format!("{}[{}]", base_val, index))
                     } else {
-                        Ok(format!("{}.f{}", base_val, index))
+                        Ok(format!("{}.{}", base_val, generated_field_name(index)))
                     }
                 }
 
@@ -3071,7 +3085,14 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         if let Some(PolyType::Constructed(TypeName::ArrayVariantVirtual, _)) =
                             base_ty.array_variant()
                         {
-                            return Ok(format!("({}.f0 + {} * {}.f1)", base_val, index_val, base_val));
+                            return Ok(format!(
+                                "({}.{} + {} * {}.{})",
+                                base_val,
+                                generated_field_name(0),
+                                index_val,
+                                base_val,
+                                generated_field_name(1)
+                            ));
                         }
                         if let Some(PolyType::Constructed(TypeName::ArrayVariantBounded, _)) =
                             base_ty.array_variant()
@@ -3079,7 +3100,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             // Bounded `{buffer, len}`: index into the buffer
                             // member (no bounds check against `len` — same
                             // contract as Composite).
-                            return Ok(format!("{}.f0[{}]", base_val, index_val));
+                            return Ok(format!("{}.{}[{}]", base_val, generated_field_name(0), index_val));
                         }
                         if is_view_array_ty(base_ty) {
                             let buffer_name = self.view_buffer_name(id)?;
@@ -3348,7 +3369,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             if let Some(PolyType::Constructed(TypeName::ArrayVariantVirtual, _)) =
                                 ty.array_variant()
                             {
-                                let expr = format!("{}.f2", arg_strs[0]);
+                                let expr = format!("{}.{}", arg_strs[0], generated_field_name(2));
                                 let range_len_is_i32 = matches!(
                                     ty.elem_type(),
                                     Some(PolyType::Constructed(TypeName::Int(32), _))
@@ -3365,7 +3386,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             if let Some(PolyType::Constructed(TypeName::ArrayVariantBounded, _)) =
                                 ty.array_variant()
                             {
-                                let expr = format!("{}.f1", arg_strs[0]);
+                                let expr = format!("{}.{}", arg_strs[0], generated_field_name(1));
                                 return Ok(if wants_i32 { expr } else { format!("u32({})", expr) });
                             }
                             if let Some(PolyType::Constructed(TypeName::Size(n), _)) = ty.array_size() {
@@ -3454,15 +3475,15 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     let base_val = self.get_value(base)?;
                     let index_val = self.get_value(index)?;
                     // For a Bounded base the materialized value is a
-                    // `{f0: array<T,N>, f1: i32}` struct, so the dynamic
-                    // index has to traverse the `f0` member first.
+                    // `{field_0: array<T,N>, field_1: i32}` struct, so the dynamic
+                    // index has to traverse the buffer member first.
                     if let Some(id) = base.as_ssa() {
                         let base_ty = self.body.get_value_type(id);
                         if matches!(
                             base_ty.array_variant(),
                             Some(PolyType::Constructed(TypeName::ArrayVariantBounded, _))
                         ) {
-                            return Ok(format!("{}.f0[{}]", base_val, index_val));
+                            return Ok(format!("{}.{}[{}]", base_val, generated_field_name(0), index_val));
                         }
                     }
                     Ok(format!("{}[{}]", base_val, index_val))

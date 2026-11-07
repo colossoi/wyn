@@ -1156,3 +1156,20 @@ fn selected_state_vector_lanes_read_their_containing_storage_binding() {
     "#,
     );
 }
+
+#[test]
+fn large_record_fields_use_legal_wgsl_names_in_updates_and_accesses() {
+    for count in [17, 33, 65] {
+        let fields = (0..count).map(|index| format!("a{index}:f32")).collect::<Vec<_>>().join(",");
+        let source = format!(
+            "type big = {{{fields}}}\n\
+             entry repro(input:[2]big) [2]big =
+               map(|v| let changed = v with a0 = v.a{last}+1.0 in
+                   changed with a{last} = changed.a0+2.0,input)",
+            last = count - 1,
+        );
+        let source = pipeline::source(&source);
+        let output = lower_ssa_to_wgsl_with_program(pipeline::lower(&source, CodegenTarget::Wgsl)).unwrap();
+        validate(naga::front::wgsl::parse_str(&output.wgsl).unwrap());
+    }
+}

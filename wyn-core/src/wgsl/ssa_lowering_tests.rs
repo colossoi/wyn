@@ -840,12 +840,12 @@ fn wgsl_vertex_multi_output_struct() {
     )]);
     validate_wgsl(&wgsl);
     assert!(wgsl.contains("struct VsOut0"));
-    assert!(wgsl.contains("@builtin(position) f0: vec4<f32>,"));
-    assert!(wgsl.contains("@location(0) f1: vec3<f32>,"));
+    assert!(wgsl.contains("@builtin(position) field_0: vec4<f32>,"));
+    assert!(wgsl.contains("@location(0) field_1: vec3<f32>,"));
     assert!(wgsl.contains("-> VsOut0"));
     assert!(wgsl.contains("var _out_struct: VsOut0;"));
-    assert!(wgsl.contains("_out_struct.f0 ="));
-    assert!(wgsl.contains("_out_struct.f1 ="));
+    assert!(wgsl.contains("_out_struct.field_0 ="));
+    assert!(wgsl.contains("_out_struct.field_1 ="));
     assert!(wgsl.contains("return _out_struct;"));
 }
 
@@ -1071,4 +1071,14 @@ fn helpers_with_identical_display_names_keep_distinct_identities() {
     let text = super::lower(&program).unwrap();
     assert_eq!(text.matches("fn w_Uw_Ufunction_").count(), 2);
     validate_wgsl(&text);
+}
+
+#[test]
+fn generated_fields_are_legal_and_distinct_even_at_numeric_type_names() {
+    let mut names = std::collections::HashSet::new();
+    for index in 0..4096 {
+        let name = super::generated_field_name(index);
+        validate_wgsl_identifier(&name).unwrap();
+        assert!(names.insert(name), "generated fields must not collide");
+    }
 }
