@@ -21,6 +21,45 @@ fn local_plan() -> (PackageGraph, ModuleKey, ModuleKey) {
     )
 }
 
+#[test]
+fn imported_map_callback_with_opened_sqrt_and_runtime_index_normalizes() {
+    assert_imported_callback_normalizes(
+        "module Helper = import \"dependency\"\nentry repro() [2]f32 = Helper.values",
+        "open f32\ndef values:[2]f32 = map(|i| f32.i32([i,i+1][i%2])+sqrt(2.0),iota(2))",
+    );
+}
+
+#[test]
+fn imported_builtin_can_be_reexported_and_called_by_qualified_name() {
+    assert_imported_callback_normalizes(
+        "module Helper = import \"dependency\"\nmodule Again = { open Helper }\nentry repro(x:f32) f32 = Again.sqrt(x)",
+        "open f32",
+    );
+}
+
+#[test]
+fn imported_definition_shadows_opened_builtin() {
+    assert_imported_callback_normalizes(
+        "module Helper = import \"dependency\"\nentry repro(x:bool) bool = Helper.sqrt(x)",
+        "open f32\ndef sqrt(x:bool) bool = !x",
+    );
+}
+
+fn assert_imported_callback_normalizes(root_source: &str, helper_source: &str) {
+    let (plan, root, dependency) = local_plan();
+    let mut sources = LocalSources::new();
+    sources.add_override(root, root_source).unwrap();
+    sources.add_override(dependency, helper_source).unwrap();
+    let checked = ParsedModules::load(PackagePlan::new(plan, sources), CompilerOptions::default())
+        .unwrap()
+        .type_check()
+        .unwrap();
+    let program = crate::ast_type_holes::reject_type_holes(checked).unwrap();
+    let program = crate::tlc::lower_from_ast(program).unwrap();
+    let program = crate::tlc::validate_ownership(program).unwrap();
+    crate::optimize_tlc_for_test(program).expect("imported callback must normalize");
+}
+
 fn imported_module_definitions(module_source: &str, leaf_source: Option<&str>) -> Vec<String> {
     let identity = PackageIdentity::new("test/root", "v0.0.0").expect("valid package identity");
     let root_path = ModulePath::new("main.wyn").expect("valid root path");

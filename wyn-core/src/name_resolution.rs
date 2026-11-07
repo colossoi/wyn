@@ -445,6 +445,7 @@ pub fn resolve_names(
 ) -> NameResolution {
     let catalog = EnabledBuiltinCatalog {
         catalog,
+        aliases: &semantic_modules.builtin_aliases,
         graphics: options.graphics,
     };
     let mut nr = NameResolution::new();
@@ -524,13 +525,14 @@ pub fn resolve_names(
 
 struct EnabledBuiltinCatalog<'a> {
     catalog: &'a BuiltinCatalog,
+    aliases: &'a LookupMap<String, String>,
     graphics: bool,
 }
 
 impl EnabledBuiltinCatalog<'_> {
     fn lookup_by_surface_name(&self, name: &str) -> Option<&crate::builtins::BuiltinDef> {
         self.catalog
-            .lookup_by_surface_name(name)
+            .lookup_by_surface_name(self.aliases.get(name).map(String::as_str).unwrap_or(name))
             .filter(|def| self.graphics || !crate::builtins::is_graphics_builtin(def.id))
     }
 }

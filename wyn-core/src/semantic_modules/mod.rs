@@ -95,6 +95,7 @@ pub struct FunctorModule {
 /// Contains only parsed/elaborated ASTs - type-checking happens during user compilation.
 #[derive(Debug, Clone)]
 pub struct PreElaboratedPrelude {
+    builtin_aliases: LookupMap<String, String>,
     /// Module type registry: type name -> ModuleTypeExpression
     pub module_type_registry: LookupMap<String, ModuleTypeExpression>,
     /// Elaborated modules: module_name -> ElaboratedModule.
@@ -116,6 +117,8 @@ pub struct PreElaboratedPrelude {
 /// Owns elaborated modules, module types, functors, aliases, and prelude declarations.
 #[derive(Debug)]
 pub struct SemanticModules {
+    /// Canonical catalog names for builtin signatures re-exported by modules.
+    pub(crate) builtin_aliases: LookupMap<String, String>,
     /// Module type registry: type name -> ModuleTypeExpression
     module_type_registry: LookupMap<String, ModuleTypeExpression>,
     /// Elaborated modules: module_name -> ElaboratedModule.
@@ -158,6 +161,7 @@ impl SemanticModules {
         let known_modules = Self::BUILTIN_MODULES.iter().map(|s| s.to_string()).collect();
 
         SemanticModules {
+            builtin_aliases: LookupMap::new(),
             module_type_registry: LookupMap::new(),
             elaborated_modules: StableMap::new(),
             functor_modules: LookupMap::new(),
@@ -199,6 +203,7 @@ impl SemanticModules {
         manager.load_prelude_files(node_counter)?;
 
         Ok(PreElaboratedPrelude {
+            builtin_aliases: manager.builtin_aliases,
             module_type_registry: manager.module_type_registry,
             elaborated_modules: manager.elaborated_modules,
             known_modules: manager.known_modules,
@@ -212,6 +217,7 @@ impl SemanticModules {
     /// (see get_prelude_cache in lib.rs which caches both prelude and node_counter)
     pub fn from_prelude(prelude: PreElaboratedPrelude) -> Self {
         SemanticModules {
+            builtin_aliases: prelude.builtin_aliases,
             module_type_registry: prelude.module_type_registry,
             elaborated_modules: prelude.elaborated_modules,
             functor_modules: LookupMap::new(), // Prelude doesn't have functors
@@ -362,6 +368,12 @@ impl SemanticModules {
                     }
                 }
 
+                // Concrete definitions shadow re-exported builtin signatures.
+                for item in &elaborated.items {
+                    if let ElaboratedItem::Decl(decl) = item {
+                        self.builtin_aliases.remove(&format!("{qualified_name}.{}", decl.name));
+                    }
+                }
                 self.elaborated_modules.insert(qualified_name, elaborated);
                 Ok(())
             }
@@ -925,10 +937,29 @@ impl SemanticModules {
                 // Look up an existing elaborated module by name
                 if let Some(param_module) = param_bindings.get(name) {
                     Ok(clone_items_fresh_ids(&param_module.items, node_counter))
-                } else if let Some(elaborated) = self
+                } else if let Some(source_name) = self
                     .resolve_module_name(module_name, name)
-                    .and_then(|name| self.elaborated_modules.get(&name))
+                    .filter(|name| self.elaborated_modules.contains_key(name))
                 {
+                    let elaborated = &self.elaborated_modules[&source_name];
+                    for item in &elaborated.items {
+                        let ElaboratedItem::Spec(Spec::Sig(member, _, _)) = item else {
+                            continue;
+                        };
+                        if elaborated.items.iter().any(|item| {
+                            matches!(item,
+                            ElaboratedItem::Decl(decl) if decl.name == *member)
+                        }) {
+                            continue;
+                        }
+                        let source = format!("{source_name}.{member}");
+                        let canonical = self.builtin_aliases.get(&source).cloned().or_else(|| {
+                            crate::builtins::catalog().lookup_by_surface_name(&source).map(|_| source)
+                        });
+                        if let Some(canonical) = canonical {
+                            self.builtin_aliases.insert(format!("{module_name}.{member}"), canonical);
+                        }
+                    }
                     Ok(clone_items_fresh_ids(&elaborated.items, node_counter))
                 } else {
                     Err(err_module!("Unknown module: '{}'", name))
