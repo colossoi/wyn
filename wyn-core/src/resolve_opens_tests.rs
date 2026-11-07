@@ -114,6 +114,13 @@ fn open_index_split_qualified_keys() {
 }
 
 #[test]
+fn open_index_preserves_nested_module_paths() {
+    let idx = OpenIndex::from_qualified_names(["Wrapper.Helper.sqrt"]);
+    assert!(idx.has_member("Wrapper.Helper", "sqrt"));
+    assert!(!idx.has_member("Wrapper", "Helper.sqrt"));
+}
+
+#[test]
 fn open_index_skips_unqualified_keys() {
     // Top-level intrinsic names like `_w_intrinsic_*` aren't module
     // members and shouldn't pollute the module set.

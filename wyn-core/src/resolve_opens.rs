@@ -136,8 +136,9 @@ impl OpenIndex {
 
     /// Build an index from any iterator of `"M.name"`-style keys (the
     /// shape of `PlaceholderResolver::spec_schemes` and
-    /// `ImplSource`'s registry). Keys without exactly one dot are
-    /// ignored — they're function names not module members.
+    /// `ImplSource`'s registry). The last dot separates the member from
+    /// its module path, which may contain nested modules. Unqualified
+    /// keys are function names rather than module members.
     pub fn from_qualified_names<I, S>(keys: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -146,12 +147,12 @@ impl OpenIndex {
         let mut idx = OpenIndex::new();
         for key in keys {
             let k = key.as_ref();
-            // Exactly one '.' splits a key into (module, member). The
+            // The final '.' splits a key into (module path, member). The
             // ImplSource also registers width-conversion entries like
             // "i32.f32"; those still parse as (module=i32, name=f32)
             // and become legitimately reachable through `open i32`.
-            if let Some((m, n)) = k.split_once('.') {
-                if !m.is_empty() && !n.is_empty() && !n.contains('.') {
+            if let Some((m, n)) = k.rsplit_once('.') {
+                if !m.is_empty() && !n.is_empty() {
                     idx.add_member(m, n);
                 }
             }

@@ -30,6 +30,14 @@ fn imported_map_callback_with_opened_sqrt_and_runtime_index_normalizes() {
 }
 
 #[test]
+fn imported_nested_map_callback_with_opened_sqrt_normalizes() {
+    assert_imported_callback_normalizes(
+        "module Wrapper = import \"dependency\"\nentry repro() [2]f32 = Wrapper.values",
+        "module Helper = { open f32\ndef values:[2]f32 = map(|i| f32.i32([i,i+1][i%2])+sqrt(2.0),iota(2)) }\ndef values:[2]f32 = Helper.values",
+    );
+}
+
+#[test]
 fn imported_builtin_can_be_reexported_and_called_by_qualified_name() {
     assert_imported_callback_normalizes(
         "module Helper = import \"dependency\"\nmodule Again = { open Helper }\nentry repro(x:f32) f32 = Again.sqrt(x)",
