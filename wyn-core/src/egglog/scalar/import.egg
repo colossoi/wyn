@@ -8,9 +8,6 @@
   (AdmitCall SourceValue SourceArguments bool bool))
 ; Call flags: reusable invocation, and ordinary syntax arguments (rather than implicit callback arguments).
 ; Operator flags: retained instruction, and unary/binary specialization.
-(relation ExprSyntax (SourceValue))
-(relation ExprLiteralBits (SourceValue i64))
-(relation ExprSourceOperator (SourceValue String bool bool))
 (relation ExprImportInlining ())
 (relation ExprSourceCandidate (SourceValue bool i64 AdmissionForm))
 (function ExprSourceRank (SourceValue bool) i64 :merge (max old new))
@@ -19,6 +16,9 @@
 (function ExprSourceView (SourceValue) bool :merge (or old new))
 (function ExprSourceRematerialize (SourceValue) bool :merge (or old new))
 (ruleset scalar-source-flags)
+(rule ((SourcePrimitiveType ty name)) ((ExprPrimitiveType ty name)) :ruleset scalar-source-flags)
+(rule ((SourceIntegerType ty)) ((ExprIntegerType ty)) :ruleset scalar-source-flags)
+(rule ((SourceRecordUpdateOperator op)) ((ExprRecordUpdateOperator op)) :ruleset scalar-source-flags)
 (ruleset scalar-source-forms)
 (ruleset scalar-source-select)
 (rule ((= ty (SourceType s)))

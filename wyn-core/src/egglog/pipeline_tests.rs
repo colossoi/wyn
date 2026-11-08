@@ -1,6 +1,8 @@
 //! Regression inputs exercise the public pipeline and backend-visible output.
 use crate::compile_thru_ssa;
-use crate::egglog::prepare_interfaces;
+use crate::egglog::query::Query;
+use crate::egglog::{prepare_interfaces, scalar, ScalarOptimization};
+use egglog_engine::Write;
 
 #[test]
 fn size_hint_survives_egglog_optimization() {
@@ -318,4 +320,27 @@ fn placed_source(source: &str) -> crate::ssa::stage::Reachable {
     crate::ssa::filter_reachable(
         crate::ssa::place_floating(crate::ssa::optimize(compile_thru_ssa(source).unwrap())).unwrap(),
     )
+}
+
+#[test]
+fn scalar_admission_uses_ir_literal_edits() {
+    let tlc = crate::compile_thru_tlc("entry main(x:i32) i32=x+1").unwrap();
+    let mut program = interfaces_for_test(&tlc);
+    let literal = Query(&program.graph).row("ExprLiteralBits", |_| true).unwrap().unwrap()[0];
+    program.graph.clear_function("ExprLiteralBits").unwrap();
+    program.graph.update(|mut sink| sink.add("ExprLiteralBits", (literal, 7i64))).unwrap();
+    scalar::run(&mut program.graph, &program.identities, ScalarOptimization::Basic).unwrap();
+    let mut seen = false;
+    Query(&program.graph)
+        .for_each("ExprLiteral", |fields| {
+            let bits = program.graph.value_to_base::<i64>(fields[2]);
+            assert_ne!(
+                bits, 1,
+                "scalar admission must not reload the original TLC literal"
+            );
+            seen |= bits == 7;
+            Ok(())
+        })
+        .unwrap();
+    assert!(seen, "the edited literal must reach scalar optimization");
 }

@@ -7,7 +7,6 @@ use egglog_engine::{EGraph, RawValues, Write};
 pub(super) mod evaluation;
 pub(super) mod extract;
 mod fold;
-mod import;
 
 #[cfg(test)]
 #[path = "scalar/analysis_tests.rs"]
@@ -62,7 +61,6 @@ pub(super) fn run(
             Some("native scalar import".into()),
             include_str!("scalar/import.egg"),
         )?;
-        graph.update(|sink| Ok(import::syntax(sink, identities)))??;
         if policy == ScalarOptimization::Full {
             graph.update(|mut sink| sink.add("ExprImportInlining", RawValues(vec![])))?;
         }

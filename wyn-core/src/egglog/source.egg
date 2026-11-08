@@ -119,3 +119,11 @@
 
 (function SourceArgumentsOf (SourceValue) SourceArguments :no-merge)
 (function SourceConstruct (SourceValue) String :no-merge)
+
+; Scalar syntax is complete at import, independently of the original TLC tree.
+(relation ExprSyntax (SourceValue))
+(relation ExprLiteralBits (SourceValue i64))
+(relation ExprSourceOperator (SourceValue String bool bool))
+(relation SourcePrimitiveType (TypeKey String))
+(relation SourceIntegerType (TypeKey))
+(relation SourceRecordUpdateOperator (String))

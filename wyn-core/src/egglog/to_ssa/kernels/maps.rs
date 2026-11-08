@@ -67,7 +67,9 @@ pub(super) fn emit(
                             screma::SegmentResult::Elements
                         };
                         let results = body.compiler.facts.results(plan)?;
-                        let output = output.clone().ok_or_else(|| error("segment output missing"))?;
+                        let Some(output) = output.clone() else {
+                            return Err(error("segment output missing"));
+                        };
                         let target = screma::SegmentOutput {
                             source,
                             output,

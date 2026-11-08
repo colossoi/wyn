@@ -68,6 +68,19 @@ impl<'source> Import<'_, '_, '_, 'source> {
             return Ok(key);
         }
         let key = self.sink.add("TypeId", token)?;
+        let primitive = match ty {
+            Type::Constructed(TypeName::Int(bits) | TypeName::UInt(bits), _) => {
+                self.sink.add("SourceIntegerType", key)?;
+                let signed = matches!(ty, Type::Constructed(TypeName::Int(_), _));
+                Some(format!("{}{bits}", if signed { "i" } else { "u" }))
+            }
+            Type::Constructed(TypeName::Float(32), _) => Some("f32".into()),
+            Type::Constructed(TypeName::Bool, _) => Some("bool".into()),
+            _ => None,
+        };
+        if let Some(name) = primitive {
+            self.sink.add("SourcePrimitiveType", (key, name.as_str()))?;
+        }
         let semantic = strip_existentials(ty);
         if semantic.is_array() {
             self.sink.add("SourceArrayType", key)?;
@@ -176,9 +189,16 @@ impl<'source> Import<'_, '_, '_, 'source> {
             TermKind::App { func, args } => match &func.kind {
                 TermKind::BinOp(operator) => {
                     let speculative = operator.op.is_speculatable();
+                    self.sink.add(
+                        "ExprSourceOperator",
+                        (value, operator.op.symbol(), false, speculative),
+                    )?;
                     (false, speculative, true, true, 1)
                 }
-                TermKind::UnOp(_) => (false, true, true, true, 1),
+                TermKind::UnOp(operator) => {
+                    self.sink.add("ExprSourceOperator", (value, operator.op.symbol(), false, true))?;
+                    (false, true, true, true, 1)
+                }
                 TermKind::Var(VarRef::Builtin { id, overload_idx }) => {
                     let builtin = by_id(*id);
                     self.sink.set("SourceBuiltin", value, builtin.raw.surface_name)?;
@@ -195,6 +215,21 @@ impl<'source> Import<'_, '_, '_, 'source> {
                     let pure = builtin.raw.purity == Purity::Pure && !storage_update;
                     let reusable = pure && overload.lowering.is_reusable();
                     let structural = *id == catalog().known().length || *id == catalog().known().slice;
+                    if !structural {
+                        let operator = format!("builtin:{}:{overload_idx}", builtin.dispatch_name());
+                        self.sink.add(
+                            "ExprSourceOperator",
+                            (
+                                value,
+                                operator.as_str(),
+                                builtin.raw.purity != Purity::Pure || !overload.lowering.is_reusable(),
+                                overload.lowering.is_speculatable(),
+                            ),
+                        )?;
+                        if *id == catalog().known().record_with {
+                            self.sink.add("SourceRecordUpdateOperator", operator.as_str())?;
+                        }
+                    }
                     (
                         !reusable && !structural,
                         (pure && overload.lowering.is_speculatable()) || structural,

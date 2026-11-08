@@ -77,7 +77,6 @@ pub(super) struct Identities<'source> {
     pub(super) symbols: Interner<i64, SymbolId>,
     pub(super) types: Interner<i64, Type>,
     pub(super) scopes: LookupMap<Value, (Option<Value>, Option<&'source Term>)>,
-    pub(super) origins: LookupMap<Value, &'source Term>,
 }
 
 impl<'source> Identities<'source> {
@@ -245,7 +244,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
     fn source_value(&mut self, term: &'source Term, scope: Value) -> Result<Value, OptimizeError> {
         let id = self.identities.term(term)?;
         let value = self.sink.add("SourceTerm", (scope, id))?;
-        self.identities.origins.insert(value, term);
+        self.sink.add("ExprSyntax", value)?;
         self.value_type(value, &term.ty)?;
         Ok(value)
     }
@@ -385,11 +384,23 @@ impl<'source> Import<'_, '_, '_, 'source> {
             TermKind::Var(VarRef::Builtin { .. })
             | TermKind::BinOp(_)
             | TermKind::UnOp(_)
-            | TermKind::FloatLit(_)
-            | TermKind::BoolLit(_)
-            | TermKind::UnitLit
             | TermKind::Extern(_) => {}
+            TermKind::FloatLit(number) => {
+                self.sink.add("ExprLiteralBits", (value, i64::from(number.to_bits())))?;
+            }
+            TermKind::BoolLit(boolean) => {
+                self.sink.add("ExprLiteralBits", (value, i64::from(*boolean)))?;
+            }
+            TermKind::UnitLit => {
+                self.arguments(value, vec![])?;
+                self.sink.set("SourceConstruct", value, "unit")?;
+            }
             TermKind::IntLit(text) => {
+                let bits = text
+                    .parse::<i64>()
+                    .or_else(|_| text.parse::<u64>().map(|v| v as i64))
+                    .map_err(|_| OptimizeError::Output("invalid integer literal".into()))?;
+                self.sink.add("ExprLiteralBits", (value, bits))?;
                 if matches!(
                     &term.ty,
                     Type::Constructed(TypeName::Int(32) | TypeName::UInt(32), _)
