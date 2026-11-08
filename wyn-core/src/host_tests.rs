@@ -58,6 +58,7 @@ fn result_program(fields: Vec<(&str, crate::types::Type)>, kind: crate::host::Re
                 } else {
                     vec![]
                 },
+                packed_range: None,
                 result: index,
                 pipeline_index: 0,
                 set: 0,
@@ -208,6 +209,7 @@ fn map_program(input: &str, alias: bool, push_constant: bool) -> Program {
             kind: ResultKind::Value,
             layout: crate::interface::results::result_layout(&runtime_array(crate::types::i32())),
             shape: vec![elements],
+            packed_range: None,
             result: 0,
             pipeline_index: 0,
             set: 0,

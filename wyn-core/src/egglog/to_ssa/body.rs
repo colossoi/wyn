@@ -143,8 +143,8 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
             let element = crate::ssa::layout::storage_value_type(&ty);
             let zero = self.literal(0, &types::i32())?;
             let one = self.literal(1, &types::i32())?;
-            let view = self.op(
-                OpTag::StorageView(PureViewSource::Storage(binding)),
+            let view = self.storage_view(
+                binding,
                 vec![zero.clone(), one],
                 Body::view_type(&element, types::buffer_tag(binding)),
             )?;
@@ -503,6 +503,30 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         };
         let ty = function.body.return_ty.clone();
         self.op(OpTag::Call(id), args, ty)
+    }
+
+    /// Construct a storage view from a logical ABI binding. Its length remains
+    /// logical; the allocation plan supplies the physical base and field offset.
+    pub(super) fn storage_view(
+        &mut self,
+        binding: BindingRef,
+        mut args: Vec<Typed>,
+        ty: Type,
+    ) -> Result<Typed, OptimizeError> {
+        let (binding, offset) = self
+            .compiler
+            .bindings
+            .placement(binding)
+            .map_or((binding, 0), |p| (p.binding, p.element_offset));
+        if offset != 0 {
+            let add = self.literal(i64::from(offset), &args[0].ty)?;
+            args[0] = self.binary(crate::op::BinaryOperator::Add, args[0].clone(), add)?;
+        }
+        self.op(
+            OpTag::StorageView(PureViewSource::Storage(binding)),
+            args,
+            types::array_with_buffer(&ty, types::buffer_tag(binding)),
+        )
     }
 
     pub fn op(

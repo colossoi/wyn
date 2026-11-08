@@ -48,8 +48,10 @@ impl Program {
                     let layout = rust_layout(&descriptor.layout);
                     let range = match descriptor.layout.byte_size() {
                         Some(bytes) => {
+                            let (offset, bytes) = descriptor.packed_range.unwrap_or((0, bytes));
+                            let offset = u64::from(offset);
                             let bytes = u64::from(bytes);
-                            quote!(BufferRange::Bytes { offset: 0, size: #bytes })
+                            quote!(BufferRange::Bytes { offset: #offset, size: #bytes })
                         }
                         None => quote!(BufferRange::CallerProvided),
                     };

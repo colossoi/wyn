@@ -24,6 +24,16 @@ impl Backend for Trace {
     fn call(&mut self, _: &Program, name: &str, args: &[Value]) -> Result<Value> {
         Ok(match name {
             "gpu-alloc" => self.input(vec![0; args[0].u64()? as usize]),
+            "gpu-copy" => {
+                let destination = args[0].handle()?;
+                let start = args[1].u64()? as usize;
+                let source = args[2].handle()?;
+                let offset = args[3].u64()? as usize;
+                let bytes = args[4].u64()? as usize;
+                let data = self.buffers[&source][offset..offset + bytes].to_vec();
+                self.buffers.get_mut(&destination).unwrap()[start..start + bytes].copy_from_slice(&data);
+                Value::Nil
+            }
             "gpu-buffer-size" => Value::Number(Number::U64(self.buffers[&args[0].handle()?].len() as u64)),
             "gpu-buffer-view" => {
                 let bytes = args[1].u64()? as usize;

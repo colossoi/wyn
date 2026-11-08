@@ -1,0 +1,7 @@
+-- A fixed array plus twelve settings crosses a compute-to-graphics boundary.
+type packing_settings = {f0:f32,f1:f32,f2:f32,f3:f32,f4:f32,f5:f32,f6:f32,f7:f32,f8:f32,f9:f32,f10:f32,f11:f32}
+def packing_color(s:packing_settings) vec4f32 = @[(s.f0+s.f1+s.f2)/100.0,(s.f3+s.f4+s.f5)/100.0,(s.f6+s.f7+s.f8)/100.0,(s.f9+s.f10+s.f11)/100.0]
+entry handoff(input:[]f32,target:render_target<vec4f32>) render_target<vec4f32> =
+ let state=if input[0]>0.0 then {p=[@[-1.0,-1.0,0.1,1.0],@[3.0,-1.0,0.1,1.0],@[-1.0,3.0,0.1,1.0]], settings={f0=input[0]+1.0,f1=input[1]+1.0,f2=input[2]+1.0,f3=input[3]+1.0,f4=input[4]+1.0,f5=input[5]+1.0,f6=input[6]+1.0,f7=input[7]+1.0,f8=input[8]+1.0,f9=input[9]+1.0,f10=input[10]+1.0,f11=input[11]+1.0}} else {p=[@[-1.0,-1.0,0.2,1.0],@[3.0,-1.0,0.2,1.0],@[-1.0,3.0,0.2,1.0]], settings={f0=input[0]+2.0,f1=input[1]+2.0,f2=input[2]+2.0,f3=input[3]+2.0,f4=input[4]+2.0,f5=input[5]+2.0,f6=input[6]+2.0,f7=input[7]+2.0,f8=input[8]+2.0,f9=input[9]+2.0,f10=input[10]+2.0,f11=input[11]+2.0}} in
+ let triangles=rasterize_triangles(direct_draw(3u32,1u32),|i,_,_|vertex_output(state.p[i32.u32(i)],0.0)) in
+ shade_with({depth_test=#disabled,depth_write=false,blend=#replace,color_write=true},target,triangles,|_,_,_,_,_|packing_color(state.settings))

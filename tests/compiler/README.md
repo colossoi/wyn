@@ -254,3 +254,9 @@ live in `tests/compiler/library/` or reuse existing testfiles. Backend variants
 share source preparation and SSA; multiple input values reuse one emitted program.
 It does not execute GPU shaders. `host_stage_contracts.wyn` groups ten related
 storage and dispatch cases under the existing emitted-artifact harness.
+
+`wyn-core/tests/storage_packing.rs` validates packed storage on both shader
+backends, mixed scalar/vector alignment, borrowed array aliases, independent loop
+carriers, compute-to-graphics handoff, deterministic output, and WHL result
+extraction/lifetimes. Its tracing
+backend supplies known packed bytes; it does not execute shader arithmetic.

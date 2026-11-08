@@ -376,11 +376,7 @@ impl Body<'_, '_, '_> {
             dimensions.len()
         ]);
         fields.push(buffer_tag(binding));
-        self.op(
-            OpTag::StorageView(PureViewSource::Storage(binding)),
-            operands,
-            Type::Constructed(TypeName::Array, fields),
-        )
+        self.storage_view(binding, operands, Type::Constructed(TypeName::Array, fields))
     }
 
     pub(in crate::egglog::to_ssa) fn slot(

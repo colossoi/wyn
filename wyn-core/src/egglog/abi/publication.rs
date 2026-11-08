@@ -191,7 +191,11 @@ pub(in crate::egglog) fn publish(
                         .map_or(&declaration.name, |entry| &entry.name)
                         .clone(),
                     workgroup_size: local_size,
-                    dispatch_size: dispatch.clone(),
+                    dispatch_size: {
+                        let mut dispatch = dispatch;
+                        dispatch.reads_mut(&mut |source, offset| compiler.bindings.read(source, offset));
+                        dispatch
+                    },
                     uses: Default::default(),
                 });
                 associations[index].push(entry.id);
@@ -362,6 +366,9 @@ fn publish_results(
                 };
                 binding
             };
+            let placement = compiler.bindings.placement(binding);
+            let packed_range = placement.map(|p| p.range());
+            let binding = compiler.bindings.physical(binding);
             let (name, kind) = match result_type {
                 Type::Constructed(TypeName::Record(names), _) => {
                     (names.0[index].clone(), ResultKind::RecordField)
@@ -379,7 +386,7 @@ fn publish_results(
             } else {
                 vec![SourceResult { index, name, kind }]
             };
-            let (layout, shape) = if let Some(shape) = compiler.facts.storage_shape(backing)? {
+            let (layout, mut shape) = if let Some(shape) = compiler.facts.storage_shape(backing)? {
                 let Some((_, element, _)) = compiler.bindings.buffer(backing)? else {
                     return Err(error("rectangular output allocation missing"));
                 };
@@ -400,6 +407,9 @@ fn publish_results(
             } else {
                 (result_layout(ty), vec![])
             };
+            for dimension in &mut shape {
+                dimension.reads_mut(&mut |source, offset| compiler.bindings.read(source, offset));
+            }
             for result in results {
                 module.source_results.push(SourceResultBinding {
                     entry: declaration.source_entry.as_ref().map_or(&declaration.name, |s| &s.name).clone(),
@@ -407,6 +417,7 @@ fn publish_results(
                     kind: result.kind,
                     layout: layout.clone(),
                     shape: shape.clone(),
+                    packed_range,
                     result: result.index,
                     pipeline_index,
                     set: binding.set,
@@ -590,6 +601,10 @@ fn publish_scalars(
             });
         }
     }
+    for task in &mut module.scalar_tasks {
+        compiler.bindings.read(&mut task.destination, &mut task.offset);
+        task.value.reads_mut(&mut |source, offset| compiler.bindings.read(source, offset));
+    }
     Ok(())
 }
 
@@ -696,6 +711,8 @@ fn publish_loops(
         let (Some(setup), Some(completion)) = (setup, completion) else {
             return Err(error("loop stage boundary missing"));
         };
+        let mut control = control;
+        control.expression_mut().reads_mut(&mut |source, offset| compiler.bindings.read(source, offset));
         module.dispatch_loops.push(DispatchLoop {
             pipeline,
             setup,

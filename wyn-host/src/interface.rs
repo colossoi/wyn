@@ -32,6 +32,9 @@ pub struct SourceResultBinding {
     pub layout: ResultLayout,
     /// Row-major dimensions for a flat rectangular allocation; empty for a static layout.
     pub shape: Vec<Expr>,
+    /// `(byte_offset, byte_size)` within a compiler-packed storage allocation.
+    /// WHL materializes an independent result; Rust publishes a buffer range.
+    pub packed_range: Option<(u32, u32)>,
     pub result: usize,
     pub pipeline_index: usize,
     pub set: u32,

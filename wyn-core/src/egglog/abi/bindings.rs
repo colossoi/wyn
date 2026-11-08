@@ -12,9 +12,14 @@ use crate::{BindingRef, LookupMap, SymbolId};
 use egglog_engine::Value;
 use wyn_base::IdSource;
 
+#[path = "packing.rs"]
+mod packing;
+use packing::Placement;
+
 pub(in crate::egglog) struct Bindings<'a, 'source> {
     query: Facts<'a, 'source>,
     bindings: LookupMap<Value, BindingRef>,
+    packed: LookupMap<BindingRef, Placement>,
     pub captures: LookupMap<egglog_engine::TermId, BindingRef>,
     pub entry_outputs: LookupMap<SymbolId, Vec<EntryOutput>>,
 }
@@ -94,12 +99,61 @@ impl<'a, 'source> Bindings<'a, 'source> {
             reserved.insert(binding);
             captures.insert(term, binding);
         }
-        Ok(Self {
+        let mut result = Self {
             query,
             bindings,
             captures,
             entry_outputs,
-        })
+            packed: LookupMap::default(),
+        };
+        result.pack_outputs()?;
+        Ok(result)
+    }
+
+    // Only fresh scalar publication buffers participate. Array storage,
+    // scratch, captures and loop recurrence allocations have other ValueKeys.
+    fn pack_outputs(&mut self) -> Result<(), OptimizeError> {
+        let mut outputs = Vec::new();
+        Query(&self.query.program.graph).for_each("ReturnScalar", |row| {
+            outputs.push(self.query.integer(row[0]));
+            Ok(())
+        })?;
+        outputs.sort_unstable();
+        let mut fields = Vec::new();
+        for output in outputs {
+            let Some(key) = self.query.constructor("Output", (output,)) else {
+                continue;
+            };
+            let Some(&binding) = self.bindings.get(&key) else {
+                continue;
+            };
+            fields.push(packing::Output {
+                writer: Query(&self.query.program.graph).required("OutputWriter", (output,))?,
+                binding,
+                element: self.buffer_element(key)?,
+                name: self.buffer_name(key)?,
+            });
+        }
+        self.packed = packing::plan(fields)?;
+        Ok(())
+    }
+
+    pub fn placement(&self, binding: BindingRef) -> Option<&Placement> {
+        self.packed.get(&binding)
+    }
+
+    pub fn physical(&self, binding: BindingRef) -> BindingRef {
+        self.placement(binding).map_or(binding, |placement| placement.binding)
+    }
+
+    pub fn read(&self, source: &mut crate::host::ScalarSource, offset: &mut u32) {
+        if let crate::host::ScalarSource::Binding { set, binding } = source {
+            if let Some(placement) = self.placement(BindingRef::new(*set, *binding)) {
+                *set = placement.binding.set;
+                *binding = placement.binding.binding;
+                *offset += placement.element_offset * placement.stride;
+            }
+        }
     }
 
     pub fn buffer(&self, key: Value) -> Result<Option<(BindingRef, &'a Type, Value)>, OptimizeError> {
@@ -134,6 +188,9 @@ impl<'a, 'source> Bindings<'a, 'source> {
         let Some((binding, _, _)) = self.buffer(key)? else {
             return Err(error("allocation missing"));
         };
+        if let Some(placement) = self.placement(binding) {
+            return Ok(placement.name.clone());
+        }
         if query.lookup("PhysicalBinding", (key,))?.is_some() {
             for (index, output) in self.query.outputs(*symbol)?.into_iter().enumerate() {
                 if query.contains(

@@ -2,7 +2,7 @@
 
 use super::{error, Body, OptimizeError, Typed};
 use crate::builtins::catalog;
-use crate::op::{BinaryOperator, OpTag, PureViewSource};
+use crate::op::{BinaryOperator, OpTag};
 use crate::types::{self, Type, TypeName};
 use crate::LookupMap;
 use egglog_engine::sort::S;
@@ -43,8 +43,8 @@ pub(super) fn emit(
             let (binding, element, _) =
                 body.compiler.bindings.buffer(storage)?.ok_or_else(|| error("loop allocation missing"))?;
             let element = body.compiler.facts.physical_type(element, true)?;
-            let output = body.op(
-                OpTag::StorageView(PureViewSource::Storage(binding)),
+            let output = body.storage_view(
+                binding,
                 vec![Body::number(0), length.clone()],
                 Body::view_type(&element, crate::types::buffer_tag(binding)),
             )?;

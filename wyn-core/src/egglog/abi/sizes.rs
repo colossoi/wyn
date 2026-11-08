@@ -122,17 +122,22 @@ pub(in crate::egglog) fn capacity(
     compiler: &Compiler<'_, '_>,
     buffer: Value,
 ) -> Result<BufferLen, OptimizeError> {
-    let Some((_, _element, extent_value)) = compiler.bindings.buffer(buffer)? else {
+    let Some((binding, _element, extent_value)) = compiler.bindings.buffer(buffer)? else {
         return Err(error("allocation missing"));
     };
+    if let Some(placement) = compiler.bindings.placement(binding) {
+        return Ok(BufferLen::Fixed {
+            bytes: u64::from(placement.allocation_bytes),
+        });
+    }
     let Some(stride) = storage_elem_stride(&compiler.bindings.buffer_element(buffer)?) else {
         return Err(error("allocation stride missing"));
     };
     let minimum = crate::egglog::query::Query(&compiler.program.graph)
         .required("MinimumArrayCapacity", RawValues(vec![]))?;
     let minimum = compiler.facts.integer(minimum);
-    match allocation_bound(compiler, buffer, extent_value, &mut Vec::new())? {
-        Expr::Integer(n) => Ok(BufferLen::Fixed {
+    let mut capacity: BufferLen = match allocation_bound(compiler, buffer, extent_value, &mut Vec::new())? {
+        Expr::Integer(n) => Ok::<_, OptimizeError>(BufferLen::Fixed {
             bytes: u64::try_from(n.max(minimum))
                 .ok()
                 .and_then(|n| n.checked_mul(u64::from(stride)))
@@ -151,7 +156,9 @@ pub(in crate::egglog) fn capacity(
             bytes: Expr::Max(Box::new(Expr::Integer(minimum)), Box::new(size))
                 .multiply(Expr::Integer(stride.into())),
         }),
-    }
+    }?;
+    capacity.reads_mut(&mut |source, offset| compiler.bindings.read(source, offset));
+    Ok(capacity)
 }
 
 pub(in crate::egglog) fn extent(compiler: &Compiler<'_, '_>, key: Value) -> Result<Expr, OptimizeError> {
@@ -270,16 +277,13 @@ pub(super) fn published_read(
         .ok()
         .and_then(|index| index.checked_mul(4))
         .ok_or_else(|| error("shape offset overflow"))?;
-    match host::read(
-        ScalarSource::Binding {
-            set: binding.set,
-            binding: binding.binding,
-        },
-        offset,
-        &ty,
-        StorageLayout::Std430,
-        false,
-    ) {
+    let mut source = ScalarSource::Binding {
+        set: binding.set,
+        binding: binding.binding,
+    };
+    let mut offset = offset;
+    compiler.bindings.read(&mut source, &mut offset);
+    match host::read(source, offset, &ty, StorageLayout::Std430, false) {
         Ok(value) => Ok(Some(value)),
         Err(host::Error::Unsupported) => Ok(None),
         Err(host::Error::Invalid(error)) => Err(error.into()),

@@ -456,11 +456,14 @@ impl Program {
                 out,
                 "\n    ({} {} :source-name {} :ownership {}",
                 symbol(source_name),
-                self.resource_description(
-                    id,
-                    source_result.is_some_and(|r| !r.shape.is_empty()
-                        && matches!(r.layout, ResultLayout::Array { length: None, .. }))
-                ),
+                source_result
+                    .and_then(|r| r.packed_range)
+                    .map(|(_, bytes)| format!(":buffer :write :element :u8 :stride 1 :min-bytes {bytes}"))
+                    .unwrap_or_else(|| self.resource_description(
+                        id,
+                        source_result.is_some_and(|r| !r.shape.is_empty()
+                            && matches!(r.layout, ResultLayout::Array { length: None, .. }))
+                    )),
                 string(source_name),
                 if entry.inputs.contains(&id) { ":borrowed" } else { ":owned" }
             )?;
@@ -560,7 +563,15 @@ impl Program {
         writeln!(out, "    (let* (")?;
         let mut results = Vec::new();
         for (i, &id) in entry.results.iter().enumerate() {
-            let value = if let Some(result) = source_results.get(i).filter(|r| !r.shape.is_empty()) {
+            let value = if let Some((offset, bytes)) = source_results.get(i).and_then(|r| r.packed_range) {
+                writeln!(out, "      (packed-result-{i} (gpu-alloc {bytes}))")?;
+                writeln!(
+                    out,
+                    "      (packed-copy-{i} (gpu-copy packed-result-{i} 0 {} {offset} {bytes}))",
+                    resource(id)
+                )?;
+                format!("packed-result-{i}")
+            } else if let Some(result) = source_results.get(i).filter(|r| !r.shape.is_empty()) {
                 let ResultLayout::Array { stride, .. } = &result.layout else {
                     return Err(HostError::Invalid("shaped result must be an array".into()));
                 };
@@ -579,13 +590,16 @@ impl Program {
         for a in &entry.allocations {
             let id = a.resource();
             if !entry.results.iter().enumerate().any(|(i, result)| {
-                *result == id && source_results.get(i).is_none_or(|r| r.shape.is_empty())
+                *result == id
+                    && source_results.get(i).is_none_or(|r| r.shape.is_empty() && r.packed_range.is_none())
             }) {
                 let views: Vec<_> = entry
                     .results
                     .iter()
                     .enumerate()
-                    .filter(|(_, result)| **result == id)
+                    .filter(|(i, result)| {
+                        **result == id && source_results.get(*i).is_none_or(|r| r.packed_range.is_none())
+                    })
                     .map(|(i, _)| format!("(/= result-bytes-{i} (gpu-buffer-size {}))", resource(id)))
                     .collect();
                 if views.is_empty() {

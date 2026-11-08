@@ -1,6 +1,6 @@
 //! Expand a selected boundary layout into representation conversions and copies.
 use super::{builder_error, error, Body, OptimizeError, Typed};
-use crate::op::{BinaryOperator, OpTag, PureViewSource};
+use crate::op::{BinaryOperator, OpTag};
 use crate::ssa::types::InstKind;
 use crate::types::{self, TypeExt};
 use egglog_engine::{RawValues, Value};
@@ -83,8 +83,8 @@ impl Body<'_, '_, '_> {
             if path.is_empty() && types::array_view_buffer(&value.ty) == Some(binding) {
                 return Ok(value);
             }
-            let output = self.op(
-                OpTag::StorageView(PureViewSource::Storage(binding)),
+            let output = self.storage_view(
+                binding,
                 vec![Self::number(0), length.clone()],
                 Self::view_type(&element, types::buffer_tag(binding)),
             )?;

@@ -7,7 +7,7 @@ use crate::flow::ExecutionModel;
 use crate::interface::publish::EntryPoint;
 use crate::interface::EntryKind;
 use crate::op::BinaryOperator;
-use crate::op::{OpTag, PureViewSource};
+use crate::op::OpTag;
 use crate::ssa::types::InstKind;
 use crate::types::{self, buffer_tag, Type, TypeExt, TypeName};
 use crate::SymbolId;
@@ -161,7 +161,7 @@ fn bind_parameters(
                 let element = input.ty.elem_type().ok_or_else(|| error("storage input has no element"))?;
                 Body::view_type(
                     &lower.compiler.facts.physical_type(element, true)?,
-                    buffer_tag(binding),
+                    buffer_tag(lower.compiler.bindings.physical(binding)),
                 )
             } else {
                 lower.compiler.facts.physical_type(&input.ty, true)?
@@ -215,11 +215,7 @@ fn bind_parameters(
                     )?
                 };
                 let zero = lower.literal(0, &Type::Constructed(TypeName::UInt(32), vec![]))?;
-                value = lower.op(
-                    OpTag::StorageView(PureViewSource::Storage(binding)),
-                    vec![zero, len],
-                    value.ty,
-                )?;
+                value = lower.storage_view(binding, vec![zero, len], value.ty)?;
             }
 
             if scalar_storage {
@@ -227,6 +223,14 @@ fn bind_parameters(
                 value = lower.index(value, zero)?;
             }
             values.push(value);
+            if let crate::interface::EntryInputKind::Storage {
+                exposure: crate::interface::BindingExposure::Host(binding),
+                ..
+            } = &mut input.kind
+            {
+                *binding = lower.compiler.bindings.physical(*binding);
+                input.ty = types::array_with_buffer(&input.ty, buffer_tag(*binding));
+            }
             inputs.push(input);
         }
         let value = if values.len() == 1 {
@@ -297,8 +301,8 @@ fn write_outputs(
                 lower.literal(1, &types::i32())?
             };
             let zero = lower.literal(0, &types::i32())?;
-            let view = lower.op(
-                OpTag::StorageView(PureViewSource::Storage(binding)),
+            let view = lower.storage_view(
+                binding,
                 vec![zero.clone(), len.clone()],
                 Body::view_type(&element, buffer_tag(binding)),
             )?;

@@ -53,7 +53,12 @@ pub(super) fn entry_accesses(
                 .facts
                 .storage_access(flags)?
                 .ok_or_else(|| OptimizeError::Output("empty selected binding access".into()))?;
-            result.insert(compiler.facts.binding(keys[1])?, ResourceAccess::from(access));
+            let binding = compiler.bindings.physical(compiler.facts.binding(keys[1])?);
+            let access = ResourceAccess::from(access);
+            result
+                .entry(binding)
+                .and_modify(|old: &mut ResourceAccess| *old = old.merge(access))
+                .or_insert(access);
         }
         Ok(())
     })?;
@@ -91,9 +96,13 @@ pub(super) fn storage_bindings(
     for value in compiler.facts.set("RootResourceSet", (root,)) {
         let flags = Query(&compiler.program.graph).required("RootResource", (root, value))?;
         let access = compiler.facts.storage_access(flags)?;
-        if let Some((binding, _element, _)) = compiler.bindings.buffer(value)? {
+        if let Some((logical, _element, _)) = compiler.bindings.buffer(value)? {
+            let binding = compiler.bindings.physical(logical);
             if let Some(access) = access.map(ResourceAccess::from) {
                 accesses.entry(binding).and_modify(|old| *old = old.merge(access)).or_insert(access);
+            }
+            if storage_bindings.iter().any(|decl: &StorageBindingDecl| decl.binding == binding) {
+                continue;
             }
             let name = if let Some(name) = published
                 .iter()
@@ -139,6 +148,7 @@ pub(super) fn storage_bindings(
                     compiler.facts.source_type(source)
                 )));
             };
+            let binding = compiler.bindings.physical(binding);
             for input in inputs.iter_mut() {
                 if input.storage_binding() == Some(binding) {
                     if let EntryInputKind::Storage { access: selected, .. } = &mut input.kind {
