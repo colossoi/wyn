@@ -1,0 +1,6 @@
+-- Reproducer: each scalar result becomes a separate storage buffer. Together
+-- with input and its length buffer, 30 outputs produce 32 storage bindings in
+-- one kernel. Metal on the test machine allows only 31 (master 32f7a1a9).
+-- Compilation and WGSL validation pass; Viz rejects the bind-group layout.
+entry repro(input:[]f32) (f32,f32,f32,f32,f32,f32,f32,f32,f32,f32,f32,f32,f32,f32,f32,f32,f32,f32,f32,f32,f32,f32,f32,f32,f32,f32,f32,f32,f32,f32) =
+ (input[0]+1.0,input[1]+1.0,input[2]+1.0,input[3]+1.0,input[4]+1.0,input[5]+1.0,input[6]+1.0,input[7]+1.0,input[8]+1.0,input[9]+1.0,input[10]+1.0,input[11]+1.0,input[12]+1.0,input[13]+1.0,input[14]+1.0,input[15]+1.0,input[16]+1.0,input[17]+1.0,input[18]+1.0,input[19]+1.0,input[20]+1.0,input[21]+1.0,input[22]+1.0,input[23]+1.0,input[24]+1.0,input[25]+1.0,input[26]+1.0,input[27]+1.0,input[28]+1.0,input[29]+1.0)

@@ -7,8 +7,8 @@ import sys
 
 
 def run(command, seconds=3, **kwargs):
-    if not 0 < seconds <= 5:
-        raise ValueError('Deadline must be positive and at most five seconds')
+    if not 0 < seconds <= 30:
+        raise ValueError('Deadline must be positive and at most thirty seconds')
     process = subprocess.Popen(command, start_new_session=True, **kwargs)
     try:
         status = process.wait(timeout=seconds)

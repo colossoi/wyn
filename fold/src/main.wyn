@@ -1,0 +1,22 @@
+-- Complete Fold application. Viz dispatches this generated entry and carries
+-- the opaque feedback array; every Fold-specific state transition is Wyn.
+module Simulation = import "simulation"
+module Geometry = import "geometry"
+module Settings = import "settings"
+module Render = import "render"
+
+entry fold(previous:[]vec4f32,frame:u32,delta_time:f32,resolution:vec3f32,mouse:vec4f32,
+           keyboard:texture2d,_keyboard_sampler:sampler,
+           front:render_target<vec4f32>,behind:render_target<vec4f32>,scene:render_target<vec4f32>,
+           ao:render_target<vec4f32>,graded:render_target<vec4f32>,screen:render_target<vec4f32>)
+           ([5207]vec4f32,render_target<vec4f32>) =
+ let initial = if frame == 0u32 then Simulation.reset(Settings.defaults,resolution.x/resolution.y) else Simulation.unpack(previous) in
+ let settings = Settings.update(initial.settings,keyboard) in
+ let base = if Settings.pressed(keyboard,82) then Simulation.reset(settings,resolution.x/resolution.y)
+   else initial with settings = settings in
+ let bounded = Simulation.viewport(base,resolution.xy) in
+ let interactive = Simulation.input(bounded,mouse,resolution.xy) in
+ let current = Simulation.advance(interactive,delta_time,Simulation.edges) in
+ let vertices = Geometry.mesh(current.p,current.birth,current.active,current.feed,current.retained,current.settings.thickness) in
+ let image = Render.render(vertices,current.settings,resolution.xy,front,behind,scene,ao,graded,screen) in
+ (Simulation.pack(current),image)

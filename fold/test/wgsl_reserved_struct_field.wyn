@@ -1,0 +1,5 @@
+-- Reproducer: a 17-field record compiles to WGSL with a generated field named
+-- f16, which is reserved. WGSL validation fails on master 66e3afca; the emitter
+-- must use legal identifiers for both declarations and field accesses.
+type big = {a0:f32,a1:f32,a2:f32,a3:f32,a4:f32,a5:f32,a6:f32,a7:f32,a8:f32,a9:f32,a10:f32,a11:f32,a12:f32,a13:f32,a14:f32,a15:f32,a16:f32}
+entry repro(input:[2]big) [2]big = map(|v| v with a0 = v.a0+1.0,input)

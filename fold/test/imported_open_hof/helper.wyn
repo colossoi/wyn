@@ -1,0 +1,4 @@
+-- Reproducer helper: open-resolved sqrt inside an imported map callback.
+-- Qualified f32.sqrt compiles; the opened sqrt triggers the compiler panic.
+open f32
+def values:[2]f32 = map(|i| f32.i32([i,i+1][i%2])+sqrt(2.0),iota(2))

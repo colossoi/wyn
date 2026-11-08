@@ -1,0 +1,7 @@
+-- Reproducer: nesting this helper in an imported file leaves a function-typed
+-- parameter after HOF specialization on master 74433605.
+module Helper = {
+ open f32
+ def values:[2]f32 = map(|i| f32.i32([i,i+1][i%2])+sqrt(2.0),iota(2))
+}
+def values:[2]f32 = Helper.values

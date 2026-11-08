@@ -1,0 +1,39 @@
+-- Camera, projection, viewport planes, and cloth-length policy from upstream.
+open f32
+def eye: vec3f32 = @[7.0,1.0,0.0]
+def forward: vec3f32 = normalize(@[0.0,3.0,0.0]-eye)
+def right: vec3f32 = normalize(cross(forward,@[0.0,1.0,0.0]))
+def up: vec3f32 = cross(right,forward)
+def cot_half: f32 = 1.0/tan(55.0*pi/360.0)
+def view(p: vec3f32) vec3f32 =
+  let q = p-eye in @[dot(q,right),dot(q,up),-dot(q,forward)]
+def view_normal(n: vec3f32) vec3f32 = @[dot(n,right),dot(n,up),-dot(n,forward)]
+def clip(p: vec3f32, aspect: f32) vec4f32 =
+  let q = view(p) in @[q.x*cot_half/aspect,q.y*cot_half,-q.z*60.0/59.9-6.0/59.9,-q.z]
+def project(p: vec3f32, aspect: f32) vec2f32 =
+  @[p.x*cot_half/aspect,-p.y*cot_half]/(-p.z)*0.5+0.5
+def reconstruct(uv: vec2f32, depth: f32, aspect: f32) vec3f32 =
+  let z = 6.0/(60.0-depth*59.9) in
+  @[(uv.x*2.0-1.0)*z*aspect/cot_half,(1.0-uv.y*2.0)*z/cot_half,-z]
+def ray(pixel: vec2f32, resolution: vec2f32) vec3f32 =
+  let p = pixel/resolution*2.0-1.0 in
+  normalize(forward+right*(p.x*resolution.x/resolution.y/cot_half)+up*(p.y/cot_half))
+def planes(aspect: f32) [3]vec4f32 =
+  let ns = [normalize(forward*(aspect/cot_half)+right),
+            normalize(forward*(aspect/cot_half)-right),
+            normalize(forward/cot_half+up)] in
+  map(|n| @[n...,-dot(n,eye)],ns)
+def width_at(walls: [3]vec4f32, y: f32, clearance: f32) f32 =
+  let (low,high) = loop (lo,hi) = (-1.0e20,1.0e20) for wall < 2 do
+    let p = walls[wall] in
+    let z = (clearance-p.y*y-p.w)/p.z in
+    if abs(p.z) < 1.0e-6 then (-1.0e20,1.0e20)
+    else if p.z > 0.0 then (max(lo,z),hi) else (lo,min(hi,z))
+  in max(0.0,high-low)
+def retained(walls: [3]vec4f32, thickness: f32) f32 =
+  let spacing = 3.8/12.0 in
+  let clearance = thickness*0.5+0.025 in
+  let bottom = if walls[2].y > 1.0e-6 then max(0.0,(clearance-walls[2].w)/walls[2].y) else 0.0 in
+  let area = (width_at(walls,bottom,clearance)+width_at(walls,3.0,clearance))*0.5*max(0.0,3.0-bottom) in
+  let length = min(190.0*spacing,7.5+area*0.35/max(thickness,spacing*0.85)+22.0*spacing) in
+  clamp(length/spacing+1.0,ceil(7.5/spacing)+24.0,191.0)

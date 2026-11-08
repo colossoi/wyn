@@ -1,0 +1,148 @@
+-- Every pass and its ordering are authored in Wyn; Viz only executes the host program.
+module Camera = import "camera"
+module Geometry = import "geometry"
+module Material = import "material"
+module Settings = import "settings"
+open f32
+def fullscreen(index:u32) vec4f32 =
+ if index == 0u32 then @[-1.0,-1.0,1.0,1.0]
+ else if index == 1u32 then @[3.0,-1.0,1.0,1.0] else @[-1.0,3.0,1.0,1.0]
+def plane_vertex(i:i32) Geometry.shell_vertex =
+ {position=[@[-100.0,0.0,-100.0],@[-100.0,0.0,100.0],@[100.0,0.0,-100.0],
+            @[100.0,0.0,-100.0],@[-100.0,0.0,100.0],@[100.0,0.0,100.0]][i],
+  normal=@[0.0,1.0,0.0],birth=-1000000.0,visibility=1.0}
+def scene_vertex(vertices:[34490]Geometry.shell_vertex,i:u32,aspect:f32) vertex<Geometry.shell_vertex> =
+ let k = i32.u32(i) in
+ let v = if k >= Geometry.vertex_count then plane_vertex(k-Geometry.vertex_count) else vertices[k] in
+ vertex_output(Camera.clip(v.position,aspect),v)
+def indices: [206934]u32 = map(|i| if i < Geometry.index_count then Geometry.index(i)
+ else u32.i32(Geometry.vertex_count+i-Geometry.index_count),iota(206934))
+def coverage(v:Geometry.shell_vertex) bool =
+ let p = v.position in
+ let noise = fract(sin(dot(@[floor(p.x*1200.0),floor(p.y*1200.0),floor(p.z*1200.0)],@[12.9898,78.233,37.719]))*43758.5453) in
+ p.y >= 0.0 && noise <= v.visibility
+def pixel(uv:vec2f32,resolution:vec2f32) vec2i32 =
+ @[i32.f32(clamp(uv.x*resolution.x,0.0,resolution.x-1.0)),i32.f32(clamp(uv.y*resolution.y,0.0,resolution.y-1.0))]
+def clamp_uv(uv:vec2f32) vec2f32 = @[clamp(uv.x,0.001,0.999),clamp(uv.y,0.001,0.999)]
+-- Filtering is application policy, not sampler setup in the driver.
+def sample(image:render_target<vec4f32>,uv:vec2f32,resolution:vec2f32) vec4f32 =
+ let p = uv*resolution-0.5 in let base = @[floor(p.x),floor(p.y)] in let t = p-base in
+ let fetch = |dx:i32,dy:i32| target_load(image,@[i32.max(0,i32.min(i32.f32(base.x)+dx,i32.f32(resolution.x)-1)),i32.max(0,i32.min(i32.f32(base.y)+dy,i32.f32(resolution.y)-1))],0u32) in
+ (fetch(0,0)*(1.0-t.x)+fetch(1,0)*t.x)*(1.0-t.y)+(fetch(0,1)*(1.0-t.x)+fetch(1,1)*t.x)*t.y
+def behind_at(behind:render_target<vec4f32>,uv:vec2f32,s:Settings.settings,travel:f32,z:f32,resolution:vec2f32) vec3f32 =
+ let radius = s.roughness*s.roughness*(travel+0.35)*0.65 in
+ let footprint = radius*Camera.cot_half/max(abs(z)*2.0,0.001) in
+ let color = sample(behind,uv,resolution).xyz in
+ if s.roughness <= 0.001 then color else
+ let sum = loop result = color for i < 8 do
+   let angle = f32.i32(i)*pi/4.0 in
+   result+sample(behind,clamp_uv(uv+@[cos(angle),sin(angle)]*footprint),resolution).xyz
+ in sum/9.0
+def refracted(v:Geometry.shell_vertex,uv:vec2f32,behind:render_target<vec4f32>,resolution:vec2f32,s:Settings.settings) vec3f32 =
+ let aspect = resolution.x/resolution.y in let origin = Camera.view(v.position) in
+ let n = normalize(Camera.view_normal(v.normal)) in let incident = normalize(origin) in
+ let eta = 1.0/s.ior in let ni = dot(n,incident) in let k = 1.0-eta*eta*(1.0-ni*ni) in
+ let inside = if k < 0.0 then @[0.0,0.0,0.0] else eta*incident-(eta*ni+sqrt(k))*n in
+ let inside_distance = s.thickness/max(abs(dot(inside,n)),0.2) in
+ let exit = origin+inside*inside_distance in let end = exit+incident*8.0 in
+ let start_uv = Camera.project(exit,aspect) in let end_uv = Camera.project(end,aspect) in
+ let delta = (end_uv-start_uv)*resolution in let steps = clamp(ceil(max(abs(delta.x),abs(delta.y))),16.0,384.0) in
+ let start_k = 1.0/(-exit.z) in let end_k = 1.0/(-end.z) in let start_q = exit*start_k in let end_q = end*end_k in
+ let (hit_uv,travel,confidence,_,_,_,_) = loop (hit_uv,travel,confidence,previous_s,previous_point,previous_front,done) =
+     (uv,inside_distance,0.0,0.0,exit,true,false) for i < 384 do
+   if done || f32.i32(i+1) > steps then (hit_uv,travel,confidence,previous_s,previous_point,previous_front,true) else
+   let t = f32.i32(i+1)/steps in let coord = start_uv*(1.0-t)+end_uv*t in
+   if coord.x < 0.001 || coord.y < 0.001 || coord.x > 0.999 || coord.y > 0.999 then (hit_uv,travel,confidence,previous_s,previous_point,previous_front,true) else
+   let point = (start_q*(1.0-t)+end_q*t)/(start_k*(1.0-t)+end_k*t) in
+   let d = target_load(behind,pixel(coord,resolution),0u32).w in let surface = Camera.reconstruct(coord,d,aspect) in
+   let tolerance = max(abs(surface.z)*4.0/(resolution.y*Camera.cot_half),0.008) in
+   let error = surface.z-point.z in let step_length = magnitude(point-previous_point) in
+   let (candidate,new_travel,new_confidence,found) =
+     if d < 0.99999 && error >= 0.0 && previous_front && error < max(tolerance,step_length*1.5) && surface.z < origin.z-0.002 then
+       let (low,high) = loop (low,high) = (previous_s,t) for _refine < 8 do
+         let mid = (low+high)*0.5 in let mid_uv = start_uv*(1.0-mid)+end_uv*mid in
+         let mid_point = (start_q*(1.0-mid)+end_q*mid)/(start_k*(1.0-mid)+end_k*mid) in
+         let surface_z = Camera.reconstruct(mid_uv,target_load(behind,pixel(mid_uv,resolution),0u32).w,aspect).z in
+         if mid_point.z < surface_z then (low,mid) else (mid,high)
+       in
+       let hit = (low+high)*0.5 in let candidate = start_uv*(1.0-hit)+end_uv*hit in
+       let hit_point = (start_q*(1.0-hit)+end_q*hit)/(start_k*(1.0-hit)+end_k*hit) in
+       let hit_surface = Camera.reconstruct(candidate,target_load(behind,pixel(candidate,resolution),0u32).w,aspect) in
+       let residual = abs(hit_point.z-hit_surface.z) in
+       if residual < tolerance then (candidate,magnitude(hit_point-origin),1.0-smoothstep(tolerance*0.25,tolerance,residual),true)
+       else (hit_uv,travel,confidence,false)
+     else (hit_uv,travel,confidence,false)
+   in (candidate,new_travel,new_confidence,t,point,point.z > surface.z,found)
+ in
+ let edge = min(min(hit_uv.x,hit_uv.y),min(1.0-hit_uv.x,1.0-hit_uv.y)) in
+ let blend = confidence*smoothstep(0.0,0.025,edge) in
+ let background = Material.mix3(behind_at(behind,uv,s,travel,origin.z,resolution),behind_at(behind,hit_uv,s,travel,origin.z,resolution),blend) in
+ let f0 = pow((s.ior-1.0)/(s.ior+1.0),2.0) in
+ let f = f0+(1.0-f0)*pow(1.0-clamp(abs(dot(normalize(-origin),n)),0.0,1.0),5.0) in
+ background*Material.mix3(@[1.0,1.0,1.0],Material.pigment(v.birth,s.tint),0.95)*(1.0-f)
+def ambient(front:render_target<vec4f32>,uv:vec2f32,resolution:vec2f32,enabled:bool) f32 =
+ let sample = target_load(front,pixel(uv,resolution),0u32) in let depth = sample.w in
+ if depth >= 0.99999 || !enabled then 1.0 else
+ let p = Camera.reconstruct(uv,depth,resolution.x/resolution.y) in let n = normalize(sample.xyz) in
+ let occlusion = loop sum = 0.0 for direction < 8 do
+   let angle = f32.i32(direction)*pi/4.0 in let axis = @[cos(angle),sin(angle)] in
+   loop result = sum for k < 2 do
+     let offset = axis*(f32.i32(k+1)/2.0)*0.55*Camera.cot_half/max(-p.z,0.1)*0.5 in
+     let coord = clamp_uv(uv+offset) in let d = target_load(front,pixel(coord,resolution),0u32).w in
+     let delta = Camera.reconstruct(coord,d,resolution.x/resolution.y)-p in let distance = magnitude(delta) in
+     if distance > 0.0001 && distance < 0.6 then result+max(dot(n,delta/distance)-0.05,0.0)*(1.0-distance/0.6) else result
+ in 1.0-clamp(occlusion/16.0*3.0,0.0,1.0)
+def denoise(front:render_target<vec4f32>,ao:render_target<vec4f32>,uv:vec2f32,resolution:vec2f32) f32 =
+ let point = pixel(uv,resolution) in let center = target_load(front,point,0u32) in
+ let (sum,weight) = loop (sum,weight) = (0.0,0.0) for i < 9 do
+   let coord = @[i32.max(0,i32.min(point.x+i/3-1,i32.f32(resolution.x)-1)),i32.max(0,i32.min(point.y+i%3-1,i32.f32(resolution.y)-1))] in
+   let neighbor = target_load(front,coord,0u32) in
+   let w = exp(-abs(neighbor.w-center.w)*2000.0)*pow(max(dot(neighbor.xyz,center.xyz),0.0),8.0)+0.0001 in
+   (sum+target_load(ao,coord,0u32).x*w,weight+w)
+ in sum/weight
+def render(vertices:[34490]Geometry.shell_vertex,s:Settings.settings,resolution:vec2f32,
+ front:*render_target<vec4f32>,behind:*render_target<vec4f32>,scene:*render_target<vec4f32>,
+ ao:*render_target<vec4f32>,graded:*render_target<vec4f32>,screen:*render_target<vec4f32>) render_target<vec4f32> =
+ let aspect = resolution.x/resolution.y in
+ let background = rasterize_triangles(direct_draw(3u32,1u32),|i,_,_| vertex_output(fullscreen(i),0.0)) in
+ let front0 = shade_with({depth_test=#disabled,depth_write=true,blend=#replace,color_write=true},front,background,|_,_,_,_,_| @[0.0,0.0,0.0,1.0]) in
+ let geometry = rasterize_triangles(indexed_draw(indices,1u32),|i,_,_| scene_vertex(vertices,i,aspect)) in
+ let front_image = shade_with({depth_test=#less_equal,depth_write=true,blend=#replace,color_write=true},front0,geometry,
+   |v,p,facing,_,_| if !facing || !coverage(v) then #discard else #color(@[Camera.view_normal(normalize(v.normal))...,p.z])) in
+ let background2 = rasterize_triangles(direct_draw(3u32,1u32),|i,_,_| vertex_output(fullscreen(i),0.0)) in
+ let behind0 = shade_with({depth_test=#disabled,depth_write=true,blend=#replace,color_write=true},behind,background2,|_,_,_,_,_| @[0.815,0.791,0.723,1.0]) in
+ let peel = rasterize_triangles(indexed_draw(indices,1u32),|i,_,_| scene_vertex(vertices,i,aspect)) in
+ let behind_image = shade_with({depth_test=#less_equal,depth_write=true,blend=#replace,color_write=true},behind0,peel,
+   |v,p,facing,_,_| if !facing || !coverage(v) then #discard else
+     if v.birth > -99999.0 && p.z <= target_load(front_image,@[i32.f32(p.x),i32.f32(p.y)],0u32).w+0.000003 then #discard else
+     let color = if v.birth < -99999.0 then Material.floor_color(v.position) else Material.lighting(v.position,v.normal,Material.pigment(v.birth,s.tint),@[0.0,0.0,0.0],0.0,s) in
+     #color(@[color...,p.z])) in
+ let background3 = rasterize_triangles(direct_draw(3u32,1u32),|i,_,_| vertex_output(fullscreen(i),0.0)) in
+ let scene0 = shade_with({depth_test=#disabled,depth_write=true,blend=#replace,color_write=true},scene,background3,|_,_,_,_,_| @[0.815,0.791,0.723,1.0]) in
+ let beauty = rasterize_triangles(indexed_draw(indices,1u32),|i,_,_| scene_vertex(vertices,i,aspect)) in
+ let scene_image = shade_with({depth_test=#less_equal,depth_write=true,blend=#replace,color_write=true},scene0,beauty,
+   |v,p,facing,_,_| if !facing || !coverage(v) then #discard else
+     if v.birth < -99999.0 then #color(@[Material.floor_color(v.position)...,1.0]) else
+     let uv = p.xy/resolution in let nearest = abs(p.z-target_load(front_image,@[i32.f32(p.x),i32.f32(p.y)],0u32).w) < 0.00001 in
+     let transmission = if nearest then s.transmission else 0.0 in
+     let transmitted = if transmission > 0.0 then refracted(v,uv,behind_image,resolution,s) else @[0.0,0.0,0.0] in
+     #color(@[Material.lighting(v.position,v.normal,Material.pigment(v.birth,s.tint),transmitted,transmission,s)...,1.0])) in
+ let quad4 = rasterize_triangles(direct_draw(3u32,1u32),|i,_,_| vertex_output(fullscreen(i),0.0)) in
+ let ao_image = shade_with({depth_test=#disabled,depth_write=false,blend=#replace,color_write=true},ao,quad4,
+   |_,p,_,_,_| let a = ambient(front_image,p.xy/resolution,resolution,s.occlusion) in @[a,a,a,1.0]) in
+ let quad5 = rasterize_triangles(direct_draw(3u32,1u32),|i,_,_| vertex_output(fullscreen(i),0.0)) in
+ let graded_image = shade_with({depth_test=#disabled,depth_write=false,blend=#replace,color_write=true},graded,quad5,
+   |_,p,_,_,_| let uv = p.xy/resolution in let color = sample(scene_image,uv,resolution).xyz in
+     let ao = if s.occlusion then 0.15+0.85*denoise(front_image,ao_image,uv,resolution) else 1.0 in
+     @[Material.grade(color*ao,s)...,1.0]) in
+ let quad6 = rasterize_triangles(direct_draw(3u32,1u32),|i,_,_| vertex_output(fullscreen(i),0.0)) in
+ shade_with({depth_test=#disabled,depth_write=false,blend=#replace,color_write=true},screen,quad6,
+   |_,p,_,_,_| let uv = p.xy/resolution in let texel = 1.0/resolution in
+     let c = sample(graded_image,uv,resolution).xyz in
+     let n = sample(graded_image,uv+@[0.0,-texel.y],resolution).xyz in
+     let s = sample(graded_image,uv+@[0.0,texel.y],resolution).xyz in
+     let e = sample(graded_image,uv+@[texel.x,0.0],resolution).xyz in
+     let w = sample(graded_image,uv+@[-texel.x,0.0],resolution).xyz in
+     let l = @[0.299,0.587,0.114] in
+     let range = max(max(dot(n,l),dot(s,l)),max(dot(e,l),dot(w,l)))-min(min(dot(n,l),dot(s,l)),min(dot(e,l),dot(w,l))) in
+     let result = if range > 0.125 then Material.mix3(c,(n+s+e+w)*0.25,0.5) else c in @[result...,1.0])

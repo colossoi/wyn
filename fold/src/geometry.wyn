@@ -1,0 +1,88 @@
+-- MIT, Copyright (c) 2026 mrdoob. Port of upstream/sheet.js.
+-- Surface topology, Catmull–Rom interpolation, normals, shell, rims, and picking.
+module Camera = import "camera"
+open f32
+def rows:i32 = 570
+def columns:i32 = 24
+def surface_count:i32 = 14275
+def perimeter_count:i32 = 1188
+def vertex_count:i32 = 34490
+def index_count:i32 = 206928
+type shell_vertex = {position:vec3f32,normal:vec3f32,birth:f32,visibility:f32}
+def perimeter(i:i32) i32 =
+ if i < 24 then i else if i < 594 then (i-24)*25+24
+ else if i < 618 then 570*25+24-(i-594) else (570-(i-618))*25
+def rim_index(ring:i32, i:i32) i32 =
+ if ring == 0 then perimeter(i) else if ring == 6 then surface_count+perimeter(i)
+ else surface_count*2+(ring-1)*perimeter_count+i
+def surface_index(i:i32) i32 =
+ let cell = i/6 in let row = cell/24 in let col = cell%24 in
+ let a = row*25+col in
+ [a,a+25,a+1,a+25,a+26,a+1][i%6]
+def index(i:i32) u32 = u32.i32(
+ if i < 82080 then surface_index(i)
+ else if i < 164160 then
+   let k = i-82080 in let base = k/3*3 in
+   surface_count+surface_index(base+[0i32,2i32,1i32][k%3])
+ else
+   let k = i-164160 in let ring = k/(perimeter_count*6) in let edge = k/6%perimeter_count in
+   let next = (edge+1)%perimeter_count in
+   [rim_index(ring,edge),rim_index(ring,next),rim_index(ring+1,edge),
+    rim_index(ring,next),rim_index(ring+1,next),rim_index(ring+1,edge)][k%6])
+def sample(p:[2483]vec4f32,active:i32,row:i32,col:i32) vec3f32 = p[i32.max(0,i32.min(row,active-1))*13+col].xyz
+def interpolate(p:[2483]vec4f32,active:i32,row:i32,col:i32,t:f32) vec3f32 =
+ let a = sample(p,active,row-1,col) in let b = sample(p,active,row,col) in
+ let c = sample(p,active,row+1,col) in let d = sample(p,active,row+2,col) in
+ b+0.5*t*(c-a+t*(2.0*a-5.0*b+4.0*c-d+t*(3.0*(b-c)+d-a)))
+def visibility(row:f32,feed:f32,retained:f32) f32 =
+ let t = clamp((row+feed/(3.8/12.0)-(retained-10.0))/7.0,0.0,1.0) in
+ 1.0-t*t*(3.0-2.0*t)
+def center(p:[2483]vec4f32,active:i32,i:i32) vec3f32 =
+ let row = f32.i32(i/25)/570.0*f32.i32(active-1) in let r = i32.f32(floor(row)) in let t = row-f32.i32(r) in
+ let col = f32.i32(i%25)*0.5 in let c = i32.f32(floor(col)) in let f = col-f32.i32(c) in
+ interpolate(p,active,r,c,t)*(1.0-f)+interpolate(p,active,r,i32.min(c+1,12),t)*f
+def safe_normal(n:vec3f32) vec3f32 = if dot(n,n) > 0.0 then normalize(n) else @[0.0,0.0,0.0]
+def normal(centers:[14275]vec3f32,i:i32) vec3f32 =
+ let row = i/25 in let col = i%25 in
+ let accumulated = loop n = @[0.0,0.0,0.0] for neighbor < 4 do
+   let r = row+neighbor/2-1 in let c = col+neighbor%2-1 in
+   if r < 0 || r >= 570 || c < 0 || c >= 24 then n else
+   loop result = n for triangle < 2 do
+     let base = (r*24+c)*6+triangle*3 in
+     let a = surface_index(base) in let b = surface_index(base+1) in let d = surface_index(base+2) in
+     if i == a || i == b || i == d then result+cross(centers[d]-centers[b],centers[a]-centers[b]) else result
+ in safe_normal(accumulated)
+def mesh(p:[2483]vec4f32,birth:[191]f32,active:i32,feed:f32,retained:f32,thickness:f32) [34490]shell_vertex =
+ let centers:[14275]vec3f32 = map(|i| center(p,active,i),iota(14275)) in
+ let normals:[14275]vec3f32 = map(|i| normal(centers,i),iota(14275)) in
+ map(|i|
+   let source = if i < surface_count*2 then i%surface_count else perimeter((i-surface_count*2)%perimeter_count) in
+   let n = if i < surface_count then normals[source]
+     else if i < surface_count*2 then -normals[source]
+     else
+       let edge = (i-surface_count*2)%perimeter_count in
+       let ring = (i-surface_count*2)/perimeter_count+1 in
+       let tangent = safe_normal(centers[perimeter((edge+1)%perimeter_count)]-centers[perimeter((edge+perimeter_count-1)%perimeter_count)]) in
+       let outward = safe_normal(cross(normals[source],tangent)) in
+       let angle = f32.i32(ring)/6.0*pi in normals[source]*cos(angle)+outward*sin(angle)
+   in
+   let row = f32.i32(source/25)/570.0*f32.i32(active-1) in let r = i32.f32(floor(row)) in let t = row-f32.i32(r) in
+   {position=centers[source]+n*(thickness*0.5),normal=n,
+    birth=birth[r]*(1.0-t)+birth[i32.min(r+1,active-1)]*t,visibility=visibility(row,feed,retained)},iota(34490))
+type hit = {found:bool,point:vec3f32,row:f32,col:f32,distance:f32}
+def pick(vertices:[34490]shell_vertex,direction:vec3f32) hit =
+ loop best = {found=false,point=@[0.0,0.0,0.0],row=0.0,col=0.0,distance=1.0e20} for triangle < 68976 do
+   let ids = map(|k| i32.u32(index(triangle*3+k)),[0i32,1i32,2i32]) in
+   let ps = map(|i| vertices[i].position,ids) in
+   let e1 = ps[1]-ps[0] in let e2 = ps[2]-ps[0] in let h = cross(direction,e2) in
+   let determinant = dot(e1,h) in
+   if determinant < 1.0e-9 then best else
+   let s = Camera.eye-ps[0] in let u = dot(s,h)/determinant in
+   let q = cross(s,e1) in let v = dot(direction,q)/determinant in let distance = dot(e2,q)/determinant in
+   let point = Camera.eye+direction*distance in
+   if u < 0.0 || u > 1.0 || v < 0.0 || u+v > 1.0 || distance <= 0.0 || distance >= best.distance || point.y < 0.0 then best else
+   let weights = @[1.0-u-v,u,v] in
+   let sources = map(|i| if i < surface_count*2 then i%surface_count else perimeter((i-surface_count*2)%perimeter_count),ids) in
+   let rs = map(|i| f32.i32(i/25)/570.0,sources) in
+   let cs = map(|i| f32.i32(i%25)/24.0,sources) in
+   {found=true,point=point,row=dot(@[rs[0],rs[1],rs[2]],weights),col=dot(@[cs[0],cs[1],cs[2]],weights),distance=distance}

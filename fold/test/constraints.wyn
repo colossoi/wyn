@@ -1,0 +1,5 @@
+-- Numerical parity entry: all constraint behavior is imported from Wyn.
+module Constraints = import "../src/constraints"
+entry constraints(input_p:[2483]vec4f32,old:[2483]vec4f32,edges:[13880]vec4f32,
+ planes:[3]vec4f32,config:[3]vec4f32,grabs:[9]vec4f32,grab_info:[9]vec2f32) [2483]vec4f32 =
+ Constraints.solve(input_p,old,edges,planes,config,grabs,grab_info)

@@ -20,7 +20,7 @@ def hash(x: i32, y: i32, z: i32) i32 =
 -- Host supplies the same ordered edges as upstream (13,880 at default size).
 -- config: count, dt, thickness, stiffness / feed, retained, wallCount, unused.
 -- grabs: up to nine index/compliance/offset records; anchor is already smoothed.
-entry constraints(input_p: [2483]vec4f32, old: [2483]vec4f32,
+def solve(input_p: [2483]vec4f32, old: [2483]vec4f32,
                   edges: [13880]vec4f32, planes: [3]vec4f32,
                   config: [3]vec4f32, grabs: [9]vec4f32,
                   grab_info: [9]vec2f32)

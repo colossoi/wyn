@@ -1,0 +1,4 @@
+-- Reproducer: an imported file with a nested module using opened sqrt in a
+-- map callback panics after HOF specialization; the all-inline case compiles.
+module Wrapper = import "helper"
+entry repro() [2]f32 = Wrapper.values

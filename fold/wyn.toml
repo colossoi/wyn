@@ -3,4 +3,4 @@ manifest-version = 1
 name = "wyn/fold"
 version = "v0.1.0"
 wyn = "v0.1.0"
-library = "src/constraints.wyn"
+library = "src/main.wyn"

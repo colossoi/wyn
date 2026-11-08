@@ -1,0 +1,31 @@
+-- Fold interaction policy belongs to Wyn, including keyboard-adjusted settings.
+open f32
+type settings = {
+ speed:f32, stiffness:f32, thickness:f32, transmission:f32, ior:f32,
+ tint:f32, roughness:f32, exposure:f32, contrast:f32, saturation:f32,
+ temperature:f32, occlusion:bool, pause:bool,
+}
+def defaults: settings = {
+ speed=2.0,stiffness=0.5,thickness=0.35,transmission=1.0,ior=1.46,
+ tint=0.95,roughness=0.0,exposure=0.0,contrast=1.2,saturation=2.0,
+ temperature=0.0,occlusion=true,pause=false,
+}
+def pressed(keyboard:texture2d, key:i32) bool = texture_load(keyboard,@[key,1i32],0i32).x > 0.0
+def held(keyboard:texture2d, key:i32) bool = texture_load(keyboard,@[key,0i32],0i32).x > 0.0
+def change(keyboard:texture2d, less:i32, more:i32) f32 =
+  (if pressed(keyboard,more) then 1.0 else 0.0)-(if pressed(keyboard,less) then 1.0 else 0.0)
+def update(s:settings, k:texture2d) settings = {
+ speed=clamp(s.speed+change(k,189,187)*0.1,0.0,2.0),
+ stiffness=clamp(s.stiffness+change(k,219,221)*0.05,0.0,1.0),
+ thickness=clamp(s.thickness+change(k,188,190)*0.025,0.025,1.0),
+ transmission=if pressed(k,84) then 1.0-s.transmission else s.transmission,
+ ior=clamp(s.ior+change(k,73,79)*0.02,1.0,2.5),
+ tint=if pressed(k,71) then fract((s.tint+0.1)/1.1)*1.1 else s.tint,
+ roughness=if pressed(k,72) then fract((s.roughness+0.1)/0.6)*0.6 else s.roughness,
+ exposure=clamp(s.exposure+change(k,68,69)*0.1,-3.0,3.0),
+ contrast=clamp(s.contrast+change(k,67,86)*0.1,0.0,3.0),
+ saturation=clamp(s.saturation+change(k,83,87)*0.1,0.0,3.0),
+ temperature=clamp(s.temperature+change(k,74,75)*0.1,-2.0,2.0),
+ occlusion=if pressed(k,65) then !s.occlusion else s.occlusion,
+ pause=if pressed(k,32) then !s.pause else s.pause,
+}

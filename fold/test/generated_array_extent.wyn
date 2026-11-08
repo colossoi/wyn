@@ -1,0 +1,8 @@
+-- Reproducer: a scalar helper reads a generated array to determine an output
+-- extent. Host lowering panics with "invalid ReadElement in ValueRead"
+-- (master 9e4a1138), instead of compiling the valid dynamic array result.
+-- Fixed by 14f40130; verified compiling successfully at 8e9312a3.
+def count(values:[2]i32) i32 = values[0]
+entry repro(x:i32) []i32 =
+ let values = map(|i| x+i,iota(2)) in
+ iota(count(values))

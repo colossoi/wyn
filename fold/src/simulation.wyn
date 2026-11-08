@@ -1,0 +1,174 @@
+-- MIT, Copyright (c) 2026 mrdoob. Complete host lifecycle from upstream.
+-- State transitions, integration, topology, grabbing, and fixed stepping are Wyn.
+module Constraints = import "constraints"
+module Camera = import "camera"
+module Geometry = import "geometry"
+module Settings = import "settings"
+open f32
+def spacing:f32 = 3.8/12.0
+def dt:f32 = 1.0/120.0
+type grab = {index:i32,count:i32,target:vec3f32,anchor:vec3f32,
+             plane:vec3f32,offset:vec3f32}
+type state = {p:[2483]vec4f32,v:[2483]vec3f32,birth:[191]f32,
+ time:f32,accumulator:f32,feed:f32,emitted:i32,active:i32,retained:f32,target_retained:f32,
+ planes:[3]vec4f32,walls_changed:bool,grab:{index:i32,count:i32,target:vec3f32,anchor:vec3f32,plane:vec3f32,offset:vec3f32},grab_particles:[9]vec4f32,grab_info:[9]vec2f32,settings:Settings.settings,mouse_down:bool}
+def no_grab:grab = {index=-1i32,count=0i32,target=@[0.0,0.0,0.0],anchor=@[0.0,0.0,0.0],
+ plane=@[0.0,0.0,0.0],offset=@[0.0,0.0,0.0]}
+def reset(s:Settings.settings,aspect:f32) state =
+ let walls = Camera.planes(aspect) in let retained = Camera.retained(walls,s.thickness) in
+ let length = max(0.0,7.5-s.thickness*0.5) in let whole = floor(length/spacing) in
+ let active = i32.min(191,i32.f32(whole)+2) in let feed = max(0.0,length-whole*spacing) in
+ let rate = if s.speed > 0.0 then s.speed*1.5 else 1.5 in
+ let p:[2483]vec4f32 = map(|i|
+   let row = i/13 in let col = i%13 in
+   if row >= active then @[0.0,0.0,0.0,0.0] else
+   let bow = if row < 2 then 0.0 else 0.005*pow(f32.i32(row-1)/f32.i32(active-2),4.0) in
+   @[f32.i32(col)*spacing-1.9,7.5+(1.0-f32.i32(row))*spacing-feed,bow,0.0],iota(2483)) in
+ {p=p,v=replicate(2483,@[0.0,0.0,0.0]),
+  birth=map(|r| if r < active then -(f32.i32(r)*spacing+feed)/rate else 0.0,iota(191)),
+  time=0.0,accumulator=0.0,feed=feed,emitted=0i32,active=active,retained=retained,target_retained=retained,
+  planes=walls,walls_changed=true,grab=no_grab,grab_particles=replicate(9,@[0.0,0.0,0.0,0.0]),grab_info=replicate(9,@[0.0,0.0]),settings=s,mouse_down=false}
+-- Exact inverse of upstream's row-major edge emission order. The parallel
+-- construction changes no edge, endpoint, rest length, type, or solve ordering.
+def edge(k:i32) vec4f32 =
+ let (row,col,slot) = if k < 13797 then
+   let r = k/73 in let q = k%73 in
+   if q < 66 then (r,q/6,q%6) else if q < 71 then (r,11i32,if q-66 < 4 then q-66 else 5i32)
+   else (r,12i32,if q == 71 then 1i32 else 5i32)
+ else if k < 13857 then
+   let q = k-13797 in if q < 55 then (189i32,q/5,q%5) else if q < 59 then (189i32,11i32,q-55) else (189i32,12i32,1i32)
+ else
+   let q = k-13857 in (190i32,q/2,if q%2 == 0 then 0i32 else 4i32)
+ in
+ let i = row*13+col in
+ let a = if slot == 3 then i+1 else i in
+ let b = [i+1,i+13,i+14,i+13,i+2,i+26][slot] in
+ let length = if slot >= 4 then spacing*2.0 else if slot >= 2 then spacing*sqrt(2.0) else spacing in
+ @[f32.i32(a),f32.i32(b),length,if slot >= 4 then 2.0 else if slot >= 2 then 1.0 else 0.0]
+def edges:[13880]vec4f32 = map(edge,iota(13880))
+def recycle(row:i32,feed:f32,retained:f32) f32 =
+ let t = clamp((f32.i32(row)+feed/spacing-(retained-22.0))/20.0,0.0,1.0) in t*t*(3.0-2.0*t)
+def moving_walls(s:state) state =
+ let pv = map(|i|
+   if i < 26 || i >= s.active*13 then (s.p[i],s.v[i]) else
+   let (p,v) = loop (p,v) = (s.p[i].xyz,s.v[i]) for _sweep < 2 do
+     loop (q,w) = (p,v) for wall < 5 do
+       if wall == 2 && recycle(i/13,s.feed,s.retained) > 0.0 then (q,w) else
+       let plane = if wall < 3 then s.planes[wall] else @[if wall == 3 then 1.0 else -1.0,0.0,0.0,2.85] in
+       let distance = dot(q,plane.xyz)+plane.w in let clearance = s.settings.thickness*0.5+0.025 in
+       if distance >= clearance then (q,w) else
+       (q+plane.xyz*(clearance-distance),w-plane.xyz*min(0.0,dot(w,plane.xyz)))
+   in (@[p...,s.p[i].w],v),iota(2483)) in
+ ((s with p = map(|(p,_)| p,pv)) with v = map(|(_,v)| v,pv)) with walls_changed = false
+def prepare_grab(s:state) grab =
+ let g = s.grab in
+ if g.index < 0 then g else
+ if g.index >= s.active*13 || Geometry.visibility(f32.i32(g.index/13),s.feed,s.retained) < 0.05 then no_grab else
+ let target = g.target with .y = max(s.settings.thickness*0.5,g.target.y) in
+ let delta = target-g.anchor in let distance = magnitude(delta) in
+ let blend = min(1.0-exp(-30.0*dt),8.0*dt/max(distance,1.0e-9)) in
+ (g with target = target) with anchor = g.anchor+delta*blend
+def feed_row(s:state) state =
+ let active = i32.min(191,s.active+1) in
+ let g = if s.grab.index < 0 then s.grab else
+   s.grab with index = s.grab.index+13 in
+ let next = (((s with feed = s.feed-spacing) with active = active) with emitted = s.emitted+1) with grab = g in
+ let next = next with grab_info = (if s.grab.index < 0 then s.grab_info else map(|p| p with .x = p.x+13.0,s.grab_info)) in
+ let next = next with p = map(|i|
+    let p = if i >= 13 then s.p[i-13] else s.p[i] in
+    if s.emitted == 0 && active == 3 && i >= 26 && i < 39 then p with .z = p.z+0.005 else p,iota(2483)) in
+ let next = next with v = map(|i| if i < 13 then @[0.0,0.0,0.0] else s.v[i-13],iota(2483)) in
+ next with birth = map(|r| if r == 0 then s.time else s.birth[r-1],iota(191))
+def step(state0:state,links:[13880]vec4f32) state =
+ let time = state0.time+dt in
+ let source_z = 3.8*(0.12*sin(time*0.71)+0.045*(sin(time*1.23+1.7)-sin(1.7))+0.025*(sin(time*2.13+4.2)-sin(4.2))) in
+ let state1 = state0 with time = time in
+ if state1.active == 0 && state1.settings.speed <= 0.0 then state1 else
+ let start = if state1.active != 0 then state1 else
+   let created = state1 with active = 2i32 in
+   let created = created with p = map(|i| if i >= 26 then state1.p[i] else @[f32.i32(i%13)*spacing-1.9,7.5+(1.0-f32.i32(i/13))*spacing,source_z,0.0],iota(2483)) in
+   created with birth = map(|r| if r < 2 then time else state1.birth[r],iota(191)) in
+ let retained = if start.retained > start.target_retained then max(start.target_retained,start.retained-12.0*dt)
+   else min(start.target_retained,start.retained+start.settings.speed*1.5*dt/spacing) in
+ let before_feed = (start with retained = retained) with feed = start.feed+start.settings.speed*1.5*dt in
+ let fed = loop current = before_feed while current.feed >= spacing do feed_row(current) in
+ let reduced = fed with active = i32.min(fed.active,i32.f32(ceil(fed.retained))) in
+ let bounded = if reduced.walls_changed then moving_walls(reduced) else reduced in
+ let prescribed:[2483]vec4f32 = map(|i|
+   if i >= bounded.active*13 then bounded.p[i] else
+   if i < 26 then @[f32.i32(i%13)*spacing-1.9,7.5+(1.0-f32.i32(i/13))*spacing-bounded.feed,source_z,0.0]
+   else bounded.p[i] with .w = 1.0,iota(2483)) in
+ let velocity:[2483]vec3f32 = map(|i| if i < 26 || i >= bounded.active*13 then bounded.v[i]
+   else bounded.v[i]*exp(-1.3*dt)+@[0.0,-9.81*dt,0.0],iota(2483)) in
+ let integrated:[2483]vec4f32 = map(|i| if i < 26 || i >= bounded.active*13 then prescribed[i]
+   else prescribed[i] with .xyz = prescribed[i].xyz+velocity[i]*dt,iota(2483)) in
+ let g = prepare_grab(bounded) in
+ let config:[3]vec4f32 = [@[f32.i32(bounded.active*13),dt,bounded.settings.thickness,bounded.settings.stiffness],
+   @[bounded.feed,bounded.retained,3.0,0.0],@[g.anchor...,f32.i32(g.count)]] in
+ let solved = Constraints.solve(integrated,prescribed,links,bounded.planes,config,bounded.grab_particles,bounded.grab_info) in
+ let result = (bounded with p = solved) with grab = g in
+ result with v = map(|i| if i < 26 || i >= bounded.active*13 then velocity[i] else (solved[i].xyz-prescribed[i].xyz)/dt,iota(2483))
+def advance(s:state,delta:f32,links:[13880]vec4f32) state =
+ if s.settings.pause then s else
+ let initial = s with accumulator = s.accumulator+clamp(delta,0.0,0.05) in
+ loop current = initial while current.accumulator+1.0e-10 >= dt do
+   let next = step(current,links) in next with accumulator = next.accumulator-dt
+def begin_grab(s:state,index:i32,point:vec3f32) (grab,[9]vec4f32,[9]vec2f32) =
+ let row = index/13 in let col = index%13 in
+ if index < 26 || index >= s.active*13 || Geometry.visibility(f32.i32(row),s.feed,s.retained) < 0.1 then (no_grab,s.grab_particles,s.grab_info) else
+ let center = s.p[index].xyz in
+ let (particles,info,count) = loop (ps,is,n) = (replicate(9,@[0.0,0.0,0.0,0.0]),replicate(9,@[0.0,0.0]),0i32) for k < 9 do
+   let dr = k/3-1 in let dc = k%3-1 in let r = row+dr in let c = col+dc in
+   if r < 2 || r >= s.active || c < 0 || c >= 13 then (ps,is,n) else
+   let i = r*13+c in let compliance = if dr == 0 && dc == 0 then 0.000002 else 0.00008*f32.i32(dr*dr+dc*dc) in
+   (ps with [n] = @[(s.p[i].xyz-center)...,0.0],is with [n] = @[f32.i32(i),compliance],n+1)
+ in ({index=index,count=count,target=center,anchor=center,plane=point,offset=center-point},particles,info)
+def input(s:state,mouse:vec4f32,resolution:vec2f32) state =
+ let down = mouse.z > 0.0 in
+ let (g,particles,info) = if !down then (no_grab,s.grab_particles,s.grab_info) else
+   if !s.mouse_down then
+     let vertices = Geometry.mesh(s.p,s.birth,s.active,s.feed,s.retained,s.settings.thickness) in
+     let hit = Geometry.pick(vertices,Camera.ray(mouse.xy,resolution)) in
+     if !hit.found then (no_grab,s.grab_particles,s.grab_info) else begin_grab(s,i32.f32(round(hit.row*f32.i32(s.active-1)))*13+i32.f32(round(hit.col*12.0)),hit.point)
+   else if s.grab.index < 0 then (no_grab,s.grab_particles,s.grab_info) else
+     let unbounded = mouse.xy/resolution*2.0-1.0 in
+     let pixel = @[clamp(unbounded.x,-0.99,0.99),clamp(unbounded.y,-0.99,0.99)] in
+     let direction = Camera.ray((pixel+1.0)*0.5*resolution,resolution) in
+     let distance = dot(s.grab.plane-Camera.eye,Camera.forward)/dot(direction,Camera.forward) in
+     (s.grab with target = Camera.eye+direction*distance+s.grab.offset,s.grab_particles,s.grab_info)
+ in (((s with grab = g) with grab_particles = particles) with grab_info = info) with mouse_down = down
+def viewport(s:state,resolution:vec2f32) state =
+ let walls = Camera.planes(resolution.x/resolution.y) in
+ let changed = loop different = false for i < 3 do different || magnitude(walls[i]-s.planes[i]) >= 1.0e-9 in
+ ((s with planes = walls) with walls_changed = s.walls_changed || changed) with target_retained = Camera.retained(walls,s.settings.thickness)
+
+-- Feedback ABI is authored here; the runtime only carries this opaque array.
+def packed_count:i32 = 5207
+def pack(s:state) [5207]vec4f32 =
+ let tail:[32]vec4f32 = [
+  @[s.time,s.accumulator,s.feed,s.retained],@[f32.i32(s.active),f32.i32(s.emitted),s.target_retained,f32.i32(s.grab.index)],
+  @[s.grab.target...,f32.i32(s.grab.count)],@[s.grab.anchor...,if s.mouse_down then 1.0 else 0.0],
+  @[s.grab.plane...,if s.walls_changed then 1.0 else 0.0],@[s.grab.offset...,0.0],
+  @[s.settings.speed,s.settings.stiffness,s.settings.thickness,s.settings.transmission],
+  @[s.settings.ior,s.settings.tint,s.settings.roughness,s.settings.exposure],
+  @[s.settings.contrast,s.settings.saturation,s.settings.temperature,if s.settings.occlusion then 1.0 else 0.0],
+  @[if s.settings.pause then 1.0 else 0.0,0.0,0.0,0.0],s.planes[0],s.planes[1],s.planes[2],
+  @[0.0,0.0,0.0,0.0],@[0.0,0.0,0.0,0.0],@[0.0,0.0,0.0,0.0],@[0.0,0.0,0.0,0.0],@[0.0,0.0,0.0,0.0],
+  @[0.0,0.0,0.0,0.0],@[0.0,0.0,0.0,0.0],@[0.0,0.0,0.0,0.0],@[0.0,0.0,0.0,0.0],@[0.0,0.0,0.0,0.0],
+  @[0.0,0.0,0.0,0.0],@[0.0,0.0,0.0,0.0],@[0.0,0.0,0.0,0.0],@[0.0,0.0,0.0,0.0],@[0.0,0.0,0.0,0.0],
+  @[0.0,0.0,0.0,0.0],@[0.0,0.0,0.0,0.0],@[0.0,0.0,0.0,0.0],@[0.0,0.0,0.0,0.0]] in
+ map(|i| if i < 2483 then s.p[i] else if i < 4966 then @[s.v[i-2483]...,0.0]
+   else if i < 5157 then @[s.birth[i-4966],0.0,0.0,0.0]
+   else if i < 5189 then tail[i-5157] else if i < 5198 then s.grab_particles[i-5189]
+   else @[s.grab_info[i-5198]...,0.0,0.0],iota(5207))
+def unpack(buffer:[]vec4f32) state =
+ let a = buffer[5157] in let b = buffer[5158] in let c = buffer[5159] in let d = buffer[5160] in
+ let e = buffer[5161] in let f = buffer[5162] in let g = buffer[5163] in let h = buffer[5164] in
+ let j = buffer[5165] in let k = buffer[5166] in
+ {p=map(|i| buffer[i],iota(2483)),v=map(|i| buffer[i+2483].xyz,iota(2483)),birth=map(|i| buffer[i+4966].x,iota(191)),
+  time=a.x,accumulator=a.y,feed=a.z,retained=a.w,active=i32.f32(b.x),emitted=i32.f32(b.y),target_retained=b.z,
+  planes=[buffer[5167],buffer[5168],buffer[5169]],walls_changed=e.w > 0.0,mouse_down=d.w > 0.0,
+  grab={index=i32.f32(b.w),count=i32.f32(c.w),target=c.xyz,anchor=d.xyz,plane=e.xyz,offset=f.xyz},
+  grab_particles=map(|i| buffer[i+5189],iota(9)),grab_info=map(|i| buffer[i+5198].xy,iota(9)),
+  settings={speed=g.x,stiffness=g.y,thickness=g.z,transmission=g.w,ior=h.x,tint=h.y,roughness=h.z,exposure=h.w,
+            contrast=j.x,saturation=j.y,temperature=j.z,occlusion=j.w > 0.0,pause=k.x > 0.0}}

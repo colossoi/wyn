@@ -1,0 +1,4 @@
+-- Reproducer: importing values whose map callback uses array indexing and
+-- an opened sqrt leaves a function-typed parameter after HOF specialization.
+module Helper = import "helper"
+entry repro() [2]f32 = Helper.values

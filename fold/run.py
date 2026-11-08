@@ -1,46 +1,28 @@
-"""Launch the native driver; SIGKILL its process group five seconds after READY.
-
-Shader compilation is allowed to finish before the simulation deadline starts.
-The driver never dispatches the simulation before announcing READY.
-"""
-import os
+"""Dispatch the generated Fold application through the unchanged Viz binary."""
+import argparse
 from pathlib import Path
-import signal
-import subprocess
 import sys
-import threading
+from deadline import run
 
-ROOT=Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent
 
+def command(size):
+    shader = ROOT / 'generated/fold.wgsl'
+    if not shader.is_file() or not shader.with_suffix('.wynhost').is_file():
+        raise FileNotFoundError('Build the Wyn application first: python3 fold/build.py')
+    return [str(ROOT.parent / 'extra/viz/target/release/viz'),
+            'pipeline', str(shader), '--entry', 'fold',
+            '--config', str(ROOT / 'fold.viz.json'), '--size', size,
+            '--storage-bytes', 'previous:83312']
 
-def run(arguments):
-    binary=ROOT.parent/'extra/viz/target/release/wyn-fold'
-    process=subprocess.Popen([str(binary),*arguments],start_new_session=True,
-                             stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
-    timer=None
-    expired=threading.Event()
-    def stop():
-        expired.set()
-        try: os.killpg(process.pid,signal.SIGKILL)
-        except ProcessLookupError: pass
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--size', default='900')
+    parser.add_argument('--deadline', type=float, default=5, help='Process-group SIGKILL deadline in seconds (maximum 30)')
+    options, extra = parser.parse_known_args()
+    size = options.size if 'x' in options.size else f'{options.size}x{options.size}'
     try:
-        for line in process.stdout:
-            print(line,end='',flush=True)
-            if line.startswith('FOLD_READY') and timer is None:
-                timer=threading.Timer(5,stop)
-                timer.start()
-        status=process.wait()
-    except KeyboardInterrupt:
-        stop()
-        process.wait()
-        raise
-    finally:
-        if timer is not None: timer.cancel()
-    if expired.is_set():
-        print('Native Fold stopped at the five-second simulation deadline.',flush=True)
-        return 124
-    return status
-
-
-if __name__=='__main__':
-    sys.exit(run(sys.argv[1:]))
+        run(command(size) + extra, seconds=options.deadline)
+    except TimeoutError as error:
+        print(error, file=sys.stderr)
+        sys.exit(124)

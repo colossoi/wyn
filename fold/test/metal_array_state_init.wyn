@@ -1,0 +1,10 @@
+-- Reproducer: selecting large array-bearing state compiles to valid WGSL but
+-- Metal pipeline compilation fails with "Compiler encountered an internal error"
+-- on Radeon Pro 570 / macOS 13.7.8 (master 912ddff3). The emitted kernel
+-- materializes several large function-local arrays. No simulation is involved.
+type state = {p:[2483]vec4f32,v:[2483]vec3f32,birth:[191]f32}
+entry repro(previous:[]vec4f32,frame:u32) ([2483]vec4f32,[2483]vec3f32,[191]f32) =
+ let s = if frame == 0u32 then
+ {p=map(|i| @[f32.i32(i%13),f32.i32(i/13),0.0,0.0],iota(2483)),v=replicate(2483,@[0.0,0.0,0.0]),birth=map(f32.i32,iota(191))}
+ else {p=map(|i| previous[i],iota(2483)),v=map(|i| previous[i+2483].xyz,iota(2483)),birth=map(|i| previous[i+4966].x,iota(191))} in
+ (s.p,s.v,s.birth)

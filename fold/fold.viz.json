@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "feedback": [
+    {
+      "entry": "fold",
+      "input": "previous",
+      "result": 0,
+      "initial": { "kind": "zero" }
+    }
+  ]
+}
