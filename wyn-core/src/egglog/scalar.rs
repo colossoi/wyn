@@ -1,7 +1,7 @@
 //! Native scalar admission and optimization over the shared source graph.
 //! Selected-expression evaluation stays in this graph through emission.
 use super::query::Query;
-use super::{parse_program, source, timing, OptimizeError, ScalarOptimization};
+use super::{parse_program, timing, OptimizeError, ScalarOptimization};
 use egglog_engine::{EGraph, RawValues, Write};
 
 pub(super) mod evaluation;
@@ -39,11 +39,7 @@ pub(super) fn admit(graph: &mut EGraph) -> Result<(), OptimizeError> {
     Ok(())
 }
 
-pub(super) fn run(
-    graph: &mut EGraph,
-    identities: &source::Identities<'_>,
-    policy: ScalarOptimization,
-) -> Result<Selected, OptimizeError> {
+pub(super) fn run(graph: &mut EGraph, policy: ScalarOptimization) -> Result<Selected, OptimizeError> {
     let _timing = timing::span("egglog scalar optimization");
     let schedule = parse_program(
         "scalar fixed point",
@@ -53,9 +49,10 @@ pub(super) fn run(
         },
     )?;
     let facts = Query(graph);
-    for &region in identities.scopes.keys() {
-        facts.required("ExprContextForScope", (region,))?;
-    }
+    facts.for_each("FlowRegion", |fields| {
+        facts.required("ExprContextForScope", (fields[0],))?;
+        Ok(())
+    })?;
     timing::time("egglog scalar / admission", || {
         graph.parse_and_run_program(
             Some("native scalar import".into()),

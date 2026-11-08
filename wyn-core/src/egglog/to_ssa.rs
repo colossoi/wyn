@@ -1,13 +1,14 @@
 //! Lower selected egglog expressions and scheduled execution into SSA and host interfaces.
 use super::scalar::evaluation::Evaluation;
 use super::{timing, OptimizeError, Optimized, Program};
+use crate::ast::Span;
 use crate::interface::publish::EntryPoint;
 use crate::ssa::builder::BuilderError;
 use crate::ssa::types::{Function, ValueRef};
 use crate::tlc::DefMeta;
 use crate::types::Type;
 use crate::{CodegenTarget, FunctionId, LookupMap};
-use egglog_engine::Value;
+use egglog_engine::{sort::S, Value};
 use wyn_base::IdSource;
 use wyn_graph::topo_sort_by_dependencies;
 
@@ -19,7 +20,6 @@ use body::Body;
 
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::types::Terminator;
-use crate::tlc::TermKind;
 use crate::types::TypeName;
 use crate::EntryId;
 use crate::SymbolId;
@@ -156,9 +156,7 @@ impl Compiler<'_, '_> {
         if let Some(&id) = self.callable_ids.get(&(scope, signature.clone())) {
             return Ok(id);
         }
-        let Some(&(_, Some(source))) = self.program.identities.scopes.get(&scope) else {
-            return Err(error("callable has no source body"));
-        };
+        let span = self.program.identities.spans.get(&scope).copied().unwrap_or_else(Span::generated);
         let id = self.function_ids.next_id();
         self.callable_ids.insert((scope, signature.clone()), id);
         let name = if let Some(symbol) = self.facts.definition_name(scope) {
@@ -169,8 +167,11 @@ impl Compiler<'_, '_> {
         } else {
             format!("helper_{}", self.functions.len())
         };
-        if let TermKind::Extern(linkage) = &source.kind {
-            let mut result = &source.ty;
+        if let Some(fields) = self.facts.record("SourceExternal", "ExternalInfo", (scope,)) {
+            let Some(mut result) = self.facts.ty(fields[0]) else {
+                return Err(error("external signature type missing"));
+            };
+            let linkage = self.program.graph.value_to_base::<S>(fields[1]).to_string();
             for _ in &signature {
                 let Type::Constructed(TypeName::Arrow, parts) = result else {
                     return Err(error("external signature is not callable"));
@@ -186,15 +187,18 @@ impl Compiler<'_, '_> {
                 id,
                 name,
                 body: builder.finish().map_err(builder_error)?,
-                span: source.span,
-                linkage_name: Some(linkage.clone()),
+                span,
+                linkage_name: Some(linkage),
             });
             return Ok(id);
         }
         let Some(result) = self.facts.result(scope) else {
             return Err(error("callable has no result fact"));
         };
-        let mut lower = Body::new(self, scope, signature, source.ty.clone())?;
+        let Some(ty) = self.facts.source_type(result).cloned() else {
+            return Err(error("callable result type missing"));
+        };
+        let mut lower = Body::new(self, scope, signature, ty)?;
         let result = lower
             .value(scope, result)
             .map_err(|err| error(format!("function {name}, {} arguments: {err}", arguments.len())))?;
@@ -203,7 +207,7 @@ impl Compiler<'_, '_> {
             id,
             name,
             body,
-            span: source.span,
+            span,
             linkage_name: None,
         });
         Ok(id)

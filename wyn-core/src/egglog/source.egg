@@ -127,3 +127,6 @@
 (relation SourcePrimitiveType (TypeKey String))
 (relation SourceIntegerType (TypeKey))
 (relation SourceRecordUpdateOperator (String))
+
+(datatype ExternalDeclaration (ExternalInfo TypeKey String))
+(function SourceExternal (RegionKey) ExternalDeclaration :no-merge)

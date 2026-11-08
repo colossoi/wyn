@@ -113,7 +113,7 @@ fn scalar_policy_controls_optional_templates() {
     let program = interfaces_for_test(&tlc);
     for policy in [super::ScalarOptimization::Basic, super::ScalarOptimization::Full] {
         let mut scalars = program.graph.clone();
-        super::scalar::run(&mut scalars, &program.identities, policy).unwrap();
+        super::scalar::run(&mut scalars, policy).unwrap();
         let mut templates = 0;
         scalars.constructor_enodes("ExprTemplateBody", |_| templates += 1).unwrap();
         assert_eq!(templates > 0, policy == super::ScalarOptimization::Full);
@@ -329,7 +329,7 @@ fn scalar_admission_uses_ir_literal_edits() {
     let literal = Query(&program.graph).row("ExprLiteralBits", |_| true).unwrap().unwrap()[0];
     program.graph.clear_function("ExprLiteralBits").unwrap();
     program.graph.update(|mut sink| sink.add("ExprLiteralBits", (literal, 7i64))).unwrap();
-    scalar::run(&mut program.graph, &program.identities, ScalarOptimization::Basic).unwrap();
+    scalar::run(&mut program.graph, ScalarOptimization::Basic).unwrap();
     let mut seen = false;
     Query(&program.graph)
         .for_each("ExprLiteral", |fields| {

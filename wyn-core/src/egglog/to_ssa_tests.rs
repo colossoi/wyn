@@ -111,7 +111,7 @@ fn external_functions_retain_their_declared_signatures() {
         "#[linked(\"foreign_add\")] extern add(a:i32,b:i32) i32\nentry main(x:i32) i32 = add(x, 3)",
     )
     .unwrap();
-    let program = crate::egglog::optimize_with_policy(
+    let mut program = crate::egglog::optimize_with_policy(
         crate::egglog::prepare_interfaces(
             schedule(
                 place(
@@ -126,8 +126,10 @@ fn external_functions_retain_their_declared_signatures() {
         crate::egglog::ScalarOptimization::Basic,
     )
     .unwrap();
+    program.identities.spans.clear();
     let ssa = finish_for_test(program, CodegenTarget::Spirv).unwrap();
     let external = ssa.functions.iter().find(|f| f.linkage_name.as_deref() == Some("foreign_add")).unwrap();
+    assert!(external.span.is_generated());
     assert_eq!(external.body.params().len(), 2);
     assert_eq!(external.body.return_ty, crate::types::i32());
     let host = crate::host::Program::new(ssa.global_context.pipeline).unwrap();

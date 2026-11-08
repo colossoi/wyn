@@ -131,7 +131,7 @@ pub fn optimize_with_policy(
     mut program: Program<'_, InterfacesPrepared>,
     policy: ScalarOptimization,
 ) -> Result<Program<'_, Optimized>, OptimizeError> {
-    let selected = scalar::run(&mut program.graph, &program.identities, policy)?;
+    let selected = scalar::run(&mut program.graph, policy)?;
     Ok(program.advance(Optimized {
         selected,
         host: LookupMap::default(),
@@ -157,7 +157,7 @@ pub fn to_ssa(program: HostPrepared<'_>, target: CodegenTarget) -> Result<Elabor
 pub struct Program<'source, Stage> {
     source: &'source OwnershipApplied,
     graph: EGraph,
-    identities: source::Identities<'source>,
+    identities: source::Identities,
     stage: Stage,
 }
 

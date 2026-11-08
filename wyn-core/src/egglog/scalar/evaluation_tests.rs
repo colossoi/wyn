@@ -204,7 +204,7 @@ fn shared_placement_queries_match_individual_legal_site_selection() {
     let selected = &program.stage.selected;
     let parent = |scope| {
         (!facts.flag("ExprContextBoundary", scope).unwrap())
-            .then(|| program.identities.scopes.get(&scope).and_then(|s| s.0))
+            .then(|| facts.row("SourceParent", |row| row[0] == scope).unwrap().map(|row| row[1]))
             .flatten()
     };
     let ancestors = |mut scope| {

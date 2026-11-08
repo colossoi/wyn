@@ -1,6 +1,7 @@
 //! Import execution scopes and direct source facts; egglog resolves forwarding.
 //! Demanded arithmetic is admitted later into the same graph.
 use super::{fusion, planning, OptimizeError};
+use crate::ast::Span;
 use crate::binding_layout::{
     extract_io_decoration, extract_sampler_binding, extract_storage_access, extract_storage_binding,
     extract_storage_image_binding, extract_texture_binding, extract_uniform_binding,
@@ -30,7 +31,7 @@ use super::bindings::Bindings;
 pub(super) type Term = tlc::Term<ExplicitClosurePayload, ExplicitCapturesPayload>;
 type OperatorBody = SoacBody<ExplicitClosurePayload, ExplicitCapturesPayload>;
 
-pub(super) fn import(source: &OwnershipApplied) -> Result<(EGraph, Identities<'_>), OptimizeError> {
+pub(super) fn import(source: &OwnershipApplied) -> Result<(EGraph, Identities), OptimizeError> {
     let mut graph = fusion::new_graph()?;
     planning::load(&mut graph)?;
     graph.parse_and_run_program(Some("source.egg".into()), include_str!("source.egg"))?;
@@ -72,15 +73,15 @@ pub(super) fn import(source: &OwnershipApplied) -> Result<(EGraph, Identities<'_
 
 /// Tokens assigned by this graph map back to opaque TLC identities.
 #[derive(Default)]
-pub(super) struct Identities<'source> {
+pub(super) struct Identities {
     terms: Interner<i64, TermId>,
     pub(super) symbols: Interner<i64, SymbolId>,
     pub(super) types: Interner<i64, Type>,
-    pub(super) scopes: LookupMap<Value, (Option<Value>, Option<&'source Term>)>,
+    pub(super) spans: LookupMap<Value, Span>,
 }
 
-impl<'source> Identities<'source> {
-    fn term(&mut self, term: &'source Term) -> Result<i64, OptimizeError> {
+impl Identities {
+    fn term(&mut self, term: &Term) -> Result<i64, OptimizeError> {
         if term.id == TermId::SYNTHETIC {
             return Err(OptimizeError::Output(
                 "TLC source term has no stable identity".into(),
@@ -101,7 +102,7 @@ struct Scope {
 
 struct Import<'graph, 'db, 'ids, 'source> {
     sink: FullState<'graph, 'db>,
-    identities: &'ids mut Identities<'source>,
+    identities: &'ids mut Identities,
     globals: LookupSet<SymbolId>,
     bindings: Bindings<SymbolId, Value>,
     regions: IdSource<i64>,
@@ -224,7 +225,14 @@ impl<'source> Import<'_, '_, '_, 'source> {
         parent: Option<Value>,
     ) -> Result<Scope, OptimizeError> {
         let key = self.sink.add("RegionId", self.regions.next_id())?;
-        self.identities.scopes.insert(key, (parent, body));
+        if let Some(body) = body {
+            self.identities.spans.insert(key, body.span);
+            if let TermKind::Extern(linkage) = &body.kind {
+                let ty = self.ty(&body.ty)?;
+                let external = self.sink.add("ExternalInfo", (ty, linkage.as_str()))?;
+                self.sink.set("SourceExternal", key, external)?;
+            }
+        }
         if let Some(parent) = parent {
             self.sink.add("SourceParent", (key, parent))?;
         } else {

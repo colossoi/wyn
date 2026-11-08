@@ -123,7 +123,7 @@ fn scalar_admission_rejects_forwarding_cycles_but_stops_at_parameters() {
         let region = query.row("SourceOriginalEntry", |_| true).unwrap().unwrap()[1];
         let root = query.required("SourceResult", region).unwrap();
         program.graph.update(|mut sink| sink.set("SourceAlias", root, root)).unwrap();
-        let result = super::run(&mut program.graph, &program.identities, ScalarOptimization::Full);
+        let result = super::run(&mut program.graph, ScalarOptimization::Full);
         if valid {
             assert!(result.is_ok());
         } else {

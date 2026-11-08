@@ -5,7 +5,7 @@ use crate::{compile_thru_tlc, types};
 use egglog_engine::sort::S;
 use egglog_engine::{EGraph, Value, Write};
 
-fn source_term(graph: &EGraph, identities: &super::Identities<'_>, id: tlc::TermId) -> Value {
+fn source_term(graph: &EGraph, identities: &super::Identities, id: tlc::TermId) -> Value {
     let token = identities.terms.get(&id).unwrap();
     let query = Query(graph);
     let fields =
@@ -150,7 +150,7 @@ fn repeated_free_references_keep_dependencies_in_sibling_and_nested_regions() {
              else loop acc=produced for i<n do {step}"
         );
         let program = compile_thru_tlc(&source).unwrap();
-        let (mut graph, identities) = import(&program).unwrap();
+        let (mut graph, _) = import(&program).unwrap();
         graph.parse_and_run_program(None, "(run-schedule (saturate source-summary))").unwrap();
         let query = Query(&graph);
         let entry = query.row("SourceOriginalEntry", |_| true).unwrap().unwrap()[1];
@@ -178,7 +178,9 @@ fn repeated_free_references_keep_dependencies_in_sibling_and_nested_regions() {
         // Lifted helpers depend on their own parameters, not this entry's producer.
         nested.retain(|&region| {
             let mut root = region;
-            while let Some(parent) = identities.scopes[&root].0 {
+            while let Some(parent) =
+                query.row("SourceParent", |row| row[0] == root).unwrap().map(|row| row[1])
+            {
                 root = parent;
             }
             root == entry
