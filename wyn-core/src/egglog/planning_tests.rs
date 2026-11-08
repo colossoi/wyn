@@ -2,8 +2,8 @@ use super::super::query::Query;
 use super::super::{finish_for_test, from_tlc, fuse, place, schedule, schedule_with_subgroups};
 use crate::{compile_thru_tlc, CodegenTarget, PipelineTopologyPolicy};
 use egglog_engine::{
-    sort::{SetContainer, VecContainer, S},
-    EGraph, Value, Write,
+    sort::{SetContainer, S},
+    EGraph, RawValues, Value, Write,
 };
 
 fn selected(
@@ -1080,7 +1080,8 @@ fn segment_callback_blockers_cover_every_output_of_a_fused_plan() {
                 // Request both results independently, as outer map traversal would.
                 for &value in &values {
                     sink.add("RectangularDemand", (value,))?;
-                    sink.add("SegmentDemand", (value, 0i64))?;
+                    let leaf = sink.add("CollectiveLeaf", RawValues(vec![]))?;
+                    sink.add("TraversalDemand", (value, 0i64, leaf))?;
                 }
                 if blocked {
                     let region = sink.add("FlowRegion", callback)?;
@@ -1095,7 +1096,17 @@ fn segment_callback_blockers_cover_every_output_of_a_fused_plan() {
         for value in values {
             assert_eq!(query.required("SegmentCandidatePlan", (value,)).unwrap(), plan);
             assert_eq!(
-                query.lookup("SegmentTerminal", (value, 0i64)).unwrap().is_some(),
+                query
+                    .lookup(
+                        "Traversal",
+                        (
+                            value,
+                            0i64,
+                            query.constructor("CollectiveLeaf", RawValues(vec![])).unwrap().unwrap()
+                        )
+                    )
+                    .unwrap()
+                    .is_some(),
                 !blocked
             );
         }
@@ -1146,7 +1157,7 @@ fn segmented_collectives_do_not_cross_callback_control_flow() {
 }
 
 #[test]
-fn selected_map_bindings_replace_callback_discovery() {
+fn selected_traversal_replaces_callback_discovery() {
     let source = r#"
 def row(x:i32) [3]i32=map(|y|x+y,iota(3))
           entry case_0(xs:[]i32) [][3]i32=map(row,xs)
@@ -1154,6 +1165,10 @@ entry case_1(xs:[][3][17]i32) [][3]i32=
           map(|rows|map(|row|reduce((+),0,map(|x|x+row[0],row)),rows),xs)
 entry case_2(xs:[][3][17]i32) [][3][17]i32=
           map(|rows|map(|row|map(|x|x*2,scan((+),0,map(|x|x+1,row))),rows),xs)
+def sum_row(row:[17]i32) i32=reduce((+),0,row)
+entry case_3(xs:[][17]i32) []i32=map(sum_row,xs)
+def repeat_sum(n:i32,x:i32) i32=reduce((+),0,map(|y|x+y,iota(n)))
+entry case_4(xs:[]i32,n:i32) []i32=map(|x|repeat_sum(n,x),xs)
 "#;
     let tlc = compile_thru_tlc(source).unwrap();
     let mut program = selected(&tlc);
@@ -1164,7 +1179,16 @@ entry case_2(xs:[][3][17]i32) [][3][17]i32=
             let symbol = program.identities.symbols.resolve(program.graph.value_to_base::<i64>(row[0]));
             let name = program.source.symbols.get(*symbol).unwrap();
             let index: usize = name.strip_prefix("case_").unwrap().parse().unwrap();
-            expected.insert(row[1], [(2, 2), (2, 2), (2, 3)][index]);
+            expected.insert(
+                row[1],
+                [
+                    (2, "TraversalValue"),
+                    (2, "TraversalReduce"),
+                    (2, "TraversalElements"),
+                    (1, "TraversalReduce"),
+                    (1, "TraversalReduce"),
+                ][index],
+            );
             Ok(())
         })
         .unwrap();
@@ -1176,33 +1200,26 @@ entry case_2(xs:[][3][17]i32) [][3][17]i32=
             }
             let info = query.required("SourceOperation", (row[1],))?;
             let region = query.enode("OperationInfo", info)?.unwrap()[0];
-            let (rank, output_rank) = expected[&region];
-            let mut bindings = query.required("MapOutputBindings", (row[1], 0i64))?;
-            let mut axes = Vec::new();
+            let (rank, leaf) = expected[&region];
+            let mut traversal = query.required("MapOutputTraversal", (row[1], 0i64))?;
+            let mut depth = 0;
             loop {
-                if let Some(fields) = query.enode("MapIndexBinding", bindings)? {
-                    axes.push(program.graph.value_to_base::<i64>(fields[4]));
-                    bindings = fields[5];
-                } else if let Some(fields) = query.enode("MapCallBinding", bindings)? {
-                    bindings = fields[3];
+                if let Some(fields) = query.enode("TraversalFor", traversal)? {
+                    depth += 1;
+                    traversal = fields[4];
+                } else if let Some(fields) = query.enode("TraversalCall", traversal)? {
+                    traversal = fields[4];
                 } else {
-                    assert!(query.enode("MapValueBinding", bindings)?.is_some());
+                    assert!(query.enode(leaf, traversal)?.is_some(), "{leaf}");
                     break;
                 }
             }
-            assert_eq!(axes, (0..rank).collect::<Vec<_>>(), "{source}");
-            let axes = query.required("MapOutputAxes", (row[1], 0i64))?;
-            let axes = program.graph.value_to_container::<VecContainer>(axes).unwrap();
-            assert_eq!(
-                axes.data.iter().map(|&axis| program.graph.value_to_base::<i64>(axis)).collect::<Vec<_>>(),
-                (0..output_rank).collect::<Vec<_>>(),
-                "{source}"
-            );
+            assert_eq!(depth, rank, "{source}");
             outputs += 1;
             Ok(())
         })
         .unwrap();
-    assert_eq!(outputs, 3, "{source}");
+    assert_eq!(outputs, 5, "{source}");
     let mut collectives = Vec::new();
     query
         .for_function("SourceOperatorBody", |keys, callback| {
@@ -1216,7 +1233,9 @@ entry case_2(xs:[][3][17]i32) [][3][17]i32=
         "SourceOperatorBody",
         "SourceCallTarget",
         "SourceCallArgument",
-        "SegmentTerminal",
+        "Traversal",
+        "TraversalExtent",
+        "TraversalMap",
     ] {
         program.graph.clear_function(table).unwrap();
     }

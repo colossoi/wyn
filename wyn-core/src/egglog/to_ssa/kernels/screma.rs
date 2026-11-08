@@ -1,6 +1,6 @@
 // Expand scheduled phases straight into SSA instructions and structured loops.
 use super::super::{error, Body, OptimizeError, Typed};
-use super::{coordinates, element, indexed, invocation, write_arrays};
+use super::{element, indexed, invocation, write_arrays};
 use crate::op::BinaryOperator::{
     Add, Divide, Equal, Greater, GreaterEqual, Less, Multiply, Remainder, Subtract,
 };
@@ -9,13 +9,17 @@ use crate::types::{self, Type, TypeExt, TypeName};
 use crate::LookupMap;
 use egglog_engine::Value;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SegmentResult {
+    Total(usize),
+    Elements,
+}
+
 pub(super) struct SegmentOutput<'a> {
     pub source: Value,
     pub output: Typed,
     pub indices: &'a [Typed],
-    pub axes: Value,
-    pub role: &'a str,
-    pub slot: usize,
+    pub result: SegmentResult,
 }
 
 impl SegmentOutput<'_> {
@@ -25,7 +29,12 @@ impl SegmentOutput<'_> {
         inner: Option<Typed>,
         value: Typed,
     ) -> Result<(), OptimizeError> {
-        let indices = coordinates::project(body, self.axes, self.indices, inner)?;
+        let mut indices = self.indices.to_vec();
+        match (self.result, inner) {
+            (SegmentResult::Elements, Some(index)) => indices.push(index),
+            (SegmentResult::Total(_), None) => {}
+            _ => return Err(error("collective result coordinate mismatch")),
+        }
         body.store_at(self.output.clone(), &indices, value)
     }
 }
@@ -236,7 +245,7 @@ pub(super) fn screma(
                             }
                         }
                         if let Some(target) = segment {
-                            if target.role == "array" {
+                            if target.result == SegmentResult::Elements {
                                 let value = element(
                                     body,
                                     scope,
@@ -278,7 +287,7 @@ pub(super) fn screma(
             body.when(first, |body| {
                 for (i, value) in state.into_iter().enumerate() {
                     if let Some(target) = segment {
-                        if target.role == "total" && target.slot == i {
+                        if target.result == SegmentResult::Total(i) {
                             target.store(body, None, value)?;
                         }
                     } else if phase == "local" {

@@ -1,18 +1,16 @@
 //! Lower the selected map traversal, retaining nested output storage.
 use super::super::{error, Body, OptimizeError};
-use super::{coordinates, emit_bindings, invocation, screma, workgroup};
+use super::{coordinates, emit_traversal, invocation, screma, workgroup};
 use crate::egglog::query::Query;
 use crate::op::BinaryOperator;
 use crate::types::TypeExt;
 use crate::LookupMap;
-use egglog_engine::sort::S;
 use egglog_engine::{RawValues, Value};
 
 pub(super) fn emit(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
     owner: Value,
-    segmented: bool,
     width: u32,
     results: &[(String, i64, Value)],
 ) -> Result<(), OptimizeError> {
@@ -45,43 +43,36 @@ pub(super) fn emit(
             if output.is_none() && tiled.is_empty() {
                 continue;
             }
-            let Some(bindings) = body.compiler.facts.lookup("MapOutputBindings", (owner, *slot)) else {
-                return Err(error("map output has no selected callback bindings"));
+            let Some(traversal) = body.compiler.facts.lookup("MapOutputTraversal", (owner, *slot)) else {
+                return Err(error("map output has no selected callback traversal"));
             };
-            let Some(axes) = body.compiler.facts.lookup("MapOutputAxes", (owner, *slot)) else {
-                return Err(error("map output has no selected coordinate mapping"));
-            };
-            emit_bindings(
+            emit_traversal(
                 body,
                 scope,
-                bindings,
+                traversal,
                 &indices,
                 &mut cache,
-                &mut |body, scope, source| {
-                    if segmented {
-                        let Some(result) = body.compiler.facts.lookup("SegmentOutput", (owner, *slot))
-                        else {
-                            return Err(error("segmented output has no selected result"));
+                &mut |body, scope, leaf| {
+                    let reduction = body.compiler.facts.enode("TraversalReduce", leaf);
+                    let elements = body.compiler.facts.enode("TraversalElements", leaf);
+                    if let Some(fields) = reduction.as_ref().or(elements.as_ref()) {
+                        let source = fields[0];
+                        let owner = fields[1];
+                        let plan = fields[2];
+                        let result = if reduction.is_some() {
+                            screma::SegmentResult::Total(
+                                body.compiler.facts.unsigned(fields[3], "segment result slot")? as usize,
+                            )
+                        } else {
+                            screma::SegmentResult::Elements
                         };
-                        let Some(result) = body.compiler.facts.enode("SegmentResult", result) else {
-                            return Err(error("invalid segmented result"));
-                        };
-                        let [_, owner, plan, role, slot] = result[..] else {
-                            return Err(error("invalid segmented result"));
-                        };
-                        let role = body.compiler.program.graph.value_to_base::<S>(role);
-                        let slot = body.compiler.facts.unsigned(slot, "segment result slot")? as usize;
                         let results = body.compiler.facts.results(plan)?;
-                        let Some(output) = output.clone() else {
-                            return Err(error("segment output missing"));
-                        };
+                        let output = output.clone().ok_or_else(|| error("segment output missing"))?;
                         let target = screma::SegmentOutput {
                             source,
                             output,
                             indices: &indices,
-                            axes,
-                            role: role.as_ref(),
-                            slot,
+                            result,
                         };
                         screma::screma(
                             body,
@@ -94,6 +85,10 @@ pub(super) fn emit(
                             Some(&target),
                         )
                     } else {
+                        let Some(fields) = body.compiler.facts.enode("TraversalValue", leaf) else {
+                            return Err(error("invalid traversal leaf"));
+                        };
+                        let source = fields[0];
                         let previous = body.workgroup_width;
                         let previous_execution = body.invocation_execution;
                         if group {
@@ -104,7 +99,6 @@ pub(super) fn emit(
                         body.workgroup_width = previous;
                         body.invocation_execution = previous_execution;
                         let value = value?;
-                        let indices = coordinates::project(body, axes, &indices, None)?;
                         for destination in &tiled {
                             body.store_tiled(scope, *destination, indices[0].clone(), value.clone())?;
                         }

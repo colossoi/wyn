@@ -81,14 +81,7 @@ pub(super) fn emit(
     };
     let results = body.compiler.facts.results(plan)?;
     match phase {
-        "elements" | "segments" => maps::emit(
-            body,
-            scope,
-            phase_owner,
-            phase == "segments",
-            phase_width,
-            &results,
-        ),
+        "elements" | "segments" => maps::emit(body, scope, phase_owner, phase_width, &results),
         "scatter" | "initialize" | "atomic" => {
             indexed(body, scope, phase_owner, phase, phase_extent, phase_width, plan)
         }
@@ -209,18 +202,23 @@ fn element_local(
                 .lookup("PlanMapping", (operation,))
                 .is_some_and(|mapping| body.compiler.program.graph.value_to_base::<bool>(mapping))
         {
-            let Some(bindings) =
-                body.compiler.facts.lookup("MapBindings", (source, 0i64, indices.len() as i64, false))
+            let Some(traversal) =
+                body.compiler.facts.lookup("ElementTraversal", (source, indices.len() as i64))
             else {
-                return Err(error("map has no selected callback bindings"));
+                return Err(error("map has no selected callback traversal"));
             };
-            let value = emit_bindings(
+            let value = emit_traversal(
                 body,
                 scope,
-                bindings,
+                traversal,
                 indices,
                 cache,
-                &mut |body, scope, source| body.value(scope, source),
+                &mut |body, scope, leaf| {
+                    let Some(fields) = body.compiler.facts.enode("TraversalValue", leaf) else {
+                        return Err(error("element traversal must yield a value"));
+                    };
+                    body.value(scope, fields[0])
+                },
             )?;
             cache.insert(source, value.clone());
             return Ok(value);
@@ -234,22 +232,18 @@ fn element_local(
     Ok(value)
 }
 
-fn emit_bindings<T>(
+fn emit_traversal<T>(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
-    bindings: Value,
+    traversal: Value,
     indices: &[Typed],
     cache: &mut LookupMap<Value, Typed>,
     emit: &mut impl FnMut(&mut Body<'_, '_, '_>, Value, Value) -> Result<T, OptimizeError>,
 ) -> Result<T, OptimizeError> {
-    if let Some(fields) = body.compiler.facts.enode("MapValueBinding", bindings) {
-        return emit(body, scope, fields[0]);
-    }
-    let (owner, region, arguments, next) =
-        if let Some(fields) = body.compiler.facts.enode("MapIndexBinding", bindings) {
-            let axis = body.compiler.facts.unsigned(fields[4], "callback input axis")? as usize;
-            let Some(index) = indices.get(axis) else {
-                return Err(error("callback input axis exceeds the selected domain"));
+    let (owner, region, arguments, next, remaining) =
+        if let Some(fields) = body.compiler.facts.enode("TraversalFor", traversal) {
+            let Some((index, remaining)) = indices.split_first() else {
+                return Err(error("traversal rank exceeds the selected domain"));
             };
             let mut arguments = Vec::new();
             // Cached leaves and input rows are evaluated at different coordinate ranks.
@@ -265,18 +259,20 @@ fn emit_bindings<T>(
                     cache,
                 )?);
             }
-            (fields[0], fields[1], arguments, fields[5])
-        } else if let Some(fields) = body.compiler.facts.enode("MapCallBinding", bindings) {
+            (fields[0], fields[1], arguments, fields[4], remaining)
+        } else if let Some(fields) = body.compiler.facts.enode("TraversalCall", traversal) {
             let mut arguments = Vec::new();
-            for argument in body.compiler.facts.vector(fields[2])? {
+            for argument in body.compiler.facts.vector(fields[3])? {
                 arguments.push(body.value(scope, argument)?);
             }
-            (fields[0], fields[1], arguments, fields[3])
+            (fields[1], fields[2], arguments, fields[4], indices)
+        } else if indices.is_empty() {
+            return emit(body, scope, traversal);
         } else {
-            return Err(error("unknown selected callback binding"));
+            return Err(error("traversal rank is less than the selected domain"));
         };
     body.in_region(owner, region, arguments, |body, _| {
-        emit_bindings(body, region, next, indices, &mut LookupMap::default(), emit)
+        emit_traversal(body, region, next, remaining, &mut LookupMap::default(), emit)
     })
 }
 pub(super) fn write_arrays(
