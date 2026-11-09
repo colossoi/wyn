@@ -293,14 +293,10 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
                     let Some(source) = self.compiler.facts.parameter(region, index) else {
                         return Err(error("selected parameter missing"));
                     };
-                    let Some(value) = self.values.get(&source).cloned() else {
-                        return Err(error(format!(
-                            "selected parameter {source:?} in {region:?} is unbound in {:?}, bound {:?}",
-                            self.context,
-                            self.values.keys().collect::<Vec<_>>()
-                        )));
-                    };
-                    value
+                    match self.values.get(&source).cloned() {
+                        Some(value) => value,
+                        None => self.boundary(scope, source)?,
+                    }
                 }
                 "ExprLiteral" => self.literal(selected.integer(fields[2])?, &ty)?,
                 "ExprUnary" | "ExprBinary" | "ExprOp" => {

@@ -2,7 +2,7 @@ use super::import;
 use crate::egglog::query::Query;
 use crate::tlc::{self, DefMeta, TermKind};
 use crate::{compile_thru_tlc, types};
-use egglog_engine::sort::S;
+use egglog_engine::sort::{VecContainer, S};
 use egglog_engine::{EGraph, Value, Write};
 
 fn source_term(graph: &EGraph, identities: &super::Identities, id: tlc::TermId) -> Value {
@@ -165,12 +165,28 @@ fn repeated_free_references_keep_dependencies_in_sibling_and_nested_regions() {
             })
             .unwrap();
         let producer = producer.expect("outer producer");
+        query
+            .for_function("SourceOperation", |keys, info| {
+                let fields = query.enode("OperationInfo", info)?.unwrap();
+                let definition = query.required("RegionDefinition", (fields[0],))?;
+                let body = query.enode("RegionBody", definition)?.unwrap();
+                let operations = graph.value_to_container::<VecContainer>(body[2]).unwrap();
+                let index = operations.data.iter().position(|&op| op == keys[0]).unwrap();
+                assert!(query.contains("ImportedPosition", (keys[0], index as i64))?);
+                if index > 0 {
+                    assert!(query.contains("SourceNextOperation", (operations.data[index - 1], keys[0]))?);
+                }
+                Ok(())
+            })
+            .unwrap();
         let mut nested = Vec::new();
-        for (table, constructor) in [("SourceBranch", "BranchInfo"), ("SourceLoop", "LoopInfo")] {
+        for (table, constructor, start) in
+            [("SourceBranch", "BranchInfo", 1), ("SourceLoop", "LoopInfo", 0)]
+        {
             query
                 .for_function(table, |_, info| {
                     let fields = query.enode(constructor, info)?.unwrap();
-                    nested.extend_from_slice(&fields[fields.len() - 2..]);
+                    nested.extend_from_slice(&fields[start..start + 2]);
                     Ok(())
                 })
                 .unwrap();

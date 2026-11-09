@@ -101,8 +101,6 @@
 (rule ((SourceClosureCode value code) (= (SourceCallable code) region)) ((set (SourceCallable value) region)) :ruleset source-summary)
 (rule ((SourceApply value function) (= (SourceCallable function) region)) ((SourceEnters value region)) :ruleset source-summary)
 
-(relation ImportedPosition (OperationKey i64))
-(relation SourceNextOperation (OperationKey OperationKey))
 (relation ImportedEffectOrder (OperationKey OperationKey))
 
 (rule ((= value (SourceDestination op))) ((set (SourceStorage value) false)) :ruleset source-summary)

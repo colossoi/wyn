@@ -52,7 +52,7 @@
 (rule ((SafeLayoutArguments call i) (= argument (SourceCallArgument call i)) (= (SourceSpeculatable argument) true))
       ((SafeLayoutArguments call (+ i 1))) :ruleset output-layouts)
 (rule ((= call (SourceInvocation caller function args)) (= callee (SourceCallTarget call))
-       (= (RegionDefinition callee) (RegionBody parameters captures result))
+       (= (RegionDefinition callee) (RegionBody parameters captures operations result))
        (SafeLayoutArguments call (vec-length parameters)) (IndexGather result rows address a b guard)
        (LayoutCallArgument call address actual-index) (LayoutCallArgument call rows actual-rows))
       ((IndexGather call actual-rows actual-index a b guard)) :ruleset output-layouts)

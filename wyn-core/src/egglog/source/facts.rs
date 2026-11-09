@@ -42,10 +42,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         self.owners.insert(value, scope.key);
         if let Some(&operation) = self.operations_by_value.get(&value) {
             self.sink.set("SourceWork", value, self.work[&value])?;
-            self.sink.add("ImportedPosition", (operation, scope.position))?;
-            if let Some(previous) = scope.previous_operation.replace(operation) {
-                self.sink.add("SourceNextOperation", (previous, operation))?;
-            }
+            scope.operations.push(operation);
         }
         Ok(())
     }

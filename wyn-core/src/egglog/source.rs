@@ -94,7 +94,7 @@ impl Identities {
 struct Scope {
     key: Value,
     position: i64,
-    previous_operation: Option<Value>,
+    operations: Vec<Value>,
     work: i64,
     evaluation: Option<Value>,
     parameters: Vec<Value>,
@@ -243,7 +243,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         Ok(Scope {
             key,
             position: 0,
-            previous_operation: None,
+            operations: Vec::new(),
             work: 0,
             evaluation: None,
             parameters: Vec::new(),
@@ -318,7 +318,11 @@ impl<'source> Import<'_, '_, '_, 'source> {
             data: std::mem::take(&mut scope.captures),
             do_rebuild: true,
         });
-        let body = self.sink.add("RegionBody", (parameters, captures, result))?;
+        let operations = self.sink.container_to_value(VecContainer {
+            data: std::mem::take(&mut scope.operations),
+            do_rebuild: true,
+        });
+        let body = self.sink.add("RegionBody", (parameters, captures, operations, result))?;
         self.sink.set("RegionDefinition", scope.key, body)?;
         self.sink.set("SourceRegionWork", scope.key, scope.work)?;
         Ok(())
@@ -363,8 +367,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         let operation = self.sink.add("OperationId", self.operations.next_id())?;
         if let Some(kind) = kind {
             let node = self.sink.add("ScalarOperator", kind)?;
-            let definition = self.sink.add("DefinedIn", (scope.key, node))?;
-            self.sink.set("OperatorDefinition", operation, definition)?;
+            self.sink.set("OperatorDefinition", operation, node)?;
         }
         self.sink.set("SourceOperationValue", operation, value)?;
         self.operations_by_value.insert(value, operation);
@@ -590,22 +593,24 @@ impl<'source> Import<'_, '_, '_, 'source> {
         self.sink.add("SourceEnters", (owner, iteration.key))?;
         let checkpoint = self.bindings.checkpoint();
         let accumulator = self.formal(variable, variable_ty, &header)?;
+        header.parameters.push(accumulator);
         for (symbol, _, extraction) in bindings {
             let (value, _) = self.visit(extraction, &mut header)?;
             self.bind(*symbol, value, &header)?;
         }
-        let form = match kind {
+        let (form, test) = match kind {
             LoopKind::While { cond } => {
                 let (condition, _) = self.visit(cond, &mut header)?;
-                self.sink.add("WhileCondition", condition)?
+                (self.sink.add("WhileCondition", condition)?, condition)
             }
             LoopKind::For { var, var_ty, .. } | LoopKind::ForRange { var, var_ty, .. } => {
                 let variable = self.formal(*var, var_ty, &iteration)?;
                 self.sink.set("SourceIterationValue", iteration.key, variable)?;
+                iteration.parameters.push(variable);
                 let Some(form) = counted else {
                     return Err(OptimizeError::Output("counted loop control is missing".into()));
                 };
-                form
+                (form, accumulator)
             }
         };
         let result = self.finish_body(body, &mut iteration)?;
@@ -627,7 +632,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 matches!(kind, LoopKind::ForRange { .. }) && variable_ty.is_array(),
             )?;
         }
-        self.sink.set("SourceRegionWork", header.key, header.work)?;
+        self.finish_region(&mut header, test)?;
         self.bindings.restore(checkpoint);
         Ok(())
     }
@@ -835,8 +840,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 self.sink.add("IndexedOperator", (body, destination, neutral, indices, values))?
             }
         };
-        let definition = self.sink.add("DefinedIn", (scope.key, node))?;
-        self.sink.set("OperatorDefinition", operation, definition)?;
+        self.sink.set("OperatorDefinition", operation, node)?;
         Ok(())
     }
 }

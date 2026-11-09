@@ -161,7 +161,7 @@
 (rule ((= array (SourceLength value)) (= value (SourceOperationValue original)) (PlannedOperation original owner plan region)) ((LengthOperation owner array)) :ruleset planning-import)
 (rule ((SourceScratch value (Length array)) (= value (SourceOperationValue original))
        (PlannedOperation original owner plan region)) ((LengthOperation owner array)) :ruleset planning-import)
-(rule ((PlanEffect plan original offset) (= (OperatorDefinition original) (DefinedIn scope (ReserveOperator body destination inputs rank maps))) (= owner (Owner plan))
+(rule ((PlanEffect plan original offset) (= (OperatorDefinition original) (ReserveOperator body destination inputs rank maps)) (= owner (Owner plan))
        (= value (SourceOperationValue original)) (= ty (SourceType value)) (= fields (SourceTypeFields ty))
        (PlanUpdateArray plan slot initial mode) (= i (- slot offset)) (>= i 0) (< i (vec-length fields)) (= base (DestinationSlot owner)))
       ((ResultField value i (Result owner (+ base slot)))) :ruleset planning-import)

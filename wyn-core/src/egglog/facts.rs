@@ -95,7 +95,7 @@ impl<'a, 'source> Facts<'a, 'source> {
         self.lookup("ExprContextForScope", (value,))
     }
     pub fn result(&self, value: Value) -> Option<Value> {
-        Some(self.record("RegionDefinition", "RegionBody", (value,))?[2])
+        Some(self.record("RegionDefinition", "RegionBody", (value,))?[3])
     }
     pub fn loop_state(&self, value: Value) -> Option<Value> {
         Some(self.record("LoopHeader", "LoopInfo", (value,))?[3])
