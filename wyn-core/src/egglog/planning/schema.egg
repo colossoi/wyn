@@ -269,3 +269,5 @@
 
 (function ArrayInitialization (ValueKey) InitializationPlan :no-merge)
 (function UpdateInitialization (OperationKey i64) InitializationPlan :no-merge)
+
+(function FinalOutputPass (FusionPlan) bool :merge (or old new))

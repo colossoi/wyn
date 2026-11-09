@@ -96,18 +96,18 @@ fn operations_in(graph: &EGraph, kind: &str, region: Value) -> Vec<Value> {
 }
 
 #[test]
-fn scan_output_can_capture_a_fused_total() {
-    planned(
-        "entry main(xs: [257]i32) [257]i32 =
-         let prefix = scan((+), 0, xs) in
-         let total = reduce((+), 0, xs) in
-         map(|x| x + total, prefix)",
-        |graph| {
+fn outputs_that_capture_a_total_wait_for_the_collective_barrier() {
+    planned_cases(&[
+        "entry main(xs:[257]i32) [257]i32=let prefix=scan((+),0,xs) let total=reduce((+),0,xs) in map(|x|x+total,prefix)",
+        "entry main(xs:[257]i32) [257]i32=let total=reduce((+),0,xs) in map(|x|x+total,xs)",
+        "entry main(xs:[257]i32) [3]i32=let total=reduce((+),0,xs) let dest=[0,0,0] in reduce_by_index(dest,(+),0,map(|x|x%3,xs),map(|x|x+total,xs))",
+    ], |index, graph, region| {
             let query = Query(graph);
-            let scan = operations(graph, "scan")[0];
-            let reduce = operations(graph, "reduce")[0];
-            let plan = query.required("SelectedPlan", (scan,)).unwrap();
-            assert_eq!(plan, query.required("SelectedPlan", (reduce,)).unwrap());
+            let reduce = operations_in(graph, "reduce", region)[0];
+            let plan = query.required("SelectedPlan", (reduce,)).unwrap();
+            for op in operations_in(graph, "map", region) {
+                assert_eq!(plan, query.required("SelectedPlan", (op,)).unwrap(), "case {index}");
+            }
             let owner = query.required("Owner", (plan,)).unwrap();
             let total = query.constructor("Result", (owner, 0i64)).unwrap().unwrap();
             for phase in ["chunks", "combine", "offsets"] {
@@ -123,12 +123,12 @@ fn scan_output_can_capture_a_fused_total() {
             }
             let mut phases = 0;
             query
-                .for_each("Phase", |_| {
-                    phases += 1;
+                .for_each("Phase", |row| {
+                    if row[1] == region { phases += 1; }
                     Ok(())
                 })
                 .unwrap();
-            assert_eq!(phases, 3);
+            assert_eq!(phases, if index == 2 { 4 } else { 3 });
         },
     );
 }

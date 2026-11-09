@@ -216,3 +216,7 @@
        (= plan (SelectedPlan op)) (= owner (Owner plan)) (= extent (SourceDomainExtent op)))
       ((set (ElideElements owner) true) (DeviceOperation owner)
        (set (ViewExtent value) extent)) :ruleset planning-import)
+
+; Prefixes and captured totals both require outputs after the collective barrier.
+(rule ((Current group plan) (= scans (HasScans plan))) ((set (FinalOutputPass plan) scans)) :ruleset planning-import)
+(rule ((PlanLateTotals plan)) ((set (FinalOutputPass plan) true)) :ruleset planning-import)

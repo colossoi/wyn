@@ -4,6 +4,7 @@ use super::contribution::Contribution;
 use super::{invocation, updates, write_arrays};
 use crate::builtins::catalog;
 use crate::egglog::facts::{AccumulatorComponent, FoldOutput, OutputAction};
+use crate::egglog::query::Query;
 use crate::op::BinaryOperator::{
     Add, Divide, Equal, Greater, GreaterEqual, Less, Multiply, Remainder, Subtract,
 };
@@ -35,6 +36,7 @@ pub(super) fn screma(
             &[],
         )?;
     }
+    let final_outputs = Query(&body.compiler.program.graph).flag("FinalOutputPass", (plan,))?;
     let packing = match body.compiler.facts.action(plan)? {
         OutputAction::Pack { predicate, input } => Some((predicate, input)),
         _ => None,
@@ -187,7 +189,10 @@ pub(super) fn screma(
                                 };
                                 values.push(value);
                             }
-                            if !has_scans && !totals_only && phase != "combine" {
+                            if !has_scans
+                                && !totals_only
+                                && (phase == "local" || (phase == "chunks" && !final_outputs))
+                            {
                                 write_output(
                                     body,
                                     scope,
