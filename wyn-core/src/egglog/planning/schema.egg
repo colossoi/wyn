@@ -229,7 +229,17 @@
 ; Iteration axes describe logical coordinates, before cooperative width expansion.
 (function IterationExtent (OperationKey) Extent :no-merge)
 (function IterationRank (OperationKey) i64 :no-merge)
-(function IterationAxis (OperationKey i64) Extent :no-merge)
+; A logical domain has at least one axis. Rank, volume, and coordinate vectors
+; are projections of this value, never independent authored facts.
+(datatype DomainShape (OneAxis Extent) (AppendAxis DomainShape Extent))
+(function ShapeDimensions (DomainShape) RectangularShape :no-merge)
+(function ShapeExtent (DomainShape) Extent :no-merge)
+(ruleset shape-properties)
+(rule ((= shape (OneAxis n)))
+      ((set (ShapeDimensions shape) (vec-of n)) (set (ShapeExtent shape) n)) :ruleset shape-properties)
+(rule ((= shape (AppendAxis prefix n)) (= axes (ShapeDimensions prefix)) (= product (ShapeExtent prefix)))
+      ((set (ShapeDimensions shape) (vec-push axes n)) (set (ShapeExtent shape) (Product product n))) :ruleset shape-properties)
+(function IterationShape (OperationKey) DomainShape :no-merge)
 (function SubgroupsEnabled () bool :no-merge)
 (function SegmentWidth (OperationKey) i64 :merge (min old new))
 (function MapSegmented (OperationKey) bool :merge (or old new))

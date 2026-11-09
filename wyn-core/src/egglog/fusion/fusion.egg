@@ -54,7 +54,7 @@
       ((PlanLateTotals plan)) :ruleset fusion-candidates)
 
 (relation JoinCandidate (i64 i64 FusionGroup FusionGroup bool))
-(relation JoinedCandidate (i64 i64 FusionGroup FusionGroup bool OperationKey ResultTree ResultTree ResultTree ResultTree OutputAction))
+(relation JoinedCandidate (i64 i64 FusionGroup FusionGroup bool DomainShape ResultTree ResultTree ResultTree ResultTree OutputAction))
 (relation MaskCandidate (i64 i64 FusionGroup FusionGroup))
 (relation PlanCandidate (i64 i64 FusionGroup FusionGroup Replacement))
 (ruleset fusion-replacements)

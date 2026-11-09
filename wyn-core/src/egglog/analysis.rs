@@ -14,7 +14,7 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
         graph
             .run_program(parse_program(
                 "source summary",
-                "(run-schedule (saturate source-summary))",
+                "(run-schedule (saturate source-summary shape-properties))",
             )?)
             .map_err(OptimizeError::from)
     })?;

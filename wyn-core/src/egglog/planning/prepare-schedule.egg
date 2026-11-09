@@ -6,7 +6,7 @@
     (saturate (seq (run extent-shapes) (run map-shapes)))
     (saturate extent-dependencies) (run extent-uniformity)
     (run map-blockers) (saturate map-select) (saturate map-launch)
-    (saturate iteration-domains)
+    (saturate shape-properties iteration-domains)
     (saturate segment-shapes)
     (saturate extent-dependencies) (run extent-uniformity)
     (run segment-approve) (run segment-select)

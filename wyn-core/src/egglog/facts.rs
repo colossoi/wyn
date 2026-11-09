@@ -137,18 +137,9 @@ impl<'a, 'source> Facts<'a, 'source> {
         Ok(info[1])
     }
     pub fn iteration_dimensions(&self, operation: Value) -> Result<Vec<Value>, OptimizeError> {
-        let Some(rank) = self.lookup("IterationRank", (operation,)) else {
-            return Err(error("iteration domain has no rank"));
-        };
-        let rank = self.positive(rank, "iteration domain rank")? as usize;
-        let mut dimensions = Vec::with_capacity(rank);
-        for axis in 0..rank {
-            let Some(extent) = self.lookup("IterationAxis", (operation, axis as i64)) else {
-                return Err(error("domain axis has no planned extent"));
-            };
-            dimensions.push(extent);
-        }
-        Ok(dimensions)
+        let query = Query(&self.program.graph);
+        let shape = query.required("IterationShape", (operation,))?;
+        self.vector(query.required("ShapeDimensions", (shape,))?)
     }
     pub fn domain_shape(&self, operation: Value) -> Result<(Vec<Value>, Vec<Vec<usize>>), OptimizeError> {
         let dimensions = self.iteration_dimensions(operation)?;

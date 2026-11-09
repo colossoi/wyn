@@ -749,7 +749,10 @@ fn fused_filter_postmap_retains_the_traversed_input_domain() {
                 panic!("one selected filter plan")
             };
             assert!(query.contains("PlanMember", (plan, map)).unwrap());
-            assert_eq!(query.required("PlanDomain", (plan,)).unwrap(), filter);
+            assert_eq!(
+                query.required("PlanDomain", (plan,)).unwrap(),
+                query.required("SourceDomainShape", (filter,)).unwrap()
+            );
             let input = query.required("SourceInput", (filter, 0i64)).unwrap();
             let extent = query.required("SourceExtent", (input,)).unwrap();
             let owner = query.required("Owner", (plan,)).unwrap();
@@ -822,7 +825,7 @@ fn ranked_inputs_keep_their_independent_coordinate_mappings() {
 }
 
 #[test]
-fn map_and_bucket_emission_require_selected_axes_not_source_domains() {
+fn map_and_bucket_emission_require_selected_shapes_not_source_domains() {
     let tlc = compile_thru_tlc(
         r#"
 entry case_0(xs:[2]i32) [2][3]i32=map(|x|map(|y|x+y,iota(3)),xs)
@@ -845,13 +848,13 @@ entry case_1(dest:*[2][2]i32) ([2][2]i32,[2]u32,u32)=
         })
         .unwrap();
     assert!(owners.len() >= 2);
-    prepared.program.graph.clear_function("IterationAxis").unwrap();
+    prepared.program.graph.clear_function("IterationShape").unwrap();
     let facts = super::super::facts::Facts {
         program: &prepared.program,
     };
     for owner in owners {
         let error = facts.iteration_dimensions(owner).unwrap_err();
-        assert!(error.to_string().contains("domain axis has no planned extent"));
+        assert!(error.to_string().contains("missing selected IterationShape"));
     }
 }
 
@@ -870,7 +873,9 @@ fn rectangular_maps_expand_launch_without_expanding_row_capacity() {
                         graph.value_to_base::<i64>(query.required("StaticCapacityBound", (launch,))?),
                         12
                     );
-                    let outer = query.required("IterationAxis", (keys[0], 0i64))?;
+                    let shape = query.required("IterationShape", (keys[0],))?;
+                    let axes = query.required("ShapeDimensions", (shape,))?;
+                    let outer = graph.value_to_container::<VecContainer>(axes).unwrap().data[0];
                     assert_eq!(query.required("InputDomain", (keys[0],))?, outer);
                     assert_eq!(
                         graph.value_to_base::<i64>(query.required("StaticCapacityBound", (outer,))?),

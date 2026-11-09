@@ -110,7 +110,7 @@
        (= (ContainsCollective (OperationId op)) false))
       ((set (Rematerialize (OperationId op)) true)) :ruleset classify)
 
-(rule ((Current group plan) (= owner (Owner plan)) (= domain (PlanDomain plan)) (= extent (SourceDomainExtent domain)))
+(rule ((Current group plan) (= owner (Owner plan)) (= domain (PlanDomain plan)) (= extent (ShapeExtent domain)))
       ((set (InputDomain owner) extent)) :ruleset planning-import)
 (rule ((Current group plan) (= owner (Owner plan)) (ScremaPlan plan))
       ((set (ContainsCollective owner) true)) :ruleset planning-import)
