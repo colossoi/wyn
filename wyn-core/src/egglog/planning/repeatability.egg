@@ -78,3 +78,7 @@
       ((RectangularDemand result)) :ruleset rectangular-discover)
 (rule ((RectangularDemand value) (= argument (SourceCallArgument value i)))
       ((RectangularRequirement value (OutsidePlan) argument)) :ruleset rectangular-discover)
+
+(rule ((RectangularDemand value) (= (SourceBranch value) (BranchInfo condition yes no))
+       (= a (SourceResult yes)) (= b (SourceResult no)))
+      ((RectangularDemand a) (RectangularDemand b)) :ruleset rectangular-discover)

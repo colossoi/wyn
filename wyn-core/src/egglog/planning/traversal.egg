@@ -4,6 +4,7 @@
 
 (datatype OutputPort (TotalPort i64) (ArrayPort i64))
 (datatype ParallelTraversal
+  (TraversalChoice SourceValue RegionKey ParallelTraversal RegionKey ParallelTraversal)
   (TraversalValue SourceValue)
   (TraversalResult SourceValue OperationKey FusionPlan OutputPort Extent)
   (TraversalCall SourceValue RegionKey RegionKey SourceArguments ParallelTraversal)
@@ -38,6 +39,11 @@
 (rule ((RectangularReady value) (= value (SourceInvocation caller function args))
        (= callee (SourceCallTarget value)) (= next (DirectOutput (SourceResult callee))))
       ((set (DirectOutput value) (TraversalCall value caller callee args next))) :ruleset direct-outputs)
+; Fixed-layout choices write either result directly into the enclosing output.
+(rule ((RectangularDemand value) (= ty (SourceType value)) (= bytes (SourceByteSize ty))
+       (= (SourceBranch value) (BranchInfo condition yes no))
+       (= a (DirectOutput (SourceResult yes))) (= b (DirectOutput (SourceResult no))))
+      ((set (DirectOutput value) (TraversalChoice condition yes a no b))) :ruleset direct-outputs)
 (rule ((= ty (SourceType value)) (= (HasDirectOutput value) false))
       ((set (Traversal value 0) (TraversalValue value))) :ruleset traversal-leaves)
 (rule ((= next (DirectOutput value))) ((set (Traversal value 0) next)) :ruleset traversal-leaves)
@@ -91,3 +97,6 @@
       ((WorkgroupOutputTraversal next)) :ruleset local-storage)
 (rule ((WorkgroupOutputTraversal (TraversalValue value)) (= ty (SourceType value)) (SourceArrayType ty))
       ((StorageDemand value (StorageRoot))) :ruleset local-storage)
+
+(rule ((WorkgroupOutputTraversal (TraversalChoice condition yes a no b)))
+      ((WorkgroupOutputTraversal a) (WorkgroupOutputTraversal b)) :ruleset local-storage)

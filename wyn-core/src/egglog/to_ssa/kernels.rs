@@ -208,24 +208,17 @@ fn element_local(
             else {
                 return Err(error("map has no selected callback traversal"));
             };
-            let value = emit_traversal(
-                body,
-                scope,
-                traversal,
-                indices,
-                cache,
-                &mut |body, scope, leaf| {
-                    let Some(fields) = body
-                        .compiler
-                        .facts
-                        .enode("TraversalValue", leaf)
-                        .or_else(|| body.compiler.facts.enode("TraversalResult", leaf))
-                    else {
-                        return Err(error("element traversal must yield a value"));
-                    };
-                    body.value(scope, fields[0])
-                },
-            )?;
+            let value = emit_traversal(body, scope, traversal, indices, cache, &|body, scope, leaf| {
+                let Some(fields) = body
+                    .compiler
+                    .facts
+                    .enode("TraversalValue", leaf)
+                    .or_else(|| body.compiler.facts.enode("TraversalResult", leaf))
+                else {
+                    return Err(error("element traversal must yield a value"));
+                };
+                body.value(scope, fields[0])
+            })?;
             cache.insert(source, value.clone());
             return Ok(value);
         }
@@ -266,14 +259,24 @@ fn element_local(
     Ok(value)
 }
 
-fn emit_traversal<T>(
+fn emit_traversal(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
     traversal: Value,
     indices: &[Typed],
     cache: &mut LookupMap<Value, Typed>,
-    emit: &mut impl FnMut(&mut Body<'_, '_, '_>, Value, Value) -> Result<T, OptimizeError>,
-) -> Result<T, OptimizeError> {
+    emit: &impl Fn(&mut Body<'_, '_, '_>, Value, Value) -> Result<Typed, OptimizeError>,
+) -> Result<Typed, OptimizeError> {
+    if let Some(fields) = body.compiler.facts.enode("TraversalChoice", traversal) {
+        let condition = body.value(scope, fields[0])?;
+        return body.branch(
+            scope,
+            condition,
+            |body| emit_traversal(body, fields[1], fields[2], indices, &mut cache.clone(), emit),
+            |body| emit_traversal(body, fields[3], fields[4], indices, &mut cache.clone(), emit),
+            Some((fields[1], fields[3])),
+        );
+    }
     let (owner, region, arguments, next, remaining) =
         if let Some(fields) = body.compiler.facts.enode("TraversalFor", traversal) {
             let Some((index, remaining)) = indices.split_first() else {

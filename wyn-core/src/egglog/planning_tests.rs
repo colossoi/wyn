@@ -1165,6 +1165,7 @@ def sum_row(row:[17]i32) i32=reduce((+),0,row)
 entry case_3(xs:[][17]i32) []i32=map(sum_row,xs)
 def repeat_sum(n:i32,x:i32) i32=reduce((+),0,map(|y|x+y,iota(n)))
 entry case_4(xs:[]i32,n:i32) []i32=map(|x|repeat_sum(n,x),xs)
+entry case_5(xs:[][17]i32) []i32=map(|row|if row[0]>0 then reduce((+),0,row) else reduce((*),1,row),xs)
 "#;
     let tlc = compile_thru_tlc(source).unwrap();
     let mut program = selected(&tlc);
@@ -1183,6 +1184,7 @@ entry case_4(xs:[]i32,n:i32) []i32=map(|x|repeat_sum(n,x),xs)
                     (2, "TraversalResult"),
                     (1, "TraversalResult"),
                     (1, "TraversalResult"),
+                    (1, "TraversalChoice"),
                 ][index],
             );
             Ok(())
@@ -1215,11 +1217,12 @@ entry case_4(xs:[]i32,n:i32) []i32=map(|x|repeat_sum(n,x),xs)
             Ok(())
         })
         .unwrap();
-    assert_eq!(outputs, 5, "{source}");
+    assert_eq!(outputs, 6, "{source}");
     for table in [
         "SourceOperatorBody",
         "SourceCallTarget",
         "SourceCallArgument",
+        "SourceBranch",
         "Traversal",
         "TraversalExtent",
     ] {

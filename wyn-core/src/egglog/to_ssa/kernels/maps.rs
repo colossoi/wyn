@@ -59,14 +59,14 @@ pub(super) fn emit(
                 traversal,
                 &indices,
                 &mut cache,
-                &mut |body, scope, leaf| {
+                &|body, scope, leaf| {
                     if let Some(fields) = body.compiler.facts.enode("TraversalResult", leaf) {
                         let Some(output) = output.clone() else {
                             return Err(error("parallel output missing"));
                         };
                         body.with_output(fields[1], fields[3], output, &indices, |body| {
                             super::emit(body, scope, fields[1], "local", width)
-                        })
+                        })?;
                     } else {
                         let Some(fields) = body.compiler.facts.enode("TraversalValue", leaf) else {
                             return Err(error("invalid traversal leaf"));
@@ -86,7 +86,7 @@ pub(super) fn emit(
                             body.store_mapped(scope, *destination, indices[0].clone(), value.clone())?;
                         }
                         let Some(output) = &output else {
-                            return Ok(());
+                            return body.tuple(vec![]);
                         };
                         if group {
                             let lane = body.local_id()?;
@@ -104,11 +104,12 @@ pub(super) fn emit(
                                 let first = body.binary(BinaryOperator::Equal, lane, Body::number(0))?;
                                 body.when(first, |body| body.store_at(output.clone(), &indices, value))?;
                             }
-                            body.workgroup_barrier()
+                            body.workgroup_barrier()?;
                         } else {
-                            body.store_at(output.clone(), &indices, value)
+                            body.store_at(output.clone(), &indices, value)?;
                         }
                     }
+                    body.tuple(vec![])
                 },
             )?;
         }
