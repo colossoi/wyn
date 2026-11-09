@@ -5,11 +5,11 @@
   (OneResult SourceValue TypeKey)
   (JoinResults ResultTree ResultTree))
 (datatype UpdateMode (Overwrite) (IdenticalWrites) (Adding) (Combining RegionKey))
+(datatype UpdateOperations (UpdateOne OperationKey) (UpdateThen UpdateOperations UpdateOperations))
 (datatype OutputAction
   (Publish)
   (Pack OperationKey SourceValue)
-  (Update OperationKey SourceValue UpdateMode)
-  (Reserve OperationKey SourceValue RegionKey))
+  (PerformUpdates UpdateOperations))
 (datatype ParallelBody (ScalarBody) (ParallelLoop DomainShape ResultTree ResultTree ResultTree OutputAction))
 (function PlanBody (FusionPlan) ParallelBody :no-merge)
 (function PlanTotals (FusionPlan) ResultTree :no-merge)
@@ -27,3 +27,5 @@
 (relation ResultContains (ResultTree SourceValue))
 (function PlanTotal (FusionPlan OperationKey) bool :merge (or old new))
 (constructor CountValue (FusionPlan OperationKey SourceValue) SourceValue)
+
+(function UpdateModeOf (OperationKey) UpdateMode :no-merge)

@@ -9,7 +9,7 @@
     (saturate (seq (run flow-structure) (run residency) (run representations) (saturate integer-bounds) (run capacity-select) (run allocation) (run dispatch)))
     (saturate array-views)
     (saturate (seq (run representations) (run output-backings) (saturate integer-bounds) (run capacity-select) (run allocation)))
-    (run materialize-outputs) (saturate integer-bounds) (run capacity-select) (run allocation) (run select-allocation)
+    (run materialize-outputs) (saturate integer-bounds) (run capacity-select) (saturate allocation) (run select-allocation)
     (saturate (seq (saturate integer-bounds) (run capacity-select) (run allocation)))
     (saturate (run output-candidates)) (run output-blockers)
     (run output-select) (run output-fallback)

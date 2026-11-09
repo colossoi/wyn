@@ -221,6 +221,7 @@ fn capabilities(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
     owner: Value,
+    plan: Value,
     phase: &str,
     declarations: Value,
 ) -> Result<Capabilities, OptimizeError> {
@@ -232,6 +233,9 @@ fn capabilities(
         let Some(handle) = body.compiler.facts.enode("ScopedUpdate", fields[0]) else {
             return Err(error("invalid update handle"));
         };
+        if handle[0] != plan {
+            return Err(error("update declaration belongs to another scope"));
+        }
         let Some(base) = body.compiler.facts.lookup("DestinationSlot", (owner,)) else {
             return Err(error("update scope has no result slots"));
         };
@@ -280,7 +284,9 @@ fn capabilities(
                 Update::Combine(combine[0])
             }
         };
-        handles.insert(fields[0], (output, mode));
+        if handles.insert(fields[0], (output, mode)).is_some() {
+            return Err(error("duplicate update capability"));
+        }
     }
     Ok(Capabilities(handles))
 }
@@ -297,17 +303,22 @@ pub(super) fn update(
     let Some(fields) = body.compiler.facts.record("PlanUpdates", "WithUpdates", (plan,)) else {
         return Err(error("parallel loop has no update scope"));
     };
-    let handles = capabilities(body, scope, owner, phase, fields[0])?;
-    Contribution {
-        scope,
-        plan,
-        indices,
-        skipped: &|body, _| body.tuple(vec![]),
+    let handles = capabilities(body, scope, owner, plan, phase, fields[0])?;
+    for block in body.compiler.facts.vector(fields[1])? {
+        let Some(block) = body.compiler.facts.enode("EvaluateUpdates", block) else {
+            return Err(error("invalid update block"));
+        };
+        Contribution {
+            scope,
+            plan,
+            indices,
+            skipped: &|body, _| body.tuple(vec![]),
+        }
+        .emit(body, block[0], cache, &mut |body, _, input| {
+            handles.emit(body, scope, block[1], &input, &[])?;
+            body.tuple(vec![])
+        })?;
     }
-    .emit(body, fields[1], cache, &mut |body, _, input| {
-        handles.emit(body, scope, fields[2], &input, &[])?;
-        body.tuple(vec![])
-    })?;
     Ok(())
 }
 

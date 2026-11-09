@@ -148,7 +148,7 @@
 (rule ((ArrayResult op i t) (Operand op "input" e) (FitsInput op e))
       ((ReuseOperand op e)) :ruleset reuse)
 (rule ((= (StorageDeclaration (Result op i)) (AllocateResult (StoredArray t n live) (CopyFrom destination))))
-      ((ReuseResult op i t) (ReuseOperand op destination)) :ruleset reuse)
+      ((ReuseResult op i t) (ReuseOperand op destination) (PreferredReuse (Result op i) destination)) :ruleset reuse)
 ; Check each writer/input pair once, independently of the number of outputs.
 (relation ReuseType (OperationKey TypeKey))
 (rule ((ReuseResult op i t) (Materialize (Result op i))) ((ReuseType op t)) :ruleset reuse)
@@ -266,7 +266,7 @@
 (rule ((= id (PreferredInputChoice (Result op i)))
        (Materialize (Result op i)) (= (PinnedResult (Result op i)) false))
       ((set (ReuseInput (Result op i)) id)) :ruleset reuse-input)
-(rule ((= id (OwnedInputChoice op t)) (ReuseResult op i t) (Materialize (Result op i))
+(rule ((= id (OwnedInputChoice op t)) (ArrayResult op i t) (Materialize (Result op i))
        (= (HasPreferredReuse (Result op i)) false) (= (PinnedResult (Result op i)) false))
       ((set (ReuseInput (Result op i)) id)) :ruleset reuse-input)
 ; The lowest eligible output slot wins. Reads exclude other writers, so this

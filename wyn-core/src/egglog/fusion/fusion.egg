@@ -159,6 +159,13 @@
        (= (GroupPath n p c) false) (= (GroupPath n c p) false)
        (= (OrderIntermediate n p c) false) (= (OrderIntermediate n c p) false))
       ((JoinCandidate n 1 p c true)) :ruleset fusion-candidates)
+; Independent owned updates share a traversal without sharing capabilities.
+(rule ((Pair n p a c b) (= (PlanAction a) (PerformUpdates left)) (= (PlanAction b) (PerformUpdates right))
+       (ReadOnlyPlan a) (ReadOnlyPlan b) (= (HasScans a) false) (= (HasScans b) false)
+       (SameDomain (PlanDomain a) (PlanDomain b))
+       (= (GroupPath n p c) false) (= (GroupPath n c p) false)
+       (= (OrderIntermediate n p c) false) (= (OrderIntermediate n c p) false))
+      ((JoinCandidate n 1 p c true)) :ruleset fusion-candidates)
 (relation ElementFusion (FusionPlan FusionPlan))
 ; A completed total may feed a scan's output callback. It must not feed its
 ; input, neutral, or combiner, nor cross an intervening operation/effect.
@@ -174,7 +181,8 @@
 (rule ((Pair n p a c b) (ElementPlan b) (= (HasScans a) false))
       ((ElementFusion a b)) :ruleset fusion-candidates)
 (rule ((Pair n p a c b) (= (HasScans a) true)
-       (= (PlanAction b) (Update op destination (Overwrite))) (= (SourceScratchValue destination) true))
+       (= (PlanAction b) (PerformUpdates (UpdateOne op))) (= (UpdateModeOf op) (Overwrite))
+       (= destination (SourceDestination op)) (= (SourceScratchValue destination) true))
       ((ElementFusion a b)) :ruleset fusion-candidates)
 ; Completed reductions may be captured by the output callback, but array
 ; producers still require whole-stream inputs and early consumers cannot use totals.
@@ -250,6 +258,8 @@
 (rule ((NewPlan n p c a b next) (ElementPlan b) (= (HasScans a) false)
        (= action (PlanAction b)) (= (PlanBody next) (ParallelLoop domain totals scans arrays action)))
       ((ElementPlan next)) :ruleset fusion-commit)
+(rule ((NewPlan n p c a b next) (ElementPlan a) (ElementPlan b) (= (HasScans next) false)
+       (= (PlanAction next) (PerformUpdates operations))) ((ElementPlan next)) :ruleset fusion-commit)
 (rule ((NewPlan n p c a b next) (ElementPlan a) (SafePlan b) (ScremaPlan b) (= (HasScans next) false)
        (= action (PlanAction a)) (= action (Pack op input))
        (= (PlanBody next) (ParallelLoop domain totals scans arrays action)))

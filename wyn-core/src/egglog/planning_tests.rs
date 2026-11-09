@@ -3,7 +3,7 @@ use super::super::{finish_for_test, from_tlc, fuse, place, schedule, schedule_wi
 use crate::{compile_thru_tlc, CodegenTarget, PipelineTopologyPolicy};
 use egglog_engine::{
     sort::{SetContainer, VecContainer, S},
-    EGraph, Value, Write,
+    Core, EGraph, Value, Write,
 };
 
 fn selected(
@@ -1591,7 +1591,9 @@ fn update_handles_and_reservation_results_cannot_escape_their_scope() {
     let query = Query(&prepared.program.graph);
     let plan = query.required("SelectedPlan", (operation,)).unwrap();
     let scope = query.record("PlanUpdates", "WithUpdates", (plan,)).unwrap().unwrap();
-    let branch = query.enode("ChooseUpdates", scope[2]).unwrap().unwrap();
+    let block = prepared.program.graph.value_to_container::<VecContainer>(scope[1]).unwrap().data[0];
+    let block = query.enode("EvaluateUpdates", block).unwrap().unwrap();
+    let branch = query.enode("ChooseUpdates", block[1]).unwrap().unwrap();
     let update = query.enode("BindUpdate", branch[1]).unwrap().unwrap();
     let baseline = prepared.program.graph.clone();
     for (invalid_handle, expected) in [
@@ -1608,7 +1610,12 @@ fn update_handles_and_reservation_results_cannot_escape_their_scope() {
                     if invalid_handle { sink.add("ScopedUpdate", (plan, 99i64))? } else { update[0] };
                 let value = if invalid_handle { update[2] } else { sink.add("FormulaBound", 0i64)? };
                 let program = sink.add("BindUpdate", (handle, update[1], value, update[3]))?;
-                let scope = sink.add("WithUpdates", (scope[0], scope[1], program))?;
+                let block = sink.add("EvaluateUpdates", (block[0], program))?;
+                let blocks = sink.container_to_value(VecContainer {
+                    data: vec![block],
+                    do_rebuild: true,
+                });
+                let scope = sink.add("WithUpdates", (scope[0], blocks))?;
                 sink.set("PlanUpdates", plan, scope)?;
                 Ok(())
             })
@@ -1648,4 +1655,31 @@ fn output_coordinate_maps_accept_permutations_and_reject_overlapping_digits() {
             .unwrap();
         assert_eq!(mapped, usize::from(coordinates[index].3), "{}", sources[index]);
     });
+}
+
+#[test]
+fn independent_update_scopes_share_a_loop_and_keep_distinct_exports() {
+    for (source, count) in [
+        ("entry main(xs:[4]i32) ([3]i32,[5]i32)=let da=[0,0,0] let db=[1,1,1,1,1] let a=reduce_by_index(da,(+),0,map(|x|x%3,xs),xs) let b=reduce_by_index(db,|a,b|a+b+1,0,map(|x|x%5,xs),xs) in (a,b)", 2),
+        ("entry main() ([2]u32,u32,[2]u32,u32)=let da=[[-1,-1],[-1,-1]] let db=[[-2],[-2]] let (a,ac,ao)=bucket_scatter_2d(da,[[(0,10),(0,11),(1,20)]]) let (b,bc,bo)=bucket_scatter_2d(db,[[(0,30),(0,31),(1,40)]]) in (ac,ao,bc,bo)", 6),
+    ] {
+        let tlc = compile_thru_tlc(source).unwrap();
+        let program = selected(&tlc);
+        let graph = &program.graph;
+        let query = Query(graph);
+        let mut scopes = Vec::new();
+        query.for_function("PlanUpdates", |keys, scope| {
+            let owner = query.required("Owner", (keys[0],))?;
+            if query.lookup("SelectedPlan", (owner,))? == Some(keys[0]) {
+                scopes.push((owner, scope));
+            }
+            Ok(())
+        }).unwrap();
+        assert_eq!(scopes.len(), 1, "{source}");
+        let scope = query.enode("WithUpdates", scopes[0].1).unwrap().unwrap();
+        assert_eq!(graph.value_to_container::<VecContainer>(scope[0]).unwrap().data.len(), count);
+        assert_eq!(graph.value_to_container::<VecContainer>(scope[1]).unwrap().data.len(), 2);
+        let ssa = finish_for_test(program, CodegenTarget::Wgsl).unwrap();
+        crate::lower_ssa_to_wgsl(ssa).unwrap();
+    }
 }
