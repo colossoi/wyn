@@ -3,7 +3,6 @@
 (rule ((= (SourceOperation op) (OperationInfo region kind)))
       ((Current (Group op) (FusionSource op)) (Member (Group op) op)
        (set (Owner (FusionSource op)) op) (set (PlanScope (FusionSource op)) region)
-       (set (IterationDomain (FusionSource op)) (SourceDomain op))
        (set (DirectInputs (Group op)) (set-empty)) (set (GroupInternalUseMask (Group op)) (set-empty))
        (set (InputUses (Group op)) (set-empty)) (set (GroupUsesOf (Group op)) (set-empty))
        (set (GroupLengths (Group op)) (set-empty)) (set (GroupDirectLengthUses (Group op)) (set-empty))
@@ -27,10 +26,6 @@
        (WholeStreamUse (Group producer) (Group consumer))) :ruleset source-fusion)
 (rule ((= input (SourceInput consumer i)) (= (SourceHasOrigin input) false) (= token (SourceOrdinal input)))
       ((InputFact (Group consumer) (External token))) :ruleset source-fusion)
-(rule ((= input (SourceInput op 0)) (= token (SourceIdentityToken (Identity input))))
-      ((union (SourceDomain op) (DomainValue token))) :ruleset source-fusion)
-(rule ((= input (SourceInput op 0)) (= (SourceExtent input) (Fixed n)))
-      ((union (SourceDomain op) (FixedDomain n))) :ruleset source-fusion)
 ; Scan-derived inputs remain barrier-bearing through field-sensitive uses.
 (rule ((SourceDepends consumer producer role) (= (SourceOperation producer) (OperationInfo r "scan")))
       ((SourceScanDependency producer consumer)) :ruleset source-fusion)

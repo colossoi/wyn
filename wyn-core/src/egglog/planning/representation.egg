@@ -313,9 +313,6 @@
        (= extent (ViewExtent a)) (= extent (ViewExtent b)))
       ((set (ViewExtent value) extent)) :ruleset representations)
 
-(rule ((Fixed n)) ((set (ConstantLogicalExtent (Fixed n)) n)) :ruleset representations)
-(rule ((Scalar value) (= n (SourceInteger32 value)))
-      ((set (ConstantLogicalExtent (Scalar value)) n)) :ruleset representations)
 (rule ((= (SourceBranch value) (BranchInfo condition yes no))
        (= a (SourceResult yes)) (= b (SourceResult no))
        (= ea (ViewExtent a)) (= eb (ViewExtent b)) (!= ea eb)
@@ -353,8 +350,6 @@
 
 (rule ((Length value) (= extent (SourceExtent value)) (!= extent (Length value))
        (= n (ConstantLogicalExtent extent)))
-      ((set (ConstantLogicalExtent (Length value)) n)) :ruleset representations)
-(rule ((Length value) (= ty (SourceType value)) (= (SourceArraySize ty) (FixedSize n)))
       ((set (ConstantLogicalExtent (Length value)) n)) :ruleset representations)
 (rule ((Length value) (= op (SourceValueOperation value)) (= (SourceOperation op) (OperationInfo region "map"))
        (= extent (SourceDomainExtent op)) (= n (ConstantLogicalExtent extent)))

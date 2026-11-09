@@ -20,7 +20,7 @@
 ; Initialize only connected operations or operations sharing an iteration domain.
 (rule ((GroupUseFact p (To c role))) ((RelevantPair p c) (RelevantPair c p)) :ruleset fusion-dependencies)
 (rule ((GroupEdge p c)) ((RelevantPair p c) (RelevantPair c p)) :ruleset fusion-dependencies)
-(rule ((Current p a) (Current c b) (= (PlanScope a) (PlanScope b)) (= (IterationDomain a) (IterationDomain b)))
+(rule ((Current p a) (Current c b) (= (PlanScope a) (PlanScope b)) (SameDomain (PlanDomain a) (PlanDomain b)))
       ((RelevantPair p c)) :ruleset fusion-dependencies)
 (rule ((RelevantPair p c))
       ((set (StreamBlocked p c) false)
@@ -151,7 +151,7 @@
        (ScremaPlan b)
        (SafePlan a)
        (SafePlan b)
-       (= (IterationDomain a) (IterationDomain b))
+       (SameDomain (PlanDomain a) (PlanDomain b))
        (= (GroupPath n p c) false) (= (GroupPath n c p) false)
        (= (OrderIntermediate n p c) false) (= (OrderIntermediate n c p) false))
       ((JoinCandidate n 1 p c true)) :ruleset fusion-candidates)
@@ -160,7 +160,7 @@
 ; input, neutral, or combiner, nor cross an intervening operation/effect.
 (rule ((Pair n p a c b) (ScremaPlan a) (ScremaPlan b) (ReadOnlyPlan a) (ReadOnlyPlan b)
        (= (HasScans a) false) (= (HasReductions a) true) (= (HasScans b) true)
-       (= (IterationDomain a) (IterationDomain b)) (= (LateFusionBlocked a b) false)
+       (SameDomain (PlanDomain a) (PlanDomain b)) (= (LateFusionBlocked a b) false)
        (= (GroupPath n c p) false)
        (= (OrderIntermediate n p c) false) (= (OrderIntermediate n c p) false))
       ((JoinCandidate n 1 p c true)) :ruleset fusion-candidates)
@@ -327,6 +327,3 @@
       ((OrderWalk n from to next true)) :ruleset fusion-paths)
 (rule ((OrderWalk n from to to true))
       ((set (OrderIntermediate n from to) true)) :ruleset fusion-paths)
-
-(rule ((NewPlan n p c a b next) (= domain (IterationDomain a)))
-      ((set (IterationDomain next) domain)) :ruleset fusion-commit)

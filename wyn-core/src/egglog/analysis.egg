@@ -57,7 +57,6 @@
 ; their execution occurrences. Lexical bindings are resolved during import.
 ; Captures stay scope boundaries here; FlowValue equality serves shape/bounds proofs.
 (datatype SourceIdentity (Identity SourceValue))
-(function SourceIdentityToken (SourceIdentity) i64 :merge (min old new))
 (function SourceHasOrigin (SourceValue) bool :merge (or old new))
 (relation SourceOrigin (SourceValue OperationKey))
 (relation SourceDepends (OperationKey OperationKey OperandRole))
@@ -89,7 +88,6 @@
       ((SourceObserved op)) :ruleset source-summary)
 (function WorkOperationCheap (OperationKey) bool :merge (or old new))
 
-(rule ((= value (SourceInput op i)) (= token (SourceOrdinal value))) ((set (SourceIdentityToken (Identity value)) token)) :ruleset source-summary)
 (rule ((= value (SourceOperationValue op))) ((SourceOrigin value op) (Identity value)) :ruleset source-summary)
 (rule ((= target (SourceAlias value))) ((union (Identity value) (Identity target))) :ruleset source-summary)
 (rule ((FlowFrom value target) (SourceOrigin target op)) ((SourceOrigin value op)) :ruleset source-summary)
@@ -272,3 +270,26 @@
 
 (rule ((= shape (SourceDomainShape op)) (= n (ShapeExtent shape)))
       ((set (SourceDomainExtent op) n)) :ruleset source-summary)
+
+; Domain equality is a proof over logical axes, not a union of extent recipes.
+; Equal extents can still require different lexical bindings during emission.
+(relation DomainAxis (Extent))
+(relation SameAxis (Extent Extent))
+(relation SameDomain (DomainShape DomainShape))
+(rule ((OneAxis n)) ((DomainAxis n)) :ruleset shape-properties)
+(rule ((AppendAxis prefix n)) ((DomainAxis n)) :ruleset shape-properties)
+(rule ((DomainAxis n)) ((SameAxis n n)) :ruleset shape-properties)
+(rule ((DomainAxis a) (DomainAxis b) (= n (ConstantLogicalExtent a)) (= n (ConstantLogicalExtent b)))
+      ((SameAxis a b)) :ruleset shape-properties)
+(rule ((DomainAxis a) (DomainAxis b) (= a (Length x)) (= b (Length y)) (= (Identity x) (Identity y)))
+      ((SameAxis a b)) :ruleset shape-properties)
+(rule ((= a (OneAxis x)) (= b (OneAxis y)) (SameAxis x y))
+      ((SameDomain a b)) :ruleset shape-properties)
+(rule ((= a (AppendAxis ap x)) (= b (AppendAxis bp y)) (SameDomain ap bp) (SameAxis x y))
+      ((SameDomain a b)) :ruleset shape-properties)
+
+(rule ((Fixed n)) ((set (ConstantLogicalExtent (Fixed n)) n)) :ruleset shape-properties)
+(rule ((Scalar value) (= n (SourceInteger32 value)))
+      ((set (ConstantLogicalExtent (Scalar value)) n)) :ruleset shape-properties)
+(rule ((Length value) (= ty (SourceType value)) (= (SourceArraySize ty) (FixedSize n)))
+      ((set (ConstantLogicalExtent (Length value)) n)) :ruleset shape-properties)

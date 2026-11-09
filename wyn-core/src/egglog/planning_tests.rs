@@ -1556,3 +1556,20 @@ fn guarded_streams_feed_updates_and_prefixes_without_a_compaction_buffer() {
         },
     );
 }
+
+#[test]
+fn fusion_compares_logical_shapes_of_independent_inputs() {
+    for size in [17, 19] {
+        planned(
+            &format!("entry main(xs:[17]i32,ys:[{size}]i32) (i32,i32)=(reduce((+),0,xs),reduce((+),0,ys))"),
+            |graph| {
+                let query = Query(graph);
+                let reductions = operations(graph, "reduce");
+                assert_eq!(reductions.len(), 2);
+                let first = query.required("SelectedPlan", (reductions[0],)).unwrap();
+                let second = query.required("SelectedPlan", (reductions[1],)).unwrap();
+                assert_eq!(first == second, size == 17);
+            },
+        );
+    }
+}
