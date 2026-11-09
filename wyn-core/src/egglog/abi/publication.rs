@@ -14,7 +14,7 @@ use crate::host::{
 };
 use crate::host::{DispatchLoop, DispatchLoopControl, ScalarExpr, ScalarSource, ScalarTask, ScalarType};
 use crate::interface::publish::{reconcile_storage_binding_access, EntryPoint, ModuleInterfacePublish};
-use crate::interface::results::result_layout;
+use crate::interface::results::{result_layout, result_layout_with_storage};
 use crate::interface::{DrawBufferOperand, SourceResult};
 use crate::tlc::extract_lambda_params_ref;
 use crate::tlc::DefMeta;
@@ -396,9 +396,28 @@ fn publish_results(
                 ));
                 (layout, shape)
             } else if ty.is_array() {
-                (result_layout(ty), vec![sizes::published_shape(compiler, value)?])
+                let element = if let Some((_, _, _)) = compiler.bindings.buffer(backing)? {
+                    compiler.bindings.buffer_element(backing)?
+                } else {
+                    let Some(element) = ty.elem_type() else {
+                        return Err(error("array result element missing"));
+                    };
+                    compiler.facts.physical_type(element, true)?
+                };
+                let physical = types::view_array_with_size(
+                    &element,
+                    Type::Constructed(TypeName::SizePlaceholder, vec![]),
+                    types::no_buffer(),
+                );
+                (
+                    result_layout_with_storage(ty, &physical),
+                    vec![sizes::published_shape(compiler, value)?],
+                )
             } else {
-                (result_layout(ty), vec![])
+                (
+                    result_layout_with_storage(ty, &compiler.facts.physical_type(ty, true)?),
+                    vec![],
+                )
             };
             for result in results {
                 module.source_results.push(SourceResultBinding {

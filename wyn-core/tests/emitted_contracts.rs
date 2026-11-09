@@ -517,6 +517,7 @@ fn direct_mode_keeps_collectives_in_the_authored_entry() {
         for pipeline in &output.program.interface.pipelines {
             if let Pipeline::Compute(p) = pipeline {
                 assert_eq!(p.stages.len(), 1);
+                assert!(!p.stages[0].writes.is_empty(), "authored output writes must be declared");
             }
         }
         let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
@@ -1090,5 +1091,51 @@ fn graphics_entry_publishes_scalar_results_alongside_its_target() {
             .unwrap();
         assert!(host.contains(":source-name \"result_0\""), "{host}");
         assert!(host.contains(":value-layout :bool"), "{host}");
+    }
+}
+
+#[test]
+fn empty_dimensions_keep_logical_counts_and_physical_strides() {
+    for (program, format) in host_outputs(
+        "entry empty() [0]i32=map(|x|x+1,iota(0))
+         entry rows() [3][0]i32=map(|x|if x>0 then map(|y|1/x+y,iota(0)) else map(|y|x-y,iota(0)),[0,1,-1])
+         entry fields() [2]([0]i32,i32)=map(|x|(iota(0),x),[1,2])",
+    )
+    .into_iter()
+    .zip([ShaderFormat::Spirv, ShaderFormat::Wgsl])
+    {
+        for result in &program.interface.source_results {
+            let ResultLayout::Array {
+                stride,
+                element,
+                length,
+            } = &result.layout
+            else {
+                panic!("array result");
+            };
+            assert_eq!(*stride, 4);
+            let expected = match result.entry.as_str() {
+                "empty" => 0,
+                "rows" => 3,
+                "fields" => 2,
+                name => panic!("unexpected result {name}"),
+            };
+            assert_eq!(*length, Some(expected));
+            if result.entry == "fields" && result.result == 1 {
+                assert!(matches!(**element, ResultLayout::Scalar(ResultScalar::I32)));
+            } else if result.entry != "empty" {
+                assert!(matches!(
+                    **element,
+                    ResultLayout::Sequence {
+                        count: 0,
+                        stride: 4,
+                        ..
+                    }
+                ));
+            }
+        }
+        let whl = program.to_whl("empty", format).unwrap();
+        assert!(whl.contains(":min-bytes 0 :value-layout"));
+        WhlProgram::parse(&whl).unwrap();
     }
 }

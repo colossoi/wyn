@@ -456,15 +456,21 @@ impl Program {
                 out,
                 "\n    ({} {} :source-name {} :ownership {}",
                 symbol(source_name),
-                self.resource_description(
-                    id,
-                    source_result.is_some_and(|r| !r.shape.is_empty()
-                        && matches!(r.layout, ResultLayout::Array { length: None, .. }))
-                ),
+                self.resource_description(id, source_result.is_some_and(|r| !r.shape.is_empty())),
                 string(source_name),
                 if entry.inputs.contains(&id) { ":borrowed" } else { ":owned" }
             )?;
             if let Some(result) = source_result {
+                if !result.shape.is_empty() {
+                    if let ResultLayout::Array {
+                        length: Some(length),
+                        stride,
+                        ..
+                    } = result.layout
+                    {
+                        write!(out, " :min-bytes {}", u64::from(length) * u64::from(stride))?;
+                    }
+                }
                 write!(out, " :value-layout {}", result.layout.to_whl())?;
             }
             // A shaped result may create a shorter view with a distinct handle.

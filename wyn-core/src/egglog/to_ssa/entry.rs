@@ -10,7 +10,7 @@ use crate::op::BinaryOperator;
 use crate::op::{OpTag, PureViewSource};
 use crate::ssa::types::InstKind;
 use crate::types::{self, buffer_tag, Type, TypeExt, TypeName};
-use crate::SymbolId;
+use crate::{ResourceAccess, SymbolId};
 use egglog_engine::Value;
 
 pub(super) fn entry<'source>(
@@ -119,6 +119,14 @@ pub(super) fn entry<'source>(
     let compute = decl.entry_kind == EntryKind::Compute;
     let result = emit_body(&mut lower, scope, stage, compute, original)?;
     write_outputs(&mut lower, result, &outputs)?;
+    for output in &outputs {
+        if let Some(binding) = output.storage_binding() {
+            accesses
+                .entry(binding)
+                .and_modify(|a| *a = a.merge(ResourceAccess::Write))
+                .or_insert(ResourceAccess::Write);
+        }
+    }
     if compute {
         copy_results(&mut lower, scope, symbol, stage)?;
     }

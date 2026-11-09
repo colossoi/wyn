@@ -6,6 +6,11 @@ use crate::ssa::layout::{
 use crate::types::{strip_existentials, Type, TypeExt, TypeName};
 
 pub(crate) fn result_layout(ty: &Type) -> ResultLayout {
+    result_layout_with_storage(ty, &storage_value_type(ty))
+}
+
+/// Logical counts describe values; physical types supply strides and field offsets.
+pub(crate) fn result_layout_with_storage(ty: &Type, physical: &Type) -> ResultLayout {
     let ty = strip_existentials(ty);
     // A root SoA result is published as one array of logical tuple elements.
     // Nested fields inside a scalar storage record retain their own arrays.
@@ -32,13 +37,23 @@ pub(crate) fn result_layout(ty: &Type) -> ResultLayout {
                 size,
                 Type::Constructed(TypeName::NoBuffer, vec![]),
             );
-            return layout(&array, true).unwrap_or_else(|| ResultLayout::Unsupported(ty.to_string()));
+            let physical = array_element(physical).map(|(element, size)| {
+                crate::types::make_array1(
+                    element,
+                    crate::types::array_variant_composite(),
+                    size,
+                    crate::types::no_buffer(),
+                )
+            });
+            if let Some(physical) = physical {
+                return result_layout_with_storage(&array, &physical);
+            }
         }
     }
-    layout(ty, true).unwrap_or_else(|| ResultLayout::Unsupported(ty.to_string()))
+    layout(ty, physical, true).unwrap_or_else(|| ResultLayout::Unsupported(ty.to_string()))
 }
 
-fn layout(ty: &Type, root: bool) -> Option<ResultLayout> {
+fn layout(ty: &Type, physical: &Type, root: bool) -> Option<ResultLayout> {
     let ty = strip_existentials(ty);
     let scalar = match ty {
         Type::Constructed(TypeName::Int(8), _) => Some(ResultScalar::I8),
@@ -59,7 +74,7 @@ fn layout(ty: &Type, root: bool) -> Option<ResultLayout> {
     }
     if ty.is_vec() {
         return Some(ResultLayout::Sequence {
-            element: Box::new(layout(ty.elem_type()?, false)?),
+            element: Box::new(layout(ty.elem_type()?, physical.elem_type()?, false)?),
             count: u32::try_from(ty.vec_size()?).ok()?,
             stride: type_byte_size(ty.elem_type()?)?,
         });
@@ -68,7 +83,7 @@ fn layout(ty: &Type, root: bool) -> Option<ResultLayout> {
         let scalar = ty.as_tensor()?.elem;
         return Some(ResultLayout::Sequence {
             element: Box::new(ResultLayout::Sequence {
-                element: Box::new(layout(scalar, false)?),
+                element: Box::new(layout(scalar, physical.as_tensor()?.elem, false)?),
                 count: u32::try_from(ty.mat_rows()?).ok()?,
                 stride: type_byte_size(scalar)?,
             }),
@@ -78,12 +93,13 @@ fn layout(ty: &Type, root: bool) -> Option<ResultLayout> {
     }
     if ty.is_array() {
         let element = ty.elem_type()?;
-        let stride = storage_elem_stride(&storage_value_type(element))?;
+        let physical = physical.elem_type()?;
+        let stride = storage_elem_stride(physical)?;
         let length = match ty.array_size()? {
             Type::Constructed(TypeName::Size(n), _) => u32::try_from(*n).ok(),
             _ => None,
         };
-        let element = Box::new(layout(element, false)?);
+        let element = Box::new(layout(element, physical, false)?);
         return Some(if root {
             ResultLayout::Array {
                 element,
@@ -100,15 +116,19 @@ fn layout(ty: &Type, root: bool) -> Option<ResultLayout> {
     }
     match ty {
         Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), types) => {
-            let physical = types.iter().map(storage_value_type).collect::<Vec<_>>();
+            let Type::Constructed(_, physical) = strip_existentials(physical) else {
+                return None;
+            };
             let storage = std430_struct_layout(&physical.iter().collect::<Vec<_>>())?;
             let mut fields = Vec::new();
-            for (index, (ty, offset)) in types.iter().zip(storage.member_offsets).enumerate() {
+            for (index, ((ty, physical), offset)) in
+                types.iter().zip(physical).zip(storage.member_offsets).enumerate()
+            {
                 let name = format!("result_{index}");
                 fields.push(ResultField {
                     name,
                     offset,
-                    layout: layout(ty, false)?,
+                    layout: layout(ty, physical, false)?,
                 });
             }
             if let Type::Constructed(TypeName::Record(names), _) = ty {

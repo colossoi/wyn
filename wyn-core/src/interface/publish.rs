@@ -341,7 +341,7 @@ impl ModuleInterfacePublish for ModuleInterface {
                     continue;
                 };
                 let source_result = SourceResultBinding {
-                    entry: entry.name.clone(),
+                    entry: entry_source.into(),
                     kind: if entry.outputs.len() == 1 { ResultKind::Value } else { ResultKind::TupleField },
                     name: output.host.target.clone().unwrap_or_else(|| {
                         if entry.outputs.len() == 1 {
