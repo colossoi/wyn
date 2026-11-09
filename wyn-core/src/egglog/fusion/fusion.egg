@@ -97,6 +97,18 @@
 (rule ((Pair n p a c b) (FilterPlan a) (ReadOnlyPlan a) (FilterPlan b) (ReadOnlyPlan b)
        (= (set-diff (GroupLengths p) (GroupInternalUseMask p)) (set-empty)))
       ((FilterPostMapCompatible n p c)) :ruleset fusion-candidates)
+(rule ((Pair n p a c b) (FilterPlan a) (SafePlan a) (ElementPlan b)
+       (= (ArrayOutputs b) 0) (= (set-diff (GroupLengths p) (GroupInternalUseMask p)) (set-empty)))
+      ((FilterPostMapCompatible n p c)) :ruleset fusion-candidates)
+; Every consumed stream comes from the producer; only direct length observers
+; may remain outside the contraction. This proof is shared by all guarded uses.
+(relation ExclusiveStream (i64 FusionGroup FusionGroup))
+(rule ((Pair n p a c b)
+       (> (set-length (set-diff (GroupInputs c) (InternalInputs c))) 0)
+       (= (set-diff (set-diff (GroupInputs c) (InternalInputs c)) (DirectInputs p)) (set-empty))
+       (= (set-diff (set-diff (GroupUsesOf p) (GroupInternalUseMask p)) (set-union (GroupLengths p) (InputUses c))) (set-empty))
+       (= (OrderIntermediate n p c) false))
+      ((ExclusiveStream n p c)) :ruleset fusion-candidates)
 (relation ClearStream (i64 FusionGroup FusionGroup))
 (rule ((Pair n p a c b)
        (= (StreamBlocked p c) false)
@@ -201,35 +213,24 @@
        (= (HasReductions b) true)
        (= (ArrayOutputs b) 0)
        (= (PrePure b) true)
-       (> (set-length (set-diff (GroupInputs c) (InternalInputs c))) 0) (= (set-diff (set-diff (GroupInputs c) (InternalInputs c)) (DirectInputs p)) (set-empty))
-       (= (set-diff (set-diff (GroupUsesOf p) (GroupInternalUseMask p)) (set-union (GroupLengths p) (InputUses c))) (set-empty))
-       (= (OrderIntermediate n p c) false))
+       (ExclusiveStream n p c))
       ((MaskCandidate n 3 p c)) :ruleset fusion-candidates)
 ; A filter observed only through lengths becomes a count reduction.
 (rule ((MaskablePlan n p)
        (> (set-length (set-diff (GroupLengths p) (GroupInternalUseMask p))) 0)
        (= (set-diff (GroupUsesOf p) (GroupInternalUseMask p)) (set-diff (GroupLengths p) (GroupInternalUseMask p))))
       ((MaskCandidate n 5 p p)) :ruleset fusion-candidates)
-; A sole whole-stream map runs only on selected elements during compaction.
-; Length observers keep observing the same live count. Raw observers, slices,
-; additional inputs, and intervening dependencies prevent this contraction.
-; The filter may read captured storage: retain its ordering and safety summary.
-; The map may read captured storage, but cannot write it or invoke unknown
-; effects. ClearStream forbids intervening dependencies/effect barriers, so
-; its reads stay on the same side of writes. Retain both groups' incoming and
-; outgoing edges; after construction ordinary analysis still sees these reads.
-; A reading post-map also requires read-only filter callbacks: serial compaction
-; must not interleave its reads with writes from later predicate invocations.
+; Compose a guarded stream with a map, another selection, or an update.
+; Reading callbacks retain their effect-order proof; updating consumers require
+; a speculatable producer and no surviving compaction length.
 (rule ((Pair n p a c b)
        (FilterPlan a)
        (FilterPostMapCompatible n p c)
        (= (HasScans b) false) (= (HasReductions b) false)
-       (= (ArrayOutputs b) 1)
+       (<= (ArrayOutputs b) 1)
        (ClearStream n p c)
        (= (set-diff (GroupLengths p) (GroupInternalUseMask p)) (set-diff (GroupDirectLengthUses p) (GroupInternalUseMask p)))
-       (> (set-length (set-diff (GroupInputs c) (InternalInputs c))) 0)
-       (= (set-diff (set-diff (GroupInputs c) (InternalInputs c)) (DirectInputs p)) (set-empty))
-       (= (set-diff (set-diff (GroupUsesOf p) (GroupInternalUseMask p)) (set-union (GroupLengths p) (InputUses c))) (set-empty)))
+       (ExclusiveStream n p c))
       ((JoinCandidate n 6 p c false)) :ruleset fusion-candidates)
 
 (ruleset fusion-commit)
@@ -292,6 +293,8 @@
       ((delete (MaskTotals n p))) :ruleset fusion-clear-candidates)
 (rule ((Chosen n chosen-producer chosen-consumer replacement) (= v (Retained n p c)))
       ((delete (Retained n p c))) :ruleset fusion-clear-candidates)
+(rule ((Chosen n producer consumer replacement) (ExclusiveStream n p c))
+      ((delete (ExclusiveStream n p c))) :ruleset fusion-clear-candidates)
 (rule ((Chosen n chosen-producer chosen-consumer replacement) (ClearStream n p c))
       ((delete (ClearStream n p c))) :ruleset fusion-clear-candidates)
 (rule ((Chosen n chosen-producer chosen-consumer replacement) (FilterPostMapCompatible n p c))

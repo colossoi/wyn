@@ -11,13 +11,9 @@ pub enum OutputAction {
         predicate: Value,
         input: Value,
     },
-    Write {
-        callback: Value,
-    },
-    Accumulate {
-        combine: Value,
-        keys: Value,
-        values: Value,
+    Update {
+        combine: Option<Value>,
+        contribution: Value,
     },
     Reserve {
         callback: Value,
@@ -130,14 +126,19 @@ impl<'a, 'source> Facts<'a, 'source> {
                 input: f[1],
             });
         }
-        if let Some(f) = self.enode("Write", action) {
-            return Ok(OutputAction::Write { callback: f[0] });
-        }
-        if let Some(f) = self.enode("Accumulate", action) {
-            return Ok(OutputAction::Accumulate {
-                combine: f[0],
-                keys: f[2],
-                values: f[3],
+        if let Some(f) = self.enode("Update", action) {
+            let combine = if self.enode("Overwrite", f[2]).is_some() {
+                None
+            } else {
+                let Some(mode) = self.enode("Combining", f[2]) else {
+                    return Err(error("invalid update mode"));
+                };
+                Some(mode[0])
+            };
+            let contribution = Query(&self.program.graph).required("UpdateContribution", (plan,))?;
+            return Ok(OutputAction::Update {
+                combine,
+                contribution,
             });
         }
         if let Some(f) = self.enode("Reserve", action) {

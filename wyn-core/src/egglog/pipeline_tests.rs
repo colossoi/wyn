@@ -348,6 +348,7 @@ fn scalar_admission_uses_ir_literal_edits() {
 #[test]
 fn parallel_loops_lower_without_source_operator_kinds_or_neutrals() {
     let source = r#"
+entry guarded_write(xs:[]i32) [3]i32=let ys=filter(|x|x!=0,xs) let dest=[-1,-1,-1] in scatter(dest,map(|x|x-1,ys),map(|x|100/x,ys))
 entry owned_indexed() [3]i32=let dest=[0,0,0] in reduce_by_index(dest,|a,b|a+b+1,0,[0,1,0,2,1],[2,3,4,5,6])
 entry bucket_counts() ([2]u32,u32)=let dest=[[-1,-1],[-1,-1]] in let (ys,counts,overflow)=bucket_scatter_2d(dest,[[(-1,9),(0,10),(0,11)],[(0,12),(1,20),(2,9)]]) in (counts,overflow)
 entry sum(xs:[17]i32) i32=reduce((+),0,map(|x|x+1,xs))

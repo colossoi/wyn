@@ -127,9 +127,6 @@ impl<'a, 'source> Facts<'a, 'source> {
     pub fn iteration(&self, value: Value) -> Option<Value> {
         self.lookup("SourceIterationValue", (value,))
     }
-    pub fn destination(&self, value: Value) -> Option<Value> {
-        self.lookup("SourceDestination", (value,))
-    }
     pub fn operation(&self, value: Value) -> Option<Value> {
         self.lookup("SourceValueOperation", (value,))
     }

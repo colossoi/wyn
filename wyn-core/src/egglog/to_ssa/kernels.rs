@@ -8,6 +8,7 @@ use crate::types::{self, Type, TypeName};
 use crate::LookupMap;
 use egglog_engine::Value;
 
+mod contribution;
 mod coordinates;
 mod loops;
 mod maps;
@@ -94,7 +95,7 @@ pub(super) fn emit(
                 OutputAction::Pack { .. } => {
                     screma::pack(body, scope, phase_owner, phase_width, plan, &results)
                 }
-                OutputAction::Write { .. } | OutputAction::Accumulate { .. } => {
+                OutputAction::Update { .. } => {
                     indexed(body, scope, phase_owner, phase, phase_extent, phase_width, plan)
                 }
                 OutputAction::Reserve { .. } => buckets(body, scope, phase_owner, phase, phase_width, plan),

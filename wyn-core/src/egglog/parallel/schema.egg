@@ -4,11 +4,11 @@
   (NoResults)
   (OneResult SourceValue TypeKey)
   (JoinResults ResultTree ResultTree))
+(datatype UpdateMode (Overwrite) (Combining OperationKey))
 (datatype OutputAction
   (Publish)
   (Pack OperationKey SourceValue)
-  (Write OperationKey SourceValue)
-  (Accumulate OperationKey SourceValue SourceValue SourceValue)
+  (Update OperationKey SourceValue UpdateMode)
   (Reserve OperationKey SourceValue))
 (datatype ParallelBody (ScalarBody) (ParallelLoop OperationKey ResultTree ResultTree ResultTree OutputAction))
 (function PlanBody (FusionPlan) ParallelBody :no-merge)

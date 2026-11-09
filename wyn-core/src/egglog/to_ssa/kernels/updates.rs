@@ -1,6 +1,7 @@
 //! Output actions share bounds checking and serial/atomic accumulation.
 use super::super::{builder_error, error, Body, OptimizeError, Typed};
-use super::{coordinates, element, invocation};
+use super::contribution::Contribution;
+use super::{coordinates, invocation};
 use crate::egglog::facts::OutputAction;
 use crate::op::{BinaryOperator, OpTag};
 use crate::ssa::types::{AtomicOp, InstKind};
@@ -204,45 +205,45 @@ pub(super) fn update(
     index: Typed,
     cache: &mut LookupMap<Value, Typed>,
 ) -> Result<(), OptimizeError> {
-    let (key, value, update) = match body.compiler.facts.action(plan)? {
-        OutputAction::Write { callback, .. } => {
-            let mut arguments = Vec::new();
-            for (_, input) in body.compiler.facts.inputs(callback)? {
-                arguments.push(element(body, scope, plan, input, &[index.clone()], cache)?);
-            }
-            let pair = body.callback(scope, callback, arguments)?;
-            (body.field(pair.clone(), 0)?, body.field(pair, 1)?, Update::Store)
-        }
-        OutputAction::Accumulate {
-            combine,
-            keys,
-            values,
-            ..
-        } => {
-            let key = element(body, scope, plan, keys, &[index.clone()], cache)?;
-            let value = element(body, scope, plan, values, &[index], cache)?;
-            let update = if phase == "atomic" {
-                let Some(op) = body.compiler.facts.atomic(owner) else {
-                    return Err(error("atomic update missing"));
-                };
-                if op == AtomicOp::CompareExchange {
-                    Update::AtomicCombine(combine)
-                } else {
-                    Update::Atomic(op)
-                }
-            } else {
-                Update::Combine(combine)
-            };
-            (key, value, update)
-        }
-        _ => return Err(error("indexed loop requires an update action")),
+    let OutputAction::Update {
+        combine,
+        contribution,
+    } = body.compiler.facts.action(plan)?
+    else {
+        return Err(error("indexed loop requires an update action"));
     };
-    let length = body.length(output.clone())?;
-    let valid = in_bounds(body, key.clone(), length)?;
-    body.when(valid, |body| {
-        apply(body, scope, output, key, value, update)?;
-        Ok(())
-    })
+    let update = match combine {
+        None => Update::Store,
+        Some(combine) if phase == "atomic" => {
+            let Some(op) = body.compiler.facts.atomic(owner) else {
+                return Err(error("atomic update missing"));
+            };
+            if op == AtomicOp::CompareExchange {
+                Update::AtomicCombine(combine)
+            } else {
+                Update::Atomic(op)
+            }
+        }
+        Some(combine) => Update::Combine(combine),
+    };
+    Contribution {
+        scope,
+        plan,
+        index: &index,
+        skipped: &|body, _| body.tuple(vec![]),
+    }
+    .emit(body, contribution, cache, &mut |body, _, pair| {
+        let key = body.field(pair.clone(), 0)?;
+        let value = body.field(pair, 1)?;
+        let length = body.length(output.clone())?;
+        let valid = in_bounds(body, key.clone(), length)?;
+        body.when(valid, |body| {
+            apply(body, scope, output.clone(), key, value, update)?;
+            Ok(())
+        })?;
+        body.tuple(vec![])
+    })?;
+    Ok(())
 }
 
 pub(super) fn buckets(
