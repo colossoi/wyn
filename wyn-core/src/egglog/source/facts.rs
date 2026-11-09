@@ -41,9 +41,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
     pub(super) fn finish_value(&mut self, value: Value, scope: &mut Scope) -> Result<(), OptimizeError> {
         self.owners.insert(value, scope.key);
         if let Some(&operation) = self.operations_by_value.get(&value) {
-            let role = if self.lengths.contains_key(&value) { "LengthUse" } else { "Other" };
-            let role = self.sink.add(role, RawValues(vec![]))?;
-            self.sink.set("SourceOperandRole", operation, role)?;
             self.sink.set("SourceWork", value, self.work[&value])?;
             self.sink.add("ImportedPosition", (operation, scope.position))?;
             if let Some(previous) = scope.previous_operation.replace(operation) {
@@ -314,49 +311,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
             do_rebuild: true,
         });
         self.sink.set("SourceArgumentsOf", value, args)?;
-        Ok(())
-    }
-
-    pub(super) fn application(
-        &mut self,
-        value: Value,
-        func: &Term,
-        args: &[Value],
-    ) -> Result<(), OptimizeError> {
-        match (&func.kind, args) {
-            (TermKind::BinOp(op), &[left, right]) => {
-                self.sink.add("SourceBinary", (value, op.op.symbol(), left, right))?;
-            }
-            (TermKind::Var(VarRef::Builtin { id, .. }), &[array, _, _])
-                if *id == catalog().known().array_with || *id == catalog().known().array_with_in_place =>
-            {
-                self.sink.add("SourceResultOperand", (value, 0i64, array))?;
-            }
-            (TermKind::Var(VarRef::Builtin { id, .. }), &[array]) if *id == catalog().known().length => {
-                self.sink.set("SourceLength", value, array)?;
-                self.lengths.insert(value, array);
-            }
-            (TermKind::Var(VarRef::Builtin { id, .. }), &[array, start, end])
-                if *id == catalog().known().slice =>
-            {
-                let info = self.sink.add("SliceInfo", (array, start, end))?;
-                self.sink.set("SourceSlice", value, info)?;
-            }
-            (TermKind::Var(VarRef::Builtin { id, .. }), &[length])
-                if *id == catalog().known().scratch_alloc =>
-            {
-                let extent = self.sink.add("Scalar", length)?;
-                self.sink.add("SourceScratch", (value, extent))?;
-            }
-            (TermKind::Var(VarRef::Builtin { id, .. }), &[array])
-                if *id == catalog().known().scratch_annotation =>
-            {
-                self.lengths.insert(value, array);
-                let extent = self.sink.add("Length", array)?;
-                self.sink.add("SourceScratch", (value, extent))?;
-            }
-            _ => {}
-        }
         Ok(())
     }
 

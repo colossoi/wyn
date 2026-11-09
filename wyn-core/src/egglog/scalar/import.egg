@@ -60,8 +60,6 @@
 (rule ((ExprSourceCandidate s expand 0 form) (ExprSourceOperator s op retained safe) (= args (SourceArgumentsOf s)))
       ((ExprSourceCandidate s expand 2 (AdmitOperator op args retained true))) :ruleset scalar-source-forms)
 (rule ((ExprSourceOperator s op false true) (= ty (SourceType s))) ((ExprOperatorTotal ty op)) :ruleset scalar-source-forms)
-(rule ((ExprSourceCandidate s expand 0 form) (= a (SourceIndexedArray s)) (= i (SourceIndex s)))
-      ((ExprSourceCandidate s expand 2 (AdmitOperator "index" (vec-of a i) true false))) :ruleset scalar-source-forms)
 (rule ((ExprSourceCandidate s expand 0 form) (SourceApply s function) (= args (SourceArgumentsOf s)) (= region (SourceCallable function)) (= duplicate (ExprSourceDuplicate s)))
       ((ExprSourceCandidate s expand 2 (AdmitCall function args duplicate true))) :ruleset scalar-source-forms)
 (rule ((ExprSourceCandidate s expand 0 form) (= (SourceBranch s) (BranchInfo condition yes no)) (= a (SourceResult yes)) (= b (SourceResult no))

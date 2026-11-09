@@ -56,7 +56,6 @@ pub(super) fn import(source: &OwnershipApplied) -> Result<(EGraph, Identities), 
             work: LookupMap::default(),
             operations_by_value: LookupMap::default(),
             operation_regions: LookupSet::default(),
-            lengths: LookupMap::default(),
             owners: LookupMap::default(),
             ownership: &source.global_context.ownership,
         };
@@ -116,7 +115,6 @@ struct Import<'graph, 'db, 'ids, 'source> {
     work: LookupMap<Value, i64>,
     operations_by_value: LookupMap<Value, Value>,
     operation_regions: LookupSet<Value>,
-    lengths: LookupMap<Value, Value>,
     owners: LookupMap<Value, Value>,
     ownership: &'source tlc::ownership::OwnershipFacts,
 }
@@ -436,15 +434,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
                     .or_else(|_| text.parse::<u64>().map(|v| v as i64))
                     .map_err(|_| OptimizeError::Output("invalid integer literal".into()))?;
                 self.sink.add("ExprLiteralBits", (value, bits))?;
-                if matches!(
-                    &term.ty,
-                    Type::Constructed(TypeName::Int(32) | TypeName::UInt(32), _)
-                ) {
-                    let integer = text
-                        .parse::<i64>()
-                        .map_err(|_| OptimizeError::Output("invalid 32-bit integer literal".into()))?;
-                    self.sink.set("SourceInteger32", value, integer)?;
-                }
             }
             TermKind::Lambda(lambda) => {
                 let mut inner = self.scope(Some(&lambda.body), Some(scope.key))?;
@@ -513,7 +502,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
                     .iter()
                     .map(|argument| self.operand(argument, value, scope))
                     .collect::<Result<Vec<_>, _>>()?;
-                self.application(value, func, &arguments)?;
                 if let Some((_, index, _)) = tlc::record_update_parts(term) {
                     self.sink.add(
                         "SourceFieldUpdate",
@@ -527,9 +515,9 @@ impl<'source> Import<'_, '_, '_, 'source> {
             }
             TermKind::Index { array, index } => {
                 let input = self.operand(array, value, scope)?;
-                self.sink.set("SourceIndexedArray", value, input)?;
                 let index = self.operand(index, value, scope)?;
-                self.sink.set("SourceIndex", value, index)?;
+                self.arguments(value, vec![input, index])?;
+                self.sink.add("ExprSourceOperator", (value, "index", true, false))?;
                 self.operation(value, Some("index"), scope)?;
             }
             TermKind::Closure(closure) => {
