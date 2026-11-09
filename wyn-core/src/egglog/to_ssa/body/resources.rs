@@ -53,7 +53,7 @@ impl Body<'_, '_, '_> {
     pub(super) fn boundary(&mut self, scope: Value, source: Value) -> Result<Typed, OptimizeError> {
         if let Some(access) = self.compiler.facts.access(source) {
             if let Some(fields) = self.compiler.facts.enode("RunCollective", access) {
-                return self.collective(scope, source, fields[0], fields[1]);
+                return self.collective(scope, source, fields[0]);
             }
             let Some(fields) = self.compiler.facts.enode("StoredRead", access) else {
                 return Err(error("unknown boundary access recipe"));
@@ -143,7 +143,7 @@ impl Body<'_, '_, '_> {
         self.planned_boundary(scope, source)?;
         if let Some(access) = self.compiler.facts.access(source) {
             if let Some(fields) = self.compiler.facts.enode("RunCollective", access) {
-                return self.collective(scope, source, fields[0], fields[1]);
+                return self.collective(scope, source, fields[0]);
             }
         }
         if self.compiler.facts.loops(source).is_some() {
@@ -325,13 +325,10 @@ impl Body<'_, '_, '_> {
             return Ok(value.clone());
         }
         if let Some(owner) = self.compiler.facts.lookup("LocalStorageOwner", (resource,)) {
-            let (Some(source), Some(plan)) = (
-                self.compiler.facts.source(owner),
-                self.compiler.facts.group(owner),
-            ) else {
+            let Some(source) = self.compiler.facts.source(owner) else {
                 return Err(error("local resource owner missing"));
             };
-            self.collective(scope, source, owner, plan)?;
+            self.collective(scope, source, owner)?;
             let Some(value) = self.local_resources.get(&resource) else {
                 return Err(error("local recipe did not allocate its resource"));
             };

@@ -171,7 +171,7 @@
       ((set (LocalPrerequisites owner) (set-of actual))) :ruleset readout)
 ; Select one boundary action after scheduling has settled. A local collective's
 ; result slots use local execution storage, not an inter-dispatch buffer.
-(datatype BoundaryAccess (StoredRead StorageRead) (RunCollective OperationKey FusionPlan))
+(datatype BoundaryAccess (StoredRead StorageRead) (RunCollective OperationKey))
 (function SelectedAccess (SourceValue) BoundaryAccess :no-merge)
 (function IsLocalResult (SourceValue) bool :merge (or old new))
 ; A dispatched producer's effects have already executed. Copy its stored view,
@@ -186,6 +186,11 @@
       ((set (ValueRepresentation value) (ViewLayout resource element))) :ruleset runtime-representations)
 (rule ((= (RuntimeArrayJoin value) true) (= ty (SourceType value)) (SourceArrayElement ty element))
       ((set (ValueRepresentation value) (ViewLayout (Source value) element))) :ruleset representations)
+(sort LocalExportSet (Set SourceValue))
+(function LocalExports (OperationKey) LocalExportSet :merge (set-union old new))
+(rule ((DirectResult source owner i)) ((set (LocalExports owner) (set-of source))) :ruleset residency)
+(rule ((FlowProjection source tuple i) (ResultField tuple i (Result owner slot)))
+      ((set (LocalExports owner) (set-of source))) :ruleset residency)
 (relation LocalResult (SourceValue OperationKey FusionPlan))
 (function LocalStorageOwner (ValueKey) OperationKey :no-merge)
 (rule ((= ordinal (SourceOrdinal value))) ((set (IsLocalResult value) false)) :ruleset residency)
@@ -202,7 +207,7 @@
       ((LocalResult key owner plan)) :ruleset residency)
 (rule ((LocalResult key owner plan)) ((set (IsLocalResult key) true)) :ruleset residency)
 (rule ((LocalResult key owner plan))
-      ((set (SelectedAccess key) (RunCollective owner plan))) :ruleset readout)
+      ((set (SelectedAccess key) (RunCollective owner))) :ruleset readout)
 (rule ((= (IsLocalResult key) false) (= access (ValueRead key)))
       ((set (SelectedAccess key) (StoredRead access))) :ruleset readout)
 (rule ((LocalBuffer owner role i ty extent) (= value (BufferSlot owner role i)))

@@ -11,7 +11,6 @@ impl Body<'_, '_, '_> {
         scope: Value,
         source: Value,
         owner: Value,
-        plan: Value,
     ) -> Result<Typed, OptimizeError> {
         let Some(execution) =
             self.compiler.facts.lookup("LocalExecution", (owner, self.execution_scope()?))
@@ -78,45 +77,32 @@ impl Body<'_, '_, '_> {
         if width.is_some() {
             self.workgroup_barrier()?;
         }
-        let mut output_index = 0;
-        for (role, index, result) in self.compiler.facts.results(plan)? {
-            if role == "scan" {
+        for result in self.compiler.facts.set("LocalExports", (owner,)) {
+            let Some(access) = self.compiler.facts.value_read(result) else {
+                return Err(error("local export has no read recipe"));
+            };
+            let (resource, array) = if let Some(fields) = self.compiler.facts.enode("ReadView", access) {
+                (fields[0], true)
+            } else if let Some(fields) = self.compiler.facts.enode("ReadElement", access) {
+                (fields[0], false)
+            } else {
+                return Err(error("invalid local export read"));
+            };
+            if !self.local_resources.contains_key(&resource)
+                && self.compiler.facts.backing(resource).is_none()
+            {
                 continue;
             }
-            let slot = if role == "total" { "total" } else { "output" };
-            // Plan result indices include totals and counts; output buffers
-            // number only the array results, matching the array writes.
-            let index = if role == "array" {
-                let index = output_index;
-                output_index += 1;
-                index
+            let value = self.resource(scope, resource, 1)?;
+            let value = if array {
+                self.local_array_result(value, result)?
             } else {
-                index
-            };
-            let Some(array) = self.slot(scope, owner, slot, index, 1)? else {
-                continue;
-            };
-            let value = if role == "total" {
-                let zero = self.literal(0, &types::i32())?;
-                self.index(array, zero)?
-            } else {
-                self.local_array_result(array, result)?
+                self.index(value, Self::number(0))?
             };
             self.values.insert(result, value);
         }
         if let Some(value) = self.values.get(&source) {
             return Ok(value.clone());
-        }
-        if let Some(access) = self.compiler.facts.value_read(source) {
-            if let Some(fields) = self.compiler.facts.enode("ReadElement", access) {
-                let array = self.resource(scope, fields[0], 1)?;
-                let zero = self.literal(0, &types::i32())?;
-                return self.index(array, zero);
-            }
-            if let Some(fields) = self.compiler.facts.enode("ReadView", access) {
-                let array = self.resource(scope, fields[0], 1)?;
-                return self.local_array_result(array, source);
-            }
         }
         Err(error(format!("local recipe did not produce {source:?}")))
     }

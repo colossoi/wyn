@@ -51,7 +51,7 @@
        (OperationDependency op before) (InvocationResult child before))
       ((FlowReferenceEdge e child)) :ruleset residency)
 (rule ((InvocationResult e op) (= (Rematerialize op) true) (= (ReadsLength op) false)
-       (OperationDependency op before) (ResultTuple child before))
+       (OperationDependency op before) (ResultField child i (Result before slot)))
       ((FlowReferenceEdge e child)) :ruleset residency)
 ; A length use needs the logical extent, never the old element contents.
 ; Resolve those metadata dependencies at the length definition; ordinary
@@ -78,10 +78,9 @@
 ; Direct results and forwarding preserve lengths; sliced views keep their own
 ; bounds and must not inherit the backing resource's live length.
 (rule ((DirectResult e op i) (= (ResultRead op i) (ReadView value)) (= n (LiveLength value))) ((set (ViewExtent e) n)) :ruleset residency)
-(rule ((FlowProjection e tuple i) (ResultTuple tuple op) (ArrayResult op i t) (= n (LiveLength (Result op i))))
+(rule ((FlowProjection e tuple i) (ResultField tuple i value)
+       (= (DeclarationRead value) (ReadView value)) (= n (LiveLength value)))
       ((set (ViewExtent e) n)) :ruleset residency)
-(rule ((FlowProjection e tuple 1) (ResultTuple tuple op) (BucketResult op destination))
-      ((set (ViewExtent e) (Length destination))) :ruleset residency)
 (rule ((FlowForward e source) (= n (ViewExtent source))) ((set (ViewExtent e) n)) :ruleset residency)
 (rule ((= (SourceSlice e) (SliceInfo source start end))) ((set (ViewExtent e) (Difference (Scalar end) (Scalar start)))) :ruleset residency)
 (rule ((= (Rematerialize op) true) (Enters op r)) ((DeviceRegion r)) :ruleset residency)
