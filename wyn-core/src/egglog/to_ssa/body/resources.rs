@@ -149,43 +149,6 @@ impl Body<'_, '_, '_> {
         if self.compiler.facts.loops(source).is_some() {
             return self.loop_(scope, source);
         }
-        if let Some((yes, no)) = self.compiler.facts.branches(source) {
-            let Some(condition) = self.compiler.facts.branch_condition(source) else {
-                return Err(error("branch has no condition"));
-            };
-            let (Some(a), Some(b)) = (self.compiler.facts.result(yes), self.compiler.facts.result(no))
-            else {
-                return Err(error("branch has incomplete result facts"));
-            };
-            let layout = self.compiler.facts.value_layout(source)?;
-            let target = self.boundary_target(source)?;
-            let condition = self.value(scope, condition)?;
-            let selected = &self.compiler.program.stage.selected;
-            let (Some(&a_root), Some(&b_root)) = (
-                selected.roots.get(&(self.context, a)),
-                selected.roots.get(&(self.context, b)),
-            ) else {
-                return Err(error("branch has no selected result roots"));
-            };
-            let shared = self.scalar_common(scope, [&[a_root], &[b_root]]);
-            for term in shared {
-                self.scalar_roots(scope, &[term], &mut crate::LookupSet::default())?;
-            }
-            let result = self.branch(
-                scope,
-                condition,
-                |body| {
-                    let value = body.value(yes, a)?;
-                    body.materialize_boundary(value, layout, target.as_ref())
-                },
-                |body| {
-                    let value = body.value(no, b)?;
-                    body.materialize_boundary(value, layout, target.as_ref())
-                },
-                Some((yes, no)),
-            )?;
-            return self.rebind_boundary(result, target.as_ref());
-        }
         if let Some(actual) = self.compiler.facts.alias(source) {
             return self.value(scope, actual);
         }

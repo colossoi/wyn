@@ -102,6 +102,16 @@ impl Body<'_, '_, '_> {
         arm: usize,
         targets: &[Option<BoundaryTarget>],
     ) -> Result<Typed, OptimizeError> {
+        // Region identities retain lexical placement even when several choices
+        // share one conditional block. Their operands still evaluate per arm.
+        let selected = &self.compiler.program.stage.selected;
+        let block = self.current()?;
+        for &term in terms {
+            let (_, fields) = selected.app(term)?;
+            if let Some((yes, no)) = self.compiler.facts.branches(selected.values[fields[5]]) {
+                self.scopes.insert(if arm == 3 { yes } else { no }, block);
+            }
+        }
         self.scalar_roots(scope, roots, available)?;
         let mut values = Vec::new();
         for (i, &term) in terms.iter().enumerate() {

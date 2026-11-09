@@ -10,6 +10,7 @@ fn extraction_preserves_nested_source_arguments_without_unrelated_identities() {
                 include_str!("../flow.egg"),
                 r#"
                 (datatype TypeKey (TypeId i64))
+                (sort ValueKey)
                 (datatype FusionPlan (FusionSource OperationKey))
                 (sort SourceArguments (Vec SourceValue))
                 (constructor SourceInvocation (RegionKey SourceValue SourceArguments) SourceValue)

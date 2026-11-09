@@ -25,9 +25,15 @@ pub(super) fn emit(
     if matches!(phase, "loop_enter" | "loop_test" | "loop_step" | "loop_exit") {
         return loops::emit(body, scope, phase_owner, phase, phase_width);
     }
+    if matches!(phase, "scalar" | "view") {
+        let Some(context) = body.compiler.facts.dispatch_context(phase_owner) else {
+            return Err(error("scalar kernel has no selected context"));
+        };
+        body.context = context;
+    }
     if phase == "view" {
         let source = body.compiler.facts.source(phase_owner).ok_or_else(|| error("view source missing"))?;
-        let value = body.local(scope, source)?;
+        let value = body.value(scope, source)?;
         let length = body.length(value.clone())?;
         if body.compiler.facts.loops(source).is_some() {
             // Published views start at zero even when the loop finishes with a slice.
@@ -56,10 +62,6 @@ pub(super) fn emit(
     }
     if phase == "scalar" {
         let operations = body.compiler.facts.scalar_group(phase_owner);
-        let Some(context) = body.compiler.facts.dispatch_context(phase_owner) else {
-            return Err(error("scalar dispatch has no selected context"));
-        };
-        body.context = context;
         for operation in operations {
             let Some(source) = body.compiler.facts.source(operation) else {
                 return Err(error("scalar dispatch source missing"));

@@ -14,6 +14,11 @@
 (relation ExprImportDispatchDemand (OperationKey RegionKey SourceValue))
 (relation ExprImportRoot (ExprContext RegionKey SourceValue bool))
 
+; Scalar and view kernels both execute their own boundary rather than read it.
+(relation ScalarKernel (OperationKey OperationKey))
+(rule ((InvocationValue op) (DispatchGroupLeader op leader) (FirstPhase leader phase))
+      ((ScalarKernel op leader)) :ruleset scalar-admission)
+(rule ((Phase (Stage op "view") region)) ((ScalarKernel op op)) :ruleset scalar-admission)
 (rule ((= v (SourceTerm r i))) ((set (ExprContextOwner v) r)) :ruleset scalar-admission)
 (rule ((= v (SourceFormal r i))) ((set (ExprContextOwner v) r)) :ruleset scalar-admission)
 (rule ((= v (SourceInvocation r f args))) ((set (ExprContextOwner v) r)) :ruleset scalar-admission)
@@ -32,13 +37,13 @@
 (rule ((PlannedOperation op owner plan r) (= body (SourceOperatorBody op)))
       ((set (ExprContextKernelRegion body) true)) :ruleset scalar-admission)
 (rule ((= ty (SourceType v))) ((set (ExprImportDispatchedSource v) false)) :ruleset scalar-admission)
-(rule ((InvocationValue op) (DispatchGroupLeader op leader) (FirstPhase leader phase)
+(rule ((ScalarKernel op leader)
        (= v (SourceOperationValue op)) (PlannedOperation op owner plan r))
       ((set (ExprImportDispatchExpand leader v) true) (set (ExprImportDispatchedSource v) true)
        (ExprImportDispatchDemand leader r v) (set (ExprImportMovedDemand op v) true)) :ruleset scalar-admission)
 (rule ((= (HasViewStage v) true))
       ((set (ExprImportDispatchedSource v) true)) :ruleset scalar-admission)
-(rule ((InvocationValue op) (DispatchGroupLeader op leader) (FirstPhase leader phase)
+(rule ((ScalarKernel op leader)
        (SourceOperand op v) (PlannedOperation op owner plan r))
       ((ExprImportDispatchDemand leader r v) (set (ExprImportMovedDemand op v) true)) :ruleset scalar-admission)
 (rule ((InvocationValue op) (DispatchGroupLeader op leader) (FirstPhase leader phase) (Enters op r))
@@ -112,3 +117,9 @@
 
 (rule ((= v (SourceOffset parent)) (= r (ExprContextOwner parent)))
       ((set (ExprContextOwner v) r)) :ruleset scalar-admission)
+
+(rule ((ScalarKernel op leader) (Enters op r) (ExprImportLocalDemand r v))
+      ((ExprImportDispatchDemand leader r v)) :ruleset scalar-demands)
+(rule ((ScalarKernel op leader) (Enters op r) (ExprImportLocalDemand r v)
+       (= (ExprImportDispatchedSource v) false))
+      ((set (ExprImportDispatchExpand leader v) true)) :ruleset scalar-demands)

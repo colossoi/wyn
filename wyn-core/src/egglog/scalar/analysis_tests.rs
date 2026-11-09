@@ -9,8 +9,10 @@ fn graph() -> EGraph {
                 include_str!("../flow.egg"),
                 r#"
                 (datatype TypeKey (TypeId i64))
+                (sort ValueKey)
                 (datatype FusionPlan (FusionSource OperationKey))
                 (function SourceReadOnly (SourceValue) bool :merge (and old new))
+                (function SourceSpeculatable (SourceValue) bool :merge (and old new))
                 "#,
                 include_str!("schema.egg"),
                 include_str!("analysis.egg"),
@@ -45,6 +47,7 @@ fn readonly_proofs_do_not_authorize_speculation_or_ignore_argument_effects() {
             (let $call (ExprCall $ctx $ty (SourceGlobal 0) (RegionId 0) $args))
             (let $invoke (ExprInvoke $ctx $ty (RegionId 1) $nil))
             (let $choice (ExprChoice $ctx $ty $x $loop $write (SourceTerm (RegionId 0) 0)))
+            (let $effectful-choice (ExprChoice $ctx $ty $x $zero $zero (SourceGlobal 1)))
             (let $unknown (ExprExecute $ctx $ty (SourceGlobal 99)))
             (let $state (ExprLeaf $ctx $ty (SourceFormal (RegionId 0) 1)))
             (ExprRoot $ctx (RegionId 0) (SourceFormal (RegionId 0) 1) $state)
@@ -60,6 +63,8 @@ fn readonly_proofs_do_not_authorize_speculation_or_ignore_argument_effects() {
             (check (= (ExprReadOnly $call) false))
             (check (= (ExprReadOnly $invoke) false))
             (check (= (ExprReadOnly $choice) false))
+            (check (= (ExprReadOnly $effectful-choice) false))
+            (fail (check (ExprTotal $effectful-choice)))
             (fail (check (= (ExprReadOnly $unknown) true)))
             "#,
         )

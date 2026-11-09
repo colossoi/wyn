@@ -237,16 +237,6 @@
 ; Executing a source boundary includes its selected branch/loop roots, while
 ; ordinary references remain anchors for independently scheduled definitions.
 (rule ((= (SelectedHead term) "ExprExecute") (= source (SelectedSource (SelectedField term 2)))
-       (= (SourceBranch source) (BranchInfo condition yes no)))
-      ((SelectedExecutionSource term condition)) :ruleset selected-flow)
-(rule ((= (SelectedHead term) "ExprExecute") (= source (SelectedSource (SelectedField term 2)))
-       (= (SourceBranch source) (BranchInfo condition yes no)) (= a (SourceResult yes)) (= b (SourceResult no)))
-      ((SelectedExecutionSource term a) (SelectedExecutionSource term b)) :ruleset selected-flow)
-(rule ((= (SelectedHead term) "ExprExecute") (= source (SelectedSource (SelectedField term 2)))
-       (= (SourceBranch source) (BranchInfo condition yes no)) (EvaluationTermContext term context)
-       (= a (SelectedRoot context (SourceResult yes))) (= b (SelectedRoot context (SourceResult no))))
-      ((EvaluationPair a b)) :ruleset selected-flow)
-(rule ((= (SelectedHead term) "ExprExecute") (= source (SelectedSource (SelectedField term 2)))
       (= (SourceLoop source) (LoopInfo header body loop-control loop-state loop-initial)) (= result (SourceResult body)))
       ((SelectedExecutionSource term result)) :ruleset selected-flow)
 (rule ((= (SelectedHead term) "ExprExecute") (= source (SelectedSource (SelectedField term 2)))
