@@ -225,7 +225,9 @@ impl<'a, 'source> Facts<'a, 'source> {
                 if slot != expected as i64 {
                     return Err(error("noncontiguous accumulator slots"));
                 }
-                if component.output_slot < 0 || !matches!(component.role.as_str(), "scan" | "total") {
+                if component.output_slot < 0
+                    || !matches!(component.role.as_str(), "scan" | "total" | "pack")
+                {
                     return Err(error("invalid accumulator output slot"));
                 }
                 Ok(component)

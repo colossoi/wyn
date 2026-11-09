@@ -133,7 +133,7 @@
 (rule ((PlanMember plan op) (= neutral (SourceNeutral op)) (= value (SourceOperationValue op))
        (= input (SourceInput op 0)) (= element (StreamInput plan input)))
       ((set (PlanFold plan value) (FoldWith (CombineWith op neutral) element))) :ruleset fusion-signatures)
-(rule ((PlanResult plan "total" i (CountValue origin op input) ty) (= element (StreamInput plan input))
+(rule ((= value (CountValue origin op input)) (= ty (SourceType value)) (= element (StreamInput plan input))
        (= body (SourceOperatorBody op)) (= predicate (SourceResult body)))
       ((set (PlanFold plan (CountValue origin op input)) (FoldWith (AddValues ty) (ApplyElement predicate body (vec-of element))))) :ruleset fusion-signatures)
 
@@ -189,3 +189,11 @@
 (rule ((= (PlanAction plan) (Update op destination (Combining combine)))
        (= inputs (OperatorInputs op)) (= arguments (StreamArguments plan inputs (vec-length inputs))))
       ((set (UpdateContribution plan) (TupleElements arguments))) :ruleset fusion-signatures)
+
+(rule ((Current group plan) (= (PlanAction plan) (Pack op input)) (CounterType ty))
+      ((set (SourceType (CountValue plan op input)) ty)) :ruleset fusion-signatures)
+
+(function PackingContribution (FusionPlan) Contribution :no-merge)
+(rule ((Current group plan) (= (PlanAction plan) (Pack op input))
+       (= element (StreamInput plan input)) (= body (SourceOperatorBody op)) (= predicate (SourceResult body)))
+      ((set (PackingContribution plan) (TupleElements (vec-of (ApplyElement predicate body (vec-of element)) element)))) :ruleset fusion-signatures)

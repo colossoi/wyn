@@ -88,12 +88,14 @@ pub(super) fn emit(
             if body.compiler.facts.lookup("InitialValue", (phase_owner,)).is_some() {
                 updates::initialize(body, scope, phase_owner, phase, phase_width)?;
             }
-            if body.compiler.facts.contains("ScremaPlan", (plan,)) {
+            if !body.compiler.facts.accumulators(plan)?.is_empty()
+                || body.compiler.facts.contains("ScremaPlan", (plan,))
+            {
                 return screma(body, scope, phase_owner, phase, phase_width, plan, &results);
             }
             match body.compiler.facts.action(plan)? {
                 OutputAction::Pack { .. } => {
-                    screma::pack(body, scope, phase_owner, phase_width, plan, &results)
+                    screma(body, scope, phase_owner, phase, phase_width, plan, &results)
                 }
                 OutputAction::Update { .. } => {
                     indexed(body, scope, phase_owner, phase, phase_extent, phase_width, plan)
@@ -102,7 +104,7 @@ pub(super) fn emit(
                 OutputAction::Publish => Err(error("parallel output has no selected loop")),
             }
         }
-        "compact" => screma::pack(body, scope, phase_owner, phase_width, plan, &results),
+        "compact" => screma(body, scope, phase_owner, phase, phase_width, plan, &results),
         "chunks" | "combine" | "offsets" => {
             screma(body, scope, phase_owner, phase, phase_width, plan, &results)
         }
