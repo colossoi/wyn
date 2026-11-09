@@ -61,7 +61,8 @@
 (datatype FoldOutput (PrefixOutput i64) (TotalOutput i64) (PackedLength))
 (relation Accumulator (OperationKey i64 TypeKey FoldOutput SourceValue))
 (datatype Initialization (CopyFrom SourceValue) (NoContents))
-(datatype ResultStorage (AllocateResult TypeKey Extent Initialization) (ExistingResult SourceValue))
+(datatype ResultLayout (StoredValue TypeKey) (StoredArray TypeKey Extent Extent))
+(datatype ResultStorage (AllocateResult ResultLayout Initialization) (ExistingResult SourceValue) (SharedResult ValueKey))
 (function StorageDeclaration (ValueKey) ResultStorage :no-merge)
 (relation FilterResult (OperationKey TypeKey))
 (relation BucketResult (OperationKey SourceValue))
@@ -104,6 +105,7 @@
 ; A value crossing a storage boundary is either a descriptor or an element load.
 ; Forwarded values preserve this choice; slices retain their own descriptor bounds.
 (datatype StorageRead (ReadView ValueKey) (ReadElement ValueKey))
+(function DeclarationRead (ValueKey) StorageRead :no-merge)
 (function ResultRead (OperationKey i64) StorageRead :no-merge)
 (function ValueRead (SourceValue) StorageRead :no-merge)
 

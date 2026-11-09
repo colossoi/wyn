@@ -140,7 +140,7 @@ impl<'a, 'source> Facts<'a, 'source> {
             if let Some(result) = query.enode("Result", keys[0])? {
                 if result[0] == owner {
                     if let Some(fields) = query.enode("AllocateResult", declaration)? {
-                        if let Some(initial) = query.enode("CopyFrom", fields[2])? {
+                        if let Some(initial) = query.enode("CopyFrom", fields[1])? {
                             arrays.push((keys[0], initial[0]));
                         }
                     }

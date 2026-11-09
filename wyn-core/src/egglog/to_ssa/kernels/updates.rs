@@ -319,11 +319,11 @@ pub(super) fn emit(
             let Some(array) = body.compiler.facts.enode("UpdateArray", declaration) else {
                 return Err(error("invalid update declaration"));
             };
-            if let Some(initial) = body.compiler.facts.enode("ZeroArray", array[1]) {
+            if body.compiler.facts.enode("ZeroInitialized", array[1]).is_some() {
                 let Some((output, _)) = handles.0.get(&array[0]) else {
                     return Err(error("update handle missing"));
                 };
-                let n = body.extent(scope, initial[1])?;
+                let n = body.length(output.clone())?;
                 let (start, step) = iteration(body, phase, width)?;
                 body.counted(start, n, step, vec![], |body, index, _| {
                     body.store(output.clone(), index, Body::number(0))?;

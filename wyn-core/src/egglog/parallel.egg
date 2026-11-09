@@ -222,7 +222,7 @@
 ; Each update result is bound only inside its continuation; branches do not
 ; leak bindings. Initial arrays are immutable inputs to the enclosing scope.
 (datatype UpdateHandle (ScopedUpdate FusionPlan i64))
-(datatype UpdateInitial (SeedArray SourceValue) (ZeroArray TypeKey Extent))
+(datatype UpdateInitial (SeedArray SourceValue) (ZeroInitialized ResultLayout))
 (datatype UpdateDeclaration (UpdateArray UpdateHandle UpdateInitial UpdateMode))
 (sort UpdateArrays (Vec UpdateDeclaration))
 (datatype ScalarFormula
@@ -248,8 +248,8 @@
       ((set (PlanUpdates plan)
         (WithUpdates (vec-of
           (UpdateArray (ScopedUpdate plan 0) (SeedArray destination) (Overwrite))
-          (UpdateArray (ScopedUpdate plan 1) (ZeroArray count (Length destination)) (Adding))
-          (UpdateArray (ScopedUpdate plan 2) (ZeroArray count (Fixed 1)) (IdenticalWrites))) contribution
+          (UpdateArray (ScopedUpdate plan 1) (ZeroInitialized (StoredArray count (Length destination) (Length destination))) (Adding))
+          (UpdateArray (ScopedUpdate plan 2) (ZeroInitialized (StoredValue count)) (IdenticalWrites))) contribution
           (ChooseUpdates (FormulaInput 0)
             (ChooseUpdates (FormulaBinary "&&" (FormulaBinary ">=" (FormulaInput 1) (FormulaConstant 0))
                 (FormulaBinary "<" (FormulaInput 1) (FormulaExtent (Length destination))))
