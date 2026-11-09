@@ -109,78 +109,25 @@ impl Body<'_, '_, '_> {
         let target = self.boundary_target(source)?;
         let initial = self.materialize_boundary(initial, layout, target.as_ref())?;
         if let Some(fields) = self.compiler.facts.enode("WhileCondition", form) {
-            let values = self.values.checkpoint();
-            let scopes = self.scopes.checkpoint();
-            let (header, parameters) = self.builder.create_block_with_params(vec![initial.ty.clone()]);
-            let iteration = self.builder.create_block();
-            let continuing = self.builder.create_block();
-            let (end, results) = self.builder.create_block_with_params(vec![initial.ty.clone()]);
-            self.terminate(Terminator::Branch {
-                target: header,
-                args: vec![initial.value],
-            })
-            .map_err(builder_error)?;
-            self.builder.switch_to_block_unchecked(header);
-            self.builder.set_control_header(
-                header,
-                ControlHeader::Loop {
-                    merge: end,
-                    continue_block: continuing,
+            let mut results = self.while_loop(
+                vec![initial],
+                |body, state_values| {
+                    body.scopes.insert(header_scope, body.current()?);
+                    let carried = body.rebind_boundary(state_values[0].clone(), target.as_ref())?;
+                    body.values.insert(state, carried);
+                    body.value(header_scope, fields[0])
                 },
-            );
-            // The test can contain a selection of its own. Give it a separate
-            // block so it cannot replace the loop's structural header.
-            let test = self.builder.create_block();
-            self.terminate(Terminator::Branch {
-                target: test,
-                args: vec![],
-            })
-            .map_err(builder_error)?;
-            self.builder.switch_to_block_unchecked(test);
-            self.scopes.insert(header_scope, test);
-            let carried = self.rebind_boundary(
-                Typed {
-                    value: parameters[0].into(),
-                    ty: initial.ty.clone(),
+                |body, _| {
+                    body.scopes.insert(iteration_scope, body.current()?);
+                    let next = body.value(iteration_scope, next)?;
+                    Ok(vec![body.materialize_boundary(next, layout, target.as_ref())?])
                 },
-                target.as_ref(),
             )?;
-            self.values.insert(state, carried);
-            let condition = self.value(header_scope, fields[0])?;
-            self.terminate(Terminator::CondBranch {
-                cond: condition.value,
-                then_target: iteration,
-                then_args: vec![],
-                else_target: end,
-                else_args: vec![parameters[0].into()],
-            })
-            .map_err(builder_error)?;
-            self.builder.switch_to_block_unchecked(iteration);
-            self.scopes.insert(iteration_scope, iteration);
-            let next = self.value(iteration_scope, next)?;
-            let next = self.materialize_boundary(next, layout, target.as_ref())?;
-            self.terminate(Terminator::Branch {
-                target: continuing,
-                args: vec![],
-            })
-            .map_err(builder_error)?;
-            self.builder.switch_to_block_unchecked(continuing);
-            self.terminate(Terminator::Branch {
-                target: header,
-                args: vec![next.value],
-            })
-            .map_err(builder_error)?;
-            self.values.restore(values);
-            self.scopes.restore(scopes);
-            self.builder.switch_to_block_unchecked(end);
-            self.scopes.insert(scope, end);
-            return self.rebind_boundary(
-                Typed {
-                    value: results[0].into(),
-                    ty: initial.ty,
-                },
-                target.as_ref(),
-            );
+            self.scopes.insert(scope, self.current()?);
+            let Some(result) = results.pop() else {
+                return Err(error("loop result is missing"));
+            };
+            return self.rebind_boundary(result, target.as_ref());
         }
         let (bound, array, index_ty) = if let Some(fields) = self.compiler.facts.enode("ForCount", form) {
             let Some(ty) = self.compiler.facts.ty(fields[1]).cloned() else {
@@ -276,15 +223,39 @@ impl Body<'_, '_, '_> {
         emit: impl FnOnce(&mut Self, Typed, Vec<Typed>) -> Result<Vec<Typed>, OptimizeError>,
     ) -> Result<Vec<Typed>, OptimizeError> {
         let bound = self.cast(bound, &start.ty)?;
-        let mut types = vec![start.ty.clone()];
-        types.extend(initial.iter().map(|v| v.ty.clone()));
+        let mut state = vec![start];
+        state.extend(initial);
+        let mut results = self.while_loop(
+            state,
+            |body, state| body.binary(BinaryOperator::Less, state[0].clone(), bound),
+            |body, mut state| {
+                let index = state.remove(0);
+                let mut next = emit(body, index.clone(), state)?;
+                next.insert(0, body.binary(BinaryOperator::Add, index, step)?);
+                Ok(next)
+            },
+        )?;
+        results.remove(0);
+        Ok(results)
+    }
+
+    /// Every structured loop has typed carried values and one exit. Keep the
+    /// condition in its own block so nested selections cannot replace the header.
+    fn while_loop(
+        &mut self,
+        initial: Vec<Typed>,
+        test: impl FnOnce(&mut Self, &[Typed]) -> Result<Typed, OptimizeError>,
+        emit: impl FnOnce(&mut Self, Vec<Typed>) -> Result<Vec<Typed>, OptimizeError>,
+    ) -> Result<Vec<Typed>, OptimizeError> {
+        let types: Vec<_> = initial.iter().map(|v| v.ty.clone()).collect();
         let (header, parameters) = self.builder.create_block_with_params(types.clone());
-        let body = self.builder.create_block();
+        let condition_block = self.builder.create_block();
+        let active = self.builder.create_block();
         let continuing = self.builder.create_block();
-        let (done, results) = self.builder.create_block_with_params(types[1..].to_vec());
+        let (done, results) = self.builder.create_block_with_params(types.clone());
         self.terminate(Terminator::Branch {
             target: header,
-            args: std::iter::once(start.value).chain(initial.iter().map(|v| v.value)).collect(),
+            args: initial.into_iter().map(|v| v.value).collect(),
         })
         .map_err(builder_error)?;
         self.builder.switch_to_block_unchecked(header);
@@ -295,56 +266,61 @@ impl Body<'_, '_, '_> {
                 continue_block: continuing,
             },
         );
-        let index = Typed {
-            value: parameters[0].into(),
-            ty: start.ty,
-        };
-        let state: Vec<_> = parameters[1..]
-            .iter()
-            .zip(&types[1..])
-            .map(|(&v, ty)| Typed {
-                value: v.into(),
+        self.terminate(Terminator::Branch {
+            target: condition_block,
+            args: vec![],
+        })
+        .map_err(builder_error)?;
+        let state: Vec<_> = parameters
+            .into_iter()
+            .zip(&types)
+            .map(|(value, ty)| Typed {
+                value: value.into(),
                 ty: ty.clone(),
             })
             .collect();
-        let condition = self.binary(BinaryOperator::Less, index.clone(), bound)?;
+        let values = self.values.checkpoint();
+        let scopes = self.scopes.checkpoint();
+        self.builder.switch_to_block_unchecked(condition_block);
+        let condition = test(self, &state)?;
         self.terminate(Terminator::CondBranch {
             cond: condition.value,
-            then_target: body,
+            then_target: active,
             then_args: vec![],
             else_target: done,
             else_args: state.iter().map(|v| v.value).collect(),
         })
         .map_err(builder_error)?;
-        self.builder.switch_to_block_unchecked(body);
-        let outer_values = self.values.checkpoint();
-        let outer_scopes = self.scopes.checkpoint();
-        let next = emit(self, index.clone(), state)?;
-        if next.len() != initial.len() {
+        self.builder.switch_to_block_unchecked(active);
+        let next = emit(self, state)?;
+        if next.len() != types.len() {
             return Err(error("loop accumulator arity mismatch"));
         }
-        let mut args = Vec::new();
-        for (value, ty) in next.into_iter().zip(&types[1..]) {
-            args.push(self.cast(value, ty)?.value);
-        }
+        let next = next
+            .into_iter()
+            .zip(&types)
+            .map(|(value, ty)| self.cast(value, ty).map(|v| v.value))
+            .collect::<Result<Vec<_>, _>>()?;
         self.terminate(Terminator::Branch {
             target: continuing,
             args: vec![],
         })
         .map_err(builder_error)?;
         self.builder.switch_to_block_unchecked(continuing);
-        let next_index = self.binary(BinaryOperator::Add, index, step)?;
-        args.insert(0, next_index.value);
-        self.terminate(Terminator::Branch { target: header, args }).map_err(builder_error)?;
+        self.terminate(Terminator::Branch {
+            target: header,
+            args: next,
+        })
+        .map_err(builder_error)?;
         self.builder.switch_to_block_unchecked(done);
-        self.values.restore(outer_values);
-        self.scopes.restore(outer_scopes);
+        self.values.restore(values);
+        self.scopes.restore(scopes);
         Ok(results
             .into_iter()
-            .zip(&types[1..])
-            .map(|(v, ty)| Typed {
-                value: v.into(),
-                ty: ty.clone(),
+            .zip(types)
+            .map(|(value, ty)| Typed {
+                value: value.into(),
+                ty,
             })
             .collect())
     }
@@ -410,50 +386,23 @@ impl Body<'_, '_, '_> {
         initial: Typed,
         emit: impl FnOnce(&mut Self, Typed) -> Result<Typed, OptimizeError>,
     ) -> Result<Typed, OptimizeError> {
-        let (header, parameters) = self.builder.create_block_with_params(vec![initial.ty.clone()]);
-        let active = self.builder.create_block();
-        let continuing = self.builder.create_block();
-        let done = self.builder.create_block();
-        self.terminate(Terminator::Branch {
-            target: header,
-            args: vec![initial.value],
-        })
-        .map_err(builder_error)?;
-        self.builder.switch_to_block_unchecked(header);
-        self.builder.set_control_header(
-            header,
-            ControlHeader::Loop {
-                merge: done,
-                continue_block: continuing,
+        let mut results = self.while_loop(
+            vec![initial],
+            |body, state| {
+                let exchanged = body.field(state[0].clone(), 1)?;
+                let no = body.op(OpTag::Bool(false), vec![], types::bool_type())?;
+                body.binary(BinaryOperator::Equal, exchanged, no)
             },
-        );
-        let state = Typed {
-            value: parameters[0].into(),
-            ty: initial.ty,
+            |body, mut state| {
+                let Some(state) = state.pop() else {
+                    return Err(error("atomic retry state is missing"));
+                };
+                Ok(vec![emit(body, state)?])
+            },
+        )?;
+        let Some(result) = results.pop() else {
+            return Err(error("atomic retry result is missing"));
         };
-        let exchanged = self.field(state.clone(), 1)?;
-        self.terminate(Terminator::CondBranch {
-            cond: exchanged.value,
-            then_target: done,
-            then_args: vec![],
-            else_target: active,
-            else_args: vec![],
-        })
-        .map_err(builder_error)?;
-        self.builder.switch_to_block_unchecked(active);
-        let next = emit(self, state.clone())?;
-        self.terminate(Terminator::Branch {
-            target: continuing,
-            args: vec![],
-        })
-        .map_err(builder_error)?;
-        self.builder.switch_to_block_unchecked(continuing);
-        self.terminate(Terminator::Branch {
-            target: header,
-            args: vec![next.value],
-        })
-        .map_err(builder_error)?;
-        self.builder.switch_to_block_unchecked(done);
-        Ok(state)
+        Ok(result)
     }
 }

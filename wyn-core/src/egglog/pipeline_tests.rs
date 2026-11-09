@@ -357,6 +357,8 @@ entry buckets(dest:*[2][2]i32) ([2][2]i32,[2]u32,u32)=bucket_scatter_2d(dest,[[(
 entry varying(xs:[]i32) []i32=map(|n|reduce((+),0,iota(n)),xs)
 entry branching(xs:[][17]i32) []i32=map(|row|if row[0]>0 then reduce((+),0,row) else 0,xs)
 entry local_pack(xs:[][17]i32) []i32=map(|row|reduce((+),0,filter(|x|x>0,row)),xs)
+entry conditional_loop(xs:[4]i32,n:i32) [4]i32=map(|x|loop y=x while (if y<n then y>=0 else false) do y+1,xs)
+entry counted_loop(xs:[4]i32) [4]i32=map(|x|loop y=x for i<33 do y+i,xs)
 "#;
     let tlc = crate::compile_thru_tlc(source).unwrap();
     let mut program =
@@ -364,5 +366,12 @@ entry local_pack(xs:[][17]i32) []i32=map(|row|reduce((+),0,filter(|x|x>0,row)),x
     program.graph.clear_function("SourceOperation").unwrap();
     program.graph.clear_function("SourceNeutral").unwrap();
     let ssa = super::finish_for_test(program, crate::CodegenTarget::Wgsl).unwrap();
-    crate::ssa::place_floating(crate::ssa::optimize(ssa)).unwrap();
+    let wgsl = crate::lower_ssa_to_wgsl(ssa).unwrap();
+    let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap();
 }
