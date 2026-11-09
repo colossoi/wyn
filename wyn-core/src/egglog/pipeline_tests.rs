@@ -372,6 +372,9 @@ entry chained_total(xs:[17]i32) (i32,i32)=let ys=filter(|x|x<20,map(|x|x+1,filte
     program.graph.clear_function("SourceNeutral").unwrap();
     program.graph.clear_function("SourceParameter").unwrap();
     program.graph.clear_function("SourceResult").unwrap();
+    program.graph.clear_function("SourceLoopForm").unwrap();
+    program.graph.clear_function("SourceLoopInitial").unwrap();
+    program.graph.clear_function("SourceOperatorBody").unwrap();
     let ssa = super::finish_for_test(program, crate::CodegenTarget::Wgsl).unwrap();
     let wgsl = crate::lower_ssa_to_wgsl(ssa).unwrap();
     let module = naga::front::wgsl::parse_str(&wgsl).unwrap();

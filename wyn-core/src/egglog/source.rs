@@ -584,47 +584,48 @@ impl<'source> Import<'_, '_, '_, 'source> {
         parent: &mut Scope,
     ) -> Result<(), OptimizeError> {
         let initial = self.operand(initial, owner, parent)?;
-        match kind {
+        let counted = match kind {
             LoopKind::For { iter, .. } => {
                 let extent = self.operand(iter, owner, parent)?;
-                let form = self.sink.add("ForEach", extent)?;
-                self.sink.set("SourceLoopForm", owner, form)?;
+                Some(self.sink.add("ForEach", extent)?)
             }
             LoopKind::ForRange { bound, var_ty, .. } => {
                 let extent = self.operand(bound, owner, parent)?;
                 let ty = self.ty(var_ty)?;
-                let form = self.sink.add("ForCount", (extent, ty))?;
-                self.sink.set("SourceLoopForm", owner, form)?;
+                Some(self.sink.add("ForCount", (extent, ty))?)
             }
-            LoopKind::While { .. } => {}
-        }
+            LoopKind::While { .. } => None,
+        };
         let mut header = self.scope(None, Some(parent.key))?;
         let mut iteration = self.scope(Some(body), Some(header.key))?;
         self.sink.add("SourceEnters", (owner, header.key))?;
         self.sink.add("SourceEnters", (owner, iteration.key))?;
-        let info = self.sink.add("LoopInfo", (header.key, iteration.key))?;
-        self.sink.set("SourceLoop", owner, info)?;
         let checkpoint = self.bindings.checkpoint();
         let accumulator = self.formal(variable, variable_ty, &header)?;
-        let info = self.sink.add("LoopInitialInfo", (accumulator, initial))?;
-        self.sink.set("SourceLoopInitial", header.key, info)?;
         for (symbol, _, extraction) in bindings {
             let (value, _) = self.visit(extraction, &mut header)?;
             self.bind(*symbol, value, &header)?;
         }
-        match kind {
+        let form = match kind {
             LoopKind::While { cond } => {
                 let (condition, _) = self.visit(cond, &mut header)?;
-                let form = self.sink.add("WhileCondition", condition)?;
-                self.sink.set("SourceLoopForm", owner, form)?;
+                self.sink.add("WhileCondition", condition)?
             }
             LoopKind::For { var, var_ty, .. } | LoopKind::ForRange { var, var_ty, .. } => {
                 let variable = self.formal(*var, var_ty, &iteration)?;
                 self.sink.set("SourceIterationValue", iteration.key, variable)?;
+                let Some(form) = counted else {
+                    return Err(OptimizeError::Output("counted loop control is missing".into()));
+                };
+                form
             }
-        }
+        };
         let result = self.finish_body(body, &mut iteration)?;
-        self.sink.add("SourceLoopBackedge", (header.key, accumulator, result))?;
+        let definition = self.sink.add(
+            "LoopInfo",
+            (header.key, iteration.key, form, accumulator, initial),
+        )?;
+        self.sink.set("SourceLoop", owner, definition)?;
         if matches!(kind, LoopKind::ForRange { .. } | LoopKind::While { .. })
             && loops::supported(variable_ty)
         {

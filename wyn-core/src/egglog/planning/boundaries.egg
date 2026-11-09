@@ -44,10 +44,10 @@
 (rule ((StorageDemand next path) (SourceLoopBackedge region state next))
       ((StorageDemand state path)) :ruleset local-storage)
 (relation BoundaryMember (SourceValue SourceValue))
-(rule ((= (SourceLoop source) (LoopInfo header iteration))
-       (= (SourceLoopInitial header) (LoopInitialInfo state initial)))
+(rule ((= (SourceLoop source) (LoopInfo header iteration loop-control state initial))
+       )
       ((BoundaryMember source state) (BoundaryMember source initial)) :ruleset local-storage)
-(rule ((= (SourceLoop source) (LoopInfo header iteration)) (= result (SourceResult iteration)))
+(rule ((= (SourceLoop source) (LoopInfo header iteration loop-control loop-state loop-initial)) (= result (SourceResult iteration)))
       ((BoundaryMember source result)) :ruleset local-storage)
 (rule ((= (SourceBranch source) (BranchInfo test yes no)) (= a (SourceResult yes)) (= b (SourceResult no)))
       ((BoundaryMember source a) (BoundaryMember source b)) :ruleset local-storage)
@@ -117,8 +117,8 @@
 (rule ((= (SourceBranch source) branch)) ((set (BoundaryTransfer source) false)) :ruleset boundary-select)
 ; A branch has already copied all shared fields into fresh destinations.
 ; These cannot alias the enclosing loop's destinations, even for a field swap.
-(rule ((= (SourceLoop source) (LoopInfo header iteration)) (= next (SourceResult iteration))
-       (= branch (SourceBranch next)))
+(rule ((= (SourceLoop source) (LoopInfo header iteration loop-control loop-state loop-initial)) (= next (SourceResult iteration))
+      (= branch (SourceBranch next)))
       ((set (BoundaryTransfer source) false)) :ruleset boundary-select)
 
 (function BoundaryHasShared (BoundaryPlan) bool :merge (or old new))

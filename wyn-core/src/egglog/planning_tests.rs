@@ -1208,15 +1208,6 @@ entry case_4(xs:[]i32,n:i32) []i32=map(|x|repeat_sum(n,x),xs)
         })
         .unwrap();
     assert_eq!(outputs, 5, "{source}");
-    let mut collectives = Vec::new();
-    query
-        .for_function("SourceOperatorBody", |keys, callback| {
-            if !query.flag("PlanMapping", (keys[0],))? {
-                collectives.push((keys[0], callback));
-            }
-            Ok(())
-        })
-        .unwrap();
     for table in [
         "SourceOperatorBody",
         "SourceCallTarget",
@@ -1226,15 +1217,6 @@ entry case_4(xs:[]i32,n:i32) []i32=map(|x|repeat_sum(n,x),xs)
     ] {
         program.graph.clear_function(table).unwrap();
     }
-    program
-        .graph
-        .update(|mut sink| {
-            for (op, callback) in collectives {
-                sink.set("SourceOperatorBody", (op,), callback)?;
-            }
-            Ok(())
-        })
-        .unwrap();
     finish_for_test(program, CodegenTarget::Wgsl).unwrap();
 }
 
@@ -1305,7 +1287,8 @@ fn subgroup_addition_is_opt_in_and_uses_small_segments() {
         let program = schedule_with_subgroups(placed, enabled).unwrap();
         let query = Query(&program.graph);
         let scan = operations(&program.graph, "scan")[0];
-        assert_eq!(query.contains("SubgroupAddition", (scan,)).unwrap(), enabled);
+        let body = query.required("SourceOperatorBody", (scan,)).unwrap();
+        assert_eq!(query.contains("SubgroupAddition", (body,)).unwrap(), enabled);
         let mut segments = 0;
         query
             .for_each("MapPlan", |row| {

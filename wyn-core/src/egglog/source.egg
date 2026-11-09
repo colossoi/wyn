@@ -27,7 +27,9 @@
 (function SourceValueOperation (SourceValue) OperationKey :no-merge)
 (datatype SourceBranchData (BranchInfo SourceValue RegionKey RegionKey))
 (function SourceBranch (SourceValue) SourceBranchData :no-merge)
-(datatype SourceLoopData (LoopInfo RegionKey RegionKey))
+(datatype LoopForm (ForCount SourceValue TypeKey) (ForEach SourceValue) (WhileCondition SourceValue))
+(datatype SourceLoopData (LoopInfo RegionKey RegionKey LoopForm SourceValue SourceValue))
+(function LoopHeader (RegionKey) SourceLoopData :no-merge)
 (function SourceLoop (SourceValue) SourceLoopData :no-merge)
 (datatype SourceLoopInitialData (LoopInitialInfo SourceValue SourceValue))
 (function SourceLoopInitial (RegionKey) SourceLoopInitialData :no-merge)
@@ -88,7 +90,6 @@
 (function SourceParameterStorageAccess (RegionKey i64) i64 :no-merge)
 
 (relation SourceBlockLayout (TypeKey i64 i64))
-(datatype LoopForm (ForCount SourceValue TypeKey) (ForEach SourceValue) (WhileCondition SourceValue))
 (function SourceLoopForm (SourceValue) LoopForm :no-merge)
 (function SourceIndexedReducer (OperationKey) bool :merge (or old new))
 (function SourceDomainRank (OperationKey) i64 :no-merge)
@@ -225,3 +226,9 @@
 (rule ((= size (SourceArraySize ty))) ((ArrayTypeAxis ty 0 size)) :ruleset operator-structure)
 (rule ((= array-size (SourceArraySize ty)) (SourceArrayElement ty element) (ArrayTypeAxis element i size))
       ((ArrayTypeAxis ty (+ i 1) size)) :ruleset operator-structure)
+
+; The loop record owns control and carried values; these are indexed projections.
+(rule ((= loop (SourceLoop source)) (= loop (LoopInfo header body form state initial)) (= next (SourceResult body)))
+      ((set (LoopHeader header) loop) (set (SourceLoopForm source) form)
+       (set (SourceLoopInitial header) (LoopInitialInfo state initial))
+       (SourceLoopBackedge header state next)) :ruleset operator-structure)

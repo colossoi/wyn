@@ -98,7 +98,7 @@ impl<'a, 'source> Facts<'a, 'source> {
         Some(self.record("RegionDefinition", "RegionBody", (value,))?[2])
     }
     pub fn loop_state(&self, value: Value) -> Option<Value> {
-        Some(self.record("SourceLoopInitial", "LoopInitialInfo", (value,))?[0])
+        Some(self.record("LoopHeader", "LoopInfo", (value,))?[3])
     }
     pub fn loop_carries(&self, operation: Value) -> Result<Vec<LoopCarry>, OptimizeError> {
         let mut rows = Vec::new();
@@ -131,10 +131,13 @@ impl<'a, 'source> Facts<'a, 'source> {
         self.lookup("SourceValueOperation", (value,))
     }
     pub fn loop_initial(&self, region: Value) -> Result<Value, OptimizeError> {
-        let Some(info) = self.record("SourceLoopInitial", "LoopInitialInfo", (region,)) else {
+        let Some(info) = self.record("LoopHeader", "LoopInfo", (region,)) else {
             return Err(error("loop region has no initial state"));
         };
-        Ok(info[1])
+        Ok(info[4])
+    }
+    pub fn loop_form(&self, source: Value) -> Option<Value> {
+        Some(self.record("SourceLoop", "LoopInfo", (source,))?[2])
     }
     pub fn iteration_dimensions(&self, operation: Value) -> Result<Vec<Value>, OptimizeError> {
         let query = Query(&self.program.graph);
@@ -158,10 +161,6 @@ impl<'a, 'source> Facts<'a, 'source> {
             inputs.push(axes);
         }
         Ok((dimensions, inputs))
-    }
-    pub fn callback(&self, value: Value) -> Option<Value> {
-        self.group(value)?;
-        self.lookup("SourceOperatorBody", (value,))
     }
     pub fn definition_name(&self, scope: Value) -> Option<SymbolId> {
         let token = self.lookup("SourceDefinitionSymbol", (scope,))?;

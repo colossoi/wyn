@@ -18,7 +18,7 @@
        (= (HostLoopCandidate op) true) (= (ContainsCollective op) true) (= (LoopDispatchProfitable op) true))
       ((set (DispatchLoopSelected op) true)) :ruleset host-regions)
 (rule ((= (DispatchLoopSelected op) true) (HostRegion parent) (= parent (OperationRegion op))
-       (= source (SourceOperationValue op)) (= (SourceLoop source) (LoopInfo header body)))
+      (= source (SourceOperationValue op)) (= (SourceLoop source) (LoopInfo header body loop-control loop-state loop-initial)))
       ((HostLoop op header body)) :ruleset residency)
 (rule ((HostLoop op header body) (= source (SourceOperationValue op))
        (SourceLoopCarry source slot initial state next output array))

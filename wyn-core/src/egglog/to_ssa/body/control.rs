@@ -103,7 +103,7 @@ impl Body<'_, '_, '_> {
         let (Some(state), Some(next), Some(form)) = (
             self.compiler.facts.loop_state(header_scope),
             self.compiler.facts.result(iteration_scope),
-            self.compiler.facts.lookup("SourceLoopForm", (source,)),
+            self.compiler.facts.loop_form(source),
         ) else {
             return Err(error("loop has incomplete control facts"));
         };

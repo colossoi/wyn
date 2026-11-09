@@ -16,6 +16,7 @@ pub enum OutputAction {
         contribution: Value,
     },
     Reserve {
+        operation: Value,
         callback: Value,
     },
 }
@@ -142,7 +143,10 @@ impl<'a, 'source> Facts<'a, 'source> {
             });
         }
         if let Some(f) = self.enode("Reserve", action) {
-            return Ok(OutputAction::Reserve { callback: f[0] });
+            return Ok(OutputAction::Reserve {
+                operation: f[0],
+                callback: f[2],
+            });
         }
         Err(error("invalid parallel output action"))
     }

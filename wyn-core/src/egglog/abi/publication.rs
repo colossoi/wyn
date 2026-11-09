@@ -624,10 +624,7 @@ fn publish_loops(
                 binding: binding.binding,
             })
         };
-        let form = compiler
-            .facts
-            .lookup("SourceLoopForm", (source,))
-            .ok_or_else(|| error("loop control missing"))?;
+        let form = compiler.facts.loop_form(source).ok_or_else(|| error("loop control missing"))?;
         let control = if let Some(fields) = compiler.facts.enode("ForCount", form) {
             let context = crate::egglog::query::Query(&compiler.program.graph)
                 .required("ExprContextForSource", (fields[0],))?;

@@ -145,10 +145,10 @@
 (rule ((PlannedOperation original owner plan region) (= safe (SourceIndexedReducer original))
        (= body (SourceOperatorBody original)) (= (HasReducerUpdate body) false))
       ((IndexedReducer owner safe (AtomicCas))) :ruleset execution-finalize)
-(relation SubgroupAddition (OperationKey))
+(relation SubgroupAddition (RegionKey))
 (rule ((= (SubgroupsEnabled) true) (= body (SourceOperatorBody op)) (ReducerUpdate body (AtomicAdd))
        (= neutral (SourceNeutral op)) (= ty (SourceType neutral)) (SourceSubgroupScalar ty))
-      ((SubgroupAddition op)) :ruleset execution-discover)
+      ((SubgroupAddition body)) :ruleset execution-discover)
 
 ; Local recipes are selected for each calling scope. The same helper can be
 ; reached from a group-uniform call and an invocation-local element callback.

@@ -388,18 +388,6 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
             .collect()
     }
 
-    pub fn callback(
-        &mut self,
-        owner: Value,
-        operation: Value,
-        arguments: Vec<Typed>,
-    ) -> Result<Typed, OptimizeError> {
-        let Some(scope) = self.compiler.facts.callback(operation) else {
-            return Err(error("collective callback is missing"));
-        };
-        self.apply_region(owner, scope, arguments)
-    }
-
     pub fn apply_region(
         &mut self,
         owner: Value,

@@ -553,7 +553,7 @@ struct Reduction {
 enum Reducer {
     Add,
     Callback {
-        operation: Value,
+        region: Value,
         layout: Value,
     },
 }
@@ -577,7 +577,7 @@ impl Accumulator {
             let neutral = body.value(scope, reducer[1])?;
             (
                 Reducer::Callback {
-                    operation: reducer[0],
+                    region: reducer[0],
                     layout,
                 },
                 body.materialize(neutral, layout)?,
@@ -622,9 +622,7 @@ impl Reduction {
     fn subgroup_addition(&self, body: &Body<'_, '_, '_>) -> bool {
         match self.reducer {
             Reducer::Add => true,
-            Reducer::Callback { operation, .. } => {
-                body.compiler.facts.contains("SubgroupAddition", (operation,))
-            }
+            Reducer::Callback { region, .. } => body.compiler.facts.contains("SubgroupAddition", (region,)),
         }
     }
 
@@ -640,8 +638,8 @@ impl Reduction {
                 let b = body.cast(b, &a.ty)?;
                 body.binary(Add, a, b)
             }
-            Reducer::Callback { operation, layout } => {
-                let value = body.callback(scope, operation, vec![a, b])?;
+            Reducer::Callback { region, layout } => {
+                let value = body.apply_region(scope, region, vec![a, b])?;
                 body.materialize(value, layout)
             }
         }

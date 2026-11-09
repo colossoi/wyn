@@ -23,7 +23,8 @@ pub(super) fn emit(
         let condition = body
             .compiler
             .facts
-            .record("SourceLoopForm", "WhileCondition", (source,))
+            .loop_form(source)
+            .and_then(|form| body.compiler.facts.enode("WhileCondition", form))
             .ok_or_else(|| error("loop predicate missing"))?[0];
         let value = body.value(header, condition)?;
         let resource = body

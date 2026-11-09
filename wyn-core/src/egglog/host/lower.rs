@@ -314,7 +314,7 @@ impl<'a, 'source> Lower<'a, 'source> {
             };
             let initial = self.facts.loop_initial(header)?;
             let initial = self.source(context, initial)?;
-            let Some(form) = self.facts.lookup("SourceLoopForm", (source,)) else {
+            let Some(form) = self.facts.loop_form(source) else {
                 return Err(error("host loop form missing").into());
             };
             let name = self.name();

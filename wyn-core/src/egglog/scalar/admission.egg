@@ -66,7 +66,7 @@
 (rule ((PlannedOperation op owner plan r) (= v (SourceInput op i))) ((ExprImportDemand op r v)) :ruleset scalar-admission)
 (rule ((PlannedOperation op owner plan r) (= v (SourceNeutral op))) ((ExprImportDemand op r v)) :ruleset scalar-admission)
 (rule ((PlannedOperation op owner plan r) (= v (SourceDestination op))) ((ExprImportDemand op r v)) :ruleset scalar-admission)
-(rule ((= (SourceLoop source-loop-owner) (LoopInfo r source-loop-iteration)) (= (SourceLoopForm source-loop-owner) (WhileCondition v))) ((ExprImportLocalDemand r v)) :ruleset scalar-admission)
+(rule ((= (SourceLoop source-loop-owner) (LoopInfo r source-loop-iteration (WhileCondition v) loop-state loop-initial)) ) ((ExprImportLocalDemand r v)) :ruleset scalar-admission)
 (rule ((= (SourceLoopInitial header) (LoopInitialInfo state initial)) (= r (ExprContextOwner initial)))
       ((ExprImportLocalDemand r initial)) :ruleset scalar-admission)
 (rule ((= (SourceLoopForm loop) (ForCount count ty)) (= r (ExprContextOwner count)))

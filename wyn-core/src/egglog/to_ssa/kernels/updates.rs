@@ -36,7 +36,9 @@ fn apply(
         Update::Add | Update::Combine(_) => {
             let old = body.index(output.clone(), key.clone())?;
             let next = match update {
-                Update::Combine(operation) => body.callback(scope, operation, vec![old.clone(), value])?,
+                Update::Combine(operation) => {
+                    body.apply_region(scope, operation, vec![old.clone(), value])?
+                }
                 _ => body.binary(BinaryOperator::Add, old.clone(), value)?,
             };
             body.store(output, key, next)?;
@@ -84,7 +86,7 @@ fn apply(
             let initial = body.tuple(vec![old, done])?;
             let state = body.retry(initial, |body, state| {
                 let old = body.field(state, 0)?;
-                let next = body.callback(scope, operation, vec![old.clone(), value.clone()])?;
+                let next = body.apply_region(scope, operation, vec![old.clone(), value.clone()])?;
                 let result = body
                     .builder
                     .push_inst(
@@ -254,7 +256,7 @@ pub(super) fn buckets(
     width: u32,
     plan: Value,
 ) -> Result<(), OptimizeError> {
-    let OutputAction::Reserve { callback } = body.compiler.facts.action(plan)? else {
+    let OutputAction::Reserve { operation, callback } = body.compiler.facts.action(plan)? else {
         return Err(error("reservation loop requires a bucket action"));
     };
     let output = destination(body, scope, owner)?;
@@ -283,7 +285,7 @@ pub(super) fn buckets(
         }
     }
     let (dimensions, input_dimensions) = body.compiler.facts.domain_shape(owner)?;
-    let inputs = body.compiler.facts.inputs(callback)?;
+    let inputs = body.compiler.facts.inputs(operation)?;
     let dimensions =
         dimensions.iter().map(|&extent| body.extent(scope, extent)).collect::<Result<Vec<_>, _>>()?;
     let n = coordinates::length(body, &dimensions)?;
@@ -300,7 +302,7 @@ pub(super) fn buckets(
         let coordinates = coordinates::decode(body, &dimensions, index)?;
         let arguments =
             coordinates::arguments(body, scope, plan, &inputs, &input_dimensions, &coordinates)?;
-        let emission = body.callback(scope, callback, arguments)?;
+        let emission = body.apply_region(scope, callback, arguments)?;
         let active = body.field(emission.clone(), 0)?;
         body.when(active, |body| {
             let key = body.field(emission.clone(), 1)?;
