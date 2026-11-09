@@ -35,7 +35,7 @@
       ((set (StorageDeclaration (Result op 0)) (AllocateResult (StoredArray t n (Stored (Result op 1))) (NoContents)))
        (set (StorageDeclaration (Result op 1)) (AllocateResult (StoredValue count) (NoContents)))) :ruleset allocation)
 (rule ((= owner (Owner plan)) (= base (DestinationSlot owner)) (PlanUpdateArray plan i (ZeroInitialized layout) mode))
-      ((set (StorageDeclaration (Result owner (+ base i))) (AllocateResult layout (NoContents)))) :ruleset allocation)
+      ((set (StorageDeclaration (Result owner (+ base i))) (AllocateResult layout (ZeroContents)))) :ruleset allocation)
 
 ; A declaration owns capacity, live shape and access together. Scalar slots
 ; cannot accidentally acquire an array length or a view read.
@@ -161,7 +161,7 @@
       ((set (ReuseWriter op) writer)) :ruleset reuse)
 (rule ((= (Plan op) (Prefixes)) (LastPhase op writer))
       ((set (ReuseWriter op) writer)) :ruleset reuse)
-(rule ((= (Plan op) (Scatter)) (LastPhase op writer))
+(rule ((= (Plan op) (Updates)) (StoreUpdates op) (LastPhase op writer))
       ((set (ReuseWriter op) writer)) :ruleset reuse)
 ; Ownership is a property of the input value, not the source operation whose
 ; output may disappear during fusion. Final shape and reads are checked here.
@@ -234,7 +234,7 @@
       ((set (ReuseBlocked writer e) true)) :ruleset reuse)
 ; Captures and shifted input aliases may read elements already overwritten.
 (rule ((ReuseAlias (Stage op name) e alias)
-       (= recipe (Plan op)) (!= recipe (Scatter))
+       (= recipe (Plan op)) (!= recipe (Updates))
        (Operand op "environment" capture) (References capture (Contents alias)))
       ((set (ReuseBlocked (Stage op name) e) true)) :ruleset reuse)
 (rule ((ReuseAlias (Stage op name) e alias)

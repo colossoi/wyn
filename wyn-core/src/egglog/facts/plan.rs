@@ -140,8 +140,8 @@ impl<'a, 'source> Facts<'a, 'source> {
             if let Some(result) = query.enode("Result", keys[0])? {
                 if result[0] == owner {
                     if let Some(fields) = query.enode("AllocateResult", declaration)? {
-                        if let Some(initial) = query.enode("CopyFrom", fields[1])? {
-                            arrays.push((keys[0], initial[0]));
+                        if query.enode("NoContents", fields[1])?.is_none() {
+                            arrays.push((keys[0], fields[1]));
                         }
                     }
                 }
@@ -159,9 +159,8 @@ impl<'a, 'source> Facts<'a, 'source> {
     pub fn slot(&self, op: Value, role: &str, index: i64) -> Option<Value> {
         self.lookup("BufferSlot", (op, role, index))
     }
-    pub fn atomic(&self, op: Value) -> Option<AtomicOp> {
-        let recipe = self.lookup("Plan", (op,))?;
-        let value = self.enode("Atomic", recipe)?[0];
+    pub fn atomic(&self, reducer: Value) -> Option<AtomicOp> {
+        let value = self.lookup("AtomicReducer", (reducer,))?;
         for (name, update) in [
             ("AtomicAdd", AtomicOp::Add),
             ("AtomicAnd", AtomicOp::And),

@@ -132,10 +132,19 @@ pub(super) fn initialize(
     }
     for (resource, source) in arrays {
         let output = body.resource(scope, resource, 2)?;
-        let initial = body.value(scope, source)?;
         let n = body.length(output.clone())?;
         let (start, step) = iteration(body, phase, width)?;
-        body.copy_array_strided((output, &[]), initial, n, &[], start, step)?;
+        if let Some(copy) = body.compiler.facts.enode("CopyFrom", source) {
+            let initial = body.value(scope, copy[0])?;
+            body.copy_array_strided((output, &[]), initial, n, &[], start, step)?;
+        } else if body.compiler.facts.enode("ZeroContents", source).is_some() {
+            body.counted(start, n, step, vec![], |body, index, _| {
+                body.store(output.clone(), index, Body::number(0))?;
+                Ok(vec![])
+            })?;
+        } else {
+            return Err(error("invalid result initializer"));
+        }
     }
     if phase == "local" {
         body.workgroup_barrier()?;
@@ -238,7 +247,7 @@ fn capabilities(
         let output = if let Some(initial) = existing {
             body.value(scope, initial[0])?
         } else {
-            body.resource(scope, resource, if phase == "clear" { 2 } else { 3 })?
+            body.resource(scope, resource, 3)?
         };
         let mode = if body.compiler.facts.enode("Overwrite", fields[2]).is_some() {
             Update::Store
@@ -258,8 +267,8 @@ fn capabilities(
             let Some(combine) = body.compiler.facts.enode("Combining", fields[2]) else {
                 return Err(error("invalid accumulator mode"));
             };
-            if phase == "atomic" {
-                let Some(op) = body.compiler.facts.atomic(owner) else {
+            if phase == "updates" {
+                let Some(op) = body.compiler.facts.atomic(combine[0]) else {
                     return Err(error("atomic update missing"));
                 };
                 if op == AtomicOp::CompareExchange {
@@ -310,31 +319,6 @@ pub(super) fn emit(
     width: u32,
     plan: Value,
 ) -> Result<(), OptimizeError> {
-    let Some(fields) = body.compiler.facts.record("PlanUpdates", "WithUpdates", (plan,)) else {
-        return Err(error("parallel loop has no update scope"));
-    };
-    if phase == "ordered" || phase == "clear" {
-        let handles = capabilities(body, scope, owner, phase, fields[0])?;
-        for declaration in body.compiler.facts.vector(fields[0])? {
-            let Some(array) = body.compiler.facts.enode("UpdateArray", declaration) else {
-                return Err(error("invalid update declaration"));
-            };
-            if body.compiler.facts.enode("ZeroInitialized", array[1]).is_some() {
-                let Some((output, _)) = handles.0.get(&array[0]) else {
-                    return Err(error("update handle missing"));
-                };
-                let n = body.length(output.clone())?;
-                let (start, step) = iteration(body, phase, width)?;
-                body.counted(start, n, step, vec![], |body, index, _| {
-                    body.store(output.clone(), index, Body::number(0))?;
-                    Ok(vec![])
-                })?;
-            }
-        }
-        if phase == "clear" {
-            return Ok(());
-        }
-    }
     let dimensions = body
         .compiler
         .facts

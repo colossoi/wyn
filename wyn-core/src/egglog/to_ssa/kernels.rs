@@ -80,9 +80,7 @@ pub(super) fn emit(
     match phase {
         "elements" | "segments" => maps::emit(body, scope, phase_owner, phase_width, &results),
         "initialize" => updates::initialize(body, scope, phase_owner, phase, phase_width),
-        "scatter" | "atomic" | "clear" | "buckets" => {
-            updates::emit(body, scope, phase_owner, phase, phase_width, plan)
-        }
+        "updates" => updates::emit(body, scope, phase_owner, phase, phase_width, plan),
         "ordered" | "local" => {
             updates::initialize(body, scope, phase_owner, phase, phase_width)?;
             if !body.compiler.facts.accumulators(plan)?.is_empty()

@@ -60,7 +60,7 @@
 ; State slot, type, result role/slot, and source are shared by scheduling and emission.
 (datatype FoldOutput (PrefixOutput i64) (TotalOutput i64) (PackedLength))
 (relation Accumulator (OperationKey i64 TypeKey FoldOutput SourceValue))
-(datatype Initialization (CopyFrom SourceValue) (NoContents))
+(datatype Initialization (CopyFrom SourceValue) (ZeroContents) (NoContents))
 (datatype ResultLayout (StoredValue TypeKey) (StoredArray TypeKey Extent Extent))
 (datatype ResultStorage (AllocateResult ResultLayout Initialization) (ExistingResult SourceValue) (SharedResult ValueKey))
 (function StorageDeclaration (ValueKey) ResultStorage :no-merge)
@@ -214,13 +214,13 @@
 (ruleset order-emit)
 
 (datatype AtomicUpdate (AtomicAdd) (AtomicAnd) (AtomicOr) (AtomicXor) (AtomicCas))
-(datatype Recipe (Elements) (Totals) (Prefixes) (Compact) (Scatter) (Serial) (Atomic AtomicUpdate) (Buckets))
+(datatype Recipe (Elements) (Totals) (Prefixes) (Compact) (Updates) (Serial))
 (relation FilterShape (OperationKey))
-(relation IndexedWrite (OperationKey bool))
 
 ; Result indices include preceding totals; the destination's output buffer slot is 0.
 (function DestinationSlot (OperationKey) i64 :no-merge)
-(relation IndexedReducer (OperationKey bool AtomicUpdate))
+(function AtomicReducer (RegionKey) AtomicUpdate :no-merge)
+(relation StoreUpdates (OperationKey))
 (function Plan (OperationKey) Recipe :no-merge)
 (function ElideElements (OperationKey) bool :merge (or old new))
 (ruleset schedule)
@@ -264,3 +264,7 @@
 (ruleset output-candidates)
 (function ParallelOutput (i64) bool :merge (or old new))
 (function FinishWidth (i64) i64 :merge (max old new))
+
+(datatype InitializationPlan (NoInitialization) (Initialize Extent))
+(function ArrayInitialization (ValueKey) InitializationPlan :no-merge)
+(function UpdateInitialization (OperationKey i64) InitializationPlan :no-merge)

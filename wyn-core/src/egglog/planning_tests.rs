@@ -157,9 +157,9 @@ fn radix_step_has_three_phases() {
         assert_eq!(
             phases,
             vec![
-                ("chunks".into(), "scatter".into()),
-                ("combine".into(), "scatter".into()),
-                ("offsets".into(), "scatter".into())
+                ("chunks".into(), "updates".into()),
+                ("combine".into(), "updates".into()),
+                ("offsets".into(), "updates".into())
             ]
         );
     });
@@ -214,9 +214,9 @@ fn four_bit_radix_step_has_three_phases() {
         assert_eq!(
             phases,
             vec![
-                ("chunks".into(), "scatter".into()),
-                ("combine".into(), "scatter".into()),
-                ("offsets".into(), "scatter".into())
+                ("chunks".into(), "updates".into()),
+                ("combine".into(), "updates".into()),
+                ("offsets".into(), "updates".into())
             ]
         );
     });
@@ -1267,13 +1267,16 @@ fn indexed_reducers_share_native_recognition_and_keep_cas_fallback() {
         let source = format!("def combine(a:i32,b:i32) i32 = a+b\nentry main(dest:*[3]i32,xs:[5]i32,k:i32) [3]i32 = reduce_by_index(dest,{reducer},0,map(|x:i32|x%3,xs),xs)");
         planned(&source, |graph| {
             let query = Query(graph);
-            let row = query.row("IndexedReducer", |_| true).unwrap().unwrap();
+            let operation = operations(graph, "reduce-by-index")[0];
+            let body = query.required("SourceOperatorBody", (operation,)).unwrap();
+            let update = query.required("AtomicReducer", (body,)).unwrap();
             assert!(
-                query.enode(expected, row[2]).unwrap().is_some(),
+                query.enode(expected, update).unwrap().is_some(),
                 "{reducer}: {expected}"
             );
-            let recipe = query.record("Plan", "Atomic", (row[0],)).unwrap().unwrap();
-            assert_eq!(recipe[0], row[2], "{reducer}");
+            let plan = query.required("SelectedPlan", (operation,)).unwrap();
+            let owner = query.required("Owner", (plan,)).unwrap();
+            assert!(query.enode("Updates", query.required("Plan", (owner,)).unwrap()).unwrap().is_some());
         });
     }
 }
@@ -1395,11 +1398,11 @@ fn primitive_dispatch_recipes_publish_their_phase_widths_and_order() {
         (FilterShape (OperationId 3))
         (set (ParallelBodySafe (OperationId 3)) true)
         (set (OperationGrid (OperationId 3)) (FixedGrid 2 3 4))
-        (IndexedReducer (OperationId 4) true (AtomicAdd))
+        (set (Plan (OperationId 4)) (Updates))
         (set (ParallelBodySafe (OperationId 4)) true)
         (set (InputDomain (OperationId 4)) (Fixed 5))
         (set (OperationGrid (OperationId 4)) (AutomaticGrid))
-        (IndexedReducer (OperationId 5) false (AtomicAdd))
+        (set (Plan (OperationId 5)) (Serial))
         (run-schedule (saturate schedule))
         (check (KernelPhase (OperationId 0) "elements" (Fixed 1024) 64 (AutomaticGrid)))
         (check (KernelPhase (OperationId 1) "chunks" (Fixed 65536) 256 (FixedGrid 256 1 1)))
@@ -1409,8 +1412,8 @@ fn primitive_dispatch_recipes_publish_their_phase_widths_and_order() {
         (check (PhaseLink (OperationId 2) "combine" "offsets"))
         (check (= (Plan (OperationId 3)) (Compact)))
         (check (KernelPhase (OperationId 3) "compact" (Fixed 64) 64 (FixedGrid 1 1 1)))
-        (check (= (Plan (OperationId 4)) (Atomic (AtomicAdd))))
-        (check (KernelPhase (OperationId 4) "atomic" (Fixed 5) 64 (AutomaticGrid)))
+        (check (= (Plan (OperationId 4)) (Updates)))
+        (check (KernelPhase (OperationId 4) "updates" (Fixed 5) 64 (AutomaticGrid)))
         (check (= (Plan (OperationId 5)) (Serial)))
         (check (KernelPhase (OperationId 5) "ordered" (Fixed 1) 1 (FixedGrid 1 1 1)))
     "#,

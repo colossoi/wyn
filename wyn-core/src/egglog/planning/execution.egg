@@ -80,8 +80,6 @@
       ((set (LocalSupportsWorkgroup owner) true)) :ruleset execution-discover)
 (rule ((PlannedOperation original owner plan region) (FilterPlan plan))
       ((set (LocalSupportsWorkgroup owner) true)) :ruleset execution-discover)
-(rule ((IndexedWrite owner false))
-      ((set (LocalSupportsWorkgroup owner) true)) :ruleset execution-discover)
 
 ; Calls made inside a workgroup kernel retain lexical access to its shared
 ; resources, including calls from invocation-local element callbacks. Calls in
@@ -138,13 +136,31 @@
 (function HasReducerUpdate (RegionKey) bool :merge (or old new))
 (rule ((= body (SourceOperatorBody op))) ((set (HasReducerUpdate body) false)) :ruleset execution-discover)
 (rule ((ReducerUpdate body update)) ((set (HasReducerUpdate body) true)) :ruleset execution-discover)
-; Finalize only after recognition has settled, so CAS is a genuine fallback.
-(rule ((PlannedOperation original owner plan region) (= safe (SourceIndexedReducer original))
-       (= body (SourceOperatorBody original)) (ReducerUpdate body update))
-      ((IndexedReducer owner safe update)) :ruleset execution-finalize)
-(rule ((PlannedOperation original owner plan region) (= safe (SourceIndexedReducer original))
-       (= body (SourceOperatorBody original)) (= (HasReducerUpdate body) false))
-      ((IndexedReducer owner safe (AtomicCas))) :ruleset execution-finalize)
+(rule ((ReducerUpdate body update)) ((set (AtomicReducer body) update)) :ruleset execution-finalize)
+(rule ((= (HasReducerUpdate body) false)) ((set (AtomicReducer body) (AtomicCas))) :ruleset execution-finalize)
+
+; One execution proof folds every declaration in an update scope. Physical
+; atomic selection belongs to the combiner, independently of the launch recipe.
+(function UpdateArrayParallel (UpdateInitial UpdateMode) bool :merge (or old new))
+(rule ((PlanUpdateArray plan i initial mode)) ((set (UpdateArrayParallel initial mode) false)) :ruleset execution-discover)
+(rule ((PlanUpdateArray plan i initial (Overwrite))) ((set (UpdateArrayParallel initial (Overwrite)) true)) :ruleset execution-discover)
+(rule ((PlanUpdateArray plan i initial (Adding))) ((set (UpdateArrayParallel initial (Adding)) true)) :ruleset execution-discover)
+(rule ((PlanUpdateArray plan i initial (IdenticalWrites))) ((set (UpdateArrayParallel initial (IdenticalWrites)) true)) :ruleset execution-discover)
+(rule ((PlanUpdateArray plan i (SeedArray source) (Combining body)) (= ty (SourceType source))
+       (SourceArrayElement ty element) (SourcePrimitiveType element name) (AtomicScalarName name))
+      ((set (UpdateArrayParallel (SeedArray source) (Combining body)) true)) :ruleset execution-discover)
+(function UpdateSafety (FusionPlan i64) bool :no-merge)
+(function UpdateStores (FusionPlan i64) bool :no-merge)
+(rule ((= (PlanUpdates plan) (WithUpdates arrays input program)))
+      ((set (UpdateSafety plan 0) true) (set (UpdateStores plan 0) true)) :ruleset execution-finalize)
+(rule ((PlanUpdateArray plan i initial mode) (= safe (UpdateSafety plan i)) (= valid (UpdateArrayParallel initial mode)))
+      ((set (UpdateSafety plan (+ i 1)) (and safe valid))) :ruleset execution-finalize)
+(rule ((PlanUpdateArray plan i initial (Overwrite)) (= stores (UpdateStores plan i)))
+      ((set (UpdateStores plan (+ i 1)) stores)) :ruleset execution-finalize)
+(rule ((PlanUpdateArray plan i initial mode) (!= mode (Overwrite)))
+      ((set (UpdateStores plan (+ i 1)) false)) :ruleset execution-finalize)
+(rule ((= (PlanUpdates plan) (WithUpdates arrays input program)) (= (UpdateStores plan (vec-length arrays)) true) (= owner (Owner plan)))
+      ((StoreUpdates owner) (set (LocalSupportsWorkgroup owner) true)) :ruleset execution-finalize)
 (relation SubgroupAddition (RegionKey))
 (rule ((= (SubgroupsEnabled) true) (= body (SourceOperatorBody op)) (ReducerUpdate body (AtomicAdd))
        (= neutral (SourceNeutral op)) (= ty (SourceType neutral)) (SourceSubgroupScalar ty))

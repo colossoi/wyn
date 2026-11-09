@@ -11,7 +11,7 @@
     (saturate segment-shapes)
     (saturate extent-dependencies) (run extent-uniformity)
     (run segment-approve) (run segment-select)
-    (saturate execution-discover) (saturate execution-select) (run execution-finalize)
+    (saturate execution-discover) (saturate execution-select) (saturate execution-finalize)
     (saturate map-bindings)
     (saturate storage-shapes shape-properties)
     (saturate capacity-types)

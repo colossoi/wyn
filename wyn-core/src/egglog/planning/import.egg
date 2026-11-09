@@ -141,7 +141,6 @@
        (= (SourceOperation original) (OperationInfo r "filter")) (= value (SourceOperationValue original)))
       ((set (ViewExtent value) (Stored (Result owner 1)))) :ruleset planning-import)
 
-(rule ((PlannedOperation original owner plan region) (= (SourceOperation original) (OperationInfo r "scatter")) (= scans (HasScans plan))) ((IndexedWrite owner scans)) :ruleset planning-import)
 (rule ((PlannedOperation original owner plan region) (= (SourceOperation original) (OperationInfo r "bucket-scatter"))
        (= destination (SourceDestination original))) ((BucketResult owner destination)) :ruleset planning-import)
 (rule ((PlannedOperation original owner plan region) (= destination (SourceDestination original))
