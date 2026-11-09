@@ -428,6 +428,15 @@ impl Body<'_, '_, '_> {
         let Some(resource) = self.compiler.facts.slot(operation, role, index) else {
             return Err(error(format!("missing {role} slot {index}")));
         };
+        self.optional_resource(scope, resource, access)
+    }
+
+    pub(in crate::egglog::to_ssa) fn optional_resource(
+        &mut self,
+        scope: Value,
+        resource: Value,
+        access: i64,
+    ) -> Result<Option<Typed>, OptimizeError> {
         if !self.local_resources.contains_key(&resource) && self.compiler.facts.backing(resource).is_none()
         {
             return Ok(None);

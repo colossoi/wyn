@@ -7,10 +7,6 @@ use egglog_engine::{sort::S, Value};
 
 pub enum OutputAction {
     Publish,
-    Pack {
-        predicate: Value,
-        input: Value,
-    },
     Updates,
 }
 
@@ -18,7 +14,7 @@ pub enum OutputAction {
 pub enum FoldOutput {
     Prefix(i64),
     Total(i64),
-    PackedLength,
+    LocalPrefix(Value),
 }
 
 pub struct AccumulatorComponent {
@@ -119,14 +115,8 @@ impl<'a, 'source> Facts<'a, 'source> {
     }
     pub fn action(&self, plan: Value) -> Result<OutputAction, OptimizeError> {
         let action = Query(&self.program.graph).required("PlanAction", (plan,))?;
-        if self.enode("Publish", action).is_some() {
+        if self.enode("Publish", action).is_some() || self.enode("Pack", action).is_some() {
             return Ok(OutputAction::Publish);
-        }
-        if let Some(f) = self.enode("Pack", action) {
-            return Ok(OutputAction::Pack {
-                predicate: f[0],
-                input: f[1],
-            });
         }
         if self.lookup("PlanUpdates", (plan,)).is_some() {
             return Ok(OutputAction::Updates);
@@ -211,8 +201,8 @@ impl<'a, 'source> Facts<'a, 'source> {
                     FoldOutput::Prefix(self.integer(fields[0]))
                 } else if let Some(fields) = self.enode("TotalOutput", row[3]) {
                     FoldOutput::Total(self.integer(fields[0]))
-                } else if self.enode("PackedLength", row[3]).is_some() {
-                    FoldOutput::PackedLength
+                } else if let Some(fields) = self.enode("LocalPrefix", row[3]) {
+                    FoldOutput::LocalPrefix(fields[0])
                 } else {
                     return Err(error("invalid fold output"));
                 };

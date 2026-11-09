@@ -501,6 +501,10 @@ fn direct_mode_keeps_collectives_in_the_authored_entry() {
         include_str!("../../tests/compiler/library/direct_collective_0.wyn"),
         include_str!("../../tests/compiler/library/direct_collective_1.wyn"),
         include_str!("../../testfiles/unified_triangle.wyn"),
+        "entry serial(xs:[4]i32) [4]i32=scan(|a,b|a*10+b,0,xs)
+         entry packed(xs:[4]i32) []i32=scan(|a,b|a*10+b,0,filter(|x|x!=0,xs))
+         entry retained(xs:[4]i32) []i32=map(|p|p.0+p.1,filter(|p|p.0!=0,map(|x|(x,if x==0 then 0 else 100/x),xs)))",
+
     ] {
         let prepared = pipeline::source(source);
         let ssa = pipeline::lower_with_options(

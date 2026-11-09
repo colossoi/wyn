@@ -1,7 +1,7 @@
 // Expand scheduled phases straight into SSA instructions and structured loops.
 use super::super::{error, Body, OptimizeError, Typed};
 use super::contribution::Contribution;
-use super::{invocation, updates, write_arrays};
+use super::{element, invocation, updates, write_arrays};
 use crate::builtins::catalog;
 use crate::egglog::facts::{AccumulatorComponent, FoldOutput, OutputAction};
 use crate::egglog::query::Query;
@@ -35,16 +35,10 @@ pub(super) fn screma(
         )?;
     }
     let final_outputs = Query(&body.compiler.program.graph).flag("FinalOutputPass", (plan,))?;
-    let packing = match body.compiler.facts.action(plan)? {
-        OutputAction::Pack { predicate, input } => Some((predicate, input)),
-        _ => None,
-    };
-    // Packing's count is a prefix fold. A serial recipe uses the same loop at width one.
-    let phase_width = if phase == "ordered" && packing.is_some() { 1 } else { phase_width };
-    let phase = if packing.is_some() { "local" } else { phase };
+    let phase_width = if phase == "ordered" || phase == "ordered-totals" { 1 } else { phase_width };
     let totals_only = matches!(phase, "ordered-totals" | "local-totals");
     let phase = match phase {
-        "ordered-totals" => "ordered",
+        "ordered" | "ordered-totals" | "compact" => "local",
         "local-totals" => "local",
         phase => phase,
     };
@@ -58,14 +52,7 @@ pub(super) fn screma(
     if totals_only {
         accumulators.retain(|a| matches!(a.output, FoldOutput::Total(_)));
     }
-    let packing = if let Some((predicate, input)) = packing {
-        let Some(index) = accumulators.iter().position(|a| a.output == FoldOutput::PackedLength) else {
-            return Err(error("packing requires a count prefix"));
-        };
-        Some((predicate, input, index))
-    } else {
-        None
-    };
+    let route = body.compiler.facts.record("PlanOutputRoute", "OutputAt", (plan,));
     let has_scans = accumulators.iter().any(|a| !matches!(a.output, FoldOutput::Total(_)));
     let reductions: Vec<_> = accumulators.iter().map(|a| &a.reduction).collect();
     let initial: Vec<_> = accumulators.iter().map(|a| a.reduction.neutral.clone()).collect();
@@ -73,36 +60,6 @@ pub(super) fn screma(
         return Err(error("collective domain missing"));
     };
     let n = body.extent(scope, domain)?;
-    if phase == "ordered" {
-        let zero = body.literal(0, &types::i32())?;
-        let one = body.literal(1, &types::i32())?;
-        let state = body.counted(zero.clone(), n, one, initial, |body, index, state| {
-            let mut cache = LookupMap::default();
-            let mut next = Vec::new();
-            for (accumulator, state) in accumulators.iter().zip(state) {
-                let value = accumulator.accumulate(body, scope, plan, state, &index, &mut cache)?;
-                cache.insert(accumulator.source, value.clone());
-                next.push(value);
-            }
-            if !totals_only {
-                write_output(body, scope, phase_owner, phase, plan, results, index, &mut cache)?;
-            }
-            Ok(next)
-        })?;
-        for (accumulator, value) in accumulators.iter().zip(state) {
-            let FoldOutput::Total(slot) = accumulator.output else {
-                continue;
-            };
-            if totals_only {
-                body.values.insert(accumulator.source, value);
-                continue;
-            }
-            if let Some(output) = body.output_target(scope, phase_owner, "total", slot)? {
-                output.store(body, &[zero.clone()], value)?;
-            }
-        }
-        return Ok(());
-    }
     let uint = Type::Constructed(TypeName::UInt(32), vec![]);
     let n = body.cast(n, &uint)?;
     let (chunks_width, groups) = if phase == "local" {
@@ -173,17 +130,13 @@ pub(super) fn screma(
                                     };
                                     let value = body.index(partial, index.clone())?;
                                     body.cast(value, &initial[i].ty)?
-                                } else if accumulator.output == FoldOutput::PackedLength {
-                                    packing_input(body, scope, plan, &index, &mut cache)?
                                 } else {
-                                    accumulator.accumulate(
-                                        body,
-                                        scope,
-                                        plan,
-                                        accumulator.reduction.neutral.clone(),
-                                        &index,
-                                        &mut cache,
-                                    )?
+                                    accumulator.input(body, scope, plan, &index, &mut cache)?
+                                };
+                                let value = if phase == "combine" {
+                                    body.tuple(vec![value, Body::number(1)])?
+                                } else {
+                                    value
                                 };
                                 values.push(value);
                             }
@@ -205,27 +158,23 @@ pub(super) fn screma(
                             body.tuple(values)
                         },
                         |body, ty| {
-                            let mut values = initial.clone();
-                            if let Some((_, _, i)) = packing {
-                                let Type::Constructed(TypeName::Tuple(_), fields) = ty else {
-                                    return Err(error("collective input tuple missing"));
-                                };
-                                values[i] = empty_retained(body, &fields[i])?;
-                            }
+                            let Type::Constructed(TypeName::Tuple(_), fields) = ty else {
+                                return Err(error("collective input tuple missing"));
+                            };
+                            let values = accumulators
+                                .iter()
+                                .zip(fields)
+                                .map(|(a, ty)| a.empty_input(body, ty))
+                                .collect::<Result<Vec<_>, _>>()?;
                             body.tuple(values)
                         },
                         None,
                     )?;
-                    let mut values = (0..accumulators.len())
+                    let inputs = (0..accumulators.len())
                         .map(|i| body.field(incoming.clone(), i))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let retained = if let Some((_, _, i)) = packing {
-                        let pair = values[i].clone();
-                        values[i] = body.field(pair.clone(), 0)?;
-                        Some(pair)
-                    } else {
-                        None
-                    };
+                    let values =
+                        inputs.iter().cloned().map(|v| body.field(v, 0)).collect::<Result<Vec<_>, _>>()?;
                     let mode = if !has_scans {
                         CollectiveOutput::Totals
                     } else if phase == "combine" {
@@ -233,39 +182,79 @@ pub(super) fn screma(
                     } else {
                         CollectiveOutput::Inclusive
                     };
-                    let (prefixes, totals) =
-                        workgroup_fold(body, scope, &reductions, values, lane.clone(), phase_width, mode)?;
+                    let (prefixes, totals) = if phase_width == 1 {
+                        let mut next = Vec::new();
+                        for ((accumulator, input), state) in accumulators.iter().zip(&inputs).zip(&carry) {
+                            let active = body.field(input.clone(), 1)?;
+                            let active = body.binary(Greater, active, Body::number(0))?;
+                            next.push(body.branch(
+                                scope,
+                                active,
+                                |body| {
+                                    let value = body.field(input.clone(), 0)?;
+                                    accumulator.reduction.combine(body, scope, state.clone(), value)
+                                },
+                                |_| Ok(state.clone()),
+                                None,
+                            )?);
+                        }
+                        let prefixes = if matches!(mode, CollectiveOutput::Exclusive) {
+                            carry.clone()
+                        } else {
+                            next.clone()
+                        };
+                        (prefixes, next)
+                    } else {
+                        let (prefixes, totals) = workgroup_fold(
+                            body,
+                            scope,
+                            &reductions,
+                            values,
+                            lane.clone(),
+                            phase_width,
+                            mode,
+                        )?;
+                        let prefixes = reductions
+                            .iter()
+                            .zip(carry.iter().zip(prefixes))
+                            .map(|(r, (a, b))| r.combine(body, scope, a.clone(), b))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let totals = reductions
+                            .iter()
+                            .zip(carry.iter().zip(totals))
+                            .map(|(r, (a, b))| r.combine(body, scope, a.clone(), b))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        (prefixes, totals)
+                    };
                     body.when(valid, |body| {
                         let mut cache = LookupMap::default();
-                        for (i, (accumulator, prefix)) in
-                            accumulators.iter().zip(prefixes.iter().cloned()).enumerate()
-                        {
+                        for (i, accumulator) in accumulators.iter().enumerate() {
+                            if phase != "combine" {
+                                for (j, &(formal, _)) in accumulator.retained.iter().enumerate() {
+                                    cache.insert(formal, body.field(inputs[i].clone(), j + 2)?);
+                                }
+                            }
                             let FoldOutput::Prefix(slot) = accumulator.output else {
                                 continue;
                             };
-                            let value =
-                                accumulators[i].reduction.combine(body, scope, carry[i].clone(), prefix)?;
                             if phase == "local" {
-                                cache.insert(accumulators[i].source, value);
+                                cache.insert(accumulator.source, prefixes[i].clone());
                             } else {
                                 let role = if phase == "combine" { "offset" } else { "prefix" };
                                 if let Some(output) = body.slot(scope, phase_owner, role, slot, 2)? {
-                                    body.store(output, index.clone(), value)?;
+                                    body.store(output, index.clone(), prefixes[i].clone())?;
                                 }
                             }
                         }
-                        if let (Some((predicate, input, i)), Some(retained)) = (packing, retained) {
-                            let flag = body.field(retained.clone(), 0)?;
-                            let selected = body.binary(Greater, flag, Body::number(0))?;
+                        if let Some(route) = &route {
+                            let Some(i) = accumulators.iter().position(|a| a.source == route[0]) else {
+                                return Err(error("output route refers to an unavailable prefix"));
+                            };
+                            let incoming = body.field(inputs[i].clone(), 0)?;
+                            let arguments = body.tuple(vec![incoming, prefixes[i].clone()])?;
+                            let selected = body.formula(scope, route[1], &arguments, &[])?;
                             return body.when(selected, |body| {
-                                let value = body.field(retained, 1)?;
-                                let Some(source) = body.compiler.facts.source(predicate) else {
-                                    return Err(error("packing result missing"));
-                                };
-                                cache.insert(input, value.clone());
-                                cache.insert(source, value);
-                                let prefix = body.binary(Add, carry[i].clone(), prefixes[i].clone())?;
-                                let destination = body.binary(Subtract, prefix, Body::number(1))?;
+                                let destination = body.formula(scope, route[2], &arguments, &[])?;
                                 super::write_arrays_at(
                                     body,
                                     scope,
@@ -292,13 +281,7 @@ pub(super) fn screma(
                         }
                         Ok(())
                     })?;
-                    accumulators
-                        .iter()
-                        .zip(carry.into_iter().zip(totals))
-                        .map(|(accumulator, (carry, total))| {
-                            accumulator.reduction.combine(body, scope, carry, total)
-                        })
-                        .collect()
+                    Ok(totals)
                 },
             )?;
             if totals_only {
@@ -312,8 +295,8 @@ pub(super) fn screma(
                 for (i, value) in state.into_iter().enumerate() {
                     if phase != "chunks" {
                         match accumulators[i].output {
-                            FoldOutput::PackedLength => {
-                                if let Some(output) = body.slot(scope, phase_owner, "length", 0, 2)? {
+                            FoldOutput::LocalPrefix(resource) => {
+                                if let Some(output) = body.optional_resource(scope, resource, 2)? {
                                     body.store(output, Body::number(0), value)?;
                                 }
                             }
@@ -551,6 +534,7 @@ struct Accumulator {
     output: FoldOutput,
     source: Value,
     contribution: Value,
+    retained: Vec<(Value, Value)>,
     reduction: Reduction,
 }
 
@@ -604,16 +588,28 @@ impl Accumulator {
             source,
             output: component.output,
             contribution: fields[1],
+            retained: body
+                .compiler
+                .facts
+                .vector(fields[2])?
+                .into_iter()
+                .map(|binding| {
+                    let Some(fields) = body.compiler.facts.enode("CaptureBinding", binding) else {
+                        return Err(error("invalid fold retained binding"));
+                    };
+                    Ok((fields[0], fields[1]))
+                })
+                .collect::<Result<_, _>>()?,
             reduction: Reduction { reducer, neutral },
         })
     }
 
-    fn accumulate(
+    // The activation field lets serial execution skip the reducer on rejected lanes.
+    fn input(
         &self,
         body: &mut Body<'_, '_, '_>,
         scope: Value,
         plan: Value,
-        state: Typed,
         index: &Typed,
         cache: &mut LookupMap<Value, Typed>,
     ) -> Result<Typed, OptimizeError> {
@@ -621,11 +617,37 @@ impl Accumulator {
             scope,
             plan,
             indices: std::slice::from_ref(index),
-            skipped: &|_, _| Ok(state.clone()),
+            skipped: &|body, ty| self.empty_input(body, ty),
         }
-        .emit(body, self.contribution, cache, &mut |body, _, incoming| {
-            self.reduction.combine(body, scope, state.clone(), incoming)
+        .emit(body, self.contribution, cache, &mut |body, cache, incoming| {
+            let value = body.cast(incoming, &self.reduction.neutral.ty)?;
+            let retained = self
+                .retained
+                .iter()
+                .map(|&(_, actual)| element(body, scope, plan, actual, std::slice::from_ref(index), cache))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut values = vec![value, Body::number(1)];
+            values.extend(retained);
+            body.tuple(values)
         })
+    }
+
+    fn empty_input(&self, body: &mut Body<'_, '_, '_>, ty: &Type) -> Result<Typed, OptimizeError> {
+        let Type::Constructed(TypeName::Tuple(_), fields) = ty else {
+            return Err(error("collective input tuple missing"));
+        };
+        let mut values = vec![self.reduction.neutral.clone(), Body::number(0)];
+        for ty in &fields[2..] {
+            values.push(body.op(
+                OpTag::Intrinsic {
+                    id: catalog().known().uninit,
+                    overload_idx: 0,
+                },
+                vec![],
+                ty.clone(),
+            )?);
+        }
+        body.tuple(values)
     }
 }
 
@@ -655,43 +677,4 @@ impl Reduction {
             }
         }
     }
-}
-
-fn empty_retained(body: &mut Body<'_, '_, '_>, ty: &Type) -> Result<Typed, OptimizeError> {
-    let Type::Constructed(TypeName::Tuple(_), fields) = ty else {
-        return Err(error("packing input pair missing"));
-    };
-    let unused = body.op(
-        OpTag::Intrinsic {
-            id: catalog().known().uninit,
-            overload_idx: 0,
-        },
-        vec![],
-        fields[1].clone(),
-    )?;
-    body.tuple(vec![Body::number(0), unused])
-}
-
-fn packing_input(
-    body: &mut Body<'_, '_, '_>,
-    scope: Value,
-    plan: Value,
-    index: &Typed,
-    cache: &mut LookupMap<Value, Typed>,
-) -> Result<Typed, OptimizeError> {
-    let Some(input) = body.compiler.facts.lookup("PackingContribution", (plan,)) else {
-        return Err(error("packing contribution missing"));
-    };
-    Contribution {
-        scope,
-        plan,
-        indices: std::slice::from_ref(index),
-        skipped: &empty_retained,
-    }
-    .emit(body, input, cache, &mut |body, _, pair| {
-        let flag = body.field(pair.clone(), 0)?;
-        let flag = body.cast(flag, &Body::number(0).ty)?;
-        let value = body.field(pair, 1)?;
-        body.tuple(vec![flag, value])
-    })
 }

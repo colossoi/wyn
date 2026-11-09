@@ -130,7 +130,8 @@
 (constructor SelectElement (Contribution Contribution) Contribution)
 (constructor TupleElements (Contributions) Contribution)
 (datatype Reducer (CombineWith RegionKey SourceValue) (AddValues TypeKey))
-(datatype Fold (FoldWith Reducer Contribution))
+(datatype Fold (FoldWith Reducer Contribution RegionCaptures))
+(function CountRetained (FusionPlan OperationKey SourceValue) RegionCaptures :no-merge)
 (function PlanFold (FusionPlan SourceValue) Fold :no-merge)
 (function StreamInput (FusionPlan SourceValue) Contribution :no-merge)
 (rule ((PlanMember plan op) (= input (SourceInput op i)) (= (PlanInternal plan input) false))
@@ -145,10 +146,10 @@
       ((set (StreamInput plan input) (SelectElement (ApplyElement predicate body (vec-of element)) element))) :ruleset fusion-signatures)
 (rule ((PlanMember plan op) (= neutral (SourceNeutral op)) (= value (SourceOperationValue op))
        (= input (SourceInput op 0)) (= element (StreamInput plan input)) (= body (SourceOperatorBody op)))
-      ((set (PlanFold plan value) (FoldWith (CombineWith body neutral) element))) :ruleset fusion-signatures)
+      ((set (PlanFold plan value) (FoldWith (CombineWith body neutral) element (vec-of)))) :ruleset fusion-signatures)
 (rule ((= value (CountValue origin op input)) (= ty (SourceType value)) (= element (StreamInput plan input))
-       (= body (SourceOperatorBody op)) (= predicate (SourceResult body)))
-      ((set (PlanFold plan (CountValue origin op input)) (FoldWith (AddValues ty) (ApplyElement predicate body (vec-of element))))) :ruleset fusion-signatures)
+       (= body (SourceOperatorBody op)) (= predicate (SourceResult body)) (= retained (CountRetained plan op input)))
+      ((set (PlanFold plan (CountValue origin op input)) (FoldWith (AddValues ty) (ApplyElement predicate body (vec-of element)) retained))) :ruleset fusion-signatures)
 
 (rule ((= (PlanBody plan) (ScalarBody)))
       ((set (PlanTotals plan) (NoResults)) (set (PlanScans plan) (NoResults))
@@ -221,11 +222,6 @@
 (rule ((Current group plan) (= (PlanAction plan) (Pack op input)) (CounterType ty))
       ((set (SourceType (CountValue plan op input)) ty)) :ruleset fusion-signatures)
 
-(function PackingContribution (FusionPlan) Contribution :no-merge)
-(rule ((Current group plan) (= (PlanAction plan) (Pack op input))
-       (= element (StreamInput plan input)) (= body (SourceOperatorBody op)) (= predicate (SourceResult body)))
-      ((set (PackingContribution plan) (TupleElements (vec-of (ApplyElement predicate body (vec-of element)) element)))) :ruleset fusion-signatures)
-
 ; Operand indexing belongs to the expression, including broadcast operands.
 (function MappedArguments (SourceArguments IndexMaps i64) Contributions :no-merge)
 (rule ((= (OperatorDefinition op) (ReserveOperator body destination inputs rank maps)))
@@ -248,6 +244,18 @@
 (datatype ScalarFormula
   (FormulaInput i64) (FormulaBound i64) (FormulaConstant i64)
   (FormulaExtent Extent) (FormulaBinary String ScalarFormula ScalarFormula))
+(datatype OutputRoute (OutputAt SourceValue ScalarFormula ScalarFormula))
+(function PlanOutputRoute (FusionPlan) OutputRoute :no-merge)
+; Retained bindings carry map values across the collective barrier. Output
+; formulas receive the contributing value and its completed inclusive prefix.
+(rule ((ScremaPlan plan) (PlanMember plan op) (= value (CountValue origin op input)))
+      ((set (CountRetained plan op input) (vec-of))) :ruleset fusion-signatures)
+(rule ((Current group plan) (= (PlanAction plan) (Pack op input)) (= result (SourceOperationValue op)))
+      ((set (CountRetained plan op input) (vec-of (CaptureBinding input input) (CaptureBinding result input)))
+       (set (PlanOutputRoute plan) (OutputAt (CountValue plan op input)
+          (FormulaBinary ">" (FormulaInput 0) (FormulaConstant 0))
+          (FormulaBinary "-" (FormulaInput 1) (FormulaConstant 1))))) :ruleset fusion-signatures)
+
 (sort UpdateCoordinates (Vec ScalarFormula))
 (datatype UpdateProgram
   (UpdatesDone)
