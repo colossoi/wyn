@@ -308,11 +308,11 @@ fn write_arrays_at(
             continue;
         }
         let output = body.output_target(scope, operation, "output", position)?;
-        let tiled = body.compiler.facts.set("TiledOutputs", (operation, *slot));
-        if output.is_some() || !tiled.is_empty() {
+        let mappings = body.compiler.facts.set("MappedOutputs", (operation, *slot));
+        if output.is_some() || !mappings.is_empty() {
             let value = element(body, scope, plan, *source, indices, cache)?;
-            for destination in tiled {
-                body.store_tiled(scope, destination, destinations[0].clone(), value.clone())?;
+            for destination in mappings {
+                body.store_mapped(scope, destination, destinations[0].clone(), value.clone())?;
             }
             if let Some(output) = output {
                 output.store(body, destinations, value)?;

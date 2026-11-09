@@ -39,8 +39,8 @@ pub(super) fn emit(
         };
         for (_, slot, _) in results.iter().filter(|r| r.0 == "array") {
             let output = body.slot(scope, owner, "output", *slot, 2)?;
-            let tiled = body.compiler.facts.set("TiledOutputs", (owner, *slot));
-            if output.is_none() && tiled.is_empty() {
+            let mappings = body.compiler.facts.set("MappedOutputs", (owner, *slot));
+            if output.is_none() && mappings.is_empty() {
                 continue;
             }
             let Some(traversal) = body.compiler.facts.lookup("MapOutputTraversal", (owner, *slot)) else {
@@ -75,8 +75,8 @@ pub(super) fn emit(
                         body.workgroup_width = previous;
                         body.invocation_execution = previous_execution;
                         let value = value?;
-                        for destination in &tiled {
-                            body.store_tiled(scope, *destination, indices[0].clone(), value.clone())?;
+                        for destination in &mappings {
+                            body.store_mapped(scope, *destination, indices[0].clone(), value.clone())?;
                         }
                         let Some(output) = &output else {
                             return Ok(());

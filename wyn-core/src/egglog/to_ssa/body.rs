@@ -17,6 +17,7 @@ use wyn_graph::DominatorTree;
 
 mod collective;
 mod control;
+mod formulas;
 mod materialize;
 mod readout;
 mod resources;

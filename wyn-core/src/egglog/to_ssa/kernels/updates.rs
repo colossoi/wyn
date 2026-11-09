@@ -6,7 +6,7 @@ use crate::op::{BinaryOperator, OpTag};
 use crate::ssa::types::{AtomicOp, InstKind};
 use crate::types;
 use crate::LookupMap;
-use egglog_engine::{sort::S, Value};
+use egglog_engine::Value;
 
 #[derive(Clone, Copy)]
 enum Update {
@@ -159,7 +159,7 @@ impl Capabilities {
             return Ok(());
         }
         if let Some(fields) = body.compiler.facts.enode("ChooseUpdates", program) {
-            let condition = expression(body, scope, fields[0], input, bound)?;
+            let condition = body.formula(scope, fields[0], input, bound)?;
             body.branch(
                 scope,
                 condition,
@@ -186,9 +186,9 @@ impl Capabilities {
             .facts
             .vector(fields[1])?
             .into_iter()
-            .map(|value| expression(body, scope, value, input, bound))
+            .map(|value| body.formula(scope, value, input, bound))
             .collect::<Result<Vec<_>, _>>()?;
-        let value = expression(body, scope, fields[2], input, bound)?;
+        let value = body.formula(scope, fields[2], input, bound)?;
         let result = if matches!(mode, Update::Store) {
             body.store_at(output.clone(), &coordinates, value.clone())?;
             value
@@ -206,43 +206,6 @@ impl Capabilities {
         bound.push(result);
         self.emit(body, scope, fields[3], input, &bound)
     }
-}
-
-fn expression(
-    body: &mut Body<'_, '_, '_>,
-    scope: Value,
-    value: Value,
-    input: &Typed,
-    bound: &[Typed],
-) -> Result<Typed, OptimizeError> {
-    if let Some(fields) = body.compiler.facts.enode("UpdateInput", value) {
-        return body.field(
-            input.clone(),
-            body.compiler.facts.unsigned(fields[0], "update input")? as usize,
-        );
-    }
-    if let Some(fields) = body.compiler.facts.enode("UpdateBound", value) {
-        let index = body.compiler.facts.unsigned(fields[0], "update binding")? as usize;
-        let Some(value) = bound.iter().rev().nth(index) else {
-            return Err(error("update binding is out of scope"));
-        };
-        return Ok(value.clone());
-    }
-    if let Some(fields) = body.compiler.facts.enode("UpdateConstant", value) {
-        return body.literal(body.compiler.facts.integer(fields[0]), &types::i32());
-    }
-    if let Some(fields) = body.compiler.facts.enode("UpdateExtent", value) {
-        return body.extent(scope, fields[0]);
-    }
-    let Some(fields) = body.compiler.facts.enode("UpdateBinary", value) else {
-        return Err(error("invalid update expression"));
-    };
-    let name = body.compiler.program.graph.value_to_base::<S>(fields[0]);
-    let operator =
-        BinaryOperator::try_from(name.as_str()).map_err(|_| error("invalid update binary operator"))?;
-    let left = expression(body, scope, fields[1], input, bound)?;
-    let right = expression(body, scope, fields[2], input, bound)?;
-    body.binary(operator, left, right)
 }
 
 fn capabilities(

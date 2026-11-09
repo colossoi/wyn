@@ -280,36 +280,29 @@ impl Body<'_, '_, '_> {
 
 impl Body<'_, '_, '_> {
     /// Emit the selected output address mapping without materializing a row buffer.
-    pub fn store_tiled(
+    pub fn store_mapped(
         &mut self,
         scope: Value,
         destination: Value,
         row: Typed,
         value: Typed,
     ) -> Result<(), OptimizeError> {
-        let Some(fields) = self.compiler.facts.enode("TiledDestinationInfo", destination) else {
-            return Err(error("invalid tiled output destination"));
+        let Some(fields) = self.compiler.facts.enode("OutputMappingInfo", destination) else {
+            return Err(error("invalid output mapping"));
         };
         let Some(resource) = self.compiler.facts.constructor("Result", (fields[0], 0i64)) else {
-            return Err(error("tiled output resource missing"));
+            return Err(error("mapped output resource missing"));
         };
         let output = self.resource(scope, resource, 2)?;
-        let tile = Self::number(self.compiler.facts.positive(fields[1], "output tile width")?);
-        let columns = Self::number(self.compiler.facts.positive(fields[2], "output columns")?);
-        let row = self.cast(row, &Self::number(0).ty)?;
-        let block = self.binary(BinaryOperator::Divide, row.clone(), tile.clone())?;
-        let block = self.binary(BinaryOperator::Multiply, block, columns.clone())?;
-        let block = self.binary(BinaryOperator::Multiply, block, tile.clone())?;
-        let lane = self.binary(BinaryOperator::Remainder, row, tile.clone())?;
-        let base = self.binary(BinaryOperator::Add, block, lane)?;
+        let columns = self.extent(scope, fields[1])?;
         self.counted(
             Self::number(0),
             columns,
             Self::number(1),
             vec![],
             |body, column, _| {
-                let offset = body.binary(BinaryOperator::Multiply, column.clone(), tile.clone())?;
-                let address = body.binary(BinaryOperator::Add, base.clone(), offset)?;
+                let coordinates = body.tuple(vec![row.clone(), column.clone()])?;
+                let address = body.formula(scope, fields[2], &coordinates, &[])?;
                 let item = body.index(value.clone(), column)?;
                 body.store(output.clone(), address, item)?;
                 Ok(vec![])

@@ -1332,14 +1332,14 @@ fn tiled_outputs_require_complete_tiles_and_preserve_other_consumers() {
                     let query = Query(graph);
                     let mut destinations = 0;
                     query
-                        .for_function("TiledOutputs", |_, _| {
+                        .for_function("MappedOutputs", |_, _| {
                             destinations += 1;
                             Ok(())
                         })
                         .unwrap();
                     assert_eq!(destinations, usize::from(fused), "{source}");
                     query
-                        .for_each("TiledOutput", |row| {
+                        .for_each("MappedOutput", |row| {
                             let producer = row[0];
                             let slot = row[1];
                             let gather = row[2];
@@ -1603,7 +1603,7 @@ fn update_handles_and_reservation_results_cannot_escape_their_scope() {
             .update(|mut sink| {
                 let handle =
                     if invalid_handle { sink.add("ScopedUpdate", (plan, 99i64))? } else { update[0] };
-                let value = if invalid_handle { update[2] } else { sink.add("UpdateBound", 0i64)? };
+                let value = if invalid_handle { update[2] } else { sink.add("FormulaBound", 0i64)? };
                 let program = sink.add("BindUpdate", (handle, update[1], value, update[3]))?;
                 let scope = sink.add("WithUpdates", (scope[0], scope[1], program))?;
                 sink.set("PlanUpdates", plan, scope)?;
@@ -1613,4 +1613,36 @@ fn update_handles_and_reservation_results_cannot_escape_their_scope() {
         let error = super::super::to_ssa::lower(&prepared.program, CodegenTarget::Wgsl).unwrap_err();
         assert!(error.to_string().contains(expected), "{error}");
     }
+}
+
+#[test]
+fn output_coordinate_maps_accept_permutations_and_reject_overlapping_digits() {
+    let coordinates = [
+        ("a/2", "a%2", 8, true),
+        ("a%8", "a/8", 8, true),
+        ("4*(a/8)+a%4", "(a/4)%2", 8, true),
+        ("4*(a%2)+2*((a/4)%2)+a/8", "(a/2)%2", 8, true),
+        ("a%8", "a%2", 8, false),
+        ("a%8", "a/8", 4, false),
+        ("(a/2)%4+4*(a/3)", "a%2", 8, false),
+    ];
+    let sources = coordinates.map(|(row, column, bound, _)| {
+        format!(
+            "entry main() [16]i32=let rows=map(|i|[10*i,10*i+1],iota(8)) in
+         map(|a|let r={row} in if r<{bound} then rows[r][{column}] else -1,iota(16))"
+        )
+    });
+    planned_cases(&sources, |index, graph, region| {
+        let query = Query(graph);
+        let mut mapped = 0;
+        query
+            .for_each("MappedOutput", |row| {
+                if query.required("OperationRegion", (row[0],))? == region {
+                    mapped += 1;
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(mapped, usize::from(coordinates[index].3), "{}", sources[index]);
+    });
 }
