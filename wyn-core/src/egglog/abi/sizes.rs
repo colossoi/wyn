@@ -161,38 +161,16 @@ pub(in crate::egglog) fn extent(compiler: &Compiler<'_, '_>, key: Value) -> Resu
     if let Some(count) = compiler.facts.lookup("StaticCapacityBound", (key,)) {
         return Ok(Expr::Integer(compiler.facts.integer(count)));
     }
-    if compiler.program.stage.selected.extents.contains_key(&key) {
-        return Ok(Expr::Scalar(
-            host::allocation(compiler.program, key).map_err(|e| e.required("allocation extent"))?,
-        ));
-    }
-    let Some((name, children)) = compiler.facts.extent(key) else {
-        return Err(error("host extent missing"));
-    };
-    match name {
-        "Fixed" => Ok(Expr::Integer(
-            compiler.program.graph.value_to_base::<i64>(children[0]),
-        )),
-        "Length" | "Scalar" => Ok(
-            match host::allocation(compiler.program, key).map_err(|e| e.required("allocation extent"))? {
-                ScalarExpr::I32(value) => Expr::Integer(value.into()),
-                ScalarExpr::U32(value) => Expr::Integer(value.into()),
-                ScalarExpr::BufferLength { source, stride } => Expr::BufferLength { source, stride },
-                value => Expr::Scalar(value),
-            },
-        ),
-        "Product" => Ok(extent(compiler, children[0])?.multiply(extent(compiler, children[1])?)),
-        "Sum" => Ok(Expr::Add(
-            Box::new(extent(compiler, children[0])?),
-            Box::new(extent(compiler, children[1])?),
-        )),
-        "Difference" => Ok(Expr::Subtract(
-            Box::new(extent(compiler, children[0])?),
-            Box::new(extent(compiler, children[1])?),
-        )),
-        _ => Err(error("unsupported host extent")),
-    }
+    Ok(
+        match host::allocation(compiler.program, key).map_err(|e| e.required("allocation extent"))? {
+            ScalarExpr::I32(value) => Expr::Integer(value.into()),
+            ScalarExpr::U32(value) => Expr::Integer(value.into()),
+            ScalarExpr::BufferLength { source, stride } => Expr::BufferLength { source, stride },
+            value => Expr::Scalar(value),
+        },
+    )
 }
+
 fn allocation_bound(
     compiler: &Compiler<'_, '_>,
     buffer: Value,

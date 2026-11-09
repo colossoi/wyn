@@ -133,75 +133,59 @@ impl<'a, 'source> Lower<'a, 'source> {
                 return self.extent(bound);
             }
         }
-        if let Some(&term) = self.facts.program.stage.selected.extents.get(&extent) {
-            return self.term(term);
-        }
-        if let Some(fields) = self.facts.enode("Fixed", extent) {
-            return Ok(ScalarExpr::I32(
-                i32::try_from(self.facts.integer(fields[0]))
-                    .map_err(|_| error("logical length exceeds i32"))?,
-            ));
-        }
-        if let Some(fields) = self.facts.enode("Length", extent) {
-            let source = fields[0];
-            if self.facts.lookup("LogicalExtent", (source,)) != Some(extent) {
-                return self.length(source);
-            }
-            if let Some((binding, stride)) = self.facts.input_storage(source)? {
-                return Ok(ScalarExpr::BufferLength {
-                    source: ScalarSource::Binding {
-                        set: binding.set,
-                        binding: binding.binding,
-                    },
-                    stride,
-                });
-            }
-            if self
-                .facts
-                .lookup("SourceParameterRegion", (source,))
-                .is_some_and(|region| self.facts.entry_region(region))
-            {
-                return Err(error(format!("array {source:?} has no host length input")).into());
-            }
-            // Invocation-local views have no host-readable descriptor.
-            return Err(Error::Unsupported);
-        }
-        if let Some(fields) = self.facts.enode("Scalar", extent) {
-            let source = fields[0];
-            let Some(context) = self.facts.lookup("ExprContextForSource", (source,)) else {
-                return Err(error("host extent has no selected scalar context").into());
-            };
-            return self.source(context, source);
-        }
-        for (name, op) in [("Sum", "add"), ("Difference", "sub"), ("Product", "mul")] {
-            if let Some(fields) = self.facts.enode(name, extent) {
-                return Ok(apply(
-                    op,
-                    ScalarType::I32,
-                    vec![self.extent(fields[0])?, self.extent(fields[1])?],
-                ));
+        let Some(&term) = self.facts.program.stage.selected.extents.get(&extent) else {
+            return Err(error("host extent has no selected expression").into());
+        };
+        self.term(term)
+    }
+    fn array_length(&mut self, source: Value) -> Result<ScalarExpr> {
+        if let Some(extent) = self.facts.lookup("LogicalExtent", (source,)) {
+            if self.facts.enode("Length", extent).is_none_or(|fields| fields[0] != source) {
+                return self.extent(extent);
             }
         }
-        // Device counts require readback. Capacity bounds are not logical lengths.
-        if let Some(fields) = self.facts.enode("Stored", extent) {
-            let read = self.device_read.ok_or(Error::Unsupported)?;
-            let count = read(fields[0])?.ok_or(Error::Unsupported)?;
-            // Device counters are u32; Wyn length arithmetic is i32.
-            return Ok(
-                if matches!(
-                    count,
-                    ScalarExpr::Read {
-                        ty: ScalarType::U32,
-                        ..
-                    }
-                ) {
-                    apply("to-i32", ScalarType::U32, vec![count])
-                } else {
-                    count
+        if let Some((binding, stride)) = self.facts.input_storage(source)? {
+            return Ok(ScalarExpr::BufferLength {
+                source: ScalarSource::Binding {
+                    set: binding.set,
+                    binding: binding.binding,
                 },
-            );
+                stride,
+            });
         }
-        Err(error("unsupported selected logical extent").into())
+        if self
+            .facts
+            .lookup("SourceParameterRegion", (source,))
+            .is_some_and(|region| self.facts.entry_region(region))
+        {
+            return Err(error(format!("array {source:?} has no host length input")).into());
+        }
+        Err(Error::Unsupported)
+    }
+    fn stored_count(&mut self, resource: Value) -> Result<ScalarExpr> {
+        if self.capacity_bounds {
+            if let Some(extent) = self.facts.constructor("Stored", (resource,)) {
+                if let Some(bound) = self.facts.lookup("HostBound", (extent,)) {
+                    return self.extent(bound);
+                }
+            }
+        }
+        let read = self.device_read.ok_or(Error::Unsupported)?;
+        let count = read(resource)?.ok_or(Error::Unsupported)?;
+        // Device counters are u32; Wyn length arithmetic is i32.
+        Ok(
+            if matches!(
+                count,
+                ScalarExpr::Read {
+                    ty: ScalarType::U32,
+                    ..
+                }
+            ) {
+                apply("to-i32", ScalarType::U32, vec![count])
+            } else {
+                count
+            },
+        )
     }
     fn name(&mut self) -> String {
         let name = format!("value{}", self.next);
@@ -462,7 +446,8 @@ impl<'a, 'source> Lower<'a, 'source> {
             return Err(error("host expression type missing").into());
         };
         let value = match name {
-            "ExprLength" => self.length(selected.values[f[2]])?,
+            "ExprLength" => self.array_length(selected.values[f[2]])?,
+            "ExprStoredCount" => self.stored_count(selected.values[f[2]])?,
             "ExprLeaf" | "ExprExecute" => self.boundary(context, selected.values[f[2]])?,
             "ExprParameter" => {
                 let Some(source) = self.facts.parameter(selected.values[f[2]], selected.integer(f[3])?)

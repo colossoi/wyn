@@ -165,6 +165,12 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         let value = {
             match name {
                 "ExprLength" => self.source_length(scope, selected.values[fields[2]])?,
+                "ExprStoredCount" => {
+                    let view = self.resource(scope, selected.values[fields[2]], 1)?;
+                    let zero = self.literal(0, &types::i32())?;
+                    let count = self.index(view, zero)?;
+                    self.cast(count, &ty)?
+                }
                 "ExprLeaf" => {
                     let source = selected.values[fields[2]];
                     // A source boundary can have its own optimized root in this

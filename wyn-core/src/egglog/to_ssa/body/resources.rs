@@ -477,48 +477,9 @@ impl Body<'_, '_, '_> {
         scope: Value,
         extent: Value,
     ) -> Result<Typed, OptimizeError> {
-        if let Some(&term) = self.compiler.program.stage.selected.extents.get(&extent) {
-            return self.scalar_body(scope, term);
-        }
-        let Some((name, children)) = self.compiler.facts.extent(extent) else {
-            return Err(error("unknown extent"));
+        let Some(&term) = self.compiler.program.stage.selected.extents.get(&extent) else {
+            return Err(error(format!("extent {extent:?} has no selected expression")));
         };
-        match name {
-            "Fixed" => {
-                let n = self.compiler.program.graph.value_to_base::<i64>(children[0]);
-                self.literal((n) as i64, &types::i32())
-            }
-            "Length" | "Scalar" => {
-                let source = children[0];
-                if name == "Length" {
-                    self.source_length(scope, source)
-                } else {
-                    let Some(context) = self.compiler.facts.lookup("ExprContextForSource", (source,))
-                    else {
-                        return Err(error("extent has no scalar context"));
-                    };
-                    let old_context = std::mem::replace(&mut self.context, context);
-                    let result = self.value(scope, source);
-                    self.context = old_context;
-                    result
-                }
-            }
-            "Stored" => {
-                let view = self.resource(scope, children[0], 1)?;
-                let zero = self.literal(0, &types::i32())?;
-                self.index(view, zero)
-            }
-            "Sum" | "Product" | "Difference" => {
-                let a = self.extent(scope, children[0])?;
-                let b = self.extent(scope, children[1])?;
-                let op = match name {
-                    "Sum" => BinaryOperator::Add,
-                    "Product" => BinaryOperator::Multiply,
-                    _ => BinaryOperator::Subtract,
-                };
-                self.binary(op, a, b)
-            }
-            _ => Err(error("invalid extent constructor")),
-        }
+        self.scalar_body(scope, term)
     }
 }
