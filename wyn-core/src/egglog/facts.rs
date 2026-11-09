@@ -3,10 +3,11 @@ use super::{output_error as error, query::Query, OptimizeError, Optimized, Progr
 use crate::types::{self, Type};
 use crate::BindingRef;
 use crate::SymbolId;
-use egglog_engine::sort::{SetContainer, VecContainer, S};
+use egglog_engine::sort::{SetContainer, VecContainer};
 use egglog_engine::{IntoValues, Value};
 
 mod plan;
+pub(super) use plan::OutputAction;
 
 pub(super) struct Facts<'a, 'source> {
     pub program: &'a Program<'source, Optimized>,
@@ -131,18 +132,6 @@ impl<'a, 'source> Facts<'a, 'source> {
     }
     pub fn operation(&self, value: Value) -> Option<Value> {
         self.lookup("SourceValueOperation", (value,))
-    }
-    pub fn operation_kind(&self, operation: Value) -> Result<String, OptimizeError> {
-        let Some(info) = self.record("SourceOperation", "OperationInfo", (operation,)) else {
-            return Err(error("operation has no source kind"));
-        };
-        Ok(self.program.graph.value_to_base::<S>(info[1]).to_string())
-    }
-    pub fn neutral(&self, operation: Value) -> Result<Value, OptimizeError> {
-        let Some(value) = self.lookup("SourceNeutral", (operation,)) else {
-            return Err(error("accumulator has no neutral value"));
-        };
-        Ok(value)
     }
     pub fn loop_initial(&self, region: Value) -> Result<Value, OptimizeError> {
         let Some(info) = self.record("SourceLoopInitial", "LoopInitialInfo", (region,)) else {
@@ -356,29 +345,9 @@ impl<'a, 'source> Facts<'a, 'source> {
         let info = self.record("SourceSlice", "SliceInfo", (value,))?;
         Some((info[0], info[1], info[2]))
     }
-    pub fn input(&self, operation: Value, index: i64) -> Option<Value> {
-        self.group(operation)?;
-        self.lookup("SourceInput", (operation, index))
-    }
     pub fn inputs(&self, operation: Value) -> Result<Vec<(i64, Value)>, OptimizeError> {
-        let Some(_) = self.group(operation) else {
-            return Err(error("operation has no fusion plan"));
-        };
-        let Some(count) = self.lookup("SourceInputCount", (operation,)) else {
-            return Err(error("operation has no input count"));
-        };
-        let count = self.integer(count);
-        if count < 0 {
-            return Err(error("operation input count is negative"));
-        }
-        (0..count)
-            .map(|index| {
-                let Some(value) = self.input(operation, index) else {
-                    return Err(error("operation input is missing"));
-                };
-                Ok((index, value))
-            })
-            .collect()
+        let inputs = Query(&self.program.graph).required("OperatorInputs", (operation,))?;
+        Ok(self.vector(inputs)?.into_iter().enumerate().map(|(i, value)| (i as i64, value)).collect())
     }
     pub fn captures(&self, scope: Value) -> Result<Vec<(Value, Value)>, OptimizeError> {
         self.set("SourceCapturedFormals", (scope,))

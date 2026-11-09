@@ -409,7 +409,7 @@ impl Body<'_, '_, '_> {
         &mut self,
         initial: Typed,
         emit: impl FnOnce(&mut Self, Typed) -> Result<Typed, OptimizeError>,
-    ) -> Result<(), OptimizeError> {
+    ) -> Result<Typed, OptimizeError> {
         let (header, parameters) = self.builder.create_block_with_params(vec![initial.ty.clone()]);
         let active = self.builder.create_block();
         let continuing = self.builder.create_block();
@@ -441,7 +441,7 @@ impl Body<'_, '_, '_> {
         })
         .map_err(builder_error)?;
         self.builder.switch_to_block_unchecked(active);
-        let next = emit(self, state)?;
+        let next = emit(self, state.clone())?;
         self.terminate(Terminator::Branch {
             target: continuing,
             args: vec![],
@@ -454,6 +454,6 @@ impl Body<'_, '_, '_> {
         })
         .map_err(builder_error)?;
         self.builder.switch_to_block_unchecked(done);
-        Ok(())
+        Ok(state)
     }
 }

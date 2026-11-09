@@ -66,7 +66,7 @@ pub(super) fn import(source: &OwnershipApplied) -> Result<(EGraph, Identities), 
     })??;
     graph.parse_and_run_program(
         None,
-        "(run-schedule (saturate flow-forward source-forwarding) flow-projections source-projections)",
+        "(run-schedule (saturate operator-structure) (saturate flow-forward source-forwarding) flow-projections source-projections)",
     )?;
     Ok((graph, identities))
 }
@@ -334,16 +334,21 @@ impl<'source> Import<'_, '_, '_, 'source> {
         Ok(value)
     }
 
-    fn operation(&mut self, value: Value, kind: &str, scope: &Scope) -> Result<Value, OptimizeError> {
+    fn operation(
+        &mut self,
+        value: Value,
+        kind: Option<&str>,
+        scope: &Scope,
+    ) -> Result<Value, OptimizeError> {
         let operation = self.sink.add("OperationId", self.operations.next_id())?;
-        let info = self.sink.add("OperationInfo", (scope.key, kind))?;
-        self.sink.set("SourceOperation", operation, info)?;
+        if let Some(kind) = kind {
+            let node = self.sink.add("ScalarOperator", kind)?;
+            let definition = self.sink.add("DefinedIn", (scope.key, node))?;
+            self.sink.set("OperatorDefinition", operation, definition)?;
+        }
         self.sink.set("SourceOperationValue", operation, value)?;
         self.operations_by_value.insert(value, operation);
         self.operation_regions.insert(scope.key);
-        if matches!(kind, "control" | "call" | "index" | "global") {
-            self.sink.set("SourceInputCount", operation, 0i64)?;
-        }
         Ok(operation)
     }
 
@@ -445,7 +450,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                             Some(Type::Constructed(TypeName::Size(_), _))
                         ))
                 {
-                    self.operation(value, "control", scope)?;
+                    self.operation(value, Some("control"), scope)?;
                 }
             }
             TermKind::Loop {
@@ -467,7 +472,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                     body,
                     scope,
                 )?;
-                self.operation(value, "control", scope)?;
+                self.operation(value, Some("control"), scope)?;
             }
             TermKind::Soac(soac) => self.soac(value, soac, scope)?,
             TermKind::ArrayExpr(array) => {
@@ -495,7 +500,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 }
                 self.arguments(value, arguments)?;
                 if !facts::scalar_application(func, args, &term.ty) {
-                    self.operation(value, "call", scope)?;
+                    self.operation(value, Some("call"), scope)?;
                 }
             }
             TermKind::Index { array, index } => {
@@ -503,7 +508,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 self.sink.set("SourceIndexedArray", value, input)?;
                 let index = self.operand(index, value, scope)?;
                 self.sink.set("SourceIndex", value, index)?;
-                self.operation(value, "index", scope)?;
+                self.operation(value, Some("index"), scope)?;
             }
             TermKind::Closure(closure) => {
                 let code = self.resolve(closure.code)?;
@@ -619,10 +624,9 @@ impl<'source> Import<'_, '_, '_, 'source> {
     fn operator_body(
         &mut self,
         body: &'source OperatorBody,
-        operation: Value,
         owner: Value,
         parent: &mut Scope,
-    ) -> Result<(), OptimizeError> {
+    ) -> Result<Value, OptimizeError> {
         let captures = body
             .data
             .captures
@@ -631,7 +635,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
             .collect::<Result<Vec<_>, _>>()?;
         let Lambda { params, body, ret_ty } = &body.lam;
         let mut scope = self.scope(Some(body), Some(parent.key))?;
-        self.sink.set("SourceOperatorBody", operation, scope.key)?;
         self.sink.add("SourceEnters", (owner, scope.key))?;
         let checkpoint = self.bindings.checkpoint();
         let mut captured = Vec::new();
@@ -658,7 +661,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             self.finish_body(body, &mut scope)?;
         }
         self.bindings.restore(checkpoint);
-        Ok(())
+        Ok(scope.key)
     }
 
     fn array(
@@ -725,65 +728,58 @@ impl<'source> Import<'_, '_, '_, 'source> {
         Ok(value)
     }
 
-    fn input(
-        &mut self,
-        array: &'source ArrayExpr<ExplicitClosurePayload, ExplicitCapturesPayload>,
-        operation: Value,
-        index: i64,
-        owner: Value,
-        scope: &mut Scope,
-    ) -> Result<(), OptimizeError> {
-        let value = self.array(array, owner, scope)?;
-        self.sink.set("SourceInput", (operation, index), value)?;
-
-        Ok(())
-    }
-
     fn soac(
         &mut self,
         value: Value,
         soac: &'source SoacOp<ExplicitClosurePayload, ExplicitCapturesPayload>,
         scope: &mut Scope,
     ) -> Result<(), OptimizeError> {
-        let (kind, body) = match soac {
-            SoacOp::Map { lam, .. } => ("map", lam),
-            SoacOp::Reduce { op, .. } => ("reduce", op),
-            SoacOp::Scan { op, .. } => ("scan", op),
-            SoacOp::Filter { pred, .. } => ("filter", pred),
-            SoacOp::Scatter { lam, .. } => ("scatter", lam),
-            SoacOp::BucketScatter { lam, .. } => ("bucket-scatter", lam),
-            SoacOp::ReduceByIndex { op, .. } => ("reduce-by-index", op),
+        let operation = self.operation(value, None, scope)?;
+        let body = match soac {
+            SoacOp::Map { lam, .. } | SoacOp::Scatter { lam, .. } | SoacOp::BucketScatter { lam, .. } => {
+                lam
+            }
+            SoacOp::Reduce { op, .. } | SoacOp::Scan { op, .. } | SoacOp::ReduceByIndex { op, .. } => op,
+            SoacOp::Filter { pred, .. } => pred,
         };
-        let operation = self.operation(value, kind, scope)?;
-        self.operator_body(body, operation, value, scope)?;
-        let count = match soac {
+        let body = self.operator_body(body, value, scope)?;
+        let node = match soac {
             SoacOp::Map { inputs, .. }
             | SoacOp::Scatter { inputs, .. }
-            | SoacOp::BucketScatter { inputs, .. } => inputs.len(),
-            SoacOp::Reduce { .. } | SoacOp::Scan { .. } | SoacOp::Filter { .. } => 1,
-            SoacOp::ReduceByIndex { .. } => 2,
-        };
-        self.sink.set("SourceInputCount", operation, count as i64)?;
-        match soac {
-            SoacOp::Map { inputs, .. } => {
-                for (index, input) in inputs.iter().enumerate() {
-                    self.input(input, operation, index as i64, value, scope)?;
+            | SoacOp::BucketScatter { inputs, .. } => {
+                let inputs = inputs
+                    .iter()
+                    .map(|input| self.array(input, value, scope))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let inputs = self.sink.container_to_value(VecContainer {
+                    data: inputs,
+                    do_rebuild: true,
+                });
+                match soac {
+                    SoacOp::Scatter { dest, .. } | SoacOp::BucketScatter { dest, .. } => {
+                        let destination = self.resolve(dest.id)?;
+                        self.sink.add("SourceDirectUse", (value, destination))?;
+                        self.use_value(value, destination, false)?;
+                        let constructor = if matches!(soac, SoacOp::Scatter { .. }) {
+                            "WriteOperator"
+                        } else {
+                            "ReserveOperator"
+                        };
+                        self.sink.add(constructor, (body, destination, inputs))?
+                    }
+                    _ => self.sink.add("MapOperator", (body, inputs))?,
                 }
             }
             SoacOp::Reduce { ne, input, .. } | SoacOp::Scan { ne, input, .. } => {
                 let neutral = self.operand(ne, value, scope)?;
-                self.sink.set("SourceNeutral", operation, neutral)?;
-                self.input(input, operation, 0, value, scope)?;
+                let input = self.array(input, value, scope)?;
+                let mode = if matches!(soac, SoacOp::Reduce { .. }) { "FoldTotal" } else { "FoldPrefix" };
+                let mode = self.sink.add(mode, RawValues(vec![]))?;
+                self.sink.add("FoldOperator", (mode, body, neutral, input))?
             }
-            SoacOp::Filter { input, .. } => self.input(input, operation, 0, value, scope)?,
-            SoacOp::Scatter { dest, inputs, .. } | SoacOp::BucketScatter { dest, inputs, .. } => {
-                let destination = self.resolve(dest.id)?;
-                self.sink.add("SourceDirectUse", (value, destination))?;
-                self.sink.set("SourceDestination", operation, destination)?;
-                self.use_value(value, destination, false)?;
-                for (index, input) in inputs.iter().enumerate() {
-                    self.input(input, operation, index as i64, value, scope)?;
-                }
+            SoacOp::Filter { input, .. } => {
+                let input = self.array(input, value, scope)?;
+                self.sink.add("PackOperator", (body, input))?
             }
             SoacOp::ReduceByIndex {
                 dest,
@@ -794,14 +790,15 @@ impl<'source> Import<'_, '_, '_, 'source> {
             } => {
                 let destination = self.resolve(dest.id)?;
                 self.sink.add("SourceDirectUse", (value, destination))?;
-                self.sink.set("SourceDestination", operation, destination)?;
                 self.use_value(value, destination, false)?;
                 let neutral = self.operand(ne, value, scope)?;
-                self.sink.set("SourceNeutral", operation, neutral)?;
-                self.input(indices, operation, 0, value, scope)?;
-                self.input(values, operation, 1, value, scope)?;
+                let indices = self.array(indices, value, scope)?;
+                let values = self.array(values, value, scope)?;
+                self.sink.add("IndexedOperator", (body, destination, neutral, indices, values))?
             }
-        }
+        };
+        let definition = self.sink.add("DefinedIn", (scope.key, node))?;
+        self.sink.set("OperatorDefinition", operation, definition)?;
         self.collective_metadata(operation, soac)?;
         Ok(())
     }

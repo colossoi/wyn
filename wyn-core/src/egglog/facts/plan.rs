@@ -5,11 +5,31 @@ use crate::ssa::types::AtomicOp;
 use crate::{types::Type, SymbolId};
 use egglog_engine::{sort::S, Value};
 
+pub enum OutputAction {
+    Publish,
+    Pack {
+        predicate: Value,
+        input: Value,
+    },
+    Write {
+        callback: Value,
+        destination: Value,
+    },
+    Accumulate {
+        combine: Value,
+        destination: Value,
+        keys: Value,
+        values: Value,
+    },
+    Reserve {
+        callback: Value,
+    },
+}
+
 pub struct AccumulatorComponent {
     pub role: String,
     pub output_slot: i64,
     pub source: Value,
-    pub ty: Value,
 }
 
 impl<'a, 'source> Facts<'a, 'source> {
@@ -101,20 +121,41 @@ impl<'a, 'source> Facts<'a, 'source> {
     pub fn backing(&self, value: Value) -> Option<Value> {
         self.lookup("Backing", (value,))
     }
-    pub fn filter(&self, plan: Value) -> Result<Value, OptimizeError> {
-        let Some(operation) = self.lookup("PlanFilterOperation", (plan,)) else {
-            return Err(error("filter plan has no filter operation"));
-        };
-        Ok(operation)
+    pub fn action(&self, plan: Value) -> Result<OutputAction, OptimizeError> {
+        let action = Query(&self.program.graph).required("PlanAction", (plan,))?;
+        if self.enode("Publish", action).is_some() {
+            return Ok(OutputAction::Publish);
+        }
+        if let Some(f) = self.enode("Pack", action) {
+            return Ok(OutputAction::Pack {
+                predicate: f[0],
+                input: f[1],
+            });
+        }
+        if let Some(f) = self.enode("Write", action) {
+            return Ok(OutputAction::Write {
+                callback: f[0],
+                destination: f[1],
+            });
+        }
+        if let Some(f) = self.enode("Accumulate", action) {
+            return Ok(OutputAction::Accumulate {
+                combine: f[0],
+                destination: f[1],
+                keys: f[2],
+                values: f[3],
+            });
+        }
+        if let Some(f) = self.enode("Reserve", action) {
+            return Ok(OutputAction::Reserve { callback: f[0] });
+        }
+        Err(error("invalid parallel output action"))
     }
     pub fn scalar_group(&self, value: Value) -> Vec<Value> {
         self.set("DispatchGroupMembers", (value,))
     }
     pub fn dependencies(&self, value: Value) -> Vec<Value> {
         self.set("DispatchPredecessors", (value,))
-    }
-    pub fn member(&self, plan: Value, op: Value) -> bool {
-        self.contains("PlanMember", (plan, op))
     }
     pub fn slot(&self, op: Value, role: &str, index: i64) -> Option<Value> {
         self.lookup("BufferSlot", (op, role, index))
@@ -174,7 +215,6 @@ impl<'a, 'source> Facts<'a, 'source> {
                 components.push((
                     self.integer(row.children[1]),
                     AccumulatorComponent {
-                        ty: row.children[2],
                         role: self.program.graph.value_to_base::<S>(row.children[3]).to_string(),
                         output_slot: self.integer(row.children[4]),
                         source: row.children[5],
@@ -190,9 +230,7 @@ impl<'a, 'source> Facts<'a, 'source> {
                 if slot != expected as i64 {
                     return Err(error("noncontiguous accumulator slots"));
                 }
-                if component.output_slot < 0
-                    || !matches!(component.role.as_str(), "scan" | "total" | "count")
-                {
+                if component.output_slot < 0 || !matches!(component.role.as_str(), "scan" | "total") {
                     return Err(error("invalid accumulator output slot"));
                 }
                 Ok(component)

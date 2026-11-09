@@ -2,21 +2,19 @@
 
 use super::{error, Body, OptimizeError, Typed};
 use crate::builtins::catalog;
+use crate::egglog::facts::OutputAction;
 use crate::op::{BinaryOperator, OpTag, PureViewSource};
 use crate::types::{self, Type, TypeName};
 use crate::LookupMap;
-use egglog_engine::sort::S;
 use egglog_engine::Value;
 
 mod coordinates;
-mod filter;
-mod indexed;
 mod loops;
 mod maps;
 mod screma;
-use filter::{compact, serial_filter};
-use indexed::{buckets, indexed};
+mod updates;
 use screma::screma;
+use updates::{buckets, indexed};
 
 pub(super) fn emit(
     body: &mut Body<'_, '_, '_>,
@@ -87,20 +85,23 @@ pub(super) fn emit(
         }
         "clear" | "buckets" => buckets(body, scope, phase_owner, phase, phase_width, plan),
         "ordered" | "local" => {
-            let Some(recipe) = body.compiler.facts.lookup("OrderedRecipe", (phase_owner,)) else {
-                return Err(error("ordered kernel has no selected algorithm"));
-            };
-            match body.compiler.program.graph.value_to_base::<S>(recipe).as_ref() {
-                "screma" => screma(body, scope, phase_owner, phase, phase_width, plan, &results, None),
-                "filter" => serial_filter(body, scope, phase_owner, plan, &results),
-                "indexed" => indexed(body, scope, phase_owner, phase, phase_extent, phase_width, plan),
-                "buckets" => buckets(body, scope, phase_owner, phase, phase_width, plan),
-                _ => Err(error("unknown ordered algorithm")),
+            if body.compiler.facts.contains("ScremaPlan", (plan,)) {
+                return screma(body, scope, phase_owner, phase, phase_width, plan, &results);
+            }
+            match body.compiler.facts.action(plan)? {
+                OutputAction::Pack { .. } => {
+                    screma::pack(body, scope, phase_owner, phase_width, plan, &results)
+                }
+                OutputAction::Write { .. } | OutputAction::Accumulate { .. } => {
+                    indexed(body, scope, phase_owner, phase, phase_extent, phase_width, plan)
+                }
+                OutputAction::Reserve { .. } => buckets(body, scope, phase_owner, phase, phase_width, plan),
+                OutputAction::Publish => Err(error("parallel output has no selected loop")),
             }
         }
-        "compact" => compact(body, scope, phase_owner, phase_width, plan, &results),
+        "compact" => screma::pack(body, scope, phase_owner, phase_width, plan, &results),
         "chunks" | "combine" | "offsets" => {
-            screma(body, scope, phase_owner, phase, phase_width, plan, &results, None)
+            screma(body, scope, phase_owner, phase, phase_width, plan, &results)
         }
         _ => Err(error(format!("scheduled {} kernel is not implemented", phase))),
     }
@@ -284,20 +285,33 @@ pub(super) fn write_arrays(
     indices: &[Typed],
     cache: &mut LookupMap<Value, Typed>,
 ) -> Result<(), OptimizeError> {
+    write_arrays_at(body, scope, operation, plan, results, indices, indices, cache)
+}
+
+fn write_arrays_at(
+    body: &mut Body<'_, '_, '_>,
+    scope: Value,
+    operation: Value,
+    plan: Value,
+    results: &[(String, i64, Value)],
+    indices: &[Typed],
+    destinations: &[Typed],
+    cache: &mut LookupMap<Value, Typed>,
+) -> Result<(), OptimizeError> {
     let mut position = 0;
     for (role, slot, source) in results {
         if role != "array" {
             continue;
         }
-        let output = body.slot(scope, operation, "output", position, 2)?;
+        let output = body.output_target(scope, operation, "output", position)?;
         let tiled = body.compiler.facts.set("TiledOutputs", (operation, *slot));
         if output.is_some() || !tiled.is_empty() {
             let value = element(body, scope, plan, *source, indices, cache)?;
             for destination in tiled {
-                body.store_tiled(scope, destination, indices[0].clone(), value.clone())?;
+                body.store_tiled(scope, destination, destinations[0].clone(), value.clone())?;
             }
             if let Some(output) = output {
-                body.store_at(output, indices, value)?;
+                output.store(body, destinations, value)?;
             }
         }
         position += 1;

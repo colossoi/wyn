@@ -1,6 +1,6 @@
 //! Lower the selected map traversal, retaining nested output storage.
 use super::super::{error, Body, OptimizeError};
-use super::{coordinates, emit_traversal, invocation, screma, workgroup};
+use super::{coordinates, emit_traversal, invocation, workgroup};
 use crate::egglog::query::Query;
 use crate::op::BinaryOperator;
 use crate::types::TypeExt;
@@ -53,39 +53,13 @@ pub(super) fn emit(
                 &indices,
                 &mut cache,
                 &mut |body, scope, leaf| {
-                    let reduction = body.compiler.facts.enode("TraversalReduce", leaf);
-                    let elements = body.compiler.facts.enode("TraversalElements", leaf);
-                    if let Some(fields) = reduction.as_ref().or(elements.as_ref()) {
-                        let source = fields[0];
-                        let owner = fields[1];
-                        let plan = fields[2];
-                        let result = if reduction.is_some() {
-                            screma::SegmentResult::Total(
-                                body.compiler.facts.unsigned(fields[3], "segment result slot")? as usize,
-                            )
-                        } else {
-                            screma::SegmentResult::Elements
-                        };
-                        let results = body.compiler.facts.results(plan)?;
+                    if let Some(fields) = body.compiler.facts.enode("TraversalResult", leaf) {
                         let Some(output) = output.clone() else {
-                            return Err(error("segment output missing"));
+                            return Err(error("parallel output missing"));
                         };
-                        let target = screma::SegmentOutput {
-                            source,
-                            output,
-                            indices: &indices,
-                            result,
-                        };
-                        screma::screma(
-                            body,
-                            scope,
-                            owner,
-                            "segment",
-                            width,
-                            plan,
-                            &results,
-                            Some(&target),
-                        )
+                        body.with_output(fields[1], fields[3], output, &indices, |body| {
+                            super::emit(body, scope, fields[1], "local", fields[4], width)
+                        })
                     } else {
                         let Some(fields) = body.compiler.facts.enode("TraversalValue", leaf) else {
                             return Err(error("invalid traversal leaf"));

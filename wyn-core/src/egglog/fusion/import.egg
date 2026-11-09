@@ -9,19 +9,10 @@
        (set (GroupLengths (Group op)) (set-empty)) (set (GroupDirectLengthUses (Group op)) (set-empty))
        (set (GroupInputs (Group op)) (set-empty))
        (set (InternalInputs (Group op)) (set-empty))) :ruleset source-fusion)
-(rule ((SourceScrema op)) ((ScremaPlan (FusionSource op))) :ruleset source-fusion)
-(rule ((= (SourceOperation op) (OperationInfo r "filter"))) ((FilterPlan (FusionSource op))) :ruleset source-fusion)
-(relation SourceArrayProducer (OperationKey))
-(rule ((= (SourceOperation op) (OperationInfo r "map"))) ((SourceArrayProducer op)) :ruleset source-fusion)
-(rule ((= (SourceOperation op) (OperationInfo r "scan"))) ((SourceArrayProducer op)) :ruleset source-fusion)
-(rule ((= (SourceOperation op) (OperationInfo r "filter"))) ((SourceArrayProducer op)) :ruleset source-fusion)
-(rule ((= value (SourceOperationValue op)) (= safe (SourceSpeculatable value)))
-      ((set (PrePure (FusionSource op)) safe) (set (PostPure (FusionSource op)) safe)
-       (set (PredicatePure (FusionSource op)) safe)) :ruleset source-fusion)
+
 (rule ((= value (SourceOperationValue op)) (= (SourceSpeculatable value) true)) ((SafePlan (FusionSource op))) :ruleset source-fusion)
 (rule ((= (SourceOperation op) (OperationInfo r "filter")) (SafePlan (FusionSource op))) ((ElementPlan (FusionSource op))) :ruleset source-fusion)
-(rule ((SourceScrema op) (= value (SourceOperationValue op)) (= (SourceReadOnly value) true)) ((ReadOnlyScremaPlan (FusionSource op))) :ruleset source-fusion)
-(rule ((= (SourceOperation op) (OperationInfo r "filter")) (= value (SourceOperationValue op)) (= (SourceReadOnly value) true)) ((ReadOnlyFilterPlan (FusionSource op))) :ruleset source-fusion)
+
 ; Initialize group sets before merging uses into them during import.
 (rule ((SourceDepends consumer producer role) (= uses (GroupUsesOf (Group producer))))
       ((GroupEdge (Group producer) (Group consumer))

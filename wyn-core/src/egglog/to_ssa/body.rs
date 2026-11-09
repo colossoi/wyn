@@ -36,6 +36,7 @@ pub(super) struct Body<'a, 'p, 'source> {
     dominators: RefCell<Option<DominatorTree<BlockId>>>,
     pub grid: Option<(u32, u32, u32)>,
     local_resources: LookupMap<Value, Typed>,
+    outputs: Bindings<Value, resources::OutputTarget>,
     local_arrays: LookupMap<ValueRef, PlaceId>,
     next_workgroup_array: u32,
     // Kernel storage ownership survives invocation-local element callbacks.
@@ -83,6 +84,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
             dominators: RefCell::new(None),
             grid: None,
             local_resources: LookupMap::default(),
+            outputs: Bindings::default(),
             local_arrays: LookupMap::default(),
             next_workgroup_array: 0,
             workgroup_width: None,

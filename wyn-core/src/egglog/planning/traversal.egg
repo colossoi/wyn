@@ -5,10 +5,10 @@
 (function SegmentPlanBlocked (FusionPlan) bool :merge (or old new))
 
 (datatype TraversalLeaf (EvaluateLeaf) (CollectiveLeaf))
+(datatype OutputPort (TotalPort i64) (ArrayPort i64))
 (datatype ParallelTraversal
   (TraversalValue SourceValue)
-  (TraversalReduce SourceValue OperationKey FusionPlan i64 Extent)
-  (TraversalElements SourceValue OperationKey FusionPlan Extent)
+  (TraversalResult SourceValue OperationKey FusionPlan OutputPort Extent)
   (TraversalCall SourceValue RegionKey RegionKey SourceArguments ParallelTraversal)
   (TraversalFor RegionKey RegionKey FusionPlan SourceArguments ParallelTraversal))
 (relation TraversalDemand (SourceValue i64 TraversalLeaf))
@@ -17,7 +17,6 @@
 (function Traversal (SourceValue i64 TraversalLeaf) ParallelTraversal :no-merge)
 (function ElementTraversal (SourceValue i64) ParallelTraversal :no-merge)
 (function MapOutputTraversal (OperationKey i64) ParallelTraversal :no-merge)
-(function MapArguments (FusionPlan OperationKey i64) SourceArguments :no-merge)
 
 (function TraversalExtent (ParallelTraversal) Extent :no-merge)
 
@@ -41,13 +40,13 @@
 (rule ((TraversalDemand value 0 (CollectiveLeaf)) (= plan (SegmentCandidatePlan value))
        (RectangularReady value) (= (SegmentPlanBlocked plan) false) (= owner (Owner plan))
        (= extent (RectangularExtent (SourceDomainExtent (PlanDomain plan))))
-       (PlanResult plan "array" i value ty))
-      ((set (Traversal value 0 (CollectiveLeaf)) (TraversalElements value owner plan extent))) :ruleset segment-shapes)
+       (PlanResult plan "array" i value ty) (= totals (ResultCount (PlanTotals plan))))
+      ((set (Traversal value 0 (CollectiveLeaf)) (TraversalResult value owner plan (ArrayPort (- i totals)) extent))) :ruleset segment-shapes)
 (rule ((TraversalDemand value 0 (CollectiveLeaf)) (= plan (SegmentCandidatePlan value))
        (RectangularReady value) (= (SegmentPlanBlocked plan) false) (= owner (Owner plan))
        (= extent (RectangularExtent (SourceDomainExtent (PlanDomain plan))))
-       (Accumulator owner slot ty "total" i value))
-      ((set (Traversal value 0 (CollectiveLeaf)) (TraversalReduce value owner plan slot extent))) :ruleset segment-shapes)
+       (PlanResult plan "total" i value ty))
+      ((set (Traversal value 0 (CollectiveLeaf)) (TraversalResult value owner plan (TotalPort i) extent))) :ruleset segment-shapes)
 (rule ((TraversalDemand value depth leaf) (> depth 0))
       ((TraversalContinue value depth leaf)) :ruleset segment-shapes)
 (rule ((TraversalDemand value 0 (CollectiveLeaf)))
@@ -70,20 +69,16 @@
 (rule ((MapCandidate value plan op body) (RectangularReady value))
       ((TraversalMap value (CollectiveLeaf) plan op body)) :ruleset segment-shapes)
 (rule ((TraversalContinue value depth leaf) (> depth 0) (TraversalMap value leaf plan op body) (= result (SourceResult body)))
-      ((set (MapArguments plan op 0) (vec-of))
-       (TraversalDemand result (- depth 1) leaf)) :ruleset segment-shapes)
-(rule ((= args (MapArguments plan op i)) (= count (SourceInputCount op)) (< i count) (= input (SourceInput op i)))
-      ((set (MapArguments plan op (+ i 1)) (vec-push args input))) :ruleset segment-shapes)
+      ((TraversalDemand result (- depth 1) leaf)) :ruleset segment-shapes)
 (rule ((TraversalContinue value depth leaf) (> depth 0) (TraversalMap value leaf plan op body)
        (= caller (PlanScope plan))
-       (= args (MapArguments plan op (SourceInputCount op))) (= next (Traversal (SourceResult body) (- depth 1) leaf)))
+       (= args (OperatorInputs op)) (= next (Traversal (SourceResult body) (- depth 1) leaf)))
       ((set (Traversal value depth leaf) (TraversalFor caller body plan args next))) :ruleset segment-shapes)
 
 (relation WorkgroupOutputTraversal (ParallelTraversal))
 
 ; Extents are a fold over the admitted program, including call substitution.
-(rule ((= t (TraversalReduce value owner plan slot extent))) ((set (TraversalExtent t) extent)) :ruleset segment-shapes)
-(rule ((= t (TraversalElements value owner plan extent))) ((set (TraversalExtent t) extent)) :ruleset segment-shapes)
+(rule ((= t (TraversalResult value owner plan port extent))) ((set (TraversalExtent t) extent)) :ruleset segment-shapes)
 (rule ((= t (TraversalCall value caller callee args next)) (= extent (TraversalExtent next)))
       ((set (TraversalExtent t) (CallExtent value extent))) :ruleset segment-shapes)
 (rule ((= t (TraversalFor caller callee plan args next)) (= extent (TraversalExtent next)))
@@ -99,9 +94,7 @@
        (PlanResult plan "array" i value element) (= traversal (Traversal value rank (CollectiveLeaf))))
       ((set (MapOutputTraversal owner i) traversal)) :ruleset map-bindings)
 
-(rule ((WorkgroupOutputTraversal (TraversalElements value owner plan extent)) (= ty (SourceType value)) (SourceArrayType ty))
-      ((StorageDemand value (StorageRoot))) :ruleset local-storage)
-(rule ((WorkgroupOutputTraversal (TraversalReduce value owner plan slot extent)) (= ty (SourceType value)) (SourceArrayType ty))
+(rule ((WorkgroupOutputTraversal (TraversalResult value owner plan port extent)) (= ty (SourceType value)) (SourceArrayType ty))
       ((StorageDemand value (StorageRoot))) :ruleset local-storage)
 
 (rule ((= (MapExecution owner) (WorkgroupScope)) (= traversal (MapOutputTraversal owner i)))

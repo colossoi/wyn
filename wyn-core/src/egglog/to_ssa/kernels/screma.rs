@@ -1,6 +1,8 @@
 // Expand scheduled phases straight into SSA instructions and structured loops.
 use super::super::{error, Body, OptimizeError, Typed};
-use super::{element, indexed, invocation, write_arrays};
+use super::{element, invocation, updates, write_arrays};
+use crate::builtins::catalog;
+use crate::egglog::facts::OutputAction;
 use crate::op::BinaryOperator::{
     Add, Divide, Equal, Greater, GreaterEqual, Less, Multiply, Remainder, Subtract,
 };
@@ -8,36 +10,6 @@ use crate::op::OpTag;
 use crate::types::{self, Type, TypeExt, TypeName};
 use crate::LookupMap;
 use egglog_engine::Value;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum SegmentResult {
-    Total(usize),
-    Elements,
-}
-
-pub(super) struct SegmentOutput<'a> {
-    pub source: Value,
-    pub output: Typed,
-    pub indices: &'a [Typed],
-    pub result: SegmentResult,
-}
-
-impl SegmentOutput<'_> {
-    fn store(
-        &self,
-        body: &mut Body<'_, '_, '_>,
-        inner: Option<Typed>,
-        value: Typed,
-    ) -> Result<(), OptimizeError> {
-        let mut indices = self.indices.to_vec();
-        match (self.result, inner) {
-            (SegmentResult::Elements, Some(index)) => indices.push(index),
-            (SegmentResult::Total(_), None) => {}
-            _ => return Err(error("collective result coordinate mismatch")),
-        }
-        body.store_at(self.output.clone(), &indices, value)
-    }
-}
 
 pub(super) fn screma(
     body: &mut Body<'_, '_, '_>,
@@ -47,14 +19,11 @@ pub(super) fn screma(
     phase_width: u32,
     plan: Value,
     results: &[(String, i64, Value)],
-    segment: Option<&SegmentOutput<'_>>,
 ) -> Result<(), OptimizeError> {
     // Local recipes have no separate combine dispatch. Complete captured totals
     // first; the normal traversal can then emit each prefix with the final total.
     // These plans have duplicable callbacks; replay only their original domain.
-    if matches!(phase, "ordered" | "local" | "segment")
-        && body.compiler.facts.contains("PlanLateTotals", (plan,))
-    {
+    if matches!(phase, "ordered" | "local") && body.compiler.facts.contains("PlanLateTotals", (plan,)) {
         screma(
             body,
             scope,
@@ -63,7 +32,6 @@ pub(super) fn screma(
             phase_width,
             plan,
             &[],
-            None,
         )?;
     }
     let totals_only = matches!(phase, "ordered-totals" | "local-totals");
@@ -79,22 +47,10 @@ pub(super) fn screma(
     let has_scans = components.iter().any(|component| component.role == "scan");
     let mut accumulators = Vec::new();
     for component in &components {
-        let source = component.source;
-        let Some(operation) = body.compiler.facts.operation(source) else {
-            return Err(error("accumulator operation missing"));
-        };
-        let neutral = if component.role == "count" {
-            let ty = body.compiler.facts.ty(component.ty).ok_or_else(|| error("count type missing"))?;
-            body.literal(0, ty)?
-        } else {
-            let neutral = body.compiler.facts.neutral(operation)?;
-            let layout = body.compiler.facts.value_layout(neutral)?;
-            let value = body.value(scope, neutral)?;
-            body.materialize(value, layout)?
-        };
-        accumulators.push(Accumulator::new(body, plan, source, operation, neutral)?);
+        accumulators.push(Accumulator::new(body, scope, plan, component.source)?);
     }
-    let initial: Vec<_> = accumulators.iter().map(|a| a.neutral.clone()).collect();
+    let reductions: Vec<_> = accumulators.iter().map(|a| &a.reduction).collect();
+    let initial: Vec<_> = accumulators.iter().map(|a| a.reduction.neutral.clone()).collect();
     let Some(domain) = body.compiler.facts.domain(phase_owner) else {
         return Err(error("collective domain missing"));
     };
@@ -120,15 +76,15 @@ pub(super) fn screma(
                 body.values.insert(component.source, value);
                 continue;
             }
-            if let Some(output) = body.slot(scope, phase_owner, "total", component.output_slot, 2)? {
-                body.store(output, zero.clone(), value)?;
+            if let Some(output) = body.output_target(scope, phase_owner, "total", component.output_slot)? {
+                output.store(body, &[zero.clone()], value)?;
             }
         }
         return Ok(());
     }
     let uint = Type::Constructed(TypeName::UInt(32), vec![]);
     let n = body.cast(n, &uint)?;
-    let (chunks_width, groups) = if segment.is_some() || phase == "local" {
+    let (chunks_width, groups) = if phase == "local" {
         (phase_width, 1)
     } else {
         let Some(key) = body.compiler.facts.constructor("Stage", (phase_owner, "chunks")) else {
@@ -156,8 +112,8 @@ pub(super) fn screma(
     let tiles = body.binary(Divide, tiles, Body::number(threads as u32))?;
     let span = body.binary(Multiply, tiles.clone(), width.clone())?;
     match phase {
-        "chunks" | "segment" | "local" => {
-            let group = if segment.is_some() || phase == "local" {
+        "chunks" | "local" => {
+            let group = if phase == "local" {
                 Body::number(0)
             } else {
                 let (thread, _) = invocation(body, phase_width)?;
@@ -185,13 +141,13 @@ pub(super) fn screma(
                                     body,
                                     scope,
                                     plan,
-                                    accumulator.neutral.clone(),
+                                    accumulator.reduction.neutral.clone(),
                                     &index,
                                     &mut cache,
                                 )?;
                                 values.push(value);
                             }
-                            if !has_scans && segment.is_none() && !totals_only {
+                            if !has_scans && !totals_only {
                                 write_arrays(
                                     body,
                                     scope,
@@ -213,18 +169,11 @@ pub(super) fn screma(
                     let (prefixes, totals) = if !has_scans {
                         (
                             Vec::new(),
-                            workgroup_reduce(
-                                body,
-                                scope,
-                                &accumulators,
-                                values,
-                                lane.clone(),
-                                phase_width,
-                            )?,
+                            workgroup_reduce(body, scope, &reductions, values, lane.clone(), phase_width)?,
                         )
                     } else {
                         let (prefixes, _, totals) =
-                            workgroup_scan(body, scope, &accumulators, values, lane.clone(), phase_width)?;
+                            workgroup_scan(body, scope, &reductions, values, lane.clone(), phase_width)?;
                         (prefixes, totals)
                     };
                     body.when(valid, |body| {
@@ -235,8 +184,9 @@ pub(super) fn screma(
                             .enumerate()
                             .filter(|(_, (c, _))| c.role == "scan")
                         {
-                            let value = accumulators[i].combine(body, scope, carry[i].clone(), prefix)?;
-                            if segment.is_some() || phase == "local" {
+                            let value =
+                                accumulators[i].reduction.combine(body, scope, carry[i].clone(), prefix)?;
+                            if phase == "local" {
                                 cache.insert(accumulators[i].source, value);
                             } else if let Some(output) =
                                 body.slot(scope, phase_owner, "prefix", component.output_slot, 2)?
@@ -244,19 +194,7 @@ pub(super) fn screma(
                                 body.store(output, index.clone(), value)?;
                             }
                         }
-                        if let Some(target) = segment {
-                            if target.result == SegmentResult::Elements {
-                                let value = element(
-                                    body,
-                                    scope,
-                                    plan,
-                                    target.source,
-                                    std::slice::from_ref(&index),
-                                    &mut cache,
-                                )?;
-                                target.store(body, Some(index.clone()), value)?;
-                            }
-                        } else if phase == "local" && has_scans {
+                        if phase == "local" && has_scans {
                             write_output(
                                 body,
                                 scope,
@@ -273,7 +211,9 @@ pub(super) fn screma(
                     accumulators
                         .iter()
                         .zip(carry.into_iter().zip(totals))
-                        .map(|(accumulator, (carry, total))| accumulator.combine(body, scope, carry, total))
+                        .map(|(accumulator, (carry, total))| {
+                            accumulator.reduction.combine(body, scope, carry, total)
+                        })
                         .collect()
                 },
             )?;
@@ -286,17 +226,13 @@ pub(super) fn screma(
             let first = body.binary(Equal, lane, Body::number(0))?;
             body.when(first, |body| {
                 for (i, value) in state.into_iter().enumerate() {
-                    if let Some(target) = segment {
-                        if target.result == SegmentResult::Total(i) {
-                            target.store(body, None, value)?;
-                        }
-                    } else if phase == "local" {
+                    if phase == "local" {
                         let component = &components[i];
                         if component.role != "scan" {
                             if let Some(output) =
-                                body.slot(scope, phase_owner, "total", component.output_slot, 2)?
+                                body.output_target(scope, phase_owner, "total", component.output_slot)?
                             {
-                                body.store(output, Body::number(0), value)?;
+                                output.store(body, &[Body::number(0)], value)?;
                             }
                         }
                     } else if let Some(output) = body.slot(scope, phase_owner, "partial", i as i64, 2)? {
@@ -337,18 +273,11 @@ pub(super) fn screma(
                     let (offsets, totals) = if !has_scans {
                         (
                             Vec::new(),
-                            workgroup_reduce(
-                                body,
-                                scope,
-                                &accumulators,
-                                values,
-                                lane.clone(),
-                                phase_width,
-                            )?,
+                            workgroup_reduce(body, scope, &reductions, values, lane.clone(), phase_width)?,
                         )
                     } else {
                         let (_, offsets, totals) =
-                            workgroup_scan(body, scope, &accumulators, values, lane.clone(), phase_width)?;
+                            workgroup_scan(body, scope, &reductions, values, lane.clone(), phase_width)?;
                         (offsets, totals)
                     };
                     body.when(valid, |body| {
@@ -361,8 +290,12 @@ pub(super) fn screma(
                             if let Some(output) =
                                 body.slot(scope, phase_owner, "offset", component.output_slot, 2)?
                             {
-                                let value =
-                                    accumulators[i].combine(body, scope, carry[i].clone(), offset)?;
+                                let value = accumulators[i].reduction.combine(
+                                    body,
+                                    scope,
+                                    carry[i].clone(),
+                                    offset,
+                                )?;
                                 body.store(output, index.clone(), value)?;
                             }
                         }
@@ -371,7 +304,9 @@ pub(super) fn screma(
                     accumulators
                         .iter()
                         .zip(carry.into_iter().zip(totals))
-                        .map(|(accumulator, (carry, total))| accumulator.combine(body, scope, carry, total))
+                        .map(|(accumulator, (carry, total))| {
+                            accumulator.reduction.combine(body, scope, carry, total)
+                        })
                         .collect()
                 },
             )?;
@@ -379,9 +314,9 @@ pub(super) fn screma(
             body.when(first, |body| {
                 for (component, value) in components.iter().zip(totals).filter(|(c, _)| c.role != "scan") {
                     if let Some(output) =
-                        body.slot(scope, phase_owner, "total", component.output_slot, 2)?
+                        body.output_target(scope, phase_owner, "total", component.output_slot)?
                     {
-                        body.store(output, Body::number(0), value)?;
+                        output.store(body, &[Body::number(0)], value)?;
                     }
                 }
                 Ok(())
@@ -403,7 +338,7 @@ pub(super) fn screma(
                     };
                     let a = body.index(offset, chunk.clone())?;
                     let b = body.index(prefix, index.clone())?;
-                    let value = accumulators[i].combine(body, scope, a, b)?;
+                    let value = accumulators[i].reduction.combine(body, scope, a, b)?;
                     cache.insert(component.source, value);
                 }
                 write_output(body, scope, phase_owner, phase, plan, results, index, &mut cache)?;
@@ -429,7 +364,7 @@ fn write_output(
         let Some(output) = body.slot(scope, owner, "output", 0, 2)? else {
             return Err(error("scan output action has no destination"));
         };
-        indexed::update(body, scope, owner, phase, plan, output, index, cache)
+        updates::update(body, scope, owner, phase, plan, output, index, cache)
     } else {
         write_arrays(body, scope, owner, plan, results, &[index], cache)
     }
@@ -440,7 +375,7 @@ fn write_output(
 fn workgroup_reduce(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
-    accumulators: &[Accumulator],
+    accumulators: &[&Reduction],
     values: Vec<Typed>,
     lane: Typed,
     width: u32,
@@ -448,9 +383,7 @@ fn workgroup_reduce(
     if accumulators.is_empty() {
         return Ok(Vec::new());
     }
-    if body.subgroup.is_some()
-        && accumulators.iter().all(|a| body.compiler.facts.contains("SubgroupAddition", (a.operation,)))
-    {
+    if body.subgroup.is_some() && accumulators.iter().all(|a| a.subgroup_addition(body)) {
         let (_, _, totals) = body.subgroup_scan(values, width)?;
         return Ok(totals);
     }
@@ -538,17 +471,22 @@ impl CollectiveStorage {
     }
 }
 
-pub(super) fn workgroup_scan(
+fn workgroup_scan(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
-    accumulators: &[Accumulator],
+    accumulators: &[&Reduction],
     mut values: Vec<Typed>,
     lane: Typed,
     width: u32,
 ) -> Result<(Vec<Typed>, Vec<Typed>, Vec<Typed>), OptimizeError> {
-    if body.subgroup.is_some()
-        && accumulators.iter().all(|a| body.compiler.facts.contains("SubgroupAddition", (a.operation,)))
-    {
+    if width == 1 {
+        return Ok((
+            values.clone(),
+            accumulators.iter().map(|a| a.neutral.clone()).collect(),
+            values,
+        ));
+    }
+    if body.subgroup.is_some() && accumulators.iter().all(|a| a.subgroup_addition(body)) {
         return body.subgroup_scan(values, width);
     }
     let mut shared = Vec::new();
@@ -605,60 +543,65 @@ pub(super) fn workgroup_scan(
     Ok((values, exclusive, totals))
 }
 
-/// Resolved recipe inputs, shared by serial accumulation and cooperative phases.
-pub(super) struct Accumulator {
+/// One fold has one contribution expression and one reducer.
+struct Accumulator {
     source: Value,
-    input: Value,
-    filter: Option<Value>,
-    operation: Value,
-    count: bool,
+    contribution: Value,
+    reduction: Reduction,
+}
+
+struct Reduction {
+    reducer: Reducer,
     neutral: Typed,
-    layout: Option<Value>,
+}
+
+enum Reducer {
+    Add,
+    Callback {
+        operation: Value,
+        layout: Value,
+    },
 }
 
 impl Accumulator {
-    pub fn new(
-        body: &Body<'_, '_, '_>,
+    fn new(
+        body: &mut Body<'_, '_, '_>,
+        scope: Value,
         plan: Value,
         source: Value,
-        operation: Value,
-        neutral: Typed,
     ) -> Result<Self, OptimizeError> {
-        let Some(mut input) = body.compiler.facts.input(operation, 0) else {
-            return Err(error("accumulator input missing"));
+        let Some(fold) = body.compiler.facts.lookup("PlanFold", (plan, source)) else {
+            return Err(error("parallel fold is missing"));
         };
-        let filter = match body.compiler.facts.operation(input) {
-            Some(filter)
-                if body.compiler.facts.member(plan, filter)
-                    && body.compiler.facts.operation_kind(filter)? == "filter" =>
-            {
-                Some(filter)
-            }
-            _ => None,
+        let Some(fields) = body.compiler.facts.enode("FoldWith", fold) else {
+            return Err(error("invalid parallel fold"));
         };
-        if let Some(filter) = filter {
-            let Some(source) = body.compiler.facts.input(filter, 0) else {
-                return Err(error("filter input missing"));
+        let (reducer, neutral) = if let Some(reducer) = body.compiler.facts.enode("CombineWith", fields[0])
+        {
+            let layout = body.compiler.facts.value_layout(reducer[1])?;
+            let neutral = body.value(scope, reducer[1])?;
+            (
+                Reducer::Callback {
+                    operation: reducer[0],
+                    layout,
+                },
+                body.materialize(neutral, layout)?,
+            )
+        } else if let Some(reducer) = body.compiler.facts.enode("AddValues", fields[0]) {
+            let Some(ty) = body.compiler.facts.ty(reducer[0]) else {
+                return Err(error("additive fold type is missing"));
             };
-            input = source;
-        }
-        let layout = if body.compiler.facts.operation_kind(operation)? == "filter" {
-            None
+            (Reducer::Add, body.literal(0, ty)?)
         } else {
-            Some(body.compiler.facts.value_layout(body.compiler.facts.neutral(operation)?)?)
+            return Err(error("invalid parallel reducer"));
         };
         Ok(Self {
-            layout,
             source,
-            input,
-            filter,
-            operation,
-            count: body.compiler.facts.operation_kind(operation)? == "filter",
-            neutral,
+            contribution: fields[1],
+            reduction: Reduction { reducer, neutral },
         })
     }
 
-    /// Guard fused filter inputs in place; reading their array would reenter this collective.
     fn accumulate(
         &self,
         body: &mut Body<'_, '_, '_>,
@@ -668,41 +611,26 @@ impl Accumulator {
         index: &Typed,
         cache: &mut LookupMap<Value, Typed>,
     ) -> Result<Typed, OptimizeError> {
-        let incoming = element(body, scope, plan, self.input, std::slice::from_ref(index), cache)?;
-        if let Some(filter) = self.filter {
-            let keep = body.callback(scope, filter, vec![incoming.clone()])?;
-            body.branch(
-                scope,
-                keep,
-                |body| self.accumulate_element(body, scope, state.clone(), incoming),
-                |_| Ok(state.clone()),
-                None,
-            )
-        } else {
-            self.accumulate_element(body, scope, state, incoming)
-        }
+        contribute(
+            body,
+            scope,
+            plan,
+            self.contribution,
+            index,
+            cache,
+            &state,
+            &mut |body, _, incoming| self.reduction.combine(body, scope, state.clone(), incoming),
+        )
     }
+}
 
-    fn accumulate_element(
-        &self,
-        body: &mut Body<'_, '_, '_>,
-        scope: Value,
-        state: Typed,
-        incoming: Typed,
-    ) -> Result<Typed, OptimizeError> {
-        if self.count {
-            let keep = body.callback(scope, self.operation, vec![incoming])?;
-            let increment = body.cast(keep, &state.ty)?;
-            return body.binary(Add, state, increment);
-        }
-        let value = body.callback(scope, self.operation, vec![state, incoming])?;
-        self.materialize(body, value)
-    }
-
-    fn materialize(&self, body: &mut Body<'_, '_, '_>, value: Typed) -> Result<Typed, OptimizeError> {
-        match self.layout {
-            Some(layout) => body.materialize(value, layout),
-            None => Ok(value),
+impl Reduction {
+    fn subgroup_addition(&self, body: &Body<'_, '_, '_>) -> bool {
+        match self.reducer {
+            Reducer::Add => true,
+            Reducer::Callback { operation, .. } => {
+                body.compiler.facts.contains("SubgroupAddition", (operation,))
+            }
         }
     }
 
@@ -713,11 +641,195 @@ impl Accumulator {
         a: Typed,
         b: Typed,
     ) -> Result<Typed, OptimizeError> {
-        if self.count {
-            body.binary(Add, a, b)
-        } else {
-            let value = body.callback(scope, self.operation, vec![a, b])?;
-            self.materialize(body, value)
+        match self.reducer {
+            Reducer::Add => {
+                let b = body.cast(b, &a.ty)?;
+                body.binary(Add, a, b)
+            }
+            Reducer::Callback { operation, layout } => {
+                let value = body.callback(scope, operation, vec![a, b])?;
+                body.materialize(value, layout)
+            }
         }
     }
+}
+
+fn contribute(
+    body: &mut Body<'_, '_, '_>,
+    scope: Value,
+    plan: Value,
+    expression: Value,
+    index: &Typed,
+    cache: &mut LookupMap<Value, Typed>,
+    skipped: &Typed,
+    emit: &mut dyn FnMut(
+        &mut Body<'_, '_, '_>,
+        &mut LookupMap<Value, Typed>,
+        Typed,
+    ) -> Result<Typed, OptimizeError>,
+) -> Result<Typed, OptimizeError> {
+    if let Some(fields) = body.compiler.facts.enode("ElementAt", expression) {
+        let value = element(body, scope, plan, fields[0], std::slice::from_ref(index), cache)?;
+        return emit(body, cache, value);
+    }
+    if let Some(fields) = body.compiler.facts.enode("TestElement", expression) {
+        return contribute(
+            body,
+            scope,
+            plan,
+            fields[1],
+            index,
+            cache,
+            skipped,
+            &mut |body, cache, value| {
+                let value = body.callback(scope, fields[0], vec![value])?;
+                emit(body, cache, value)
+            },
+        );
+    }
+    if let Some(fields) = body.compiler.facts.enode("SelectElement", expression) {
+        return contribute(
+            body,
+            scope,
+            plan,
+            fields[0],
+            index,
+            cache,
+            skipped,
+            &mut |body, cache, keep| {
+                body.branch(
+                    scope,
+                    keep,
+                    |body| {
+                        contribute(
+                            body,
+                            scope,
+                            plan,
+                            fields[1],
+                            index,
+                            &mut cache.clone(),
+                            skipped,
+                            emit,
+                        )
+                    },
+                    |_| Ok(skipped.clone()),
+                    None,
+                )
+            },
+        );
+    }
+    Err(error("invalid parallel contribution"))
+}
+
+/// Packing is an additive prefix plus a guarded output action. Width one uses
+/// exactly the same order and predicate lifetime as cooperative execution.
+pub(super) fn pack(
+    body: &mut Body<'_, '_, '_>,
+    scope: Value,
+    owner: Value,
+    width: u32,
+    plan: Value,
+    results: &[(String, i64, Value)],
+) -> Result<(), OptimizeError> {
+    let OutputAction::Pack { predicate, input } = body.compiler.facts.action(plan)? else {
+        return Err(error("packing requires a prefix output action"));
+    };
+    let Some(source) = body.compiler.facts.source(predicate) else {
+        return Err(error("packing result missing"));
+    };
+    let Some(domain) = body.compiler.facts.domain(owner) else {
+        return Err(error("packing domain missing"));
+    };
+    let n = body.extent(scope, domain)?;
+    let uint = Type::Constructed(TypeName::UInt(32), vec![]);
+    let n = body.cast(n, &uint)?;
+    let zero = Body::number(0);
+    let one = Body::number(1);
+    let lane = if width == 1 { zero.clone() } else { body.local_id()? };
+    let sum = body.binary(Add, n.clone(), Body::number(width - 1))?;
+    let tiles = body.binary(Divide, sum, Body::number(width))?;
+    let reduction = Reduction {
+        reducer: Reducer::Add,
+        neutral: zero.clone(),
+    };
+    let counts = body.counted(
+        zero.clone(),
+        tiles,
+        one.clone(),
+        vec![zero.clone()],
+        |body, tile, carry| {
+            let base = body.binary(Multiply, tile, Body::number(width))?;
+            let index = body.binary(Add, base, lane.clone())?;
+            let valid = body.binary(Less, index.clone(), n.clone())?;
+            // Retain the input beside its flag; invalid lanes never evaluate it.
+            let retained = body.branch_with_type(
+                scope,
+                valid,
+                |body| {
+                    let value = element(
+                        body,
+                        scope,
+                        plan,
+                        input,
+                        &[index.clone()],
+                        &mut LookupMap::default(),
+                    )?;
+                    let flag = body.callback(scope, predicate, vec![value.clone()])?;
+                    let flag = body.cast(flag, &uint)?;
+                    body.tuple(vec![flag, value])
+                },
+                |body, ty| {
+                    let Type::Constructed(TypeName::Tuple(_), fields) = ty else {
+                        return Err(error("packing input pair missing"));
+                    };
+                    let unused = body.op(
+                        OpTag::Intrinsic {
+                            id: catalog().known().uninit,
+                            overload_idx: 0,
+                        },
+                        vec![],
+                        fields[1].clone(),
+                    )?;
+                    body.tuple(vec![zero.clone(), unused])
+                },
+                None,
+            )?;
+            let flag = body.field(retained.clone(), 0)?;
+            let (prefix, _, total) = workgroup_scan(
+                body,
+                scope,
+                &[&reduction],
+                vec![flag.clone()],
+                lane.clone(),
+                width,
+            )?;
+            let selected = body.binary(Greater, flag, zero.clone())?;
+            body.when(selected, |body| {
+                let value = body.field(retained, 1)?;
+                let mut cache = LookupMap::default();
+                cache.insert(input, value.clone());
+                cache.insert(source, value);
+                let offset = body.binary(Subtract, prefix[0].clone(), one.clone())?;
+                let destination = body.binary(Add, carry[0].clone(), offset)?;
+                super::write_arrays_at(
+                    body,
+                    scope,
+                    owner,
+                    plan,
+                    results,
+                    &[index],
+                    &[destination],
+                    &mut cache,
+                )
+            })?;
+            Ok(vec![body.binary(Add, carry[0].clone(), total[0].clone())?])
+        },
+    )?;
+    let first = body.binary(Equal, lane, zero.clone())?;
+    body.when(first, |body| {
+        if let Some(output) = body.slot(scope, owner, "length", 0, 2)? {
+            body.store(output, zero, counts[0].clone())?;
+        }
+        Ok(())
+    })
 }

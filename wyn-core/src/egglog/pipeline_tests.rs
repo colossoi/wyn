@@ -344,3 +344,25 @@ fn scalar_admission_uses_ir_literal_edits() {
         .unwrap();
     assert!(seen, "the edited literal must reach scalar optimization");
 }
+
+#[test]
+fn parallel_loops_lower_without_source_operator_kinds_or_neutrals() {
+    let source = r#"
+entry sum(xs:[17]i32) i32=reduce((+),0,map(|x|x+1,xs))
+entry prefix(xs:[17]i32) [17]i32=map(|x|x*2,scan((+),0,xs))
+entry packed(xs:[17]i32) []i32=map(|x|100/x,filter(|x|x!=0,xs))
+entry masked(xs:[17]i32) (i32,i32)=let ys=filter(|x|x>0,xs) in (length(ys),reduce((+),0,ys))
+entry indexed(dest:*[3]i32,xs:[5]i32,k:i32) [3]i32=reduce_by_index(dest,|a,b|a+b+k,0,map(|x|x%3,xs),xs)
+entry buckets(dest:*[2][2]i32) ([2][2]i32,[2]u32,u32)=bucket_scatter_2d(dest,[[(-1,9),(0,10),(0,11)],[(0,12),(1,20),(2,9)]])
+entry varying(xs:[]i32) []i32=map(|n|reduce((+),0,iota(n)),xs)
+entry branching(xs:[][17]i32) []i32=map(|row|if row[0]>0 then reduce((+),0,row) else 0,xs)
+entry local_pack(xs:[][17]i32) []i32=map(|row|reduce((+),0,filter(|x|x>0,row)),xs)
+"#;
+    let tlc = crate::compile_thru_tlc(source).unwrap();
+    let mut program =
+        super::optimize_with_policy(interfaces_for_test(&tlc), ScalarOptimization::Basic).unwrap();
+    program.graph.clear_function("SourceOperation").unwrap();
+    program.graph.clear_function("SourceNeutral").unwrap();
+    let ssa = super::finish_for_test(program, crate::CodegenTarget::Wgsl).unwrap();
+    crate::ssa::place_floating(crate::ssa::optimize(ssa)).unwrap();
+}

@@ -22,7 +22,7 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
         parse_program("fusion.egg", include_str!("fusion.egg"))
     })?;
     time("egglog fusion / load rules", || graph.run_program(rules))?;
-    graph.parse_and_run_program(Some("fusion composition".into()), include_str!("composition.egg"))?;
+    graph.parse_and_run_program(Some("parallel IR".into()), include_str!("../parallel.egg"))?;
     graph.run_program(parse_program(
         "fusion import",
         "(run-schedule (saturate source-fusion))",

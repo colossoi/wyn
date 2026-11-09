@@ -656,7 +656,7 @@ fn fused_scan_and_filter_count_have_distinct_accumulator_slots() {
                 let slot = graph.value_to_base::<i64>(row[1]);
                 let partial = query.constructor("Temporary", (row[0], "partial", slot)).unwrap().unwrap();
                 assert!(query.contains("ElementType", (partial, row[2])).unwrap());
-                if graph.value_to_base::<S>(row[3]).as_str() == "count" {
+                if graph.value_to_base::<S>(row[3]).as_str() == "total" {
                     assert_eq!(slot, graph.value_to_base::<i64>(row[4]) + 1);
                 }
             }
@@ -1137,22 +1137,18 @@ fn segmented_collectives_select_workgroups_for_each_outer_coordinate() {
 }
 
 #[test]
-fn segmented_collectives_do_not_cross_callback_control_flow() {
+fn workgroup_regions_cover_uniform_control_flow_and_varying_inner_domains() {
     let sources = [
         "entry main(xs:[][17]i32) []i32=map(|row|if row[0]>0 then reduce((+),0,row) else 0,xs)",
         "entry main(xs:[][17]i32) []i32=map(|row|loop a=0 for i<2 do a+reduce((+),0,row),xs)",
         "entry main(xs:[]i32) []i32=map(|n|reduce((+),0,iota(n)),xs)",
     ];
-    planned(&cases_source(&sources), |graph| {
-        Query(graph)
-            .for_function("MapSegmented", |_, enabled| {
-                assert!(
-                    !graph.value_to_base::<bool>(enabled),
-                    "all three control-flow cases"
-                );
-                Ok(())
-            })
-            .unwrap();
+    planned_cases(&sources, |_, graph, region| {
+        let query = Query(graph);
+        for map in operations_in(graph, "map", region) {
+            let execution = query.required("MapExecution", (map,)).unwrap();
+            assert!(query.enode("WorkgroupScope", execution).unwrap().is_some());
+        }
     });
 }
 
@@ -1183,10 +1179,10 @@ entry case_4(xs:[]i32,n:i32) []i32=map(|x|repeat_sum(n,x),xs)
                 row[1],
                 [
                     (2, "TraversalValue"),
-                    (2, "TraversalReduce"),
-                    (2, "TraversalElements"),
-                    (1, "TraversalReduce"),
-                    (1, "TraversalReduce"),
+                    (2, "TraversalResult"),
+                    (2, "TraversalResult"),
+                    (1, "TraversalResult"),
+                    (1, "TraversalResult"),
                 ][index],
             );
             Ok(())
@@ -1252,7 +1248,7 @@ entry case_4(xs:[]i32,n:i32) []i32=map(|x|repeat_sum(n,x),xs)
 }
 
 #[test]
-fn runtime_segmented_collectives_require_uniform_dimensions() {
+fn segment_lengths_are_bound_inside_each_workgroup() {
     planned_cases(
         &[
             "entry main(xs:[]i32,n:i32) []i32=map(|x|reduce((+),0,map(|y|x+y,iota(n))),xs)",
@@ -1267,7 +1263,7 @@ fn runtime_segmented_collectives_require_uniform_dimensions() {
             assert!(query.flag("MapHost", (plan,)).unwrap());
             assert_eq!(
                 query.flag("MapSegmented", (maps[0],)).unwrap(),
-                index < 2,
+                true,
                 "case {index}"
             );
         },

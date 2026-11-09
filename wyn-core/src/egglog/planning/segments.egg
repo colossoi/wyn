@@ -1,5 +1,5 @@
-; A workgroup owns one rectangular map coordinate and streams its collective
-; straight to that coordinate's output. No intermediate row is materialized.
+; Each group binds one outer coordinate before evaluating its inner domain.
+; Inner lengths may vary between groups; output storage retains its own shape.
 (rule ((RectangularDemand value) (= op (SourceValueOperation value)) (= plan (SelectedPlan op))
        (ScremaPlan plan) (= (HasReductions plan) true))
       ((set (SegmentCandidatePlan value) plan)) :ruleset rectangular-discover)
@@ -26,8 +26,7 @@
 (rule ((MapPlan plan owner extent) (PlanResult plan "array" i value element))
       ((set (SegmentRequiredOutputs plan) (set-of value))) :ruleset segment-shapes)
 (rule ((MapPlan plan owner extent) (= (MapHost plan) true) (= rank (IterationRank owner))
-       (PlanResult plan "array" i value element) (= traversal (Traversal value rank (CollectiveLeaf)))
-       (= segment (TraversalExtent traversal)) (= (ExtentUniform segment) true))
+       (PlanResult plan "array" i value element) (= traversal (Traversal value rank (CollectiveLeaf))))
       ((set (SegmentApprovedOutputs plan) (set-of value))) :ruleset segment-approve)
 (rule ((MapPlan plan owner extent) (= (MapHost plan) true)
        (= (SegmentRequiredOutputs plan) (SegmentApprovedOutputs plan)))

@@ -5,6 +5,30 @@ use crate::op::{BinaryOperator, OpTag, PureViewSource};
 use crate::ssa::types::InstKind;
 use crate::types::{self, buffer_tag, Type, TypeExt, TypeName};
 
+#[derive(Clone)]
+pub(in crate::egglog::to_ssa) enum OutputTarget {
+    Elements(Typed, Vec<Typed>),
+    Total(Typed, Vec<Typed>),
+}
+
+impl OutputTarget {
+    pub fn store(
+        &self,
+        body: &mut Body<'_, '_, '_>,
+        coordinates: &[Typed],
+        value: Typed,
+    ) -> Result<(), OptimizeError> {
+        let (array, prefix) = match self {
+            Self::Elements(array, prefix) | Self::Total(array, prefix) => (array, prefix),
+        };
+        let mut indices = prefix.clone();
+        if matches!(self, Self::Elements(..)) {
+            indices.extend_from_slice(coordinates);
+        }
+        body.store_at(array.clone(), &indices, value)
+    }
+}
+
 impl Body<'_, '_, '_> {
     pub fn workgroup_array(&mut self, count: u32, element: &Type) -> Result<Typed, OptimizeError> {
         let id = self.next_workgroup_array;
@@ -381,6 +405,56 @@ impl Body<'_, '_, '_> {
             operands,
             Type::Constructed(TypeName::Array, fields),
         )
+    }
+
+    /// Bind a loop result to an enclosing output for the duration of emission.
+    pub fn with_output<T>(
+        &mut self,
+        owner: Value,
+        port: Value,
+        array: Typed,
+        coordinates: &[Typed],
+        emit: impl FnOnce(&mut Self) -> Result<T, OptimizeError>,
+    ) -> Result<T, OptimizeError> {
+        let (role, index, target) = if let Some(fields) = self.compiler.facts.enode("TotalPort", port) {
+            (
+                "total",
+                fields[0],
+                OutputTarget::Total(array, coordinates.to_vec()),
+            )
+        } else if let Some(fields) = self.compiler.facts.enode("ArrayPort", port) {
+            (
+                "output",
+                fields[0],
+                OutputTarget::Elements(array, coordinates.to_vec()),
+            )
+        } else {
+            return Err(error("invalid parallel result port"));
+        };
+        let Some(resource) = self.compiler.facts.slot(owner, role, self.compiler.facts.integer(index))
+        else {
+            return Err(error("parallel result port has no buffer slot"));
+        };
+        let checkpoint = self.outputs.checkpoint();
+        self.outputs.insert(resource, target);
+        let result = emit(self);
+        self.outputs.restore(checkpoint);
+        result
+    }
+
+    pub fn output_target(
+        &mut self,
+        scope: Value,
+        owner: Value,
+        role: &str,
+        index: i64,
+    ) -> Result<Option<OutputTarget>, OptimizeError> {
+        if let Some(resource) = self.compiler.facts.slot(owner, role, index) {
+            if let Some(target) = self.outputs.get(&resource) {
+                return Ok(Some(target.clone()));
+            }
+        }
+        Ok(self.slot(scope, owner, role, index, 2)?.map(|array| OutputTarget::Elements(array, Vec::new())))
     }
 
     pub(in crate::egglog::to_ssa) fn slot(

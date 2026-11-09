@@ -9,9 +9,6 @@
 
 (sort DispatchGroupOperations (Set OperationKey))
 (sort DispatchStages (Set StageKey))
-(function PlanFilterOperation (FusionPlan) OperationKey :no-merge)
-(rule ((FilterPlan plan) (PlanMember plan op) (= (SourceOperation op) (OperationInfo region "filter")))
-      ((set (PlanFilterOperation plan) op)) :ruleset ssa-access)
 (function DispatchGroupMembers (OperationKey) DispatchGroupOperations :merge (set-union old new))
 (rule ((DispatchGroupLeader o owner)) ((set (DispatchGroupMembers owner) (set-of o))) :ruleset ssa-access)
 (function DispatchPredecessors (StageKey) DispatchStages :merge (set-union old new))
