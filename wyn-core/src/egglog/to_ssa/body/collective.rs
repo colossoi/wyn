@@ -26,9 +26,6 @@ impl Body<'_, '_, '_> {
         } else {
             return Err(error("invalid local execution scope"));
         };
-        for prerequisite in self.compiler.facts.set("LocalPrerequisites", (owner,)) {
-            self.value(scope, prerequisite)?;
-        }
         if width.is_some() {
             self.workgroup_barrier()?;
         }

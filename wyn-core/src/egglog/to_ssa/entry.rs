@@ -10,7 +10,7 @@ use crate::op::BinaryOperator;
 use crate::op::{OpTag, PureViewSource};
 use crate::ssa::types::InstKind;
 use crate::types::{self, buffer_tag, Type, TypeExt, TypeName};
-use crate::{ResourceAccess, SymbolId};
+use crate::{LookupMap, ResourceAccess, SymbolId};
 use egglog_engine::Value;
 
 pub(super) fn entry<'source>(
@@ -366,15 +366,25 @@ fn copy_results<'source>(
         let array_output = ty.is_array() || types::as_soa_tuple(ty).is_some();
         let write = |lower: &mut Body<'_, '_, 'source>| -> Result<(), OptimizeError> {
             if array_output {
-                let (array, fields) = lower.source_array(scope, source)?;
                 let destination = lower.resource(scope, resource, 2)?;
-                let length = lower.length(array.clone())?;
-                if parallel {
-                    let (start, step) = kernels::invocation(lower, width)?;
-                    lower.copy_array_strided((destination, &[]), array, length, &fields, start, step)?;
+                let length = lower.source_length(scope, source)?;
+                let (start, step) = if parallel {
+                    kernels::invocation(lower, width)?
                 } else {
-                    lower.copy_array(destination, array, length, &fields)?;
-                }
+                    (Body::number(0), Body::number(1))
+                };
+                lower.counted(start, length, step, vec![], |lower, index, _| {
+                    let item = kernels::element(
+                        lower,
+                        scope,
+                        None,
+                        source,
+                        std::slice::from_ref(&index),
+                        &mut LookupMap::default(),
+                    )?;
+                    lower.store(destination.clone(), index, item)?;
+                    Ok(vec![])
+                })?;
             } else {
                 let value = lower.value(scope, source)?;
                 let destination = lower.resource(scope, resource, 2)?;

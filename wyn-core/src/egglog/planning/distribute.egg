@@ -1,6 +1,9 @@
 ; Lift a closed array-producing region into an ordinary parallel loop. The
 ; selected traversal supplies its elements; calls and choices retain their scopes.
 (ruleset distribute-discover)
+(rule ((= (SourceOutput output) (OutputInfo entry value ty true)))
+      ((FlowValueOf value)) :ruleset distribute-discover)
+(rule ((= view (SourceView value))) ((FlowValueOf value)) :ruleset distribute-discover)
 (rule ((Current group plan) (= (PlanBody plan) (ScalarBody)) (= owner (Owner plan))
        (= value (SourceOperationValue owner)) (= ty (SourceType value)) (SourceArrayElement ty element)
        (= (SourceReadOnly value) true))
@@ -20,7 +23,8 @@
 (rule ((DistributedBody group original replacement) (= owner (Owner original)))
       ((delete (Current group original)) (delete (SelectedPlan owner)) (Current group replacement)) :ruleset distribute-commit)
 
-(rule ((Current group plan) (= plan (Distributed original)) (= owner (Owner plan)) (Enters owner region))
+(rule ((Current group plan) (= owner (Owner plan)) (= (PlanMapping owner) true) (Enters owner region))
       ((Callback owner region) (DeviceRegion region)) :ruleset planning-import)
-(rule ((Current group plan) (= plan (Distributed original)) (= owner (Owner plan)))
+(rule ((Current group plan) (= owner (Owner plan))
+       (= (PlanBody plan) (ParallelLoop domain totals scans arrays action)))
       ((set (InvocationBoundary owner) true)) :ruleset classify)

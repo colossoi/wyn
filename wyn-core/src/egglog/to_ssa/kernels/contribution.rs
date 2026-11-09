@@ -46,7 +46,7 @@ impl Contribution<'_> {
             let value = element(
                 body,
                 self.scope,
-                self.plan,
+                Some(self.plan),
                 fields[0],
                 &coordinates,
                 if canonical { cache } else { &mut other_axes },

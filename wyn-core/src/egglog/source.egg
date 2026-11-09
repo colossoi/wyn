@@ -64,6 +64,7 @@
 (function SourceDomainShape (OperationKey) DomainShape :no-merge)
 (function SourceExtent (SourceValue) Extent :no-merge)
 (constructor SourceArrayAtom (SourceValue i64) SourceValue)
+(constructor SourceDescriptorPart (SourceValue i64) SourceValue)
 (constructor SourceProjected (SourceValue i64) SourceValue)
 (relation SourceOriginalEntry (i64 RegionKey bool))
 (datatype SourceOutputData (OutputInfo i64 SourceValue TypeKey bool))
@@ -102,8 +103,6 @@
 (relation SourceLoopField (SourceValue SourceValue i64 SourceValue))
 (relation SourceLoopCarry (SourceValue i64 SourceValue SourceValue SourceValue SourceValue bool))
 (function SourceLoopDomain (SourceValue) Extent :no-merge)
-; Single-array counted loops can swap the producer's allocation directly.
-(function SourceLoopDirectCarry (SourceValue) bool :no-merge)
 (function SourceInteger32 (SourceValue) i64 :no-merge)
 
 (function SourceEvaluationPosition (SourceValue) i64 :merge (min old new))

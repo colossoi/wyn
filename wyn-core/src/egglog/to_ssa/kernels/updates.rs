@@ -209,25 +209,18 @@ fn capabilities(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
     owner: Value,
-    plan: Value,
     phase: &str,
     declarations: Value,
 ) -> Result<Capabilities, OptimizeError> {
     let mut handles = LookupMap::default();
-    for declaration in body.compiler.facts.vector(declarations)? {
+    for (slot, declaration) in body.compiler.facts.vector(declarations)?.into_iter().enumerate() {
         let Some(fields) = body.compiler.facts.enode("UpdateArray", declaration) else {
             return Err(error("invalid update declaration"));
         };
-        let Some(handle) = body.compiler.facts.enode("ScopedUpdate", fields[0]) else {
-            return Err(error("invalid update handle"));
-        };
-        if handle[0] != plan {
-            return Err(error("update declaration belongs to another scope"));
-        }
         let Some(base) = body.compiler.facts.lookup("DestinationSlot", (owner,)) else {
             return Err(error("update scope has no result slots"));
         };
-        let slot = body.compiler.facts.integer(base) + body.compiler.facts.integer(handle[1]);
+        let slot = body.compiler.facts.integer(base) + slot as i64;
         let Some(resource) = body.compiler.facts.constructor("Result", (owner, slot)) else {
             return Err(error("update resource missing"));
         };
@@ -291,10 +284,13 @@ pub(super) fn update(
     let Some(fields) = body.compiler.facts.record("PlanUpdates", "WithUpdates", (plan,)) else {
         return Err(error("parallel loop has no update scope"));
     };
-    let handles = capabilities(body, scope, owner, plan, phase, fields[0])?;
+    let handles = capabilities(body, scope, owner, phase, fields[0])?;
     for block in body.compiler.facts.vector(fields[1])? {
         let Some(block) = body.compiler.facts.enode("EvaluateUpdates", block) else {
             return Err(error("invalid update block"));
+        };
+        let Some(input) = body.compiler.facts.lookup("UpdateContribution", (plan, block[0])) else {
+            return Err(error("update block has no input contribution"));
         };
         Contribution {
             scope,
@@ -302,7 +298,7 @@ pub(super) fn update(
             indices,
             skipped: &|body, _| body.tuple(vec![]),
         }
-        .emit(body, block[0], cache, &mut |body, _, input| {
+        .emit(body, input, cache, &mut |body, _, input| {
             handles.emit(body, scope, block[1], &input, &[])?;
             body.tuple(vec![])
         })?;

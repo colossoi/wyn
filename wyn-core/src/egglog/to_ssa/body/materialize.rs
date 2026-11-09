@@ -258,12 +258,12 @@ impl Body<'_, '_, '_> {
 }
 
 impl Body<'_, '_, '_> {
-    /// Emit the selected output address mapping without materializing a row buffer.
+    /// Apply a complete coordinate map, copying any remaining array dimensions.
     pub fn store_mapped(
         &mut self,
         scope: Value,
         destination: Value,
-        row: Typed,
+        coordinates: &[Typed],
         value: Typed,
     ) -> Result<(), OptimizeError> {
         let Some(fields) = self.compiler.facts.enode("OutputMappingInfo", destination) else {
@@ -273,20 +273,35 @@ impl Body<'_, '_, '_> {
             return Err(error("mapped output resource missing"));
         };
         let output = self.resource(scope, resource, 2)?;
-        let columns = self.extent(scope, fields[1])?;
-        self.counted(
-            Self::number(0),
-            columns,
-            Self::number(1),
-            vec![],
-            |body, column, _| {
-                let coordinates = body.tuple(vec![row.clone(), column.clone()])?;
-                let address = body.formula(scope, fields[2], &coordinates, &[])?;
-                let item = body.index(value.clone(), column)?;
-                body.store(output.clone(), address, item)?;
-                Ok(vec![])
-            },
-        )?;
+        let dimensions = self.compiler.facts.vector(fields[1])?;
+        let Some(remaining) = dimensions.get(coordinates.len()..) else {
+            return Err(error("output coordinates exceed mapping rank"));
+        };
+        self.store_mapped_at(scope, output, fields[2], coordinates, remaining, value)
+    }
+
+    fn store_mapped_at(
+        &mut self,
+        scope: Value,
+        output: Typed,
+        formula: Value,
+        coordinates: &[Typed],
+        remaining: &[Value],
+        value: Typed,
+    ) -> Result<(), OptimizeError> {
+        let Some((&extent, remaining)) = remaining.split_first() else {
+            let arguments = self.tuple(coordinates.to_vec())?;
+            let address = self.formula(scope, formula, &arguments, &[])?;
+            return self.store(output, address, value);
+        };
+        let n = self.extent(scope, extent)?;
+        self.counted(Self::number(0), n, Self::number(1), vec![], |body, index, _| {
+            let item = body.index(value.clone(), index.clone())?;
+            let mut coordinates = coordinates.to_vec();
+            coordinates.push(index);
+            body.store_mapped_at(scope, output.clone(), formula, &coordinates, remaining, item)?;
+            Ok(vec![])
+        })?;
         Ok(())
     }
 }

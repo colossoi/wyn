@@ -5,11 +5,30 @@
   (OneResult SourceValue TypeKey)
   (JoinResults ResultTree ResultTree))
 (datatype UpdateMode (Overwrite) (IdenticalWrites) (Adding) (Combining RegionKey))
-(datatype UpdateOperations (UpdateOne OperationKey) (UpdateThen UpdateOperations UpdateOperations))
+; Handles name declarations, not physical slots. Fusion preserves their identity.
+(datatype UpdateHandle (ScopedUpdate OperationKey i64))
+(datatype UpdateInitial (SeedArray SourceValue) (ZeroInitialized ResultLayout))
+(datatype UpdateDeclaration (UpdateArray UpdateHandle UpdateInitial UpdateMode))
+(sort UpdateArrays (Vec UpdateDeclaration))
+(datatype ScalarFormula
+  (FormulaInput i64) (FormulaBound i64) (FormulaConstant i64)
+  (FormulaExtent Extent) (FormulaBinary String ScalarFormula ScalarFormula))
+(sort CoordinateFormulas (Vec ScalarFormula))
+; Each update result is bound only inside its continuation; branches do not leak bindings.
+(datatype UpdateProgram
+  (UpdatesDone)
+  (ChooseUpdates ScalarFormula UpdateProgram UpdateProgram)
+  (BindUpdate UpdateHandle CoordinateFormulas ScalarFormula UpdateProgram))
+; Input contributions are substituted in the enclosing loop's domain.
+(datatype UpdateBlock (EvaluateUpdates OperationKey UpdateProgram))
+(sort UpdateBlocks (Vec UpdateBlock))
+(datatype UpdateScope (WithUpdates UpdateArrays UpdateBlocks))
+(function SourceUpdates (OperationKey) UpdateScope :no-merge)
+(function PlanUpdates (FusionPlan) UpdateScope :no-merge)
 (datatype OutputAction
   (Publish)
   (Pack OperationKey SourceValue)
-  (PerformUpdates UpdateOperations))
+  (PerformUpdates UpdateScope))
 (datatype ParallelBody (ScalarBody) (ParallelLoop DomainShape ResultTree ResultTree ResultTree OutputAction))
 (function PlanBody (FusionPlan) ParallelBody :no-merge)
 (function PlanTotals (FusionPlan) ResultTree :no-merge)

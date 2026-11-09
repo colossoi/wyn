@@ -1764,6 +1764,7 @@ impl<'a> LowerCtx<'a> {
                 if let Some((value_id, _)) = body.param(field.input_index) {
                     let expr = format!("{}.{}", pc.var_name, field.wgsl_name);
                     body_ctx.addressable.insert(expr.clone());
+                    body_ctx.immutable_addresses.insert(expr.clone());
                     body_ctx.value_map.insert(value_id, ValueBinding::Alias(expr));
                 }
             }
@@ -1886,6 +1887,7 @@ struct BodyLowerCtx<'a, 'b> {
     /// Names that can be used as addressable storage. Ordinary SSA
     /// results are immutable `let` bindings and deliberately absent.
     addressable: LookupSet<String>,
+    immutable_addresses: LookupSet<String>,
     /// Addressable names that can also appear on the left-hand side of
     /// an assignment. Function parameters are addressable but immutable.
     writable: LookupSet<String>,
@@ -1941,6 +1943,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             inline_values: LookupSet::new(),
             next_copy: 0,
             addressable: LookupSet::new(),
+            immutable_addresses: LookupSet::new(),
             writable: LookupSet::new(),
             needs_mutable_binding,
             workgroup_view_name: LookupMap::new(),
@@ -2755,6 +2758,30 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                     // Subscripts and fields of an addressable array remain
                                     // addressable when retained as lexical aliases.
                                     self.addressable.insert(expr.clone());
+                                    if self.immutable_addresses.contains(&base) {
+                                        self.immutable_addresses.insert(expr.clone());
+                                    }
+                                    if self.immutable_addresses.contains(&expr)
+                                        && !self.inline_values.contains(&result)
+                                        && !matches!(
+                                            self.value_map.get(&result),
+                                            Some(ValueBinding::Variable(_))
+                                        )
+                                    {
+                                        // Retain the address across nested scopes without copying
+                                        // an immutable row. The pointer freezes its index here.
+                                        let pointer = wgsl_var(result);
+                                        writeln!(
+                                            output,
+                                            "{}let {pointer} = &{expr};",
+                                            self.ctx.indent_str()
+                                        )?;
+                                        let alias = format!("(*{pointer})");
+                                        self.addressable.insert(alias.clone());
+                                        self.immutable_addresses.insert(alias.clone());
+                                        self.value_map.insert(result, ValueBinding::Alias(alias));
+                                        continue;
+                                    }
                                 }
                             }
                             self.emit_alias_or_binding(output, result, expr)?;

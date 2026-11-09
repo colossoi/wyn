@@ -33,7 +33,7 @@
       ((set (ArrayStorage value) resource) (set (DerivedView value) true)) :ruleset residency)
 (rule ((SourceResultOperand value index original) (= ty (SourceType value)) (SourceArrayElement ty element) (= resource (ArrayStorage original)))
       ((set (ArrayStorage value) resource) (set (DerivedView value) true)) :ruleset residency)
-(rule ((= (SourceSlice value) (SliceInfo original start end)) (= resource (ArrayStorage original)))
+(rule ((= (HasDirectResult value) false) (= (SourceSlice value) (SliceInfo original start end)) (= resource (ArrayStorage original)))
       ((set (ArrayStorage value) resource) (set (DerivedView value) true)) :ruleset residency)
 (rule (
       (= (SourceLoop value) (LoopInfo header iteration loop-control state initial))
@@ -149,7 +149,7 @@
       ((set (ArrayView value) view)) :ruleset array-views)
 (rule ((SourceResultOperand value index original) (= view (ArrayView original)))
       ((set (ArrayView value) view)) :ruleset array-views)
-(rule ((= (SourceSlice value) (SliceInfo original start end))
+(rule ((= (HasDirectResult value) false) (= (SourceSlice value) (SliceInfo original start end))
        (= (ArrayView original) (ViewInfo resource offset length)))
       ((set (ArrayView value) (ViewInfo resource (Sum offset (Scalar start)) (Difference (Scalar end) (Scalar start))))) :ruleset array-views)
 (rule ( (= (SourceLoop value) (LoopInfo header iteration loop-control state initial)) (= op (SourceValueOperation value)) (= (ContainsCollective op) false) (= resource (ArrayStorage state)) (= ty (SourceType state)) (= (SourceArraySize ty) (DynamicSize)))

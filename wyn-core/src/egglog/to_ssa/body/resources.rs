@@ -1,6 +1,7 @@
 //! Final storage views and launch extents decoded from the selected plan.
 use super::{builder_error, error, Body, OptimizeError, Typed, Value};
 use crate::builtins::catalog;
+use crate::egglog::query::Query;
 use crate::op::{BinaryOperator, OpTag, PureViewSource};
 use crate::ssa::types::InstKind;
 use crate::types::{self, buffer_tag, Type, TypeExt, TypeName};
@@ -18,6 +19,11 @@ impl OutputTarget {
         coordinates: &[Typed],
         value: Typed,
     ) -> Result<(), OptimizeError> {
+        let (array, indices) = self.destination(coordinates);
+        body.store_at(array, &indices, value)
+    }
+
+    pub fn destination(&self, coordinates: &[Typed]) -> (Typed, Vec<Typed>) {
         let (array, prefix) = match self {
             Self::Elements(array, prefix) | Self::Total(array, prefix) => (array, prefix),
         };
@@ -25,7 +31,7 @@ impl OutputTarget {
         if matches!(self, Self::Elements(..)) {
             indices.extend_from_slice(coordinates);
         }
-        body.store_at(array.clone(), &indices, value)
+        (array.clone(), indices)
     }
 }
 
@@ -103,7 +109,8 @@ impl Body<'_, '_, '_> {
             let Type::Constructed(_, fields) = ty else {
                 return Err(error("loop product is not an aggregate"));
             };
-            let count = fields.len();
+            let segmented = ty.is_array();
+            let count = if segmented { 2 } else { fields.len() };
             let mut values = Vec::with_capacity(count);
             for index in 0..count {
                 let child = self
@@ -113,32 +120,34 @@ impl Body<'_, '_, '_> {
                     .ok_or_else(|| error("loop product field missing"))?;
                 values.push(self.value(scope, child)?);
             }
-            return self.tuple(values);
+            return if segmented {
+                let elements = values.remove(1);
+                self.segmented_array(values.remove(0), elements)
+            } else {
+                self.tuple(values)
+            };
+        }
+        if let Some(fields) = self.compiler.facts.enode("SourceDescriptorPart", source) {
+            let array = self.value(scope, fields[0])?;
+            let index = self.compiler.facts.unsigned(fields[1], "descriptor field")?;
+            return self.field(array, index as usize);
         }
         if let Some(formal) = self.compiler.facts.enode("SourceFormal", source) {
             if let Some(actual) = self.compiler.facts.lookup("SourceCapture", (formal[0], source)) {
-                let Some(context) = self.compiler.facts.lookup("ExprContextForSource", (actual,)) else {
-                    return Err(error("captured value has no scalar context"));
-                };
-                let old_context = std::mem::replace(&mut self.context, context);
-                let result = self.value(scope, actual);
-                self.context = old_context;
-                return result;
+                return self.value(scope, actual);
             }
         }
-        for (constructor, index) in [("SourceShape", 1), ("SourceOffset", 0)] {
-            if let Some(fields) = self.compiler.facts.enode(constructor, source) {
-                let view = self.value(scope, fields[0])?;
-                if index == 1 {
-                    return self.length(view);
-                }
-                let offset = self.op(
-                    OpTag::Project { index },
-                    vec![view],
-                    Type::Constructed(TypeName::UInt(32), vec![]),
-                )?;
-                return self.cast(offset, &types::i32());
-            }
+        if let Some(fields) = self.compiler.facts.enode("SourceShape", source) {
+            return self.source_length(scope, fields[0]);
+        }
+        if let Some(fields) = self.compiler.facts.enode("SourceOffset", source) {
+            let view = self.value(scope, fields[0])?;
+            let offset = self.op(
+                OpTag::Project { index: 0 },
+                vec![view],
+                Type::Constructed(TypeName::UInt(32), vec![]),
+            )?;
+            return self.cast(offset, &types::i32());
         }
         self.planned_boundary(scope, source)?;
         if let Some(access) = self.compiler.facts.access(source) {
@@ -183,13 +192,20 @@ impl Body<'_, '_, '_> {
         )))
     }
 
-    fn slice(
+    pub(in crate::egglog::to_ssa) fn slice(
         &mut self,
         array: Typed,
         start: Typed,
         end: Typed,
         size: Type,
     ) -> Result<Typed, OptimizeError> {
+        if array.is_segmented() {
+            let offsets = self.field(array.clone(), 0)?;
+            let elements = self.field(array, 1)?;
+            let end = self.binary(BinaryOperator::Add, end, Self::number(1))?;
+            let offsets = self.slice(offsets, start, end, size)?;
+            return self.segmented_array(offsets, elements);
+        }
         let Type::Constructed(TypeName::Array, mut fields) = array.ty.clone() else {
             return Err(error("slice operand has no array representation"));
         };
@@ -229,16 +245,17 @@ impl Body<'_, '_, '_> {
         )
     }
 
-    pub(super) fn source_length(&mut self, scope: Value, source: Value) -> Result<Typed, OptimizeError> {
+    pub(in crate::egglog::to_ssa) fn source_length(
+        &mut self,
+        scope: Value,
+        source: Value,
+    ) -> Result<Typed, OptimizeError> {
         if let Some(value) = self.values.get(&source) {
             return self.length(value.clone());
         }
         let Some(extent) = self.compiler.facts.view_extent(source) else {
-            return Err(error(format!(
-                "array {source:?} has no planned view extent, projection {:?}, type {:?}",
-                self.compiler.facts.projection(source),
-                self.compiler.facts.source_type(source)
-            )));
+            let value = self.value(scope, source)?;
+            return self.length(value);
         };
         // A parameter's Length(self) queries its bound descriptor. Other lengths
         // follow the plan, including compacted counts and slice bounds.
@@ -249,33 +266,6 @@ impl Body<'_, '_, '_> {
             }
         }
         self.extent(scope, extent)
-    }
-
-    /// Resolve a component array without materializing it separately from its parent.
-    pub(in crate::egglog::to_ssa) fn source_array(
-        &mut self,
-        scope: Value,
-        source: Value,
-    ) -> Result<(Typed, Vec<usize>), OptimizeError> {
-        if let Some(actual) = self.compiler.facts.alias(source) {
-            return self.source_array(scope, actual);
-        }
-        if let Some((parent, field)) = self.compiler.facts.projection(source) {
-            if self
-                .compiler
-                .facts
-                .source_type(parent)
-                .is_some_and(|ty| types::as_soa_tuple(types::strip_existentials(ty)).is_some())
-            {
-                let (array, mut fields) = self.source_array(scope, parent)?;
-                if fields.is_empty() && types::as_soa_tuple(&array.ty).is_some() {
-                    return Ok((self.field(array, field)?, fields));
-                }
-                fields.push(field);
-                return Ok((array, fields));
-            }
-        }
-        Ok((self.value(scope, source)?, vec![]))
     }
 
     pub(in crate::egglog::to_ssa) fn resource(
@@ -338,10 +328,17 @@ impl Body<'_, '_, '_> {
             return Err(error("selected resource has no planned extent"));
         };
         let element = self.compiler.bindings.buffer_element(backing)?;
-        let dimensions = match self.compiler.facts.storage_shape(backing)? {
-            Some(shape) => self.compiler.facts.vector(shape)?,
-            None => vec![extent],
-        };
+        let domain = self.compiler.facts.storage_domain(backing)?;
+        let segmented = domain.filter(|&shape| self.compiler.facts.enode("Segments", shape).is_some());
+        let dimensions =
+            match domain.and_then(|shape| self.compiler.facts.lookup("ShapeDimensions", (shape,))) {
+                Some(shape) => self.compiler.facts.vector(shape)?,
+                None => vec![if let Some(shape) = segmented {
+                    Query(&self.compiler.program.graph).required("ShapeExtent", (shape,))?
+                } else {
+                    extent
+                }],
+            };
         let offset = self
             .compiler
             .facts
@@ -360,11 +357,16 @@ impl Body<'_, '_, '_> {
             dimensions.len()
         ]);
         fields.push(buffer_tag(binding));
-        self.op(
+        let array = self.op(
             OpTag::StorageView(PureViewSource::Storage(binding)),
             operands,
             Type::Constructed(TypeName::Array, fields),
-        )
+        )?;
+        if let Some(shape) = segmented {
+            self.segmented_storage(scope, shape, array)
+        } else {
+            Ok(array)
+        }
     }
 
     /// Bind a loop result to an enclosing output for the duration of emission.
@@ -372,22 +374,15 @@ impl Body<'_, '_, '_> {
         &mut self,
         owner: Value,
         port: Value,
-        array: Typed,
+        target: OutputTarget,
         coordinates: &[Typed],
         emit: impl FnOnce(&mut Self) -> Result<T, OptimizeError>,
     ) -> Result<T, OptimizeError> {
+        let (array, coordinates) = target.destination(coordinates);
         let (role, index, target) = if let Some(fields) = self.compiler.facts.enode("TotalPort", port) {
-            (
-                "total",
-                fields[0],
-                OutputTarget::Total(array, coordinates.to_vec()),
-            )
+            ("total", fields[0], OutputTarget::Total(array, coordinates))
         } else if let Some(fields) = self.compiler.facts.enode("ArrayPort", port) {
-            (
-                "output",
-                fields[0],
-                OutputTarget::Elements(array, coordinates.to_vec()),
-            )
+            ("output", fields[0], OutputTarget::Elements(array, coordinates))
         } else {
             return Err(error("invalid parallel result port"));
         };

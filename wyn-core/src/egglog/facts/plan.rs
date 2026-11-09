@@ -18,6 +18,8 @@ pub enum FoldOutput {
 }
 
 pub struct AccumulatorComponent {
+    pub slot: i64,
+    pub stage: i64,
     pub output: FoldOutput,
     pub source: Value,
 }
@@ -94,12 +96,12 @@ impl<'a, 'source> Facts<'a, 'source> {
     pub fn live_length(&self, value: Value) -> Option<Value> {
         self.lookup("LiveLength", (value,))
     }
-    pub fn storage_shape(&self, value: Value) -> Result<Option<Value>, OptimizeError> {
+    pub fn storage_domain(&self, value: Value) -> Result<Option<Value>, OptimizeError> {
         let query = Query(&self.program.graph);
         let Some(fields) = query.record("StorageLayout", "FlatStorage", (value,))? else {
             return Ok(None);
         };
-        Ok(Some(query.required("ShapeDimensions", (fields[1],))?))
+        Ok(Some(fields[1]))
     }
     pub fn capacity(&self, value: Value) -> Option<Value> {
         self.lookup("CapacityExtent", (value,))
@@ -206,29 +208,25 @@ impl<'a, 'source> Facts<'a, 'source> {
                 } else {
                     return Err(error("invalid fold output"));
                 };
-                components.push((
-                    self.integer(row[1]),
-                    AccumulatorComponent {
-                        output,
-                        source: row[4],
-                    },
-                ));
+                components.push(AccumulatorComponent {
+                    slot: self.integer(row[1]),
+                    stage: self.integer(Query(&self.program.graph).required("FoldStage", (owner, row[4]))?),
+                    output,
+                    source: row[4],
+                });
             }
             Ok(())
         })?;
-        components.sort_by_key(|(slot, _)| *slot);
-        components
-            .into_iter()
-            .enumerate()
-            .map(|(expected, (slot, component))| {
-                if slot != expected as i64 {
-                    return Err(error("noncontiguous accumulator slots"));
-                }
-                if matches!(component.output, FoldOutput::Prefix(i) | FoldOutput::Total(i) if i < 0) {
-                    return Err(error("invalid accumulator output slot"));
-                }
-                Ok(component)
-            })
-            .collect()
+        components.sort_by_key(|component| component.slot);
+        for (expected, component) in components.iter().enumerate() {
+            if component.slot != expected as i64 {
+                return Err(error("noncontiguous accumulator slots"));
+            }
+            if matches!(component.output, FoldOutput::Prefix(i) | FoldOutput::Total(i) if i < 0) {
+                return Err(error("invalid accumulator output slot"));
+            }
+        }
+        components.sort_by_key(|component| (component.stage, component.slot));
+        Ok(components)
     }
 }

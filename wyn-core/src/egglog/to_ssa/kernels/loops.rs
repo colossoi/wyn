@@ -51,22 +51,19 @@ pub(super) fn emit(
         } else {
             Query(&body.compiler.program.graph).required("LoopNext", (operation, carry.slot))?
         };
+        if phase == "loop_step" && body.compiler.facts.enode("Temporary", resource).is_none() {
+            continue;
+        }
         let output = body.resource(scope, resource, 2)?;
         let value = if phase == "loop_enter" { carry.initial } else { carry.next };
         let value_scope = if phase == "loop_enter" { scope } else { iteration };
-        let length = if carry.array {
-            let extent =
-                Query(&body.compiler.program.graph).required("LoopCarryExtent", (operation, carry.slot))?;
-            body.extent(scope, extent)?
-        } else {
-            Body::number(1)
-        };
+        let length = if carry.array { body.source_length(value_scope, value)? } else { Body::number(1) };
         body.counted(start.clone(), length, stride.clone(), vec![], |body, index, _| {
             let item = if carry.array {
                 element(
                     body,
                     value_scope,
-                    plan,
+                    Some(plan),
                     value,
                     std::slice::from_ref(&index),
                     &mut LookupMap::default(),

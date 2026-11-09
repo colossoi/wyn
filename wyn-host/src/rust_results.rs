@@ -45,29 +45,34 @@ impl Program {
                             "missing result layout for {source_name}"
                         )));
                     };
+                    let offsets = descriptor
+                        .shape
+                        .offsets()
+                        .iter()
+                        .map(|source| source.resource().map(resource))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let offsets = quote!(Vec::from([#(Buffer::clone(&#offsets)),*]));
                     let layout = rust_layout(&descriptor.layout);
-                    let range = match descriptor.layout.byte_size() {
-                        Some(bytes) => {
-                            let bytes = u64::from(bytes);
-                            quote!(BufferRange::Bytes { offset: 0, size: #bytes })
-                        }
-                        None => quote!(BufferRange::CallerProvided),
-                    };
-                    if descriptor.shape.is_empty() {
-                        quote!(OutputResource::Buffer { buffer: Buffer::clone(&#local), layout: #layout, range: #range })
+                    let layout = if descriptor.shape.is_static() {
+                        layout
                     } else {
                         let dimensions = descriptor
                             .shape
+                            .expressions()
                             .iter()
                             .map(|extent| self.rust_expr(extent, entry))
                             .collect::<Result<Vec<_>, _>>()?;
-                        quote!({
-                            let layout = (#layout).rectangular(&[#(dimension(#dimensions)?),*])
-                                .ok_or_else(|| HostError::Invalid("rectangular result size overflow".into()))?;
-                            let size = layout.byte_size().ok_or_else(|| HostError::Invalid("rectangular result has no byte size".into()))?;
-                            OutputResource::Buffer { buffer: Buffer::clone(&#local), layout, range: BufferRange::Bytes {offset: 0, size: u64::from(size)} }
-                        })
-                    }
+                        quote!((#layout).rectangular(&[#(dimension(#dimensions)?),*])
+                            .ok_or_else(|| HostError::Invalid("rectangular result size overflow".into()))?)
+                    };
+                    quote!({
+                        let layout = #layout;
+                        let range = match layout.byte_size() {
+                            Some(size) => BufferRange::Bytes { offset: 0, size: u64::from(size) },
+                            None => BufferRange::CallerProvided,
+                        };
+                        OutputResource::Buffer { buffer: Buffer::clone(&#local), offsets: #offsets, layout, range }
+                    })
                 }
                 FrameResourceKind::Texture | FrameResourceKind::StorageTexture => {
                     quote!(OutputResource::Texture(Texture::clone(&#local)))

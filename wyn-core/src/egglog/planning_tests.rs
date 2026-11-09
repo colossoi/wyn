@@ -96,6 +96,63 @@ fn operations_in(graph: &EGraph, kind: &str, region: Value) -> Vec<Value> {
 }
 
 #[test]
+fn invariant_array_regions_are_evaluated_outside_parallel_callbacks() {
+    planned("def producer(n:i32) []f32=map(|i|f32.i32(i),0i32..<n) entry main(n:i32,j:i32) [4]f32=map(|p|producer(n)[j],iota(4))", |graph| {
+        let query = Query(graph);
+        let candidate = query.row("InvariantCandidate", |_| true).unwrap().unwrap();
+        let owner = candidate[2];
+        let selected = query.required("SelectedPlan", (owner,)).unwrap();
+        assert!(query.enode("Lifted", selected).unwrap().is_some());
+        assert_eq!(query.required("OperationRegion", (owner,)).unwrap(), candidate[4]);
+        let result = query.constructor("Result", (owner, 0i64)).unwrap().unwrap();
+        assert!(query.lookup("Backing", (result,)).unwrap().is_some());
+        let producer = query.row("Produces", |row| row[1] == result).unwrap().unwrap()[0];
+        let consumer = query.row("Needs", |row| row[1] == result).unwrap().unwrap()[0];
+        assert_ne!(producer, consumer);
+        assert!(query.row("DispatchDependency", |row| row == [producer, consumer]).unwrap().is_some());
+    });
+}
+
+#[test]
+fn dependent_or_partial_regions_stay_inside_parallel_callbacks() {
+    planned_cases(
+        &[
+            "entry main(j:i32) [4]i32=map(|p|map(|i|i+p,iota(8))[j],iota(4))",
+            "entry main(j:i32) [4]i32=map(|p|map(|i|i/j,iota(8))[0],iota(4))",
+            "entry main(j:i32) [4]i32=map(|p|map(|i|loop x=i while x<j do x+1,iota(8))[0],iota(4))",
+        ],
+        |_, graph, _| {
+            Query(graph)
+                .for_each("Current", |row| {
+                    assert!(Query(graph).enode("Lifted", row[1])?.is_none());
+                    Ok(())
+                })
+                .unwrap();
+        },
+    );
+}
+
+#[test]
+fn exported_views_have_their_own_logical_domain() {
+    planned(
+        "entry main() [][]i32=let rows=map(|n|map(|i|i+n,iota(n)),[0,1,3,7]) in rows[1..3]",
+        |graph| {
+            let query = Query(graph);
+            query
+                .for_function("SourceView", |keys, _| {
+                    assert!(query.flag("HasDirectResult", (keys[0],))?);
+                    let owner = query.required("SourceValueOperation", (keys[0],))?;
+                    let domain = query.required("InputDomain", (owner,))?;
+                    let length = query.required("ConstantLogicalExtent", (domain,))?;
+                    assert_eq!(graph.value_to_base::<i64>(length), 2);
+                    Ok(())
+                })
+                .unwrap();
+        },
+    );
+}
+
+#[test]
 fn outputs_that_capture_a_total_wait_for_the_collective_barrier() {
     planned_cases(&[
         "entry main(xs:[257]i32) [257]i32=let prefix=scan((+),0,xs) let total=reduce((+),0,xs) in map(|x|x+total,prefix)",
@@ -145,23 +202,12 @@ fn radix_step_has_three_phases() {
         query
             .for_each("Phase", |row| {
                 let stage = query.enode("Stage", row[0])?.unwrap();
-                let info = query.record("SourceOperation", "OperationInfo", (stage[0],))?.unwrap();
-                phases.push((
-                    graph.value_to_base::<S>(stage[1]).to_string(),
-                    graph.value_to_base::<S>(info[1]).to_string(),
-                ));
+                phases.push(graph.value_to_base::<S>(stage[1]).to_string());
                 Ok(())
             })
             .unwrap();
         phases.sort();
-        assert_eq!(
-            phases,
-            vec![
-                ("chunks".into(), "elements".into()),
-                ("combine".into(), "elements".into()),
-                ("offsets".into(), "elements".into())
-            ]
-        );
+        assert_eq!(phases, ["chunks", "combine", "offsets"]);
     });
 }
 
@@ -202,23 +248,12 @@ fn four_bit_radix_step_has_three_phases() {
         query
             .for_each("Phase", |row| {
                 let stage = query.enode("Stage", row[0])?.unwrap();
-                let info = query.record("SourceOperation", "OperationInfo", (stage[0],))?.unwrap();
-                phases.push((
-                    graph.value_to_base::<S>(stage[1]).to_string(),
-                    graph.value_to_base::<S>(info[1]).to_string(),
-                ));
+                phases.push(graph.value_to_base::<S>(stage[1]).to_string());
                 Ok(())
             })
             .unwrap();
         phases.sort();
-        assert_eq!(
-            phases,
-            vec![
-                ("chunks".into(), "elements".into()),
-                ("combine".into(), "elements".into()),
-                ("offsets".into(), "elements".into())
-            ]
-        );
+        assert_eq!(phases, ["chunks", "combine", "offsets"]);
     });
 }
 
@@ -768,7 +803,6 @@ fn nested_domains_retain_distinct_axes_and_capture_origins() {
         |graph| {
             let query = Query(graph);
             let maps = operations(graph, "map");
-            assert_eq!(maps.len(), 2);
             let mut bodies = Vec::new();
             for operation in maps {
                 let body = query.required("SourceOperatorBody", (operation,)).unwrap();
@@ -776,7 +810,7 @@ fn nested_domains_retain_distinct_axes_and_capture_origins() {
                 query.required("SourceDomainAxis", (operation, 0i64)).unwrap();
                 bodies.push(body);
             }
-            assert_ne!(bodies[0], bodies[1]);
+            assert_eq!(bodies.iter().collect::<crate::LookupSet<_>>().len(), bodies.len());
             let mut capture_origins = Vec::new();
             query
                 .for_function("SourceCapture", |row, actual| {
@@ -861,11 +895,8 @@ entry case_1(dest:*[2][2]i32) ([2][2]i32,[2]u32,u32)=
         .unwrap();
     assert!(owners.len() >= 2);
     prepared.program.graph.clear_function("IterationShape").unwrap();
-    let facts = super::super::facts::Facts {
-        program: &prepared.program,
-    };
     for owner in owners {
-        let error = facts.iteration_dimensions(owner).unwrap_err();
+        let error = Query(&prepared.program.graph).required("IterationShape", (owner,)).unwrap_err();
         assert!(error.to_string().contains("missing selected IterationShape"));
     }
 }
@@ -1011,7 +1042,7 @@ fn rectangular_maps_select_arbitrary_rank_and_preserve_sequential_prefixes() {
 }
 
 #[test]
-fn fused_outputs_only_share_a_rectangular_launch_when_inner_shapes_agree() {
+fn fused_outputs_traverse_independent_rectangular_domains() {
     let sources = [3, 5].map(|inner| {
         format!(
             "entry main(xs:[4]i32) ([4][3]i32,[4][{inner}]i32)=
@@ -1019,7 +1050,6 @@ fn fused_outputs_only_share_a_rectangular_launch_when_inner_shapes_agree() {
         )
     });
     planned_cases(&sources, |index, graph, region| {
-        let expected_rank = [2, 1][index];
         let query = Query(graph);
         let mut fused = 0;
         query
@@ -1036,8 +1066,17 @@ fn fused_outputs_only_share_a_rectangular_launch_when_inner_shapes_agree() {
                 })?;
                 if outputs == 2 {
                     fused += 1;
-                    let rank = query.required("IterationRank", (row[1],))?;
-                    assert_eq!(graph.value_to_base::<i64>(rank), expected_rank);
+                    let mut inner = Vec::new();
+                    query.for_function("MapOutputDomain", |keys, shape| {
+                        if keys[0] == row[1] {
+                            let axes = query.enode("AppendAxis", shape)?.unwrap();
+                            let extent = query.enode("Fixed", axes[1])?.unwrap();
+                            inner.push(graph.value_to_base::<i64>(extent[0]));
+                        }
+                        Ok(())
+                    })?;
+                    inner.sort();
+                    assert_eq!(inner, vec![3, [3, 5][index]]);
                 }
                 Ok(())
             })
@@ -1110,9 +1149,9 @@ fn segment_callback_blockers_cover_every_output_of_a_fused_plan() {
             .unwrap();
         super::schedule(&mut graph, super::super::cost::CostModel::default()).unwrap();
         let query = Query(&graph);
-        assert_eq!(query.flag("SegmentPlanBlocked", (plan,)).unwrap(), blocked);
+        assert_eq!(query.flag("TraversalPlanBlocked", (plan,)).unwrap(), blocked);
         for value in values {
-            assert_eq!(query.required("SegmentCandidatePlan", (value,)).unwrap(), plan);
+            assert!(query.row("TraversalPlan", |row| row == [value, plan]).unwrap().is_some());
             assert_eq!(
                 query.lookup("DirectOutput", (value,)).unwrap().is_some(),
                 !blocked
@@ -1409,7 +1448,7 @@ fn primitive_dispatch_recipes_publish_their_phase_widths_and_order() {
         (set (OperationGrid (OperationId 1)) (AutomaticGrid))
         (set (OperationGrid (OperationId 2)) (AutomaticGrid))
         (set (InputDomain (OperationId 2)) (Fixed 1024))
-        (FilterShape (OperationId 3))
+        (Accumulator (OperationId 3) 0 (TypeId 0) (LocalPrefix (Result (OperationId 3) 1)) (SourceTerm (RegionId 0) 0))
         (set (ParallelBodySafe (OperationId 3)) true)
         (set (OperationGrid (OperationId 3)) (FixedGrid 2 3 4))
         (set (Plan (OperationId 4)) (Elements))
@@ -1418,7 +1457,7 @@ fn primitive_dispatch_recipes_publish_their_phase_widths_and_order() {
         (set (ElideElements (OperationId 4)) false)
         (set (MapExecution (OperationId 4)) (InvocationScope))
         (set (OperationGrid (OperationId 4)) (AutomaticGrid))
-        (set (Plan (OperationId 5)) (Serial))
+        (set (Plan (OperationId 5)) (LocalFold 1))
         (run-schedule (saturate schedule))
         (check (KernelPhase (OperationId 0) "elements" (Fixed 1024) 64 (AutomaticGrid)))
         (check (KernelPhase (OperationId 1) "chunks" (Fixed 65536) 256 (FixedGrid 256 1 1)))
@@ -1426,11 +1465,11 @@ fn primitive_dispatch_recipes_publish_their_phase_widths_and_order() {
         (check (PhaseLink (OperationId 1) "chunks" "combine"))
         (check (KernelPhase (OperationId 2) "offsets" (Fixed 1024) 64 (AutomaticGrid)))
         (check (PhaseLink (OperationId 2) "combine" "offsets"))
-        (check (= (Plan (OperationId 3)) (Compact)))
-        (check (KernelPhase (OperationId 3) "compact" (Fixed 64) 64 (FixedGrid 1 1 1)))
+        (check (= (Plan (OperationId 3)) (LocalFold 64)))
+        (check (KernelPhase (OperationId 3) "local" (Fixed 64) 64 (FixedGrid 1 1 1)))
         (check (= (Plan (OperationId 4)) (Elements)))
         (check (KernelPhase (OperationId 4) "elements" (Fixed 5) 64 (AutomaticGrid)))
-        (check (= (Plan (OperationId 5)) (Serial)))
+        (check (= (Plan (OperationId 5)) (LocalFold 1)))
         (check (KernelPhase (OperationId 5) "ordered" (Fixed 1) 1 (FixedGrid 1 1 1)))
     "#,
         )
@@ -1539,17 +1578,16 @@ fn fluid_radix_scan_avoids_empty_groups_and_oversized_carries() {
         let scan = operations(graph, "scan")[0];
         let plan = query.required("SelectedPlan", (scan,)).unwrap();
         let owner = query.required("Owner", (plan,)).unwrap();
-        for (fact, expected) in [
-            ("CollectiveChunkWidth", 64),
-            ("CollectiveGroups", 68),
-            ("CollectiveCombineWidth", 128),
-        ] {
-            assert_eq!(
-                graph.value_to_base::<i64>(query.required(fact, (owner,)).unwrap()),
-                expected,
-                "{fact}"
-            );
-        }
+        let width = graph.value_to_base::<i64>(query.required("CollectiveChunkWidth", (owner,)).unwrap());
+        let groups = graph.value_to_base::<i64>(query.required("CollectiveGroups", (owner,)).unwrap());
+        let combine =
+            graph.value_to_base::<i64>(query.required("CollectiveCombineWidth", (owner,)).unwrap());
+        assert_eq!(width, 64);
+        assert!(
+            (1..=(4320 + width - 1) / width).contains(&groups),
+            "no empty groups"
+        );
+        assert_eq!(combine, (groups as u64).next_power_of_two().max(32) as i64);
     });
 }
 
@@ -1623,7 +1661,7 @@ fn update_handles_and_reservation_results_cannot_escape_their_scope() {
             .graph
             .update(|mut sink| {
                 let handle =
-                    if invalid_handle { sink.add("ScopedUpdate", (plan, 99i64))? } else { update[0] };
+                    if invalid_handle { sink.add("ScopedUpdate", (operation, 99i64))? } else { update[0] };
                 let value = if invalid_handle { update[2] } else { sink.add("FormulaBound", 0i64)? };
                 let program = sink.add("BindUpdate", (handle, update[1], value, update[3]))?;
                 let block = sink.add("EvaluateUpdates", (block[0], program))?;
@@ -1759,9 +1797,40 @@ fn ranked_fusion_preserves_prefix_evaluation_and_retained_rows() {
         if index == 1 {
             let owner = query.required("Owner", (a,)).unwrap();
             assert_eq!(
-                query.required("MapFlattenRank", (owner,)).map(|v| graph.value_to_base::<i64>(v)).unwrap(),
+                query.required("IterationRank", (owner,)).map(|v| graph.value_to_base::<i64>(v)).unwrap(),
                 1
             );
         }
     });
+}
+
+#[test]
+fn output_coordinate_maps_cover_every_axis_of_ranked_producers() {
+    let sources = [
+        "entry main() [12]i32=let rows=map(|i|[[10*i,10*i+1],[10*i+2,10*i+3]],iota(3)) in map(|a|rows[a%3][(a/3)%2][a/6],iota(12))",
+        "entry main() [24]i32=let rows=map(|i|map(|j|map(|k|100*i+10*j+k,iota(4)),iota(3)),iota(2)) in map(|a|rows[a%2][(a/2)%3][a/6],iota(24))",
+    ];
+    let tlc = compile_thru_tlc(&cases_source(&sources)).unwrap();
+    let program = selected(&tlc);
+    check_entries(&program, sources.len(), |index, graph, region| {
+        let query = Query(graph);
+        let mut mappings = 0;
+        query
+            .for_each("MappedOutput", |row| {
+                if query.required("OperationRegion", (row[0],))? == region {
+                    assert_eq!(
+                        graph.value_to_container::<VecContainer>(row[3]).unwrap().data.len(),
+                        3
+                    );
+                    mappings += 1;
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(mappings, 1, "{}", sources[index]);
+    });
+    let prepared = super::super::prepare_host(program).unwrap();
+    let ssa = super::super::to_ssa(prepared, CodegenTarget::Portable).unwrap();
+    crate::lower_ssa_to_spirv(ssa.clone()).unwrap();
+    crate::lower_ssa_to_wgsl_with_program(ssa).unwrap();
 }

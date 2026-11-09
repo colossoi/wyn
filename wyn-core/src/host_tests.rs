@@ -50,14 +50,16 @@ fn result_program(fields: Vec<(&str, crate::types::Type)>, kind: crate::host::Re
                 name: name.into(),
                 kind,
                 layout: crate::interface::results::result_layout(&ty),
-                shape: if matches!(
-                    crate::interface::results::result_layout(&ty),
-                    ResultLayout::Array { .. }
-                ) {
-                    vec![crate::host::Expr::Integer(4)]
-                } else {
-                    vec![]
-                },
+                shape: crate::host::ResultShape::Rectangular(
+                    if matches!(
+                        crate::interface::results::result_layout(&ty),
+                        ResultLayout::Array { .. }
+                    ) {
+                        vec![crate::host::Expr::Integer(4)]
+                    } else {
+                        vec![]
+                    },
+                ),
                 result: index,
                 pipeline_index: 0,
                 set: 0,
@@ -207,7 +209,7 @@ fn map_program(input: &str, alias: bool, push_constant: bool) -> Program {
             name: "main".into(),
             kind: ResultKind::Value,
             layout: crate::interface::results::result_layout(&runtime_array(crate::types::i32())),
-            shape: vec![elements],
+            shape: crate::host::ResultShape::Rectangular(vec![elements]),
             result: 0,
             pipeline_index: 0,
             set: 0,
@@ -317,7 +319,7 @@ fn array_output_descriptors_publish_padding_and_logical_view_ranges() {
         }
     ));
     let rust = program.to_rust_wgpu("vectors.wgsl", ShaderFormat::Wgsl).unwrap();
-    assert!(rust.contains("range: BufferRange::Bytes"), "{rust}");
+    assert!(rust.contains("BufferRange::Bytes {"), "{rust}");
     assert!(rust.contains("ResultLayout::Array {"));
     assert!(rust.contains("stride: 16u32"));
     assert!(rust.contains("length: None"));
@@ -406,7 +408,7 @@ fn output_descriptors_do_not_require_a_rust_decoder_for_every_type() {
     ));
     let rust = program.to_rust_wgpu("half.wgsl", ShaderFormat::Wgsl).unwrap();
     assert!(rust.contains("ResultLayout::Unsupported("));
-    assert!(rust.contains("range: BufferRange::CallerProvided"));
+    assert!(rust.contains("None => BufferRange::CallerProvided"));
     assert!(!rust.contains("from_le_bytes"));
 }
 

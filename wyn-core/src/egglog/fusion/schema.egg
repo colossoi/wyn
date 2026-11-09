@@ -2,7 +2,7 @@
 ; Union redirects direct graph edges and use sets together.
 (datatype FusionGroup (Group OperationKey))
 ; Each planning round selects one contraction, giving its immutable plan an ID.
-(datatype FusionPlan (FusionSource OperationKey) (Joined i64) (Distributed FusionPlan))
+(datatype FusionPlan (FusionSource OperationKey) (Joined i64) (Distributed FusionPlan) (Lifted FusionPlan RegionKey))
 ; Captures and neutrals are ordinary uses; lengths carry additional proofs
 ; that fusion must distinguish from input streams.
 (datatype OperandRole (Input) (Other) (LengthUse))

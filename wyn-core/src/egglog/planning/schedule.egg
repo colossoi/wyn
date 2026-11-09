@@ -21,9 +21,12 @@
        (= (FinalOutputPass plan) true) (= (ParallelBodySafe op) true))
       ((set (Plan op) (Prefixes))) :ruleset schedule)
 (rule ((Current group plan) (= op (Owner plan)) (ScremaPlan plan) (= (ParallelBodySafe op) false))
-      ((set (Plan op) (Serial))) :ruleset schedule)
-(rule ((FilterShape op) (= (ParallelBodySafe op) true)) ((set (Plan op) (Compact))) :ruleset schedule)
-(rule ((FilterShape op) (= (ParallelBodySafe op) false)) ((set (Plan op) (Serial))) :ruleset schedule)
+      ((set (Plan op) (LocalFold 1))) :ruleset schedule)
+; A routed prefix stays within one cooperating group, where its destination is known.
+(rule ((Accumulator op state t (LocalPrefix count) source) (= (ParallelBodySafe op) true))
+      ((set (Plan op) (LocalFold 64))) :ruleset schedule)
+(rule ((Accumulator op state t (LocalPrefix count) source) (= (ParallelBodySafe op) false))
+      ((set (Plan op) (LocalFold 1))) :ruleset schedule)
 
 ; Recipes declare logical phases before any kernel body is built. Widths match
 ; the current emitters; PhaseDomain counts invocations, not rounded workgroups.
@@ -83,12 +86,11 @@
        (PhaseInput (Stage op "offsets") op "input")
        (ParallelPhaseEnds op "chunks" "offsets")
        (PhaseLink op "combine" "offsets")) :ruleset schedule)
-; Stable compaction runs in one workgroup, looping over the input in tiles.
-(rule ((= (Plan op) (Compact)))
-      ((KernelPhase op "compact" (Fixed 64) 64 (FixedGrid 1 1 1))
-       (PhaseEnds op "compact" "compact")) :ruleset schedule)
-(rule ((= (Plan op) (Serial)))
-      ((KernelPhase op "ordered" (Fixed 1) 1 (FixedGrid 1 1 1)) (PhaseEnds op "ordered" "ordered")) :ruleset schedule)
+(rule ((= (Plan op) (LocalFold 1))) ((set (LocalPhase op) "ordered")) :ruleset schedule)
+(rule ((= (Plan op) (LocalFold width)) (> width 1)) ((set (LocalPhase op) "local")) :ruleset schedule)
+(rule ((= (Plan op) (LocalFold width)) (= phase (LocalPhase op)))
+      ((KernelPhase op phase (Fixed width) width (FixedGrid 1 1 1))
+       (PhaseEnds op phase phase) (set (ElementPhase op) phase)) :ruleset schedule)
 (rule ((KernelPhase op name n width grid) (= r (OperationRegion op)) (HostRegion r))
       ((Phase (Stage op name) r) (PhaseDomain (Stage op name) n width)
        (set (PhaseGrid (Stage op name)) grid)) :ruleset schedule)
@@ -105,15 +107,14 @@
 (rule ((FirstPhase op first)) ((PhaseInput first op "input")) :ruleset schedule)
 
 ; Record the phase that actually writes each result, not just the recipe's last phase.
-(rule ((ArrayResult op i t) (= phase (ElementPhase op)) (Phase (Stage op phase) r))
+(rule ((ArrayResult op i t live) (= phase (ElementPhase op)) (Phase (Stage op phase) r))
       ((Produces (Stage op phase) (Result op i))) :ruleset schedule)
 (rule ((TotalResult op i t) (Phase (Stage op "combine") r))
       ((Produces (Stage op "combine") (Result op i))) :ruleset schedule)
-(rule ((= (Plan op) (Serial)) (ResultSlot op i) (Phase (Stage op "ordered") r))
-      ((Produces (Stage op "ordered") (Result op i))) :ruleset schedule)
-(rule ((= (Plan op) (Compact)) (Phase (Stage op "compact") r))
-      ((Produces (Stage op "compact") (Result op 0))
-       (Produces (Stage op "compact") (Result op 1))) :ruleset schedule)
+(rule ((= phase (LocalPhase op)) (ResultSlot op i) (Phase (Stage op phase) r))
+      ((Produces (Stage op phase) (Result op i))) :ruleset schedule)
+(rule ((Accumulator op state t (LocalPrefix count) source) (= phase (LocalPhase op)) (Phase (Stage op phase) r))
+      ((Produces (Stage op phase) count)) :ruleset schedule)
 
 (rule ((= op (Owner plan)) (PlanUpdateArray plan i initial mode) (= base (DestinationSlot op))
        (ParallelPhaseEnds op first last) (= phase (ElementPhase op)) (Phase (Stage op phase) r))

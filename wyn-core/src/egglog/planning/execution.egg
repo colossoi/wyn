@@ -53,6 +53,7 @@
 ; region. Parallel work must remain inside a leaf, after rectangular flattening.
 (relation GroupSafeTraversal (ParallelTraversal))
 (relation ParallelTraversalWork (ParallelTraversal))
+(rule ((= t (TraversalIndex value depth))) ((GroupSafeTraversal t)) :ruleset execution-select)
 (rule ((= t (TraversalValue value))) ((GroupSafeTraversal t)) :ruleset execution-select)
 (rule ((= t (TraversalResult value owner plan port extent)))
       ((GroupSafeTraversal t) (ParallelTraversalWork t)) :ruleset execution-select)
@@ -86,6 +87,7 @@
        (= n (WorkgroupOutputPrefix plan))) ((set (MapUsesWorkgroup owner) true)) :ruleset execution-select)
 ; Width follows the remaining local computation, independent of map depth.
 (function TraversalWidth (ParallelTraversal) i64 :merge (min old new))
+(rule ((= t (TraversalIndex value depth))) ((set (TraversalWidth t) 32)) :ruleset collective-costs)
 (rule ((= t (TraversalValue value))) ((set (TraversalWidth t) 32)) :ruleset collective-costs)
 (rule ((= t (TraversalResult value owner plan port extent))) ((set (TraversalWidth t) 256)) :ruleset collective-costs)
 (rule ((TraversalRegion t region next) (= width (TraversalWidth next)))
@@ -122,22 +124,12 @@
 (function RegionHasOwnedArrayParameter (RegionKey) bool :merge (or old new))
 (rule ((= region (RegionId i)))
       ((set (RegionHasOwnedArrayParameter region) false)) :ruleset execution-discover)
-(rule ((= formal (SourceParameter region i)) (= ty (SourceType formal))
-       (SourceOwnedArrayType ty))
-      ((set (RegionHasOwnedArrayParameter region) true)) :ruleset execution-discover)
-(rule ((= actual (SourceCapture region formal)) (= ty (SourceType formal))
-       (SourceOwnedArrayType ty))
+(rule ((= formal (SourceFormal region symbol)) (= ty (SourceType formal)) (SourceOwnedArrayType ty))
       ((set (RegionHasOwnedArrayParameter region) true)) :ruleset execution-discover)
 (rule ((= region (RegionId i)) (= (RegionRecursive region) false))
       ((set (InlineCall region (WorkgroupScope)) true)) :ruleset readout)
-(rule ((= region (RegionId i)) (= (RegionHasOwnedArrayParameter region) false))
-      ((set (InlineCall region (InvocationScope)) false)) :ruleset readout)
-(rule ((= region (RegionId i)) (= (RegionRecursive region) true))
-      ((set (InlineCall region (InvocationScope)) false)) :ruleset readout)
-; Expose by-value array accesses to local bufferization instead of copying a
-; complete array through the function ABI at each element callback.
-(rule ((= (RegionHasOwnedArrayParameter region) true) (= (RegionRecursive region) false))
-      ((set (InlineCall region (InvocationScope)) true)) :ruleset readout)
+(rule ((= owned (RegionHasOwnedArrayParameter region)) (= recursive (RegionRecursive region)))
+      ((set (InlineCall region (InvocationScope)) (and owned (not recursive)))) :ruleset readout)
 
 (rule ((= actual (SourceCapture region formal))
        (= (ValueRepresentation actual) (ArrayLayout count element)))
@@ -208,3 +200,8 @@
       ((set (LocalExecution op (WorkgroupScope)) (WorkgroupScope))) :ruleset schedule)
 (rule ((DeviceOperation op) (= plan (SelectedPlan op)) (= (PlanBody plan) (ParallelLoop domain totals scans arrays action)) (= (LocalSupportsWorkgroup op) false))
       ((set (LocalExecution op (WorkgroupScope)) (InvocationScope))) :ruleset schedule)
+
+(rule ((= t (TraversalReindex next indices)) (GroupSafeTraversal next))
+      ((GroupSafeTraversal t)) :ruleset execution-select)
+(rule ((= t (TraversalReindex next indices)) (= width (TraversalWidth next)))
+      ((set (TraversalWidth t) width)) :ruleset collective-costs)

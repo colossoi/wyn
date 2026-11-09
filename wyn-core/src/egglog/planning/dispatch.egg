@@ -62,6 +62,7 @@
       ((References e (Descriptor source))) :ruleset residency)
 (rule ((LengthReference e array) (= (SourceSlice array) (SliceInfo source start end)))
       ((FlowReferenceEdge e start) (FlowReferenceEdge e end)) :ruleset residency)
+(rule ((= value (SourceShape array))) ((LengthReference value array)) :ruleset residency)
 (relation ReferencedExtent (SourceValue Extent))
 (rule ((LengthReference e array) (= (ValueRef array) value) (= n (LiveLength value)))
       ((ReferencedExtent e n)) :ruleset residency)
@@ -77,7 +78,7 @@
 ; Keep exact view extents available even when their element slots are unused.
 ; Direct results and forwarding preserve lengths; sliced views keep their own
 ; bounds and must not inherit the backing resource's live length.
-(rule ((DirectResult e op i) (= (ResultRead op i) (ReadView value)) (= n (LiveLength value))) ((set (ViewExtent e) n)) :ruleset residency)
+(rule ((DirectResult e op i) (= (HasLogicalExtent e) false) (= (ResultRead op i) (ReadView value)) (= n (LiveLength value))) ((set (ViewExtent e) n)) :ruleset residency)
 (rule ((FlowProjection e tuple i) (ResultField tuple i value)
        (= (DeclarationRead value) (ReadView value)) (= n (LiveLength value)))
       ((set (ViewExtent e) n)) :ruleset residency)

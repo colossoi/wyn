@@ -64,9 +64,14 @@ pub(in crate::egglog) fn published_expression(
     Ok(lower.finish(value))
 }
 /// Allocation capacities may use proven bounds for device-produced logical lengths.
-pub(in crate::egglog) fn allocation(program: &Program<'_, Optimized>, extent: Value) -> Result<ScalarExpr> {
+pub(in crate::egglog) fn allocation(
+    program: &Program<'_, Optimized>,
+    extent: Value,
+    device_read: &DeviceRead<'_>,
+) -> Result<ScalarExpr> {
     let mut lower = Lower::new(program);
     lower.capacity_bounds = true;
+    lower.device_read = Some(device_read);
     let value = lower.extent(extent)?;
     Ok(lower.finish(value))
 }
@@ -134,7 +139,11 @@ impl<'a, 'source> Lower<'a, 'source> {
             }
         }
         let Some(&term) = self.facts.program.stage.selected.extents.get(&extent) else {
-            return Err(error("host extent has no selected expression").into());
+            return Err(error(format!(
+                "host extent {extent:?} {:?} has no selected expression",
+                self.facts.extent(extent)
+            ))
+            .into());
         };
         self.term(term)
     }
@@ -170,8 +179,12 @@ impl<'a, 'source> Lower<'a, 'source> {
                 }
             }
         }
-        let read = self.device_read.ok_or(Error::Unsupported)?;
-        let count = read(resource)?.ok_or(Error::Unsupported)?;
+        let Some(read) = self.device_read else {
+            return Err(Error::Unsupported);
+        };
+        let Some(count) = read(resource)? else {
+            return Err(Error::Unsupported);
+        };
         // Device counters are u32; Wyn length arithmetic is i32.
         Ok(
             if matches!(

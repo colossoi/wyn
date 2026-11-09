@@ -1,11 +1,13 @@
 (ruleset segment-shapes)
-(function SegmentCandidatePlan (SourceValue) FusionPlan :no-merge)
-(function SegmentPlanBlocked (FusionPlan) bool :merge (or old new))
 
 (datatype OutputPort (TotalPort i64) (ArrayPort i64))
 (datatype ParallelTraversal
+  (TraversalElement SourceValue i64)
+  (TraversalField i64 ParallelTraversal)
+  (TraversalReindex ParallelTraversal CoordinateFormulas)
   (TraversalChoice SourceValue RegionKey ParallelTraversal RegionKey ParallelTraversal)
   (TraversalValue SourceValue)
+  (TraversalIndex SourceValue i64)
   (TraversalResult SourceValue OperationKey FusionPlan OutputPort Extent)
   (TraversalCall SourceValue RegionKey RegionKey SourceArguments ParallelTraversal)
   (TraversalFor RegionKey RegionKey FusionPlan SourceArguments ParallelTraversal))
@@ -24,13 +26,13 @@
 (function HasDirectOutput (SourceValue) bool :merge (or old new))
 (rule ((= ty (SourceType value))) ((set (HasDirectOutput value) false)) :ruleset direct-outputs)
 (rule ((= traversal (DirectOutput value))) ((set (HasDirectOutput value) true)) :ruleset direct-outputs)
-(rule ((= plan (SegmentCandidatePlan value)) (RectangularReady value)
-       (= (SegmentPlanBlocked plan) false) (= owner (Owner plan))
+(rule ((TraversalPlan value plan) (RectangularReady value)
+       (= (TraversalPlanBlocked plan) false) (= owner (Owner plan))
        (= extent (RectangularExtent (ShapeExtent (PlanDomain plan))))
        (PlanResult plan "array" i value ty) (= totals (ResultCount (PlanTotals plan))))
       ((set (DirectOutput value) (TraversalResult value owner plan (ArrayPort (- i totals)) extent))) :ruleset direct-outputs)
-(rule ((= plan (SegmentCandidatePlan value)) (RectangularReady value)
-       (= (SegmentPlanBlocked plan) false) (= owner (Owner plan))
+(rule ((TraversalPlan value plan)
+       (= (TraversalPlanBlocked plan) false) (= owner (Owner plan))
        (= extent (RectangularExtent (ShapeExtent (PlanDomain plan))))
        (PlanResult plan "total" i value ty))
       ((set (DirectOutput value) (TraversalResult value owner plan (TotalPort i) extent))) :ruleset direct-outputs)
@@ -39,20 +41,22 @@
 (rule ((RectangularReady value) (= value (SourceInvocation caller function args))
        (= callee (SourceCallTarget value)) (= next (DirectOutput (SourceResult callee))))
       ((set (DirectOutput value) (TraversalCall value caller callee args next))) :ruleset direct-outputs)
-; Fixed-layout choices write either result directly into the enclosing output.
-(rule ((RectangularDemand value) (= ty (SourceType value)) (= bytes (SourceByteSize ty))
-       (= (SourceBranch value) (BranchInfo condition yes no))
+; A choice retains its active region and writes into the selected result view.
+(rule ((= (SourceBranch value) (BranchInfo condition yes no))
        (= a (DirectOutput (SourceResult yes))) (= b (DirectOutput (SourceResult no))))
       ((set (DirectOutput value) (TraversalChoice condition yes a no b))) :ruleset direct-outputs)
 (rule ((= ty (SourceType value)) (= (HasDirectOutput value) false))
       ((set (Traversal value 0) (TraversalValue value))) :ruleset traversal-leaves)
 (rule ((= next (DirectOutput value))) ((set (Traversal value 0) next)) :ruleset traversal-leaves)
 
+(rule ((SourceLoopCarry owner slot initial state next output true))
+      ((TraversalDemand initial 1) (TraversalDemand next 1)) :ruleset segment-shapes)
+
 (rule ((ElementAt value axes)) ((TraversalDemand value (vec-length axes))) :ruleset segment-shapes)
 
 (rule ((Current group plan) (PlanMember plan op) (= (PlanMapping op) true)
        (= value (SourceOperationValue op))) ((TraversalDemand value 1)) :ruleset segment-shapes)
-(rule ((MapPlan plan owner extent) (= rank (IterationRank owner)) (PlanResult plan "array" i value element))
+(rule ((MapPlan plan owner extent) (= shape (MapOutputDomain owner i)) (= rank (ShapeRank shape)) (PlanResult plan "array" i value element))
       ((TraversalDemand value rank)) :ruleset segment-shapes)
 (rule ((TraversalDemand value depth) (> depth 0) (= actual (SourceAlias value)))
       ((TraversalDemand actual depth)) :ruleset segment-shapes)
@@ -91,7 +95,7 @@
 
 (rule ((= traversal (Traversal value depth)))
       ((set (ElementTraversal value depth) traversal)) :ruleset map-bindings)
-(rule ((MapPlan plan owner extent) (= rank (IterationRank owner))
+(rule ((MapPlan plan owner extent) (= shape (MapOutputDomain owner i)) (= rank (ShapeRank shape))
        (PlanResult plan "array" i value element) (= traversal (Traversal value rank)))
       ((set (MapOutputTraversal owner i) traversal)) :ruleset map-bindings)
 
@@ -109,3 +113,39 @@
 
 (rule ((WorkgroupOutputTraversal (TraversalChoice condition yes a no b)))
       ((WorkgroupOutputTraversal a) (WorkgroupOutputTraversal b)) :ruleset local-storage)
+
+(rule ((SegmentedOutput value owner i rank) (= parents (SegmentedPrefix (Result owner i) axis)) (< axis rank))
+      ((TraversalDemand value axis)) :ruleset segment-shapes)
+
+(rule ((TraversalDemand value depth) (> depth 0) (IndexTraversalBase value))
+      ((set (Traversal value depth) (TraversalIndex value depth))) :ruleset segment-shapes)
+
+(rule ((TraversalDemand value depth) (> depth 0) (= (SourceView value) (ReindexedArray base extent indices)))
+      ((set (Traversal value depth) (TraversalReindex (TraversalIndex base depth) indices))) :ruleset segment-shapes)
+
+; Structural element access uses the same coordinate/region interpreter as
+; output distribution. TraversalElement respects the consuming plan's boundary.
+(function StreamTraversal (SourceValue i64) ParallelTraversal :no-merge)
+(function TraversalForwarded (SourceValue) bool :merge (or old new))
+(rule ((= ty (SourceType value))) ((set (TraversalForwarded value) false)) :ruleset flow-structure)
+(rule ((FlowForward value actual)) ((set (TraversalForwarded value) true)) :ruleset flow-structure)
+(rule ((= t (TraversalFor caller callee plan args next)) (= input (SourceInput op i)) (= callee (SourceOperatorBody op)))
+      ((TraversalDemand input 1)) :ruleset segment-shapes)
+(rule ((TraversalDemand value depth) (> depth 0) (FlowForward value actual))
+      ((TraversalDemand actual depth) (set (StreamTraversal value depth) (TraversalElement actual depth))) :ruleset segment-shapes)
+(rule ((TraversalDemand value depth) (> depth 0) (= (SourceView value) (ReindexedArray base extent indices)))
+      ((TraversalDemand base depth)
+       (set (StreamTraversal value depth) (TraversalReindex (TraversalElement base depth) indices))) :ruleset segment-shapes)
+(rule ((TraversalDemand value depth) (> depth 0)
+       (= (SourceProjection value) (ProjectionInfo parent i)) (= size (SourceArraySize (SourceType parent)))
+       (= (TraversalForwarded value) false))
+      ((TraversalDemand parent depth)
+       (set (StreamTraversal value depth) (TraversalField i (TraversalElement parent depth)))) :ruleset segment-shapes)
+(rule ((TraversalDemand value depth) (> depth 0)
+       (= (RuntimeArrayJoin value) false) (= (HasViewStage value) false)
+       (= (SourceBranch value) (BranchInfo condition yes no)) (= a (SourceResult yes)) (= b (SourceResult no)))
+      ((set (StreamTraversal value depth) (TraversalChoice condition yes (TraversalElement a depth)
+                                                                    no (TraversalElement b depth)))) :ruleset segment-shapes)
+
+(rule ((= (SourceOutput output) (OutputInfo entry value ty true)))
+      ((TraversalDemand value 1)) :ruleset segment-shapes)

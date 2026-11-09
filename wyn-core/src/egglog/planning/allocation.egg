@@ -24,16 +24,15 @@
       ((set (LaunchGrid stage) grid)) :ruleset allocation)
 (rule ((PhaseDomain stage extent width) (= count (StaticCapacityBound extent)) (= (PhaseGrid stage) (AutomaticGrid)))
       ((set (LaunchGrid stage) (FixedGrid (min 65535 (max 1 (/ (+ count (- width 1)) width))) 1 1))) :ruleset readout)
-(rule ((InvocationValue op) (ElementType (Result op 0) t))
+(rule ((InvocationValue op) (Produces stage (Result op 0)) (ElementType (Result op 0) t))
       ((set (StorageDeclaration (Result op 0)) (AllocateResult (StoredValue t) (NoContents)))
        (set (BufferSlot op "scalar" 0) (Result op 0))) :ruleset allocation)
-(rule ((ArrayResult op i t) (= n (InputDomain op)))
-      ((set (StorageDeclaration (Result op i)) (AllocateResult (StoredArray t n n) (NoContents)))) :ruleset allocation)
+(rule ((ArrayResult op i t live) (= n (InputDomain op)))
+      ((set (StorageDeclaration (Result op i)) (AllocateResult (StoredArray t n live) (NoContents)))) :ruleset allocation)
 (rule ((TotalResult op i t))
       ((set (StorageDeclaration (Result op i)) (AllocateResult (StoredValue t) (NoContents)))) :ruleset allocation)
-(rule ((FilterResult op t) (= n (InputDomain op)) (CounterType count))
-      ((set (StorageDeclaration (Result op 0)) (AllocateResult (StoredArray t n (Stored (Result op 1))) (NoContents)))
-       (set (StorageDeclaration (Result op 1)) (AllocateResult (StoredValue count) (NoContents)))) :ruleset allocation)
+(rule ((Accumulator op state t (LocalPrefix count) source))
+      ((set (StorageDeclaration count) (AllocateResult (StoredValue t) (NoContents)))) :ruleset allocation)
 (rule ((= owner (Owner plan)) (= base (DestinationSlot owner)) (PlanUpdateArray plan i (ZeroInitialized layout) mode))
       ((set (StorageDeclaration (Result owner (+ base i))) (AllocateResult layout (ZeroContents)))) :ruleset allocation)
 
@@ -68,8 +67,8 @@
 ; Returning or reading a compacted view also requires its stored live length.
 (rule ((Materialize value) (= (LiveLength value) (Stored count)))
       ((Materialize count)) :ruleset allocation)
-(rule ((Needs stage value) (= (LiveLength value) (Stored count)))
-      ((Needs stage count)) :ruleset allocation)
+(rule ((Needs stage value) (= extent (LiveLength value)))
+      ((ExtentDemand stage extent)) :ruleset allocation)
 
 (relation OutputCanAlias (i64))
 ; Kernel emission looks up these slots; only Allocation facts create storage.
@@ -105,8 +104,8 @@
        (= (ValueRef e) (Source source)))
       ((set (Backing (Source source)) (Source source)) (set (OutputBacking output) (Source source))) :ruleset output-backings)
 (rule ((TotalResult op i t)) ((set (BufferSlot op "total" i) (Result op i))) :ruleset allocation)
-(rule ((FilterResult op t))
-      ((set (BufferSlot op "output" 0) (Result op 0)) (set (BufferSlot op "length" 0) (Result op 1))) :ruleset allocation)
+(rule ((Accumulator op state t (LocalPrefix count) source))
+      ((set (BufferSlot op "length" state) count)) :ruleset allocation)
 (rule ((= value (Temporary op name i)) (= n (CapacityExtent value)))
       ((set (BufferSlot op name i) value)
        (set (LiveLength value) n)) :ruleset allocation)
@@ -143,9 +142,10 @@
 
 ; Scatter can reuse its destination, never an arbitrary update input.
 (relation ReuseResult (OperationKey i64 TypeKey))
-(rule ((ArrayResult op i t)) ((ReuseResult op i t)) :ruleset reuse)
+; Equal element types prove equal storage only for fixed-size elements.
+(rule ((ArrayResult op i t live) (= bytes (SourceByteSize t))) ((ReuseResult op i t)) :ruleset reuse)
 (relation ReuseOperand (OperationKey SourceValue))
-(rule ((ArrayResult op i t) (Operand op "input" e) (FitsInput op e))
+(rule ((ArrayResult op i t live) (Operand op "input" e) (FitsInput op e))
       ((ReuseOperand op e)) :ruleset reuse)
 (rule ((= (StorageDeclaration (Result op i)) (AllocateResult (StoredArray t n live) (CopyFrom destination))))
       ((ReuseResult op i t) (ReuseOperand op destination) (PreferredReuse (Result op i) destination)) :ruleset reuse)
@@ -265,7 +265,7 @@
 (rule ((= id (PreferredInputChoice (Result op i)))
        (Materialize (Result op i)) (= (PinnedResult (Result op i)) false))
       ((set (ReuseInput (Result op i)) id)) :ruleset reuse-input)
-(rule ((= id (OwnedInputChoice op t)) (ArrayResult op i t) (Materialize (Result op i))
+(rule ((= id (OwnedInputChoice op t)) (ReuseResult op i t) (Materialize (Result op i))
        (= (HasPreferredReuse (Result op i)) false) (= (PinnedResult (Result op i)) false))
       ((set (ReuseInput (Result op i)) id)) :ruleset reuse-input)
 ; The lowest eligible output slot wins. Reads exclude other writers, so this

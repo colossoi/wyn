@@ -1,21 +1,54 @@
 //! Row-major domains and input indexing; the last axis varies fastest.
 
-use super::super::{Body, OptimizeError, Typed};
-use crate::op::BinaryOperator::{Divide, Remainder};
-use crate::types;
+use super::super::{error, Body, OptimizeError, Typed};
+use crate::egglog::query::Query;
+use crate::op::BinaryOperator::{Add, Divide, Less, LessEqual, Remainder, Subtract};
+use egglog_engine::Value;
 
-/// Call only inside the domain's bounds, so an empty dimension is never divided by.
-pub fn decode(
+/// Invert the selected logical shape. Upper-bound search skips empty segments.
+pub(super) fn domain(
     body: &mut Body<'_, '_, '_>,
-    dimensions: &[Typed],
+    scope: Value,
+    shape: Value,
     index: Typed,
 ) -> Result<Vec<Typed>, OptimizeError> {
-    let zero = body.literal(0, &types::i32())?;
-    let mut coordinates = vec![zero; dimensions.len()];
-    let mut remainder = index;
-    for i in (0..dimensions.len()).rev() {
-        coordinates[i] = body.binary(Remainder, remainder.clone(), dimensions[i].clone())?;
-        remainder = body.binary(Divide, remainder, dimensions[i].clone())?;
+    if body.compiler.facts.enode("OneAxis", shape).is_some() {
+        return Ok(vec![index]);
     }
+    if let Some(fields) = body.compiler.facts.enode("AppendAxis", shape) {
+        let length = body.extent(scope, fields[1])?;
+        let parent = body.binary(Divide, index.clone(), length.clone())?;
+        let child = body.binary(Remainder, index, length)?;
+        let mut coordinates = domain(body, scope, fields[0], parent)?;
+        coordinates.push(child);
+        return Ok(coordinates);
+    }
+    let Some(fields) = body.compiler.facts.enode("Segments", shape) else {
+        return Err(error("unknown iteration shape"));
+    };
+    let extent = Query(&body.compiler.program.graph).required("ShapeExtent", (fields[0],))?;
+    let parents = body.extent(scope, extent)?;
+    let parents = body.cast(parents, &Body::number(0).ty)?;
+    let offsets = body.resource(scope, fields[1], 1)?;
+    let bounds = body.while_loop(
+        vec![Body::number(0), parents],
+        |body, state| body.binary(Less, state[0].clone(), state[1].clone()),
+        |body, state| {
+            let sum = body.binary(Add, state[0].clone(), state[1].clone())?;
+            let middle = body.binary(Divide, sum, Body::number(2))?;
+            let offset = body.index(offsets.clone(), middle.clone())?;
+            let before = body.binary(LessEqual, offset, index.clone())?;
+            let next = body.binary(Add, middle.clone(), Body::number(1))?;
+            Ok(vec![
+                body.select(before.clone(), next, state[0].clone())?,
+                body.select(before, state[1].clone(), middle)?,
+            ])
+        },
+    )?;
+    let parent = body.binary(Subtract, bounds[0].clone(), Body::number(1))?;
+    let offset = body.index(offsets, parent.clone())?;
+    let child = body.binary(Subtract, index, offset)?;
+    let mut coordinates = domain(body, scope, fields[0], parent)?;
+    coordinates.push(child);
     Ok(coordinates)
 }

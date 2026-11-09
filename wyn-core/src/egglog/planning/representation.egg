@@ -111,7 +111,7 @@
       ((set (ArrayElementLayout value) layout)) :ruleset representations)
 (rule ((= ty (SourceType value)) (SourceOwnedArrayType ty) (= (HasTypeLayout ty) false)
        (= (RuntimeArrayJoin value) false)
-       (= extent (ViewExtent value)) (= count (StaticCapacityBound extent))
+       (= count (StaticCapacityBound (Length value)))
        (= layout (ArrayElementLayout value)))
       ((set (ValueRepresentation value) (ArrayLayout count layout))) :ruleset representations)
 ; Components projected from a stored array share that array's logical length.
@@ -222,7 +222,7 @@
        (= value (Result producer result)) (DirectResult source producer result)
        (= (ResultRead producer result) (ReadElement value)) (= layout (ValueRepresentation source)))
       ((set (LocalElementLayout value) layout)) :ruleset readout)
-(rule ((Fixed n)) ((set (StaticCapacityBound (Fixed n)) n)) :ruleset residency)
+(rule ((= n (ConstantLogicalExtent extent))) ((set (StaticCapacityBound extent) n)) :ruleset residency)
 (rule ((= n (SourceInteger32 source)) (>= n 0))
       ((set (StaticCapacityBound (Scalar source)) n)) :ruleset residency)
 (rule ((= ty (SourceType source)) (= (SourceArraySize ty) (FixedSize n)))
@@ -258,13 +258,6 @@
       ((LocalObservedResult value)) :ruleset schedule)
 (rule ((LocalObservedResult source) (DirectResult source owner i))
       ((LocalObservedBuffer (Result owner i))) :ruleset schedule)
-
-; A projection of an array/SoA stream follows indexing. Ordinary tuple fields,
-; such as a loop state containing arrays and scalars, are projected first.
-(relation ArrayStreamProjection (SourceValue))
-(rule ((= (SourceProjection source) (ProjectionInfo parent i))
-       (= ty (SourceType parent)) (= size (SourceArraySize ty)))
-      ((ArrayStreamProjection source)) :ruleset readout)
 
 ; A collective's accumulator shape is established by its neutral value, even
 ; when inferred array dimensions have no type-wide representation.

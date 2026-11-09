@@ -53,6 +53,7 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
                 "PlanCandidate",
                 "JoinCandidate",
                 "JoinedCandidate",
+                "StreamRepresentationBlocked",
                 "MaskCandidate",
                 "MaskBindings",
                 "MaskTotals",

@@ -24,6 +24,8 @@
 (rule ((= v (SourceInvocation r f args))) ((set (ExprContextOwner v) r)) :ruleset scalar-admission)
 (rule ((= v (SourceArrayAtom parent i)) (= r (ExprContextOwner parent)))
       ((set (ExprContextOwner v) r) (ExprImportLocalDemand r v)) :ruleset scalar-admission)
+(rule ((= v (SourceDescriptorPart parent i)) (= r (ExprContextOwner parent)))
+      ((set (ExprContextOwner v) r)) :ruleset scalar-admission)
 (rule ((= v (SourceProjected parent i)) (= r (ExprContextOwner parent)))
       ((set (ExprContextOwner v) r)) :ruleset scalar-admission)
 (rule ((= v (SourceShape parent)) (= r (ExprContextOwner parent)))

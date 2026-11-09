@@ -139,7 +139,7 @@ fn computed_dispatch_extents_preserve_parameters_wrapping_and_grid_limits() {
             ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
         };
         assert!(
-            host.entries[0].allocations.is_empty(),
+            host.entries[0].allocations().next().is_none(),
             "scatter reuses its destination"
         );
         host.to_rust_wgpu("computed_dispatch", format).unwrap();
@@ -208,7 +208,10 @@ fn multiple_callable_arguments_keep_distinct_captured_values() {
     );
     let prepared = pipeline::source(source);
     let output = lower_ssa_to_wgsl_with_program(pipeline::lower(&prepared, CodegenTarget::Wgsl)).unwrap();
-    assert!(output.program.entries[0].operations.iter().all(|op| matches!(op, Operation::Scalar { .. })));
+    assert!(output.program.entries[0]
+        .operations
+        .iter()
+        .all(|op| matches!(op, Operation::Scalar { .. } | Operation::Allocate(_))));
     assert!(!output
         .program
         .to_rust_wgpu("scalar", ShaderFormat::Wgsl)
@@ -452,7 +455,7 @@ fn gpu_scalar_capture_stays_between_reduction_and_map_without_readback() {
     ).unwrap()).unwrap();
     let host = &compiled.program;
     let operations = &host.entries[0].operations;
-    assert!(operations.iter().all(|op| matches!(op, Operation::Dispatch { .. })));
+    assert!(operations.iter().all(|op| matches!(op, Operation::Dispatch { .. } | Operation::Allocate(_))));
     let whl = host.to_whl("test.wgsl", ShaderFormat::Wgsl).unwrap();
     assert!(!whl.contains("gpu-read-scalar"), "{whl}");
     let rust = host.to_rust_wgpu("test.wgsl", ShaderFormat::Wgsl).unwrap();

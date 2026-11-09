@@ -162,7 +162,11 @@ pub(in crate::egglog) fn extent(compiler: &Compiler<'_, '_>, key: Value) -> Resu
         return Ok(Expr::Integer(compiler.facts.integer(count)));
     }
     Ok(
-        match host::allocation(compiler.program, key).map_err(|e| e.required("allocation extent"))? {
+        match host::allocation(compiler.program, key, &|resource| {
+            published_read(compiler, resource)
+        })
+        .map_err(|e| e.required("allocation extent"))?
+        {
             ScalarExpr::I32(value) => Expr::Integer(value.into()),
             ScalarExpr::U32(value) => Expr::Integer(value.into()),
             ScalarExpr::BufferLength { source, stride } => Expr::BufferLength { source, stride },

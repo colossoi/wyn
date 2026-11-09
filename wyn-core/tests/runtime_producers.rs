@@ -20,6 +20,7 @@ entry retained(dest:*[4][8]i32) (i32,[4]u32,u32)=
   let (values,counts,overflow)=bucket_scatter_2d(dest,items)
   in (reduce((+),0,map(|row|reduce((+),0,map(|p|p.1,row)),items)),counts,overflow)
 def producer(n:i32) []f32=map(|i|f32.i32(i),0i32..<n)
+entry nested_capture(n:i32,j:i32) [2][3]f32=map(|a|map(|b|producer(n)[j]+f32.i32(a+b),iota(3)),iota(2))
 entry indexed(j:i32) [1]f32=[producer(256)[j]]
 entry scatter_index(dest:*[8]f32,j:i32) [8]f32=
   scatter(dest,map(|p|i32.f32(producer(8)[j]),iota(4)),[0.0,1.0,2.0,3.0])

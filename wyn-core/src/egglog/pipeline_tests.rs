@@ -231,7 +231,27 @@ fn interfaces_for_test(
 fn narrowing_loop_capacity_requires_bounded_backedge() {
     let source = include_str!("../../../testfiles/regressions/narrowing_loop_capacity.wyn")
         .replace("(mid+1,hi)", "(hi+1,hi)");
-    assert!(compile_thru_ssa(&source).is_err());
+    let tlc = crate::compile_thru_tlc(&source).unwrap();
+    let program = interfaces_for_test(&tlc);
+    let query = Query(&program.graph);
+    let mut scans = 0;
+    query
+        .for_function("SourceOperation", |keys, operation| {
+            let fields = query.enode("OperationInfo", operation)?.unwrap();
+            if program.graph.value_to_base::<egglog_engine::sort::S>(fields[1]).as_str() == "scan" {
+                scans += 1;
+                let extent = query.required("InputDomain", (keys[0],))?;
+                if let Some(bound) = query.lookup("StaticCapacityBound", (extent,))? {
+                    assert!(
+                        program.graph.value_to_base::<i64>(bound) >= 34,
+                        "backedge can produce 34 elements"
+                    );
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(scans, 1);
 }
 
 #[test]
@@ -332,13 +352,12 @@ fn scalar_admission_uses_ir_literal_edits() {
     scalar::run(&mut program.graph, ScalarOptimization::Basic).unwrap();
     let mut seen = false;
     Query(&program.graph)
-        .for_each("ExprLiteral", |fields| {
-            let bits = program.graph.value_to_base::<i64>(fields[2]);
-            assert_ne!(
-                bits, 1,
-                "scalar admission must not reload the original TLC literal"
-            );
-            seen |= bits == 7;
+        .for_function("ExprImported", |keys, expression| {
+            if keys[1] == literal {
+                let fields = Query(&program.graph).enode("ExprLiteral", expression)?.unwrap();
+                assert_eq!(program.graph.value_to_base::<i64>(fields[2]), 7);
+                seen = true;
+            }
             Ok(())
         })
         .unwrap();

@@ -161,16 +161,7 @@ impl Program {
         names.visit_file(&syntax);
         names.used.extend(["RESOURCE_NAMES".into(), "BUFFER_FIELDS".into()]);
         names.used.extend((0..self.entries.len()).map(|i| format!("ENTRY_{i}")));
-        let pipelines: BTreeSet<_> = entry
-            .operations
-            .iter()
-            .map(|operation| match operation {
-                Operation::Dispatch { pipeline, .. }
-                | Operation::Draw { pipeline }
-                | Operation::Scalar { pipeline, .. }
-                | Operation::Loop { pipeline, .. } => *pipeline,
-            })
-            .collect();
+        let pipelines: BTreeSet<_> = entry.operations.iter().filter_map(Operation::pipeline).collect();
         let mut replacements = BTreeMap::new();
         for &id in &entry.inputs {
             let frame_resource = &self.interface.frame_graph.resources[id.0];
@@ -338,16 +329,7 @@ impl Program {
         let mut params = vec![];
         let mut arguments = vec![];
         let mut input_checks = vec![];
-        let pipelines: BTreeSet<_> = entry
-            .operations
-            .iter()
-            .map(|operation| match operation {
-                Operation::Dispatch { pipeline, .. }
-                | Operation::Draw { pipeline }
-                | Operation::Scalar { pipeline, .. }
-                | Operation::Loop { pipeline, .. } => *pipeline,
-            })
-            .collect();
+        let pipelines: BTreeSet<_> = entry.operations.iter().filter_map(Operation::pipeline).collect();
         for &r in &entry.inputs {
             let id = resource(r);
             let ty = match self.interface.frame_graph.resources[r.0].kind {
@@ -435,73 +417,7 @@ impl Program {
                 }
             });
         }
-        let mut carried = BTreeSet::new();
-        self.loop_resources(&entry.operations, &mut carried)?;
         let mut code = input_checks;
-        let mut scratch = vec![];
-        for a in &entry.allocations {
-            match a {
-                Allocation::Buffer { resource: r, bytes } => {
-                    let id = resource(*r);
-                    let bytes = self.rust_expr(bytes, entry)?;
-                    let length = format_ident!("resource_{}_bytes", r.0);
-                    let label = &self.interface.frame_graph.resources[r.0].name;
-                    // Either carried buffer can become the result after a swap.
-                    // A cached handle must not let a later call overwrite it.
-                    let allocate = if entry.results.contains(r) || carried.contains(r) {
-                        quote!(device.create_buffer(&descriptor))
-                    } else {
-                        context.scratch = true;
-                        let slot = r.0;
-                        scratch.push(quote! {
-                            if let Some(cached_buffer) = context.scratch.get(&#slot) {
-                                encoder.clear_buffer(cached_buffer, 0, None);
-                            }
-                        });
-                        quote!(support::scratch_buffer(device, &mut context.scratch, #slot, &descriptor))
-                    };
-                    let mutable = carried.contains(r).then(|| quote!(mut));
-                    code.push(quote!{
-                        let #length=size(#bytes)?;
-                        if #length>device.limits().max_buffer_size {return Err(HostError::Invalid(format!("buffer {} exceeds device limit",#label)));}
-                        let #mutable #id={ let descriptor=BufferDescriptor{
-                            label:Some(#label),size:#length.max(4),mapped_at_creation:false,
-                            usage:BufferUsages::STORAGE|BufferUsages::COPY_SRC|BufferUsages::COPY_DST|BufferUsages::VERTEX|BufferUsages::INDEX|BufferUsages::INDIRECT,
-                        }; #allocate };
-                    });
-                }
-                Allocation::Texture {
-                    resource: r,
-                    width,
-                    height,
-                } => {
-                    let id = resource(*r);
-                    let width = self.rust_expr(width, entry)?;
-                    let height = self.rust_expr(height, entry)?;
-                    let Some(Binding::StorageTexture { format, .. }) = self.texture_binding(*r) else {
-                        return Err(HostError::Invalid("texture allocation without format".into()));
-                    };
-                    let format = texture_format(*format);
-                    let label = &self.interface.frame_graph.resources[r.0].name;
-                    code.push(quote!{let #id=device.create_texture(&TextureDescriptor{
-                        label:Some(#label),size:Extent3d{width:dimension(#width)?,height:dimension(#height)?,depth_or_array_layers:1},
-                        mip_level_count:1,sample_count:1,dimension:TextureDimension::D2,format:#format,
-                        usage:TextureUsages::STORAGE_BINDING|TextureUsages::TEXTURE_BINDING|TextureUsages::RENDER_ATTACHMENT|TextureUsages::COPY_SRC|TextureUsages::COPY_DST,
-                        view_formats:&[],
-                    });});
-                }
-            }
-        }
-        if !scratch.is_empty() {
-            code.insert(
-                0,
-                quote! {
-                    if !context.scratch.is_empty() {
-                        #(#scratch)*
-                    }
-                },
-            );
-        }
         code.push(self.rust_operations(&entry.operations, entry, format, context)?);
         let results = self.rust_results(entry)?;
         let entry_id = format_ident!("ENTRY_{}", index);
@@ -579,6 +495,71 @@ impl Program {
         Ok(())
     }
 
+    fn rust_allocation(
+        &self,
+        a: &Allocation,
+        entry: &Entry,
+        context: &mut RustContext,
+    ) -> Result<TokenStream, HostError> {
+        let mut carried = BTreeSet::new();
+        self.loop_resources(&entry.operations, &mut carried)?;
+        let mut code = Vec::new();
+        let mut scratch = Vec::new();
+
+        match a {
+            Allocation::Buffer { resource: r, bytes } => {
+                let id = resource(*r);
+                let bytes = self.rust_expr(bytes, entry)?;
+                let length = format_ident!("resource_{}_bytes", r.0);
+                let label = &self.interface.frame_graph.resources[r.0].name;
+                // Either carried buffer can become the result after a swap.
+                // A cached handle must not let a later call overwrite it.
+                let allocate = if self.result_resource(entry, *r) || carried.contains(r) {
+                    quote!(device.create_buffer(&descriptor))
+                } else {
+                    context.scratch = true;
+                    let slot = r.0;
+                    scratch.push(quote! {
+                        if let Some(cached_buffer) = context.scratch.get(&#slot) {
+                            encoder.clear_buffer(cached_buffer, 0, None);
+                        }
+                    });
+                    quote!(support::scratch_buffer(device, &mut context.scratch, #slot, &descriptor))
+                };
+                let mutable = carried.contains(r).then(|| quote!(mut));
+                code.push(quote!{
+                        let #length=size(#bytes)?;
+                        if #length>device.limits().max_buffer_size {return Err(HostError::Invalid(format!("buffer {} exceeds device limit",#label)));}
+                        let #mutable #id={ let descriptor=BufferDescriptor{
+                            label:Some(#label),size:#length.max(4),mapped_at_creation:false,
+                            usage:BufferUsages::STORAGE|BufferUsages::COPY_SRC|BufferUsages::COPY_DST|BufferUsages::VERTEX|BufferUsages::INDEX|BufferUsages::INDIRECT,
+                        }; #allocate };
+                    });
+            }
+            Allocation::Texture {
+                resource: r,
+                width,
+                height,
+            } => {
+                let id = resource(*r);
+                let width = self.rust_expr(width, entry)?;
+                let height = self.rust_expr(height, entry)?;
+                let Some(Binding::StorageTexture { format, .. }) = self.texture_binding(*r) else {
+                    return Err(HostError::Invalid("texture allocation without format".into()));
+                };
+                let format = texture_format(*format);
+                let label = &self.interface.frame_graph.resources[r.0].name;
+                code.push(quote!{let #id=device.create_texture(&TextureDescriptor{
+                        label:Some(#label),size:Extent3d{width:dimension(#width)?,height:dimension(#height)?,depth_or_array_layers:1},
+                        mip_level_count:1,sample_count:1,dimension:TextureDimension::D2,format:#format,
+                        usage:TextureUsages::STORAGE_BINDING|TextureUsages::TEXTURE_BINDING|TextureUsages::RENDER_ATTACHMENT|TextureUsages::COPY_SRC|TextureUsages::COPY_DST,
+                        view_formats:&[],
+                    });});
+            }
+        }
+        Ok(quote!(#(#scratch)* #(#code)*))
+    }
+
     fn rust_operations(
         &self,
         operations: &[Operation],
@@ -589,9 +570,9 @@ impl Program {
         let mut code = vec![];
         for (ordinal, operation) in operations.iter().enumerate() {
             code.push(match operation {
-                Operation::Loop { pipeline, region, setup, test, body } => {
+                Operation::Allocate(allocation) => self.rust_allocation(allocation, entry, context)?,
+                Operation::Loop { pipeline, region, test, body } => {
                     let repeated = &self.interface.dispatch_loops[*region];
-                    let setup = self.rust_operations(setup, entry, format, context)?;
                     let test = self.rust_operations(test, entry, format, context)?;
                     let body = self.rust_operations(body, entry, format, context)?;
                     let swaps = repeated.carried.iter().map(|(current, next)| {
@@ -607,7 +588,6 @@ impl Program {
                             let count = self.rust_scalar(*pipeline, count)?;
                             let index = resource(self.scalar_resource(*pipeline, index)?);
                             quote!({
-                                #setup
                                 let iterations = #count;
                                 for iteration in 0..iterations {
                                     support::write_buffer(device, encoder, &#index, 0, &(iteration as i32).to_le_bytes());
@@ -619,7 +599,6 @@ impl Program {
                         crate::DispatchLoopControl::While { condition } => {
                             let condition = self.rust_scalar(*pipeline, condition)?;
                             quote!({
-                                #setup
                                 loop {
                                     #test
                                     if !(#condition) { break; }

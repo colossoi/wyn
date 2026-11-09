@@ -36,7 +36,6 @@
       ((References e (Contents value))) :ruleset residency)
 (rule ((FlowForward e source) (= (ValueRef source) value))
       ((set (ValueRef e) value)) :ruleset residency)
-(rule ((= (SourceSlice e) (SliceInfo source start end)) (= (ValueRef source) value)) ((set (ValueRef e) value)) :ruleset residency)
 (rule ((DirectResult e op i) (= access (ResultRead op i)))
       ((set (ValueRead e) access)) :ruleset residency)
 (rule ((FlowProjection e tuple i) (ResultField tuple i value) (= access (DeclarationRead value)))
@@ -95,3 +94,6 @@
 (rule ((Escapes value) (Produces producer value)) ((Materialize value)) :ruleset residency)
 (rule ((Requires (InOperation op) value) (Produces producer value))
       ((Materialize value)) :ruleset residency)
+
+(rule ((= (HasDirectResult e) false) (= (SourceSlice e) (SliceInfo source start end)) (= (ValueRef source) value))
+      ((set (ValueRef e) value)) :ruleset residency)

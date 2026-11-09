@@ -15,6 +15,7 @@ use egglog_engine::{RawValues, TermId, Value};
 use std::cell::RefCell;
 use wyn_graph::DominatorTree;
 
+mod arrays;
 mod collective;
 mod control;
 mod formulas;
@@ -115,11 +116,19 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         if !self.loading.insert(source) {
             return Err(error("cyclic source evaluation during SSA emission"));
         }
+        let selected = &self.compiler.program.stage.selected;
+        let root =
+            selected.roots.get(&(self.context, source)).map(|&term| (self.context, term)).or_else(|| {
+                let context = self.compiler.facts.lookup("ExprContextForSource", (source,))?;
+                selected.roots.get(&(context, source)).map(|&term| (context, term))
+            });
         let value = if self.compiler.facts.contains("HostLoopAggregate", (source,)) {
             self.local(scope, source)?
-        } else if let Some(&term) = self.compiler.program.stage.selected.roots.get(&(self.context, source))
-        {
-            self.scalar_body(scope, term)?
+        } else if let Some((context, term)) = root {
+            let previous = std::mem::replace(&mut self.context, context);
+            let value = self.scalar_body(scope, term);
+            self.context = previous;
+            value?
         } else {
             self.boundary(scope, source)?
         };
@@ -446,7 +455,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         for (formal, value) in bindings {
             self.values.insert(formal, value);
         }
-        let result = emit(self, source);
+        let result = self.planned_boundary(scope, source).and_then(|()| emit(self, source));
         self.context = old_context;
         self.values.restore(old_values);
         self.scopes = old_scopes;

@@ -18,10 +18,10 @@ enum ReadAddress {
 }
 
 impl ReadAddress {
-    fn ty(&self) -> &Type {
+    fn is_array(&self) -> bool {
         match self {
-            Self::Value(value) => &value.ty,
-            Self::Place(_, ty) => ty,
+            Self::Value(value) => value.is_segmented() || value.ty.is_array(),
+            Self::Place(_, ty) => ty.is_array(),
         }
     }
 }
@@ -94,6 +94,9 @@ impl Body<'_, '_, '_> {
         array: Typed,
         index: Typed,
     ) -> Result<Typed, OptimizeError> {
+        if array.is_segmented() {
+            return self.segment(array, index);
+        }
         if let Type::Constructed(TypeName::Tuple(_), fields) = &array.ty {
             let mut values = vec![];
             for i in 0..fields.len() {
@@ -159,8 +162,11 @@ impl Body<'_, '_, '_> {
         let mut address = ReadAddress::Value(array);
         for (fields, index) in steps {
             let mut fields = fields.iter().copied().peekable();
-            while !address.ty().is_array() && fields.peek().is_some() {
-                address = self.address_field(address, fields.next().unwrap())?;
+            while !address.is_array() && fields.peek().is_some() {
+                let Some(field) = fields.next() else {
+                    break;
+                };
+                address = self.address_field(address, field)?;
             }
             address = match address {
                 ReadAddress::Place(place, ty)
@@ -226,7 +232,7 @@ impl Body<'_, '_, '_> {
         }
         // Source array qualifiers describe shape and ownership, not a physical
         // conversion. Boundary layouts explicitly request any required copy.
-        if (value.ty.is_array() || types::as_soa_tuple(&value.ty).is_some())
+        if (value.is_segmented() || value.ty.is_array() || types::as_soa_tuple(&value.ty).is_some())
             && (ty.is_array() || types::as_soa_tuple(ty).is_some())
         {
             return Ok(value);
@@ -355,6 +361,11 @@ impl Body<'_, '_, '_> {
         self.op(tag, vec![], ty.clone())
     }
     pub(in crate::egglog::to_ssa) fn length(&mut self, array: Typed) -> Result<Typed, OptimizeError> {
+        if array.is_segmented() {
+            let offsets = self.field(array, 0)?;
+            let length = self.length(offsets)?;
+            return self.binary(BinaryOperator::Subtract, length, Self::number(1));
+        }
         if array.ty.array_variant().is_some_and(types::is_array_variant_composite) {
             if let Some(Type::Constructed(TypeName::Size(n), _)) = array.ty.array_size() {
                 return self.literal(*n as i64, &types::i32());
@@ -476,8 +487,9 @@ impl Body<'_, '_, '_> {
             let length = self.length(value.clone())?;
             return self.copy_array(array, value, length, &[]);
         };
-        if array.ty.array_variant().is_some_and(is_array_variant_view)
-            && array.ty.array_rank().is_some_and(|rank| rank > 1)
+        if array.is_segmented()
+            || (array.ty.array_variant().is_some_and(is_array_variant_view)
+                && array.ty.array_rank().is_some_and(|rank| rank > 1))
         {
             let row = self.index(array, first.clone())?;
             return self.store_at(row, rest, value);

@@ -30,12 +30,52 @@ pub struct SourceResultBinding {
     pub name: String,
     pub kind: ResultKind,
     pub layout: ResultLayout,
-    /// Row-major dimensions for a flat rectangular allocation; empty for a static layout.
-    pub shape: Vec<Expr>,
+    /// Logical shape and any offset buffers over the flat element allocation.
+    pub shape: ResultShape,
     pub result: usize,
     pub pipeline_index: usize,
     pub set: u32,
     pub binding: u32,
+}
+
+/// Logical shape over flat element storage. Offsets are ordered outermost first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResultShape {
+    Rectangular(Vec<Expr>),
+    Segmented {
+        offsets: Vec<ScalarSource>,
+        elements: Expr,
+    },
+}
+
+impl Default for ResultShape {
+    fn default() -> Self {
+        Self::Rectangular(Vec::new())
+    }
+}
+
+impl ResultShape {
+    pub fn expressions(&self) -> &[Expr] {
+        match self {
+            Self::Rectangular(dimensions) => dimensions,
+            Self::Segmented { elements, .. } => std::slice::from_ref(elements),
+        }
+    }
+    pub fn expressions_mut(&mut self) -> &mut [Expr] {
+        match self {
+            Self::Rectangular(dimensions) => dimensions,
+            Self::Segmented { elements, .. } => std::slice::from_mut(elements),
+        }
+    }
+    pub fn is_static(&self) -> bool {
+        self.expressions().is_empty()
+    }
+    pub fn offsets(&self) -> &[ScalarSource] {
+        match self {
+            Self::Rectangular(_) => &[],
+            Self::Segmented { offsets, .. } => offsets,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

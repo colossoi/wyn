@@ -16,10 +16,11 @@
 (relation EpilogueValue (StageKey ValueKey))
 (rule ((Produces stage value) (PhaseDomain stage (Fixed 1) 1))
       ((EpilogueValue stage value)) :ruleset output-candidates)
-; Compaction publishes its count in lane zero. Its element output is written
-; by other lanes and cannot be read here without storage synchronization.
-(rule ((= (Plan op) (Compact)) (Produces (Stage op "compact") (Result op 1)))
-      ((EpilogueValue (Stage op "compact") (Result op 1))) :ruleset output-candidates)
+; Completed local folds publish their scalar result in lane zero. Elements
+; written by other lanes still require storage synchronization before reading.
+(rule ((Accumulator op state t (LocalPrefix count) source) (= phase (LocalPhase op))
+       (Produces (Stage op phase) count))
+      ((EpilogueValue (Stage op phase) count)) :ruleset output-candidates)
 (function OutputAttached (i64) bool :merge (or old new))
 (rule ((CopyOutput output)) ((set (OutputAttached output) false)) :ruleset output-candidates)
 (function OutputBlocked (i64 StageKey) bool :merge (or old new))

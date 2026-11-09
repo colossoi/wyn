@@ -30,16 +30,16 @@ pub(super) fn place(
             "\n",
             include_str!("planning/views.egg"),
             "\n",
-            include_str!("planning/repeatability.egg"),
+            include_str!("planning/distribution.egg"),
             "\n",
             include_str!("planning/shapes.egg"),
             "\n",
-            include_str!("planning/maps.egg"),
+            include_str!("planning/segmented-storage.egg"),
             "\n",
             include_str!("planning/traversal.egg"),
             include_str!("planning/distribute.egg"),
-            include_str!("planning/segments.egg"),
             include_str!("planning/execution.egg"),
+            include_str!("planning/invariants.egg"),
             "\n",
             include_str!("planning/output-layouts.egg"),
             "\n",
@@ -59,8 +59,8 @@ pub(super) fn place(
         ),
     )?;
     // Complete logical distribution before importing physical placements.
-    graph.parse_and_run_program(None, "(run-schedule distribute-discover (saturate traversal-types) (saturate rectangular-discover) (saturate repeatability) traversal-proofs traversal-ready (saturate (seq extent-shapes map-shapes)) distribute-select distribute-commit (saturate fusion-counts shape-properties))")?;
-    graph.parse_and_run_program(None, "(run-schedule (saturate fusion-signatures))")?;
+    graph.parse_and_run_program(None, "(run-schedule distribute-discover (saturate flow-structure) (saturate traversal-types) (saturate rectangular-discover) (saturate repeatability) traversal-proofs traversal-ready (saturate (seq extent-shapes map-shapes)) distribute-select distribute-commit (saturate fusion-counts shape-properties))")?;
+    graph.parse_and_run_program(None, "(run-schedule (saturate fusion-signatures) (saturate execution-discover) (saturate invariant-discover) (saturate invariant-select) (saturate invariant-replacement) invariant-commit (saturate fusion-counts) (saturate fusion-signatures))")?;
     let policy = match topology {
         PipelineTopologyPolicy::AllowGenerated => "AllowGeneratedTopology",
         PipelineTopologyPolicy::AuthoredOnly => "AuthoredTopology",

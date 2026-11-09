@@ -247,7 +247,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                         1,
                     )
                 }
-                TermKind::Var(VarRef::Symbol(symbol)) if self.globals.contains(symbol) => {
+                TermKind::Var(VarRef::Symbol(symbol)) if self.definitions.contains_key(symbol) => {
                     (false, true, true, true, 1)
                 }
                 TermKind::Lambda(_) | TermKind::Closure(_) => (false, true, true, true, 1),
@@ -262,7 +262,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 1,
             ),
             TermKind::Soac(_) => (true, true, true, false, 65),
-            TermKind::Loop { .. } => (false, true, true, false, 65),
+            TermKind::Loop { .. } => (false, false, true, false, 65),
             TermKind::Extern(_) => (true, false, false, false, 65),
             TermKind::Var(_)
             | TermKind::BinOp(_)
@@ -395,9 +395,6 @@ pub(super) fn scalar_application(func: &Term, args: &[Term], result: &Type) -> b
     match &func.kind {
         TermKind::BinOp(_) | TermKind::UnOp(_) => true,
         TermKind::Var(VarRef::Builtin { id, overload_idx }) => {
-            if *id == catalog().known().slice {
-                return true;
-            }
             let builtin = by_id(*id);
             let Some(overload) = builtin.overloads().get(*overload_idx) else {
                 return false;

@@ -2,10 +2,10 @@
 use super::sizes;
 use crate::binding_layout::extract_storage_binding;
 use crate::egglog::host::lower::{self as host, scalar_type};
+use crate::egglog::query::Query;
 use crate::egglog::to_ssa::{error, Compiler};
 use crate::egglog::OptimizeError;
 use crate::flow::ExecutionModel;
-use crate::host::ResultKind;
 use crate::host::SourceResultBinding;
 use crate::host::{Binding, BufferUsage, DrawBufferRef, DrawCall, DrawCount, GraphicsInvocation};
 use crate::host::{
@@ -13,6 +13,7 @@ use crate::host::{
     ModuleInterface, Pipeline, ShaderStage,
 };
 use crate::host::{DispatchLoop, DispatchLoopControl, ScalarExpr, ScalarSource, ScalarTask, ScalarType};
+use crate::host::{ResultKind, ResultShape};
 use crate::interface::publish::{reconcile_storage_binding_access, EntryPoint, ModuleInterfacePublish};
 use crate::interface::results::{result_layout, result_layout_with_storage};
 use crate::interface::{DrawBufferOperand, SourceResult};
@@ -129,8 +130,7 @@ pub(in crate::egglog) fn publish(
         let Some(token) = compiler.program.identities.symbols.get(owner) else {
             return Err(error("entry identity missing"));
         };
-        let selected =
-            crate::egglog::query::Query(&compiler.program.graph).required("DefaultThreads", (token,))?;
+        let selected = Query(&compiler.program.graph).required("DefaultThreads", (token,))?;
         let threads = u32::try_from(compiler.facts.integer(selected))
             .map_err(|_| error("invalid selected thread count"))?;
         let Some(threads) = std::num::NonZeroU32::new(threads) else {
@@ -379,24 +379,11 @@ fn publish_results(
             } else {
                 vec![SourceResult { index, name, kind }]
             };
-            let (layout, shape) = if let Some(shape) = compiler.facts.storage_shape(backing)? {
-                let Some((_, element, _)) = compiler.bindings.buffer(backing)? else {
-                    return Err(error("rectangular output allocation missing"));
-                };
-                let shape = compiler
-                    .facts
-                    .vector(shape)?
-                    .into_iter()
-                    .map(|extent| sizes::extent(compiler, extent))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let layout = result_layout(&types::view_array_with_size(
-                    element,
-                    Type::Constructed(TypeName::SizePlaceholder, vec![]),
-                    types::no_buffer(),
-                ));
-                (layout, shape)
-            } else if ty.is_array() {
-                let element = if let Some((_, _, _)) = compiler.bindings.buffer(backing)? {
+            let domain = Query(&compiler.program.graph)
+                .record("ArrayShape", "FlatStorage", (value,))?
+                .map(|row| row[1]);
+            let (layout, shape) = if domain.is_some() || ty.is_array() {
+                let element = if compiler.bindings.buffer(backing)?.is_some() {
                     compiler.bindings.buffer_element(backing)?
                 } else {
                     let Some(element) = ty.elem_type() else {
@@ -409,15 +396,58 @@ fn publish_results(
                     Type::Constructed(TypeName::SizePlaceholder, vec![]),
                     types::no_buffer(),
                 );
-                (
-                    result_layout_with_storage(ty, &physical),
-                    vec![sizes::published_shape(compiler, value)?],
-                )
+                if let Some(domain) = domain {
+                    let dimensions = compiler.facts.lookup("ShapeDimensions", (domain,));
+                    let dimensions = dimensions
+                        .map(|shape| compiler.facts.vector(shape))
+                        .transpose()?
+                        .unwrap_or_default();
+                    let shape = dimensions
+                        .into_iter()
+                        .map(|extent| sizes::extent(compiler, extent))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    (result_layout(&physical), shape)
+                } else {
+                    (
+                        result_layout_with_storage(ty, &physical),
+                        vec![sizes::published_shape(compiler, value)?],
+                    )
+                }
             } else {
                 (
                     result_layout_with_storage(ty, &compiler.facts.physical_type(ty, true)?),
                     vec![],
                 )
+            };
+            let shape = if let Some(domain) = domain {
+                let shape_domain = domain;
+                let mut domain = domain;
+                let mut offsets = Vec::new();
+                while let Some(fields) = compiler.facts.enode("Segments", domain) {
+                    let Some(offset_resource) = compiler.facts.backing(fields[1]) else {
+                        return Err(error("segment offsets have no backing"));
+                    };
+                    let Some((binding, _, _)) = compiler.bindings.buffer(offset_resource)? else {
+                        return Err(error("segment offsets have no allocation"));
+                    };
+                    offsets.push(ScalarSource::Binding {
+                        set: binding.set,
+                        binding: binding.binding,
+                    });
+                    domain = fields[0];
+                }
+                if offsets.is_empty() {
+                    ResultShape::Rectangular(shape)
+                } else {
+                    offsets.reverse();
+                    let extent = Query(&compiler.program.graph).required("ShapeExtent", (shape_domain,))?;
+                    ResultShape::Segmented {
+                        offsets,
+                        elements: sizes::extent(compiler, extent)?,
+                    }
+                }
+            } else {
+                ResultShape::Rectangular(shape)
             };
             for result in results {
                 module.source_results.push(SourceResultBinding {
@@ -480,7 +510,7 @@ fn publish_frame_graph(
         }
     }
     let mut edges = Vec::new();
-    crate::egglog::query::Query(&compiler.program.graph).for_each("PublicationDependency", |row| {
+    Query(&compiler.program.graph).for_each("PublicationDependency", |row| {
         let (Some(&before), Some(&after)) = (locations.get(&row[0]), locations.get(&row[1])) else {
             return Err(error("selected dependency has no published execution root"));
         };
@@ -643,10 +673,11 @@ fn publish_loops(
                 binding: binding.binding,
             })
         };
-        let form = compiler.facts.loop_form(source).ok_or_else(|| error("loop control missing"))?;
+        let Some(form) = compiler.facts.loop_form(source) else {
+            return Err(error("loop control missing"));
+        };
         let control = if let Some(fields) = compiler.facts.enode("ForCount", form) {
-            let context = crate::egglog::query::Query(&compiler.program.graph)
-                .required("ExprContextForSource", (fields[0],))?;
+            let context = Query(&compiler.program.graph).required("ExprContextForSource", (fields[0],))?;
             let count = host::published_expression(compiler.program, context, fields[0], &|resource| {
                 sizes::published_read(compiler, resource)
             })
@@ -677,8 +708,7 @@ fn publish_loops(
         for carry in compiler.facts.loop_carries(operation)? {
             let current =
                 compiler.facts.value_ref(carry.state).ok_or_else(|| error("loop carry missing"))?;
-            let next = crate::egglog::query::Query(&compiler.program.graph)
-                .required("LoopNext", (operation, carry.slot))?;
+            let next = Query(&compiler.program.graph).required("LoopNext", (operation, carry.slot))?;
             carried.push((slot(current)?, slot(next)?));
         }
         let Some(pipeline) = associations.iter().position(|ids| ids.contains(&entry.id)) else {

@@ -139,11 +139,6 @@ impl<'a, 'source> Facts<'a, 'source> {
     pub fn loop_form(&self, source: Value) -> Option<Value> {
         Some(self.record("SourceLoop", "LoopInfo", (source,))?[2])
     }
-    pub fn iteration_dimensions(&self, operation: Value) -> Result<Vec<Value>, OptimizeError> {
-        let query = Query(&self.program.graph);
-        let shape = query.required("IterationShape", (operation,))?;
-        self.vector(query.required("ShapeDimensions", (shape,))?)
-    }
     pub fn definition_name(&self, scope: Value) -> Option<SymbolId> {
         let token = self.lookup("SourceDefinitionSymbol", (scope,))?;
         Some(*self.program.identities.symbols.resolve(self.program.graph.value_to_base::<i64>(token)))

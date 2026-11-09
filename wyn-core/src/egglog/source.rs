@@ -45,7 +45,8 @@ pub(super) fn import(source: &OwnershipApplied) -> Result<(EGraph, Identities), 
         let mut import = Import {
             sink,
             identities: &mut identities,
-            globals: source.defs.iter().map(|definition| definition.name).collect(),
+            definitions: source.defs.iter().map(|definition| (definition.name, &definition.body)).collect(),
+            instantiating: LookupSet::default(),
             bindings: Bindings::default(),
             regions: IdSource::new(),
             operations: IdSource::new(),
@@ -104,7 +105,8 @@ struct Scope {
 struct Import<'graph, 'db, 'ids, 'source> {
     sink: FullState<'graph, 'db>,
     identities: &'ids mut Identities,
-    globals: LookupSet<SymbolId>,
+    definitions: LookupMap<SymbolId, &'source Term>,
+    instantiating: LookupSet<SymbolId>,
     bindings: Bindings<SymbolId, Value>,
     regions: IdSource<i64>,
     operations: IdSource<i64>,
@@ -205,7 +207,9 @@ impl<'source> Import<'_, '_, '_, 'source> {
                     }
                 }
             }
+            self.instantiating.insert(definition.name);
             let result = self.finish_body(body, &mut scope)?;
+            self.instantiating.remove(&definition.name);
             if let DefMeta::EntryPoint(entry) = &definition.meta {
                 if entry.declaration.buffer_demand {
                     self.sink.add("SourceBufferDemand", symbol)?;
@@ -294,7 +298,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         if let Some(value) = self.bindings.get(&symbol).copied() {
             return Ok(value);
         }
-        if self.globals.contains(&symbol) {
+        if self.definitions.contains_key(&symbol) {
             let symbol = self.identities.symbols.intern(&symbol);
             return Ok(self.sink.add("SourceGlobal", symbol)?);
         }
@@ -631,13 +635,8 @@ impl<'source> Import<'_, '_, '_, 'source> {
         {
             self.sink.add("SourceDispatchLoop", owner)?;
             let domain =
-                self.loop_carries(owner, variable_ty, initial, accumulator, result, owner, &mut 0)?;
+                self.loop_carries(owner, variable_ty, [initial, accumulator, result, owner], &mut 0)?;
             self.sink.set("SourceLoopDomain", owner, domain)?;
-            self.sink.set(
-                "SourceLoopDirectCarry",
-                owner,
-                matches!(kind, LoopKind::ForRange { .. }) && variable_ty.is_array(),
-            )?;
         }
         self.capture_region(&iteration, &mut header)?;
         self.finish_region(&mut header, test)?;
@@ -669,18 +668,38 @@ impl<'source> Import<'_, '_, '_, 'source> {
             scope.captures.push((parameter, argument));
         }
         self.parameters(params, &mut scope)?;
-        if matches!(&body.kind, TermKind::Var(VarRef::Symbol(symbol)) if self.globals.contains(symbol)) {
+        let definition = match &body.kind {
+            TermKind::Var(VarRef::Symbol(symbol)) => {
+                self.definitions.get(symbol).map(|body| (*symbol, *body))
+            }
+            _ => None,
+        };
+        if let Some((symbol, definition)) = definition {
             let (function, _) = self.visit(body, &mut scope)?;
             let mut arguments =
                 params.iter().map(|(symbol, _)| self.resolve(*symbol)).collect::<Result<Vec<_>, _>>()?;
             arguments.extend(captured);
-            let arguments = self.sink.container_to_value(VecContainer {
-                data: arguments,
-                do_rebuild: true,
-            });
-            let result = self.sink.add("SourceInvocation", (scope.key, function, arguments))?;
-            self.value_type(result, ret_ty)?;
-            self.finish_region(&mut scope, result)?;
+            if self.instantiating.insert(symbol) {
+                // Fresh scope identities substitute both ordinary operands and
+                // the values referenced by logical extents. The definition stays intact.
+                let (definition, formals) = extract_lambda_params_ref(definition);
+                if formals.len() != arguments.len() {
+                    return Err(OptimizeError::Output("callback argument arity mismatch".into()));
+                }
+                for ((formal, _), actual) in formals.iter().zip(arguments) {
+                    self.bindings.insert(*formal, actual);
+                }
+                self.finish_body(definition, &mut scope)?;
+                self.instantiating.remove(&symbol);
+            } else {
+                let arguments = self.sink.container_to_value(VecContainer {
+                    data: arguments,
+                    do_rebuild: true,
+                });
+                let result = self.sink.add("SourceInvocation", (scope.key, function, arguments))?;
+                self.value_type(result, ret_ty)?;
+                self.finish_region(&mut scope, result)?;
+            }
         } else {
             self.finish_body(body, &mut scope)?;
         }

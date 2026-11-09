@@ -387,12 +387,87 @@ impl Program {
         }
     }
 
+    fn write_allocation(&self, out: &mut String, allocation: &Allocation) -> Result<(), HostError> {
+        let target = resource(allocation.resource());
+        writeln!(out, "    (if {target} (gpu-free {target}))")?;
+        match allocation {
+            Allocation::Buffer { resource: r, bytes } => {
+                writeln!(out, "    (setq {} (gpu-alloc {}))", resource(*r), bytes.to_whl()?)?
+            }
+            Allocation::Texture {
+                resource: r,
+                width,
+                height,
+            } => {
+                let Some(Binding::StorageTexture { format, .. }) = self.texture_binding(*r) else {
+                    return Err(HostError::Invalid("allocated texture has no format".into()));
+                };
+                writeln!(out,"    (setq {} (gpu-alloc-texture :dimension :d2 :size (list {} {} 1) :format :{} :mip-levels 1 :samples 1 :usage '(:storage :sampled :render-target :copy)))",resource(*r),width.to_whl()?,height.to_whl()?,format_name(*format))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn write_views(&self, out: &mut String, p: usize) -> Result<(), HostError> {
+        for (b, binding) in self.bindings(p).iter().enumerate() {
+            let usage = match binding {
+                Binding::Texture { .. } => Some("sampled"),
+                Binding::StorageTexture { .. } => Some("storage"),
+                _ => None,
+            };
+            if let Some(usage) = usage {
+                let id = self.binding_resource(p, b)?;
+                let view_dimension = match binding {
+                    Binding::Texture { view_dimension, .. } => dimension(view_dimension),
+                    _ => ":d2",
+                };
+                let layers = match binding {
+                    Binding::Texture {
+                        view_dimension: TextureViewDimension::D2Array | TextureViewDimension::CubeArray,
+                        ..
+                    } => format!("(gpu-texture-dimension {} 0 'depth-or-layers)", resource(id)),
+                    Binding::Texture {
+                        view_dimension: TextureViewDimension::Cube,
+                        ..
+                    } => "6".into(),
+                    _ => "1".into(),
+                };
+                let mips = if usage == "sampled" {
+                    format!("(gpu-texture-mip-levels {})", resource(id))
+                } else {
+                    "1".into()
+                };
+                writeln!(out,"    (view-{p}-{b} (gpu-texture-view {} :usage :{usage} :dimension {view_dimension} :mip 0 :mip-count {mips} :layer 0 :layer-count {layers}))",resource(id))?;
+            }
+        }
+        if let Pipeline::Graphics(g) = &self.interface.pipelines[p] {
+            if g.invocation.fragment_state.depth_test != DepthTest::Disabled {
+                let id = self.depth_target(p)?;
+                writeln!(out,"    (depth-view-{p} (gpu-texture-view {} :usage :render-target :dimension :d2 :mip 0 :mip-count 1 :layer 0 :layer-count 1))",resource(id))?;
+            }
+            for target in &g.fragment_outputs {
+                let id = self.target_resource(&target.name)?;
+                writeln!(out,"    (target-{p}-{} (gpu-texture-view {} :usage :render-target :dimension :d2 :mip 0 :mip-count 1 :layer 0 :layer-count 1))",target.location,resource(id))?;
+            }
+        }
+        Ok(())
+    }
+
     fn write_operations(&self, out: &mut String, operations: &[Operation]) -> Result<(), HostError> {
         for op in operations {
+            let pipeline = match op {
+                Operation::Dispatch { pipeline, .. } | Operation::Draw { pipeline } => Some(*pipeline),
+                _ => None,
+            };
+            if let Some(pipeline) = pipeline {
+                writeln!(out, "    (let* (")?;
+                self.write_views(out, pipeline)?;
+                writeln!(out, "    )")?;
+            }
             match op {
-                Operation::Loop { pipeline, region, setup, test, body } => {
+                Operation::Allocate(allocation) => self.write_allocation(out, allocation)?,
+                Operation::Loop { pipeline, region, test, body } => {
                     let repeated = &self.interface.dispatch_loops[*region];
-                    self.write_operations(out, setup)?;
                     match &repeated.control {
                         crate::DispatchLoopControl::Counted { count, index } => {
                             let index = resource(self.scalar_resource(*pipeline, index)?);
@@ -417,6 +492,9 @@ impl Program {
                 Operation::Scalar { pipeline, task } => writeln!(out, "    {}", self.whl_scalar_task(*pipeline, &self.interface.scalar_tasks[*task])?)?,
                 Operation::Dispatch { pipeline: p, stage: s, groups } => writeln!(out, "    (gpu-dispatch 'kernel-{p}-{s}\n      :groups (list {} {} {})\n      :args (list {}))", groups[0].to_whl()?, groups[1].to_whl()?, groups[2].to_whl()?, self.arguments(*p, Some(*s))?)?,
                 Operation::Draw { pipeline } => self.write_draw(out, *pipeline)?,
+            }
+            if pipeline.is_some() {
+                writeln!(out, "    )")?;
             }
         }
         Ok(())
@@ -456,12 +534,16 @@ impl Program {
                 out,
                 "\n    ({} {} :source-name {} :ownership {}",
                 symbol(source_name),
-                self.resource_description(id, source_result.is_some_and(|r| !r.shape.is_empty())),
+                if source_result.is_some_and(|r| !r.shape.offsets().is_empty()) {
+                    ":segmented-buffer :write".into()
+                } else {
+                    self.resource_description(id, source_result.is_some_and(|r| !r.shape.is_static()))
+                },
                 string(source_name),
                 if entry.inputs.contains(&id) { ":borrowed" } else { ":owned" }
             )?;
             if let Some(result) = source_result {
-                if !result.shape.is_empty() {
+                if !result.shape.is_static() {
                     if let ResultLayout::Array {
                         length: Some(length),
                         stride,
@@ -472,9 +554,12 @@ impl Program {
                     }
                 }
                 write!(out, " :value-layout {}", result.layout.to_whl())?;
+                if !result.shape.offsets().is_empty() {
+                    write!(out, " :segmented-rank {}", result.shape.offsets().len() + 1)?;
+                }
             }
             // A shaped result may create a shorter view with a distinct handle.
-            if entry.inputs.contains(&id) && source_result.is_none_or(|r| r.shape.is_empty()) {
+            if entry.inputs.contains(&id) && source_result.is_none_or(|r| r.shape.is_static()) {
                 write!(out, " :alias {}", resource(id))?;
             }
             write!(out, ")")?;
@@ -491,119 +576,74 @@ impl Program {
                 .join(" ")
         )?;
         writeln!(out, "  (let* (")?;
-        for allocation in &entry.allocations {
-            match allocation {
-                Allocation::Buffer { resource: r, bytes } => {
-                    writeln!(out, "    ({} (gpu-alloc {}))", resource(*r), bytes.to_whl()?)?
-                }
-                Allocation::Texture {
-                    resource: r,
-                    width,
-                    height,
-                } => {
-                    let Some(Binding::StorageTexture { format, .. }) = self.texture_binding(*r) else {
-                        return Err(HostError::Invalid("allocated texture has no format".into()));
-                    };
-                    writeln!(out,"    ({} (gpu-alloc-texture :dimension :d2 :size (list {} {} 1) :format :{} :mip-levels 1 :samples 1 :usage '(:storage :sampled :render-target :copy)))",resource(*r),width.to_whl()?,height.to_whl()?,format_name(*format))?;
-                }
-            }
-        }
-        for p in entry
-            .operations
-            .iter()
-            .map(|op| match op {
-                Operation::Dispatch { pipeline, .. }
-                | Operation::Draw { pipeline }
-                | Operation::Scalar { pipeline, .. }
-                | Operation::Loop { pipeline, .. } => *pipeline,
-            })
-            .collect::<std::collections::BTreeSet<_>>()
-        {
-            for (b, binding) in self.bindings(p).iter().enumerate() {
-                let usage = match binding {
-                    Binding::Texture { .. } => Some("sampled"),
-                    Binding::StorageTexture { .. } => Some("storage"),
-                    _ => None,
-                };
-                if let Some(usage) = usage {
-                    let id = self.binding_resource(p, b)?;
-                    let view_dimension = match binding {
-                        Binding::Texture { view_dimension, .. } => dimension(view_dimension),
-                        _ => ":d2",
-                    };
-                    let layers = match binding {
-                        Binding::Texture {
-                            view_dimension: TextureViewDimension::D2Array | TextureViewDimension::CubeArray,
-                            ..
-                        } => format!("(gpu-texture-dimension {} 0 'depth-or-layers)", resource(id)),
-                        Binding::Texture {
-                            view_dimension: TextureViewDimension::Cube,
-                            ..
-                        } => "6".into(),
-                        _ => "1".into(),
-                    };
-                    let mips = if usage == "sampled" {
-                        format!("(gpu-texture-mip-levels {})", resource(id))
-                    } else {
-                        "1".into()
-                    };
-                    writeln!(out,"    (view-{p}-{b} (gpu-texture-view {} :usage :{usage} :dimension {view_dimension} :mip 0 :mip-count {mips} :layer 0 :layer-count {layers}))",resource(id))?;
-                }
-            }
-            if let Pipeline::Graphics(g) = &self.interface.pipelines[p] {
-                if g.invocation.fragment_state.depth_test != DepthTest::Disabled {
-                    let id = self.depth_target(p)?;
-                    writeln!(out,"    (depth-view-{p} (gpu-texture-view {} :usage :render-target :dimension :d2 :mip 0 :mip-count 1 :layer 0 :layer-count 1))",resource(id))?;
-                }
-                for target in &g.fragment_outputs {
-                    let id = self.target_resource(&target.name)?;
-                    writeln!(out,"    (target-{p}-{} (gpu-texture-view {} :usage :render-target :dimension :d2 :mip 0 :mip-count 1 :layer 0 :layer-count 1))",target.location,resource(id))?;
-                }
-            }
+        for allocation in entry.allocations() {
+            writeln!(out, "    ({} nil)", resource(allocation.resource()))?;
         }
         writeln!(out, "  )")?;
         self.write_operations(out, &entry.operations)?;
         writeln!(out, "    (let* (")?;
         let mut results = Vec::new();
         for (i, &id) in entry.results.iter().enumerate() {
-            let value = if let Some(result) = source_results.get(i).filter(|r| !r.shape.is_empty()) {
+            let value = if let Some(result) = source_results.get(i).filter(|r| !r.shape.is_static()) {
                 let ResultLayout::Array { stride, .. } = &result.layout else {
                     return Err(HostError::Invalid("shaped result must be an array".into()));
                 };
-                let bytes =
-                    result.shape.iter().cloned().fold(Expr::Integer(i64::from(*stride)), Expr::multiply);
+                let bytes = result
+                    .shape
+                    .expressions()
+                    .iter()
+                    .cloned()
+                    .fold(Expr::Integer(i64::from(*stride)), Expr::multiply);
                 writeln!(out, "      (result-bytes-{i} (u64 {}))", bytes.to_whl()?)?;
                 format!("(if (= result-bytes-{i} (gpu-buffer-size {0})) {0} (gpu-buffer-view {0} result-bytes-{i}))", resource(id))
             } else {
                 resource(id)
+            };
+            let value = if let Some(result) = source_results.get(i) {
+                let offsets = result
+                    .shape
+                    .offsets()
+                    .iter()
+                    .map(|s| s.resource().map(resource))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if offsets.is_empty() {
+                    value
+                } else {
+                    format!("(list {} {value})", offsets.join(" "))
+                }
+            } else {
+                value
             };
             let name = format!("result-{i}");
             writeln!(out, "      ({name} {value})")?;
             results.push(name);
         }
         writeln!(out, "    )")?;
-        for a in &entry.allocations {
+        for a in entry.allocations() {
             let id = a.resource();
+            if source_results
+                .iter()
+                .any(|r| r.shape.offsets().iter().any(|s| s.resource().is_ok_and(|r| r == id)))
+            {
+                continue;
+            }
             if !entry.results.iter().enumerate().any(|(i, result)| {
-                *result == id && source_results.get(i).is_none_or(|r| r.shape.is_empty())
+                *result == id && source_results.get(i).is_none_or(|r| r.shape.is_static())
             }) {
-                let views: Vec<_> = entry
+                let mut views: Vec<_> = entry
                     .results
                     .iter()
                     .enumerate()
                     .filter(|(_, result)| **result == id)
                     .map(|(i, _)| format!("(/= result-bytes-{i} (gpu-buffer-size {}))", resource(id)))
                     .collect();
-                if views.is_empty() {
-                    writeln!(out, "    (gpu-free {})", resource(id))?;
-                } else {
-                    writeln!(
-                        out,
-                        "    (if (and {}) (gpu-free {}))",
-                        views.join(" "),
-                        resource(id)
-                    )?;
-                }
+                views.insert(0, resource(id));
+                writeln!(
+                    out,
+                    "    (if (and {}) (gpu-free {}))",
+                    views.join(" "),
+                    resource(id)
+                )?;
             }
         }
         writeln!(

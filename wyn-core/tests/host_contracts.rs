@@ -65,6 +65,21 @@ fn dispatch_loops_share_product_carries_and_control_across_backends() {
             loops[*region].control,
             DispatchLoopControl::Counted { .. }
         ));
+        for entry in program.entries.iter().filter(|entry| entry.name.starts_with("growing")) {
+            let body = entry
+                .operations
+                .iter()
+                .find_map(|operation| match operation {
+                    Operation::Loop { body, .. } => Some(body),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(
+                body.iter().any(|op| matches!(op, Operation::Allocate(_))),
+                "{}",
+                entry.name
+            );
+        }
         for loop_ in loops {
             if matches!(loop_.control, DispatchLoopControl::While { .. }) {
                 assert!(!loop_.test.is_empty());
@@ -182,12 +197,12 @@ fn rust_context_keeps_pipeline_creation_out_of_entry_calls() {
                 );
             }
             let entry = &program.entries[0];
-            let scratch = entry.allocations.iter().filter(|allocation| {
+            let scratch = entry.allocations().filter(|allocation| {
                 matches!(allocation, Allocation::Buffer { resource, .. } if !entry.results.contains(resource))
             }).count();
             assert_eq!(call.matches("support::scratch_buffer(").count(), scratch);
             assert_eq!(call.matches("encoder.clear_buffer(").count(), scratch);
-            let returned_buffers = entry.allocations.iter().filter(|allocation| {
+            let returned_buffers = entry.allocations().filter(|allocation| {
                 matches!(allocation, Allocation::Buffer { resource, .. } if entry.results.contains(resource))
             }).count();
             assert_eq!(call.matches("device.create_buffer(").count(), returned_buffers);

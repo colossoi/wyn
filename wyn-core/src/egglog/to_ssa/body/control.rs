@@ -245,7 +245,7 @@ impl Body<'_, '_, '_> {
 
     /// Every structured loop has typed carried values and one exit. Keep the
     /// condition in its own block so nested selections cannot replace the header.
-    fn while_loop(
+    pub(in crate::egglog::to_ssa) fn while_loop(
         &mut self,
         initial: Vec<Typed>,
         test: impl FnOnce(&mut Self, &[Typed]) -> Result<Typed, OptimizeError>,

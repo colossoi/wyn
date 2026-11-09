@@ -309,8 +309,6 @@
       ((set (RegionPrefixSpeculatable region) safe)) :ruleset source-summary)
 (rule ((= body (SourceOperatorBody op)) (= value (SourceOperationValue op)) (= safe (RegionPrefixSpeculatable body)))
       ((set (TraversalPrefixSpeculatable value) safe)) :ruleset source-summary)
-(rule ((= input (SourceInput op i)) (= value (SourceOperationValue op)) (= safe (SourceSpeculatable input)))
-      ((set (TraversalPrefixSpeculatable value) safe)) :ruleset source-summary)
 (rule ((= (OperatorDefinition op) (MapOperator body inputs)) (= value (SourceOperationValue op))
        (= (SourceReadOnly value) true))
       ((set (SourceTraversalDepth value) 1)) :ruleset traversal-depths)
@@ -354,5 +352,38 @@
        (= n (SourceFixedAxis (SourceResult yes) axis)) (= n (SourceFixedAxis (SourceResult no) axis)))
       ((set (SourceFixedAxis value axis) n)) :ruleset source-summary)
 
+(rule ((= (OperatorDefinition op) (FoldOperator (FoldPrefix) body neutral input))
+       (= value (SourceOperationValue op)) (= n (SourceFixedAxis neutral axis)))
+      ((set (SourceFixedAxis value (+ axis 1)) n)) :ruleset source-summary)
+(rule ((= (OperatorDefinition op) (FoldOperator (FoldTotal) body neutral input))
+       (= value (SourceOperationValue op)) (= n (SourceFixedAxis neutral axis)))
+      ((set (SourceFixedAxis value axis) n)) :ruleset source-summary)
+
 (rule ((Length value) (= n (SourceFixedAxis value 0)))
       ((set (ConstantLogicalExtent (Length value)) n)) :ruleset shape-properties)
+
+; A stream element can cross an invocation boundary by value only when its
+; remaining array dimensions have a concrete representation.
+(function SourceFixedSuffix (SourceValue) i64 :merge (min old new))
+(rule ((= ty (SourceType value)) (= rank (ArrayTypeRank ty)))
+      ((set (SourceFixedSuffix value) rank)) :ruleset source-summary)
+(rule ((= axis (SourceFixedSuffix value)) (> axis 0) (= n (SourceFixedAxis value (- axis 1))))
+      ((set (SourceFixedSuffix value) (- axis 1))) :ruleset source-summary)
+
+(rule ((= (SourceBranch value) (BranchInfo condition yes no))
+       (= safe (SourceSpeculatable condition)))
+      ((set (TraversalPrefixSpeculatable value) safe)) :ruleset source-summary)
+(rule ((= (SourceBranch value) (BranchInfo condition yes no))
+       (= a (RegionPrefixSpeculatable yes)) (= b (RegionPrefixSpeculatable no)))
+      ((set (TraversalPrefixSpeculatable value) (and a b))) :ruleset source-summary)
+(rule ((= (SourceBranch value) (BranchInfo condition yes no))
+       (= (TraversalPrefixSpeculatable value) true)
+       (= a (SourceTraversalDepth (SourceResult yes))) (= b (SourceTraversalDepth (SourceResult no))))
+      ((set (SourceTraversalDepth value) (min a b))) :ruleset traversal-depths)
+
+(relation IndexTraversalBase (SourceValue))
+(rule ((= value (SourceFormal region i))) ((IndexTraversalBase value)) :ruleset source-summary)
+(rule ((= (SourceConstruct value) "array") (= (SourceSpeculatable value) true))
+      ((IndexTraversalBase value)) :ruleset source-summary)
+(rule ((IndexTraversalBase value) (= rank (ArrayTypeRank (SourceType value))))
+      ((set (SourceTraversalDepth value) rank)) :ruleset traversal-depths)
