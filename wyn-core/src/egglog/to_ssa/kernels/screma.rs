@@ -52,6 +52,14 @@ pub(super) fn screma(
     if totals_only {
         components.retain(|component| component.role != "scan");
     }
+    let packing = if let Some((predicate, input)) = packing {
+        let Some(index) = components.iter().position(|component| component.role == "pack") else {
+            return Err(error("packing requires a count prefix"));
+        };
+        Some((predicate, input, index))
+    } else {
+        None
+    };
     let has_scans = components.iter().any(|component| component.role != "total");
     let mut accumulators = Vec::new();
     for component in &components {
@@ -160,8 +168,8 @@ pub(super) fn screma(
                                     };
                                     let value = body.index(partial, index.clone())?;
                                     body.cast(value, &initial[i].ty)?
-                                } else if packing.is_some() {
-                                    packing_input(body, scope, plan, &index)?
+                                } else if components[i].role == "pack" {
+                                    packing_input(body, scope, plan, &index, &mut cache)?
                                 } else {
                                     accumulator.accumulate(
                                         body,
@@ -188,24 +196,23 @@ pub(super) fn screma(
                             body.tuple(values)
                         },
                         |body, ty| {
-                            if packing.is_some() {
+                            let mut values = initial.clone();
+                            if let Some((_, _, i)) = packing {
                                 let Type::Constructed(TypeName::Tuple(_), fields) = ty else {
                                     return Err(error("collective input tuple missing"));
                                 };
-                                let empty = empty_retained(body, &fields[0])?;
-                                body.tuple(vec![empty])
-                            } else {
-                                body.tuple(initial.clone())
+                                values[i] = empty_retained(body, &fields[i])?;
                             }
+                            body.tuple(values)
                         },
                         None,
                     )?;
                     let mut values = (0..accumulators.len())
                         .map(|i| body.field(incoming.clone(), i))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let retained = if packing.is_some() {
-                        let pair = values[0].clone();
-                        values[0] = body.field(pair.clone(), 0)?;
+                    let retained = if let Some((_, _, i)) = packing {
+                        let pair = values[i].clone();
+                        values[i] = body.field(pair.clone(), 0)?;
                         Some(pair)
                     } else {
                         None
@@ -222,33 +229,9 @@ pub(super) fn screma(
                     };
                     body.when(valid, |body| {
                         let mut cache = LookupMap::default();
-                        if let (Some((predicate, input)), Some(retained)) = (packing, retained) {
-                            let flag = body.field(retained.clone(), 0)?;
-                            let selected = body.binary(Greater, flag, Body::number(0))?;
-                            return body.when(selected, |body| {
-                                let value = body.field(retained, 1)?;
-                                let Some(source) = body.compiler.facts.source(predicate) else {
-                                    return Err(error("packing result missing"));
-                                };
-                                cache.insert(input, value.clone());
-                                cache.insert(source, value);
-                                let prefix = body.binary(Add, carry[0].clone(), prefixes[0].clone())?;
-                                let destination = body.binary(Subtract, prefix, Body::number(1))?;
-                                super::write_arrays_at(
-                                    body,
-                                    scope,
-                                    phase_owner,
-                                    plan,
-                                    results,
-                                    &[index.clone()],
-                                    &[destination],
-                                    &mut cache,
-                                )
-                            });
-                        }
                         for (i, (component, prefix)) in components
                             .iter()
-                            .zip(prefixes)
+                            .zip(prefixes.iter().cloned())
                             .enumerate()
                             .filter(|(_, (c, _))| c.role == "scan")
                         {
@@ -264,6 +247,30 @@ pub(super) fn screma(
                                     body.store(output, index.clone(), value)?;
                                 }
                             }
+                        }
+                        if let (Some((predicate, input, i)), Some(retained)) = (packing, retained) {
+                            let flag = body.field(retained.clone(), 0)?;
+                            let selected = body.binary(Greater, flag, Body::number(0))?;
+                            return body.when(selected, |body| {
+                                let value = body.field(retained, 1)?;
+                                let Some(source) = body.compiler.facts.source(predicate) else {
+                                    return Err(error("packing result missing"));
+                                };
+                                cache.insert(input, value.clone());
+                                cache.insert(source, value);
+                                let prefix = body.binary(Add, carry[i].clone(), prefixes[i].clone())?;
+                                let destination = body.binary(Subtract, prefix, Body::number(1))?;
+                                super::write_arrays_at(
+                                    body,
+                                    scope,
+                                    phase_owner,
+                                    plan,
+                                    results,
+                                    &[index.clone()],
+                                    &[destination],
+                                    &mut cache,
+                                )
+                            });
                         }
                         if phase == "local" && has_scans {
                             write_output(
@@ -666,6 +673,7 @@ fn packing_input(
     scope: Value,
     plan: Value,
     index: &Typed,
+    cache: &mut LookupMap<Value, Typed>,
 ) -> Result<Typed, OptimizeError> {
     let Some(input) = body.compiler.facts.lookup("PackingContribution", (plan,)) else {
         return Err(error("packing contribution missing"));
@@ -676,7 +684,7 @@ fn packing_input(
         index,
         skipped: &empty_retained,
     }
-    .emit(body, input, &mut LookupMap::default(), &mut |body, _, pair| {
+    .emit(body, input, cache, &mut |body, _, pair| {
         let flag = body.field(pair.clone(), 0)?;
         let flag = body.cast(flag, &Body::number(0).ty)?;
         let value = body.field(pair, 1)?;

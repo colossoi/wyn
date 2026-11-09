@@ -1538,17 +1538,20 @@ fn observing_an_intermediate_filter_length_preserves_its_cardinality() {
 }
 
 #[test]
-fn guarded_updates_consume_the_filter_without_a_compaction_buffer() {
-    planned(
-        "entry main(xs:[]i32) [3]i32=let ys=filter(|x|x!=0,xs)
-         let dest=[-1,-1,-1] in scatter(dest,map(|x|x-1,ys),map(|x|100/x,ys))",
-        |graph| {
+fn guarded_streams_feed_updates_and_prefixes_without_a_compaction_buffer() {
+    planned_cases(
+        &[
+            "entry main(xs:[]i32) [3]i32=let ys=filter(|x|x!=0,xs)
+             let dest=[-1,-1,-1] in scatter(dest,map(|x|x-1,ys),map(|x|100/x,ys))",
+            "entry main(xs:[]i32) []i32=map(|x|x*2,scan((+),0,map(|x|100/x,filter(|x|x!=0,xs))))",
+        ],
+        |case, graph, region| {
             let query = Query(graph);
-            let filter = operations(graph, "filter")[0];
-            let scatter = operations(graph, "scatter")[0];
+            let filter = operations_in(graph, "filter", region)[0];
+            let consumer = operations_in(graph, ["scatter", "scan"][case], region)[0];
             assert_eq!(
                 query.required("SelectedPlan", (filter,)).unwrap(),
-                query.required("SelectedPlan", (scatter,)).unwrap()
+                query.required("SelectedPlan", (consumer,)).unwrap()
             );
         },
     );

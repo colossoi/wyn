@@ -141,7 +141,7 @@
       ((set (PlanTotals plan) (NoResults)) (set (PlanScans plan) (NoResults))
        (set (PlanArrays plan) (NoResults))) :ruleset fusion-counts)
 (rule ((= (PlanAction plan) (Publish))) ((ScremaPlan plan)) :ruleset fusion-counts)
-(rule ((= (HasScans plan) true)) ((ScremaPlan plan)) :ruleset fusion-counts)
+(rule ((= (HasScans plan) true) (= (PlanAction plan) (Update op destination mode))) ((ScremaPlan plan)) :ruleset fusion-counts)
 (rule ((= (PlanAction plan) (Pack op input))) ((FilterPlan plan)) :ruleset fusion-counts)
 (rule ((= value (SourceOperationValue op)) (= (SourceReadOnly value) true))
       ((ReadOnlyPlan (FusionSource op))) :ruleset source-fusion)

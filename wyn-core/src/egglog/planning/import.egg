@@ -132,8 +132,9 @@
       ((Accumulator owner (+ count i) ty "total" i value)) :ruleset planning-import)
 (rule ((Current group plan) (= owner (Owner plan)) (FilterPlan plan) (PlanResult plan "array" i value ty))
       ((FilterShape owner) (FilterResult owner ty) (DirectResult value owner 0) (set (ContainsCollective owner) true)) :ruleset planning-import)
-(rule ((Current group plan) (= owner (Owner plan)) (= (PlanAction plan) (Pack op input)) (CounterType ty))
-      ((Accumulator owner 0 ty "pack" 0 (CountValue plan op input))) :ruleset planning-import)
+(rule ((Current group plan) (= owner (Owner plan)) (= (PlanAction plan) (Pack op input)) (CounterType ty)
+       (= scans (ResultCount (PlanScans plan))) (= totals (ResultCount (PlanTotals plan))))
+      ((Accumulator owner (+ scans totals) ty "pack" 0 (CountValue plan op input))) :ruleset planning-import)
 ; A fused post-map replaces the elements, but the original filtered view still
 ; has the compaction count. Length observers must retain that metadata route.
 (rule ((PlannedOperation original owner plan region) (FilterPlan plan)

@@ -353,6 +353,7 @@ entry owned_indexed() [3]i32=let dest=[0,0,0] in reduce_by_index(dest,|a,b|a+b+1
 entry bucket_counts() ([2]u32,u32)=let dest=[[-1,-1],[-1,-1]] in let (ys,counts,overflow)=bucket_scatter_2d(dest,[[(-1,9),(0,10),(0,11)],[(0,12),(1,20),(2,9)]]) in (counts,overflow)
 entry sum(xs:[17]i32) i32=reduce((+),0,map(|x|x+1,xs))
 entry prefix(xs:[17]i32) [17]i32=map(|x|x*2,scan((+),0,xs))
+entry packed_prefix(xs:[]i32) []i32=map(|x|x*2,scan((+),0,map(|x|100/x,filter(|x|x!=0,xs))))
 entry packed(xs:[17]i32) []i32=map(|x|100/x,filter(|x|x!=0,xs))
 entry masked(xs:[17]i32) (i32,i32)=let ys=filter(|x|x>0,xs) in (length(ys),reduce((+),0,ys))
 entry indexed(dest:*[3]i32,xs:[5]i32,k:i32) [3]i32=reduce_by_index(dest,|a,b|a+b+k,0,map(|x|x%3,xs),xs)
