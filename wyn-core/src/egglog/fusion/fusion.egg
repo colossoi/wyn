@@ -89,6 +89,9 @@
       ((FilterPostMapCompatible n p c)) :ruleset fusion-candidates)
 (rule ((Pair n p a c b) (ReadOnlyFilterPlan a) (ReadOnlyScremaPlan b))
       ((FilterPostMapCompatible n p c)) :ruleset fusion-candidates)
+(rule ((Pair n p a c b) (ReadOnlyFilterPlan a) (ReadOnlyFilterPlan b)
+       (= (set-diff (GroupLengths p) (GroupInternalUseMask p)) (set-empty)))
+      ((FilterPostMapCompatible n p c)) :ruleset fusion-candidates)
 (relation ClearStream (i64 FusionGroup FusionGroup))
 (rule ((Pair n p a c b)
        (= (StreamBlocked p c) false)
@@ -214,7 +217,7 @@
 ; must not interleave its reads with writes from later predicate invocations.
 (rule ((Pair n p a c b)
        (FilterPlan a)
-       (ScremaPlan b) (FilterPostMapCompatible n p c)
+       (FilterPostMapCompatible n p c)
        (= (HasScans b) false) (= (HasReductions b) false)
        (= (ArrayOutputs b) 1)
        (ClearStream n p c)

@@ -49,18 +49,15 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
     pub fn new(
         compiler: &'a mut Compiler<'p, 'source>,
         scope: Value,
-        parameters: Vec<Type>,
+        parameters: Vec<(Value, Type)>,
         result: Type,
     ) -> Result<Self, OptimizeError> {
         let Some(context) = compiler.facts.context(scope) else {
             return Err(error("function has no scalar context"));
         };
-        let builder = FuncBuilder::new(parameters.clone(), result);
+        let builder = FuncBuilder::new(parameters.iter().map(|(_, ty)| ty.clone()).collect(), result);
         let mut values = Bindings::default();
-        for (i, ty) in parameters.into_iter().enumerate() {
-            let Some(source) = compiler.facts.parameter(scope, i as i64) else {
-                return Err(error("missing function parameter identity"));
-            };
+        for (i, (source, ty)) in parameters.into_iter().enumerate() {
             values.insert(
                 source,
                 Typed {
@@ -400,14 +397,17 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         let Some(scope) = self.compiler.facts.callback(operation) else {
             return Err(error("collective callback is missing"));
         };
+        self.apply_region(owner, scope, arguments)
+    }
+
+    pub fn apply_region(
+        &mut self,
+        owner: Value,
+        scope: Value,
+        arguments: Vec<Typed>,
+    ) -> Result<Typed, OptimizeError> {
         self.invocation_local(|body| {
-            body.in_region(owner, scope, arguments, |body, source| {
-                let Some(&term) = body.compiler.program.stage.selected.roots.get(&(body.context, source))
-                else {
-                    return Err(error("callback has no selected scalar body"));
-                };
-                body.scalar_body(scope, term)
-            })
+            body.in_region(owner, scope, arguments, |body, source| body.value(scope, source))
         })
     }
 
@@ -438,13 +438,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         for (formal, actual) in self.compiler.facts.captures(scope)? {
             bindings.push((formal, self.value(owner, actual)?));
         }
-        if self.compiler.facts.parameter(scope, arguments.len() as i64).is_some() {
-            return Err(error("callback has too few arguments"));
-        }
-        for (i, argument) in arguments.into_iter().enumerate() {
-            let Some(formal) = self.compiler.facts.parameter(scope, i as i64) else {
-                return Err(error("callback has too many arguments"));
-            };
+        for (formal, argument) in self.compiler.facts.bind_arguments(scope, arguments)? {
             let Some(ty) = self.compiler.facts.source_type(formal).cloned() else {
                 return Err(error("callback parameter type is missing"));
             };

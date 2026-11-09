@@ -157,7 +157,7 @@
        (= ty (SourceType source)) (= (SourceArraySize ty) (FixedSize n)))
       ((set (ViewExtent source) (Fixed n))) :ruleset residency)
 (function LocalExecution (OperationKey ExecutionScope) ExecutionScope :no-merge)
-(relation LocalInitialize (OperationKey SourceValue))
+(function InitialValue (OperationKey) SourceValue :no-merge)
 ; Captures belong to the enclosing execution scope, not each callback iteration.
 ; Only independent, read-only values outside the fused plan can be prepared here.
 (sort LocalPrerequisiteValues (Set SourceValue))

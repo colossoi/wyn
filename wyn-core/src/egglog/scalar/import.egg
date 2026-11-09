@@ -44,6 +44,9 @@
       ((ExprSourceCandidate s expand 4 (AdmitCall function args false false))) :ruleset scalar-source-forms)
 (rule ((= (SourceHasOperation s) true))
       ((ExprSourceCandidate s false 3 (AdmitLeaf))) :ruleset scalar-source-forms)
+; Stored projections are boundaries too; reconstructing their parent would replay it.
+(rule ((= read (ValueRead s)) (= (IsLocalResult s) false) (= (SourceHasOperation s) false))
+      ((ExprSourceCandidate s false 3 (AdmitLeaf)) (ExprSourceCandidate s true 3 (AdmitLeaf))) :ruleset scalar-source-forms)
 (rule ((ExprSourceCandidate s expand 0 form) (ExprSyntax s) (= (SourceProjection s) (ProjectionInfo parent i)))
       ((ExprSourceCandidate s expand 2 (AdmitProject parent i))) :ruleset scalar-source-forms)
 (rule ((ExprSourceCandidate s expand 0 form) (= (SourceConstruct s) "tuple") (= args (SourceArgumentsOf s)))

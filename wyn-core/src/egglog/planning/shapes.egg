@@ -1,17 +1,8 @@
 ; Shared array type dimensions and symbolic extent proofs.
-(ruleset shape-types)
 (ruleset extent-shapes)
 (function RectangularPrefix (SourceValue) i64 :merge (max old new))
 (function RectangularAxis (SourceValue i64) Extent :no-merge)
 (rule ((RectangularDemand value)) ((set (RectangularPrefix value) 0)) :ruleset extent-shapes)
-(function ArrayTypeRank (TypeKey) i64 :merge (max old new))
-(relation ArrayTypeAxis (TypeKey i64 ArraySize))
-(rule ((= ty (TypeId id))) ((set (ArrayTypeRank ty) 0)) :ruleset shape-types)
-(rule ((= array-size (SourceArraySize ty)) (SourceArrayElement ty element) (= n (ArrayTypeRank element)))
-      ((set (ArrayTypeRank ty) (+ n 1))) :ruleset shape-types)
-(rule ((= size (SourceArraySize ty))) ((ArrayTypeAxis ty 0 size)) :ruleset shape-types)
-(rule ((= array-size (SourceArraySize ty)) (SourceArrayElement ty element) (ArrayTypeAxis element i size))
-      ((ArrayTypeAxis ty (+ i 1) size)) :ruleset shape-types)
 ; Dimension expressions stay symbolic through helper calls. The dependency proof
 ; runs to completion before any uniformity decision is consumed.
 (ruleset extent-dependencies)

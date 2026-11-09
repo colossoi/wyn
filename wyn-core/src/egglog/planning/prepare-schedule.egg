@@ -1,6 +1,6 @@
 ; Structural scheduling; selected scalar evaluation is planned after extraction.
 (run-schedule (seq
-    (saturate shape-types) (saturate traversal-types) (saturate map-types)
+    (saturate traversal-types) (saturate map-types)
     (saturate rectangular-discover)
     (saturate repeatability) (run traversal-proofs) (run traversal-ready)
     (saturate (seq (run extent-shapes) (run map-shapes)))
@@ -54,8 +54,8 @@
 (rule ((ParallelCollective owner) (PlannedOperation op owner plan region) (= body (SourceOperatorBody op))
        (= (PlanMapping op) false))
       ((set (CostCombineItems owner) (set-of (BodyCost op plan region)))) :ruleset launch-cost-inputs)
-(rule ((ParallelCollective owner) (PlannedOperation op owner plan region) (= n (SourceInputCount op))
-       (= input (SourceInput op i)) (>= i 0) (< i n) (= (PlanInternal plan input) false))
+(rule ((ParallelCollective owner) (PlannedOperation op owner plan region)
+       (= input (SourceInput op i)) (= (PlanInternal plan input) false))
       ((set (CostInputItems owner) (set-of (InputCost input)))) :ruleset launch-cost-inputs)
 (rule ((ParallelCollective owner) (ArrayResult owner i ty))
       ((set (CostOutputItems owner) (set-of (OutputCost owner i ty)))) :ruleset launch-cost-inputs)

@@ -14,7 +14,7 @@ impl Body<'_, '_, '_> {
         source_scopes: Option<(Value, Value)>,
     ) -> Result<Typed, OptimizeError> {
         self.branch_with_type(
-            scope,
+            Some(scope),
             condition,
             yes_value,
             |body, _| no_value(body),
@@ -25,14 +25,16 @@ impl Body<'_, '_, '_> {
     /// Let a synthetic fallback use the representation produced by the true arm.
     pub(in crate::egglog::to_ssa) fn branch_with_type(
         &mut self,
-        scope: Value,
+        scope: Option<Value>,
         condition: Typed,
         yes_value: impl FnOnce(&mut Self) -> Result<Typed, OptimizeError>,
         no_value: impl FnOnce(&mut Self, &types::Type) -> Result<Typed, OptimizeError>,
         source_scopes: Option<(Value, Value)>,
     ) -> Result<Typed, OptimizeError> {
         let start = self.current()?;
-        self.scopes.insert(scope, start);
+        if let Some(scope) = scope {
+            self.scopes.insert(scope, start);
+        }
         let yes = self.builder.create_block();
         let no = self.builder.create_block();
         let end = self.builder.create_block();
@@ -83,7 +85,9 @@ impl Body<'_, '_, '_> {
         self.values.restore(outer_values);
         self.scopes.restore(outer_scopes);
         self.builder.switch_to_block_unchecked(end);
-        self.scopes.insert(scope, end);
+        if let Some(scope) = scope {
+            self.scopes.insert(scope, end);
+        }
         Ok(Typed {
             value: result.into(),
             ty: a.ty,
@@ -351,30 +355,16 @@ impl Body<'_, '_, '_> {
         condition: Typed,
         emit: impl FnOnce(&mut Self) -> Result<(), OptimizeError>,
     ) -> Result<(), OptimizeError> {
-        let start = self.current()?;
-        let yes = self.builder.create_block();
-        let done = self.builder.create_block();
-        self.builder.set_control_header(start, ControlHeader::Selection { merge: done });
-        self.terminate(Terminator::CondBranch {
-            cond: condition.value,
-            then_target: yes,
-            then_args: vec![],
-            else_target: done,
-            else_args: vec![],
-        })
-        .map_err(builder_error)?;
-        let values = self.values.checkpoint();
-        let scopes = self.scopes.checkpoint();
-        self.builder.switch_to_block_unchecked(yes);
-        emit(self)?;
-        self.terminate(Terminator::Branch {
-            target: done,
-            args: vec![],
-        })
-        .map_err(builder_error)?;
-        self.builder.switch_to_block_unchecked(done);
-        self.values.restore(values);
-        self.scopes.restore(scopes);
+        self.branch_with_type(
+            None,
+            condition,
+            |body| {
+                emit(body)?;
+                body.tuple(Vec::new())
+            },
+            |body, _| body.tuple(Vec::new()),
+            None,
+        )?;
         Ok(())
     }
 }

@@ -13,11 +13,9 @@ pub enum OutputAction {
     },
     Write {
         callback: Value,
-        destination: Value,
     },
     Accumulate {
         combine: Value,
-        destination: Value,
         keys: Value,
         values: Value,
     },
@@ -133,15 +131,11 @@ impl<'a, 'source> Facts<'a, 'source> {
             });
         }
         if let Some(f) = self.enode("Write", action) {
-            return Ok(OutputAction::Write {
-                callback: f[0],
-                destination: f[1],
-            });
+            return Ok(OutputAction::Write { callback: f[0] });
         }
         if let Some(f) = self.enode("Accumulate", action) {
             return Ok(OutputAction::Accumulate {
                 combine: f[0],
-                destination: f[1],
                 keys: f[2],
                 values: f[3],
             });

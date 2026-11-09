@@ -2,7 +2,7 @@ use super::super::query::Query;
 use super::super::{finish_for_test, from_tlc, fuse, place, schedule, schedule_with_subgroups};
 use crate::{compile_thru_tlc, CodegenTarget, PipelineTopologyPolicy};
 use egglog_engine::{
-    sort::{SetContainer, S},
+    sort::{SetContainer, VecContainer, S},
     EGraph, RawValues, Value, Write,
 };
 
@@ -711,12 +711,10 @@ fn flat_and_ranked_collectives_share_dimension_metadata() {
             query.required("SourceDomainAxis", (operation, axis)).unwrap();
         }
         query
-            .for_function("SourceInputRank", |keys, value| {
+            .for_function("SourceInputMap", |keys, value| {
                 if keys[0] == operation {
-                    for dimension in 0..graph.value_to_base::<i64>(value) {
-                        let axis = graph.value_to_base::<i64>(
-                            query.required("SourceInputDimension", (operation, keys[1], dimension))?,
-                        );
+                    for &value in &graph.value_to_container::<VecContainer>(value).unwrap().data {
+                        let axis = graph.value_to_base::<i64>(value);
                         assert!((0..rank).contains(&axis));
                     }
                 }
@@ -808,10 +806,10 @@ fn ranked_inputs_keep_their_independent_coordinate_mappings() {
                 panic!("one bucket scatter")
             };
             for input in 0..2i64 {
-                let rank = query.required("SourceInputRank", (operation, input)).unwrap();
-                assert_eq!(graph.value_to_base::<i64>(rank), 1);
-                let axis = query.required("SourceInputDimension", (operation, input, 0i64)).unwrap();
-                assert_eq!(graph.value_to_base::<i64>(axis), input);
+                let mapping = query.required("SourceInputMap", (operation, input)).unwrap();
+                let axes = graph.value_to_container::<VecContainer>(mapping).unwrap();
+                assert_eq!(axes.data.len(), 1);
+                assert_eq!(graph.value_to_base::<i64>(axes.data[0]), input);
             }
             let extent = query.required("SourceDomainExtent", (operation,)).unwrap();
             let product = query.enode("Product", extent).unwrap().unwrap();
@@ -1551,5 +1549,14 @@ fn fluid_radix_scan_avoids_empty_groups_and_oversized_carries() {
                 "{fact}"
             );
         }
+    });
+}
+
+#[test]
+fn observing_an_intermediate_filter_length_preserves_its_cardinality() {
+    planned("entry main(xs:[]i32) (i32,i32)=let a=filter(|x|x>0,xs) let b=filter(|x|x<20,map(|x|x+1,a)) in (length(a),length(b))", |graph| {
+        let mut totals = Vec::new();
+        Query(graph).for_each("TotalResult", |row| { totals.push((row[0], row[1])); Ok(()) }).unwrap();
+        assert_eq!(totals.len(), 2, "each observed cardinality needs its own count");
     });
 }

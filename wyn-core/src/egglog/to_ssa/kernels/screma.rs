@@ -611,16 +611,15 @@ impl Accumulator {
         index: &Typed,
         cache: &mut LookupMap<Value, Typed>,
     ) -> Result<Typed, OptimizeError> {
-        contribute(
-            body,
+        Contribution {
             scope,
             plan,
-            self.contribution,
             index,
-            cache,
-            &state,
-            &mut |body, _, incoming| self.reduction.combine(body, scope, state.clone(), incoming),
-        )
+            skipped: &|_, _| Ok(state.clone()),
+        }
+        .emit(body, self.contribution, cache, &mut |body, _, incoming| {
+            self.reduction.combine(body, scope, state.clone(), incoming)
+        })
     }
 }
 
@@ -654,71 +653,99 @@ impl Reduction {
     }
 }
 
-fn contribute(
-    body: &mut Body<'_, '_, '_>,
+type EmitContribution<'a, T> =
+    dyn FnMut(&mut Body<'_, '_, '_>, &mut LookupMap<Value, Typed>, T) -> Result<Typed, OptimizeError> + 'a;
+
+/// A selection guards the entire continuation, including later arguments.
+struct Contribution<'a> {
     scope: Value,
     plan: Value,
-    expression: Value,
-    index: &Typed,
-    cache: &mut LookupMap<Value, Typed>,
-    skipped: &Typed,
-    emit: &mut dyn FnMut(
-        &mut Body<'_, '_, '_>,
-        &mut LookupMap<Value, Typed>,
-        Typed,
-    ) -> Result<Typed, OptimizeError>,
-) -> Result<Typed, OptimizeError> {
-    if let Some(fields) = body.compiler.facts.enode("ElementAt", expression) {
-        let value = element(body, scope, plan, fields[0], std::slice::from_ref(index), cache)?;
-        return emit(body, cache, value);
-    }
-    if let Some(fields) = body.compiler.facts.enode("TestElement", expression) {
-        return contribute(
-            body,
-            scope,
-            plan,
-            fields[1],
-            index,
-            cache,
-            skipped,
-            &mut |body, cache, value| {
-                let value = body.callback(scope, fields[0], vec![value])?;
-                emit(body, cache, value)
-            },
-        );
-    }
-    if let Some(fields) = body.compiler.facts.enode("SelectElement", expression) {
-        return contribute(
-            body,
-            scope,
-            plan,
-            fields[0],
-            index,
-            cache,
-            skipped,
-            &mut |body, cache, keep| {
-                body.branch(
-                    scope,
+    index: &'a Typed,
+    skipped: &'a dyn Fn(&mut Body<'_, '_, '_>, &Type) -> Result<Typed, OptimizeError>,
+}
+
+impl Contribution<'_> {
+    fn emit(
+        &self,
+        body: &mut Body<'_, '_, '_>,
+        expression: Value,
+        cache: &mut LookupMap<Value, Typed>,
+        emit: &mut EmitContribution<'_, Typed>,
+    ) -> Result<Typed, OptimizeError> {
+        if let Some(fields) = body.compiler.facts.enode("ElementAt", expression) {
+            let value = element(
+                body,
+                self.scope,
+                self.plan,
+                fields[0],
+                std::slice::from_ref(self.index),
+                cache,
+            )?;
+            return emit(body, cache, value);
+        }
+        if let Some(fields) = body.compiler.facts.enode("ApplyElement", expression) {
+            if let Some(value) = cache.get(&fields[0]).cloned() {
+                return emit(body, cache, value);
+            }
+            let arguments = body.compiler.facts.vector(fields[2])?;
+            return self.arguments(
+                body,
+                &arguments,
+                cache,
+                Vec::new(),
+                &mut |body, cache, arguments| {
+                    let value = body.apply_region(self.scope, fields[1], arguments)?;
+                    cache.insert(fields[0], value.clone());
+                    emit(body, cache, value)
+                },
+            );
+        }
+        if let Some(fields) = body.compiler.facts.enode("SelectElement", expression) {
+            return self.emit(body, fields[0], cache, &mut |body, cache, keep| {
+                body.branch_with_type(
+                    Some(self.scope),
                     keep,
-                    |body| {
-                        contribute(
-                            body,
-                            scope,
-                            plan,
-                            fields[1],
-                            index,
-                            &mut cache.clone(),
-                            skipped,
-                            emit,
-                        )
-                    },
-                    |_| Ok(skipped.clone()),
+                    |body| self.emit(body, fields[1], &mut cache.clone(), emit),
+                    |body, ty| (self.skipped)(body, ty),
                     None,
                 )
-            },
-        );
+            });
+        }
+        Err(error("invalid parallel contribution"))
     }
-    Err(error("invalid parallel contribution"))
+
+    fn arguments(
+        &self,
+        body: &mut Body<'_, '_, '_>,
+        arguments: &[Value],
+        cache: &mut LookupMap<Value, Typed>,
+        values: Vec<Typed>,
+        emit: &mut EmitContribution<'_, Vec<Typed>>,
+    ) -> Result<Typed, OptimizeError> {
+        let Some((&argument, rest)) = arguments.split_first() else {
+            return emit(body, cache, values);
+        };
+        self.emit(body, argument, cache, &mut |body, cache, value| {
+            let mut values = values.clone();
+            values.push(value);
+            self.arguments(body, rest, cache, values, emit)
+        })
+    }
+}
+
+fn empty_retained(body: &mut Body<'_, '_, '_>, ty: &Type) -> Result<Typed, OptimizeError> {
+    let Type::Constructed(TypeName::Tuple(_), fields) = ty else {
+        return Err(error("packing input pair missing"));
+    };
+    let unused = body.op(
+        OpTag::Intrinsic {
+            id: catalog().known().uninit,
+            overload_idx: 0,
+        },
+        vec![],
+        fields[1].clone(),
+    )?;
+    body.tuple(vec![Body::number(0), unused])
 }
 
 /// Packing is an additive prefix plus a guarded output action. Width one uses
@@ -763,35 +790,30 @@ pub(super) fn pack(
             let valid = body.binary(Less, index.clone(), n.clone())?;
             // Retain the input beside its flag; invalid lanes never evaluate it.
             let retained = body.branch_with_type(
-                scope,
+                Some(scope),
                 valid,
                 |body| {
-                    let value = element(
-                        body,
+                    let Some(input) = body.compiler.facts.lookup("StreamInput", (plan, input)) else {
+                        return Err(error("packing contribution missing"));
+                    };
+                    Contribution {
                         scope,
                         plan,
+                        index: &index,
+                        skipped: &empty_retained,
+                    }
+                    .emit(
+                        body,
                         input,
-                        &[index.clone()],
                         &mut LookupMap::default(),
-                    )?;
-                    let flag = body.callback(scope, predicate, vec![value.clone()])?;
-                    let flag = body.cast(flag, &uint)?;
-                    body.tuple(vec![flag, value])
-                },
-                |body, ty| {
-                    let Type::Constructed(TypeName::Tuple(_), fields) = ty else {
-                        return Err(error("packing input pair missing"));
-                    };
-                    let unused = body.op(
-                        OpTag::Intrinsic {
-                            id: catalog().known().uninit,
-                            overload_idx: 0,
+                        &mut |body, _, value| {
+                            let flag = body.callback(scope, predicate, vec![value.clone()])?;
+                            let flag = body.cast(flag, &uint)?;
+                            body.tuple(vec![flag, value])
                         },
-                        vec![],
-                        fields[1].clone(),
-                    )?;
-                    body.tuple(vec![zero.clone(), unused])
+                    )
                 },
+                empty_retained,
                 None,
             )?;
             let flag = body.field(retained.clone(), 0)?;

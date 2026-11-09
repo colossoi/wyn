@@ -78,7 +78,7 @@
        (StorageResource counts) (StorageResource overflow))
       ((set (RootResource (KernelRoot (Stage op "clear")) counts) 2)
        (set (RootResource (KernelRoot (Stage op "clear")) overflow) 2)) :ruleset physical-abi)
-(rule ((= (Plan op) (Scatter)) (InitializedResult op i t n)
+(rule ((InitializedResult op i t n)
        (Phase (Stage op "initialize") r) (= storage (Backing (Result op i))) (StorageResource storage))
       ((set (RootResource (KernelRoot (Stage op "initialize")) storage) 2)) :ruleset physical-abi)
 (rule ((= root (OutputWriter output)) (= (OutputBacking output) value) (= backing (Backing value)))

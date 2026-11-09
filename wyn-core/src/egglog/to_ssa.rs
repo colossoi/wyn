@@ -198,7 +198,8 @@ impl Compiler<'_, '_> {
         let Some(ty) = self.facts.source_type(result).cloned() else {
             return Err(error("callable result type missing"));
         };
-        let mut lower = Body::new(self, scope, signature, ty)?;
+        let parameters = self.facts.bind_arguments(scope, signature)?;
+        let mut lower = Body::new(self, scope, parameters, ty)?;
         let result = lower
             .value(scope, result)
             .map_err(|err| error(format!("function {name}, {} arguments: {err}", arguments.len())))?;

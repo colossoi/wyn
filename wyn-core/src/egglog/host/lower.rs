@@ -528,10 +528,7 @@ impl<'a, 'source> Lower<'a, 'source> {
                     .collect::<Result<Vec<_>>>()?;
                 // Required sizes and cheap scalar helpers may retain calls after extraction.
                 self.scope(|lower| {
-                    for (index, argument) in arguments.into_iter().enumerate() {
-                        let Some(formal) = lower.facts.parameter(callee, index as i64) else {
-                            return Err(error("host helper parameter missing").into());
-                        };
+                    for (formal, argument) in lower.facts.bind_arguments(callee, arguments)? {
                         lower.values.insert(formal, argument);
                     }
                     lower.region(callee)

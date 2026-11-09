@@ -98,6 +98,8 @@ struct Scope {
     previous_operation: Option<Value>,
     work: i64,
     evaluation: Option<Value>,
+    parameters: Vec<Value>,
+    captures: Vec<Value>,
 }
 
 struct Import<'graph, 'db, 'ids, 'source> {
@@ -147,7 +149,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 self.sink.set("EntryGrid", symbol, grid)?;
             }
             let checkpoint = self.bindings.checkpoint();
-            self.parameters(&parameters, &scope)?;
+            self.parameters(&parameters, &mut scope)?;
             if let DefMeta::EntryPoint(entry) = &definition.meta {
                 let family = if let Some(group) = &entry.declaration.graphics_group {
                     let Some(name) = source.symbols.get(group.root) else {
@@ -246,6 +248,8 @@ impl<'source> Import<'_, '_, '_, 'source> {
             previous_operation: None,
             work: 0,
             evaluation: None,
+            parameters: Vec::new(),
+            captures: Vec::new(),
         })
     }
 
@@ -276,10 +280,14 @@ impl<'source> Import<'_, '_, '_, 'source> {
         Ok(value)
     }
 
-    fn parameters(&mut self, parameters: &[(SymbolId, Type)], scope: &Scope) -> Result<(), OptimizeError> {
-        for (index, (symbol, ty)) in parameters.iter().enumerate() {
+    fn parameters(
+        &mut self,
+        parameters: &[(SymbolId, Type)],
+        scope: &mut Scope,
+    ) -> Result<(), OptimizeError> {
+        for (symbol, ty) in parameters {
             let value = self.formal(*symbol, ty, scope)?;
-            self.sink.set("SourceParameter", (scope.key, index as i64), value)?;
+            scope.parameters.push(value);
         }
         Ok(())
     }
@@ -299,9 +307,23 @@ impl<'source> Import<'_, '_, '_, 'source> {
 
     fn finish_body(&mut self, body: &'source Term, scope: &mut Scope) -> Result<Value, OptimizeError> {
         let (result, _) = self.visit(body, scope)?;
-        self.sink.set("SourceResult", scope.key, result)?;
-        self.sink.set("SourceRegionWork", scope.key, scope.work)?;
+        self.finish_region(scope, result)?;
         Ok(result)
+    }
+
+    fn finish_region(&mut self, scope: &mut Scope, result: Value) -> Result<(), OptimizeError> {
+        let parameters = self.sink.container_to_value(VecContainer {
+            data: std::mem::take(&mut scope.parameters),
+            do_rebuild: true,
+        });
+        let captures = self.sink.container_to_value(VecContainer {
+            data: std::mem::take(&mut scope.captures),
+            do_rebuild: true,
+        });
+        let body = self.sink.add("RegionBody", (parameters, captures, result))?;
+        self.sink.set("RegionDefinition", scope.key, body)?;
+        self.sink.set("SourceRegionWork", scope.key, scope.work)?;
+        Ok(())
     }
 
     fn nested(
@@ -428,7 +450,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 let mut inner = self.scope(Some(&lambda.body), Some(scope.key))?;
                 self.sink.set("SourceCallable", value, inner.key)?;
                 let checkpoint = self.bindings.checkpoint();
-                self.parameters(&lambda.params, &inner)?;
+                self.parameters(&lambda.params, &mut inner)?;
                 self.finish_body(&lambda.body, &mut inner)?;
                 self.bindings.restore(checkpoint);
             }
@@ -641,9 +663,9 @@ impl<'source> Import<'_, '_, '_, 'source> {
         for (symbol, ty, argument) in captures {
             let parameter = self.formal(symbol, ty, &scope)?;
             captured.push(parameter);
-            self.sink.set("SourceCapture", (scope.key, parameter), argument)?;
+            scope.captures.push(self.sink.add("CaptureBinding", (parameter, argument))?);
         }
-        self.parameters(params, &scope)?;
+        self.parameters(params, &mut scope)?;
         if matches!(&body.kind, TermKind::Var(VarRef::Symbol(symbol)) if self.globals.contains(symbol)) {
             let (function, _) = self.visit(body, &mut scope)?;
             let mut arguments =
@@ -655,8 +677,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             });
             let result = self.sink.add("SourceInvocation", (scope.key, function, arguments))?;
             self.value_type(result, ret_ty)?;
-            self.sink.set("SourceResult", scope.key, result)?;
-            self.sink.set("SourceRegionWork", scope.key, scope.work)?;
+            self.finish_region(&mut scope, result)?;
         } else {
             self.finish_body(body, &mut scope)?;
         }
@@ -760,12 +781,40 @@ impl<'source> Import<'_, '_, '_, 'source> {
                         let destination = self.resolve(dest.id)?;
                         self.sink.add("SourceDirectUse", (value, destination))?;
                         self.use_value(value, destination, false)?;
-                        let constructor = if matches!(soac, SoacOp::Scatter { .. }) {
-                            "WriteOperator"
+                        if let SoacOp::BucketScatter {
+                            input_dimensions,
+                            domain_rank,
+                            inputs: source_inputs,
+                            ..
+                        } = soac
+                        {
+                            if input_dimensions.len() != source_inputs.len()
+                                || input_dimensions.iter().flatten().any(|axis| axis >= domain_rank)
+                            {
+                                return Err(OptimizeError::Output("invalid input coordinate maps".into()));
+                            }
+                            let mut maps = Vec::new();
+                            for axes in input_dimensions {
+                                let data = axes
+                                    .iter()
+                                    .map(|&axis| self.sink.base_to_value(i64::from(axis)))
+                                    .collect();
+                                maps.push(self.sink.container_to_value(VecContainer {
+                                    data,
+                                    do_rebuild: true,
+                                }));
+                            }
+                            let maps = self.sink.container_to_value(VecContainer {
+                                data: maps,
+                                do_rebuild: true,
+                            });
+                            self.sink.add(
+                                "ReserveOperator",
+                                (body, destination, inputs, i64::from(*domain_rank), maps),
+                            )?
                         } else {
-                            "ReserveOperator"
-                        };
-                        self.sink.add(constructor, (body, destination, inputs))?
+                            self.sink.add("WriteOperator", (body, destination, inputs))?
+                        }
                     }
                     _ => self.sink.add("MapOperator", (body, inputs))?,
                 }
@@ -799,7 +848,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
         };
         let definition = self.sink.add("DefinedIn", (scope.key, node))?;
         self.sink.set("OperatorDefinition", operation, definition)?;
-        self.collective_metadata(operation, soac)?;
         Ok(())
     }
 }

@@ -348,6 +348,8 @@ fn scalar_admission_uses_ir_literal_edits() {
 #[test]
 fn parallel_loops_lower_without_source_operator_kinds_or_neutrals() {
     let source = r#"
+entry owned_indexed() [3]i32=let dest=[0,0,0] in reduce_by_index(dest,|a,b|a+b+1,0,[0,1,0,2,1],[2,3,4,5,6])
+entry bucket_counts() ([2]u32,u32)=let dest=[[-1,-1],[-1,-1]] in let (ys,counts,overflow)=bucket_scatter_2d(dest,[[(-1,9),(0,10),(0,11)],[(0,12),(1,20),(2,9)]]) in (counts,overflow)
 entry sum(xs:[17]i32) i32=reduce((+),0,map(|x|x+1,xs))
 entry prefix(xs:[17]i32) [17]i32=map(|x|x*2,scan((+),0,xs))
 entry packed(xs:[17]i32) []i32=map(|x|100/x,filter(|x|x!=0,xs))
@@ -359,12 +361,16 @@ entry branching(xs:[][17]i32) []i32=map(|row|if row[0]>0 then reduce((+),0,row) 
 entry local_pack(xs:[][17]i32) []i32=map(|row|reduce((+),0,filter(|x|x>0,row)),xs)
 entry conditional_loop(xs:[4]i32,n:i32) [4]i32=map(|x|loop y=x while (if y<n then y>=0 else false) do y+1,xs)
 entry counted_loop(xs:[4]i32) [4]i32=map(|x|loop y=x for i<33 do y+i,xs)
+entry chained(xs:[17]i32) []i32=filter(|x|x<50,map(|x|100/x,filter(|x|x!=0,xs)))
+entry chained_total(xs:[17]i32) (i32,i32)=let ys=filter(|x|x<20,map(|x|x+1,filter(|x|x>0,xs))) in (length(ys),reduce((+),0,ys))
 "#;
     let tlc = crate::compile_thru_tlc(source).unwrap();
     let mut program =
         super::optimize_with_policy(interfaces_for_test(&tlc), ScalarOptimization::Basic).unwrap();
     program.graph.clear_function("SourceOperation").unwrap();
     program.graph.clear_function("SourceNeutral").unwrap();
+    program.graph.clear_function("SourceParameter").unwrap();
+    program.graph.clear_function("SourceResult").unwrap();
     let ssa = super::finish_for_test(program, crate::CodegenTarget::Wgsl).unwrap();
     let wgsl = crate::lower_ssa_to_wgsl(ssa).unwrap();
     let module = naga::front::wgsl::parse_str(&wgsl).unwrap();

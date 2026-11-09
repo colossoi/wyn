@@ -80,11 +80,13 @@ pub(super) fn emit(
     let results = body.compiler.facts.results(plan)?;
     match phase {
         "elements" | "segments" => maps::emit(body, scope, phase_owner, phase_width, &results),
-        "scatter" | "initialize" | "atomic" => {
-            indexed(body, scope, phase_owner, phase, phase_extent, phase_width, plan)
-        }
+        "initialize" => updates::initialize(body, scope, phase_owner, phase, phase_width),
+        "scatter" | "atomic" => indexed(body, scope, phase_owner, phase, phase_extent, phase_width, plan),
         "clear" | "buckets" => buckets(body, scope, phase_owner, phase, phase_width, plan),
         "ordered" | "local" => {
+            if body.compiler.facts.lookup("InitialValue", (phase_owner,)).is_some() {
+                updates::initialize(body, scope, phase_owner, phase, phase_width)?;
+            }
             if body.compiler.facts.contains("ScremaPlan", (plan,)) {
                 return screma(body, scope, phase_owner, phase, phase_width, plan, &results);
             }

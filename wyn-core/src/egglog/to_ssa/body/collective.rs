@@ -71,22 +71,6 @@ impl Body<'_, '_, '_> {
             self.local_arrays.insert(value.value, place);
             self.local_resources.insert(resource, value);
         }
-        if let Some(destination) = self.compiler.facts.destination(owner) {
-            if self.compiler.facts.contains("LocalInitialize", (owner, destination)) {
-                let initial = self.value(scope, destination)?;
-                let Some(output) = self.slot(scope, owner, "output", 0, 2)? else {
-                    return Err(error("local destination missing"));
-                };
-                let n = self.length(initial.clone())?;
-                if let Some(width) = width {
-                    let lane = self.local_id()?;
-                    self.copy_array_strided((output, &[]), initial, n, &[], lane, Self::number(width))?;
-                    self.workgroup_barrier()?;
-                } else {
-                    self.copy_array(output, initial, n, &[])?;
-                }
-            }
-        }
         kernels::emit(
             self,
             scope,

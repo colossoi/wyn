@@ -95,7 +95,7 @@ impl<'a, 'source> Facts<'a, 'source> {
         self.lookup("ExprContextForScope", (value,))
     }
     pub fn result(&self, value: Value) -> Option<Value> {
-        self.lookup("SourceResult", (value,))
+        Some(self.record("RegionDefinition", "RegionBody", (value,))?[2])
     }
     pub fn loop_state(&self, value: Value) -> Option<Value> {
         Some(self.record("SourceLoopInitial", "LoopInitialInfo", (value,))?[0])
@@ -158,17 +158,9 @@ impl<'a, 'source> Facts<'a, 'source> {
         let rank = dimensions.len();
         let mut inputs = Vec::new();
         for (input, _) in self.inputs(operation)? {
-            let Some(input_rank) = self.lookup("SourceInputRank", (operation, input)) else {
-                return Err(error("input has no dimension mapping"));
-            };
-            let input_rank =
-                usize::try_from(self.integer(input_rank)).map_err(|_| error("invalid input rank"))?;
+            let mapping = Query(&self.program.graph).required("SourceInputMap", (operation, input))?;
             let mut axes = Vec::new();
-            for dimension in 0..input_rank {
-                let Some(axis) = self.lookup("SourceInputDimension", (operation, input, dimension as i64))
-                else {
-                    return Err(error("input dimension is missing"));
-                };
+            for axis in self.vector(mapping)? {
                 let axis = usize::try_from(self.integer(axis)).map_err(|_| error("invalid domain axis"))?;
                 if axis >= rank {
                     return Err(error("input axis exceeds its domain rank"));
@@ -327,7 +319,9 @@ impl<'a, 'source> Facts<'a, 'source> {
         self.ty(self.lookup("SourceType", (value,))?)
     }
     pub fn parameter(&self, scope: Value, index: i64) -> Option<Value> {
-        self.lookup("SourceParameter", (scope, index))
+        let body = self.record("RegionDefinition", "RegionBody", (scope,))?;
+        let parameters = self.program.graph.value_to_container::<VecContainer>(body[0])?;
+        parameters.data.get(usize::try_from(index).ok()?).copied()
     }
     pub fn branches(&self, value: Value) -> Option<(Value, Value)> {
         let info = self.record("SourceBranch", "BranchInfo", (value,))?;
@@ -349,14 +343,35 @@ impl<'a, 'source> Facts<'a, 'source> {
         let inputs = Query(&self.program.graph).required("OperatorInputs", (operation,))?;
         Ok(self.vector(inputs)?.into_iter().enumerate().map(|(i, value)| (i as i64, value)).collect())
     }
+    pub fn bind_arguments<T>(
+        &self,
+        region: Value,
+        arguments: Vec<T>,
+    ) -> Result<Vec<(Value, T)>, OptimizeError> {
+        let Some(body) = self.record("RegionDefinition", "RegionBody", (region,)) else {
+            return Err(error("region definition missing"));
+        };
+        let parameters = self.vector(body[0])?;
+        if parameters.len() != arguments.len() {
+            return Err(error(format!(
+                "region expects {} arguments, got {}",
+                parameters.len(),
+                arguments.len()
+            )));
+        }
+        Ok(parameters.into_iter().zip(arguments).collect())
+    }
     pub fn captures(&self, scope: Value) -> Result<Vec<(Value, Value)>, OptimizeError> {
-        self.set("SourceCapturedFormals", (scope,))
+        let Some(body) = self.record("RegionDefinition", "RegionBody", (scope,)) else {
+            return Err(error("region definition missing"));
+        };
+        self.vector(body[1])?
             .into_iter()
-            .map(|formal| {
-                let Some(actual) = self.lookup("SourceCapture", (scope, formal)) else {
-                    return Err(error("capture has no selected actual value"));
+            .map(|binding| {
+                let Some(fields) = self.enode("CaptureBinding", binding) else {
+                    return Err(error("invalid region capture"));
                 };
-                Ok((formal, actual))
+                Ok((fields[0], fields[1]))
             })
             .collect()
     }

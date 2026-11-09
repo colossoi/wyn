@@ -1,9 +1,6 @@
 ; Keyed read access to selected facts. This ruleset runs once after optimization.
 (ruleset ssa-access)
 
-(sort CapturedFormals (Set SourceValue))
-(function SourceCapturedFormals (RegionKey) CapturedFormals :merge (set-union old new))
-(rule ((= (SourceCapture r p) v)) ((set (SourceCapturedFormals r) (set-of p))) :ruleset ssa-access)
 (function SourceDefinitionSymbol (RegionKey) i64 :no-merge)
 (rule ((= (SourceDefinition s) r)) ((set (SourceDefinitionSymbol r) s)) :ruleset ssa-access)
 

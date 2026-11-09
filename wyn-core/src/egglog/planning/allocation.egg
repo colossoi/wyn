@@ -6,8 +6,6 @@
       ((set (SelectedDestination op) (DestinationBuffer (Result op i)))) :ruleset allocation)
 (rule ((UpdatedResult op i source))
       ((set (SelectedDestination op) (DestinationValue source))) :ruleset allocation)
-(rule ((BucketResult op source))
-      ((set (SelectedDestination op) (DestinationValue source))) :ruleset allocation)
 (function ReuseSelected (ValueKey) bool :merge (or old new))
 (rule ((FreshValue value)) ((set (ReuseSelected value) false)) :ruleset allocation)
 (datatype StorageChoice (Allocate) (Reuse SourceValue))

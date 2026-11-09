@@ -103,22 +103,16 @@
        (PhaseEnds op "compact" "compact")) :ruleset schedule)
 (rule ((= (Plan op) (Scatter)) (= n (InputDomain op)) (= grid (OperationGrid op)))
       ((KernelPhase op "scatter" n 64 grid)) :ruleset schedule)
-(rule ((= (Plan op) (Scatter)) (InitializedResult op i t n) (= grid (OperationGrid op)))
-      ((KernelPhase op "initialize" n 64 grid)
-       (PhaseEnds op "initialize" "scatter")
-       (PhaseLink op "initialize" "scatter")) :ruleset schedule)
-(rule ((= (Plan op) (Scatter)) (UpdatedResult op i source))
-      ((PhaseEnds op "scatter" "scatter")) :ruleset schedule)
 (rule ((= (Plan op) (Scatter)) (Phase (Stage op "scatter") r))
       ((PhaseInput (Stage op "scatter") op "input")) :ruleset schedule)
 (rule ((= (Plan op) (Serial)))
       ((KernelPhase op "ordered" (Fixed 1) 1 (FixedGrid 1 1 1)) (PhaseEnds op "ordered" "ordered")) :ruleset schedule)
 (rule ((= (Plan op) (Atomic update)) (= n (InputDomain op)) (= grid (OperationGrid op)))
-      ((KernelPhase op "atomic" n 64 grid) (PhaseEnds op "atomic" "atomic")) :ruleset schedule)
+      ((KernelPhase op "atomic" n 64 grid)) :ruleset schedule)
 ; Counts are cleared in a completed dispatch before any invocation reserves a slot.
 (rule ((= (Plan op) (Buckets)) (= n (InputDomain op)) (BucketResult op dest) (= grid (OperationGrid op)))
       ((KernelPhase op "clear" (Length dest) 64 grid) (KernelPhase op "buckets" n 64 grid)
-       (PhaseEnds op "clear" "buckets") (PhaseLink op "clear" "buckets")) :ruleset schedule)
+       (PhaseLink op "clear" "buckets")) :ruleset schedule)
 (rule ((= (Plan op) (Buckets)) (Phase (Stage op "buckets") r))
       ((PhaseInput (Stage op "buckets") op "input")
        (Materialize (Result op 1)) (Materialize (Result op 2))) :ruleset schedule)
@@ -191,7 +185,7 @@
        (LocalObservedBuffer value) (ElementType value t) (= n (CapacityExtent value)))
       ((LocalBuffer op "output" i t n)) :ruleset schedule)
 
-(rule ((= (Plan op) (Scatter)) (UninitializedResult op i t n)) ((PhaseEnds op "scatter" "scatter")) :ruleset schedule)
+
 
 (rule ((DeviceOperation op) (UninitializedResult op i t n)) ((LocalBuffer op "output" 0 t n)) :ruleset schedule)
 
@@ -219,3 +213,16 @@
 (rule ((Phase (Stage leader "combine") region) (PlannedOperation op leader plan region)
        (= neutral (SourceNeutral op)))
       ((Demand (InStage (Stage leader "combine")) neutral)) :ruleset schedule)
+
+; Initialization is a property of the destination, shared by every update action.
+(relation UpdatePhases (OperationKey String String))
+(rule ((= (Plan op) (Scatter))) ((UpdatePhases op "scatter" "scatter")) :ruleset schedule)
+(rule ((= (Plan op) (Atomic update))) ((UpdatePhases op "atomic" "atomic")) :ruleset schedule)
+(rule ((= (Plan op) (Buckets))) ((UpdatePhases op "clear" "buckets")) :ruleset schedule)
+(rule ((UpdatePhases op first last) (InitializedResult op i t n) (= grid (OperationGrid op)))
+      ((KernelPhase op "initialize" n 64 grid) (PhaseEnds op "initialize" last)
+       (PhaseLink op "initialize" first)) :ruleset schedule)
+(rule ((UpdatePhases op first last) (UpdatedResult op i source))
+      ((PhaseEnds op first last)) :ruleset schedule)
+(rule ((UpdatePhases op first last) (UninitializedResult op i t n))
+      ((PhaseEnds op first last)) :ruleset schedule)

@@ -137,6 +137,27 @@ fn iteration(
     }
 }
 
+pub(super) fn initialize(
+    body: &mut Body<'_, '_, '_>,
+    scope: Value,
+    owner: Value,
+    phase: &str,
+    width: u32,
+) -> Result<(), OptimizeError> {
+    let Some(source) = body.compiler.facts.lookup("InitialValue", (owner,)) else {
+        return Err(error("update has no initial value"));
+    };
+    let output = destination(body, scope, owner)?;
+    let initial = body.value(scope, source)?;
+    let n = body.length(output.clone())?;
+    let (start, step) = iteration(body, phase, width)?;
+    body.copy_array_strided((output, &[]), initial, n, &[], start, step)?;
+    if phase == "local" {
+        body.workgroup_barrier()?;
+    }
+    Ok(())
+}
+
 pub(super) fn indexed(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
@@ -146,13 +167,6 @@ pub(super) fn indexed(
     width: u32,
     plan: Value,
 ) -> Result<(), OptimizeError> {
-    let action = body.compiler.facts.action(plan)?;
-    let original = match action {
-        OutputAction::Write { destination, .. } | OutputAction::Accumulate { destination, .. } => {
-            destination
-        }
-        _ => return Err(error("indexed loop requires an update action")),
-    };
     let output = destination(body, scope, owner)?;
     let extent = if phase == "ordered" {
         let Some(extent) = body.compiler.facts.domain(owner) else {
@@ -165,22 +179,16 @@ pub(super) fn indexed(
     let n = body.extent(scope, extent)?;
     let (start, step) = iteration(body, phase, width)?;
     body.counted(start, n, step, vec![], |body, index, _| {
-        if phase == "initialize" {
-            let original = body.value(scope, original)?;
-            let value = body.index(original, index.clone())?;
-            body.store(output.clone(), index, value)?;
-        } else {
-            update(
-                body,
-                scope,
-                owner,
-                phase,
-                plan,
-                output.clone(),
-                index,
-                &mut LookupMap::default(),
-            )?;
-        }
+        update(
+            body,
+            scope,
+            owner,
+            phase,
+            plan,
+            output.clone(),
+            index,
+            &mut LookupMap::default(),
+        )?;
         Ok(vec![])
     })?;
     Ok(())
