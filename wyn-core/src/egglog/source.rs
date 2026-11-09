@@ -499,7 +499,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 )?;
                 self.operation(value, Some("control"), scope)?;
             }
-            TermKind::Soac(soac) => self.soac(value, soac, scope)?,
+            TermKind::Soac(soac) => self.soac(value, &term.ty, soac, scope)?,
             TermKind::ArrayExpr(array) => {
                 let array = self.array(array, value, scope)?;
                 self.sink.set("SourceAlias", value, array)?;
@@ -774,6 +774,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
     fn soac(
         &mut self,
         value: Value,
+        ty: &Type,
         soac: &'source SoacOp<ExplicitClosurePayload, ExplicitCapturesPayload>,
         scope: &mut Scope,
     ) -> Result<(), OptimizeError> {
@@ -800,9 +801,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 });
                 match soac {
                     SoacOp::Scatter { dest, .. } | SoacOp::BucketScatter { dest, .. } => {
-                        let destination = self.resolve(dest.id)?;
-                        self.sink.add("SourceDirectUse", (value, destination))?;
-                        self.use_value(value, destination, false)?;
+                        let destination = self.operand(dest, value, scope)?;
                         if let SoacOp::BucketScatter {
                             input_dimensions,
                             domain_rank,
@@ -830,6 +829,21 @@ impl<'source> Import<'_, '_, '_, 'source> {
                                 data: maps,
                                 do_rebuild: true,
                             });
+                            let Type::Constructed(TypeName::Tuple(_), fields) = ty else {
+                                return Err(OptimizeError::Output(
+                                    "update results must form a product".into(),
+                                ));
+                            };
+                            let mut results = Vec::with_capacity(fields.len());
+                            for (index, ty) in fields.iter().enumerate() {
+                                let field = self.sink.add("SourceProjected", (value, index as i64))?;
+                                self.value_type(field, ty)?;
+                                self.sink.add("SourceSelect", (field, value, index as i64))?;
+                                self.sink.add("SourceField", (value, index as i64, field))?;
+                                results.push(field);
+                            }
+                            self.arguments(value, results)?;
+                            self.sink.set("SourceConstruct", value, "tuple")?;
                             self.sink.add(
                                 "ReserveOperator",
                                 (body, destination, inputs, i64::from(*domain_rank), maps),
@@ -859,9 +873,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 values,
                 ..
             } => {
-                let destination = self.resolve(dest.id)?;
-                self.sink.add("SourceDirectUse", (value, destination))?;
-                self.use_value(value, destination, false)?;
+                let destination = self.operand(dest, value, scope)?;
                 let neutral = self.operand(ne, value, scope)?;
                 let indices = self.array(indices, value, scope)?;
                 let values = self.array(values, value, scope)?;

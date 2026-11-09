@@ -506,7 +506,7 @@ impl ClosureConverter {
                 input: self.convert_array_expr(input),
             },
             SoacOp::Scatter { dest, lam, inputs } => SoacOp::Scatter {
-                dest,
+                dest: Box::new(self.convert_term(*dest)),
                 lam: self.lift_soac_lambda(lam.lam, span),
                 inputs: inputs.into_iter().map(|input| self.convert_array_expr(input)).collect(),
             },
@@ -517,7 +517,7 @@ impl ClosureConverter {
                 input_dimensions,
                 domain_rank,
             } => SoacOp::BucketScatter {
-                dest,
+                dest: Box::new(self.convert_term(*dest)),
                 lam: self.lift_soac_lambda(lam.lam, span),
                 inputs: inputs.into_iter().map(|input| self.convert_array_expr(input)).collect(),
                 input_dimensions,
@@ -530,7 +530,7 @@ impl ClosureConverter {
                 indices,
                 values,
             } => SoacOp::ReduceByIndex {
-                dest,
+                dest: Box::new(self.convert_term(*dest)),
                 op: self.lift_soac_lambda(op.lam, span),
                 ne: Box::new(self.convert_term(*ne)),
                 indices: self.convert_array_expr(indices),

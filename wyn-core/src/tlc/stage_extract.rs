@@ -11,8 +11,8 @@ use super::inline::UnifiedHelpersInlined;
 use super::run::UnpinnedPolymorphic;
 use super::{
     clone_term_with_fresh_ids, curried_function_type, Def, DefMeta, EntryPoint, Lambda, Program,
-    ProgramParts, RewriteDecision, SoacOp, Term, TermId, TermIdSource, TermKind, TermRewriter, TermVisitor,
-    VarRef, WalkDecision,
+    ProgramParts, RewriteDecision, Term, TermId, TermIdSource, TermKind, TermRewriter, TermVisitor, VarRef,
+    WalkDecision,
 };
 use crate::ast;
 use crate::ast::Span;
@@ -2010,17 +2010,6 @@ impl TermRewriter<data::Empty, data::Empty> for ExternalValueRewriter<'_> {
     }
 
     fn rewrite_owned_node_before_children(&mut self, mut term: Term) -> (Term, RewriteDecision) {
-        if let TermKind::Soac(
-            SoacOp::Scatter { dest, .. }
-            | SoacOp::BucketScatter { dest, .. }
-            | SoacOp::ReduceByIndex { dest, .. },
-        ) = &mut term.kind
-        {
-            if let Some((replacement, _)) = self.substitutions.get(&(dest.id, vec![])) {
-                dest.id = *replacement;
-                return (term, RewriteDecision::Changed);
-            }
-        }
         if let Some(key) = projected_symbol_path(&term) {
             if let Some((replacement, ty)) = self.substitutions.get(&key) {
                 term.ty = ty.clone();

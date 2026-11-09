@@ -51,6 +51,10 @@
       ((ExprSourceCandidate s expand 2 (AdmitProject parent i))) :ruleset scalar-source-forms)
 (rule ((ExprSourceCandidate s expand 0 form) (= (SourceConstruct s) "tuple") (= args (SourceArgumentsOf s)))
       ((ExprSourceCandidate s expand 2 (AdmitTuple args true))) :ruleset scalar-source-forms)
+; A multi-result operation exposes its stored fields as ordinary tuple operands.
+(rule ((ExprSourceCandidate s expand 0 form) (= (SourceHasOperation s) true)
+       (= (SourceConstruct s) "tuple") (= args (SourceArgumentsOf s)))
+      ((ExprSourceCandidate s expand 4 (AdmitTuple args false))) :ruleset scalar-source-forms)
 (rule ((ExprSourceCandidate s expand 0 form) (= (SourceConstruct s) "zip") (= args (SourceArgumentsOf s)))
       ((ExprSourceCandidate s expand 2 (AdmitTuple args false))) :ruleset scalar-source-forms)
 (rule ((ExprSourceCandidate s expand 0 form) (= (SourceConstruct s) "vector") (= args (SourceArgumentsOf s)))

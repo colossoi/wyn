@@ -516,25 +516,27 @@ fn check_linear_image_results_in_soac(
         SoacOp::Filter { pred, input, .. } => {
             check_linear_image_results_in_array_expr(input, program, model).or_else(|| check_body(pred))
         }
-        SoacOp::Scatter { lam, inputs, .. } => {
-            for input in inputs {
-                if let Some(err) = check_linear_image_results_in_array_expr(input, program, model) {
-                    return Some(err);
-                }
-            }
-            check_body(lam)
-        }
-        SoacOp::BucketScatter { lam, inputs, .. } => inputs
-            .iter()
-            .find_map(|input| check_linear_image_results_in_array_expr(input, program, model))
+        SoacOp::Scatter { dest, lam, inputs }
+        | SoacOp::BucketScatter {
+            dest, lam, inputs, ..
+        } => check_linear_image_results_in_term(dest, program, model, LinearImageUseContext::Used)
+            .or_else(|| {
+                inputs
+                    .iter()
+                    .find_map(|input| check_linear_image_results_in_array_expr(input, program, model))
+            })
             .or_else(|| check_body(lam)),
         SoacOp::ReduceByIndex {
+            dest,
             op,
             ne,
             indices,
             values,
             ..
-        } => check_linear_image_results_in_term(ne, program, model, LinearImageUseContext::Discarded)
+        } => check_linear_image_results_in_term(dest, program, model, LinearImageUseContext::Used)
+            .or_else(|| {
+                check_linear_image_results_in_term(ne, program, model, LinearImageUseContext::Discarded)
+            })
             .or_else(|| check_linear_image_results_in_array_expr(indices, program, model))
             .or_else(|| check_linear_image_results_in_array_expr(values, program, model))
             .or_else(|| check_body(op)),

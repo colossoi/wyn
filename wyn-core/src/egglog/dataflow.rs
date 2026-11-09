@@ -458,16 +458,6 @@ impl Dataflow {
                     })();
                 });
                 result?;
-                if let TermKind::Soac(
-                    SoacOp::Scatter { dest, .. }
-                    | SoacOp::BucketScatter { dest, .. }
-                    | SoacOp::ReduceByIndex { dest, .. },
-                ) = &term.kind
-                {
-                    let destination = self.symbol(dest.id, sink)?.evaluation;
-                    sink.add("FlowReference", (value, destination))?;
-                    self.reference_occurrences.push(Reference::Name(dest.id));
-                }
                 Expression::new(value, value)
             }
         };
@@ -617,14 +607,6 @@ pub(crate) fn reference_paths<C: Payload, S: Payload>(term: &Term<C, S>) -> Vec<
         if let Some(path) = projected_symbol_path(term) {
             references.push(path);
             return WalkDecision::Prune;
-        }
-        if let TermKind::Soac(
-            SoacOp::Scatter { dest, .. }
-            | SoacOp::BucketScatter { dest, .. }
-            | SoacOp::ReduceByIndex { dest, .. },
-        ) = &term.kind
-        {
-            references.push((dest.id, vec![]));
         }
         WalkDecision::Recurse
     });

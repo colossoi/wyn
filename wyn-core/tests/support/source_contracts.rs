@@ -357,9 +357,14 @@ mod source_pipeline {
         );
     }
     #[test]
-    #[ignore = "nested scheduling follow-up: ranked buckets inside map fail with an unbound TLC symbol during source import"]
     fn ranked_bucket_scatter_inside_map_reaches_both_backends() {
         shaders(include_str!("../../../tests/compiler/library/batched_traversal_has_shared_state_and_no_partial_lane_barriers.wyn"));
+    }
+    #[test]
+    fn nested_updates_capture_destinations_and_cross_control_boundaries() {
+        shaders(include_str!(
+            "../../../tests/compiler/library/nested_update_destinations.wyn"
+        ));
     }
     #[test]
     fn independent_scalar_results_do_not_share_a_host_resource() {

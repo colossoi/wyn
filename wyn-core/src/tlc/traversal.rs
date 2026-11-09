@@ -123,7 +123,7 @@ impl<C: Payload, S: Payload> Term<C, S> {
 
     /// Apply `f` to every immediate `Term` child, returning a rebuilt `Term`
     /// with the caller-provided fresh ID. Recurses into Lambda, SoacOp,
-    /// ArrayExpr, LoopKind, and Place sub-structures.
+    /// ArrayExpr and LoopKind sub-structures.
     ///
     /// This is the single place that knows the shape of TermKind — passes
     /// that need a uniform bottom-up or top-down walk can use this instead
@@ -404,7 +404,9 @@ where
     M: FnMut(&Type<TypeName>) -> Type<TypeName>,
 {
     match soac {
-        SoacOp::Map { lam, inputs, .. } => {
+        SoacOp::Map { lam, inputs }
+        | SoacOp::Scatter { lam, inputs, .. }
+        | SoacOp::BucketScatter { lam, inputs, .. } => {
             rewrite_soac_body_types(lam, map);
             for input in inputs {
                 rewrite_array_expr_types(input, map);
@@ -418,32 +420,9 @@ where
             rewrite_soac_body_types(pred, map);
             rewrite_array_expr_types(input, map);
         }
-        SoacOp::Scatter {
-            dest, lam, inputs, ..
-        } => {
-            dest.elem_ty = map(&dest.elem_ty);
-            rewrite_soac_body_types(lam, map);
-            for input in inputs {
-                rewrite_array_expr_types(input, map);
-            }
-        }
-        SoacOp::BucketScatter {
-            dest, lam, inputs, ..
-        } => {
-            dest.elem_ty = map(&dest.elem_ty);
-            rewrite_soac_body_types(lam, map);
-            for input in inputs {
-                rewrite_array_expr_types(input, map);
-            }
-        }
         SoacOp::ReduceByIndex {
-            dest,
-            op,
-            indices,
-            values,
-            ..
+            op, indices, values, ..
         } => {
-            dest.elem_ty = map(&dest.elem_ty);
             rewrite_soac_body_types(op, map);
             rewrite_array_expr_types(indices, map);
             rewrite_array_expr_types(values, map);
@@ -514,25 +493,25 @@ where
             visit_soac_body_children(pred, f);
             visit_array_expr_children(input, f);
         }
-        SoacOp::Scatter { lam, inputs, .. } => {
-            visit_soac_body_children(lam, f);
-            for input in inputs {
-                visit_array_expr_children(input, f);
-            }
-        }
-        SoacOp::BucketScatter { lam, inputs, .. } => {
+        SoacOp::Scatter { dest, lam, inputs }
+        | SoacOp::BucketScatter {
+            dest, lam, inputs, ..
+        } => {
+            f(dest);
             visit_soac_body_children(lam, f);
             for input in inputs {
                 visit_array_expr_children(input, f);
             }
         }
         SoacOp::ReduceByIndex {
+            dest,
             op,
             ne,
             indices,
             values,
             ..
         } => {
+            f(dest);
             visit_soac_body_children(op, f);
             f(ne);
             visit_array_expr_children(indices, f);
@@ -630,25 +609,25 @@ where
             visit_soac_body_children_mut(pred, f);
             visit_array_expr_children_mut(input, f);
         }
-        SoacOp::Scatter { lam, inputs, .. } => {
-            visit_soac_body_children_mut(lam, f);
-            for input in inputs {
-                visit_array_expr_children_mut(input, f);
-            }
-        }
-        SoacOp::BucketScatter { lam, inputs, .. } => {
+        SoacOp::Scatter { dest, lam, inputs }
+        | SoacOp::BucketScatter {
+            dest, lam, inputs, ..
+        } => {
+            f(dest);
             visit_soac_body_children_mut(lam, f);
             for input in inputs {
                 visit_array_expr_children_mut(input, f);
             }
         }
         SoacOp::ReduceByIndex {
+            dest,
             op,
             ne,
             indices,
             values,
             ..
         } => {
+            f(dest);
             visit_soac_body_children_mut(op, f);
             f(ne);
             visit_array_expr_children_mut(indices, f);
@@ -755,7 +734,7 @@ where
             input: map_array_expr_children(input, f),
         },
         SoacOp::Scatter { dest, lam, inputs } => SoacOp::Scatter {
-            dest,
+            dest: Box::new(f(*dest)),
             lam: map_soac_body_children(lam, f),
             inputs: inputs.into_iter().map(|ae| map_array_expr_children(ae, f)).collect(),
         },
@@ -766,7 +745,7 @@ where
             input_dimensions,
             domain_rank,
         } => SoacOp::BucketScatter {
-            dest,
+            dest: Box::new(f(*dest)),
             lam: map_soac_body_children(lam, f),
             inputs: inputs.into_iter().map(|input| map_array_expr_children(input, f)).collect(),
             input_dimensions,
@@ -779,7 +758,7 @@ where
             indices,
             values,
         } => SoacOp::ReduceByIndex {
-            dest,
+            dest: Box::new(f(*dest)),
             op: map_soac_body_children(op, f),
             ne: Box::new(f(*ne)),
             indices: map_array_expr_children(indices, f),

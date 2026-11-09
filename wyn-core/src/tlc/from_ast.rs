@@ -4,8 +4,8 @@
 //! lowering and the pattern-binding helpers that extend `Transformer`.
 
 use super::{
-    count_function_arity, data, run, ArrayExpr, Bindings, Def, DefMeta, EntryPoint, Lambda, LetBinding,
-    LoopKind, Place, ProgramParts, SoacBody, SoacOp, Term, TermIdSource, TermKind, VarRef,
+    count_function_arity, data, run, ArrayExpr, Bindings, Def, DefMeta, EntryPoint, Lambda, LoopKind,
+    ProgramParts, SoacBody, SoacOp, Term, TermIdSource, TermKind, VarRef,
 };
 use crate::ast::{self, Span, TypeName};
 use crate::ast_type_holes;
@@ -1132,20 +1132,6 @@ impl<'a> Transformer<'a> {
 
         let op = self.term_to_lambda(op_term);
 
-        // Build a Place from dest_term
-        let dest_elem_ty = dest_term.ty.elem_type().unwrap().clone();
-        let dest = Place {
-            id: match &dest_term.kind {
-                TermKind::Var(VarRef::Symbol(sym)) => sym.clone(),
-                _ => {
-                    // Bind dest to a fresh name
-                    let fresh = self.fresh("_w_rbi_dest");
-                    fresh
-                }
-            },
-            elem_ty: dest_elem_ty,
-        };
-
         let mut binds = Bindings::new();
         let indices = self.soac_input(indices_term, &mut binds);
         let values = self.soac_input(values_term, &mut binds);
@@ -1153,7 +1139,7 @@ impl<'a> Transformer<'a> {
             ty,
             span,
             TermKind::Soac(SoacOp::ReduceByIndex {
-                dest,
+                dest: Box::new(dest_term),
                 op,
                 ne: Box::new(ne_term),
                 indices,
@@ -1165,8 +1151,7 @@ impl<'a> Transformer<'a> {
 
     /// `scatter(dest, indices, values)` → `SoacOp::Scatter`. Writes
     /// `values[i]` into `dest[indices[i]]` for each `i`; out-of-bounds indices
-    /// are ignored (Futhark semantics). Bind destination expressions so the
-    /// `Place` names the actual array passed to egglog conversion.
+    /// are ignored (Futhark semantics).
     fn transform_soac_scatter(
         &mut self,
         args: &[ast::Expression<ast::HolesResolvedTree>],
@@ -1177,27 +1162,9 @@ impl<'a> Transformer<'a> {
         let indices_term = self.transform_expr(&args[1]);
         let values_term = self.transform_expr(&args[2]);
 
-        let dest_elem_ty = dest_term.ty.elem_type().unwrap().clone();
         let idx_elem_ty = indices_term.ty.elem_type().unwrap().clone();
         let val_elem_ty = values_term.ty.elem_type().unwrap().clone();
         let mut binds = Bindings::new();
-        let dest = Place {
-            id: match &dest_term.kind {
-                TermKind::Var(VarRef::Symbol(sym)) => sym.clone(),
-                _ => {
-                    let sym = self.fresh("_w_scatter_dest");
-                    binds.push(LetBinding {
-                        name: sym,
-                        name_ty: dest_term.ty.clone(),
-                        rhs: dest_term,
-                        span,
-                    });
-                    sym
-                }
-            },
-            elem_ty: dest_elem_ty,
-        };
-
         // Identity envelope `λ(i, v) → (i, v)`. Fusion composes producer
         // lambdas into this and splices their inputs in place of `is`/`vs`.
         let i_sym = self.fresh("_w_scatter_i");
@@ -1222,7 +1189,7 @@ impl<'a> Transformer<'a> {
             ty,
             span,
             TermKind::Soac(SoacOp::Scatter {
-                dest,
+                dest: Box::new(dest_term),
                 lam,
                 inputs: vec![indices, values],
             }),
@@ -1247,14 +1214,6 @@ impl<'a> Transformer<'a> {
         let key_ty = types::i32();
         let value_ty = dest_elem_ty.clone();
         let pair_ty = Type::Constructed(TypeName::Tuple(2), vec![key_ty.clone(), value_ty.clone()]);
-        let dest = Place {
-            id: match &dest_term.kind {
-                TermKind::Var(VarRef::Symbol(symbol)) => *symbol,
-                _ => self.fresh("_w_bucket_scatter_dest"),
-            },
-            elem_ty: dest_elem_ty,
-        };
-
         let mut binds = Bindings::new();
         let items = self.soac_input(items_term, &mut binds);
         let item = self.fresh("_w_bucket_scatter_item");
@@ -1286,7 +1245,7 @@ impl<'a> Transformer<'a> {
             ty,
             span,
             TermKind::Soac(SoacOp::BucketScatter {
-                dest,
+                dest: Box::new(dest_term),
                 lam,
                 inputs: vec![items],
                 input_dimensions: vec![(0..input_rank).collect()],

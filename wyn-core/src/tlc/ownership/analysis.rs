@@ -852,13 +852,17 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
                 }
                 self.visit_soac_body(pred);
             }
-            SoacOp::Scatter { lam, inputs, .. } => {
+            SoacOp::Scatter { dest, lam, inputs } => {
+                self.visit_term(dest);
                 self.visit_soac_body(lam);
                 for input in inputs {
                     self.visit_array_expr(input);
                 }
             }
-            SoacOp::BucketScatter { lam, inputs, .. } => {
+            SoacOp::BucketScatter {
+                dest, lam, inputs, ..
+            } => {
+                self.visit_term(dest);
                 for input in inputs {
                     self.visit_array_expr(input);
                 }
@@ -873,12 +877,14 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
                 self.visit_soac_body(lam);
             }
             SoacOp::ReduceByIndex {
+                dest,
                 op,
                 ne,
                 indices,
                 values,
                 ..
             } => {
+                self.visit_term(dest);
                 self.visit_term(ne);
                 self.visit_array_expr(indices);
                 self.visit_array_expr(values);

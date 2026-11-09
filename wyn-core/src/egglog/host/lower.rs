@@ -253,7 +253,10 @@ impl<'a, 'source> Lower<'a, 'source> {
         if let Some(value) = self.values.get(&source) {
             return Ok(value.clone());
         }
-        if let Some(fields) = self.facts.record("ValueRead", "ReadElement", (source,)) {
+        if let Some(access) = self.facts.value_read(source) {
+            let Some(fields) = self.facts.enode("ReadElement", access) else {
+                return Err(Error::Unsupported);
+            };
             if let Some(read) = self.device_read {
                 if let Some(value) = read(fields[0])? {
                     return Ok(value);

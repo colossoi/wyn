@@ -945,14 +945,14 @@ pub enum SoacOp<C: Payload = data::Empty, S: Payload = data::Empty> {
     /// `lam = λ(i, v) → (i, v)` with `inputs = [is, vs]`. egglog receives that
     /// callable ABI and owns any later producer composition.
     Scatter {
-        dest: Place,
+        dest: Box<Term<C, S>>,
         lam: SoacBody<C, S>,
         inputs: Vec<ArrayExpr<C, S>>,
     },
     /// Capacity-bounded insertion into a `[bucket_count][capacity]a`
     /// destination. Every ranked item leaf is `(bucket_key, value)`.
     BucketScatter {
-        dest: Place,
+        dest: Box<Term<C, S>>,
         /// Identity at the surface, then available for ordinary producer
         /// composition just like Scatter's envelope.
         lam: SoacBody<C, S>,
@@ -965,19 +965,12 @@ pub enum SoacOp<C: Payload = data::Empty, S: Payload = data::Empty> {
     /// General histogram update. egglog retains the reducer and neutral value;
     /// physical expansion currently emits a serial read-combine-write loop.
     ReduceByIndex {
-        dest: Place,
+        dest: Box<Term<C, S>>,
         op: SoacBody<C, S>,
         ne: Box<Term<C, S>>,
         indices: ArrayExpr<C, S>,
         values: ArrayExpr<C, S>,
     },
-}
-
-/// Destination-passing for scatter / reduce_by_index.
-#[derive(Debug, Clone)]
-pub struct Place {
-    pub id: SymbolId,
-    pub elem_ty: Type<TypeName>,
 }
 
 // =============================================================================
