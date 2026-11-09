@@ -23,3 +23,7 @@
 (sort ResultBindings (Set ResultBinding))
 ; Selection can only see a complete body and a frozen set of substitutions.
 (datatype Replacement (ReplaceBody ParallelBody ResultBindings))
+
+(relation ResultContains (ResultTree SourceValue))
+(function PlanTotal (FusionPlan OperationKey) bool :merge (or old new))
+(constructor CountValue (FusionPlan OperationKey SourceValue) SourceValue)

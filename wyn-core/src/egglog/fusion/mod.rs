@@ -1,5 +1,6 @@
 //! Structural fusion on the persistent egglog graph.
 //! Plans remain in egglog for the subsequent placement and scheduling passes.
+use super::query::Query;
 use super::timing::{span, time};
 use super::{parse_program, OptimizeError};
 use egglog_engine::EGraph;
@@ -31,8 +32,50 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "fusion import",
         "(run-schedule (saturate source-fusion))",
     )?)?;
-    time("egglog fusion / run schedule", || {
-        graph.parse_and_run_program(None, "(PlanningRound 0) (run-schedule (saturate (seq (saturate fusion-dependencies) (saturate fusion-paths) (saturate fusion-counts) (saturate fusion-candidates) (saturate fusion-replacements) (saturate fusion-select) fusion-choose (saturate fusion-commit) fusion-clear-candidates fusion-clear-paths fusion-union fusion-clear)))")
+    graph.parse_and_run_program(None, "(PlanningRound 0)")?;
+    let choose = parse_program("fusion round", "(run-schedule (seq (saturate fusion-counts) (saturate fusion-dependencies) (saturate fusion-paths) (saturate fusion-counts) (saturate fusion-candidates) (saturate fusion-replacements) (saturate fusion-select) fusion-choose (saturate fusion-commit)))")?;
+    let commit = parse_program(
+        "fusion contraction",
+        "(run-schedule (seq fusion-union fusion-clear))",
+    )?;
+    time("egglog fusion / run schedule", || -> Result<(), OptimizeError> {
+        loop {
+            graph.run_program(choose.clone())?;
+            let chosen = Query(graph).row("Chosen", |_| true)?.is_some();
+            // Proofs belong to this graph revision. Retain only the frozen
+            // replacement across contraction, including when there is no candidate.
+            for table in [
+                "Pair",
+                "PlanCandidate",
+                "JoinCandidate",
+                "JoinedCandidate",
+                "MaskCandidate",
+                "MaskBindings",
+                "MaskTotals",
+                "Retained",
+                "ExclusiveStream",
+                "ClearStream",
+                "ClearOutputStream",
+                "FilterPostMapCompatible",
+                "BarrierAllowed",
+                "MaskablePlan",
+                "GroupReach",
+                "OrderWalk",
+                "GroupPath",
+                "OrderIntermediate",
+                "BestPriority",
+                "BestRegion",
+                "BestProducer",
+                "BestConsumer",
+            ] {
+                graph.clear_function(table)?;
+            }
+            if !chosen {
+                break;
+            }
+            graph.run_program(commit.clone())?;
+        }
+        Ok(())
     })?;
     graph.run_program(parse_program(
         "fusion signatures",
