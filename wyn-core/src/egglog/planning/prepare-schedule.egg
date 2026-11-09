@@ -7,6 +7,7 @@
     (saturate extent-dependencies) (run extent-uniformity)
     (run map-blockers) (saturate map-select) (saturate map-launch)
     (saturate shape-properties iteration-domains)
+    (saturate direct-outputs) (run traversal-leaves)
     (saturate segment-shapes)
     (saturate extent-dependencies) (run extent-uniformity)
     (run segment-approve) (run segment-select)

@@ -3,7 +3,7 @@ use super::super::{finish_for_test, from_tlc, fuse, place, schedule, schedule_wi
 use crate::{compile_thru_tlc, CodegenTarget, PipelineTopologyPolicy};
 use egglog_engine::{
     sort::{SetContainer, VecContainer, S},
-    EGraph, RawValues, Value, Write,
+    EGraph, Value, Write,
 };
 
 fn selected(
@@ -1083,8 +1083,7 @@ fn segment_callback_blockers_cover_every_output_of_a_fused_plan() {
                 // Request both results independently, as outer map traversal would.
                 for &value in &values {
                     sink.add("RectangularDemand", (value,))?;
-                    let leaf = sink.add("CollectiveLeaf", RawValues(vec![]))?;
-                    sink.add("TraversalDemand", (value, 0i64, leaf))?;
+                    sink.add("TraversalDemand", (value, 0i64))?;
                 }
                 if blocked {
                     let region = sink.add("FlowRegion", callback)?;
@@ -1099,17 +1098,7 @@ fn segment_callback_blockers_cover_every_output_of_a_fused_plan() {
         for value in values {
             assert_eq!(query.required("SegmentCandidatePlan", (value,)).unwrap(), plan);
             assert_eq!(
-                query
-                    .lookup(
-                        "Traversal",
-                        (
-                            value,
-                            0i64,
-                            query.constructor("CollectiveLeaf", RawValues(vec![])).unwrap().unwrap()
-                        )
-                    )
-                    .unwrap()
-                    .is_some(),
+                query.lookup("DirectOutput", (value,)).unwrap().is_some(),
                 !blocked
             );
         }
@@ -1234,7 +1223,6 @@ entry case_4(xs:[]i32,n:i32) []i32=map(|x|repeat_sum(n,x),xs)
         "SourceCallArgument",
         "Traversal",
         "TraversalExtent",
-        "TraversalMap",
     ] {
         program.graph.clear_function(table).unwrap();
     }

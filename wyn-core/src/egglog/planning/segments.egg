@@ -26,7 +26,7 @@
 (rule ((MapPlan plan owner extent) (PlanResult plan "array" i value element))
       ((set (SegmentRequiredOutputs plan) (set-of value))) :ruleset segment-shapes)
 (rule ((MapPlan plan owner extent) (= (MapHost plan) true) (= rank (IterationRank owner))
-       (PlanResult plan "array" i value element) (= traversal (Traversal value rank (CollectiveLeaf))))
+       (PlanResult plan "array" i value element) (= traversal (Traversal value rank)) (= inner (TraversalExtent traversal)))
       ((set (SegmentApprovedOutputs plan) (set-of value))) :ruleset segment-approve)
 (rule ((MapPlan plan owner extent) (= (MapHost plan) true)
        (= (SegmentRequiredOutputs plan) (SegmentApprovedOutputs plan)))
@@ -35,5 +35,5 @@
 ; Small segments use a small workgroup; subgroup support is optional.
 (rule ((MapPlan plan owner extent)) ((set (SegmentWidth owner) 256)) :ruleset segment-shapes)
 (rule ((= (SubgroupsEnabled) true) (MapAnchor plan value) (= owner (Owner plan))
-       (= rank (IterationRank owner)) (= traversal (Traversal value rank (CollectiveLeaf))) (= extent (TraversalExtent traversal)) (= n (ConstantLogicalExtent extent)) (<= n 32))
+       (= rank (IterationRank owner)) (= traversal (Traversal value rank)) (= extent (TraversalExtent traversal)) (= n (ConstantLogicalExtent extent)) (<= n 32))
       ((set (SegmentWidth owner) 32)) :ruleset collective-costs)

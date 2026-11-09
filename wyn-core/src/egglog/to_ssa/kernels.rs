@@ -220,7 +220,12 @@ fn element_local(
                 indices,
                 cache,
                 &mut |body, scope, leaf| {
-                    let Some(fields) = body.compiler.facts.enode("TraversalValue", leaf) else {
+                    let Some(fields) = body
+                        .compiler
+                        .facts
+                        .enode("TraversalValue", leaf)
+                        .or_else(|| body.compiler.facts.enode("TraversalResult", leaf))
+                    else {
                         return Err(error("element traversal must yield a value"));
                     };
                     body.value(scope, fields[0])
