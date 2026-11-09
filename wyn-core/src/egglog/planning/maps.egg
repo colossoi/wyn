@@ -49,6 +49,18 @@
        (= output (SourceType value)) (= rank (ArrayTypeRank output)))
       ((set (MapDepth value) (min rank (+ 1 (min depth prefix))))) :ruleset map-shapes)
 
+; Distribution keeps the branch inside the outer coordinates. Its condition
+; must be safe even when an empty inner domain removes all repeated evaluations.
+(rule ((RectangularDemand value) (RectangularReady value)
+       (= (SourceBranch value) (BranchInfo condition yes no))
+       (= (SourceReadOnly value) true)
+       (= a (SourceResult yes)) (= b (SourceResult no)) (= x (MapDepth a)) (= y (MapDepth b)))
+      ((set (MapDepth value) (min x y))) :ruleset map-shapes)
+(rule ((RectangularDemand value) (= (SourceBranch value) (BranchInfo condition yes no))
+       (= a (SourceResult yes)) (= b (SourceResult no)) (= extent (RectangularAxis a axis))
+       (= extent (RectangularAxis b axis)))
+      ((set (RectangularAxis value axis) extent)) :ruleset map-shapes)
+
 ; Compare each output with one anchor, rather than forming all output pairs.
 (relation MapAnchor (FusionPlan SourceValue))
 (function MapBlocked (FusionPlan) bool :merge (or old new))

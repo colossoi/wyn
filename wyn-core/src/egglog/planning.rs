@@ -37,6 +37,7 @@ pub(super) fn place(
             include_str!("planning/maps.egg"),
             "\n",
             include_str!("planning/traversal.egg"),
+            include_str!("planning/distribute.egg"),
             include_str!("planning/segments.egg"),
             include_str!("planning/execution.egg"),
             "\n",
@@ -57,6 +58,9 @@ pub(super) fn place(
             include_str!("planning/epilogues.egg")
         ),
     )?;
+    // Complete logical distribution before importing physical placements.
+    graph.parse_and_run_program(None, "(run-schedule distribute-discover (saturate traversal-types) (saturate rectangular-discover) (saturate repeatability) traversal-proofs traversal-ready (saturate (seq extent-shapes map-shapes)) distribute-select distribute-commit (saturate fusion-counts shape-properties))")?;
+    graph.parse_and_run_program(None, "(run-schedule (saturate fusion-signatures))")?;
     let policy = match topology {
         PipelineTopologyPolicy::AllowGenerated => "AllowGeneratedTopology",
         PipelineTopologyPolicy::AuthoredOnly => "AuthoredTopology",

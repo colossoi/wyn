@@ -69,6 +69,13 @@
        (= caller (PlanScope plan)) (= args (OperatorInputs op)) (= next (Traversal (SourceResult body) (- depth 1))))
       ((set (Traversal value depth) (TraversalFor caller body plan args next))) :ruleset segment-shapes)
 
+(rule ((TraversalDemand value depth) (> depth 0) (= (SourceBranch value) (BranchInfo condition yes no))
+       (= a (SourceResult yes)) (= b (SourceResult no)))
+      ((TraversalDemand a depth) (TraversalDemand b depth)) :ruleset segment-shapes)
+(rule ((TraversalDemand value depth) (> depth 0) (= (SourceBranch value) (BranchInfo condition yes no))
+       (= a (Traversal (SourceResult yes) depth)) (= b (Traversal (SourceResult no) depth)))
+      ((set (Traversal value depth) (TraversalChoice condition yes a no b))) :ruleset segment-shapes)
+
 (relation WorkgroupOutputTraversal (ParallelTraversal))
 
 ; Extents are a fold over the admitted program, including call substitution.

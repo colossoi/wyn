@@ -31,10 +31,25 @@ impl<'source> Import<'_, '_, '_, 'source> {
         Ok(())
     }
 
-    pub(super) fn free_reference(&mut self, target: Value, scope: Value) -> Result<(), OptimizeError> {
-        let unowned = self.sink.add("RegionId", -1i64)?;
-        let owner = self.owners.get(&target).copied().unwrap_or(unowned);
-        self.sink.add("SourceLexicalUse", (scope, target, owner))?;
+    pub(super) fn free_reference(&mut self, target: Value, scope: &mut Scope) -> Result<(), OptimizeError> {
+        let Some(&owner) = self.owners.get(&target) else {
+            return Ok(());
+        };
+        self.sink.add("SourceLexicalUse", (scope.key, target, owner))?;
+        if owner != scope.key && !scope.captures.iter().any(|&(formal, _)| formal == target) {
+            scope.captures.push((target, target));
+        }
+        Ok(())
+    }
+
+    pub(super) fn capture_region(
+        &mut self,
+        child: &Scope,
+        parent: &mut Scope,
+    ) -> Result<(), OptimizeError> {
+        for &(_, actual) in &child.captures {
+            self.free_reference(actual, parent)?;
+        }
         Ok(())
     }
 

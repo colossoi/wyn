@@ -98,7 +98,7 @@ struct Scope {
     work: i64,
     evaluation: Option<Value>,
     parameters: Vec<Value>,
-    captures: Vec<Value>,
+    captures: Vec<(Value, Value)>,
 }
 
 struct Import<'graph, 'db, 'ids, 'source> {
@@ -314,8 +314,13 @@ impl<'source> Import<'_, '_, '_, 'source> {
             data: std::mem::take(&mut scope.parameters),
             do_rebuild: true,
         });
+        let captures = scope
+            .captures
+            .iter()
+            .map(|&binding| self.sink.add("CaptureBinding", binding))
+            .collect::<Result<Vec<_>, _>>()?;
         let captures = self.sink.container_to_value(VecContainer {
-            data: std::mem::take(&mut scope.captures),
+            data: captures,
             do_rebuild: true,
         });
         let operations = self.sink.container_to_value(VecContainer {
@@ -338,6 +343,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         self.sink.add("SourceEnters", (owner, scope.key))?;
         let checkpoint = self.bindings.checkpoint();
         self.finish_body(body, &mut scope)?;
+        self.capture_region(&scope, parent)?;
         self.bindings.restore(checkpoint);
         Ok(scope.key)
     }
@@ -381,7 +387,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             TermKind::Var(VarRef::Symbol(symbol)) => {
                 let target = self.resolve(*symbol)?;
                 self.sink.add("SourceRegionUse", (scope.key, target))?;
-                self.free_reference(target, scope.key)?;
+                self.free_reference(target, scope)?;
                 if let Some(owner) = scope.evaluation {
                     self.sink.add("FlowReference", (owner, target))?;
                 }
@@ -444,6 +450,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 let checkpoint = self.bindings.checkpoint();
                 self.parameters(&lambda.params, &mut inner)?;
                 self.finish_body(&lambda.body, &mut inner)?;
+                self.capture_region(&inner, scope)?;
                 self.bindings.restore(checkpoint);
             }
             TermKind::If {
@@ -632,7 +639,9 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 matches!(kind, LoopKind::ForRange { .. }) && variable_ty.is_array(),
             )?;
         }
+        self.capture_region(&iteration, &mut header)?;
         self.finish_region(&mut header, test)?;
+        self.capture_region(&header, parent)?;
         self.bindings.restore(checkpoint);
         Ok(())
     }
@@ -657,7 +666,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         for (symbol, ty, argument) in captures {
             let parameter = self.formal(symbol, ty, &scope)?;
             captured.push(parameter);
-            scope.captures.push(self.sink.add("CaptureBinding", (parameter, argument))?);
+            scope.captures.push((parameter, argument));
         }
         self.parameters(params, &mut scope)?;
         if matches!(&body.kind, TermKind::Var(VarRef::Symbol(symbol)) if self.globals.contains(symbol)) {
@@ -737,7 +746,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             }
         };
         self.sink.set("SourceExtent", value, extent)?;
-        self.free_reference(value, scope.key)?;
+        self.free_reference(value, scope)?;
         self.sink.add("SourceRegionUse", (scope.key, value))?;
         self.use_value(owner, value, !matches!(array, ArrayExpr::Var(_, _)))?;
         Ok(value)

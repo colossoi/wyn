@@ -312,12 +312,16 @@
 ; lengths remain known without evaluating the branch predicate on the host.
 (rule ((= array (SourceIndexedArray value)) (= (ArrayElementLayout array) (ArrayLayout count element)))
       ((set (ViewExtent value) (Fixed count))) :ruleset representations)
+(rule ((= branch (SourceBranch value)) (= ty (SourceType value)) (= (SourceArraySize ty) (FixedSize n)))
+      ((set (ViewExtent value) (Fixed n))) :ruleset representations)
 (rule ((= (SourceBranch value) (BranchInfo condition yes no))
+       (= ty (SourceType value)) (= (SourceArraySize ty) (DynamicSize)) (= (RuntimeArrayJoin value) false)
        (= a (SourceResult yes)) (= b (SourceResult no))
        (= extent (ViewExtent a)) (= extent (ViewExtent b)))
       ((set (ViewExtent value) extent)) :ruleset representations)
 
 (rule ((= (SourceBranch value) (BranchInfo condition yes no))
+       (= ty (SourceType value)) (= (SourceArraySize ty) (DynamicSize)) (= (RuntimeArrayJoin value) false)
        (= a (SourceResult yes)) (= b (SourceResult no))
        (= ea (ViewExtent a)) (= eb (ViewExtent b)) (!= ea eb)
        (= n (ConstantLogicalExtent ea)) (= n (ConstantLogicalExtent eb)))

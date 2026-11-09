@@ -978,6 +978,10 @@ fn rectangular_maps_select_arbitrary_rank_and_preserve_sequential_prefixes() {
         ("entry main(xs:[2]i32) [2][3][4][5]i32=map(|x|map(|y|map(|z|map(|w|x+y+z+w,iota(5)),iota(4)),iota(3)),xs)", 4),
         ("entry main(xs:[]i32) [][3]i32=map(|x|map(|y|reduce(|a,b|a+b,0,[x,y]),iota(3)),xs)", 2),
         ("entry main(xs:[2]i32) [2][0]i32=map(|x|map(|y|x+y,iota(0)),xs)", 2),
+        ("entry main(xs:[3]i32) [3][4]i32=map(|x|if x>0 then map(|y|100/(x+y),iota(4)) else map(|y|x+y,iota(4)),xs)", 2),
+        ("entry main(xs:[3]i32) [3][4]i32=map(|x|if 1/x>0 then map(|y|x+y,iota(4)) else map(|y|x-y,iota(4)),xs)", 1),
+        ("entry main(xs:[3]i32) [3][0]i32=map(|x|if x>0 then map(|y|1/x+y,iota(0)) else map(|y|x-y,iota(0)),xs)", 2),
+        ("entry main(xs:[3]i32) [3][0]i32=map(|x|let offset=1/x in map(|y|offset+y,iota(0)),xs)", 1),
         ("entry main(xs:[]i32) [][3]i32=map(|x|let t=loop a=x for i<16 do a+i in map(|y|t+y,iota(3)),xs)", 1),
         ("entry main(xs:[]i32) [][3]i32=map(|x|let t=reduce(|a,b|a+b,0,[x,x,x]) in map(|y|t+y,iota(3)),xs)", 1),
     ];
@@ -1692,4 +1696,36 @@ fn independent_update_scopes_share_a_loop_and_keep_distinct_exports() {
         let ssa = finish_for_test(program, CodegenTarget::Wgsl).unwrap();
         crate::lower_ssa_to_wgsl(ssa).unwrap();
     }
+}
+
+#[test]
+fn closed_array_regions_distribute_before_physical_placement() {
+    let cases = [
+        ("entry main(xs:[4]i32,ys:[4]i32,flag:bool) [4]i32=if flag then map(|x|x+1,xs) else map(|y|y+2,ys)", true),
+        ("entry main(xs:[4]i32,ys:[4]i32,flag:bool) [4](i32,i32)=if flag then map(|x|(x,x+1),xs) else map(|y|(y,y+2),ys)", true),
+        ("entry main(xs:[]i32,ys:[]i32,flag:bool) []i32=if flag then map(|x|x+1,xs) else map(|y|y+2,ys)", false),
+        ("entry main(xs:[0]i32,k:i32) [0]i32=if 1/k>0 then map(|x|x+1,xs) else map(|x|x+2,xs)", false),
+    ];
+    planned_cases(&cases.map(|(source, _)| source), |index, graph, scope| {
+        let query = Query(graph);
+        let operations = operations_in(graph, "control", scope);
+        assert_eq!(operations.len(), 1);
+        let owner = operations[0];
+        let plan = query.required("SelectedPlan", (owner,)).unwrap();
+        assert_eq!(
+            query.enode("Distributed", plan).unwrap().is_some(),
+            cases[index].1
+        );
+        if cases[index].1 {
+            let stage = query.constructor("Stage", (owner, "elements")).unwrap().unwrap();
+            assert!(query.contains("Phase", (stage, scope)).unwrap());
+            let region = query.required("SourceOperationValue", (owner,)).unwrap();
+            let branch = query.record("SourceBranch", "BranchInfo", (region,)).unwrap().unwrap();
+            for arm in &branch[1..] {
+                assert!(!query.contains("HostRegion", (*arm,)).unwrap());
+                let body = query.record("RegionDefinition", "RegionBody", (*arm,)).unwrap().unwrap();
+                assert!(!graph.value_to_container::<VecContainer>(body[1]).unwrap().data.is_empty());
+            }
+        }
+    });
 }

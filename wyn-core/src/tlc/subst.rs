@@ -139,28 +139,3 @@ where
         ),
     }
 }
-
-/// Rename all free occurrences of `old` to `new` in a term, respecting
-/// shadowing by Let names, Lambda params, and Loop vars. Each renamed
-/// occurrence keeps its own type/span (a rename doesn't change the value's
-/// type); only the symbol changes.
-pub(crate) fn substitute_sym<C: Payload, S: Payload>(
-    term: Term<C, S>,
-    old: SymbolId,
-    new: SymbolId,
-    term_ids: &mut TermIdSource,
-) -> Term<C, S> {
-    substitute_with(
-        term,
-        old,
-        &mut |occurrence, ids| {
-            Term::fresh(
-                ids,
-                occurrence.ty,
-                occurrence.span,
-                TermKind::Var(VarRef::Symbol(new)),
-            )
-        },
-        term_ids,
-    )
-}

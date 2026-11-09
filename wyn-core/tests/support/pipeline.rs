@@ -21,7 +21,6 @@ pub fn source(source: &str) -> tlc::stage::OwnershipApplied {
     let program = tlc::extract_stages(program).unwrap();
     let program = tlc::pin_entry_buffers(program).unwrap();
     let program = tlc::monomorphize(program).unwrap();
-    let program = tlc::canonicalize_conditional_producers(program);
     let program = tlc::normalize_soacs(program);
     let program = tlc::float_runtime_index_nested_producers(program);
     let program = tlc::defunctionalize(program);

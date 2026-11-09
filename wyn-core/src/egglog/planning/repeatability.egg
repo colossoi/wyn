@@ -30,6 +30,11 @@
 (function RepeatMapping (RepeatContext SourceValue) bool :no-merge)
 (relation RepeatEdge (RepeatContext SourceValue SourceValue))
 (function Repeatable (RepeatContext SourceValue) bool :merge (and old new))
+(rule ((RepeatDemand context formal) (= (SourceCapture region formal) actual))
+      ((RepeatEdge context formal actual)) :ruleset repeatability)
+; Flattening can remove a repeated evaluation when an inner domain is empty.
+(rule ((RepeatDemand context value) (= (SourceSpeculatable value) false))
+      ((set (Repeatable context value) false)) :ruleset repeatability)
 (rule ((= mapping (RepeatMapping context value)))
       ((set (Repeatable context value) true)) :ruleset repeatability)
 (rule ((RepeatDemand (OutsidePlan) value)) ((set (RepeatMapping (OutsidePlan) value) false)) :ruleset repeatability)
@@ -81,4 +86,5 @@
 
 (rule ((RectangularDemand value) (= (SourceBranch value) (BranchInfo condition yes no))
        (= a (SourceResult yes)) (= b (SourceResult no)))
-      ((RectangularDemand a) (RectangularDemand b)) :ruleset rectangular-discover)
+      ((RectangularDemand a) (RectangularDemand b)
+       (RectangularRequirement value (OutsidePlan) condition)) :ruleset rectangular-discover)

@@ -41,6 +41,8 @@
        (= v (SourceOperationValue op)) (PlannedOperation op owner plan r))
       ((set (ExprImportDispatchExpand leader v) true) (set (ExprImportDispatchedSource v) true)
        (ExprImportDispatchDemand leader r v) (set (ExprImportMovedDemand op v) true)) :ruleset scalar-admission)
+(rule ((= read (ValueRead v)) (= (IsLocalResult v) false))
+      ((set (ExprImportDispatchedSource v) true)) :ruleset scalar-admission)
 (rule ((= (HasViewStage v) true))
       ((set (ExprImportDispatchedSource v) true)) :ruleset scalar-admission)
 (rule ((ScalarKernel op leader)

@@ -17,7 +17,7 @@
 (function PlanScans (FusionPlan) ResultTree :no-merge)
 (function PlanDomain (FusionPlan) DomainShape :no-merge)
 (function PlanAction (FusionPlan) OutputAction :no-merge)
-(function PlanMapping (OperationKey) bool :no-merge)
+(function PlanMapping (OperationKey) bool :merge (or old new))
 
 (datatype ResultBinding (BindResult SourceValue SourceValue))
 (sort ResultBindings (Set ResultBinding))

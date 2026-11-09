@@ -9,7 +9,6 @@ pub mod data;
 mod dce;
 pub mod defunctionalize;
 mod from_ast;
-pub mod if_over_producer;
 pub mod inline;
 pub mod monomorphize;
 pub mod ownership;
@@ -307,7 +306,6 @@ pub mod family {
 /// Stable names for checkpoints defined by their producing passes.
 pub mod stage {
     pub use super::defunctionalize::Defunctionalized;
-    pub use super::if_over_producer::ConditionalProducersCanonicalized;
     pub use super::inline::{GeneratedLambdasFolded, UnifiedHelpersInlined};
     pub use super::monomorphize::{Monomorphized, TypesSpecialized};
     pub use super::ownership::{OwnershipApplied, OwnershipValidated};
@@ -322,7 +320,6 @@ pub mod stage {
 // Named consuming TLC transitions. The stage types remain visible through
 // `tlc::stage`, while callers compose the pipeline as ordinary functions.
 pub use defunctionalize::defunctionalize;
-pub use if_over_producer::canonicalize_conditional_producers;
 pub use inline::{fold_generated_lambdas, inline_unified_helpers};
 pub use monomorphize::{monomorphize, specialize_types};
 pub use ownership::{apply_ownership, validate_ownership};
