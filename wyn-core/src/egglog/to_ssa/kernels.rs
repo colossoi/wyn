@@ -230,6 +230,34 @@ fn element_local(
             return Ok(value);
         }
     }
+    // A stored boundary is already evaluated; distribute indexing only through
+    // unmaterialized choices and fields, preserving each arm's lexical scope.
+    if body.compiler.facts.access(source).is_none() {
+        if let Some((parent, field)) = body.compiler.facts.projection(source) {
+            if let Some(actual) = body.compiler.facts.source_field(parent, field)? {
+                if actual != source {
+                    return element(body, scope, plan, actual, indices, cache);
+                }
+            }
+        }
+        if let Some((yes, no)) = body.compiler.facts.branches(source) {
+            let (Some(condition), Some(a), Some(b)) = (
+                body.compiler.facts.branch_condition(source),
+                body.compiler.facts.result(yes),
+                body.compiler.facts.result(no),
+            ) else {
+                return Err(error("array choice has incomplete regions"));
+            };
+            let condition = body.value(scope, condition)?;
+            return body.branch(
+                scope,
+                condition,
+                |body| element(body, yes, plan, a, indices, &mut cache.clone()),
+                |body| element(body, no, plan, b, indices, &mut cache.clone()),
+                Some((yes, no)),
+            );
+        }
+    }
     let mut value = body.value(scope, source)?;
     for index in indices {
         value = body.index(value, index.clone())?;

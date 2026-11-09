@@ -1,7 +1,8 @@
 //! Transfers and predicates for the shared dispatch-loop representation.
-use super::super::{error, Body, OptimizeError, Typed};
-use super::invocation;
+use super::super::{error, Body, OptimizeError};
+use super::{element, invocation};
 use crate::egglog::query::Query;
+use crate::LookupMap;
 use egglog_engine::Value;
 
 pub(super) fn emit(
@@ -39,6 +40,9 @@ pub(super) fn emit(
         body.context =
             body.compiler.facts.context(iteration).ok_or_else(|| error("loop step context missing"))?;
     }
+    let Some(plan) = body.compiler.facts.group(operation) else {
+        return Err(error("loop transfer has no selected body"));
+    };
     let carries = body.compiler.facts.loop_carries(operation)?;
     let (start, stride) = invocation(body, width)?;
     for carry in carries {
@@ -59,7 +63,14 @@ pub(super) fn emit(
         };
         body.counted(start.clone(), length, stride.clone(), vec![], |body, index, _| {
             let item = if carry.array {
-                element(body, value_scope, value, index.clone())?
+                element(
+                    body,
+                    value_scope,
+                    plan,
+                    value,
+                    std::slice::from_ref(&index),
+                    &mut LookupMap::default(),
+                )?
             } else {
                 body.value(value_scope, value)?
             };
@@ -68,56 +79,4 @@ pub(super) fn emit(
         })?;
     }
     Ok(())
-}
-
-// Transfer an array choice elementwise. A carried branch must not first copy
-// its entire fixed array into each invocation's private storage.
-fn element(
-    body: &mut Body<'_, '_, '_>,
-    scope: Value,
-    source: Value,
-    index: Typed,
-) -> Result<Typed, OptimizeError> {
-    if body.compiler.facts.contains("ArrayStreamProjection", (source,)) {
-        let (parent, field) = body
-            .compiler
-            .facts
-            .projection(source)
-            .ok_or_else(|| error("array stream projection has no parent"))?;
-        let value = element(body, scope, parent, index)?;
-        return body.field(value, field);
-    }
-    if body.compiler.facts.access(source).is_some() {
-        let value = body.value(scope, source)?;
-        return body.index(value, index);
-    }
-    if let Some(actual) = body.compiler.facts.alias(source) {
-        return element(body, scope, actual, index);
-    }
-    if let Some((parent, field)) = body.compiler.facts.projection(source) {
-        if let Some(actual) = body.compiler.facts.source_field(parent, field)? {
-            if actual != source {
-                return element(body, scope, actual, index);
-            }
-        }
-    }
-    if let Some((yes, no)) = body.compiler.facts.branches(source) {
-        let condition = body
-            .compiler
-            .facts
-            .branch_condition(source)
-            .ok_or_else(|| error("array choice condition missing"))?;
-        let condition = body.value(scope, condition)?;
-        let a = body.compiler.facts.result(yes).ok_or_else(|| error("array choice result missing"))?;
-        let b = body.compiler.facts.result(no).ok_or_else(|| error("array choice result missing"))?;
-        return body.branch(
-            scope,
-            condition,
-            |body| element(body, yes, a, index.clone()),
-            |body| element(body, no, b, index.clone()),
-            Some((yes, no)),
-        );
-    }
-    let value = body.value(scope, source)?;
-    body.index(value, index)
 }
