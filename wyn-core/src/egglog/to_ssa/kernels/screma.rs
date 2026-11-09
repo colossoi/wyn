@@ -5,9 +5,7 @@ use super::{invocation, updates, write_arrays};
 use crate::builtins::catalog;
 use crate::egglog::facts::{AccumulatorComponent, FoldOutput, OutputAction};
 use crate::egglog::query::Query;
-use crate::op::BinaryOperator::{
-    Add, Divide, Equal, Greater, GreaterEqual, Less, Multiply, Remainder, Subtract,
-};
+use crate::op::BinaryOperator::{Add, Divide, Equal, Greater, Less, Multiply, Remainder, Subtract};
 use crate::op::OpTag;
 use crate::types::{self, Type, TypeExt, TypeName};
 use crate::LookupMap;
@@ -228,16 +226,15 @@ pub(super) fn screma(
                     } else {
                         None
                     };
-                    let (prefixes, totals) = if !has_scans {
-                        (
-                            Vec::new(),
-                            workgroup_reduce(body, scope, &reductions, values, lane.clone(), phase_width)?,
-                        )
+                    let mode = if !has_scans {
+                        CollectiveOutput::Totals
+                    } else if phase == "combine" {
+                        CollectiveOutput::Exclusive
                     } else {
-                        let (prefixes, offsets, totals) =
-                            workgroup_scan(body, scope, &reductions, values, lane.clone(), phase_width)?;
-                        (if phase == "combine" { offsets } else { prefixes }, totals)
+                        CollectiveOutput::Inclusive
                     };
+                    let (prefixes, totals) =
+                        workgroup_fold(body, scope, &reductions, values, lane.clone(), phase_width, mode)?;
                     body.when(valid, |body| {
                         let mut cache = LookupMap::default();
                         for (i, (accumulator, prefix)) in
@@ -389,58 +386,6 @@ fn write_output(
     write_arrays(body, scope, owner, plan, results, &[index], cache)
 }
 
-/// Reduce adjacent contiguous ranges in source order. A single shared bank is
-/// sufficient: a round's right-hand ranges never write during that round.
-fn workgroup_reduce(
-    body: &mut Body<'_, '_, '_>,
-    scope: Value,
-    accumulators: &[&Reduction],
-    values: Vec<Typed>,
-    lane: Typed,
-    width: u32,
-) -> Result<Vec<Typed>, OptimizeError> {
-    if accumulators.is_empty() {
-        return Ok(Vec::new());
-    }
-    if body.subgroup.is_some() && accumulators.iter().all(|a| a.subgroup_addition(body)) {
-        let (_, _, totals) = body.subgroup_scan(values, width)?;
-        return Ok(totals);
-    }
-    let mut shared = Vec::new();
-    for value in values {
-        let buffer = CollectiveStorage::new(body, width, &value.ty)?;
-        buffer.store(body, lane.clone(), value)?;
-        shared.push(buffer);
-    }
-    body.workgroup_barrier()?;
-    for bit in 0..width.trailing_zeros() {
-        let remainder = body.binary(Remainder, lane.clone(), Body::number(2 << bit))?;
-        let active = body.binary(Equal, remainder, Body::number(0))?;
-        body.when(active, |body| {
-            let right = body.binary(Add, lane.clone(), Body::number(1 << bit))?;
-            for (i, buffer) in shared.iter().enumerate() {
-                let a = buffer.load(body, lane.clone())?;
-                let b = buffer.load(body, right.clone())?;
-                let value = accumulators[i].combine(body, scope, a, b)?;
-                buffer.store(body, lane.clone(), value)?;
-            }
-            Ok(())
-        })?;
-        body.workgroup_barrier()?;
-    }
-    let totals = shared
-        .into_iter()
-        .zip(accumulators)
-        .map(|(buffer, accumulator)| {
-            let total = buffer.load(body, Body::number(0))?;
-            body.cast(total, &accumulator.neutral.ty)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    // Every lane reads the total before the next tile overwrites shared storage.
-    body.workgroup_barrier()?;
-    Ok(totals)
-}
-
 enum CollectiveStorage {
     Lanes(Typed),
     Columns(Type, Vec<CollectiveStorage>),
@@ -490,23 +435,46 @@ impl CollectiveStorage {
     }
 }
 
-fn workgroup_scan(
+#[derive(Clone, Copy)]
+enum CollectiveOutput {
+    Totals,
+    Exclusive,
+    Inclusive,
+}
+
+/// Ordered tree reduction, followed by a Blelloch downsweep only for prefixes.
+/// Every round writes disjoint nodes, so both passes share one storage bank.
+fn workgroup_fold(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
     accumulators: &[&Reduction],
-    mut values: Vec<Typed>,
+    values: Vec<Typed>,
     lane: Typed,
     width: u32,
-) -> Result<(Vec<Typed>, Vec<Typed>, Vec<Typed>), OptimizeError> {
-    if width == 1 {
-        return Ok((
-            values.clone(),
-            accumulators.iter().map(|a| a.neutral.clone()).collect(),
-            values,
-        ));
+    mode: CollectiveOutput,
+) -> Result<(Vec<Typed>, Vec<Typed>), OptimizeError> {
+    if accumulators.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
     }
-    if body.subgroup.is_some() && accumulators.iter().all(|a| a.subgroup_addition(body)) {
-        return body.subgroup_scan(values, width);
+    if width == 1 || (body.subgroup.is_some() && accumulators.iter().all(|a| a.subgroup_addition(body))) {
+        let (inclusive, exclusive, totals) = if width == 1 {
+            (
+                values.clone(),
+                accumulators.iter().map(|a| a.neutral.clone()).collect(),
+                values,
+            )
+        } else {
+            body.subgroup_scan(values, width)?
+        };
+        let prefixes = match mode {
+            CollectiveOutput::Totals => Vec::new(),
+            CollectiveOutput::Exclusive => exclusive,
+            CollectiveOutput::Inclusive => inclusive,
+        };
+        return Ok((prefixes, totals));
+    }
+    if !width.is_power_of_two() {
+        return Err(error("collective width must be a positive power of two"));
     }
     let mut shared = Vec::new();
     for value in &values {
@@ -515,51 +483,67 @@ fn workgroup_scan(
         shared.push(buffer);
     }
     body.workgroup_barrier()?;
+    let end = body.binary(Add, lane.clone(), Body::number(1))?;
     for bit in 0..width.trailing_zeros() {
-        let distance = Body::number(1 << bit);
-        let valid = body.binary(GreaterEqual, lane.clone(), distance.clone())?;
-        for (i, value) in values.iter_mut().enumerate() {
-            *value = body.branch(
-                scope,
-                valid.clone(),
-                |body| {
-                    let index = body.binary(Subtract, lane.clone(), distance.clone())?;
-                    let peer = shared[i].load(body, index)?;
-                    accumulators[i].combine(body, scope, peer, value.clone())
-                },
-                |_| Ok(value.clone()),
-                None,
-            )?;
-        }
-        // Finish all reads before reusing the same shared bank for the next step.
-        body.workgroup_barrier()?;
-        for (buffer, value) in shared.iter().zip(&values) {
-            buffer.store(body, lane.clone(), value.clone())?;
-        }
+        let remainder = body.binary(Remainder, end.clone(), Body::number(2 << bit))?;
+        let active = body.binary(Equal, remainder, Body::number(0))?;
+        body.when(active, |body| {
+            let left = body.binary(Subtract, lane.clone(), Body::number(1 << bit))?;
+            for (buffer, accumulator) in shared.iter().zip(accumulators) {
+                let a = buffer.load(body, left.clone())?;
+                let b = buffer.load(body, lane.clone())?;
+                let value = accumulator.combine(body, scope, a, b)?;
+                buffer.store(body, lane.clone(), value)?;
+            }
+            Ok(())
+        })?;
         body.workgroup_barrier()?;
     }
-    let after_first = body.binary(Greater, lane.clone(), Body::number(0))?;
-    let mut exclusive = Vec::new();
     let mut totals = Vec::new();
-    for (i, buffer) in shared.iter().enumerate() {
-        let neutral = &accumulators[i].neutral;
-        exclusive.push(body.branch(
-            scope,
-            after_first.clone(),
-            |body| {
-                let previous = body.binary(Subtract, lane.clone(), Body::number(1))?;
-                let value = buffer.load(body, previous)?;
-                body.cast(value, &neutral.ty)
-            },
-            |_| Ok(neutral.clone()),
-            None,
-        )?);
+    for (buffer, accumulator) in shared.iter().zip(accumulators) {
         let value = buffer.load(body, Body::number(width - 1))?;
-        totals.push(body.cast(value, &neutral.ty)?);
+        totals.push(body.cast(value, &accumulator.neutral.ty)?);
     }
-    // All lanes must finish reading before the next tile reuses shared storage.
+    // Capture totals in every lane before resetting the root or starting a new tile.
     body.workgroup_barrier()?;
-    Ok((values, exclusive, totals))
+    if matches!(mode, CollectiveOutput::Totals) {
+        return Ok((Vec::new(), totals));
+    }
+    let last = body.binary(Equal, end.clone(), Body::number(width))?;
+    body.when(last, |body| {
+        for (buffer, accumulator) in shared.iter().zip(accumulators) {
+            buffer.store(body, lane.clone(), accumulator.neutral.clone())?;
+        }
+        Ok(())
+    })?;
+    body.workgroup_barrier()?;
+    for bit in (0..width.trailing_zeros()).rev() {
+        let remainder = body.binary(Remainder, end.clone(), Body::number(2 << bit))?;
+        let active = body.binary(Equal, remainder, Body::number(0))?;
+        body.when(active, |body| {
+            let left = body.binary(Subtract, lane.clone(), Body::number(1 << bit))?;
+            for (buffer, accumulator) in shared.iter().zip(accumulators) {
+                let left_total = buffer.load(body, left.clone())?;
+                let prefix = buffer.load(body, lane.clone())?;
+                let right_prefix = accumulator.combine(body, scope, prefix.clone(), left_total)?;
+                buffer.store(body, left.clone(), prefix)?;
+                buffer.store(body, lane.clone(), right_prefix)?;
+            }
+            Ok(())
+        })?;
+        body.workgroup_barrier()?;
+    }
+    let mut prefixes = Vec::new();
+    for ((buffer, accumulator), value) in shared.iter().zip(accumulators).zip(values) {
+        let prefix = buffer.load(body, lane.clone())?;
+        prefixes.push(match mode {
+            CollectiveOutput::Inclusive => accumulator.combine(body, scope, prefix, value)?,
+            CollectiveOutput::Exclusive => body.cast(prefix, &accumulator.neutral.ty)?,
+            CollectiveOutput::Totals => unreachable!("totals returned before the downsweep"),
+        });
+    }
+    body.workgroup_barrier()?;
+    Ok((prefixes, totals))
 }
 
 /// One fold has one contribution expression and one reducer.
