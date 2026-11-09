@@ -188,13 +188,14 @@ pub(super) fn screma(
                                 values.push(value);
                             }
                             if !has_scans && !totals_only && phase != "combine" {
-                                write_arrays(
+                                write_output(
                                     body,
                                     scope,
                                     phase_owner,
+                                    phase,
                                     plan,
                                     results,
-                                    &[index.clone()],
+                                    index.clone(),
                                     &mut cache,
                                 )?;
                             }
@@ -370,10 +371,17 @@ fn write_output(
     cache: &mut LookupMap<Value, Typed>,
 ) -> Result<(), OptimizeError> {
     if matches!(body.compiler.facts.action(plan)?, OutputAction::Updates) {
-        updates::update(body, scope, owner, phase, plan, &[index], cache)
-    } else {
-        write_arrays(body, scope, owner, plan, results, &[index], cache)
+        updates::update(
+            body,
+            scope,
+            owner,
+            phase,
+            plan,
+            std::slice::from_ref(&index),
+            cache,
+        )?;
     }
+    write_arrays(body, scope, owner, plan, results, &[index], cache)
 }
 
 /// Reduce adjacent contiguous ranges in source order. A single shared bank is

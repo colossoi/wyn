@@ -1,16 +1,8 @@
 //! Row-major domains and input indexing; the last axis varies fastest.
 
 use super::super::{Body, OptimizeError, Typed};
-use crate::op::BinaryOperator::{Divide, Multiply, Remainder};
+use crate::op::BinaryOperator::{Divide, Remainder};
 use crate::types;
-
-pub fn length(body: &mut Body<'_, '_, '_>, dimensions: &[Typed]) -> Result<Typed, OptimizeError> {
-    let mut length = body.literal(1, &types::i32())?;
-    for dimension in dimensions {
-        length = body.binary(Multiply, length, dimension.clone())?;
-    }
-    Ok(length)
-}
 
 /// Call only inside the domain's bounds, so an empty dimension is never divided by.
 pub fn decode(

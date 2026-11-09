@@ -155,12 +155,11 @@
 ; Maps load before storing each element. Scans preserve their input through
 ; chunks and combine, then write the final output in the offsets phase.
 (function ReuseWriter (OperationKey) StageKey :no-merge)
-(rule ((= (Plan op) (Elements)) (FirstPhase op writer))
-      ((set (ReuseWriter op) writer)) :ruleset reuse)
-(rule ((= (Plan op) (Prefixes)) (LastPhase op writer))
-      ((set (ReuseWriter op) writer)) :ruleset reuse)
-(rule ((= (Plan op) (Updates)) (StoreUpdates op) (LastPhase op writer))
-      ((set (ReuseWriter op) writer)) :ruleset reuse)
+(relation ReusableOutputs (OperationKey))
+(rule ((Current group plan) (= (PlanAction plan) (Publish)) (= op (Owner plan))) ((ReusableOutputs op)) :ruleset reuse)
+(rule ((StoreUpdates op)) ((ReusableOutputs op)) :ruleset reuse)
+(rule ((ReusableOutputs op) (= name (ElementPhase op)) (Phase (Stage op name) region))
+      ((set (ReuseWriter op) (Stage op name))) :ruleset reuse)
 ; Ownership is a property of the input value, not the source operation whose
 ; output may disappear during fusion. Final shape and reads are checked here.
 (function ReuseBlocked (StageKey SourceValue) bool :merge (or old new))
@@ -232,7 +231,7 @@
       ((set (ReuseBlocked writer e) true)) :ruleset reuse)
 ; Captures and shifted input aliases may read elements already overwritten.
 (rule ((ReuseAlias (Stage op name) e alias)
-       (= recipe (Plan op)) (!= recipe (Updates))
+       (= plan (SelectedPlan op)) (= (PlanAction plan) (Publish))
        (Operand op "environment" capture) (References capture (Contents alias)))
       ((set (ReuseBlocked (Stage op name) e) true)) :ruleset reuse)
 (rule ((ReuseAlias (Stage op name) e alias)

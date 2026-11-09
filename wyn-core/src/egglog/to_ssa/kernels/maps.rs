@@ -1,6 +1,7 @@
 //! Lower the selected map traversal, retaining nested output storage.
 use super::super::{error, Body, OptimizeError};
-use super::{coordinates, emit_traversal, invocation, workgroup};
+use super::{coordinates, emit_traversal, iteration, updates, workgroup};
+use crate::egglog::facts::OutputAction;
 use crate::egglog::query::Query;
 use crate::op::BinaryOperator;
 use crate::types::TypeExt;
@@ -11,7 +12,9 @@ pub(super) fn emit(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
     owner: Value,
+    phase: &str,
     width: u32,
+    plan: Value,
     results: &[(String, i64, Value)],
 ) -> Result<(), OptimizeError> {
     let group = body.has_workgroup_scope("MapExecution", owner);
@@ -29,7 +32,11 @@ pub(super) fn emit(
         return Err(error("map launch domain missing"));
     };
     let n = body.extent(scope, extent)?;
-    let (start, step) = if group { workgroup(body)? } else { invocation(body, width)? };
+    let (start, step) = if group && !matches!(phase, "ordered" | "local") {
+        workgroup(body)?
+    } else {
+        iteration(body, phase, width)?
+    };
     body.counted(start, n, step, vec![], |body, index, _| {
         let mut cache = LookupMap::default();
         let indices = if dimensions.is_empty() {
@@ -104,6 +111,9 @@ pub(super) fn emit(
                     }
                 },
             )?;
+        }
+        if matches!(body.compiler.facts.action(plan)?, OutputAction::Updates) {
+            updates::update(body, scope, owner, phase, plan, &indices, &mut cache)?;
         }
         Ok(vec![])
     })?;

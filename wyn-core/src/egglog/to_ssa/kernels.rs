@@ -2,7 +2,6 @@
 
 use super::{error, Body, OptimizeError, Typed};
 use crate::builtins::catalog;
-use crate::egglog::facts::OutputAction;
 use crate::op::{BinaryOperator, OpTag, PureViewSource};
 use crate::types::{self, Type, TypeName};
 use crate::LookupMap;
@@ -78,22 +77,14 @@ pub(super) fn emit(
     };
     let results = body.compiler.facts.results(plan)?;
     match phase {
-        "elements" | "segments" => maps::emit(body, scope, phase_owner, phase_width, &results),
+        "elements" | "segments" => maps::emit(body, scope, phase_owner, phase, phase_width, plan, &results),
         "initialize" => updates::initialize(body, scope, phase_owner, phase, phase_width),
-        "updates" => updates::emit(body, scope, phase_owner, phase, phase_width, plan),
         "ordered" | "local" => {
             updates::initialize(body, scope, phase_owner, phase, phase_width)?;
-            if !body.compiler.facts.accumulators(plan)?.is_empty()
-                || body.compiler.facts.contains("ScremaPlan", (plan,))
-            {
-                return screma(body, scope, phase_owner, phase, phase_width, plan, &results);
-            }
-            match body.compiler.facts.action(plan)? {
-                OutputAction::Pack { .. } => {
-                    screma(body, scope, phase_owner, phase, phase_width, plan, &results)
-                }
-                OutputAction::Updates => updates::emit(body, scope, phase_owner, phase, phase_width, plan),
-                OutputAction::Publish => Err(error("parallel output has no selected loop")),
+            if body.compiler.facts.accumulators(plan)?.is_empty() {
+                maps::emit(body, scope, phase_owner, phase, phase_width, plan, &results)
+            } else {
+                screma(body, scope, phase_owner, phase, phase_width, plan, &results)
             }
         }
         "compact" => screma(body, scope, phase_owner, phase, phase_width, plan, &results),
@@ -101,6 +92,18 @@ pub(super) fn emit(
             screma(body, scope, phase_owner, phase, phase_width, plan, &results)
         }
         _ => Err(error(format!("scheduled {} kernel is not implemented", phase))),
+    }
+}
+
+fn iteration(
+    body: &mut Body<'_, '_, '_>,
+    phase: &str,
+    width: u32,
+) -> Result<(Typed, Typed), OptimizeError> {
+    match phase {
+        "ordered" => Ok((Body::number(0), Body::number(1))),
+        "local" => Ok((body.local_id()?, Body::number(width))),
+        _ => invocation(body, width),
     }
 }
 

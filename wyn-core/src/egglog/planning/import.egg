@@ -17,8 +17,8 @@
 (relation AuthoredTopology ())
 (relation PlannedOperation (OperationKey OperationKey FusionPlan RegionKey))
 (rule ((PlannedOperation original owner plan region) (= destination (SourceDestination original))
-       (= totals (PlanTotals plan)) (= n (ResultCount totals)))
-      ((set (DestinationSlot owner) n)) :ruleset planning-import)
+       (= totals (ResultCount (PlanTotals plan))) (= arrays (ResultCount (PlanArrays plan))))
+      ((set (DestinationSlot owner) (+ totals arrays))) :ruleset planning-import)
 (rule ((Current group plan) (= owner (Owner plan)) (= region (PlanScope plan)) (PlanMember plan original))
       ((PlannedOperation original owner plan region) (set (OperationRegion owner) region)) :ruleset planning-import)
 
@@ -116,7 +116,7 @@
       ((set (ContainsCollective owner) true)) :ruleset planning-import)
 ; A pure map used only for its shape has no elements to publish. Keep its view
 ; extent, but do not create a dispatch for discarded scratch initializers.
-(rule ((Current group plan) (= owner (Owner plan)) (ScremaPlan plan) (SafePlan plan)
+(rule ((Current group plan) (= owner (Owner plan)) (= (PlanAction plan) (Publish)) (SafePlan plan)
        (= (HasScans plan) false) (= (HasReductions plan) false)
        (= (set-diff (set-diff (GroupUsesOf group) (GroupInternalUseMask group)) (GroupLengths group)) (set-empty)))
       ((set (ElideElements owner) true)) :ruleset planning-import)

@@ -157,9 +157,9 @@ fn radix_step_has_three_phases() {
         assert_eq!(
             phases,
             vec![
-                ("chunks".into(), "updates".into()),
-                ("combine".into(), "updates".into()),
-                ("offsets".into(), "updates".into())
+                ("chunks".into(), "elements".into()),
+                ("combine".into(), "elements".into()),
+                ("offsets".into(), "elements".into())
             ]
         );
     });
@@ -214,9 +214,9 @@ fn four_bit_radix_step_has_three_phases() {
         assert_eq!(
             phases,
             vec![
-                ("chunks".into(), "updates".into()),
-                ("combine".into(), "updates".into()),
-                ("offsets".into(), "updates".into())
+                ("chunks".into(), "elements".into()),
+                ("combine".into(), "elements".into()),
+                ("offsets".into(), "elements".into())
             ]
         );
     });
@@ -1276,7 +1276,7 @@ fn indexed_reducers_share_native_recognition_and_keep_cas_fallback() {
             );
             let plan = query.required("SelectedPlan", (operation,)).unwrap();
             let owner = query.required("Owner", (plan,)).unwrap();
-            assert!(query.enode("Updates", query.required("Plan", (owner,)).unwrap()).unwrap().is_some());
+            assert!(query.enode("Elements", query.required("Plan", (owner,)).unwrap()).unwrap().is_some());
         });
     }
 }
@@ -1398,9 +1398,12 @@ fn primitive_dispatch_recipes_publish_their_phase_widths_and_order() {
         (FilterShape (OperationId 3))
         (set (ParallelBodySafe (OperationId 3)) true)
         (set (OperationGrid (OperationId 3)) (FixedGrid 2 3 4))
-        (set (Plan (OperationId 4)) (Updates))
+        (set (Plan (OperationId 4)) (Elements))
         (set (ParallelBodySafe (OperationId 4)) true)
-        (set (InputDomain (OperationId 4)) (Fixed 5))
+        (set (IterationExtent (OperationId 4)) (Fixed 5))
+        (set (ElideElements (OperationId 4)) false)
+        (set (MapSegmented (OperationId 4)) false)
+        (set (MapExecution (OperationId 4)) (InvocationScope))
         (set (OperationGrid (OperationId 4)) (AutomaticGrid))
         (set (Plan (OperationId 5)) (Serial))
         (run-schedule (saturate schedule))
@@ -1412,8 +1415,8 @@ fn primitive_dispatch_recipes_publish_their_phase_widths_and_order() {
         (check (PhaseLink (OperationId 2) "combine" "offsets"))
         (check (= (Plan (OperationId 3)) (Compact)))
         (check (KernelPhase (OperationId 3) "compact" (Fixed 64) 64 (FixedGrid 1 1 1)))
-        (check (= (Plan (OperationId 4)) (Updates)))
-        (check (KernelPhase (OperationId 4) "updates" (Fixed 5) 64 (AutomaticGrid)))
+        (check (= (Plan (OperationId 4)) (Elements)))
+        (check (KernelPhase (OperationId 4) "elements" (Fixed 5) 64 (AutomaticGrid)))
         (check (= (Plan (OperationId 5)) (Serial)))
         (check (KernelPhase (OperationId 5) "ordered" (Fixed 1) 1 (FixedGrid 1 1 1)))
     "#,
@@ -1661,6 +1664,7 @@ fn output_coordinate_maps_accept_permutations_and_reject_overlapping_digits() {
 fn independent_update_scopes_share_a_loop_and_keep_distinct_exports() {
     for (source, count) in [
         ("entry main(xs:[4]i32) ([3]i32,[5]i32)=let da=[0,0,0] let db=[1,1,1,1,1] let a=reduce_by_index(da,(+),0,map(|x|x%3,xs),xs) let b=reduce_by_index(db,|a,b|a+b+1,0,map(|x|x%5,xs),xs) in (a,b)", 2),
+        ("entry main(xs:[4]i32) ([4]i32,[3]i32,[3]i32)=let p=scan((+),0,xs) let da=[1,1,1] let db=[2,2,2] let a=reduce_by_index(da,(+),0,map(|x|x%3,p),p) let b=reduce_by_index(db,|a,b|a+b+1,0,map(|x|x%3,p),p) in (p,map(|x|2*x,a),b)", 2),
         ("entry main() ([2]u32,u32,[2]u32,u32)=let da=[[-1,-1],[-1,-1]] let db=[[-2],[-2]] let (a,ac,ao)=bucket_scatter_2d(da,[[(0,10),(0,11),(1,20)]]) let (b,bc,bo)=bucket_scatter_2d(db,[[(0,30),(0,31),(1,40)]]) in (ac,ao,bc,bo)", 6),
     ] {
         let tlc = compile_thru_tlc(source).unwrap();
@@ -1676,6 +1680,9 @@ fn independent_update_scopes_share_a_loop_and_keep_distinct_exports() {
             Ok(())
         }).unwrap();
         assert_eq!(scopes.len(), 1, "{source}");
+        for scan in operations(graph, "scan") {
+            assert_eq!(query.required("SelectedPlan", (scan,)).unwrap(), query.required("SelectedPlan", (scopes[0].0,)).unwrap());
+        }
         let scope = query.enode("WithUpdates", scopes[0].1).unwrap().unwrap();
         assert_eq!(graph.value_to_container::<VecContainer>(scope[0]).unwrap().data.len(), count);
         assert_eq!(graph.value_to_container::<VecContainer>(scope[1]).unwrap().data.len(), 2);

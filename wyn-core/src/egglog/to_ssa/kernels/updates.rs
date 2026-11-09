@@ -1,7 +1,7 @@
 //! Output actions share bounds checking and serial/atomic accumulation.
 use super::super::{builder_error, error, Body, OptimizeError, Typed};
 use super::contribution::Contribution;
-use super::{coordinates, invocation};
+use super::iteration;
 use crate::op::{BinaryOperator, OpTag};
 use crate::ssa::types::{AtomicOp, InstKind};
 use crate::types;
@@ -104,18 +104,6 @@ fn apply(
             })?;
             body.field(state, 0)
         }
-    }
-}
-
-fn iteration(
-    body: &mut Body<'_, '_, '_>,
-    phase: &str,
-    width: u32,
-) -> Result<(Typed, Typed), OptimizeError> {
-    match phase {
-        "ordered" => Ok((Body::number(0), Body::number(1))),
-        "local" => Ok((body.local_id()?, Body::number(width))),
-        _ => invocation(body, width),
     }
 }
 
@@ -271,7 +259,7 @@ fn capabilities(
             let Some(combine) = body.compiler.facts.enode("Combining", fields[2]) else {
                 return Err(error("invalid accumulator mode"));
             };
-            if phase == "updates" {
+            if phase != "ordered" {
                 let Some(op) = body.compiler.facts.atomic(combine[0]) else {
                     return Err(error("atomic update missing"));
                 };
@@ -319,38 +307,5 @@ pub(super) fn update(
             body.tuple(vec![])
         })?;
     }
-    Ok(())
-}
-
-pub(super) fn emit(
-    body: &mut Body<'_, '_, '_>,
-    scope: Value,
-    owner: Value,
-    phase: &str,
-    width: u32,
-    plan: Value,
-) -> Result<(), OptimizeError> {
-    let dimensions = body
-        .compiler
-        .facts
-        .iteration_dimensions(owner)?
-        .into_iter()
-        .map(|extent| body.extent(scope, extent))
-        .collect::<Result<Vec<_>, _>>()?;
-    let n = coordinates::length(body, &dimensions)?;
-    let (start, step) = iteration(body, phase, width)?;
-    body.counted(start, n, step, vec![], |body, index, _| {
-        let coordinates = coordinates::decode(body, &dimensions, index)?;
-        update(
-            body,
-            scope,
-            owner,
-            phase,
-            plan,
-            &coordinates,
-            &mut LookupMap::default(),
-        )?;
-        Ok(vec![])
-    })?;
     Ok(())
 }

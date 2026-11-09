@@ -116,8 +116,6 @@
 ; Map selection and ranked indexed operations publish the same iteration domain.
 ; InputDomain remains the original traversal extent, before map flattening.
 (ruleset iteration-domains)
-(rule ((= plan (SelectedPlan owner)) (= updates (PlanUpdates plan)) (= shape (PlanDomain plan)))
-      ((set (IterationShape owner) shape)) :ruleset iteration-domains)
 (rule ((= shape (IterationShape owner)) (= axes (ShapeDimensions shape)) (= extent (ShapeExtent shape)))
       ((set (IterationRank owner) (vec-length axes)) (set (IterationExtent owner) extent)) :ruleset iteration-domains)
 

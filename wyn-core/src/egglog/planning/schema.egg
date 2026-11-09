@@ -213,7 +213,7 @@
 (ruleset order-emit)
 
 (datatype AtomicUpdate (AtomicAdd) (AtomicAnd) (AtomicOr) (AtomicXor) (AtomicCas))
-(datatype Recipe (Elements) (Totals) (Prefixes) (Compact) (Updates) (Serial))
+(datatype Recipe (Elements) (Totals) (Prefixes) (Compact) (Serial))
 (relation FilterShape (OperationKey))
 
 ; Result indices include preceding totals; the destination's output buffer slot is 0.
@@ -250,6 +250,9 @@
 (function SelectedCollectiveGroups (OperationKey) i64 :no-merge)
 (function CollectiveGroups (OperationKey) i64 :no-merge)
 (relation PhaseEnds (OperationKey String String))
+(datatype InitializationPlan (NoInitialization) (Initialize Extent))
+(relation ParallelPhaseEnds (OperationKey String String))
+(function InitializationOf (OperationKey) InitializationPlan :no-merge)
 (relation PhaseLink (OperationKey String String))
 
 ; Device-local outputs that require storage.
@@ -264,6 +267,5 @@
 (function ParallelOutput (i64) bool :merge (or old new))
 (function FinishWidth (i64) i64 :merge (max old new))
 
-(datatype InitializationPlan (NoInitialization) (Initialize Extent))
 (function ArrayInitialization (ValueKey) InitializationPlan :no-merge)
 (function UpdateInitialization (OperationKey i64) InitializationPlan :no-merge)
