@@ -1,0 +1,25 @@
+; Executable parallel loops. Results and the output action are one immutable
+; value; fusion constructs a new loop rather than changing independent flags.
+(datatype ResultTree
+  (NoResults)
+  (OneResult SourceValue TypeKey)
+  (JoinResults ResultTree ResultTree))
+(datatype OutputAction
+  (Publish)
+  (Pack OperationKey SourceValue)
+  (Write OperationKey SourceValue)
+  (Accumulate OperationKey SourceValue SourceValue SourceValue)
+  (Reserve OperationKey SourceValue))
+(datatype ParallelBody (ScalarBody) (ParallelLoop OperationKey ResultTree ResultTree ResultTree OutputAction))
+(function PlanBody (FusionPlan) ParallelBody :no-merge)
+(function PlanTotals (FusionPlan) ResultTree :no-merge)
+(function PlanArrays (FusionPlan) ResultTree :no-merge)
+(function PlanScans (FusionPlan) ResultTree :no-merge)
+(function PlanDomain (FusionPlan) OperationKey :no-merge)
+(function PlanAction (FusionPlan) OutputAction :no-merge)
+(function PlanMapping (OperationKey) bool :no-merge)
+
+(datatype ResultBinding (BindResult SourceValue SourceValue))
+(sort ResultBindings (Set ResultBinding))
+; Selection can only see a complete body and a frozen set of substitutions.
+(datatype Replacement (ReplaceBody ParallelBody ResultBindings))

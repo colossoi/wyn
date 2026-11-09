@@ -18,6 +18,10 @@ pub(super) fn new_graph() -> Result<EGraph, OptimizeError> {
 
 pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
     let _timing = span("egglog fusion");
+    graph.parse_and_run_program(
+        Some("parallel schema".into()),
+        include_str!("../parallel/schema.egg"),
+    )?;
     let rules = time("egglog fusion / parse rules", || {
         parse_program("fusion.egg", include_str!("fusion.egg"))
     })?;
@@ -28,7 +32,7 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "(run-schedule (saturate source-fusion))",
     )?)?;
     time("egglog fusion / run schedule", || {
-        graph.parse_and_run_program(None, "(PlanningRound 0) (run-schedule (saturate (seq (saturate fusion-dependencies) (saturate fusion-paths) (saturate fusion-counts) (saturate fusion-candidates) (saturate fusion-select) fusion-choose (saturate fusion-record) (saturate fusion-commit) fusion-clear-candidates fusion-clear-paths fusion-union fusion-clear)))")
+        graph.parse_and_run_program(None, "(PlanningRound 0) (run-schedule (saturate (seq (saturate fusion-dependencies) (saturate fusion-paths) (saturate fusion-counts) (saturate fusion-candidates) (saturate fusion-replacements) (saturate fusion-select) fusion-choose (saturate fusion-commit) fusion-clear-candidates fusion-clear-paths fusion-union fusion-clear)))")
     })?;
     graph.run_program(parse_program(
         "fusion signatures",
