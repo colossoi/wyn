@@ -112,7 +112,7 @@
 ; lane cannot evaluate a trapping consumer or an out-of-bounds update.
 (sort Contribution)
 (sort Contributions (Vec Contribution))
-(constructor ElementAt (SourceValue) Contribution)
+(constructor ElementAt (SourceValue IndexMap) Contribution)
 (constructor ApplyElement (SourceValue RegionKey Contributions) Contribution)
 (constructor SelectElement (Contribution Contribution) Contribution)
 (constructor TupleElements (Contributions) Contribution)
@@ -121,10 +121,10 @@
 (function PlanFold (FusionPlan SourceValue) Fold :no-merge)
 (function StreamInput (FusionPlan SourceValue) Contribution :no-merge)
 (rule ((PlanMember plan op) (= input (SourceInput op i)) (= (PlanInternal plan input) false))
-      ((set (StreamInput plan input) (ElementAt input))) :ruleset fusion-signatures)
+      ((set (StreamInput plan input) (ElementAt input (vec-of 0)))) :ruleset fusion-signatures)
 (rule ((PlanMember plan op) (= input (SourceInput op i)) (= (PlanInternal plan input) true)
        (= origin (SourceValueOperation input)) (= (SourceOperation origin) (OperationInfo r kind)) (!= kind "filter") (!= kind "map"))
-      ((set (StreamInput plan input) (ElementAt input))) :ruleset fusion-signatures)
+      ((set (StreamInput plan input) (ElementAt input (vec-of 0)))) :ruleset fusion-signatures)
 (rule ((PlanMember plan op) (= input (SourceInput op i)) (= (PlanInternal plan input) true)
        (= filter (SourceValueOperation input)) (= (SourceOperation filter) (OperationInfo r "filter"))
        (= source (SourceInput filter 0)) (= element (StreamInput plan source))
@@ -177,7 +177,7 @@
        (= value (SourceOperationValue op)) (= arguments (StreamArguments plan inputs (vec-length inputs))))
       ((set (StreamInput plan value) (ApplyElement value body arguments))) :ruleset fusion-signatures)
 (rule ((PlanMember plan op) (= input (SourceInput op i)) (= (SourceHasOperation input) false))
-      ((set (StreamInput plan input) (ElementAt input))) :ruleset fusion-signatures)
+      ((set (StreamInput plan input) (ElementAt input (vec-of 0)))) :ruleset fusion-signatures)
 
 ; Updates consume one guarded key/value expression. The combiner is independent
 ; of how that expression was produced or fused.
@@ -197,3 +197,16 @@
 (rule ((Current group plan) (= (PlanAction plan) (Pack op input))
        (= element (StreamInput plan input)) (= body (SourceOperatorBody op)) (= predicate (SourceResult body)))
       ((set (PackingContribution plan) (TupleElements (vec-of (ApplyElement predicate body (vec-of element)) element)))) :ruleset fusion-signatures)
+
+; Operand indexing belongs to the expression, including broadcast operands.
+(function MappedArguments (SourceArguments IndexMaps i64) Contributions :no-merge)
+(rule ((= (OperatorDefinition op) (DefinedIn scope (ReserveOperator body destination inputs rank maps))))
+      ((set (MappedArguments inputs maps 0) (vec-of))) :ruleset fusion-signatures)
+(rule ((= arguments (MappedArguments inputs maps i)) (< i (vec-length inputs)))
+      ((set (MappedArguments inputs maps (+ i 1))
+            (vec-push arguments (ElementAt (vec-get inputs i) (vec-get maps i))))) :ruleset fusion-signatures)
+(function ReserveContribution (FusionPlan) Contribution :no-merge)
+(rule ((= (PlanAction plan) (Reserve op destination body))
+       (= (OperatorDefinition op) (DefinedIn scope (ReserveOperator body destination inputs rank maps)))
+       (= arguments (MappedArguments inputs maps (vec-length inputs))) (= result (SourceResult body)))
+      ((set (ReserveContribution plan) (ApplyElement result body arguments))) :ruleset fusion-signatures)

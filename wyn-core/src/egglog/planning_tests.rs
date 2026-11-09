@@ -836,7 +836,13 @@ entry case_1(dest:*[2][2]i32) ([2][2]i32,[2]u32,u32)=
     .unwrap();
     let program = selected(&tlc);
     let mut prepared = super::super::prepare_host(program).unwrap();
-    for table in ["SourceDomainAxis", "SourceDomainRank", "PlanDomain"] {
+    for table in [
+        "SourceDomainAxis",
+        "SourceDomainRank",
+        "PlanDomain",
+        "SourceInputMap",
+        "OperatorInputs",
+    ] {
         prepared.program.graph.clear_function(table).unwrap();
     }
     super::super::to_ssa::lower(&prepared.program, CodegenTarget::Wgsl).unwrap();

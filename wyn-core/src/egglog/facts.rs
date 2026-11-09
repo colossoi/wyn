@@ -144,24 +144,6 @@ impl<'a, 'source> Facts<'a, 'source> {
         let shape = query.required("IterationShape", (operation,))?;
         self.vector(query.required("ShapeDimensions", (shape,))?)
     }
-    pub fn domain_shape(&self, operation: Value) -> Result<(Vec<Value>, Vec<Vec<usize>>), OptimizeError> {
-        let dimensions = self.iteration_dimensions(operation)?;
-        let rank = dimensions.len();
-        let mut inputs = Vec::new();
-        for (input, _) in self.inputs(operation)? {
-            let mapping = Query(&self.program.graph).required("SourceInputMap", (operation, input))?;
-            let mut axes = Vec::new();
-            for axis in self.vector(mapping)? {
-                let axis = usize::try_from(self.integer(axis)).map_err(|_| error("invalid domain axis"))?;
-                if axis >= rank {
-                    return Err(error("input axis exceeds its domain rank"));
-                }
-                axes.push(axis);
-            }
-            inputs.push(axes);
-        }
-        Ok((dimensions, inputs))
-    }
     pub fn definition_name(&self, scope: Value) -> Option<SymbolId> {
         let token = self.lookup("SourceDefinitionSymbol", (scope,))?;
         Some(*self.program.identities.symbols.resolve(self.program.graph.value_to_base::<i64>(token)))
@@ -325,10 +307,6 @@ impl<'a, 'source> Facts<'a, 'source> {
     pub fn slice(&self, value: Value) -> Option<(Value, Value, Value)> {
         let info = self.record("SourceSlice", "SliceInfo", (value,))?;
         Some((info[0], info[1], info[2]))
-    }
-    pub fn inputs(&self, operation: Value) -> Result<Vec<(i64, Value)>, OptimizeError> {
-        let inputs = Query(&self.program.graph).required("OperatorInputs", (operation,))?;
-        Ok(self.vector(inputs)?.into_iter().enumerate().map(|(i, value)| (i as i64, value)).collect())
     }
     pub fn bind_arguments<T>(
         &self,

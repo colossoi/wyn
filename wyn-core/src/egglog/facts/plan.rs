@@ -16,8 +16,7 @@ pub enum OutputAction {
         contribution: Value,
     },
     Reserve {
-        operation: Value,
-        callback: Value,
+        contribution: Value,
     },
 }
 
@@ -148,10 +147,9 @@ impl<'a, 'source> Facts<'a, 'source> {
                 contribution,
             });
         }
-        if let Some(f) = self.enode("Reserve", action) {
+        if self.enode("Reserve", action).is_some() {
             return Ok(OutputAction::Reserve {
-                operation: f[0],
-                callback: f[2],
+                contribution: Query(&self.program.graph).required("ReserveContribution", (plan,))?,
             });
         }
         Err(error("invalid parallel output action"))

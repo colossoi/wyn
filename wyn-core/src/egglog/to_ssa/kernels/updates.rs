@@ -231,7 +231,7 @@ pub(super) fn update(
     Contribution {
         scope,
         plan,
-        index: &index,
+        indices: std::slice::from_ref(&index),
         skipped: &|body, _| body.tuple(vec![]),
     }
     .emit(body, contribution, cache, &mut |body, _, pair| {
@@ -256,7 +256,7 @@ pub(super) fn buckets(
     width: u32,
     plan: Value,
 ) -> Result<(), OptimizeError> {
-    let OutputAction::Reserve { operation, callback } = body.compiler.facts.action(plan)? else {
+    let OutputAction::Reserve { contribution } = body.compiler.facts.action(plan)? else {
         return Err(error("reservation loop requires a bucket action"));
     };
     let output = destination(body, scope, owner)?;
@@ -284,8 +284,7 @@ pub(super) fn buckets(
             return Ok(());
         }
     }
-    let (dimensions, input_dimensions) = body.compiler.facts.domain_shape(owner)?;
-    let inputs = body.compiler.facts.inputs(operation)?;
+    let dimensions = body.compiler.facts.iteration_dimensions(owner)?;
     let dimensions =
         dimensions.iter().map(|&extent| body.extent(scope, extent)).collect::<Result<Vec<_>, _>>()?;
     let n = coordinates::length(body, &dimensions)?;
@@ -300,37 +299,50 @@ pub(super) fn buckets(
     let (start, step) = iteration(body, phase, width)?;
     body.counted(start, n, step, vec![], |body, index, _| {
         let coordinates = coordinates::decode(body, &dimensions, index)?;
-        let arguments =
-            coordinates::arguments(body, scope, plan, &inputs, &input_dimensions, &coordinates)?;
-        let emission = body.apply_region(scope, callback, arguments)?;
-        let active = body.field(emission.clone(), 0)?;
-        body.when(active, |body| {
-            let key = body.field(emission.clone(), 1)?;
-            let valid = in_bounds(body, key.clone(), length.clone())?;
-            let succeeded = body.branch(
-                scope,
-                valid,
-                |body| {
-                    let update = if serial { Update::Add } else { Update::Atomic(AtomicOp::Add) };
-                    let slot = apply(body, scope, counts.clone(), key.clone(), one.clone(), update)?;
-                    let room = body.binary(BinaryOperator::Less, slot.clone(), capacity.clone())?;
-                    body.when(room.clone(), |body| {
-                        let value = body.field(emission.clone(), 2)?;
-                        body.store_at(output.clone(), &[key, slot], value)
-                    })?;
-                    Ok(room)
-                },
-                |body| body.op(OpTag::Bool(false), vec![], types::bool_type()),
-                None,
-            )?;
-            let no = body.op(OpTag::Bool(false), vec![], types::bool_type())?;
-            let failed = body.binary(BinaryOperator::Equal, succeeded, no)?;
-            body.when(failed, |body| {
-                let update = if serial { Update::Store } else { Update::Atomic(AtomicOp::Exchange) };
-                apply(body, scope, overflow.clone(), zero.clone(), one.clone(), update)?;
-                Ok(())
-            })
-        })?;
+        Contribution {
+            scope,
+            plan,
+            indices: &coordinates,
+            skipped: &|body, _| body.tuple(vec![]),
+        }
+        .emit(
+            body,
+            contribution,
+            &mut LookupMap::default(),
+            &mut |body, _, emission| {
+                let active = body.field(emission.clone(), 0)?;
+                body.when(active, |body| {
+                    let key = body.field(emission.clone(), 1)?;
+                    let valid = in_bounds(body, key.clone(), length.clone())?;
+                    let succeeded = body.branch(
+                        scope,
+                        valid,
+                        |body| {
+                            let update = if serial { Update::Add } else { Update::Atomic(AtomicOp::Add) };
+                            let slot =
+                                apply(body, scope, counts.clone(), key.clone(), one.clone(), update)?;
+                            let room = body.binary(BinaryOperator::Less, slot.clone(), capacity.clone())?;
+                            body.when(room.clone(), |body| {
+                                let value = body.field(emission.clone(), 2)?;
+                                body.store_at(output.clone(), &[key, slot], value)
+                            })?;
+                            Ok(room)
+                        },
+                        |body| body.op(OpTag::Bool(false), vec![], types::bool_type()),
+                        None,
+                    )?;
+                    let no = body.op(OpTag::Bool(false), vec![], types::bool_type())?;
+                    let failed = body.binary(BinaryOperator::Equal, succeeded, no)?;
+                    body.when(failed, |body| {
+                        let update =
+                            if serial { Update::Store } else { Update::Atomic(AtomicOp::Exchange) };
+                        apply(body, scope, overflow.clone(), zero.clone(), one.clone(), update)?;
+                        Ok(())
+                    })
+                })?;
+                body.tuple(vec![])
+            },
+        )?;
         Ok(vec![])
     })?;
     Ok(())

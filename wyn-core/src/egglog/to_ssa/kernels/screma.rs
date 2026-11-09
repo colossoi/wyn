@@ -626,7 +626,7 @@ impl Accumulator {
         Contribution {
             scope,
             plan,
-            index,
+            indices: std::slice::from_ref(index),
             skipped: &|_, _| Ok(state.clone()),
         }
         .emit(body, self.contribution, cache, &mut |body, _, incoming| {
@@ -691,7 +691,7 @@ fn packing_input(
     Contribution {
         scope,
         plan,
-        index,
+        indices: std::slice::from_ref(index),
         skipped: &empty_retained,
     }
     .emit(body, input, cache, &mut |body, _, pair| {

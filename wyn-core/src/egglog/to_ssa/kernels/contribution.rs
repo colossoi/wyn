@@ -12,7 +12,7 @@ type EmitContribution<'a, T> =
 pub(super) struct Contribution<'a> {
     pub(super) scope: Value,
     pub(super) plan: Value,
-    pub(super) index: &'a Typed,
+    pub(super) indices: &'a [Typed],
     pub(super) skipped: &'a dyn Fn(&mut Body<'_, '_, '_>, &Type) -> Result<Typed, OptimizeError>,
 }
 
@@ -25,14 +25,36 @@ impl Contribution<'_> {
         emit: &mut EmitContribution<'_, Typed>,
     ) -> Result<Typed, OptimizeError> {
         if let Some(fields) = body.compiler.facts.enode("ElementAt", expression) {
-            let value = element(
-                body,
-                self.scope,
-                self.plan,
-                fields[0],
-                std::slice::from_ref(self.index),
-                cache,
-            )?;
+            let axes = body.compiler.facts.vector(fields[1])?;
+            let coordinates = axes
+                .iter()
+                .map(|&axis| {
+                    let axis = usize::try_from(body.compiler.facts.integer(axis))
+                        .map_err(|_| error("invalid domain axis"))?;
+                    let Some(coordinate) = self.indices.get(axis) else {
+                        return Err(error("input axis exceeds its domain rank"));
+                    };
+                    Ok((axis, coordinate.clone()))
+                })
+                .collect::<Result<Vec<_>, OptimizeError>>()?;
+            let value = if let Some(((axis, first), rest)) = coordinates.split_first() {
+                // The shared cache contains values at the leading domain coordinate.
+                let mut other_axis = LookupMap::default();
+                let mut value = element(
+                    body,
+                    self.scope,
+                    self.plan,
+                    fields[0],
+                    std::slice::from_ref(first),
+                    if *axis == 0 { cache } else { &mut other_axis },
+                )?;
+                for (_, coordinate) in rest {
+                    value = body.index(value, coordinate.clone())?;
+                }
+                value
+            } else {
+                body.value(self.scope, fields[0])?
+            };
             return emit(body, cache, value);
         }
         if let Some(fields) = body.compiler.facts.enode("ApplyElement", expression) {

@@ -1,11 +1,8 @@
 //! Row-major domains and input indexing; the last axis varies fastest.
 
 use super::super::{Body, OptimizeError, Typed};
-use super::element;
 use crate::op::BinaryOperator::{Divide, Multiply, Remainder};
 use crate::types;
-use crate::LookupMap;
-use egglog_engine::Value;
 
 pub fn length(body: &mut Body<'_, '_, '_>, dimensions: &[Typed]) -> Result<Typed, OptimizeError> {
     let mut length = body.literal(1, &types::i32())?;
@@ -29,36 +26,4 @@ pub fn decode(
         remainder = body.binary(Divide, remainder, dimensions[i].clone())?;
     }
     Ok(coordinates)
-}
-
-/// Input axes are validated against the domain rank before kernel emission.
-pub fn arguments(
-    body: &mut Body<'_, '_, '_>,
-    scope: Value,
-    plan: Value,
-    inputs: &[(i64, Value)],
-    input_dimensions: &[Vec<usize>],
-    coordinates: &[Typed],
-) -> Result<Vec<Typed>, OptimizeError> {
-    let mut arguments = Vec::new();
-    let mut cache = LookupMap::default();
-    for ((_, source), axes) in inputs.iter().zip(input_dimensions) {
-        let Some((&first, rest)) = axes.split_first() else {
-            arguments.push(body.value(scope, *source)?);
-            continue;
-        };
-        let mut value = element(
-            body,
-            scope,
-            plan,
-            *source,
-            &[coordinates[first].clone()],
-            &mut cache,
-        )?;
-        for &axis in rest {
-            value = body.index(value, coordinates[axis].clone())?;
-        }
-        arguments.push(value);
-    }
-    Ok(arguments)
 }
