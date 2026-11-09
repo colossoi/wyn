@@ -1124,7 +1124,7 @@ fn segmented_collectives_select_workgroups_for_each_outer_coordinate() {
             let maps = operations_in(graph, "map", region);
             let mut groups = 0;
             query
-                .for_function("MapSegmented", |keys, enabled| {
+                .for_function("MapUsesWorkgroup", |keys, enabled| {
                     groups += usize::from(maps.contains(&keys[0]) && graph.value_to_base::<bool>(enabled));
                     Ok(())
                 })
@@ -1140,6 +1140,8 @@ fn workgroup_regions_cover_uniform_control_flow_and_varying_inner_domains() {
         "entry main(xs:[][17]i32) []i32=map(|row|if row[0]>0 then reduce((+),0,row) else 0,xs)",
         "entry main(xs:[][17]i32) []i32=map(|row|loop a=0 for i<2 do a+reduce((+),0,row),xs)",
         "entry main(xs:[]i32) []i32=map(|n|reduce((+),0,iota(n)),xs)",
+        "entry main(xs:[][2][17]i32) [][2]i32=map(|rows|map(|row|if row[0]>0 then reduce((+),0,row) else 0,rows),xs)",
+        "entry main(xs:[][2][17]i32) [][2]i32=map(|rows|map(|row|loop a=0 for i<2 do a+reduce((+),0,row),rows),xs)",
     ];
     planned_cases(&sources, |_, graph, region| {
         let query = Query(graph);
@@ -1241,7 +1243,7 @@ fn segment_lengths_are_bound_inside_each_workgroup() {
             let plan = query.required("SelectedPlan", (maps[0],)).unwrap();
             assert!(query.flag("MapHost", (plan,)).unwrap());
             assert_eq!(
-                query.flag("MapSegmented", (maps[0],)).unwrap(),
+                query.flag("MapUsesWorkgroup", (maps[0],)).unwrap(),
                 true,
                 "case {index}"
             );
@@ -1301,8 +1303,8 @@ fn subgroup_addition_is_opt_in_and_uses_small_segments() {
         let mut segments = 0;
         query
             .for_each("MapPlan", |row| {
-                if query.flag("MapHost", (row[0],))? && query.flag("MapSegmented", (row[1],))? {
-                    let width = query.required("SegmentWidth", (row[1],))?;
+                if query.flag("MapHost", (row[0],))? && query.flag("MapUsesWorkgroup", (row[1],))? {
+                    let width = query.required("MapWorkgroupWidth", (row[1],))?;
                     assert_eq!(
                         program.graph.value_to_base::<i64>(width),
                         if enabled { 32 } else { 256 }
@@ -1380,7 +1382,6 @@ fn primitive_dispatch_recipes_publish_their_phase_widths_and_order() {
             r#"
         (set (Plan (OperationId 0)) (Elements))
         (set (ElideElements (OperationId 0)) false)
-        (set (MapSegmented (OperationId 0)) false)
         (set (MapExecution (OperationId 0)) (InvocationScope))
         (set (IterationExtent (OperationId 0)) (Fixed 1024))
         (set (OperationGrid (OperationId 0)) (AutomaticGrid))
@@ -1402,7 +1403,6 @@ fn primitive_dispatch_recipes_publish_their_phase_widths_and_order() {
         (set (ParallelBodySafe (OperationId 4)) true)
         (set (IterationExtent (OperationId 4)) (Fixed 5))
         (set (ElideElements (OperationId 4)) false)
-        (set (MapSegmented (OperationId 4)) false)
         (set (MapExecution (OperationId 4)) (InvocationScope))
         (set (OperationGrid (OperationId 4)) (AutomaticGrid))
         (set (Plan (OperationId 5)) (Serial))

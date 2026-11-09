@@ -10,9 +10,8 @@
     (saturate direct-outputs) (run traversal-leaves)
     (saturate segment-shapes)
     (saturate extent-dependencies) (run extent-uniformity)
-    (run segment-approve) (run segment-select)
-    (saturate execution-discover) (saturate execution-select) (saturate execution-finalize)
     (saturate map-bindings)
+    (saturate execution-discover) (saturate execution-select) (saturate execution-finalize)
     (saturate storage-shapes shape-properties)
     (saturate capacity-types)
     ; Loop layouts introduce fields that share the ordinary forwarding proofs.

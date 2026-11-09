@@ -67,7 +67,7 @@
       ((IndexGather result rows address a b (NoGatherGuard))) :ruleset output-layouts)
 (relation ElementOutputProducer (OperationKey))
 (rule ((MapPlan plan producer domain) (= (IterationRank producer) 1)
-       (= (MapSegmented producer) false) (= (MapExecution producer) (InvocationScope)) (= (ParallelBodySafe producer) true))
+       (= (MapExecution producer) (InvocationScope)) (= (ParallelBodySafe producer) true))
       ((ElementOutputProducer producer)) :ruleset output-layouts)
 (rule ((Current group plan) (= producer (Owner plan)) (ScremaPlan plan)
        (= (HasReductions plan) true) (= (HasScans plan) false) (= (ParallelBodySafe producer) true))

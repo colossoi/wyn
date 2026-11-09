@@ -77,7 +77,7 @@ pub(super) fn emit(
     };
     let results = body.compiler.facts.results(plan)?;
     match phase {
-        "elements" | "segments" => maps::emit(body, scope, phase_owner, phase, phase_width, plan, &results),
+        "elements" => maps::emit(body, scope, phase_owner, phase, phase_width, plan, &results),
         "initialize" => updates::initialize(body, scope, phase_owner, phase, phase_width),
         "ordered" | "local" => {
             updates::initialize(body, scope, phase_owner, phase, phase_width)?;

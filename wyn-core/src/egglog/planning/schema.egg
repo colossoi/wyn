@@ -240,8 +240,7 @@
       ((set (ShapeDimensions shape) (vec-push axes n)) (set (ShapeExtent shape) (Product product n))) :ruleset shape-properties)
 (function IterationShape (OperationKey) DomainShape :no-merge)
 (function SubgroupsEnabled () bool :no-merge)
-(function SegmentWidth (OperationKey) i64 :merge (min old new))
-(function MapSegmented (OperationKey) bool :merge (or old new))
+(function MapWorkgroupWidth (OperationKey) i64 :merge (min old new))
 (relation KernelPhase (OperationKey String Extent i64 DispatchGrid))
 
 (ruleset collective-costs)

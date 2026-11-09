@@ -1,6 +1,4 @@
 (ruleset segment-shapes)
-(ruleset segment-select)
-(ruleset segment-approve)
 (function SegmentCandidatePlan (SourceValue) FusionPlan :no-merge)
 (function SegmentPlanBlocked (FusionPlan) bool :merge (or old new))
 
