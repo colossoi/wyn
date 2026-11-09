@@ -303,7 +303,7 @@
 
 (rule ((Allocation value n) (ElementType value (TypeId ty)) (= (HasStorageShape value) false))
       ((PlannedBuffer value ty n)) :ruleset readout)
-(rule ((Allocation value logical) (= (StorageLayout value) (FlatStorage (TypeId ty) shape n)))
+(rule ((Allocation value logical) (= (StorageLayout value) (FlatStorage (TypeId ty) shape)) (= n (ShapeExtent shape)))
       ((PlannedBuffer value ty n)) :ruleset readout)
 (rule ((ElementType value ty)) ((set (HasStorageShape value) false)) :ruleset allocation)
 (rule ((= layout (StorageLayout value))) ((set (HasStorageShape value) true)) :ruleset allocation)

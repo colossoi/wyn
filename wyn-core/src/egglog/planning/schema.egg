@@ -88,8 +88,9 @@
 (function LiveLength (ValueKey) Extent :no-merge)
 (function HostBound (Extent) Extent :no-merge)
 (function StaticCapacityBound (Extent) i64 :merge (max old new))
+(datatype DomainShape (OneAxis Extent) (AppendAxis DomainShape Extent))
 (sort RectangularShape (Vec Extent))
-(datatype StorageLayoutInfo (FlatStorage TypeKey RectangularShape Extent))
+(datatype StorageLayoutInfo (FlatStorage TypeKey DomainShape))
 (function StorageLayout (ValueKey) StorageLayoutInfo :no-merge)
 (function HasStorageShape (ValueKey) bool :merge (or old new))
 (function LaunchGrid (StageKey) DispatchGrid :no-merge)
@@ -229,7 +230,6 @@
 (function IterationRank (OperationKey) i64 :no-merge)
 ; A logical domain has at least one axis. Rank, volume, and coordinate vectors
 ; are projections of this value, never independent authored facts.
-(datatype DomainShape (OneAxis Extent) (AppendAxis DomainShape Extent))
 (function ShapeDimensions (DomainShape) RectangularShape :no-merge)
 (function ShapeExtent (DomainShape) Extent :no-merge)
 (ruleset shape-properties)

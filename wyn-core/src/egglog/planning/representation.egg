@@ -284,7 +284,7 @@
 (function BufferElementLayout (ValueKey) LocalLayout :no-merge)
 (rule ((Allocation value extent) (ElementType value ty) (= (HasStorageShape value) false) (= layout (BoundaryLayout ty)))
       ((set (BufferElementLayout value) layout)) :ruleset readout)
-(rule ((Allocation value extent) (= (StorageLayout value) (FlatStorage ty shape count)) (= layout (BoundaryLayout ty)))
+(rule ((Allocation value extent) (= (StorageLayout value) (FlatStorage ty shape)) (= layout (BoundaryLayout ty)))
       ((set (BufferElementLayout value) layout)) :ruleset readout)
 (rule ((DirectResult source owner i) (Allocation (Result owner i) extent) (ElementType (Result owner i) ty)
        (= (HasTypeLayout ty) false) (= (HasStorageShape (Result owner i)) false)

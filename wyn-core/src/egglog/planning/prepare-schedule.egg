@@ -13,7 +13,7 @@
     (run segment-approve) (run segment-select)
     (saturate execution-discover) (saturate execution-select) (run execution-finalize)
     (saturate map-bindings)
-    (saturate storage-shapes)
+    (saturate storage-shapes shape-properties)
     (saturate capacity-types)
     ; Loop layouts introduce fields that share the ordinary forwarding proofs.
     (saturate (seq flow-structure type-layouts))

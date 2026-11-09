@@ -82,5 +82,6 @@
       ((set (IterationShape owner) shape)) :ruleset map-launch)
 (rule ((MapPlan plan owner extent) (= (MapHost plan) true)
        (PlanResult plan "array" i value element) (= ty (SourceType value))
-       (ArrayTypeAxis ty axis (DynamicSize)) (> axis 0))
-      ((RectangularStorageShape value 0 ty (vec-of) (Fixed 1))) :ruleset storage-shapes)
+       (ArrayTypeAxis ty axis (DynamicSize)) (> axis 0) (SourceArrayElement ty first)
+       (= outer (RectangularAxis value 0)) (= (ExtentUniform outer) true))
+      ((RectangularStorageShape value 1 first (OneAxis outer))) :ruleset storage-shapes)
