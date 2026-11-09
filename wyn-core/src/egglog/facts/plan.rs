@@ -21,9 +21,15 @@ pub enum OutputAction {
     },
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FoldOutput {
+    Prefix(i64),
+    Total(i64),
+    PackedLength,
+}
+
 pub struct AccumulatorComponent {
-    pub role: String,
-    pub output_slot: i64,
+    pub output: FoldOutput,
     pub source: Value,
 }
 
@@ -209,17 +215,26 @@ impl<'a, 'source> Facts<'a, 'source> {
     pub fn accumulators(&self, plan: Value) -> Result<Vec<AccumulatorComponent>, OptimizeError> {
         let owner = Query(&self.program.graph).required("Owner", (plan,))?;
         let mut components = Vec::new();
-        self.program.graph.constructor_enodes("Accumulator", |row| {
-            if row.children[0] == owner {
+        Query(&self.program.graph).for_each("Accumulator", |row| {
+            if row[0] == owner {
+                let output = if let Some(fields) = self.enode("PrefixOutput", row[3]) {
+                    FoldOutput::Prefix(self.integer(fields[0]))
+                } else if let Some(fields) = self.enode("TotalOutput", row[3]) {
+                    FoldOutput::Total(self.integer(fields[0]))
+                } else if self.enode("PackedLength", row[3]).is_some() {
+                    FoldOutput::PackedLength
+                } else {
+                    return Err(error("invalid fold output"));
+                };
                 components.push((
-                    self.integer(row.children[1]),
+                    self.integer(row[1]),
                     AccumulatorComponent {
-                        role: self.program.graph.value_to_base::<S>(row.children[3]).to_string(),
-                        output_slot: self.integer(row.children[4]),
-                        source: row.children[5],
+                        output,
+                        source: row[4],
                     },
                 ));
             }
+            Ok(())
         })?;
         components.sort_by_key(|(slot, _)| *slot);
         components
@@ -229,9 +244,7 @@ impl<'a, 'source> Facts<'a, 'source> {
                 if slot != expected as i64 {
                     return Err(error("noncontiguous accumulator slots"));
                 }
-                if component.output_slot < 0
-                    || !matches!(component.role.as_str(), "scan" | "total" | "pack")
-                {
+                if matches!(component.output, FoldOutput::Prefix(i) | FoldOutput::Total(i) if i < 0) {
                     return Err(error("invalid accumulator output slot"));
                 }
                 Ok(component)

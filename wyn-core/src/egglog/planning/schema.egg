@@ -58,7 +58,8 @@
 (relation TotalResult (OperationKey i64 TypeKey))
 
 ; State slot, type, result role/slot, and source are shared by scheduling and emission.
-(relation Accumulator (OperationKey i64 TypeKey String i64 SourceValue))
+(datatype FoldOutput (PrefixOutput i64) (TotalOutput i64) (PackedLength))
+(relation Accumulator (OperationKey i64 TypeKey FoldOutput SourceValue))
 (datatype Initialization (CopyFrom SourceValue) (NoContents))
 (datatype ResultStorage (AllocateResult TypeKey Extent Initialization) (ExistingResult SourceValue))
 (function StorageDeclaration (ValueKey) ResultStorage :no-merge)

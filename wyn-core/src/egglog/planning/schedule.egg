@@ -44,7 +44,7 @@
 ; Estimate per-lane accumulator storage before selecting a launch. Keep the
 ; chunk bank near 8 KiB, with power-of-two widths between 32 and 256 lanes.
 (function CollectiveChunkWidth (OperationKey) i64 :merge (min old new))
-(rule ((Accumulator op i ty role slot source))
+(rule ((Accumulator op i ty output source))
       ((set (CollectiveStatePrefix op 0) 0)
        (set (CollectiveChunkWidth op) 256)) :ruleset collective-costs)
 (rule ((= bytes (CollectiveStatePrefix op i)) (= width (CollectiveChunkWidth op))
@@ -159,12 +159,12 @@
       ((Produces (Stage op "offsets") (Result op slot))) :ruleset schedule)
 
 ; Temporary recipe results have ordinary producers, consumers, and capacity.
-(rule ((Accumulator op i t role slot source) (= groups (CollectiveGroups op)) (Phase (Stage op "chunks") r))
+(rule ((Accumulator op i t output source) (= groups (CollectiveGroups op)) (Phase (Stage op "chunks") r))
       ((set (CapacityExtent (Temporary op "partial" i)) (Fixed groups))
        (ElementType (Temporary op "partial" i) t)
        (Produces (Stage op "chunks") (Temporary op "partial" i))
        (Needs (Stage op "combine") (Temporary op "partial" i))) :ruleset schedule)
-(rule ((Accumulator op state t "scan" i source) (= n (InputDomain op)) (= groups (CollectiveGroups op)) (Phase (Stage op "offsets") r))
+(rule ((Accumulator op state t (PrefixOutput i) source) (= n (InputDomain op)) (= groups (CollectiveGroups op)) (Phase (Stage op "offsets") r))
       ((set (CapacityExtent (Temporary op "prefix" i)) n) (set (CapacityExtent (Temporary op "offset" i)) (Fixed groups))
        (ElementType (Temporary op "prefix" i) t) (ElementType (Temporary op "offset" i) t)
        (Produces (Stage op "chunks") (Temporary op "prefix" i))

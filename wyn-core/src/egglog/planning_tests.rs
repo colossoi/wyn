@@ -656,8 +656,8 @@ fn fused_scan_and_filter_count_have_distinct_accumulator_slots() {
                 let slot = graph.value_to_base::<i64>(row[1]);
                 let partial = query.constructor("Temporary", (row[0], "partial", slot)).unwrap().unwrap();
                 assert!(query.contains("ElementType", (partial, row[2])).unwrap());
-                if graph.value_to_base::<S>(row[3]).as_str() == "total" {
-                    assert_eq!(slot, graph.value_to_base::<i64>(row[4]) + 1);
+                if let Some(output) = query.enode("TotalOutput", row[3]).unwrap() {
+                    assert_eq!(slot, graph.value_to_base::<i64>(output[0]) + 1);
                 }
             }
         },

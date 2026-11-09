@@ -3,7 +3,7 @@ use super::super::{error, Body, OptimizeError, Typed};
 use super::contribution::Contribution;
 use super::{invocation, updates, write_arrays};
 use crate::builtins::catalog;
-use crate::egglog::facts::OutputAction;
+use crate::egglog::facts::{AccumulatorComponent, FoldOutput, OutputAction};
 use crate::op::BinaryOperator::{
     Add, Divide, Equal, Greater, GreaterEqual, Less, Multiply, Remainder, Subtract,
 };
@@ -48,23 +48,25 @@ pub(super) fn screma(
         "local-totals" => "local",
         phase => phase,
     };
-    let mut components = body.compiler.facts.accumulators(plan)?;
+    let mut accumulators = body
+        .compiler
+        .facts
+        .accumulators(plan)?
+        .into_iter()
+        .map(|component| Accumulator::new(body, scope, plan, component))
+        .collect::<Result<Vec<_>, _>>()?;
     if totals_only {
-        components.retain(|component| component.role != "scan");
+        accumulators.retain(|a| matches!(a.output, FoldOutput::Total(_)));
     }
     let packing = if let Some((predicate, input)) = packing {
-        let Some(index) = components.iter().position(|component| component.role == "pack") else {
+        let Some(index) = accumulators.iter().position(|a| a.output == FoldOutput::PackedLength) else {
             return Err(error("packing requires a count prefix"));
         };
         Some((predicate, input, index))
     } else {
         None
     };
-    let has_scans = components.iter().any(|component| component.role != "total");
-    let mut accumulators = Vec::new();
-    for component in &components {
-        accumulators.push(Accumulator::new(body, scope, plan, component.source)?);
-    }
+    let has_scans = accumulators.iter().any(|a| !matches!(a.output, FoldOutput::Total(_)));
     let reductions: Vec<_> = accumulators.iter().map(|a| &a.reduction).collect();
     let initial: Vec<_> = accumulators.iter().map(|a| a.reduction.neutral.clone()).collect();
     let Some(domain) = body.compiler.facts.domain(phase_owner) else {
@@ -87,12 +89,15 @@ pub(super) fn screma(
             }
             Ok(next)
         })?;
-        for (component, value) in components.iter().zip(state).filter(|(c, _)| c.role != "scan") {
+        for (accumulator, value) in accumulators.iter().zip(state) {
+            let FoldOutput::Total(slot) = accumulator.output else {
+                continue;
+            };
             if totals_only {
-                body.values.insert(component.source, value);
+                body.values.insert(accumulator.source, value);
                 continue;
             }
-            if let Some(output) = body.output_target(scope, phase_owner, "total", component.output_slot)? {
+            if let Some(output) = body.output_target(scope, phase_owner, "total", slot)? {
                 output.store(body, &[zero.clone()], value)?;
             }
         }
@@ -168,7 +173,7 @@ pub(super) fn screma(
                                     };
                                     let value = body.index(partial, index.clone())?;
                                     body.cast(value, &initial[i].ty)?
-                                } else if components[i].role == "pack" {
+                                } else if accumulator.output == FoldOutput::PackedLength {
                                     packing_input(body, scope, plan, &index, &mut cache)?
                                 } else {
                                     accumulator.accumulate(
@@ -229,21 +234,19 @@ pub(super) fn screma(
                     };
                     body.when(valid, |body| {
                         let mut cache = LookupMap::default();
-                        for (i, (component, prefix)) in components
-                            .iter()
-                            .zip(prefixes.iter().cloned())
-                            .enumerate()
-                            .filter(|(_, (c, _))| c.role == "scan")
+                        for (i, (accumulator, prefix)) in
+                            accumulators.iter().zip(prefixes.iter().cloned()).enumerate()
                         {
+                            let FoldOutput::Prefix(slot) = accumulator.output else {
+                                continue;
+                            };
                             let value =
                                 accumulators[i].reduction.combine(body, scope, carry[i].clone(), prefix)?;
                             if phase == "local" {
                                 cache.insert(accumulators[i].source, value);
                             } else {
                                 let role = if phase == "combine" { "offset" } else { "prefix" };
-                                if let Some(output) =
-                                    body.slot(scope, phase_owner, role, component.output_slot, 2)?
-                                {
+                                if let Some(output) = body.slot(scope, phase_owner, role, slot, 2)? {
                                     body.store(output, index.clone(), value)?;
                                 }
                             }
@@ -296,8 +299,8 @@ pub(super) fn screma(
                 },
             )?;
             if totals_only {
-                for (component, value) in components.iter().zip(state) {
-                    body.values.insert(component.source, value);
+                for (accumulator, value) in accumulators.iter().zip(state) {
+                    body.values.insert(accumulator.source, value);
                 }
                 return Ok(());
             }
@@ -305,17 +308,20 @@ pub(super) fn screma(
             body.when(first, |body| {
                 for (i, value) in state.into_iter().enumerate() {
                     if phase != "chunks" {
-                        let component = &components[i];
-                        if component.role == "pack" {
-                            if let Some(output) = body.slot(scope, phase_owner, "length", 0, 2)? {
-                                body.store(output, Body::number(0), value)?;
+                        match accumulators[i].output {
+                            FoldOutput::PackedLength => {
+                                if let Some(output) = body.slot(scope, phase_owner, "length", 0, 2)? {
+                                    body.store(output, Body::number(0), value)?;
+                                }
                             }
-                        } else if component.role == "total" {
-                            if let Some(output) =
-                                body.output_target(scope, phase_owner, "total", component.output_slot)?
-                            {
-                                output.store(body, &[Body::number(0)], value)?;
+                            FoldOutput::Total(slot) => {
+                                if let Some(output) =
+                                    body.output_target(scope, phase_owner, "total", slot)?
+                                {
+                                    output.store(body, &[Body::number(0)], value)?;
+                                }
                             }
+                            FoldOutput::Prefix(_) => {}
                         }
                     } else if let Some(output) = body.slot(scope, phase_owner, "partial", i as i64, 2)? {
                         body.store(output, group.clone(), value)?;
@@ -329,19 +335,20 @@ pub(super) fn screma(
             body.counted(start, n, step, vec![], |body, index, _| {
                 let chunk = body.binary(Divide, index.clone(), span.clone())?;
                 let mut cache = LookupMap::default();
-                for (i, component) in components.iter().enumerate().filter(|(_, c)| c.role == "scan") {
-                    let Some(prefix) = body.slot(scope, phase_owner, "prefix", component.output_slot, 1)?
-                    else {
+                for (i, accumulator) in accumulators.iter().enumerate() {
+                    let FoldOutput::Prefix(slot) = accumulator.output else {
+                        continue;
+                    };
+                    let Some(prefix) = body.slot(scope, phase_owner, "prefix", slot, 1)? else {
                         return Err(error("scan prefix is not materialized"));
                     };
-                    let Some(offset) = body.slot(scope, phase_owner, "offset", component.output_slot, 1)?
-                    else {
+                    let Some(offset) = body.slot(scope, phase_owner, "offset", slot, 1)? else {
                         return Err(error("scan offset is not materialized"));
                     };
                     let a = body.index(offset, chunk.clone())?;
                     let b = body.index(prefix, index.clone())?;
                     let value = accumulators[i].reduction.combine(body, scope, a, b)?;
-                    cache.insert(component.source, value);
+                    cache.insert(accumulator.source, value);
                 }
                 write_output(body, scope, phase_owner, phase, plan, results, index, &mut cache)?;
                 Ok(vec![])
@@ -547,6 +554,7 @@ fn workgroup_scan(
 
 /// One fold has one contribution expression and one reducer.
 struct Accumulator {
+    output: FoldOutput,
     source: Value,
     contribution: Value,
     reduction: Reduction,
@@ -570,8 +578,9 @@ impl Accumulator {
         body: &mut Body<'_, '_, '_>,
         scope: Value,
         plan: Value,
-        source: Value,
+        component: AccumulatorComponent,
     ) -> Result<Self, OptimizeError> {
+        let source = component.source;
         let Some(fold) = body.compiler.facts.lookup("PlanFold", (plan, source)) else {
             return Err(error("parallel fold is missing"));
         };
@@ -599,6 +608,7 @@ impl Accumulator {
         };
         Ok(Self {
             source,
+            output: component.output,
             contribution: fields[1],
             reduction: Reduction { reducer, neutral },
         })

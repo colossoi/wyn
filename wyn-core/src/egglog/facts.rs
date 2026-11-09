@@ -7,7 +7,7 @@ use egglog_engine::sort::{SetContainer, VecContainer};
 use egglog_engine::{IntoValues, Value};
 
 mod plan;
-pub(super) use plan::OutputAction;
+pub(super) use plan::{AccumulatorComponent, FoldOutput, OutputAction};
 
 pub(super) struct Facts<'a, 'source> {
     pub program: &'a Program<'source, Optimized>,
