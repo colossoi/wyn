@@ -75,7 +75,7 @@ pub(super) fn emit(
     let Some(plan) = body.compiler.facts.group(phase_owner) else {
         return Err(error("kernel has no fusion plan"));
     };
-    let results = body.compiler.facts.results(plan)?;
+    let results = body.compiler.facts.array_outputs(plan)?;
     match phase {
         "elements" => maps::emit(body, scope, phase_owner, phase, phase_width, plan, &results),
         "initialize" => updates::initialize(body, scope, phase_owner, phase, phase_width),
@@ -314,7 +314,7 @@ pub(super) fn write_arrays(
     scope: Value,
     operation: Value,
     plan: Value,
-    results: &[(String, i64, Value)],
+    results: &[(i64, Value)],
     indices: &[Typed],
     cache: &mut LookupMap<Value, Typed>,
 ) -> Result<(), OptimizeError> {
@@ -326,17 +326,13 @@ fn write_arrays_at(
     scope: Value,
     operation: Value,
     plan: Value,
-    results: &[(String, i64, Value)],
+    results: &[(i64, Value)],
     indices: &[Typed],
     destinations: &[Typed],
     cache: &mut LookupMap<Value, Typed>,
 ) -> Result<(), OptimizeError> {
-    let mut position = 0;
-    for (role, slot, source) in results {
-        if role != "array" {
-            continue;
-        }
-        let output = body.output_target(scope, operation, "output", position)?;
+    for (position, (slot, source)) in results.iter().enumerate() {
+        let output = body.output_target(scope, operation, "output", position as i64)?;
         let mappings = body.compiler.facts.set("MappedOutputs", (operation, *slot));
         if output.is_some() || !mappings.is_empty() {
             let value = element(body, scope, plan, *source, indices, cache)?;
@@ -347,7 +343,6 @@ fn write_arrays_at(
                 output.store(body, destinations, value)?;
             }
         }
-        position += 1;
     }
     Ok(())
 }

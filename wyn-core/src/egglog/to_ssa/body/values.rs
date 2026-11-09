@@ -382,6 +382,31 @@ impl Body<'_, '_, '_> {
 }
 
 impl Body<'_, '_, '_> {
+    /// Allocate mutable local storage; reads used as values are explicit snapshots.
+    pub(super) fn local_array(&mut self, ty: Type) -> Result<Typed, OptimizeError> {
+        let place = self.builder.new_place(ty.clone());
+        self.builder.push_void_inst(InstKind::Alloca { result: place }).map_err(builder_error)?;
+        let value = self.builder.push_inst(InstKind::Load { place }, ty.clone()).map_err(builder_error)?;
+        let array = Typed {
+            value: value.into(),
+            ty,
+        };
+        self.local_arrays.insert(array.value, place);
+        Ok(array)
+    }
+
+    pub(super) fn snapshot_array(&mut self, array: Typed) -> Result<Typed, OptimizeError> {
+        let Some(&place) = self.local_arrays.get(&array.value) else {
+            return Ok(array);
+        };
+        let value =
+            self.builder.push_inst(InstKind::Load { place }, array.ty.clone()).map_err(builder_error)?;
+        Ok(Typed {
+            value: value.into(),
+            ty: array.ty,
+        })
+    }
+
     fn child_place(&mut self, place: PlaceId, index: Typed, ty: &Type) -> Result<PlaceId, OptimizeError> {
         let result = self.builder.new_place(ty.clone());
         self.builder
@@ -412,8 +437,7 @@ impl Body<'_, '_, '_> {
             let Some(element) = ty.elem_type() else {
                 return Err(error("aggregate load requires an array element type"));
             };
-            let output = self.builder.new_place(ty.clone());
-            self.builder.push_void_inst(InstKind::Alloca { result: output }).map_err(builder_error)?;
+            let output = self.local_array(ty.clone())?;
             let count = self.literal(*n as i64, &types::i32())?;
             self.counted(
                 Self::number(0),
@@ -423,18 +447,11 @@ impl Body<'_, '_, '_> {
                 |body, index, _| {
                     let source = body.child_place(place, index.clone(), element)?;
                     let item = body.load_place(source, element)?;
-                    body.store_place(output, ty, &[index], item)?;
+                    body.store(output.clone(), index, item)?;
                     Ok(vec![])
                 },
             )?;
-            let value = self
-                .builder
-                .push_inst(InstKind::Load { place: output }, ty.clone())
-                .map_err(builder_error)?;
-            return Ok(Typed {
-                value: value.into(),
-                ty: ty.clone(),
-            });
+            return self.snapshot_array(output);
         }
         let value = self.builder.push_inst(InstKind::Load { place }, ty.clone()).map_err(builder_error)?;
         Ok(Typed {
@@ -477,14 +494,7 @@ impl Body<'_, '_, '_> {
         if let Some((index, rest)) = indices.split_first() {
             if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = ty {
                 for (i, field) in fields.iter().enumerate() {
-                    let next = self.builder.new_place(field.clone());
-                    self.builder
-                        .push_void_inst(InstKind::PlaceIndex {
-                            place,
-                            index: Self::number(i as u32).value,
-                            result: next,
-                        })
-                        .map_err(builder_error)?;
+                    let next = self.child_place(place, Self::number(i as u32), field)?;
                     let value = self.field(value.clone(), i)?;
                     self.store_place(next, field, indices, value)?;
                 }
@@ -493,14 +503,7 @@ impl Body<'_, '_, '_> {
             let Some(element) = ty.elem_type() else {
                 return Err(error("store index exceeds array rank"));
             };
-            let next = self.builder.new_place(element.clone());
-            self.builder
-                .push_void_inst(InstKind::PlaceIndex {
-                    place,
-                    index: index.value,
-                    result: next,
-                })
-                .map_err(builder_error)?;
+            let next = self.child_place(place, index.clone(), element)?;
             return self.store_place(next, element, rest, value);
         }
         // A view carries a descriptor; an owned destination needs its elements.

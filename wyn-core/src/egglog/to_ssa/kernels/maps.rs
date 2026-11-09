@@ -15,7 +15,7 @@ pub(super) fn emit(
     phase: &str,
     width: u32,
     plan: Value,
-    results: &[(String, i64, Value)],
+    results: &[(i64, Value)],
 ) -> Result<(), OptimizeError> {
     let group = body.has_workgroup_scope("MapExecution", owner);
     if group && Query(&body.compiler.program.graph).flag("SubgroupsEnabled", RawValues(vec![]))? {
@@ -44,7 +44,7 @@ pub(super) fn emit(
         } else {
             coordinates::decode(body, &dimensions, index)?
         };
-        for (_, slot, _) in results.iter().filter(|r| r.0 == "array") {
+        for (slot, _) in results {
             let output = body.slot(scope, owner, "output", *slot, 2)?;
             let mappings = body.compiler.facts.set("MappedOutputs", (owner, *slot));
             if output.is_none() && mappings.is_empty() {

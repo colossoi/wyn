@@ -20,7 +20,7 @@ pub(super) fn screma(
     phase: &str,
     phase_width: u32,
     plan: Value,
-    results: &[(String, i64, Value)],
+    results: &[(i64, Value)],
 ) -> Result<(), OptimizeError> {
     // Local recipes have no separate combine dispatch. Complete captured totals
     // first; the normal traversal can then emit each prefix with the final total.
@@ -371,7 +371,7 @@ fn write_output(
     owner: Value,
     phase: &str,
     plan: Value,
-    results: &[(String, i64, Value)],
+    results: &[(i64, Value)],
     index: Typed,
     cache: &mut LookupMap<Value, Typed>,
 ) -> Result<(), OptimizeError> {

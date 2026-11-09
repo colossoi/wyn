@@ -1,7 +1,6 @@
 //! Lower local recipes at their selected execution scope using fused kernel algorithms.
-use super::{builder_error, error, Body, OptimizeError, Typed, Value};
+use super::{error, Body, OptimizeError, Typed, Value};
 use crate::egglog::to_ssa::kernels;
-use crate::ssa::types::InstKind;
 use crate::types;
 use egglog_engine::sort::S;
 
@@ -56,15 +55,7 @@ impl Body<'_, '_, '_> {
                 continue;
             }
             let ty = types::sized_array(n, self.compiler.facts.layout_type(layout)?);
-            let place = self.builder.new_place(ty.clone());
-            self.builder.push_void_inst(InstKind::Alloca { result: place }).map_err(builder_error)?;
-            let value =
-                self.builder.push_inst(InstKind::Load { place }, ty.clone()).map_err(builder_error)?;
-            let value = Typed {
-                value: value.into(),
-                ty,
-            };
-            self.local_arrays.insert(value.value, place);
+            let value = self.local_array(ty)?;
             self.local_resources.insert(resource, value);
         }
         kernels::emit(
@@ -109,18 +100,13 @@ impl Body<'_, '_, '_> {
 
     /// Snapshot the local buffer after its recipe has finished writing.
     fn local_array_result(&mut self, array: Typed, source: Value) -> Result<Typed, OptimizeError> {
-        let Some(&place) = self.local_arrays.get(&array.value) else {
-            if self.workgroup_width.is_some() && self.has_shared_storage(source) {
-                return Ok(array);
-            }
-            let layout = self.compiler.facts.value_layout(source)?;
-            return self.materialize(array, layout);
-        };
-        let value =
-            self.builder.push_inst(InstKind::Load { place }, array.ty.clone()).map_err(builder_error)?;
-        Ok(Typed {
-            value: value.into(),
-            ty: array.ty,
-        })
+        if self.local_arrays.contains_key(&array.value) {
+            return self.snapshot_array(array);
+        }
+        if self.workgroup_width.is_some() && self.has_shared_storage(source) {
+            return Ok(array);
+        }
+        let layout = self.compiler.facts.value_layout(source)?;
+        self.materialize(array, layout)
     }
 }

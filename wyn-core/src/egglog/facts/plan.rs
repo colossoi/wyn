@@ -190,19 +190,16 @@ impl<'a, 'source> Facts<'a, 'source> {
         }
         None
     }
-    pub fn results(&self, plan: Value) -> Result<Vec<(String, i64, Value)>, OptimizeError> {
+    pub fn array_outputs(&self, plan: Value) -> Result<Vec<(i64, Value)>, OptimizeError> {
         let graph = &self.program.graph;
         let mut results = Vec::new();
-        graph.constructor_enodes("PlanResult", |row| {
-            if row.children[0] == plan {
-                results.push((
-                    graph.value_to_base::<S>(row.children[1]).to_string(),
-                    self.integer(row.children[2]),
-                    row.children[3],
-                ));
+        Query(graph).for_each("PlanResult", |row| {
+            if row[0] == plan && graph.value_to_base::<S>(row[1]).as_str() == "array" {
+                results.push((self.integer(row[2]), row[3]));
             }
+            Ok(())
         })?;
-        results.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+        results.sort_by_key(|(slot, _)| *slot);
         Ok(results)
     }
     pub fn accumulators(&self, plan: Value) -> Result<Vec<AccumulatorComponent>, OptimizeError> {

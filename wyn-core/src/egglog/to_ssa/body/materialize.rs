@@ -1,7 +1,6 @@
 //! Expand a selected boundary layout into representation conversions and copies.
-use super::{builder_error, error, Body, OptimizeError, Typed};
+use super::{error, Body, OptimizeError, Typed};
 use crate::op::{BinaryOperator, OpTag, PureViewSource};
-use crate::ssa::types::InstKind;
 use crate::types::{self, TypeExt};
 use egglog_engine::{RawValues, Value};
 
@@ -97,37 +96,17 @@ impl Body<'_, '_, '_> {
         }
         if let Some(fields) = self.compiler.facts.enode("ArrayLayout", layout) {
             let n = self.compiler.facts.integer(fields[0]);
-            let element = self.compiler.facts.layout_type(fields[1])?;
-            let place = self.builder.new_place(ty.clone());
-            self.builder.push_void_inst(InstKind::Alloca { result: place }).map_err(builder_error)?;
+            let output = self.local_array(ty)?;
             let zero = self.literal(0, &types::i32())?;
             let length = self.literal((n) as i64, &types::i32())?;
             let one = self.literal(1, &types::i32())?;
             self.counted(zero, length, one, vec![], |body, index, _| {
                 let item = body.index(value.clone(), index.clone())?;
                 let item = body.materialize_component(item, fields[1], path, None)?;
-                let slot = body.builder.new_place(element.clone());
-                body.builder
-                    .push_void_inst(InstKind::PlaceIndex {
-                        place,
-                        index: index.value,
-                        result: slot,
-                    })
-                    .map_err(builder_error)?;
-                body.builder
-                    .push_void_inst(InstKind::Store {
-                        place: slot,
-                        value: item.value,
-                    })
-                    .map_err(builder_error)?;
+                body.store(output.clone(), index, item)?;
                 Ok(vec![])
             })?;
-            let result =
-                self.builder.push_inst(InstKind::Load { place }, ty.clone()).map_err(builder_error)?;
-            return Ok(Typed {
-                value: result.into(),
-                ty,
-            });
+            return self.snapshot_array(output);
         }
         if let Some(fields) = self.compiler.facts.enode("TupleLayout", layout) {
             let layouts = self.compiler.facts.vector(fields[1])?;
