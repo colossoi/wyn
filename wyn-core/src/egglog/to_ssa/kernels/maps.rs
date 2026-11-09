@@ -58,7 +58,7 @@ pub(super) fn emit(
                             return Err(error("parallel output missing"));
                         };
                         body.with_output(fields[1], fields[3], output, &indices, |body| {
-                            super::emit(body, scope, fields[1], "local", fields[4], width)
+                            super::emit(body, scope, fields[1], "local", width)
                         })
                     } else {
                         let Some(fields) = body.compiler.facts.enode("TraversalValue", leaf) else {

@@ -11,13 +11,7 @@ pub enum OutputAction {
         predicate: Value,
         input: Value,
     },
-    Update {
-        combine: Option<Value>,
-        contribution: Value,
-    },
-    Reserve {
-        contribution: Value,
-    },
+    Updates,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -132,27 +126,27 @@ impl<'a, 'source> Facts<'a, 'source> {
                 input: f[1],
             });
         }
-        if let Some(f) = self.enode("Update", action) {
-            let combine = if self.enode("Overwrite", f[2]).is_some() {
-                None
-            } else {
-                let Some(mode) = self.enode("Combining", f[2]) else {
-                    return Err(error("invalid update mode"));
-                };
-                Some(mode[0])
-            };
-            let contribution = Query(&self.program.graph).required("UpdateContribution", (plan,))?;
-            return Ok(OutputAction::Update {
-                combine,
-                contribution,
-            });
-        }
-        if self.enode("Reserve", action).is_some() {
-            return Ok(OutputAction::Reserve {
-                contribution: Query(&self.program.graph).required("ReserveContribution", (plan,))?,
-            });
+        if self.lookup("PlanUpdates", (plan,)).is_some() {
+            return Ok(OutputAction::Updates);
         }
         Err(error("invalid parallel output action"))
+    }
+    pub fn initialized_arrays(&self, owner: Value) -> Result<Vec<(Value, Value)>, OptimizeError> {
+        let query = Query(&self.program.graph);
+        let mut arrays = Vec::new();
+        query.for_function("StorageDeclaration", |keys, declaration| {
+            if let Some(result) = query.enode("Result", keys[0])? {
+                if result[0] == owner {
+                    if let Some(fields) = query.enode("AllocateResult", declaration)? {
+                        if let Some(initial) = query.enode("CopyFrom", fields[2])? {
+                            arrays.push((keys[0], initial[0]));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        Ok(arrays)
     }
     pub fn scalar_group(&self, value: Value) -> Vec<Value> {
         self.set("DispatchGroupMembers", (value,))

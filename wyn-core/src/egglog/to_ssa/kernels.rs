@@ -15,14 +15,12 @@ mod maps;
 mod screma;
 mod updates;
 use screma::screma;
-use updates::{buckets, indexed};
 
 pub(super) fn emit(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
     phase_owner: Value,
     phase: &str,
-    phase_extent: Value,
     phase_width: u32,
 ) -> Result<(), OptimizeError> {
     if matches!(phase, "loop_enter" | "loop_test" | "loop_step" | "loop_exit") {
@@ -82,12 +80,11 @@ pub(super) fn emit(
     match phase {
         "elements" | "segments" => maps::emit(body, scope, phase_owner, phase_width, &results),
         "initialize" => updates::initialize(body, scope, phase_owner, phase, phase_width),
-        "scatter" | "atomic" => indexed(body, scope, phase_owner, phase, phase_extent, phase_width, plan),
-        "clear" | "buckets" => buckets(body, scope, phase_owner, phase, phase_width, plan),
+        "scatter" | "atomic" | "clear" | "buckets" => {
+            updates::emit(body, scope, phase_owner, phase, phase_width, plan)
+        }
         "ordered" | "local" => {
-            if body.compiler.facts.lookup("InitialValue", (phase_owner,)).is_some() {
-                updates::initialize(body, scope, phase_owner, phase, phase_width)?;
-            }
+            updates::initialize(body, scope, phase_owner, phase, phase_width)?;
             if !body.compiler.facts.accumulators(plan)?.is_empty()
                 || body.compiler.facts.contains("ScremaPlan", (plan,))
             {
@@ -97,10 +94,7 @@ pub(super) fn emit(
                 OutputAction::Pack { .. } => {
                     screma(body, scope, phase_owner, phase, phase_width, plan, &results)
                 }
-                OutputAction::Update { .. } => {
-                    indexed(body, scope, phase_owner, phase, phase_extent, phase_width, plan)
-                }
-                OutputAction::Reserve { .. } => buckets(body, scope, phase_owner, phase, phase_width, plan),
+                OutputAction::Updates => updates::emit(body, scope, phase_owner, phase, phase_width, plan),
                 OutputAction::Publish => Err(error("parallel output has no selected loop")),
             }
         }

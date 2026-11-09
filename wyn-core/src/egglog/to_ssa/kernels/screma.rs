@@ -369,11 +369,8 @@ fn write_output(
     index: Typed,
     cache: &mut LookupMap<Value, Typed>,
 ) -> Result<(), OptimizeError> {
-    if matches!(body.compiler.facts.action(plan)?, OutputAction::Update { .. }) {
-        let Some(output) = body.slot(scope, owner, "output", 0, 2)? else {
-            return Err(error("scan output action has no destination"));
-        };
-        updates::update(body, scope, owner, phase, plan, output, index, cache)
+    if matches!(body.compiler.facts.action(plan)?, OutputAction::Updates) {
+        updates::update(body, scope, owner, phase, plan, &[index], cache)
     } else {
         write_arrays(body, scope, owner, plan, results, &[index], cache)
     }

@@ -1579,3 +1579,38 @@ fn fusion_compares_logical_shapes_of_independent_inputs() {
         );
     }
 }
+
+#[test]
+fn update_handles_and_reservation_results_cannot_escape_their_scope() {
+    let tlc = compile_thru_tlc("entry main(dest:*[2]i32) [2]i32=scatter(dest,[0,1],[7,9])").unwrap();
+    let mut prepared = super::super::prepare_host(selected(&tlc)).unwrap();
+    let operation = operations(&prepared.program.graph, "scatter")[0];
+    let query = Query(&prepared.program.graph);
+    let plan = query.required("SelectedPlan", (operation,)).unwrap();
+    let scope = query.record("PlanUpdates", "WithUpdates", (plan,)).unwrap().unwrap();
+    let branch = query.enode("ChooseUpdates", scope[2]).unwrap().unwrap();
+    let update = query.enode("BindUpdate", branch[1]).unwrap().unwrap();
+    let baseline = prepared.program.graph.clone();
+    for (invalid_handle, expected) in [
+        (true, "outside its declaring scope"),
+        (false, "binding is out of scope"),
+    ] {
+        prepared.program.graph = baseline.clone();
+        prepared.program.graph.clear_function("PlanUpdates").unwrap();
+        prepared
+            .program
+            .graph
+            .update(|mut sink| {
+                let handle =
+                    if invalid_handle { sink.add("ScopedUpdate", (plan, 99i64))? } else { update[0] };
+                let value = if invalid_handle { update[2] } else { sink.add("UpdateBound", 0i64)? };
+                let program = sink.add("BindUpdate", (handle, update[1], value, update[3]))?;
+                let scope = sink.add("WithUpdates", (scope[0], scope[1], program))?;
+                sink.set("PlanUpdates", plan, scope)?;
+                Ok(())
+            })
+            .unwrap();
+        let error = super::super::to_ssa::lower(&prepared.program, CodegenTarget::Wgsl).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}

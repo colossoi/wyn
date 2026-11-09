@@ -4,7 +4,7 @@
   (NoResults)
   (OneResult SourceValue TypeKey)
   (JoinResults ResultTree ResultTree))
-(datatype UpdateMode (Overwrite) (Combining RegionKey))
+(datatype UpdateMode (Overwrite) (IdenticalWrites) (Adding) (Combining RegionKey))
 (datatype OutputAction
   (Publish)
   (Pack OperationKey SourceValue)

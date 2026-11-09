@@ -262,11 +262,6 @@
 (rule ((= input (DomainInput op axis)) (= dimension (DomainDimension op axis input)) (> dimension 0)
        (= value (SourceInput op input)) (= ty (SourceType value)) (ArrayTypeAxis ty dimension (FixedSize n)))
       ((set (SourceDomainAxis op axis) (Fixed n))) :ruleset source-summary)
-(rule ((= (OperatorDefinition op) (DefinedIn region (ReserveOperator body dest inputs rank maps))))
-      ((set (SourceKnownBucketDomain op) false)) :ruleset source-summary)
-(rule ((= (OperatorDefinition op) (DefinedIn region (ReserveOperator body dest inputs rank maps)))
-       (= shape (SourceDomainShape op)))
-      ((set (SourceKnownBucketDomain op) true)) :ruleset source-summary)
 
 (rule ((= shape (SourceDomainShape op)) (= n (ShapeExtent shape)))
       ((set (SourceDomainExtent op) n)) :ruleset source-summary)

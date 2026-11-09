@@ -30,9 +30,10 @@
 (rule ((IndexedReducer op false kind)) ((set (Plan op) (Serial))) :ruleset schedule)
 (rule ((IndexedReducer op true kind) (= (ParallelBodySafe op) false)) ((set (Plan op) (Serial))) :ruleset schedule)
 (rule ((IndexedReducer op true update) (= (ParallelBodySafe op) true)) ((set (Plan op) (Atomic update))) :ruleset schedule)
-(rule ((BucketShape op true) (= (ParallelBodySafe op) true)) ((set (Plan op) (Buckets))) :ruleset schedule)
-(rule ((BucketShape op true) (= (ParallelBodySafe op) false)) ((set (Plan op) (Serial))) :ruleset schedule)
-(rule ((BucketShape op false)) ((set (Plan op) (Serial))) :ruleset schedule)
+(rule ((= op (Owner plan)) (PlanUpdateArray plan i (ZeroArray ty n) mode) (= (ParallelBodySafe op) true))
+      ((set (Plan op) (Buckets))) :ruleset schedule)
+(rule ((= op (Owner plan)) (PlanUpdateArray plan i (ZeroArray ty n) mode) (= (ParallelBodySafe op) false))
+      ((set (Plan op) (Serial))) :ruleset schedule)
 
 ; Recipes declare logical phases before any kernel body is built. Widths match
 ; the current emitters; PhaseDomain counts invocations, not rounded workgroups.

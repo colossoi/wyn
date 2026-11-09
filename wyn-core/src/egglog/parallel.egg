@@ -210,3 +210,52 @@
        (= (OperatorDefinition op) (DefinedIn scope (ReserveOperator body destination inputs rank maps)))
        (= arguments (MappedArguments inputs maps (vec-length inputs))) (= result (SourceResult body)))
       ((set (ReserveContribution plan) (ApplyElement result body arguments))) :ruleset fusion-signatures)
+
+; Update handles inhabit their own sort and cannot escape as ordinary values.
+; Each update result is bound only inside its continuation; branches do not
+; leak bindings. Initial arrays are immutable inputs to the enclosing scope.
+(datatype UpdateHandle (ScopedUpdate FusionPlan i64))
+(datatype UpdateInitial (SeedArray SourceValue) (ZeroArray TypeKey Extent))
+(datatype UpdateDeclaration (UpdateArray UpdateHandle UpdateInitial UpdateMode))
+(sort UpdateArrays (Vec UpdateDeclaration))
+(datatype UpdateExpr
+  (UpdateInput i64) (UpdateBound i64) (UpdateConstant i64)
+  (UpdateExtent Extent) (UpdateBinary String UpdateExpr UpdateExpr))
+(sort UpdateCoordinates (Vec UpdateExpr))
+(datatype UpdateProgram
+  (UpdatesDone)
+  (ChooseUpdates UpdateExpr UpdateProgram UpdateProgram)
+  (BindUpdate UpdateHandle UpdateCoordinates UpdateExpr UpdateProgram))
+(datatype UpdateScope (WithUpdates UpdateArrays Contribution UpdateProgram))
+(function PlanUpdates (FusionPlan) UpdateScope :no-merge)
+(rule ((= (PlanAction plan) (Update op destination mode)) (= contribution (UpdateContribution plan)))
+      ((set (PlanUpdates plan)
+        (WithUpdates (vec-of (UpdateArray (ScopedUpdate plan 0) (SeedArray destination) mode)) contribution
+          (ChooseUpdates (UpdateBinary "&&" (UpdateBinary ">=" (UpdateInput 0) (UpdateConstant 0))
+              (UpdateBinary "<" (UpdateInput 0) (UpdateExtent (Length destination))))
+            (BindUpdate (ScopedUpdate plan 0) (vec-of (UpdateInput 0)) (UpdateInput 1) (UpdatesDone))
+            (UpdatesDone))))) :ruleset fusion-signatures)
+(rule ((= (PlanAction plan) (Reserve op destination body)) (= contribution (ReserveContribution plan))
+       (= ty (SourceType destination)) (ArrayTypeAxis ty 1 (FixedSize capacity)) (CounterType count)
+       (>= capacity 0))
+      ((set (PlanUpdates plan)
+        (WithUpdates (vec-of
+          (UpdateArray (ScopedUpdate plan 0) (SeedArray destination) (Overwrite))
+          (UpdateArray (ScopedUpdate plan 1) (ZeroArray count (Length destination)) (Adding))
+          (UpdateArray (ScopedUpdate plan 2) (ZeroArray count (Fixed 1)) (IdenticalWrites))) contribution
+          (ChooseUpdates (UpdateInput 0)
+            (ChooseUpdates (UpdateBinary "&&" (UpdateBinary ">=" (UpdateInput 1) (UpdateConstant 0))
+                (UpdateBinary "<" (UpdateInput 1) (UpdateExtent (Length destination))))
+              (BindUpdate (ScopedUpdate plan 1) (vec-of (UpdateInput 1)) (UpdateConstant 1)
+                (ChooseUpdates (UpdateBinary "<" (UpdateBound 0) (UpdateConstant capacity))
+                  (BindUpdate (ScopedUpdate plan 0) (vec-of (UpdateInput 1) (UpdateBound 0)) (UpdateInput 2) (UpdatesDone))
+                  (BindUpdate (ScopedUpdate plan 2) (vec-of (UpdateConstant 0)) (UpdateConstant 1) (UpdatesDone))))
+              (BindUpdate (ScopedUpdate plan 2) (vec-of (UpdateConstant 0)) (UpdateConstant 1) (UpdatesDone)))
+            (UpdatesDone))))) :ruleset fusion-signatures)
+
+(relation UpdateArrayAt (FusionPlan i64))
+(relation PlanUpdateArray (FusionPlan i64 UpdateInitial UpdateMode))
+(rule ((= (PlanUpdates plan) (WithUpdates arrays input body))) ((UpdateArrayAt plan 0)) :ruleset fusion-signatures)
+(rule ((UpdateArrayAt plan i) (= (PlanUpdates plan) (WithUpdates arrays input body)) (< i (vec-length arrays))
+       (= (vec-get arrays i) (UpdateArray (ScopedUpdate plan slot) initial mode)))
+      ((PlanUpdateArray plan slot initial mode) (UpdateArrayAt plan (+ i 1))) :ruleset fusion-signatures)

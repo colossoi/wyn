@@ -179,8 +179,6 @@
 (datatype InputStorage (StorageInput BindingKey i64))
 (function AbiStorage (SourceValue) InputStorage :no-merge)
 (relation AbiOutputBinding (i64 i64 i64))
-(datatype UpdateDestination (DestinationBuffer ValueKey) (DestinationValue SourceValue))
-(function SelectedDestination (OperationKey) UpdateDestination :no-merge)
 (relation Callback (OperationKey RegionKey))
 
 ; Explicit output bindings cannot be satisfied by borrowing an input buffer.
@@ -220,7 +218,6 @@
 ; Result indices include preceding totals; the destination's output buffer slot is 0.
 (function DestinationSlot (OperationKey) i64 :no-merge)
 (relation IndexedReducer (OperationKey bool AtomicUpdate))
-(relation BucketShape (OperationKey bool))
 (function Plan (OperationKey) Recipe :no-merge)
 (function ElideElements (OperationKey) bool :merge (or old new))
 (ruleset schedule)

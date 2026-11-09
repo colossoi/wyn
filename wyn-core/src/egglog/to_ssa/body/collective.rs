@@ -34,9 +34,6 @@ impl Body<'_, '_, '_> {
         if width.is_some() {
             self.workgroup_barrier()?;
         }
-        let Some(domain) = self.compiler.facts.domain(owner) else {
-            return Err(error("local domain missing"));
-        };
         let allocations = self.compiler.local_buffers.get(&owner).cloned().unwrap_or_default();
         for [role, index, _element, extent] in allocations {
             let role = self.compiler.program.graph.value_to_base::<S>(role).to_string();
@@ -76,7 +73,6 @@ impl Body<'_, '_, '_> {
             scope,
             owner,
             if width.is_some() { "local" } else { "ordered" },
-            domain,
             width.unwrap_or(1),
         )?;
         if width.is_some() {

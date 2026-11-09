@@ -2,12 +2,11 @@
 use super::super::{builder_error, error, Body, OptimizeError, Typed};
 use super::contribution::Contribution;
 use super::{coordinates, invocation};
-use crate::egglog::facts::OutputAction;
 use crate::op::{BinaryOperator, OpTag};
 use crate::ssa::types::{AtomicOp, InstKind};
-use crate::types::{self, Type, TypeExt, TypeName};
+use crate::types;
 use crate::LookupMap;
-use egglog_engine::Value;
+use egglog_engine::{sort::S, Value};
 
 #[derive(Clone, Copy)]
 enum Update {
@@ -108,26 +107,6 @@ fn apply(
     }
 }
 
-fn in_bounds(body: &mut Body<'_, '_, '_>, key: Typed, length: Typed) -> Result<Typed, OptimizeError> {
-    let zero = body.literal(0, &key.ty)?;
-    let nonnegative = body.binary(BinaryOperator::GreaterEqual, key.clone(), zero)?;
-    let below = body.binary(BinaryOperator::Less, key, length)?;
-    body.binary(BinaryOperator::LogicalAnd, nonnegative, below)
-}
-
-fn destination(body: &mut Body<'_, '_, '_>, scope: Value, owner: Value) -> Result<Typed, OptimizeError> {
-    let Some(destination) = body.compiler.facts.lookup("SelectedDestination", (owner,)) else {
-        return Err(error("update has no selected destination"));
-    };
-    if let Some(fields) = body.compiler.facts.enode("DestinationBuffer", destination) {
-        return body.resource(scope, fields[0], 3);
-    }
-    let Some(fields) = body.compiler.facts.enode("DestinationValue", destination) else {
-        return Err(error("invalid update destination"));
-    };
-    body.value(scope, fields[0])
-}
-
 fn iteration(
     body: &mut Body<'_, '_, '_>,
     phase: &str,
@@ -147,54 +126,191 @@ pub(super) fn initialize(
     phase: &str,
     width: u32,
 ) -> Result<(), OptimizeError> {
-    let Some(source) = body.compiler.facts.lookup("InitialValue", (owner,)) else {
-        return Err(error("update has no initial value"));
-    };
-    let output = destination(body, scope, owner)?;
-    let initial = body.value(scope, source)?;
-    let n = body.length(output.clone())?;
-    let (start, step) = iteration(body, phase, width)?;
-    body.copy_array_strided((output, &[]), initial, n, &[], start, step)?;
+    let arrays = body.compiler.facts.initialized_arrays(owner)?;
+    if arrays.is_empty() {
+        return Ok(());
+    }
+    for (resource, source) in arrays {
+        let output = body.resource(scope, resource, 2)?;
+        let initial = body.value(scope, source)?;
+        let n = body.length(output.clone())?;
+        let (start, step) = iteration(body, phase, width)?;
+        body.copy_array_strided((output, &[]), initial, n, &[], start, step)?;
+    }
     if phase == "local" {
         body.workgroup_barrier()?;
     }
     Ok(())
 }
 
-pub(super) fn indexed(
+/// A capability is available only while interpreting its declaring scope.
+struct Capabilities(LookupMap<Value, (Typed, Update)>);
+
+impl Capabilities {
+    fn emit(
+        &self,
+        body: &mut Body<'_, '_, '_>,
+        scope: Value,
+        program: Value,
+        input: &Typed,
+        bound: &[Typed],
+    ) -> Result<(), OptimizeError> {
+        if body.compiler.facts.enode("UpdatesDone", program).is_some() {
+            return Ok(());
+        }
+        if let Some(fields) = body.compiler.facts.enode("ChooseUpdates", program) {
+            let condition = expression(body, scope, fields[0], input, bound)?;
+            body.branch(
+                scope,
+                condition,
+                |body| {
+                    self.emit(body, scope, fields[1], input, bound)?;
+                    body.tuple(vec![])
+                },
+                |body| {
+                    self.emit(body, scope, fields[2], input, bound)?;
+                    body.tuple(vec![])
+                },
+                None,
+            )?;
+            return Ok(());
+        }
+        let Some(fields) = body.compiler.facts.enode("BindUpdate", program) else {
+            return Err(error("invalid update program"));
+        };
+        let Some((output, mode)) = self.0.get(&fields[0]) else {
+            return Err(error("update handle is outside its declaring scope"));
+        };
+        let coordinates = body
+            .compiler
+            .facts
+            .vector(fields[1])?
+            .into_iter()
+            .map(|value| expression(body, scope, value, input, bound))
+            .collect::<Result<Vec<_>, _>>()?;
+        let value = expression(body, scope, fields[2], input, bound)?;
+        let result = if matches!(mode, Update::Store) {
+            body.store_at(output.clone(), &coordinates, value.clone())?;
+            value
+        } else {
+            let Some((key, prefix)) = coordinates.split_last() else {
+                return Err(error("accumulator update requires coordinates"));
+            };
+            let mut target = output.clone();
+            for index in prefix {
+                target = body.index(target, index.clone())?;
+            }
+            apply(body, scope, target, key.clone(), value, *mode)?
+        };
+        let mut bound = bound.to_vec();
+        bound.push(result);
+        self.emit(body, scope, fields[3], input, &bound)
+    }
+}
+
+fn expression(
+    body: &mut Body<'_, '_, '_>,
+    scope: Value,
+    value: Value,
+    input: &Typed,
+    bound: &[Typed],
+) -> Result<Typed, OptimizeError> {
+    if let Some(fields) = body.compiler.facts.enode("UpdateInput", value) {
+        return body.field(
+            input.clone(),
+            body.compiler.facts.unsigned(fields[0], "update input")? as usize,
+        );
+    }
+    if let Some(fields) = body.compiler.facts.enode("UpdateBound", value) {
+        let index = body.compiler.facts.unsigned(fields[0], "update binding")? as usize;
+        let Some(value) = bound.iter().rev().nth(index) else {
+            return Err(error("update binding is out of scope"));
+        };
+        return Ok(value.clone());
+    }
+    if let Some(fields) = body.compiler.facts.enode("UpdateConstant", value) {
+        return body.literal(body.compiler.facts.integer(fields[0]), &types::i32());
+    }
+    if let Some(fields) = body.compiler.facts.enode("UpdateExtent", value) {
+        return body.extent(scope, fields[0]);
+    }
+    let Some(fields) = body.compiler.facts.enode("UpdateBinary", value) else {
+        return Err(error("invalid update expression"));
+    };
+    let name = body.compiler.program.graph.value_to_base::<S>(fields[0]);
+    let operator =
+        BinaryOperator::try_from(name.as_str()).map_err(|_| error("invalid update binary operator"))?;
+    let left = expression(body, scope, fields[1], input, bound)?;
+    let right = expression(body, scope, fields[2], input, bound)?;
+    body.binary(operator, left, right)
+}
+
+fn capabilities(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
     owner: Value,
     phase: &str,
-    extent: Value,
-    width: u32,
-    plan: Value,
-) -> Result<(), OptimizeError> {
-    let output = destination(body, scope, owner)?;
-    let extent = if phase == "ordered" {
-        let Some(extent) = body.compiler.facts.domain(owner) else {
-            return Err(error("update domain missing"));
+    declarations: Value,
+) -> Result<Capabilities, OptimizeError> {
+    let mut handles = LookupMap::default();
+    for declaration in body.compiler.facts.vector(declarations)? {
+        let Some(fields) = body.compiler.facts.enode("UpdateArray", declaration) else {
+            return Err(error("invalid update declaration"));
         };
-        extent
-    } else {
-        extent
-    };
-    let n = body.extent(scope, extent)?;
-    let (start, step) = iteration(body, phase, width)?;
-    body.counted(start, n, step, vec![], |body, index, _| {
-        update(
-            body,
-            scope,
-            owner,
-            phase,
-            plan,
-            output.clone(),
-            index,
-            &mut LookupMap::default(),
-        )?;
-        Ok(vec![])
-    })?;
-    Ok(())
+        let Some(handle) = body.compiler.facts.enode("ScopedUpdate", fields[0]) else {
+            return Err(error("invalid update handle"));
+        };
+        let Some(base) = body.compiler.facts.lookup("DestinationSlot", (owner,)) else {
+            return Err(error("update scope has no result slots"));
+        };
+        let slot = body.compiler.facts.integer(base) + body.compiler.facts.integer(handle[1]);
+        let Some(resource) = body.compiler.facts.constructor("Result", (owner, slot)) else {
+            return Err(error("update resource missing"));
+        };
+        let existing = body
+            .compiler
+            .facts
+            .lookup("StorageDeclaration", (resource,))
+            .and_then(|declaration| body.compiler.facts.enode("ExistingResult", declaration));
+        let output = if let Some(initial) = existing {
+            body.value(scope, initial[0])?
+        } else {
+            body.resource(scope, resource, if phase == "clear" { 2 } else { 3 })?
+        };
+        let mode = if body.compiler.facts.enode("Overwrite", fields[2]).is_some() {
+            Update::Store
+        } else if body.compiler.facts.enode("Adding", fields[2]).is_some() {
+            if phase == "ordered" {
+                Update::Add
+            } else {
+                Update::Atomic(AtomicOp::Add)
+            }
+        } else if body.compiler.facts.enode("IdenticalWrites", fields[2]).is_some() {
+            if phase == "ordered" {
+                Update::Store
+            } else {
+                Update::Atomic(AtomicOp::Exchange)
+            }
+        } else {
+            let Some(combine) = body.compiler.facts.enode("Combining", fields[2]) else {
+                return Err(error("invalid accumulator mode"));
+            };
+            if phase == "atomic" {
+                let Some(op) = body.compiler.facts.atomic(owner) else {
+                    return Err(error("atomic update missing"));
+                };
+                if op == AtomicOp::CompareExchange {
+                    Update::AtomicCombine(combine[0])
+                } else {
+                    Update::Atomic(op)
+                }
+            } else {
+                Update::Combine(combine[0])
+            }
+        };
+        handles.insert(fields[0], (output, mode));
+    }
+    Ok(Capabilities(handles))
 }
 
 pub(super) fn update(
@@ -203,52 +319,27 @@ pub(super) fn update(
     owner: Value,
     phase: &str,
     plan: Value,
-    output: Typed,
-    index: Typed,
+    indices: &[Typed],
     cache: &mut LookupMap<Value, Typed>,
 ) -> Result<(), OptimizeError> {
-    let OutputAction::Update {
-        combine,
-        contribution,
-    } = body.compiler.facts.action(plan)?
-    else {
-        return Err(error("indexed loop requires an update action"));
+    let Some(fields) = body.compiler.facts.record("PlanUpdates", "WithUpdates", (plan,)) else {
+        return Err(error("parallel loop has no update scope"));
     };
-    let update = match combine {
-        None => Update::Store,
-        Some(combine) if phase == "atomic" => {
-            let Some(op) = body.compiler.facts.atomic(owner) else {
-                return Err(error("atomic update missing"));
-            };
-            if op == AtomicOp::CompareExchange {
-                Update::AtomicCombine(combine)
-            } else {
-                Update::Atomic(op)
-            }
-        }
-        Some(combine) => Update::Combine(combine),
-    };
+    let handles = capabilities(body, scope, owner, phase, fields[0])?;
     Contribution {
         scope,
         plan,
-        indices: std::slice::from_ref(&index),
+        indices,
         skipped: &|body, _| body.tuple(vec![]),
     }
-    .emit(body, contribution, cache, &mut |body, _, pair| {
-        let key = body.field(pair.clone(), 0)?;
-        let value = body.field(pair, 1)?;
-        let length = body.length(output.clone())?;
-        let valid = in_bounds(body, key.clone(), length)?;
-        body.when(valid, |body| {
-            apply(body, scope, output.clone(), key, value, update)?;
-            Ok(())
-        })?;
+    .emit(body, fields[1], cache, &mut |body, _, input| {
+        handles.emit(body, scope, fields[2], &input, &[])?;
         body.tuple(vec![])
     })?;
     Ok(())
 }
 
-pub(super) fn buckets(
+pub(super) fn emit(
     body: &mut Body<'_, '_, '_>,
     scope: Value,
     owner: Value,
@@ -256,92 +347,50 @@ pub(super) fn buckets(
     width: u32,
     plan: Value,
 ) -> Result<(), OptimizeError> {
-    let OutputAction::Reserve { contribution } = body.compiler.facts.action(plan)? else {
-        return Err(error("reservation loop requires a bucket action"));
+    let Some(fields) = body.compiler.facts.record("PlanUpdates", "WithUpdates", (plan,)) else {
+        return Err(error("parallel loop has no update scope"));
     };
-    let output = destination(body, scope, owner)?;
-    let Some(counts) = body.slot(scope, owner, "counts", 0, if phase == "clear" { 2 } else { 3 })? else {
-        return Err(error("reservation counts missing"));
-    };
-    let Some(overflow) = body.slot(scope, owner, "overflow", 0, 2)? else {
-        return Err(error("reservation overflow missing"));
-    };
-    let zero = body.literal(0, &types::i32())?;
-    let one = body.literal(1, &types::i32())?;
-    let serial = phase == "ordered";
-    if serial || phase == "clear" {
-        let count = body.length(output.clone())?;
-        let (start, step) = iteration(body, phase, width)?;
-        let first = body.binary(BinaryOperator::Equal, start.clone(), zero.clone())?;
-        body.when(first, |body| {
-            body.store(overflow.clone(), zero.clone(), zero.clone())
-        })?;
-        body.counted(start, count, step, vec![], |body, index, _| {
-            body.store(counts.clone(), index, zero.clone())?;
-            Ok(vec![])
-        })?;
-        if !serial {
+    if phase == "ordered" || phase == "clear" {
+        let handles = capabilities(body, scope, owner, phase, fields[0])?;
+        for declaration in body.compiler.facts.vector(fields[0])? {
+            let Some(array) = body.compiler.facts.enode("UpdateArray", declaration) else {
+                return Err(error("invalid update declaration"));
+            };
+            if let Some(initial) = body.compiler.facts.enode("ZeroArray", array[1]) {
+                let Some((output, _)) = handles.0.get(&array[0]) else {
+                    return Err(error("update handle missing"));
+                };
+                let n = body.extent(scope, initial[1])?;
+                let (start, step) = iteration(body, phase, width)?;
+                body.counted(start, n, step, vec![], |body, index, _| {
+                    body.store(output.clone(), index, Body::number(0))?;
+                    Ok(vec![])
+                })?;
+            }
+        }
+        if phase == "clear" {
             return Ok(());
         }
     }
-    let dimensions = body.compiler.facts.iteration_dimensions(owner)?;
-    let dimensions =
-        dimensions.iter().map(|&extent| body.extent(scope, extent)).collect::<Result<Vec<_>, _>>()?;
+    let dimensions = body
+        .compiler
+        .facts
+        .iteration_dimensions(owner)?
+        .into_iter()
+        .map(|extent| body.extent(scope, extent))
+        .collect::<Result<Vec<_>, _>>()?;
     let n = coordinates::length(body, &dimensions)?;
-    let Some(Type::Constructed(TypeName::Size(capacity), _)) =
-        output.ty.elem_type().and_then(|row| row.array_size())
-    else {
-        return Err(error("reservation capacity must be static"));
-    };
-    let capacity =
-        Body::number(u32::try_from(*capacity).map_err(|_| error("reservation capacity exceeds u32"))?);
-    let length = body.length(output.clone())?;
     let (start, step) = iteration(body, phase, width)?;
     body.counted(start, n, step, vec![], |body, index, _| {
         let coordinates = coordinates::decode(body, &dimensions, index)?;
-        Contribution {
-            scope,
-            plan,
-            indices: &coordinates,
-            skipped: &|body, _| body.tuple(vec![]),
-        }
-        .emit(
+        update(
             body,
-            contribution,
+            scope,
+            owner,
+            phase,
+            plan,
+            &coordinates,
             &mut LookupMap::default(),
-            &mut |body, _, emission| {
-                let active = body.field(emission.clone(), 0)?;
-                body.when(active, |body| {
-                    let key = body.field(emission.clone(), 1)?;
-                    let valid = in_bounds(body, key.clone(), length.clone())?;
-                    let succeeded = body.branch(
-                        scope,
-                        valid,
-                        |body| {
-                            let update = if serial { Update::Add } else { Update::Atomic(AtomicOp::Add) };
-                            let slot =
-                                apply(body, scope, counts.clone(), key.clone(), one.clone(), update)?;
-                            let room = body.binary(BinaryOperator::Less, slot.clone(), capacity.clone())?;
-                            body.when(room.clone(), |body| {
-                                let value = body.field(emission.clone(), 2)?;
-                                body.store_at(output.clone(), &[key, slot], value)
-                            })?;
-                            Ok(room)
-                        },
-                        |body| body.op(OpTag::Bool(false), vec![], types::bool_type()),
-                        None,
-                    )?;
-                    let no = body.op(OpTag::Bool(false), vec![], types::bool_type())?;
-                    let failed = body.binary(BinaryOperator::Equal, succeeded, no)?;
-                    body.when(failed, |body| {
-                        let update =
-                            if serial { Update::Store } else { Update::Atomic(AtomicOp::Exchange) };
-                        apply(body, scope, overflow.clone(), zero.clone(), one.clone(), update)?;
-                        Ok(())
-                    })
-                })?;
-                body.tuple(vec![])
-            },
         )?;
         Ok(vec![])
     })?;

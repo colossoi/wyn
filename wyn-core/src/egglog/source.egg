@@ -62,7 +62,6 @@
 (relation SourceReusePermission (SourceValue RegionKey))
 (function SourceDomainExtent (OperationKey) Extent :no-merge)
 (function SourceDomainShape (OperationKey) DomainShape :no-merge)
-(function SourceKnownBucketDomain (OperationKey) bool :merge (or old new))
 (function SourceExtent (SourceValue) Extent :no-merge)
 (constructor SourceArrayAtom (SourceValue i64) SourceValue)
 (constructor SourceProjected (SourceValue i64) SourceValue)
