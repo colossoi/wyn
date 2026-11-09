@@ -158,5 +158,5 @@
       ((set (LocalExecution op (WorkgroupScope)) (WorkgroupScope))) :ruleset schedule)
 (rule ((DeviceOperation op) (= plan (SelectedPlan op)) (= (PlanBody plan) (ParallelLoop domain totals scans arrays action)) (= (LocalSupportsWorkgroup op) false))
       ((set (LocalExecution op (WorkgroupScope)) (InvocationScope))) :ruleset schedule)
-(rule ((InitializedResult op i t n) (= source (SourceDestination op)))
-      ((set (InitialValue op) source)) :ruleset schedule)
+(rule ((= (StorageDeclaration (Result op i)) (AllocateResult t n (CopyFrom initial))))
+      ((set (InitialValue op) initial)) :ruleset schedule)

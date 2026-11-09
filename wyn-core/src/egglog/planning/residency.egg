@@ -28,8 +28,8 @@
 (rule ((ParameterValue e)) ((set (StoredLoopState e) false)) :ruleset structure)
 (rule ((ArrayResult op i t)) ((ResultSlot op i)) :ruleset residency)
 (rule ((TotalResult op i t)) ((ResultSlot op i)) :ruleset residency)
-(rule ((UpdatedResult op i e)) ((ResultSlot op i)) :ruleset residency)
-(rule ((InitializedResult op i t n)) ((ResultSlot op i)) :ruleset residency)
+(rule ((= (StorageDeclaration (Result op i)) (ExistingResult e))) ((ResultSlot op i)) :ruleset residency)
+(rule ((= (StorageDeclaration (Result op i)) (AllocateResult t n initialization))) ((ResultSlot op i)) :ruleset residency)
 (rule ((FilterResult op t)) ((ResultSlot op 0) (ResultSlot op 1)) :ruleset residency)
 (rule ((BucketResult op destination)) ((ResultSlot op 1) (ResultSlot op 2)) :ruleset residency)
 (rule ((ParameterValue e) (= (StoredLoopState e) false)) ((set (ValueRef e) (Source e))) :ruleset residency)
@@ -100,5 +100,3 @@
 (rule ((Escapes value) (Produces producer value)) ((Materialize value)) :ruleset residency)
 (rule ((Requires (InOperation op) value) (Produces producer value))
       ((Materialize value)) :ruleset residency)
-
-(rule ((UninitializedResult op i t n)) ((ResultSlot op i)) :ruleset residency)

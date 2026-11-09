@@ -187,7 +187,7 @@
 
 
 
-(rule ((DeviceOperation op) (UninitializedResult op i t n)) ((LocalBuffer op "output" 0 t n)) :ruleset schedule)
+(rule ((DeviceOperation op) (= (StorageDeclaration (Result op i)) (AllocateResult t n (NoContents)))) ((LocalBuffer op "output" 0 t n)) :ruleset schedule)
 
 (rule ((Phase (Stage leader phase) r) (PlannedOperation op leader plan r)
        (= callback (SourceOperatorBody op)) (= (SourceOperation op) (OperationInfo origin kind))
@@ -219,10 +219,10 @@
 (rule ((= (Plan op) (Scatter))) ((UpdatePhases op "scatter" "scatter")) :ruleset schedule)
 (rule ((= (Plan op) (Atomic update))) ((UpdatePhases op "atomic" "atomic")) :ruleset schedule)
 (rule ((= (Plan op) (Buckets))) ((UpdatePhases op "clear" "buckets")) :ruleset schedule)
-(rule ((UpdatePhases op first last) (InitializedResult op i t n) (= grid (OperationGrid op)))
+(rule ((UpdatePhases op first last) (= (StorageDeclaration (Result op i)) (AllocateResult t n (CopyFrom initial))) (= grid (OperationGrid op)))
       ((KernelPhase op "initialize" n 64 grid) (PhaseEnds op "initialize" last)
        (PhaseLink op "initialize" first)) :ruleset schedule)
-(rule ((UpdatePhases op first last) (UpdatedResult op i source))
+(rule ((UpdatePhases op first last) (= (StorageDeclaration (Result op i)) (ExistingResult source)))
       ((PhaseEnds op first last)) :ruleset schedule)
-(rule ((UpdatePhases op first last) (UninitializedResult op i t n))
+(rule ((UpdatePhases op first last) (= (StorageDeclaration (Result op i)) (AllocateResult t n (NoContents))))
       ((PhaseEnds op first last)) :ruleset schedule)

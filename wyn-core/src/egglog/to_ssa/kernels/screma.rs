@@ -120,8 +120,15 @@ pub(super) fn screma(
     let tiles = body.binary(Divide, tiles, Body::number(threads as u32))?;
     let span = body.binary(Multiply, tiles.clone(), width.clone())?;
     match phase {
-        "chunks" | "local" => {
-            let group = if phase == "local" {
+        "chunks" | "local" | "combine" => {
+            let (n, tiles) = if phase == "combine" {
+                let n = Body::number(groups as u32);
+                let rounded = body.binary(Add, n.clone(), Body::number(phase_width - 1))?;
+                (n, body.binary(Divide, rounded, Body::number(phase_width))?)
+            } else {
+                (n, tiles)
+            };
+            let group = if phase != "chunks" {
                 Body::number(0)
             } else {
                 let (thread, _) = invocation(body, phase_width)?;
@@ -134,7 +141,7 @@ pub(super) fn screma(
                 Body::number(1),
                 initial.clone(),
                 |body, tile, carry| {
-                    let offset = body.binary(Multiply, tile, width.clone())?;
+                    let offset = body.binary(Multiply, tile, Body::number(phase_width))?;
                     let offset = body.binary(Add, base.clone(), offset)?;
                     let index = body.binary(Add, offset, lane.clone())?;
                     let valid = body.binary(Less, index.clone(), n.clone())?;
@@ -144,8 +151,16 @@ pub(super) fn screma(
                         |body| {
                             let mut cache = LookupMap::default();
                             let mut values = Vec::new();
-                            for accumulator in &accumulators {
-                                let value = if packing.is_some() {
+                            for (i, accumulator) in accumulators.iter().enumerate() {
+                                let value = if phase == "combine" {
+                                    let Some(partial) =
+                                        body.slot(scope, phase_owner, "partial", i as i64, 1)?
+                                    else {
+                                        return Err(error("collective partial is not materialized"));
+                                    };
+                                    let value = body.index(partial, index.clone())?;
+                                    body.cast(value, &initial[i].ty)?
+                                } else if packing.is_some() {
                                     packing_input(body, scope, plan, &index)?
                                 } else {
                                     accumulator.accumulate(
@@ -159,7 +174,7 @@ pub(super) fn screma(
                                 };
                                 values.push(value);
                             }
-                            if !has_scans && !totals_only {
+                            if !has_scans && !totals_only && phase != "combine" {
                                 write_arrays(
                                     body,
                                     scope,
@@ -201,9 +216,9 @@ pub(super) fn screma(
                             workgroup_reduce(body, scope, &reductions, values, lane.clone(), phase_width)?,
                         )
                     } else {
-                        let (prefixes, _, totals) =
+                        let (prefixes, offsets, totals) =
                             workgroup_scan(body, scope, &reductions, values, lane.clone(), phase_width)?;
-                        (prefixes, totals)
+                        (if phase == "combine" { offsets } else { prefixes }, totals)
                     };
                     body.when(valid, |body| {
                         let mut cache = LookupMap::default();
@@ -241,10 +256,13 @@ pub(super) fn screma(
                                 accumulators[i].reduction.combine(body, scope, carry[i].clone(), prefix)?;
                             if phase == "local" {
                                 cache.insert(accumulators[i].source, value);
-                            } else if let Some(output) =
-                                body.slot(scope, phase_owner, "prefix", component.output_slot, 2)?
-                            {
-                                body.store(output, index.clone(), value)?;
+                            } else {
+                                let role = if phase == "combine" { "offset" } else { "prefix" };
+                                if let Some(output) =
+                                    body.slot(scope, phase_owner, role, component.output_slot, 2)?
+                                {
+                                    body.store(output, index.clone(), value)?;
+                                }
                             }
                         }
                         if phase == "local" && has_scans {
@@ -279,7 +297,7 @@ pub(super) fn screma(
             let first = body.binary(Equal, lane, Body::number(0))?;
             body.when(first, |body| {
                 for (i, value) in state.into_iter().enumerate() {
-                    if phase == "local" {
+                    if phase != "chunks" {
                         let component = &components[i];
                         if component.role == "pack" {
                             if let Some(output) = body.slot(scope, phase_owner, "length", 0, 2)? {
@@ -294,86 +312,6 @@ pub(super) fn screma(
                         }
                     } else if let Some(output) = body.slot(scope, phase_owner, "partial", i as i64, 2)? {
                         body.store(output, group.clone(), value)?;
-                    }
-                }
-                Ok(())
-            })?;
-        }
-        "combine" => {
-            let groups = Body::number(groups as u32);
-            let totals = body.counted(
-                Body::number(0),
-                groups.clone(),
-                Body::number(phase_width),
-                initial.clone(),
-                |body, base, carry| {
-                    let index = body.binary(Add, base, lane.clone())?;
-                    let valid = body.binary(Less, index.clone(), groups.clone())?;
-                    let mut values = Vec::new();
-                    for (i, neutral) in initial.iter().enumerate() {
-                        values.push(body.branch(
-                            scope,
-                            valid.clone(),
-                            |body| {
-                                let Some(partial) =
-                                    body.slot(scope, phase_owner, "partial", i as i64, 1)?
-                                else {
-                                    return Err(error("collective partial is not materialized"));
-                                };
-                                let value = body.index(partial, index.clone())?;
-                                body.cast(value, &neutral.ty)
-                            },
-                            |_| Ok(neutral.clone()),
-                            None,
-                        )?);
-                    }
-                    let (offsets, totals) = if !has_scans {
-                        (
-                            Vec::new(),
-                            workgroup_reduce(body, scope, &reductions, values, lane.clone(), phase_width)?,
-                        )
-                    } else {
-                        let (_, offsets, totals) =
-                            workgroup_scan(body, scope, &reductions, values, lane.clone(), phase_width)?;
-                        (offsets, totals)
-                    };
-                    body.when(valid, |body| {
-                        for (i, (component, offset)) in components
-                            .iter()
-                            .zip(offsets)
-                            .enumerate()
-                            .filter(|(_, (c, _))| c.role == "scan")
-                        {
-                            if let Some(output) =
-                                body.slot(scope, phase_owner, "offset", component.output_slot, 2)?
-                            {
-                                let value = accumulators[i].reduction.combine(
-                                    body,
-                                    scope,
-                                    carry[i].clone(),
-                                    offset,
-                                )?;
-                                body.store(output, index.clone(), value)?;
-                            }
-                        }
-                        Ok(())
-                    })?;
-                    accumulators
-                        .iter()
-                        .zip(carry.into_iter().zip(totals))
-                        .map(|(accumulator, (carry, total))| {
-                            accumulator.reduction.combine(body, scope, carry, total)
-                        })
-                        .collect()
-                },
-            )?;
-            let first = body.binary(Equal, lane, Body::number(0))?;
-            body.when(first, |body| {
-                for (component, value) in components.iter().zip(totals).filter(|(c, _)| c.role != "scan") {
-                    if let Some(output) =
-                        body.output_target(scope, phase_owner, "total", component.output_slot)?
-                    {
-                        output.store(body, &[Body::number(0)], value)?;
                     }
                 }
                 Ok(())

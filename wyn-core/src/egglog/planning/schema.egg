@@ -59,8 +59,9 @@
 
 ; State slot, type, result role/slot, and source are shared by scheduling and emission.
 (relation Accumulator (OperationKey i64 TypeKey String i64 SourceValue))
-(relation UpdatedResult (OperationKey i64 SourceValue))
-(relation InitializedResult (OperationKey i64 TypeKey Extent))
+(datatype Initialization (CopyFrom SourceValue) (NoContents))
+(datatype ResultStorage (AllocateResult TypeKey Extent Initialization) (ExistingResult SourceValue))
+(function StorageDeclaration (ValueKey) ResultStorage :no-merge)
 (relation FilterResult (OperationKey TypeKey))
 (relation BucketResult (OperationKey SourceValue))
 (relation CounterType (TypeKey))
@@ -180,7 +181,6 @@
 (datatype UpdateDestination (DestinationBuffer ValueKey) (DestinationValue SourceValue))
 (function SelectedDestination (OperationKey) UpdateDestination :no-merge)
 (relation Callback (OperationKey RegionKey))
-(relation UninitializedResult (OperationKey i64 TypeKey Extent))
 
 ; Explicit output bindings cannot be satisfied by borrowing an input buffer.
 (function OutputPinned (i64) bool :merge (or old new))

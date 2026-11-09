@@ -1,10 +1,8 @@
 ; Backing identity is distinct from the version of a value stored there.
 ; Destination selection completes before fresh storage can be allocated.
-(rule ((InitializedResult op i t n))
+(rule ((= (StorageDeclaration (Result op i)) (AllocateResult t n initialization)))
       ((set (SelectedDestination op) (DestinationBuffer (Result op i)))) :ruleset allocation)
-(rule ((UninitializedResult op i t n))
-      ((set (SelectedDestination op) (DestinationBuffer (Result op i)))) :ruleset allocation)
-(rule ((UpdatedResult op i source))
+(rule ((= (StorageDeclaration (Result op i)) (ExistingResult source)))
       ((set (SelectedDestination op) (DestinationValue source))) :ruleset allocation)
 (function ReuseSelected (ValueKey) bool :merge (or old new))
 (rule ((FreshValue value)) ((set (ReuseSelected value) false)) :ruleset allocation)
@@ -63,21 +61,21 @@
        (set (CapacityExtent (Result op 1)) (Length destination)) (set (LiveLength (Result op 1)) (Length destination))
        (set (CapacityExtent (Result op 2)) (Fixed 1)) (set (LiveLength (Result op 2)) (Fixed 1))
        (FreshValue (Result op 1)) (FreshValue (Result op 2))) :ruleset allocation)
-(rule ((UpdatedResult op i source))
+(rule ((= (StorageDeclaration (Result op i)) (ExistingResult source)))
       ((set (SameBacking (Result op i)) source)
        (set (CapacityExtent (Result op i)) (Length source))
        (set (LiveLength (Result op i)) (Length source))
        (set (ResultRead op i) (ReadView (Result op i)))) :ruleset allocation)
 ; Value destinations receive independent storage with the destination's shape,
 ; not the number of updates. Initialization completes before scatter writes.
-(rule ((InitializedResult op i t n))
+(rule ((= (StorageDeclaration (Result op i)) (AllocateResult t n initialization)))
       ((ElementType (Result op i) t) (set (CapacityExtent (Result op i)) n)
        (set (ResultRead op i) (ReadView (Result op i)))
        (set (LiveLength (Result op i)) n) (FreshValue (Result op i))
        (set (BufferSlot op "output" 0) (Result op i))) :ruleset allocation)
-(rule ((InitializedResult op i t n) (Produces stage (Result op i)))
+(rule ((= (StorageDeclaration (Result op i)) (AllocateResult t n initialization)) (Produces stage (Result op i)))
       ((Materialize (Result op i))) :ruleset allocation)
-(rule ((UpdatedResult op i source) (= (ValueRef source) old) (Produces stage (Result op i)))
+(rule ((= (StorageDeclaration (Result op i)) (ExistingResult source)) (= (ValueRef source) old) (Produces stage (Result op i)))
       ((Clobbers stage old)) :ruleset allocation)
 
 ; Returning or reading a compacted view also requires its stored live length.
@@ -128,13 +126,8 @@
       ((set (BufferSlot op name i) value)
        (set (LiveLength value) n)) :ruleset allocation)
 
-(rule ((UninitializedResult op i t n))
-      ((ElementType (Result op i) t) (set (CapacityExtent (Result op i)) n)
-       (set (ResultRead op i) (ReadView (Result op i)))
-       (set (LiveLength (Result op i)) n) (FreshValue (Result op i))
-       (set (BufferSlot op "output" 0) (Result op i))) :ruleset allocation)
-(rule ((UninitializedResult op i t n) (Requires site (Result op i))) ((Materialize (Result op i))) :ruleset allocation)
-(rule ((UninitializedResult op i t n) (Produces stage (Result op i))) ((Materialize (Result op i))) :ruleset allocation)
+(rule ((= (StorageDeclaration (Result op i)) (AllocateResult t n initialization)) (Requires site (Result op i)))
+      ((Materialize (Result op i))) :ruleset allocation)
 
 ; Slices retain offsets that the published result ABI cannot yet describe.
 (relation WholeValue (SourceValue ValueKey))
@@ -169,7 +162,7 @@
 (relation ReuseOperand (OperationKey SourceValue))
 (rule ((ArrayResult op i t) (Operand op "input" e) (FitsInput op e))
       ((ReuseOperand op e)) :ruleset reuse)
-(rule ((InitializedResult op i t (Length destination)))
+(rule ((= (StorageDeclaration (Result op i)) (AllocateResult t n (CopyFrom destination))))
       ((ReuseResult op i t) (ReuseOperand op destination)) :ruleset reuse)
 ; Check each writer/input pair once, independently of the number of outputs.
 (relation ReuseType (OperationKey TypeKey))
