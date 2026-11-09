@@ -48,6 +48,8 @@
       ((set (Traversal value 0) (TraversalValue value))) :ruleset traversal-leaves)
 (rule ((= next (DirectOutput value))) ((set (Traversal value 0) next)) :ruleset traversal-leaves)
 
+(rule ((ElementAt value axes)) ((TraversalDemand value (vec-length axes))) :ruleset segment-shapes)
+
 (rule ((Current group plan) (PlanMember plan op) (= (PlanMapping op) true)
        (= value (SourceOperationValue op))) ((TraversalDemand value 1)) :ruleset segment-shapes)
 (rule ((MapPlan plan owner extent) (= rank (IterationRank owner)) (PlanResult plan "array" i value element))

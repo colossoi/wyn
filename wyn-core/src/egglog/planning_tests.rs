@@ -808,17 +808,23 @@ fn ranked_inputs_keep_their_independent_coordinate_mappings() {
             let [operation] = operations(graph, "bucket-scatter")[..] else {
                 panic!("one bucket scatter")
             };
-            for input in 0..2i64 {
-                let mapping = query.required("SourceInputMap", (operation, input)).unwrap();
-                let axes = graph.value_to_container::<VecContainer>(mapping).unwrap();
-                assert_eq!(axes.data.len(), 1);
-                assert_eq!(graph.value_to_base::<i64>(axes.data[0]), input);
-            }
-            let extent = query.required("SourceDomainExtent", (operation,)).unwrap();
-            let product = query.enode("Product", extent).unwrap().unwrap();
-            for (axis, factor) in product.into_iter().enumerate() {
-                let input = query.required("SourceInput", (operation, axis as i64)).unwrap();
-                assert_eq!(factor, query.required("SourceExtent", (input,)).unwrap());
+            let mapping = query.required("SourceInputMap", (operation, 0i64)).unwrap();
+            let axes = graph.value_to_container::<VecContainer>(mapping).unwrap();
+            assert_eq!(
+                axes.data.iter().map(|&axis| graph.value_to_base::<i64>(axis)).collect::<Vec<_>>(),
+                [0, 1]
+            );
+            let input = query.required("SourceInput", (operation, 0i64)).unwrap();
+            assert!(query.lookup("ElementTraversal", (input, 2i64)).unwrap().is_some());
+            let plan = query.required("SelectedPlan", (operation,)).unwrap();
+            let owner = query.required("Owner", (plan,)).unwrap();
+            let shape = query.required("IterationShape", (owner,)).unwrap();
+            let axes = query.required("ShapeDimensions", (shape,)).unwrap();
+            for (&extent, count) in
+                graph.value_to_container::<VecContainer>(axes).unwrap().data.iter().zip([4, 6])
+            {
+                let actual = query.required("ConstantLogicalExtent", (extent,)).unwrap();
+                assert_eq!(graph.value_to_base::<i64>(actual), count);
             }
         },
     );
@@ -1726,6 +1732,36 @@ fn closed_array_regions_distribute_before_physical_placement() {
                 let body = query.record("RegionDefinition", "RegionBody", (*arm,)).unwrap().unwrap();
                 assert!(!graph.value_to_container::<VecContainer>(body[1]).unwrap().data.is_empty());
             }
+        }
+    });
+}
+
+#[test]
+fn ranked_fusion_preserves_prefix_evaluation_and_retained_rows() {
+    let cases = [
+        ("entry main(dest:*[4][8]i32) ([4][8]i32,[4]u32,u32)=let items:[4][6](i32,i32)=map(|bucket|let offset=bucket*2 let shifted=offset+1 in map(|pair|((shifted+pair)%4,shifted+pair),iota(6)),iota(4)) in bucket_scatter_2d(dest,items)", true),
+        ("entry main(dest:*[4][8]i32,k:i32) ([4][8]i32,[4]u32,u32)=let items:[4][0](i32,i32)=map(|bucket|let offset=1/k in map(|pair|(bucket,offset+pair),iota(0)),iota(4)) in bucket_scatter_2d(dest,items)", false),
+        ("entry main(dest:*[4][8]i32) ([4][6](i32,i32),([4][8]i32,[4]u32,u32))=let items:[4][6](i32,i32)=map(|bucket|map(|pair|((bucket+pair)%4,bucket+pair),iota(6)),iota(4)) in (items,bucket_scatter_2d(dest,items))", false),
+    ];
+    planned_cases(&cases.map(|(source, _)| source), |index, graph, scope| {
+        let query = Query(graph);
+        let producer = operations_in(graph, "map", scope)[0];
+        let consumer = operations_in(graph, "bucket-scatter", scope)[0];
+        let a = query.required("SelectedPlan", (producer,)).unwrap();
+        let b = query.required("SelectedPlan", (consumer,)).unwrap();
+        assert_eq!(a == b, cases[index].1, "case {index}");
+        let shape = query.required("PlanDomain", (b,)).unwrap();
+        let axes = query.required("ShapeDimensions", (shape,)).unwrap();
+        assert_eq!(
+            graph.value_to_container::<VecContainer>(axes).unwrap().data.len(),
+            2
+        );
+        if index == 1 {
+            let owner = query.required("Owner", (a,)).unwrap();
+            assert_eq!(
+                query.required("MapFlattenRank", (owner,)).map(|v| graph.value_to_base::<i64>(v)).unwrap(),
+                1
+            );
         }
     });
 }

@@ -708,9 +708,6 @@ fn compile_tlc(modules: ParsedModules, options: &CompileOptions) -> Result<TlcCo
     let program = time("normalize_soacs", verbose, || {
         wyn_core::tlc::normalize_soacs(program)
     });
-    let program = time("expose_runtime_index_producers", verbose, || {
-        wyn_core::tlc::float_runtime_index_nested_producers(program)
-    });
     let program = time("defunctionalize", verbose, || {
         wyn_core::tlc::defunctionalize(program)
     });

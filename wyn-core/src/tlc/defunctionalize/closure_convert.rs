@@ -579,7 +579,7 @@ impl ClosureConverter {
     }
 }
 
-pub(super) fn convert_closures(program: tlc::stage::RuntimeIndexProducersFloated) -> Defunctionalized {
+pub(super) fn convert_closures(program: tlc::stage::SoacsAnfNormalized) -> Defunctionalized {
     let Program {
         defs,
         symbols,

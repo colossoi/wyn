@@ -170,38 +170,6 @@ impl Dataflow {
             .collect()
     }
 
-    pub fn evaluation_depends(&self, term: TermId, depends: &Dependencies) -> bool {
-        self.terms.get(&term).is_none_or(|expr| depends.0.contains(&expr.evaluation))
-    }
-
-    pub fn evaluation_uses<C: Payload, S: Payload>(
-        term: &Term<C, S>,
-        selected: impl FnMut(SymbolId) -> bool,
-    ) -> bool {
-        let (flow, _) = Self::build(term);
-        flow.evaluation_depends(term.id, &flow.dependencies(selected))
-    }
-
-    pub fn array_depends<C: Payload, S: Payload>(
-        &self,
-        array: &ArrayExpr<C, S>,
-        depends: &Dependencies,
-    ) -> bool {
-        match array {
-            ArrayExpr::Var(VarRef::Symbol(symbol), _) => {
-                self.bindings.get(symbol).is_none_or(|expr| depends.0.contains(&expr.evaluation))
-            }
-            ArrayExpr::Var(VarRef::Builtin { .. }, _) => false,
-            ArrayExpr::Zip(parts) => parts.iter().any(|part| self.array_depends(part, depends)),
-            ArrayExpr::Literal(terms) => terms.iter().any(|term| self.evaluation_depends(term.id, depends)),
-            ArrayExpr::Range { start, len, step } => {
-                self.evaluation_depends(start.id, depends)
-                    || self.evaluation_depends(len.id, depends)
-                    || step.as_deref().is_some_and(|step| self.evaluation_depends(step.id, depends))
-            }
-        }
-    }
-
     pub fn binding_input(&self, symbol: SymbolId) -> Option<SymbolId> {
         Query(&self.graph)
             .lookup("FlowStructuralInput", (self.bindings.get(&symbol)?.value,))

@@ -226,7 +226,9 @@ impl Body<'_, '_, '_> {
         }
         // Source array qualifiers describe shape and ownership, not a physical
         // conversion. Boundary layouts explicitly request any required copy.
-        if value.ty.is_array() && ty.is_array() {
+        if (value.ty.is_array() || types::as_soa_tuple(&value.ty).is_some())
+            && (ty.is_array() || types::as_soa_tuple(ty).is_some())
+        {
             return Ok(value);
         }
         if let (

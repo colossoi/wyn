@@ -277,5 +277,7 @@ fn evaluation_dependencies_include_scatter_destinations() {
     );
     let entry = program.defs.iter().find(|def| matches!(def.meta, DefMeta::EntryPoint(_))).unwrap();
     let (body, parameters) = tlc::extract_lambda_params_ref(&entry.body);
-    assert!(Dataflow::evaluation_uses(body, |symbol| symbol == parameters[0].0));
+    let (flow, _) = Dataflow::build(body);
+    let depends = flow.dependencies(|symbol| symbol == parameters[0].0);
+    assert!(depends.0.contains(&flow.terms[&body.id].evaluation));
 }

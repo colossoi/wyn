@@ -116,19 +116,6 @@ impl<C: Payload, S: Payload> Bindings<C, S> {
     }
 }
 
-/// Materialize bindings whose placement has already been chosen by the caller.
-pub(crate) fn wrap_let_bindings<C: Payload, S: Payload>(
-    bindings: Vec<LetBinding<C, S>>,
-    body: Term<C, S>,
-    ids: &mut TermIdSource,
-) -> Term<C, S> {
-    let mut scope = Bindings::new();
-    for binding in bindings {
-        scope.push(binding);
-    }
-    scope.finish(body, ids)
-}
-
 /// Normalize an existing let with a let RHS using the same construction rules.
 /// Unchanged terms retain their identity; rebuilt bindings get fresh IDs.
 pub(super) fn flatten_nested_let<C: Payload, S: Payload>(

@@ -244,8 +244,6 @@ pub use polytype::Context as PolytypeContext;
 //       tlc::pin_entry_buffers(...)       -> tlc::stage::BuffersPinned
 //       tlc::monomorphize(...)           -> tlc::stage::Monomorphized
 //       tlc::normalize_soacs(...)        -> tlc::stage::SoacsAnfNormalized
-//       tlc::float_runtime_index_nested_producers(...)
-//                                      -> tlc::stage::RuntimeIndexProducersFloated
 //       tlc::defunctionalize(...)        -> tlc::stage::Defunctionalized
 //       tlc::fold_generated_lambdas(...) -> tlc::stage::GeneratedLambdasFolded
 //       tlc::apply_ownership(...)        -> tlc::stage::OwnershipApplied
@@ -285,7 +283,6 @@ pub(crate) fn optimize_tlc_for_test(
     program: tlc::stage::OwnershipValidated,
 ) -> error::Result<tlc::stage::OwnershipApplied> {
     let program = optimize_tlc_for_test_thru_soac_normalization(program)?;
-    let program = tlc::float_runtime_index_nested_producers(program);
     let program = tlc::defunctionalize(program);
     let program = tlc::fold_generated_lambdas(program);
     Ok(tlc::apply_ownership(program))

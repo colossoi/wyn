@@ -19,7 +19,6 @@ pub mod pin_entry_buffers;
 #[path = "rep_specialize_tests.rs"]
 mod rep_specialize_tests;
 pub mod run;
-pub mod runtime_index_producers;
 pub mod soa;
 mod specialize;
 mod stage_extract;
@@ -37,7 +36,7 @@ use polytype::Type;
 use std::num::NonZeroU32;
 use wyn_module_graph::PackageId;
 
-pub(crate) use bindings::{wrap_let_bindings, Bindings, LetBinding};
+pub(crate) use bindings::{Bindings, LetBinding};
 pub(crate) use from_ast::{PendingBinding, Transformer};
 
 // =============================================================================
@@ -312,7 +311,6 @@ pub mod stage {
     pub use super::partial_eval::PartialEvaled;
     pub use super::pin_entry_buffers::BuffersPinned;
     pub use super::run::Transformed;
-    pub use super::runtime_index_producers::RuntimeIndexProducersFloated;
     pub use super::soa::SoacsAnfNormalized;
     pub use super::stage_extract::StagesExtracted;
 }
@@ -326,7 +324,6 @@ pub use ownership::{apply_ownership, validate_ownership};
 pub use partial_eval::partial_eval;
 pub use pin_entry_buffers::pin_entry_buffers;
 pub use run::lower_from_ast;
-pub use runtime_index_producers::float_runtime_index_nested_producers;
 pub use soa::normalize_soacs;
 pub use stage_extract::extract_stages;
 

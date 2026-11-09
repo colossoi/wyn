@@ -119,7 +119,10 @@ impl<'a, 'source> Bindings<'a, 'source> {
 
     pub fn buffer_element(&self, key: Value) -> Result<Type, OptimizeError> {
         let Some(layout) = self.query.lookup("BufferElementLayout", (key,)) else {
-            return Err(error("allocation has no selected element representation"));
+            return Err(error(format!(
+                "allocation {key:?} has no selected element representation for {:?}",
+                self.buffer(key)?.map(|(_, ty, _)| ty)
+            )));
         };
         Ok(storage_value_type(&self.query.layout_type(layout)?))
     }

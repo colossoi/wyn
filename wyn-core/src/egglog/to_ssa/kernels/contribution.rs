@@ -37,24 +37,20 @@ impl Contribution<'_> {
                     Ok((axis, coordinate.clone()))
                 })
                 .collect::<Result<Vec<_>, OptimizeError>>()?;
-            let value = if let Some(((axis, first), rest)) = coordinates.split_first() {
-                // The shared cache contains values at the leading domain coordinate.
-                let mut other_axis = LookupMap::default();
-                let mut value = element(
-                    body,
-                    self.scope,
-                    self.plan,
-                    fields[0],
-                    std::slice::from_ref(first),
-                    if *axis == 0 { cache } else { &mut other_axis },
-                )?;
-                for (_, coordinate) in rest {
-                    value = body.index(value, coordinate.clone())?;
-                }
-                value
-            } else {
-                body.value(self.scope, fields[0])?
-            };
+            // A cache entry names an element at one coordinate map, not a row
+            // or an element reached through a different permutation of axes.
+            let canonical = coordinates.len() == self.indices.len()
+                && coordinates.iter().enumerate().all(|(i, (axis, _))| i == *axis);
+            let mut other_axes = LookupMap::default();
+            let coordinates = coordinates.into_iter().map(|(_, value)| value).collect::<Vec<_>>();
+            let value = element(
+                body,
+                self.scope,
+                self.plan,
+                fields[0],
+                &coordinates,
+                if canonical { cache } else { &mut other_axes },
+            )?;
             return emit(body, cache, value);
         }
         if let Some(fields) = body.compiler.facts.enode("ApplyElement", expression) {

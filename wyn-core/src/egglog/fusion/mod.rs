@@ -30,8 +30,12 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
     graph.parse_and_run_program(Some("parallel IR".into()), include_str!("../parallel.egg"))?;
     graph.run_program(parse_program(
         "fusion import",
-        "(run-schedule (saturate source-fusion))",
+        "(run-schedule (saturate source-fusion) (saturate traversal-depths))",
     )?)?;
+    Query(graph).for_each("Current", |row| {
+        Query(graph).required("PlanBody", (row[1],))?;
+        Ok(())
+    })?;
     graph.parse_and_run_program(None, "(PlanningRound 0)")?;
     let choose = parse_program("fusion round", "(run-schedule (seq (saturate fusion-counts) (saturate fusion-dependencies) (saturate fusion-paths) (saturate fusion-counts) (saturate fusion-candidates) (saturate fusion-replacements) (saturate fusion-select) fusion-choose (saturate fusion-commit)))")?;
     let commit = parse_program(

@@ -31,7 +31,7 @@ fn unit_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Unit, vec![])
 }
 
-fn empty_program() -> tlc::stage::RuntimeIndexProducersFloated {
+fn empty_program() -> tlc::stage::SoacsAnfNormalized {
     Program::from_parts(
         vec![],
         SymbolTable::new(),
@@ -55,7 +55,7 @@ fn empty_converted_program() -> Defunctionalized {
 }
 
 fn term(
-    program: &mut tlc::stage::RuntimeIndexProducersFloated,
+    program: &mut tlc::stage::SoacsAnfNormalized,
     kind: TermKind<Empty, Empty>,
     ty: Type<TypeName>,
 ) -> Term<Empty, Empty> {
