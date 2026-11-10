@@ -60,3 +60,13 @@ fn source_use_sets_survive_group_initialization_and_merging() {
         )
         .unwrap();
 }
+
+#[test]
+fn independent_entries_canonicalize_stream_terms_before_selecting_inputs() {
+    let source = crate::compile_thru_tlc(include_str!(
+        "../../../../tests/compiler/library/independent_fusion_streams.wyn"
+    ))
+    .unwrap();
+    let program = crate::egglog::from_tlc(&source).unwrap();
+    crate::egglog::fuse(program).unwrap();
+}

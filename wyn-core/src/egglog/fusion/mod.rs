@@ -84,7 +84,7 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
     })?;
     graph.run_program(parse_program(
         "fusion signatures",
-        "(run-schedule (saturate fusion-signatures))",
+        "(run-schedule (saturate (seq (saturate fusion-signatures) fusion-streams)))",
     )?)?;
     Ok(())
 }

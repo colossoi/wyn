@@ -62,7 +62,7 @@ pub(super) fn place(
     )?;
     // Complete logical distribution before importing physical placements.
     graph.parse_and_run_program(None, "(run-schedule distribute-discover (saturate flow-structure) (saturate traversal-types) (saturate rectangular-discover) (saturate repeatability) traversal-proofs traversal-ready (saturate (seq extent-shapes map-shapes)) distribute-select distribute-commit (saturate fusion-counts shape-properties))")?;
-    graph.parse_and_run_program(None, "(run-schedule (saturate fusion-signatures) (saturate execution-discover) (saturate invariant-discover) (saturate invariant-select) (saturate invariant-replacement) invariant-commit (saturate fusion-counts) (saturate fusion-signatures))")?;
+    graph.parse_and_run_program(None, "(run-schedule (saturate (seq (saturate fusion-signatures) fusion-streams)) (saturate execution-discover) (saturate invariant-discover) (saturate invariant-select) (saturate invariant-replacement) invariant-commit (saturate fusion-counts) (saturate (seq (saturate fusion-signatures) fusion-streams)))")?;
     let policy = match topology {
         PipelineTopologyPolicy::AllowGenerated => "AllowGeneratedTopology",
         PipelineTopologyPolicy::AuthoredOnly => "AuthoredTopology",
