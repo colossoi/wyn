@@ -1,22 +1,7 @@
-; Structural scheduling; selected scalar evaluation is planned after extraction.
+; Commit selected domains before creating dispatches or physical placements.
 (run-schedule (seq
-    (saturate traversal-types) (saturate map-types)
-    (saturate rectangular-discover)
-    (saturate repeatability) (run traversal-proofs) (run traversal-ready)
-    (saturate (seq (run extent-shapes) (run map-shapes)))
-    (saturate extent-dependencies) (run extent-uniformity)
-    (saturate map-select) (saturate map-launch)
-    (saturate shape-properties iteration-domains)
-    (saturate storage-shapes shape-properties)
-    (saturate segmented-discover) segmented-select
-    (saturate segmented-storage shape-properties)
-    (saturate direct-outputs) (run traversal-leaves)
-    ; Loop layouts introduce fields that share the ordinary forwarding proofs.
-    (saturate (seq flow-structure type-layouts))
-    (saturate segment-shapes)
-    (saturate extent-dependencies) (run extent-uniformity)
-    (saturate map-bindings)
-    (saturate execution-discover) (saturate execution-select) (saturate execution-finalize)
+    (saturate map-launch) (saturate shape-properties iteration-domains)
+    (saturate execution-finalize)
     (saturate storage-shapes shape-properties)
     (saturate capacity-types)
     (saturate (seq flow-structure type-layouts))

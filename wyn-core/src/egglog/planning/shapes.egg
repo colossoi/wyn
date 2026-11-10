@@ -102,8 +102,8 @@
 
 ; Map selection and ranked indexed operations publish the same iteration domain.
 ; InputDomain remains the original traversal extent, before map flattening.
-(rule ((= shape (IterationShape owner)) (= axes (ShapeDimensions shape)) (= extent (ShapeExtent shape)))
-      ((set (IterationRank owner) (vec-length axes)) (set (IterationExtent owner) extent)) :ruleset iteration-domains)
+(rule ((= shape (IterationShape owner)) (= rank (ShapeRank shape)) (= extent (ShapeExtent shape)))
+      ((set (IterationRank owner) rank) (set (IterationExtent owner) extent)) :ruleset iteration-domains)
 
 ; Descriptor projections constrain representation before storage is selected.
 (function NeedsSegmentedStorage (SourceValue) bool :merge (or old new))

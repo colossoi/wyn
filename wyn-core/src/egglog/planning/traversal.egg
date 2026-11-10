@@ -15,6 +15,7 @@
 (function Traversal (SourceValue i64) ParallelTraversal :no-merge)
 (function ElementTraversal (SourceValue i64) ParallelTraversal :no-merge)
 (function MapOutputTraversal (OperationKey i64) ParallelTraversal :no-merge)
+(relation OutputTraversal (OperationKey i64 DomainShape ParallelTraversal))
 (function TraversalExtent (ParallelTraversal) Extent :no-merge)
 
 ; The same region traversal can yield a value or write into a bound output.
@@ -56,7 +57,7 @@
 
 (rule ((Current group plan) (PlanMember plan op) (= (PlanMapping op) true)
        (= value (SourceOperationValue op))) ((TraversalDemand value 1)) :ruleset segment-shapes)
-(rule ((MapPlan plan owner extent) (= shape (MapOutputDomain owner i)) (= rank (ShapeRank shape)) (PlanResult plan "array" i value element))
+(rule ((MapPlan plan owner extent) (OutputDomain owner i shape) (= rank (ShapeRank shape)) (PlanResult plan "array" i value element))
       ((TraversalDemand value rank)) :ruleset segment-shapes)
 (rule ((TraversalDemand value depth) (> depth 0) (= actual (SourceAlias value)))
       ((TraversalDemand actual depth)) :ruleset segment-shapes)
@@ -95,9 +96,9 @@
 
 (rule ((= traversal (Traversal value depth)))
       ((set (ElementTraversal value depth) traversal)) :ruleset map-bindings)
-(rule ((MapPlan plan owner extent) (= shape (MapOutputDomain owner i)) (= rank (ShapeRank shape))
+(rule ((MapPlan plan owner extent) (OutputDomain owner i shape) (= rank (ShapeRank shape))
        (PlanResult plan "array" i value element) (= traversal (Traversal value rank)))
-      ((set (MapOutputTraversal owner i) traversal)) :ruleset map-bindings)
+      ((OutputTraversal owner i shape traversal)) :ruleset map-bindings)
 
 (rule ((WorkgroupOutputTraversal (TraversalResult value owner plan port extent)) (= ty (SourceType value)) (SourceArrayType ty))
       ((StorageDemand value (StorageRoot))) :ruleset local-storage)

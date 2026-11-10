@@ -8,26 +8,37 @@ use egglog_engine::{ArcSort, Core, EGraph, Primitive, Read, ReadPrim, ReadState,
 use std::collections::HashSet;
 
 pub(super) fn register(graph: &mut EGraph) -> Result<(), OptimizeError> {
-    for (sort, shared) in [("RegionKey", false), ("OperationKey", true)] {
+    for (sort, mode) in [
+        ("RegionKey", Mode::Inline),
+        ("OperationKey", Mode::Shared),
+        ("RegionKey", Mode::Scalar),
+    ] {
         let Some(input) = graph.get_sort_by_name(sort).cloned() else {
             return Err(OptimizeError::Output(format!("work query sort {sort} missing")));
         };
-        graph.add_read_primitive(Weight { input, shared }, None);
+        graph.add_read_primitive(Weight { input, mode }, None);
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Inline,
+    Shared,
+    Scalar,
 }
 
 #[derive(Clone)]
 struct Weight {
     input: ArcSort,
-    shared: bool,
+    mode: Mode,
 }
 impl Primitive for Weight {
     fn name(&self) -> &str {
-        if self.shared {
-            "wyn-operation-weight"
-        } else {
-            "wyn-inline-weight"
+        match self.mode {
+            Mode::Shared => "wyn-operation-weight",
+            Mode::Inline => "wyn-inline-weight",
+            Mode::Scalar => "wyn-scalar-weight",
         }
     }
     fn get_type_constraints(&self, span: &Span) -> Box<dyn TypeConstraint> {
@@ -56,7 +67,7 @@ impl ReadPrim for Weight {
                 .value_to_container::<SetContainer>(value)
                 .map(|set| set.data.iter().copied().collect::<Vec<_>>())
         };
-        let (mut weight, roots) = if self.shared {
+        let (mut weight, roots) = if self.mode == Mode::Shared {
             let value = lookup("SourceOperationValue", root)?;
             let weight = state.value_to_base::<i64>(lookup("SourceWork", value)?);
             (
@@ -78,17 +89,28 @@ impl ReadPrim for Weight {
             if active.contains(&node) {
                 return Some(state.base_to_value(limit));
             }
-            if self.shared && !seen.insert(node) {
+            if self.mode == Mode::Shared && !seen.insert(node) {
                 continue;
             }
-            let cost = state.value_to_base::<i64>(lookup("SourceRegionWork", node)?);
+            let table =
+                if self.mode == Mode::Scalar { "SourceRegionScalarWork" } else { "SourceRegionWork" };
+            let cost = state.value_to_base::<i64>(lookup(table, node)?);
             weight = weight.saturating_add(cost);
             if weight >= limit {
                 return Some(state.base_to_value(limit));
             }
             active.insert(node);
             pending.push((node, true));
-            pending.extend(children("WorkChildren", node)?.into_iter().map(|child| (child, false)));
+            for child in children("WorkChildren", node)? {
+                if self.mode != Mode::Scalar
+                    || !match state.contains("RegionHasParallelWork", (child,)) {
+                        Ok(present) => present,
+                        Err(error) => panic!("invalid parallel work table: {error}"),
+                    }
+                {
+                    pending.push((child, false));
+                }
+            }
         }
         Some(state.base_to_value(weight.min(limit)))
     }

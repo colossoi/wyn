@@ -3,6 +3,8 @@ use super::{query::Query, timing, OptimizeError};
 use crate::PipelineTopologyPolicy;
 use egglog_engine::{EGraph, RawValues, Write};
 
+mod mapping;
+
 #[cfg(test)]
 #[path = "planning_tests.rs"]
 mod tests;
@@ -84,6 +86,11 @@ pub(super) fn place(
 
 pub(super) fn schedule(graph: &mut EGraph, costs: super::cost::CostModel) -> Result<(), OptimizeError> {
     super::cost::register(graph, costs, true);
+    graph.parse_and_run_program(
+        Some("map candidates".into()),
+        include_str!("planning/map-candidates.egg"),
+    )?;
+    mapping::select(graph, costs)?;
     graph.parse_and_run_program(
         Some("schedule inputs".into()),
         include_str!("planning/prepare-schedule.egg"),

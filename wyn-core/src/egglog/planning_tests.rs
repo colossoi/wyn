@@ -936,14 +936,14 @@ fn rectangular_planning_and_emission_use_fused_structure() {
 }
 
 #[test]
-fn rectangular_maps_ignore_scalar_recomputation_cost() {
+fn rectangular_candidates_retain_expensive_but_legal_recomputation() {
     let mut expression = String::from("x");
     for i in 1..=40 {
         expression = format!("({expression} * x + {i})");
     }
     let source = format!(
         "def costly(x:i32) i32={expression}
-         entry main(xs:[4]i32) [4][3]i32=
+         entry main(xs:[8192]i32) [8192][3]i32=
          map(|x|let t=costly(x) in map(|y|t+y,iota(3)),xs)"
     );
     planned(&source, |graph| {
@@ -956,6 +956,15 @@ fn rectangular_maps_ignore_scalar_recomputation_cost() {
             })
             .unwrap();
         assert!(expensive, "fixture must exceed the old repetition budget");
+        let mut legal_flattening = false;
+        query
+            .for_each("OutputTraversal", |row| {
+                let rank = query.required("ShapeRank", (row[2],))?;
+                legal_flattening |= graph.value_to_base::<i64>(rank) == 2;
+                Ok(())
+            })
+            .unwrap();
+        assert!(legal_flattening, "cost must not remove a legal schedule");
         let mut flattened = false;
         query
             .for_function("IterationRank", |_, rank| {
@@ -964,8 +973,8 @@ fn rectangular_maps_ignore_scalar_recomputation_cost() {
             })
             .unwrap();
         assert!(
-            flattened,
-            "legal scalar recomputation must not block nested parallelism"
+            !flattened,
+            "ample outer parallelism should avoid repeating the expensive prefix"
         );
     });
 }
@@ -993,18 +1002,24 @@ fn rectangular_maps_select_arbitrary_rank_and_preserve_sequential_prefixes() {
     planned_cases(&sources, |index, graph, scope| {
         let (source, expected_rank) = cases[index];
         let query = Query(graph);
-        let mut ranks = Vec::new();
+        let mut ranks = crate::LookupMap::<_, i64>::default();
         query
-            .for_function("IterationRank", |keys, rank| {
+            .for_each("OutputTraversal", |keys| {
+                let rank = query.required("ShapeRank", (keys[2],))?;
                 let region = query.required("OperationRegion", (keys[0],))?;
                 let host = query.contains("HostRegion", (region,))?;
                 if host && region == scope {
-                    ranks.push(graph.value_to_base::<i64>(rank));
+                    let n = ranks.entry(keys[0]).or_default();
+                    *n = (*n).max(graph.value_to_base::<i64>(rank));
                 }
                 Ok(())
             })
             .unwrap();
-        assert_eq!(ranks, vec![expected_rank], "{source}");
+        assert_eq!(
+            ranks.values().copied().collect::<Vec<_>>(),
+            vec![expected_rank],
+            "{source}"
+        );
     });
 }
 
@@ -1069,7 +1084,14 @@ fn rectangular_runtime_dimensions_must_be_uniform_across_outer_coordinates() {
                     let info = query.required("SourceOperation", (row[1],))?;
                     let owner = query.enode("OperationInfo", info)?.unwrap()[0];
                     if owner == region && query.flag("MapHost", (row[0],))? {
-                        ranks.push(graph.value_to_base::<i64>(query.required("IterationRank", (row[1],))?));
+                        let mut rank = 0;
+                        query.for_function("OutputShape", |keys, _| {
+                            if keys[0] == row[1] {
+                                rank = rank.max(graph.value_to_base::<i64>(keys[2]));
+                            }
+                            Ok(())
+                        })?;
+                        ranks.push(rank);
                     }
                     Ok(())
                 })
@@ -1131,17 +1153,19 @@ fn segment_callback_blockers_cover_every_output_of_a_fused_plan() {
 fn segmented_collectives_select_workgroups_for_each_outer_coordinate() {
     planned_cases(
         &[
-            "entry main(xs:[][513]i32) []i32=map(|row|reduce((+),0,row),xs)",
-            "entry main(xs:[][513]i32) [][513]i32=map(|row|scan((+),0,row),xs)",
-            "entry main(xs:[][3][17]i32) [][3]i32=map(|rows|map(|row|reduce((+),0,row),rows),xs)",
+            "entry main(xs:[4][513]i32) []i32=map(|row|reduce((+),0,row),xs)",
+            "entry main(xs:[4][513]i32) [][513]i32=map(|row|scan((+),0,row),xs)",
+            "entry main(xs:[4][3][17]i32) [][3]i32=map(|rows|map(|row|reduce((+),0,row),rows),xs)",
         ],
         |index, graph, region| {
             let query = Query(graph);
             let maps = operations_in(graph, "map", region);
             let mut groups = 0;
             query
-                .for_function("MapUsesWorkgroup", |keys, enabled| {
-                    groups += usize::from(maps.contains(&keys[0]) && graph.value_to_base::<bool>(enabled));
+                .for_function("MapExecution", |keys, execution| {
+                    groups += usize::from(
+                        maps.contains(&keys[0]) && query.enode("WorkgroupScope", execution)?.is_some(),
+                    );
                     Ok(())
                 })
                 .unwrap();
@@ -1151,7 +1175,7 @@ fn segmented_collectives_select_workgroups_for_each_outer_coordinate() {
 }
 
 #[test]
-fn workgroup_regions_cover_uniform_control_flow_and_varying_inner_domains() {
+fn workgroup_candidates_cover_uniform_control_flow_and_varying_inner_domains() {
     let sources = [
         "entry main(xs:[][17]i32) []i32=map(|row|if row[0]>0 then reduce((+),0,row) else 0,xs)",
         "entry main(xs:[][17]i32) []i32=map(|row|loop a=0 for i<2 do a+reduce((+),0,row),xs)",
@@ -1162,8 +1186,9 @@ fn workgroup_regions_cover_uniform_control_flow_and_varying_inner_domains() {
     planned_cases(&sources, |_, graph, region| {
         let query = Query(graph);
         for map in operations_in(graph, "map", region) {
-            let execution = query.required("MapExecution", (map,)).unwrap();
-            assert!(query.enode("WorkgroupScope", execution).unwrap().is_some());
+            let traversal = query.required("MapOutputTraversal", (map, 0i64)).unwrap();
+            assert!(query.contains("GroupSafeTraversal", (traversal,)).unwrap());
+            assert!(query.contains("ParallelTraversalWork", (traversal,)).unwrap());
         }
     });
 }
@@ -1251,9 +1276,9 @@ entry case_5(xs:[][17]i32) []i32=map(|row|if row[0]>0 then reduce((+),0,row) els
 fn segment_lengths_are_bound_inside_each_workgroup() {
     planned_cases(
         &[
-            "entry main(xs:[]i32,n:i32) []i32=map(|x|reduce((+),0,map(|y|x+y,iota(n))),xs)",
-            "entry main(xs:[]i32,n:i32) [][]i32=map(|x|scan((+),0,map(|y|x+y,iota(n))),xs)",
-            "entry main(xs:[]i32) []i32=map(|x|reduce((+),0,iota(x)),xs)",
+            "entry main(xs:[4]i32,n:i32) []i32=map(|x|reduce((+),0,map(|y|x+y,iota(n))),xs)",
+            "entry main(xs:[4]i32,n:i32) [][]i32=map(|x|scan((+),0,map(|y|x+y,iota(n))),xs)",
+            "entry main(xs:[4]i32) []i32=map(|x|reduce((+),0,iota(x)),xs)",
         ],
         |index, graph, region| {
             let query = Query(graph);
@@ -1262,7 +1287,13 @@ fn segment_lengths_are_bound_inside_each_workgroup() {
             let plan = query.required("SelectedPlan", (maps[0],)).unwrap();
             assert!(query.flag("MapHost", (plan,)).unwrap());
             assert_eq!(
-                query.flag("MapUsesWorkgroup", (maps[0],)).unwrap(),
+                query
+                    .enode(
+                        "WorkgroupScope",
+                        query.required("MapExecution", (maps[0],)).unwrap()
+                    )
+                    .unwrap()
+                    .is_some(),
                 true,
                 "case {index}"
             );
@@ -1322,12 +1353,11 @@ fn subgroup_addition_is_opt_in_and_uses_small_segments() {
         let mut segments = 0;
         query
             .for_each("MapPlan", |row| {
-                if query.flag("MapHost", (row[0],))? && query.flag("MapUsesWorkgroup", (row[1],))? {
+                if query.flag("MapHost", (row[0],))?
+                    && query.enode("WorkgroupScope", query.required("MapExecution", (row[1],))?)?.is_some()
+                {
                     let width = query.required("MapWorkgroupWidth", (row[1],))?;
-                    assert_eq!(
-                        program.graph.value_to_base::<i64>(width),
-                        if enabled { 32 } else { 256 }
-                    );
+                    assert_eq!(program.graph.value_to_base::<i64>(width), 32);
                     segments += 1;
                 }
                 Ok(())
@@ -1800,4 +1830,45 @@ fn output_coordinate_maps_cover_every_axis_of_ranked_producers() {
     let ssa = super::super::to_ssa(prepared, CodegenTarget::Portable).unwrap();
     crate::lower_ssa_to_spirv(ssa.clone()).unwrap();
     crate::lower_ssa_to_wgsl_with_program(ssa).unwrap();
+}
+
+#[test]
+fn calibrated_costs_select_among_the_same_legal_map_executions() {
+    let tlc = compile_thru_tlc("entry main(xs:[4][513]i32) [4]i32=map(|row|reduce((+),0,row),xs)").unwrap();
+    for (barrier_ns, scope) in [(0.0, "WorkgroupScope"), (1e9, "InvocationScope")] {
+        let placed = place(
+            fuse(from_tlc(&tlc).unwrap()).unwrap(),
+            PipelineTopologyPolicy::AllowGenerated,
+        )
+        .unwrap();
+        let program = super::super::schedule_with_cost_model(
+            placed,
+            false,
+            super::super::cost::CostModel {
+                barrier_ns,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let query = Query(&program.graph);
+        let mut checked = 0;
+        query
+            .for_each("MapPlan", |row| {
+                if query.flag("MapHost", (row[0],))? {
+                    let traversal = query.required("MapOutputTraversal", (row[1], 0i64))?;
+                    assert!(query.contains("GroupSafeTraversal", (traversal,))?);
+                    assert!(query.contains("ParallelTraversalWork", (traversal,))?);
+                    let execution = query.required("MapExecution", (row[1],))?;
+                    assert!(query.enode(scope, execution)?.is_some());
+                    checked += 1;
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(checked, 1);
+        let program = super::super::prepare_interfaces(program).unwrap();
+        let program =
+            super::super::optimize_with_policy(program, super::super::ScalarOptimization::Basic).unwrap();
+        finish_for_test(program, CodegenTarget::Wgsl).unwrap();
+    }
 }

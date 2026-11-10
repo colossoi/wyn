@@ -27,7 +27,6 @@
 (rule ((RectangularRequirement value context input))
       ((set (RectangularRequired value) (set-of (Repeat context input))) (RepeatDemand context input)) :ruleset rectangular-discover)
 
-; shortcut: all legal repetitions have equal cost until cost-based scheduling is added.
 (function RepeatMapping (RepeatContext SourceValue) bool :no-merge)
 (function RepeatBoundary (SourceValue) bool :merge (or old new))
 (function RepeatEvaluation (RepeatContext SourceValue) bool :no-merge)
@@ -105,7 +104,7 @@
       ((RectangularDemand a) (RectangularDemand b)
        (RectangularRequirement value (OutsidePlan) condition)) :ruleset rectangular-discover)
 
-; One rectangular schedule per selected SCREMA. All policy precedes SSA emission.
+; Legal rectangular prefixes, independent of the selected execution strategy.
 (ruleset map-types)
 (ruleset map-shapes)
 (ruleset map-select)
@@ -205,22 +204,18 @@
 ; Each output carries its own domain. Shared coordinates do not require equal
 ; inner shapes, and update effects retain the plan's original domain.
 (function OutputShape (OperationKey i64 i64) DomainShape :no-merge)
-(function OutputRank (OperationKey i64) i64 :merge (max old new))
-(function RectangularOutputDomain (OperationKey i64) DomainShape :no-merge)
+(function MapOutputDomain (OperationKey i64) DomainShape :no-merge)
 (rule ((MapPlan plan owner extent) (PlanResult plan "array" slot value element)
        (= domain (PlanDomain plan)) (= rank (ShapeRank domain)))
-      ((set (OutputShape owner slot rank) domain) (set (OutputRank owner slot) rank)) :ruleset map-select)
+      ((set (OutputShape owner slot rank) domain)) :ruleset map-select)
 (rule ((MapPlan plan owner extent) (= (MapHost plan) true) (= (PlanAction plan) (Publish))
        (PlanResult plan "array" slot value element) (= depth (MapDepth value))
        (= prefix (OutputShape owner slot axis)) (< axis depth)
        (= n (RectangularAxis value axis)) (= (ExtentUniform n) true))
-      ((set (OutputShape owner slot (+ axis 1)) (AppendAxis prefix n))
-       (set (OutputRank owner slot) (+ axis 1))) :ruleset map-select)
-(rule ((= rank (OutputRank owner slot)) (= shape (OutputShape owner slot rank)))
-      ((set (RectangularOutputDomain owner slot) shape)) :ruleset map-launch)
+      ((set (OutputShape owner slot (+ axis 1)) (AppendAxis prefix n))) :ruleset map-select)
 (rule ((MapPlan plan owner extent) (= (PlanAction plan) (Publish))
        (= totals (PlanTotals plan)) (= slot (ResultCount totals))
-       (= shape (RectangularOutputDomain owner slot)))
+       (= shape (MapOutputDomain owner slot)))
       ((set (IterationShape owner) shape)) :ruleset map-launch)
 (rule ((MapPlan plan owner extent) (= (PlanAction plan) (PerformUpdates operations))
        (= domain (PlanDomain plan)))

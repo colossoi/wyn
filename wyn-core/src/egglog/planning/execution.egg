@@ -7,12 +7,9 @@
 ; is uniform at its selected scope. Nested element callbacks are excluded from
 ; propagation. More precise value analysis can admit lane-dependent regions
 ; without changing the execution or storage representation.
-; Eligibility is separate from selection: nested parallelism is the current
-; profitability heuristic, not a new source operation or lowering recipe.
 (ruleset execution-discover)
 (ruleset execution-select)
 (ruleset execution-finalize)
-(function MapUsesWorkgroup (OperationKey) bool :merge (or old new))
 (function RegionRecursive (RegionKey) bool :merge (or old new))
 (function RegionLaneDependent (RegionKey) bool :merge (or old new))
 (rule ((= region (RegionId i))) ((set (RegionLaneDependent region) false) (set (RegionRecursive region) false)) :ruleset execution-discover)
@@ -48,7 +45,6 @@
 (rule ((RegionContainsCollective region)) ((RegionHasParallelWork region)) :ruleset execution-discover)
 (rule ((SourceRegionEnters region child) (RegionHasParallelWork child))
       ((RegionHasParallelWork region)) :ruleset execution-discover)
-(rule ((MapPlan plan owner extent)) ((set (MapUsesWorkgroup owner) false)) :ruleset execution-discover)
 ; Execution eligibility folds the selected traversal, including every entered
 ; region. Parallel work must remain inside a leaf, after rectangular flattening.
 (relation GroupSafeTraversal (ParallelTraversal))
@@ -78,33 +74,6 @@
       ((ParallelTraversalWork t)) :ruleset execution-select)
 (rule ((TraversalRegion t region next) (ParallelTraversalWork next))
       ((ParallelTraversalWork t)) :ruleset execution-select)
-(function WorkgroupOutputPrefix (FusionPlan) i64 :merge (max old new))
-(rule ((MapPlan plan owner extent)) ((set (WorkgroupOutputPrefix plan) 0)) :ruleset execution-select)
-(rule ((MapPlan plan owner extent) (= i (WorkgroupOutputPrefix plan))
-       (= t (MapOutputTraversal owner i)) (GroupSafeTraversal t) (ParallelTraversalWork t))
-      ((set (WorkgroupOutputPrefix plan) (+ i 1))) :ruleset execution-select)
-(rule ((MapPlan plan owner extent) (= (MapHost plan) true) (= n (ArrayOutputs plan)) (> n 0)
-       (= n (WorkgroupOutputPrefix plan))) ((set (MapUsesWorkgroup owner) true)) :ruleset execution-select)
-; Width follows the remaining local computation, independent of map depth.
-(function TraversalWidth (ParallelTraversal) i64 :merge (min old new))
-(rule ((= t (TraversalIndex value depth))) ((set (TraversalWidth t) 32)) :ruleset collective-costs)
-(rule ((= t (TraversalValue value))) ((set (TraversalWidth t) 32)) :ruleset collective-costs)
-(rule ((= t (TraversalResult value owner plan port extent))) ((set (TraversalWidth t) 256)) :ruleset collective-costs)
-(rule ((TraversalRegion t region next) (= width (TraversalWidth next)))
-      ((set (TraversalWidth t) width)) :ruleset collective-costs)
-(rule ((= t (TraversalChoice condition yes a no b)) (= x (TraversalWidth a)) (= y (TraversalWidth b)))
-      ((set (TraversalWidth t) (min x y))) :ruleset collective-costs)
-(rule ((= traversal (MapOutputTraversal owner i)) (= width (TraversalWidth traversal)))
-      ((set (MapWorkgroupWidth owner) width)) :ruleset collective-costs)
-(rule ((= (SubgroupsEnabled) true) (= traversal (MapOutputTraversal owner i))
-       (= extent (TraversalExtent traversal)) (= n (ConstantLogicalExtent extent)) (<= n 32))
-      ((set (MapWorkgroupWidth owner) 32)) :ruleset collective-costs)
-; Map scope is frozen after eligibility and selection reach a fixed point.
-(rule ((= (MapUsesWorkgroup owner) true))
-      ((set (MapExecution owner) (WorkgroupScope))) :ruleset execution-finalize)
-(rule ((= (MapUsesWorkgroup owner) false))
-      ((set (MapExecution owner) (InvocationScope))) :ruleset execution-finalize)
-
 ; These recipes have both invocation and workgroup implementations. Unsupported
 ; local recipes retain invocation execution even inside a workgroup region.
 (function LocalSupportsWorkgroup (OperationKey) bool :merge (or old new))
@@ -203,5 +172,3 @@
 
 (rule ((= t (TraversalReindex next indices)) (GroupSafeTraversal next))
       ((GroupSafeTraversal t)) :ruleset execution-select)
-(rule ((= t (TraversalReindex next indices)) (= width (TraversalWidth next)))
-      ((set (TraversalWidth t) width)) :ruleset collective-costs)

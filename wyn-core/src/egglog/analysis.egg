@@ -148,6 +148,7 @@
 (rule ((= target (SourceAlias value)) (= scratch (SourceScratchValue target))) ((set (SourceScratchValue value) scratch)) :ruleset source-summary)
 
 (function SourceRegionWork (RegionKey) i64 :no-merge)
+(function SourceRegionScalarWork (RegionKey) i64 :no-merge)
 (relation SourceSummaryEnters (SourceValue RegionKey))
 (relation SourceRegionEnters (RegionKey RegionKey))
 ; Read footprints follow evaluation edges. A concrete binding may

@@ -97,6 +97,7 @@ struct Scope {
     position: i64,
     operations: Vec<Value>,
     work: i64,
+    scalar_work: i64,
     evaluation: Option<Value>,
     parameters: Vec<Value>,
     captures: Vec<(Value, Value)>,
@@ -249,6 +250,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             position: 0,
             operations: Vec::new(),
             work: 0,
+            scalar_work: 0,
             evaluation: None,
             parameters: Vec::new(),
             captures: Vec::new(),
@@ -334,6 +336,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         let body = self.sink.add("RegionBody", (parameters, captures, operations, result))?;
         self.sink.set("RegionDefinition", scope.key, body)?;
         self.sink.set("SourceRegionWork", scope.key, scope.work)?;
+        self.sink.set("SourceRegionScalarWork", scope.key, scope.scalar_work)?;
         Ok(())
     }
 
@@ -416,6 +419,9 @@ impl<'source> Import<'_, '_, '_, 'source> {
         let value = self.source_value(term, scope.key)?;
         self.properties(term, value)?;
         scope.work = scope.work.saturating_add(self.work[&value]);
+        if !matches!(term.kind, TermKind::Soac(_)) {
+            scope.scalar_work = scope.scalar_work.saturating_add(self.work[&value]);
+        }
         let owner = match scope.evaluation {
             Some(owner) => owner,
             None => self.sink.add("FlowRegion", scope.key)?,

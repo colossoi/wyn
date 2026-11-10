@@ -73,7 +73,8 @@ pub(super) fn emit(
                                 return Err(error("parallel output missing"));
                             };
                             body.with_output(owner, port, output, &indices, |body| {
-                                super::emit(body, scope, owner, "local", width)
+                                let (phase, width) = if group { ("local", width) } else { ("ordered", 1) };
+                                super::emit(body, scope, owner, phase, width)
                             })?;
                         } else {
                             let previous = body.workgroup_width;
