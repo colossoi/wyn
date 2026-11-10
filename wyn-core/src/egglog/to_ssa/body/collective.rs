@@ -1,8 +1,7 @@
 //! Lower local recipes at their selected execution scope using fused kernel algorithms.
 use super::{error, Body, OptimizeError, Typed, Value};
-use crate::egglog::to_ssa::kernels;
+use crate::egglog::{execution::LocalBuffer, to_ssa::kernels};
 use crate::types;
-use egglog_engine::sort::S;
 
 impl Body<'_, '_, '_> {
     pub(super) fn collective(
@@ -11,47 +10,36 @@ impl Body<'_, '_, '_> {
         source: Value,
         owner: Value,
     ) -> Result<Typed, OptimizeError> {
-        let Some(execution) =
-            self.compiler.facts.lookup("LocalExecution", (owner, self.execution_scope()?))
-        else {
-            return Err(error("local collective has not been selected"));
-        };
-        let width = if self.compiler.facts.enode("WorkgroupScope", execution).is_some() {
+        let program = self.compiler.program;
+        let recipe = program.stage.execution.local(owner)?;
+        let width = if !self.invocation_execution && recipe.workgroup {
             let Some(width) = self.workgroup_width else {
                 return Err(error("workgroup recipe requires a workgroup calling context"));
             };
             Some(width)
-        } else if self.compiler.facts.enode("InvocationScope", execution).is_some() {
-            None
         } else {
-            return Err(error("invalid local execution scope"));
+            None
         };
         if width.is_some() {
             self.workgroup_barrier()?;
         }
-        let allocations = self.compiler.local_buffers.get(&owner).cloned().unwrap_or_default();
-        for [role, index, _element, extent] in allocations {
-            let role = self.compiler.program.graph.value_to_base::<S>(role).to_string();
-            let index = self.compiler.facts.integer(index);
-            let Some(resource) = self.compiler.facts.slot(owner, &role, index) else {
-                return Err(error("local slot missing"));
+        for buffer in &recipe.buffers {
+            let LocalBuffer::Allocate {
+                resource,
+                capacity,
+                layout,
+            } = *buffer
+            else {
+                return Err(error("runtime-sized local result requires an output destination"));
             };
-            let Some(n) = self.compiler.facts.lookup("PhysicalLocalCapacity", (extent,)) else {
-                return Err(error(format!("local slot {role} has no planned static capacity")));
-            };
-            let n = usize::try_from(self.compiler.facts.integer(n))
-                .map_err(|_| error("invalid local capacity"))?;
-            let Some(layout) = self.compiler.facts.lookup("LocalElementLayout", (resource,)) else {
-                return Err(error(format!("local slot {role} has no planned element layout")));
-            };
+            let n = capacity.get();
             if width.is_some() {
-                let count = u32::try_from(n).map_err(|_| error("invalid workgroup capacity"))?;
                 let element = self.compiler.facts.layout_type(layout)?;
-                let array = self.workgroup_array(count, &element)?;
+                let array = self.workgroup_array(n, &element)?;
                 self.local_resources.insert(resource, array);
                 continue;
             }
-            let ty = types::sized_array(n, self.compiler.facts.layout_type(layout)?);
+            let ty = types::sized_array(n as usize, self.compiler.facts.layout_type(layout)?);
             let value = self.local_array(ty)?;
             self.local_resources.insert(resource, value);
         }
@@ -65,24 +53,11 @@ impl Body<'_, '_, '_> {
         if width.is_some() {
             self.workgroup_barrier()?;
         }
-        for result in self.compiler.facts.set("LocalExports", (owner,)) {
-            let Some(access) = self.compiler.facts.value_read(result) else {
-                return Err(error("local export has no read recipe"));
-            };
-            let (resource, array) = if let Some(fields) = self.compiler.facts.enode("ReadView", access) {
-                (fields[0], true)
-            } else if let Some(fields) = self.compiler.facts.enode("ReadElement", access) {
-                (fields[0], false)
-            } else {
-                return Err(error("invalid local export read"));
-            };
-            if !self.local_resources.contains_key(&resource)
-                && self.compiler.facts.backing(resource).is_none()
-            {
-                continue;
-            }
+        for export in &recipe.exports {
+            let result = export.source;
+            let resource = export.resource;
             let value = self.resource(scope, resource, 1)?;
-            let value = if array {
+            let value = if export.array {
                 self.local_array_result(value, result)?
             } else {
                 self.index(value, Self::number(0))?

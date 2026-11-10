@@ -5,9 +5,6 @@
 (rule ((= (SourceDefinition s) r)) ((set (SourceDefinitionSymbol r) s)) :ruleset ssa-access)
 
 (sort DispatchGroupOperations (Set OperationKey))
-(sort DispatchStages (Set StageKey))
 (function DispatchGroupMembers (OperationKey) DispatchGroupOperations :merge (set-union old new))
 (rule ((DispatchGroupLeader o owner)) ((set (DispatchGroupMembers owner) (set-of o))) :ruleset ssa-access)
-(function DispatchPredecessors (StageKey) DispatchStages :merge (set-union old new))
-(rule ((DispatchDependency before after)) ((set (DispatchPredecessors after) (set-of before))) :ruleset ssa-access)
 (run-schedule (run ssa-access))

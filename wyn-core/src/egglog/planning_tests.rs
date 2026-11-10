@@ -575,39 +575,6 @@ fn result_tree_counts_are_available_to_fusion_choices() {
 }
 
 #[test]
-fn indexed_phase_domains_preserve_validation() {
-    let tlc = compile_thru_tlc("entry main(xs:[]i32) []i32=map(|x|x+1,xs)").unwrap();
-    let program = selected(&tlc);
-    let mut prepared = super::super::prepare_host(program).unwrap();
-    let baseline = prepared.program.graph.clone();
-    for (mode, expected) in [
-        ("missing", "stage domain missing"),
-        ("ambiguous", "ambiguous PhaseDomain"),
-        ("zero-width", "stage width must be positive"),
-    ] {
-        prepared.program.graph = baseline.clone();
-        let program = &mut prepared.program;
-        let domain = Query(&program.graph).row("PhaseDomain", |_| true).unwrap().unwrap();
-        if mode != "ambiguous" {
-            program.graph.clear_function("PhaseDomain").unwrap();
-        }
-        if mode != "missing" {
-            program
-                .graph
-                .update(|mut sink| {
-                    sink.add("PhaseDomain", (domain[0], domain[1], 0i64))?;
-                    Ok(())
-                })
-                .unwrap();
-        }
-        let Err(error) = super::super::to_ssa::lower(program, CodegenTarget::Wgsl) else {
-            panic!("invalid {mode} phase domain was accepted");
-        };
-        assert!(error.to_string().contains(expected), "{mode}: {error}");
-    }
-}
-
-#[test]
 fn accumulator_state_order_is_read_from_the_plan() {
     let tlc = compile_thru_tlc(
         "entry main(xs:[]i32) ([]i32,bool)=

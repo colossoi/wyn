@@ -1133,6 +1133,7 @@ impl<'a> Transformer<'a> {
         let op = self.term_to_lambda(op_term);
 
         let mut binds = Bindings::new();
+        let dest_term = binds.name(dest_term, "_w_destination", self.symbols, self.term_ids);
         let indices = self.soac_input(indices_term, &mut binds);
         let values = self.soac_input(values_term, &mut binds);
         let soac = self.mk_term(
@@ -1165,6 +1166,7 @@ impl<'a> Transformer<'a> {
         let idx_elem_ty = indices_term.ty.elem_type().unwrap().clone();
         let val_elem_ty = values_term.ty.elem_type().unwrap().clone();
         let mut binds = Bindings::new();
+        let dest_term = binds.name(dest_term, "_w_destination", self.symbols, self.term_ids);
         // Identity envelope `λ(i, v) → (i, v)`. Fusion composes producer
         // lambdas into this and splices their inputs in place of `is`/`vs`.
         let i_sym = self.fresh("_w_scatter_i");
@@ -1215,6 +1217,7 @@ impl<'a> Transformer<'a> {
         let value_ty = dest_elem_ty.clone();
         let pair_ty = Type::Constructed(TypeName::Tuple(2), vec![key_ty.clone(), value_ty.clone()]);
         let mut binds = Bindings::new();
+        let dest_term = binds.name(dest_term, "_w_destination", self.symbols, self.term_ids);
         let items = self.soac_input(items_term, &mut binds);
         let item = self.fresh("_w_bucket_scatter_item");
         let item_value = self.mk_term(pair_ty.clone(), span, TermKind::Var(VarRef::Symbol(item)));

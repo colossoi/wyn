@@ -64,7 +64,7 @@ pub(in crate::egglog) fn dispatch(
             },
             stride: elem_bytes,
         };
-        let domain = compiler.phase_extent(stage)?;
+        let domain = compiler.program.stage.execution.dispatch(stage)?.extent;
         let elements = match host::launch_extent(compiler.program, domain) {
             Ok(ScalarExpr::BufferLength { source, stride }) => Expr::BufferLength { source, stride },
             Ok(value) => Expr::Scalar(value),

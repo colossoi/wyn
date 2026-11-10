@@ -10,7 +10,6 @@ use crate::types::Type;
 use crate::{CodegenTarget, FunctionId, LookupMap};
 use egglog_engine::{sort::S, Value};
 use wyn_base::IdSource;
-use wyn_graph::topo_sort_by_dependencies;
 
 mod body;
 mod entry;
@@ -30,36 +29,11 @@ pub(super) fn lower(
     let evaluations = Evaluation::new(program)?;
     let _timing = timing::span("egglog to SSA");
     let facts = Facts { program };
-    let mut local_buffers = LookupMap::<_, Vec<_>>::default();
-    program.graph.constructor_enodes("LocalBuffer", |row| {
-        local_buffers.entry(row.children[0]).or_default().push([
-            row.children[1],
-            row.children[2],
-            row.children[3],
-            row.children[4],
-        ]);
-    })?;
-    let mut phase_domains = LookupMap::default();
-    let mut ambiguous_domain = false;
-    program.graph.constructor_enodes("PhaseDomain", |row| {
-        ambiguous_domain |=
-            phase_domains.insert(row.children[0], [row.children[1], row.children[2]]).is_some();
-    })?;
-    if ambiguous_domain {
-        return Err(error("ambiguous PhaseDomain"));
-    }
-    let mut stages_by_owner = LookupMap::<_, Vec<_>>::default();
-    program.graph.constructor_enodes("PhaseOwner", |row| {
-        stages_by_owner.entry(facts.integer(row.children[1])).or_default().push(row.children[0]);
-    })?;
     let mut compiler = Compiler {
         program,
         facts,
         bindings: super::abi::bindings::Bindings::new(program)?,
         evaluations,
-        local_buffers,
-        phase_domains,
-        stages_by_owner,
         entry_origins: LookupMap::default(),
         entry_names: Default::default(),
         functions: Vec::new(),
@@ -74,7 +48,7 @@ pub(super) fn lower(
             let Some(symbol) = program.identities.symbols.get(&definition.name) else {
                 return Err(error("entry symbol missing"));
             };
-            for stage in compiler.stages(definition.name)? {
+            for stage in program.stage.execution.entries.get(&symbol).into_iter().flatten().copied() {
                 let entry = entry::entry(&mut compiler, definition.name, Some(stage), &entries)?;
                 entries.push(entry);
             }
@@ -116,9 +90,6 @@ pub(super) fn lower(
 
 pub(super) struct Compiler<'a, 'source> {
     evaluations: Evaluation,
-    local_buffers: LookupMap<Value, Vec<[Value; 4]>>,
-    phase_domains: LookupMap<Value, [Value; 2]>,
-    stages_by_owner: LookupMap<i64, Vec<Value>>,
     pub(super) program: &'a Program<'source, Optimized>,
     pub(super) facts: Facts<'a, 'source>,
     pub(super) bindings: super::abi::bindings::Bindings<'a, 'source>,
@@ -131,26 +102,6 @@ pub(super) struct Compiler<'a, 'source> {
 }
 
 impl Compiler<'_, '_> {
-    fn stages(&self, owner: SymbolId) -> Result<Vec<Value>, OptimizeError> {
-        let Some(owner) = self.program.identities.symbols.get(&owner) else {
-            return Err(error("entry identity missing"));
-        };
-        let mut stages = self.stages_by_owner.get(&owner).cloned().unwrap_or_default();
-        stages.sort();
-        topo_sort_by_dependencies(stages, |key, out| out.extend(self.facts.dependencies(key)))
-            .map_err(|_| error("dispatch plan contains a cycle"))
-    }
-
-    pub(in crate::egglog) fn phase_extent(&self, stage: Value) -> Result<Value, OptimizeError> {
-        let row = self.phase_domains.get(&stage).ok_or_else(|| error("stage domain missing"))?;
-        Ok(row[0])
-    }
-
-    fn phase_width(&self, stage: Value) -> Result<u32, OptimizeError> {
-        let row = self.phase_domains.get(&stage).ok_or_else(|| error("stage domain missing"))?;
-        self.facts.positive(row[1], "stage width")
-    }
-
     fn function(&mut self, scope: Value, arguments: &[Typed]) -> Result<FunctionId, OptimizeError> {
         let signature: Vec<_> = arguments.iter().map(|argument| argument.ty.clone()).collect();
         if let Some(&id) = self.callable_ids.get(&(scope, signature.clone())) {

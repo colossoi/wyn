@@ -464,14 +464,6 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         result
     }
 
-    pub fn execution_scope(&self) -> Result<Value, OptimizeError> {
-        let name = if self.invocation_execution { "InvocationScope" } else { "WorkgroupScope" };
-        let Some(scope) = self.compiler.facts.constructor(name, RawValues(Vec::new())) else {
-            return Err(error("execution scope is missing"));
-        };
-        Ok(scope)
-    }
-
     /// Read a selected execution scope; the active width belongs to its kernel.
     pub fn has_workgroup_scope(&self, fact: &str, owner: Value) -> bool {
         self.compiler

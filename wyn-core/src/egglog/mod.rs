@@ -15,6 +15,7 @@ mod analysis;
 mod bindings;
 pub mod cost;
 pub(crate) mod dataflow;
+mod execution;
 mod facts;
 mod fusion;
 mod host;
@@ -100,7 +101,8 @@ pub fn schedule_with_cost_model(
     program.graph.parse_and_run_program(None, &format!("(set (SubgroupsEnabled) {enabled})"))?;
     let _timing = timing::span("egglog scheduling");
     planning::schedule(&mut program.graph, costs)?;
-    Ok(program.advance(Scheduled))
+    let execution = execution::Execution::select(&program.graph)?;
+    Ok(program.advance(Scheduled(execution)))
 }
 
 /// Resolve demanded scalar inputs and the physical ABI before scalar optimization.
@@ -111,7 +113,7 @@ pub fn prepare_interfaces(
     scalar::admit(&mut program.graph)?;
     // Physical ABI and publication rules consume the scalar demand facts.
     abi::prepare(&mut program.graph)?;
-    Ok(program.advance(InterfacesPrepared))
+    Ok(program.map_stage(|Scheduled(execution)| InterfacesPrepared(execution)))
 }
 
 /// Optimize and extract demanded scalar regions.
@@ -132,7 +134,8 @@ pub fn optimize_with_policy(
     policy: ScalarOptimization,
 ) -> Result<Program<'_, Optimized>, OptimizeError> {
     let selected = scalar::run(&mut program.graph, policy)?;
-    Ok(program.advance(Optimized {
+    Ok(program.map_stage(|InterfacesPrepared(execution)| Optimized {
+        execution,
         selected,
         host: LookupMap::default(),
         captures: LookupMap::default(),
@@ -163,11 +166,15 @@ pub struct Program<'source, Stage> {
 
 impl<'source, Stage> Program<'source, Stage> {
     fn advance<Next>(self, stage: Next) -> Program<'source, Next> {
+        self.map_stage(|_| stage)
+    }
+
+    fn map_stage<Next>(self, next: impl FnOnce(Stage) -> Next) -> Program<'source, Next> {
         Program {
             source: self.source,
             graph: self.graph,
             identities: self.identities,
-            stage,
+            stage: next(self.stage),
         }
     }
 }
@@ -177,11 +184,12 @@ pub struct Fused;
 pub struct Placed;
 
 /// Dispatch recipes, execution domains, storage, and effect order are fixed.
-pub struct Scheduled;
+pub struct Scheduled(execution::Execution);
 
-pub struct InterfacesPrepared;
+pub struct InterfacesPrepared(execution::Execution);
 
 pub struct Optimized {
+    execution: execution::Execution,
     captures: LookupMap<egglog_engine::TermId, host::Capture>,
     host: LookupMap<(Value, Value), ScalarExpr>,
     selected: scalar::Selected,

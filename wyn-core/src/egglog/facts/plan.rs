@@ -35,19 +35,6 @@ impl<'a, 'source> Facts<'a, 'source> {
         Ok(self.program.graph.value_to_base::<S>(fields[1]).to_string())
     }
 
-    pub fn dispatch_grid(&self, key: Value) -> Result<Option<(u32, u32, u32)>, OptimizeError> {
-        let query = Query(&self.program.graph);
-        let grid = query.required("PhaseGrid", (key,))?;
-        if query.enode("AutomaticGrid", grid)?.is_some() {
-            return Ok(None);
-        }
-        let grid = self.grid(grid)?;
-        if [grid.0, grid.1, grid.2].into_iter().any(|axis| axis > 65_535) {
-            return Err(error("dispatch grid axis must be in 1..=65535"));
-        }
-        Ok(Some(grid))
-    }
-
     pub fn outputs(&self, owner: SymbolId) -> Result<Vec<i64>, OptimizeError> {
         let Some(owner) = self.program.identities.symbols.get(&owner) else {
             return Err(error("output owner missing"));
@@ -144,9 +131,6 @@ impl<'a, 'source> Facts<'a, 'source> {
     }
     pub fn scalar_group(&self, value: Value) -> Vec<Value> {
         self.set("DispatchGroupMembers", (value,))
-    }
-    pub fn dependencies(&self, value: Value) -> Vec<Value> {
-        self.set("DispatchPredecessors", (value,))
     }
     pub fn slot(&self, op: Value, role: &str, index: i64) -> Option<Value> {
         self.lookup("BufferSlot", (op, role, index))

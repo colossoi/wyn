@@ -72,6 +72,7 @@ fn selected_grid_dimensions_are_positive() {
     let tlc = compile_thru_tlc("").unwrap();
     let imported = from_tlc(&tlc).unwrap();
     let mut program = imported.advance(crate::egglog::Optimized {
+        execution: Default::default(),
         captures: Default::default(),
         host: Default::default(),
         selected: crate::egglog::scalar::Selected {

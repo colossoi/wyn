@@ -78,14 +78,14 @@ pub(super) fn screma(
         let Some(key) = body.compiler.facts.constructor("Stage", (phase_owner, "chunks")) else {
             return Err(error("collective chunk schedule missing"));
         };
-        if body.compiler.facts.dispatch_grid(key)?.is_none() {
+        if body.compiler.program.stage.execution.dispatch(key)?.grid.is_none() {
             return Err(error("collective requires a fixed chunk grid"));
         }
         let Some(groups) = body.compiler.facts.lookup("CollectiveGroups", (phase_owner,)) else {
             return Err(error("collective group count missing"));
         };
         (
-            body.compiler.phase_width(key)?,
+            body.compiler.program.stage.execution.dispatch(key)?.width.get(),
             u64::from(body.compiler.facts.positive(groups, "collective group count")?),
         )
     };

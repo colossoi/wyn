@@ -83,7 +83,10 @@ pub(super) fn entry<'source>(
     let decl = &entry.declaration;
     let symbol = owner;
     let mut lower = Body::new(compiler, scope, vec![], source.ty.clone())?;
-    lower.grid = stage.map(|key| lower.compiler.facts.dispatch_grid(key)).transpose()?.flatten();
+    lower.grid = stage
+        .map(|key| lower.compiler.program.stage.execution.dispatch(key).map(|d| d.grid))
+        .transpose()?
+        .flatten();
     if stage.is_none() {
         let Some(token) = lower.compiler.program.identities.symbols.get(&symbol) else {
             return Err(error("entry symbol missing"));
@@ -266,7 +269,7 @@ fn emit_body(
     let result = if let Some(stage) = stage {
         let operation = lower.compiler.facts.phase_operation(stage)?;
         let phase = lower.compiler.facts.phase_name(stage)?;
-        let width = lower.compiler.phase_width(stage)?;
+        let width = lower.compiler.program.stage.execution.dispatch(stage)?.width.get();
         kernels::emit(lower, scope, operation, &phase, width)
             .map_err(|failure| error(format!("phase {operation:?}/{phase}: {failure}")))?;
         lower.op(OpTag::Unit, vec![], types::unit())?
