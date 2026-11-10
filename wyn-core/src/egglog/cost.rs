@@ -77,15 +77,15 @@ impl CostModel {
         coordinates: f64,
         serial: f64,
         parallel: f64,
-        outputs: f64,
+        elements: f64,
         width: u32,
     ) -> f64 {
         let lanes = f64::from(self.resident_workgroups) * 32.0;
-        let active = f64::from(width).min(parallel.max(1.0));
+        let active = f64::from(width).min(elements.max(1.0));
         let occupancy = (coordinates * active / lanes).clamp(1.0 / lanes, 1.0);
         let compute =
             coordinates * (serial * f64::from(width) + parallel) / (self.compute_ops_per_ns * occupancy);
-        let memory = coordinates * outputs * 4.0 / (self.memory_bytes_per_ns * occupancy);
+        let memory = coordinates * elements * 4.0 / (self.memory_bytes_per_ns * occupancy);
         let barriers = if width == 1 {
             0.0
         } else {

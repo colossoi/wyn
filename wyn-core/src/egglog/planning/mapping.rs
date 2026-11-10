@@ -18,7 +18,7 @@ struct Candidate {
 struct Work {
     serial: f64,
     parallel: f64,
-    outputs: f64,
+    elements: f64,
 }
 
 struct Estimates<'a> {
@@ -41,11 +41,29 @@ impl Estimates<'_> {
         Ok(self.number("MapPrefixWork", region)?.unwrap_or(65.0))
     }
 
+    fn full_region(&self, region: Value) -> Result<f64, OptimizeError> {
+        if let Some(cost) = self.query.constructor("RegionCost", (region,))? {
+            if let Some(cost) = self.cost("CostValue", cost)? {
+                return Ok(cost);
+            }
+        }
+        // Unknown trip counts retain a parallel-work prior, not a zero-cost leaf.
+        let parallel = self.query.contains("RegionHasParallelWork", (region,))?;
+        Ok(self.region(region)? + if parallel { 256.0 } else { 0.0 })
+    }
+
     fn traversal(&self, traversal: Value) -> Result<Work, OptimizeError> {
         for (constructor, region) in [("TraversalFor", 1), ("TraversalCall", 2)] {
             if let Some(fields) = self.query.enode(constructor, traversal)? {
                 let mut work = self.traversal(fields[4])?;
-                work.serial += self.region(fields[region])?;
+                let prefix = self.region(fields[region])?;
+                work.serial += prefix;
+                if self.query.enode("TraversalValue", fields[4])?.is_some()
+                    && self.query.contains("RegionHasParallelWork", (fields[region],))?
+                {
+                    work.parallel += (self.full_region(fields[region])? - prefix).max(0.0);
+                    work.elements = work.elements.max(256.0);
+                }
                 return Ok(work);
             }
         }
@@ -55,7 +73,7 @@ impl Estimates<'_> {
             return Ok(Work {
                 serial: 1.0 + a.serial.max(b.serial),
                 parallel: a.parallel.max(b.parallel),
-                outputs: a.outputs.max(b.outputs),
+                elements: a.elements.max(b.elements),
             });
         }
         if let Some(fields) = self.query.enode("TraversalReindex", traversal)? {
@@ -73,19 +91,14 @@ impl Estimates<'_> {
             })?;
             let mut ops = 0.0;
             for region in regions {
-                let cost = self.query.constructor("RegionCost", (region,))?;
-                let full = match cost {
-                    Some(cost) => self.cost("CostValue", cost)?,
-                    None => None,
-                };
-                ops += full.unwrap_or(self.region(region)?);
+                ops += self.full_region(region)?;
             }
             // Unknown lengths are estimates, never capacity or legality proofs.
             let n = self.cost("CostExtent", fields[4])?.unwrap_or(256.0);
             return Ok(Work {
                 serial: 0.0,
                 parallel: n * ops.max(1.0),
-                outputs: n,
+                elements: n,
             });
         }
         if self.query.enode("TraversalValue", traversal)?.is_some()
@@ -94,7 +107,7 @@ impl Estimates<'_> {
             return Ok(Work {
                 serial: 1.0,
                 parallel: 0.0,
-                outputs: 1.0,
+                elements: 1.0,
             });
         }
         Err(error("unrecognized map candidate traversal"))
@@ -118,7 +131,7 @@ pub(super) fn select(graph: &mut EGraph, costs: CostModel) -> Result<(), Optimiz
         let rank = graph.value_to_base::<i64>(query.required("ShapeRank", (shape,))?);
         let extent = query.required("ShapeExtent", (shape,))?;
         let coordinates =
-            estimates.cost("CostExtent", extent)?.unwrap_or(f64::from(costs.resident_workgroups) * 32.0);
+            estimates.cost("CostExtent", extent)?.unwrap_or(f64::from(costs.resident_workgroups));
         let work = estimates.traversal(traversal)?;
         let group_safe = hosts.contains(&owner)
             && query.contains("GroupSafeTraversal", (traversal,))?
@@ -134,7 +147,7 @@ pub(super) fn select(graph: &mut EGraph, costs: CostModel) -> Result<(), Optimiz
                 shape,
                 traversal,
                 rank,
-                cost: costs.mapping(coordinates, work.serial, work.parallel, work.outputs, width),
+                cost: costs.mapping(coordinates, work.serial, work.parallel, work.elements, width),
             };
             if choice.is_none_or(|old| {
                 candidate.cost < old.cost || (candidate.cost == old.cost && candidate.rank > old.rank)
