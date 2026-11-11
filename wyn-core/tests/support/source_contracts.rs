@@ -17,6 +17,17 @@ fn compile_to_spirv_output(source: &str) -> wyn_core::error::Result<wyn_core::Lo
 
 mod source_pipeline {
     #[test]
+    fn memory_rewrites_reach_both_backends() {
+        shaders(
+            "entry reduce_once(xs:[]i32) [4]i32=map(|p|reduce((+),0i32,xs),iota(4))
+                 entry scan_once(xs:[]i32,j:i32) [4]i32=map(|p|scan((+),0i32,xs)[j],iota(4))
+                 entry branch(xs:[]i32,b:bool) i32=if b then reduce((+),0i32,xs) else 0i32
+                 entry loop_once(xs:[]i32,n:i32) i32=loop x=0i32 for i<n do x+reduce((+),0i32,xs)
+                 entry slices(xs:[]i32) [2]i32=map(|x|x+1,xs[1..7][2..4])",
+        );
+    }
+
+    #[test]
     fn view_transfers_preserve_nested_array_ranks() {
         for source in [
             "entry chosen(xs:[100][3]i32,flag:i32) [100][3]i32 =
@@ -63,6 +74,24 @@ mod source_pipeline {
                 "cooperative array results must not be copied into per-lane arrays"
             );
         }
+    }
+
+    #[test]
+    fn simultaneous_loop_transfers_reach_both_backends() {
+        shaders(include_str!(
+            "../../../fluid-simulation/test/repro_shared_loop_swap.wyn"
+        ));
+    }
+
+    #[test]
+    fn memory_transfers_preserve_empty_arrays_and_projected_fields() {
+        shaders(include_str!(
+            "../../../tests/compiler/cases/loop_local_tuple_collectives.wyn"
+        ));
+        shaders("entry empty(flag:bool) [0]i32 = if flag then replicate(0,1i32) else replicate(0,2i32)");
+        shaders(
+            "entry empty_count(n:i32) i32=length(if n>0 then replicate(0,0i32) else replicate(2,7i32))",
+        );
     }
 
     use super::*;

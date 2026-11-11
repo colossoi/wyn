@@ -1,27 +1,18 @@
-use super::facts::collect;
 use crate::tlc::{self, TermKind, VarRef, WalkDecision};
 
 #[test]
 fn permission_survives_later_reads() {
     let source = "entry main(xs:*[]i32) ([]i32,i32) = let ys=map(|x:i32|x+1,xs) in (ys,length(xs))";
     let program = crate::compile_thru_tlc(source).unwrap();
-    assert!(!program.global_context.ownership.reusable.is_empty());
-    let facts = collect(&program);
-    assert_eq!(facts.reusable, program.global_context.ownership.reusable);
+    let entry = program.defs.iter().find(|def| matches!(def.meta, tlc::DefMeta::EntryPoint(_))).unwrap();
+    assert!(entry.param_diets[0].is_consuming());
 }
 
 #[test]
 fn borrowed_parameters_do_not_receive_reuse_permission() {
     let program = crate::compile_thru_tlc("entry main(xs:[]i32) []i32 = map(|x:i32|x+1,xs)").unwrap();
-    for def in &program.defs {
-        if let TermKind::Lambda(lam) = &def.body.kind {
-            for (symbol, _) in &lam.params {
-                if program.symbols.get(*symbol).is_some_and(|name| name == "xs") {
-                    assert!(!program.global_context.ownership.reusable.contains(symbol));
-                }
-            }
-        }
-    }
+    let entry = program.defs.iter().find(|def| matches!(def.meta, tlc::DefMeta::EntryPoint(_))).unwrap();
+    assert!(!entry.param_diets[0].is_consuming());
 }
 
 #[test]

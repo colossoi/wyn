@@ -10,7 +10,14 @@ fn fused_map_chain_keeps_permission_to_reuse_its_external_input() {
         panic!("compute")
     };
     assert_eq!(p.stages.len(), 1);
-    assert_eq!(p.bindings.len(), 2, "reused array and explicit input length");
+    assert_eq!(p.bindings.len(), 1, "the input buffer also supplies its length");
+    let host::ResultShape::Rectangular(dimensions) = &output.source_results[0].shape else {
+        panic!("rectangular result");
+    };
+    assert!(matches!(
+        dimensions.as_slice(),
+        [host::Expr::Scalar(host::ScalarExpr::BufferLength { .. })]
+    ));
     assert_eq!(p.stages[0].uses.access(0), Some(host::Access::ReadWrite));
     assert_eq!(output.source_results[0].binding, 0);
 }
@@ -26,7 +33,7 @@ fn length_observers_do_not_block_content_reuse() {
     assert_eq!(
         p.bindings.len(),
         3,
-        "input/result array, scalar result, and input length"
+        "shared input/result array and scalar ABI bindings"
     );
 }
 
@@ -55,7 +62,14 @@ fn fused_intermediate_element_types_do_not_restrict_final_reuse() {
         panic!("compute")
     };
     assert_eq!(p.stages.len(), 1);
-    assert_eq!(p.bindings.len(), 2, "reused array and explicit input length");
+    assert_eq!(p.bindings.len(), 1, "the input buffer also supplies its length");
+    let host::ResultShape::Rectangular(dimensions) = &output.source_results[0].shape else {
+        panic!("rectangular result");
+    };
+    assert!(matches!(
+        dimensions.as_slice(),
+        [host::Expr::Scalar(host::ScalarExpr::BufferLength { .. })]
+    ));
 }
 
 #[test]
@@ -67,35 +81,63 @@ fn independent_writers_cannot_both_reuse_one_input() {
 }
 
 #[test]
-fn selected_grid_dimensions_are_positive() {
-    use egglog_engine::Write;
-    let tlc = compile_thru_tlc("").unwrap();
-    let imported = from_tlc(&tlc).unwrap();
-    let mut program = imported.advance(crate::egglog::Optimized {
-        execution: Default::default(),
-        captures: Default::default(),
-        host: Default::default(),
-        selected: crate::egglog::scalar::Selected {
-            dag: Default::default(),
-            values: vec![],
-            roots: Default::default(),
-            extents: Default::default(),
-        },
-    });
-    for (dims, expected) in [
-        ((0i64, 1i64, 1i64), "grid x"),
-        ((1, 0, 1), "grid y"),
-        ((1, 1, 0), "grid z"),
+fn reuse_requires_ownership_pointwise_access_and_no_live_alias() {
+    for source in [
+        "entry main(xs:[]i32) []i32=map(|x|x+1,xs)",
+        "entry main(xs:*[4]i32) [4]i32=map(|i|xs[3-i],iota(4))",
+        "entry main(xs:*[4]i32) ([4]i32,[4]i32)=(xs,map(|x|x+1,xs))",
     ] {
-        let grid = program.graph.update(|mut sink| sink.add("FixedGrid", dims)).unwrap();
-        let error = crate::egglog::facts::Facts { program: &program }.grid(grid).unwrap_err();
-        assert!(error.to_string().contains(expected), "{error}");
+        let output = pipeline(source);
+        let result = output.source_results.last().unwrap();
+        assert_ne!(result.binding, 0, "{source}");
+        let Pipeline::Compute(pipeline) = &output.pipelines[0] else {
+            panic!("compute pipeline");
+        };
+        assert!(
+            pipeline.stages.iter().all(|stage| {
+                !matches!(
+                    stage.uses.access(0),
+                    Some(host::Access::ReadWrite | host::Access::WriteOnly)
+                )
+            }),
+            "{source}"
+        );
     }
-    let grid = program.graph.update(|mut sink| sink.add("FixedGrid", (2i64, 3i64, 4i64))).unwrap();
-    assert_eq!(
-        crate::egglog::facts::Facts { program: &program }.grid(grid).unwrap(),
-        (2, 3, 4)
-    );
+}
+
+#[test]
+fn selected_grid_dimensions_are_positive() {
+    use crate::egglog::{execution::Execution, memory};
+    for x in [0, 1, 32] {
+        let mut graph = egglog_engine::EGraph::default();
+        memory::load(&mut graph).unwrap();
+        graph
+            .parse_and_run_program(
+                None,
+                &format!(
+                    r#"
+            (let name (FunctionId 0 "grid"))
+            (let grid (Grid3D (vec-of (IndexConstant 2) (IndexConstant 3) (IndexConstant 4))
+                (vec-of (IndexConstant {x}) (IndexConstant 1) (IndexConstant 1))))
+            (let function (DefineFunction name (vec-of) (vec-of) (Block
+                (vec-of (Let (StatementTag 0) (vec-of) (vec-of)
+                    (Parallel (DeviceKernel grid) (IterationSpace (ValueId 0) (vec-of))
+                        (ParallelBlock (vec-of) (vec-of))))) (vec-of))))
+            (CurrentProgram (MemoryProgram (vec-of function) (vec-of) (vec-of (EntryPoint name 0))))
+        "#
+                ),
+            )
+            .unwrap();
+        let result = Execution::select(&graph);
+        if x == 0 {
+            assert!(result.is_err());
+        } else {
+            let selected = result.unwrap();
+            let statement = selected.entries[&0][0];
+            assert_eq!(selected.dispatch(statement).unwrap().grid, Some((2, 3, 4)));
+            assert_eq!(selected.dispatch(statement).unwrap().width.get(), x);
+        }
+    }
 }
 
 #[test]
@@ -112,7 +154,7 @@ fn external_functions_retain_their_declared_signatures() {
         "#[linked(\"foreign_add\")] extern add(a:i32,b:i32) i32\nentry main(x:i32) i32 = add(x, 3)",
     )
     .unwrap();
-    let mut program = crate::egglog::optimize_with_policy(
+    let program = crate::egglog::optimize_with_policy(
         crate::egglog::prepare_interfaces(
             schedule(
                 place(
@@ -127,7 +169,6 @@ fn external_functions_retain_their_declared_signatures() {
         crate::egglog::ScalarOptimization::Basic,
     )
     .unwrap();
-    program.identities.spans.clear();
     let ssa = finish_for_test(program, CodegenTarget::Spirv).unwrap();
     let external = ssa.functions.iter().find(|f| f.linkage_name.as_deref() == Some("foreign_add")).unwrap();
     assert!(external.span.is_generated());
@@ -142,11 +183,24 @@ fn external_functions_retain_their_declared_signatures() {
 
 #[test]
 fn sliced_fused_map_normalizes() {
-    compile_thru_tlc(
+    pipeline(
         "entry main(xs: []i32) [4]i32 =
         let a=map(|x:i32|x+1,xs) in map(|x:i32|x*2,a[2..6])",
-    )
-    .unwrap();
+    );
+}
+
+#[test]
+fn memory_rewrites_lower_through_nested_scopes() {
+    for source in [
+        "entry main(xs:[]i32) [4]i32=map(|p|reduce((+),0i32,xs),iota(4))",
+        "entry main(xs:[]i32,j:i32) [4]i32=map(|p|scan((+),0i32,xs)[j],iota(4))",
+        "entry main(xs:[]i32) [2]i32=map(|x|x+1,xs[1..7][2..4])",
+        "entry main(xs:[]i32,b:bool) [4]i32=map(|p|if b then reduce((+),0i32,xs) else p,iota(4))",
+        "entry main(xs:[]i32,n:i32) i32=loop x=0i32 for i<n do x+reduce((+),0i32,xs)",
+        "entry main() [4]i32=map(|p|let a=map(|i|i+2,iota(8)) in let b=map(|i|i+1,iota(8)) in a[0]+b[0],iota(4))",
+    ] {
+        pipeline(source);
+    }
 }
 
 fn pipeline(source: &str) -> host::ModuleInterface {
@@ -154,6 +208,21 @@ fn pipeline(source: &str) -> host::ModuleInterface {
 }
 
 fn pipeline_with_policy(source: &str, policy: crate::egglog::ScalarOptimization) -> host::ModuleInterface {
+    lowered_with_policy(source, policy).global_context.pipeline
+}
+
+fn lowered_with_policy(
+    source: &str,
+    policy: crate::egglog::ScalarOptimization,
+) -> crate::ssa::stage::Elaborated {
+    lowered_for_target(source, policy, CodegenTarget::Wgsl)
+}
+
+fn lowered_for_target(
+    source: &str,
+    policy: crate::egglog::ScalarOptimization,
+    target: CodegenTarget,
+) -> crate::ssa::stage::Elaborated {
     let tlc = compile_thru_tlc(source).unwrap();
     let program = schedule(
         place(
@@ -165,7 +234,7 @@ fn pipeline_with_policy(source: &str, policy: crate::egglog::ScalarOptimization)
     .unwrap();
     let program = crate::egglog::prepare_interfaces(program).unwrap();
     let program = crate::egglog::optimize_with_policy(program, policy).unwrap();
-    finish_for_test(program, CodegenTarget::Wgsl).unwrap().global_context.pipeline
+    finish_for_test(program, target).unwrap()
 }
 
 #[test]
@@ -217,7 +286,18 @@ fn independent_entries_keep_their_own_dispatches_and_results() {
         output.source_results[0].pipeline_index,
         output.source_results[1].pipeline_index
     );
-    assert_ne!(output.source_results[0].binding, output.source_results[1].binding);
+    assert_ne!(
+        (
+            output.source_results[0].pipeline_index,
+            output.source_results[0].set,
+            output.source_results[0].binding
+        ),
+        (
+            output.source_results[1].pipeline_index,
+            output.source_results[1].set,
+            output.source_results[1].binding
+        ),
+    );
     for (pipeline, other_input) in output.pipelines.iter().zip(["ys", "xs"]) {
         let Pipeline::Compute(pipeline) = pipeline else {
             panic!("compute")
@@ -258,19 +338,24 @@ fn in_place_results_keep_the_host_input_binding_and_upload_role() {
 }
 
 #[test]
-fn fused_maps_publish_reused_nonprimary_inputs() {
+fn fused_outputs_reuse_distinct_consumed_inputs() {
     let output = pipeline(
         "entry main(xs:*[4]i32,ys:*[4]i32) ([4]i32,[4]i32) = (map(|x:i32|x+1,ys),map(|x:i32|x*2,xs))",
     );
-    assert_eq!(
-        output.source_results.iter().map(|r| r.binding).collect::<Vec<_>>(),
-        [1, 0]
-    );
+    let mut bindings = output.source_results.iter().map(|result| result.binding).collect::<Vec<_>>();
+    bindings.sort();
+    assert_eq!(bindings, [0, 1], "each consumed buffer serves exactly one output");
     let Pipeline::Compute(p) = &output.pipelines[0] else {
         panic!("compute")
     };
     assert_eq!(p.bindings.len(), 2);
-    assert!(p.stages.iter().all(|stage| stage.workgroup_size == (64, 1, 1)));
+    assert_eq!(p.stages.len(), 1);
+    assert_eq!(p.stages[0].uses.access(0), Some(host::Access::ReadWrite));
+    assert_eq!(p.stages[0].uses.access(1), Some(host::Access::ReadWrite));
+    assert!(p.stages.iter().all(|stage| {
+        let (x, y, z) = stage.workgroup_size;
+        x.is_power_of_two() && x <= 1024 && (y, z) == (1, 1)
+    }));
 }
 
 #[test]
@@ -285,41 +370,171 @@ fn tuple_of_views_uses_the_tlc_component_bindings() {
     );
 }
 
+// Evaluate published sizing expressions at concrete input lengths; representation
+// choices such as Fixed versus Computed must not change the allocation contract.
+fn allocation_index(expression: &host::Expr, input_elements: i64) -> i64 {
+    use host::Expr;
+    match expression {
+        Expr::Integer(n) => *n,
+        Expr::Scalar(value) => scalar_index(value, input_elements),
+        Expr::BufferLength { source, stride } => {
+            assert_eq!(*source, host::ScalarSource::Binding { set: 0, binding: 0 });
+            input_elements * 4 / i64::from(*stride)
+        }
+        Expr::Add(a, b) => allocation_index(a, input_elements) + allocation_index(b, input_elements),
+        Expr::Subtract(a, b) => allocation_index(a, input_elements) - allocation_index(b, input_elements),
+        Expr::Multiply(a, b) => allocation_index(a, input_elements) * allocation_index(b, input_elements),
+        Expr::Floor(a, b) => {
+            allocation_index(a, input_elements).div_euclid(allocation_index(b, input_elements))
+        }
+        Expr::Ceiling(a, b) => {
+            let (a, b) = (
+                allocation_index(a, input_elements),
+                allocation_index(b, input_elements),
+            );
+            a.div_euclid(b) + i64::from(a.rem_euclid(b) != 0)
+        }
+        Expr::Min(a, b) => allocation_index(a, input_elements).min(allocation_index(b, input_elements)),
+        Expr::Max(a, b) => allocation_index(a, input_elements).max(allocation_index(b, input_elements)),
+        other => panic!("sizing unexpectedly requires device results: {other:?}"),
+    }
+}
+
+fn scalar_index(value: &host::ScalarExpr, input_elements: i64) -> i64 {
+    use host::ScalarExpr;
+    match value {
+        ScalarExpr::I32(n) => i64::from(*n),
+        ScalarExpr::U32(n) => i64::from(*n),
+        ScalarExpr::Bool(b) => i64::from(*b),
+        ScalarExpr::BufferLength { source, stride } => allocation_index(
+            &host::Expr::BufferLength {
+                source: source.clone(),
+                stride: *stride,
+            },
+            input_elements,
+        ),
+        ScalarExpr::If { condition, yes, no } => scalar_index(
+            if scalar_index(condition, input_elements) != 0 { yes } else { no },
+            input_elements,
+        ),
+        ScalarExpr::Apply { op, args, .. } => {
+            let a = scalar_index(&args[0], input_elements);
+            if op == "to-i32" {
+                return a;
+            }
+            let b = scalar_index(&args[1], input_elements);
+            match op.as_str() {
+                "add" => a + b,
+                "sub" => a - b,
+                "mul" => a * b,
+                "div" => a / b,
+                "rem" => a % b,
+                "lt" => i64::from(a < b),
+                "gt" => i64::from(a > b),
+                other => panic!("unexpected capacity operation {other}"),
+            }
+        }
+        other => panic!("sizing unexpectedly reads a device scalar: {other:?}"),
+    }
+}
+
+fn allocation_bytes(length: &host::BufferLen, input_elements: i64) -> i64 {
+    match length {
+        host::BufferLen::Fixed { bytes } => i64::try_from(*bytes).unwrap(),
+        host::BufferLen::Computed { bytes } => allocation_index(bytes, input_elements),
+        other => panic!("unexpected allocation policy {other:?}"),
+    }
+}
+
 #[test]
 fn runtime_collective_scratch_matches_its_bounded_chunk_grid() {
-    use host::{Binding, BufferLen, DispatchSize};
+    use host::{Binding, DispatchSize};
     let output = pipeline("entry main(xs: []i32) []i32 = scan(|a:i32,b:i32|a+b,0,xs)");
     let [Pipeline::Compute(p)] = output.pipelines.as_slice() else {
         panic!("compute")
     };
-    let DispatchSize::Fixed { x, y, z, .. } = p.stages[0].dispatch_size else {
-        panic!("collective chunk grid must be bounded");
-    };
-    let bytes = u64::from(x) * u64::from(y) * u64::from(z) * 4;
-    assert_eq!(
-        p.bindings
+    let stages = p.stages.iter().filter(|stage| stage.workgroup_size.0 > 1).collect::<Vec<_>>();
+    assert_eq!(stages.len(), 3, "chunks, carry scan, and carry application");
+    let scratch = [(0, 1), (1, 2)].map(|(producer, consumer)| {
+        let buffers = p
+            .bindings
             .iter()
-            .filter(|binding| matches!(binding,
-                Binding::StorageBuffer { length: Some(BufferLen::Fixed { bytes: capacity }), .. }
-                    if *capacity == bytes
-            ))
-            .count(),
-        2,
-        "one partial and one carry per chunk"
-    );
+            .enumerate()
+            .filter_map(|(index, binding)| {
+                let Binding::StorageBuffer {
+                    length: Some(length),
+                    usage: host::BufferUsage::Intermediate,
+                    ..
+                } = binding
+                else {
+                    return None;
+                };
+                let written = matches!(
+                    stages[producer].uses.access(index),
+                    Some(host::Access::WriteOnly | host::Access::ReadWrite)
+                );
+                let read = matches!(
+                    stages[consumer].uses.access(index),
+                    Some(host::Access::ReadOnly | host::Access::ReadWrite)
+                );
+                (written && read).then_some(length)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            buffers.len(),
+            1,
+            "one buffer carries each scalar collective dependency"
+        );
+        buffers[0]
+    });
+    for elements in [0, 1, 17, 513, 65536, 1000000] {
+        let groups = match &stages[0].dispatch_size {
+            DispatchSize::Fixed { x, y, z, .. } => i64::from(*x) * i64::from(*y) * i64::from(*z),
+            DispatchSize::Computed { groups, .. } => {
+                groups.iter().map(|g| allocation_index(g, elements)).product()
+            }
+        };
+        assert!((1..=256).contains(&groups));
+        for length in scratch {
+            assert_eq!(
+                allocation_bytes(length, elements),
+                groups * 4,
+                "one partial/carry per chunk for input {elements}"
+            );
+        }
+    }
 }
 
 #[test]
 fn bounded_filter_output_does_not_use_its_packed_backing_as_a_length() {
-    use host::{Binding, BufferLen};
     let output = pipeline(include_str!("../../../testfiles/filter_then_map.wyn"));
     let result = &output.source_results[0];
     let Pipeline::Compute(p) = &output.pipelines[result.pipeline_index] else {
         panic!("compute")
     };
-    assert!(p.bindings.iter().any(|b| matches!(b, Binding::StorageBuffer {
-        set, binding, length: Some(BufferLen::Fixed { bytes: 16384 }), ..
-    } if (*set, *binding) == (result.set, result.binding))));
+    let length = p
+        .bindings
+        .iter()
+        .find_map(|binding| match binding {
+            host::Binding::StorageBuffer {
+                set, binding, length, ..
+            } if (*set, *binding) == (result.set, result.binding) => length.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        allocation_bytes(length, 0),
+        16384,
+        "capacity must cover every retained input"
+    );
+    let host::ResultShape::Rectangular(dimensions) = &result.shape else {
+        panic!("rectangular output")
+    };
+    assert!(
+        !matches!(dimensions.as_slice(), [host::Expr::Scalar(host::ScalarExpr::BufferLength { source: host::ScalarSource::Binding { set, binding }, .. })]
+        if (*set, *binding) == (result.set, result.binding)),
+        "physical capacity is not the filtered length"
+    );
 }
 
 #[test]
@@ -332,30 +547,75 @@ fn runtime_index_into_shared_array_helper_normalizes() {
 
 #[test]
 fn collective_phase_accesses_exclude_unused_inputs_and_producer_captures() {
-    let output = pipeline_with_policy(
+    let module = lowered_with_policy(
         "entry main(xs:[]i32,unused:[]i32,bias:i32) i32=reduce((+),0,map(|x|x+bias*bias,xs))",
         crate::egglog::ScalarOptimization::Full,
     );
-    let [Pipeline::Compute(p)] = output.pipelines.as_slice() else {
+    let [Pipeline::Compute(p)] = module.global_context.pipeline.pipelines.as_slice() else {
         panic!("compute pipeline");
     };
-    let unused = p
-        .bindings
-        .iter()
-        .position(
-            |binding| matches!(binding, host::Binding::StorageBuffer { name, .. } if name == "unused"),
-        )
-        .unwrap();
-    assert!(p.stages.iter().all(|stage| stage.uses.access(unused).is_none()));
-    let combine = p.stages.iter().find(|stage| stage.entry_point.ends_with("combine")).unwrap();
-    // Combining needs the live input length, but not the producer's bias computation.
-    assert!(output
-        .scalar_tasks
-        .iter()
-        .filter(|task| task.stage == combine.entry_point)
-        .all(|task| matches!(task.value, host::ScalarExpr::BufferLength { .. })));
+    for (index, binding) in p.bindings.iter().enumerate() {
+        if matches!(binding, host::Binding::StorageBuffer { name, .. } if name == "unused") {
+            assert!(p.stages.iter().all(|stage| stage.uses.access(index).is_none()));
+        }
+    }
+    let stages =
+        p.stages
+            .iter()
+            .filter(|stage| {
+                let entry =
+                    module.entry_points.iter().find(|entry| entry.name == stage.entry_point).unwrap();
+                entry.body.inner.insts.values().any(|instruction| {
+                    matches!(instruction.data, crate::ssa::types::InstKind::ControlBarrier)
+                })
+            })
+            .collect::<Vec<_>>();
+    assert_eq!(stages.len(), 2, "partial reduction followed by combination");
+    let uses_bias = |name: &str| {
+        let entry = module.entry_points.iter().find(|entry| entry.name == name).unwrap();
+        let parameters = entry.parameter_inputs[2]
+            .iter()
+            .map(|&index| entry.body.param(index).unwrap().0)
+            .collect::<Vec<_>>();
+        entry.body.inner.insts.values().any(|instruction| {
+            instruction
+                .data
+                .value_uses()
+                .iter()
+                .any(|value| value.as_ssa().is_some_and(|value| parameters.contains(&value)))
+        })
+    };
     assert!(
-        output.scalar_tasks.iter().any(|task| task.stage != combine.entry_point
-            && !matches!(task.value, host::ScalarExpr::BufferLength { .. }))
+        p.stages
+            .iter()
+            .any(|stage| stage.entry_point != stages[1].entry_point && uses_bias(&stage.entry_point)),
+        "producer computation must retain its scalar capture"
     );
+    assert!(
+        !uses_bias(&stages[1].entry_point),
+        "the combiner must not evaluate producer captures"
+    );
+}
+
+#[test]
+fn varying_collection_emits_shaders_and_host_loop() {
+    let source = "entry main(xs:[]i32) [][]i32=map(|x|map(|y|x+y,iota(x)),xs)";
+    let module = lowered_with_policy(source, crate::egglog::ScalarOptimization::Basic);
+    let wgsl = crate::lower_ssa_to_wgsl_with_program(module).unwrap();
+    let shader = naga::front::wgsl::parse_str(&wgsl.wgsl).unwrap();
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&shader)
+    .unwrap();
+    assert_eq!(wgsl.program.interface.dispatch_loops.len(), 1);
+    let host = wgsl.program.to_whl("main", crate::host::ShaderFormat::Wgsl).unwrap();
+    wyn_host_interp::Program::parse(&host).unwrap();
+    let module = lowered_for_target(
+        source,
+        crate::egglog::ScalarOptimization::Basic,
+        CodegenTarget::Spirv,
+    );
+    assert!(!crate::lower_ssa_to_spirv(module).unwrap().spirv.is_empty());
 }

@@ -1,8 +1,0 @@
-; Settle template safety before substitution, then analyze each expanded body.
-(run-schedule
-  (saturate (run scalar-analysis))
-  (saturate
-    (seq
-      (saturate (seq (run scalar-inline) (run scalar-substitute) (run scalar-arguments)))
-      (saturate (run scalar-analysis))
-      (run scalar-micro))))

@@ -1,59 +1,25 @@
-use egglog_engine::EGraph;
+use crate::egglog::{fusion, memory};
 
 #[test]
-fn work_proofs_distinguish_shared_regions_from_repeated_inline_work() {
-    let mut graph = EGraph::default();
-    graph
-        .parse_and_run_program(
-            None,
-            concat!(
-                include_str!("flow.egg"),
-                "\n
-        (function SourceWork (SourceValue) i64 :no-merge)
-        (function SourceRegionWork (RegionKey) i64 :no-merge)
-        (function SourceDuplicable (SourceValue) bool :no-merge)
-        (function SourceOperationValue (OperationKey) SourceValue :no-merge)
-        (datatype SourceOperationData (OperationInfo RegionKey String))
-        (function SourceOperation (OperationKey) SourceOperationData :no-merge)
-        (function WorkOperationCheap (OperationKey) bool :merge (or old new))
-        (relation SourceSummaryEnters (SourceValue RegionKey))
-        (relation SourceRegionEnters (RegionKey RegionKey))
-        (function SourceCallable (SourceValue) RegionKey :no-merge)\n",
-            ),
-        )
-        .unwrap();
-    super::work::register(&mut graph).unwrap();
-    graph.parse_and_run_program(None, include_str!("analysis/work.egg")).unwrap();
+fn bounded_work_counts_every_loop_iteration() {
+    let mut graph = fusion::new_graph().unwrap();
+    graph.parse_and_run_program(None, r#"
+        (let one (LiteralBits (I32) 1))
+        (let inner (Block (vec-of (Let (StatementTag 0)
+            (vec-of (BindValue (ValueId 0) (ScalarInfo (ScalarElement (I32)))))
+            (vec-of) (Use (ValueOperand one)))) (vec-of)))
+        (let loop (Loop (vec-of) (Counted (ValueId 1) (IndexConstant 0) (IndexConstant 40) (IndexConstant 1)) (vec-of) inner))
+        (let function (DefineFunction (FunctionId 0 "work") (vec-of) (vec-of)
+            (Block (vec-of (Let (StatementTag 1) (vec-of) (vec-of) loop)) (vec-of))))
+        (CurrentProgram (MemoryProgram (vec-of function) (vec-of) (vec-of)))
+    "#).unwrap();
+    memory::validate(&mut graph).unwrap();
     graph
         .parse_and_run_program(
             None,
             r#"
-        (set (SourceOperationValue (OperationId 0)) (SourceGlobal 0))
-        (set (SourceWork (SourceGlobal 0)) 1)
-        (set (SourceRegionWork (RegionId 0)) 1)
-        (set (SourceRegionWork (RegionId 1)) 1)
-        (set (SourceRegionWork (RegionId 2)) 1)
-        (set (SourceRegionWork (RegionId 3)) 40)
-        (SourceSummaryEnters (SourceGlobal 0) (RegionId 0))
-        (SourceRegionEnters (RegionId 0) (RegionId 1))
-        (SourceRegionEnters (RegionId 0) (RegionId 2))
-        (SourceRegionEnters (RegionId 1) (RegionId 3))
-        (SourceRegionEnters (RegionId 2) (RegionId 3))
-        (set (SourceCallable (SourceGlobal 0)) (RegionId 0))
-        (set (SourceDuplicable (FlowRegion (RegionId 0))) true)
-        (set (SourceOperationValue (OperationId 1)) (SourceGlobal 1))
-        (set (SourceWork (SourceGlobal 1)) 1)
-        (SourceSummaryEnters (SourceGlobal 1) (RegionId 4))
-        (set (SourceRegionWork (RegionId 4)) 1)
-        (set (SourceDuplicable (FlowRegion (RegionId 4))) true)
-        (SourceRegionEnters (RegionId 4) (RegionId 4))
-        (set (SourceCallable (SourceGlobal 1)) (RegionId 4))
-        (run-schedule (saturate work-summaries) (saturate work-costs) (saturate work-select))
-        (check (= (WorkOperationCheap (OperationId 0)) true))
-        (check (= (WorkInlineCost (RegionId 0)) 65))
-        (fail (check (WorkInlineEligible (RegionId 0))))
-        (check (= (WorkOperationCheap (OperationId 1)) false))
-        (fail (check (WorkInlineEligible (RegionId 4))))
+        (run-schedule (saturate schedule-cost))
+        (check (= (BoundedWork function loop) (bigint 40)))
     "#,
         )
         .unwrap();

@@ -2,7 +2,6 @@
 use crate::compile_thru_ssa;
 use crate::egglog::query::Query;
 use crate::egglog::{prepare_interfaces, scalar, ScalarOptimization};
-use egglog_engine::Write;
 
 #[test]
 fn size_hint_survives_egglog_optimization() {
@@ -56,53 +55,16 @@ fn dead_fused_outputs_do_not_evaluate_their_elements() {
 }
 
 #[test]
-fn native_admission_and_selected_evaluation_share_the_source_graph() {
-    use super::{from_tlc, fuse, optimize_with_policy, place, schedule, ScalarOptimization};
-    use crate::PipelineTopologyPolicy;
-
+fn host_preparation_preserves_the_authoritative_memory_program() {
     let tlc =
-        crate::compile_thru_tlc("entry main(xs:[]i32,bias:i32) []i32=map(|x:i32|x+bias*bias,xs)").unwrap();
-    {
-        let policy = ScalarOptimization::Full;
-        let program = optimize_with_policy(
-            prepare_interfaces(
-                schedule(
-                    place(
-                        fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                        PipelineTopologyPolicy::AllowGenerated,
-                    )
-                    .unwrap(),
-                )
-                .unwrap(),
-            )
-            .unwrap(),
-            policy,
-        )
-        .unwrap();
-        assert!(
-            program.stage.captures.is_empty(),
-            "scalar optimization must not lower host captures"
-        );
-        let program = super::prepare_host(program).unwrap().program;
-        if policy == ScalarOptimization::Full {
-            assert!(
-                !program.stage.captures.is_empty(),
-                "expanded callback arithmetic must reach host evaluation"
-            );
-        }
-        let mut phase_roots = 0;
-        program
-            .graph
-            .constructor_enodes("HostEvalPhaseRoot", |row| {
-                phase_roots += 1;
-                assert!(program.stage.selected.roots.contains_key(&(row.children[1], row.children[2])));
-            })
-            .unwrap();
-        assert!(phase_roots > 0);
-        let mut requests = 0;
-        program.graph.constructor_enodes("ExprImportRoot", |_| requests += 1).unwrap();
-        assert!(requests > 0);
-    }
+        crate::compile_thru_tlc("entry main(xs:[]i32,bias:i32) []i32=map(|x|x+bias*bias,xs)").unwrap();
+    let program = super::optimize_with_policy(interfaces_for_test(&tlc), ScalarOptimization::Full).unwrap();
+    let before = Query(&program.graph).row("CurrentProgram", |_| true).unwrap().unwrap()[0];
+    let program = super::prepare_host(program).unwrap();
+    let after = Query(&program.program.graph).row("CurrentProgram", |_| true).unwrap().unwrap()[0];
+    assert_eq!(before, after, "host readout must not rebuild executable bodies");
+    let ssa = super::to_ssa(program, crate::CodegenTarget::Portable).unwrap();
+    assert!(ssa.entry_points.iter().any(|entry| entry.inputs.iter().any(|input| input.name == "bias")));
 }
 
 // Broad policy/backend coverage lives in tests/compiler/cases/scalar_policy_*.wyn.
@@ -114,9 +76,29 @@ fn scalar_policy_controls_optional_templates() {
     for policy in [super::ScalarOptimization::Basic, super::ScalarOptimization::Full] {
         let mut scalars = program.graph.clone();
         super::scalar::run(&mut scalars, policy).unwrap();
-        let mut templates = 0;
-        scalars.constructor_enodes("ExprTemplateBody", |_| templates += 1).unwrap();
-        assert_eq!(templates > 0, policy == super::ScalarOptimization::Full);
+        let query = Query(&scalars);
+        let root = query.row("CurrentProgram", |_| true).unwrap().unwrap()[0];
+        let program = query.fields("MemoryProgram", root).unwrap();
+        let entry = query.fields("EntryPoint", query.vector(program[2]).unwrap()[0]).unwrap()[0];
+        let function = query
+            .vector(program[0])
+            .unwrap()
+            .into_iter()
+            .find(|&function| query.fields("DefineFunction", function).unwrap()[0] == entry)
+            .unwrap();
+        let syntax = query.constructor("FunctionRoot", (function,)).unwrap().unwrap();
+        let mut calls = 0;
+        query
+            .for_each("ContainsExp", |row| {
+                if row[0] == syntax && query.enode("Call", row[1])?.is_some() {
+                    calls += 1;
+                }
+                Ok(())
+            })
+            .unwrap();
+        if policy == super::ScalarOptimization::Full {
+            assert_eq!(calls, 0);
+        }
     }
 }
 
@@ -232,25 +214,36 @@ fn narrowing_loop_capacity_requires_bounded_backedge() {
     let source = include_str!("../../../testfiles/regressions/narrowing_loop_capacity.wyn")
         .replace("(mid+1,hi)", "(hi+1,hi)");
     let tlc = crate::compile_thru_tlc(&source).unwrap();
-    let program = interfaces_for_test(&tlc);
+    let program = super::place(
+        super::fuse(super::from_tlc(&tlc).unwrap()).unwrap(),
+        crate::PipelineTopologyPolicy::AllowGenerated,
+    ).unwrap();
     let query = Query(&program.graph);
+    let current = query.row("CurrentProgram", |_| true).unwrap().unwrap()[0];
     let mut scans = 0;
-    query
-        .for_function("SourceOperation", |keys, operation| {
-            let fields = query.enode("OperationInfo", operation)?.unwrap();
-            if program.graph.value_to_base::<egglog_engine::sort::S>(fields[1]).as_str() == "scan" {
+    query.for_each("ProgramFunction", |member| {
+        if member[0] != current { return Ok(()); }
+        let function = member[1];
+        let root = query.constructor("FunctionRoot", (function,))?.unwrap();
+        query.for_each("ContainsExp", |row| {
+            if row[0] != root { return Ok(()); }
+            let Some(parallel) = query.enode("Parallel", row[1])? else { return Ok(()); };
+            let body = query.fields("ParallelBlock", parallel[2])?;
+            for clause in query.vector(body[1])? {
+                let Some(fold) = query.enode("Fold", clause)? else { continue; };
+                if query.enode("Total", fold[0])?.is_some() { continue; }
                 scans += 1;
-                let extent = query.required("InputDomain", (keys[0],))?;
-                if let Some(bound) = query.lookup("StaticCapacityBound", (extent,))? {
-                    assert!(
-                        program.graph.value_to_base::<i64>(bound) >= 34,
-                        "backedge can produce 34 elements"
-                    );
+                let domain = query.fields("IterationSpace", parallel[1])?;
+                let axes = query.vector(domain[1])?;
+                let axis = query.fields("DenseAxis", *axes.last().unwrap())?;
+                if let Some(bound) = query.lookup("ExtentUpper", (function, axis[1]))? {
+                    assert!(program.graph.value_to_base::<i64>(bound) >= 34,
+                        "backedge can produce 34 elements");
                 }
             }
             Ok(())
         })
-        .unwrap();
+    }).unwrap();
     assert_eq!(scans, 1);
 }
 
@@ -346,22 +339,25 @@ fn placed_source(source: &str) -> crate::ssa::stage::Reachable {
 fn scalar_admission_uses_ir_literal_edits() {
     let tlc = crate::compile_thru_tlc("entry main(x:i32) i32=x+1").unwrap();
     let mut program = interfaces_for_test(&tlc);
-    let literal = Query(&program.graph).row("ExprLiteralBits", |_| true).unwrap().unwrap()[0];
-    program.graph.clear_function("ExprLiteralBits").unwrap();
-    program.graph.update(|mut sink| sink.add("ExprLiteralBits", (literal, 7i64))).unwrap();
-    scalar::run(&mut program.graph, ScalarOptimization::Basic).unwrap();
-    let mut seen = false;
-    Query(&program.graph)
-        .for_function("ExprImported", |keys, expression| {
-            if keys[1] == literal {
-                let fields = Query(&program.graph).enode("ExprLiteral", expression)?.unwrap();
-                assert_eq!(program.graph.value_to_base::<i64>(fields[2]), 7);
-                seen = true;
-            }
-            Ok(())
-        })
+    program
+        .graph
+        .parse_and_run_program(
+            None,
+            r#"
+        (ruleset test-edit)
+        (rule ((CurrentProgram program) (ProgramFunction program function)
+            (ContainsStm (FunctionRoot function) statement)
+            (= statement (Let id pattern certs (PrimOp "+" arguments))))
+          ((ScalarReplacement program statement (LiteralBits (I32) 7))) :ruleset test-edit)
+        (run-schedule test-edit)
+    "#,
+        )
         .unwrap();
-    assert!(seen, "the edited literal must reach scalar optimization");
+    scalar::run(&mut program.graph, ScalarOptimization::Basic).unwrap();
+    program.graph.parse_and_run_program(None, r#"
+        (check (CurrentProgram program) (ProgramFunction program function)
+            (ContainsStm (FunctionRoot function) (Let id pattern certs (Use (ValueOperand (LiteralBits (I32) 7))))))
+    "#).unwrap();
 }
 
 #[test]
@@ -388,13 +384,8 @@ entry chained_total(xs:[17]i32) (i32,i32)=let ys=filter(|x|x<20,map(|x|x+1,filte
     let tlc = crate::compile_thru_tlc(source).unwrap();
     let mut program =
         super::optimize_with_policy(interfaces_for_test(&tlc), ScalarOptimization::Basic).unwrap();
-    program.graph.clear_function("SourceOperation").unwrap();
-    program.graph.clear_function("SourceNeutral").unwrap();
-    program.graph.clear_function("SourceParameter").unwrap();
-    program.graph.clear_function("SourceResult").unwrap();
-    program.graph.clear_function("SourceLoopForm").unwrap();
-    program.graph.clear_function("SourceLoopInitial").unwrap();
-    program.graph.clear_function("SourceOperatorBody").unwrap();
+    // The source operator tables no longer exist; final emission reads this root.
+    super::memory::validate(&mut program.graph).unwrap();
     let ssa = super::finish_for_test(program, crate::CodegenTarget::Wgsl).unwrap();
     let wgsl = crate::lower_ssa_to_wgsl(ssa).unwrap();
     let module = naga::front::wgsl::parse_str(&wgsl).unwrap();

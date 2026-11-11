@@ -13,11 +13,11 @@ mod scalar_emit;
 mod whl;
 
 pub use interface::{
-    Access, BackingRef, Binding, BlendMode, BufferLen, BufferUsage, ComputePipeline, ComputeStage,
-    CullMode, DepthTest, DispatchLoop, DispatchLoopControl, DispatchSize, DrawBufferRef, DrawCall,
-    DrawCount, FillMode, FragmentOutput, FragmentState, FrameAccess, FrameBindingRef, FrameGraph,
+    Access, BackingRef, Binding, BlendMode, BufferLen, BufferSource, BufferUsage, ComputePipeline,
+    ComputeStage, CullMode, DepthTest, DispatchLoop, DispatchLoopControl, DispatchSize, DrawBufferRef,
+    DrawCall, DrawCount, FillMode, FragmentOutput, FragmentState, FrameAccess, FrameBindingRef, FrameGraph,
     FramePass, FramePassKind, FrameResource, FrameResourceExtent, FrameResourceKind, FrontFace,
-    GraphicsInvocation, GraphicsPipeline, GraphicsStage, IndexFormat, ModuleInterface, Pipeline,
+    GraphicsInvocation, GraphicsPipeline, GraphicsStage, IndexFormat, LoopCarry, ModuleInterface, Pipeline,
     PrimitiveTopology, RasterState, ResultShape, SamplerBindingType, Scissor, ShaderStage,
     SourceResultBinding, StageBindingUses, StorageImageFormat, StorageTextureSize, TextureSampleType,
     TextureViewDimension, UniformMember, VertexAttribute, VertexFormat, Viewport,

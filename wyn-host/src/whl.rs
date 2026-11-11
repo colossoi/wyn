@@ -1,11 +1,11 @@
 use std::fmt::Write;
 
 use crate::{
-    Access, Allocation, Binding, BlendMode, BufferLen, CullMode, DepthTest, DrawCall, DrawCount, Entry,
-    Expr, FillMode, FrameResourceKind, FrontFace, HostError, IndexFormat, Operation, Pipeline,
-    PrimitiveTopology, Program, ResourceId, ResultLayout, ResultScalar, SamplerBindingType, Scissor,
-    ShaderFormat, ShaderStage, StorageImageFormat, TextureSampleType, TextureViewDimension, UniformMember,
-    VertexFormat, Viewport,
+    Access, Allocation, Binding, BlendMode, BufferLen, BufferSource, CullMode, DepthTest, DrawCall,
+    DrawCount, Entry, Expr, FillMode, FrameResourceKind, FrontFace, HostError, IndexFormat, Operation,
+    Pipeline, PrimitiveTopology, Program, ResourceId, ResultLayout, ResultScalar, SamplerBindingType,
+    ScalarSource, Scissor, ShaderFormat, ShaderStage, StorageImageFormat, TextureSampleType,
+    TextureViewDimension, UniformMember, VertexFormat, Viewport,
 };
 
 pub(crate) fn symbol(name: &str) -> String {
@@ -453,6 +453,42 @@ impl Program {
         Ok(())
     }
 
+    fn write_loop_bindings<'a>(
+        &self,
+        out: &mut String,
+        pipeline: usize,
+        bindings: impl Iterator<Item = (&'a ScalarSource, &'a BufferSource)>,
+    ) -> Result<(), HostError> {
+        let mut assignments = Vec::new();
+        writeln!(out, "      (let (")?;
+        for (i, (current, next)) in bindings.enumerate() {
+            let value = match next {
+                BufferSource::Binding(binding) => resource(self.scalar_resource(pipeline, binding)?),
+                BufferSource::Select { tag, cases } => {
+                    let mut value =
+                        format!("(let ((memory-tag {})) (cond", self.whl_scalar(pipeline, tag)?);
+                    for (key, source) in cases {
+                        write!(
+                            value,
+                            " ((= memory-tag (i32 {key})) {})",
+                            resource(self.scalar_resource(pipeline, source)?)
+                        )?;
+                    }
+                    value.push_str(" (t (error \"invalid loop memory tag\"))))");
+                    value
+                }
+            };
+            writeln!(out, "        (carried-{i} {value})")?;
+            assignments.push((i, resource(self.scalar_resource(pipeline, current)?)));
+        }
+        writeln!(out, "      )")?;
+        for (i, current) in assignments {
+            writeln!(out, "        (setq {current} carried-{i})")?;
+        }
+        writeln!(out, "      )")?;
+        Ok(())
+    }
+
     fn write_operations(&self, out: &mut String, operations: &[Operation]) -> Result<(), HostError> {
         for op in operations {
             let pipeline = match op {
@@ -468,6 +504,7 @@ impl Program {
                 Operation::Allocate(allocation) => self.write_allocation(out, allocation)?,
                 Operation::Loop { pipeline, region, test, body } => {
                     let repeated = &self.interface.dispatch_loops[*region];
+                    self.write_loop_bindings(out, *pipeline, repeated.carried.iter().map(|carry| (&carry.binding, &carry.initial)))?;
                     match &repeated.control {
                         crate::DispatchLoopControl::Counted { count, index } => {
                             let index = resource(self.scalar_resource(*pipeline, index)?);
@@ -481,12 +518,7 @@ impl Program {
                         }
                     }
                     self.write_operations(out, body)?;
-                    for (current, next) in &repeated.carried {
-                        let current = resource(self.scalar_resource(*pipeline, current)?);
-                        let next = resource(self.scalar_resource(*pipeline, next)?);
-                        if current == next { continue; }
-                        writeln!(out, "      (let ((previous {current})) (setq {current} {next} {next} previous))")?;
-                    }
+                    self.write_loop_bindings(out, *pipeline, repeated.carried.iter().map(|carry| (&carry.binding, &carry.next)))?;
                     writeln!(out, "    )")?;
                 }
                 Operation::Scalar { pipeline, task } => writeln!(out, "    {}", self.whl_scalar_task(*pipeline, &self.interface.scalar_tasks[*task])?)?,

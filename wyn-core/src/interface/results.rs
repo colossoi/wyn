@@ -1,10 +1,12 @@
 //! Publish source result types using the shader's storage layout rules.
 use crate::host::{ResultField, ResultLayout, ResultScalar};
-use crate::ssa::layout::{
-    std430_matrix_stride, std430_struct_layout, storage_elem_stride, storage_value_type, type_byte_size,
-};
+use crate::ssa::layout::{std430_matrix_stride, std430_struct_layout, storage_elem_stride, type_byte_size};
 use crate::types::{strip_existentials, Type, TypeExt, TypeName};
 
+#[cfg(test)]
+use crate::ssa::layout::storage_value_type;
+
+#[cfg(test)]
 pub(crate) fn result_layout(ty: &Type) -> ResultLayout {
     result_layout_with_storage(ty, &storage_value_type(ty))
 }

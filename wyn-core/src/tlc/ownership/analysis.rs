@@ -11,12 +11,9 @@
 //!    backward through control flow, including loop and callback backedges.
 //!    Records per-term `live_out`.
 //!
-//! 3. **Use** — validation and provenance export read the model:
-//!    - use-after-move checking: an owner in `kills[T] ∩ live_out[T]`
-//!      is consumed at `T` while a successor still needs it.
-//!    - ownership export uses only the build layer, retaining permission on
-//!      values independently of TLC liveness. Egglog decides physical reuse
-//!      after fusion; local update promotion uses placed SSA aliases and uses.
+//! 3. **Validation** — an owner in `kills[T] ∩ live_out[T]` is consumed
+//!    at `T` while a successor still needs it. Physical storage reuse is
+//!    decided in the memory IR from parameter diets and memory lifetimes.
 
 use crate::builtins;
 use crate::builtins::catalog;

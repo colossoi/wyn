@@ -1,0 +1,28 @@
+; Passes collect candidates against an immutable program revision, then run
+; memory-rewrite. A replacement traverses all binders and annotations together.
+(sort ProgramRewrites (Set Renaming))
+(function PendingRewrite (String Program) ProgramRewrites :merge (set-union old new))
+(relation RewriteDemand (String Program))
+(ruleset memory-rewrite)
+(rule ((CurrentProgram program) (RewriteDemand pass program)
+       (= edits (PendingRewrite pass program)) (> (set-length edits) 0))
+      ((RenameProgramDemand (set-get edits 0) program)) :ruleset memory-rewrite)
+(rule ((CurrentProgram program) (RewriteDemand pass program)
+       (= edits (PendingRewrite pass program)) (> (set-length edits) 0)
+       (= next (RenameProgram (set-get edits 0) program)) (!= next program))
+      ((delete (CurrentProgram program)) (CurrentProgram next)) :ruleset memory-rewrite)
+
+; Build a replacement map only after the complete set of independent edits is known.
+(ruleset memory-edits)
+(datatype StatementEdit (ReplaceStatement StatementId Stm))
+(sort StatementEdits (Set StatementEdit))
+(relation ReplacementMapDemand (StatementEdits))
+(function ReplacementMap (StatementEdits) StatementReplacements :no-merge)
+(rule ((ReplacementMapDemand replacements) (= replacements (set-empty)))
+      ((set (ReplacementMap replacements) (map-empty))) :ruleset memory-edits)
+(rule ((ReplacementMapDemand replacements) (> (set-length replacements) 0))
+      ((ReplacementMapDemand (set-remove replacements (set-get replacements 0)))) :ruleset memory-edits)
+(rule ((ReplacementMapDemand replacements) (> (set-length replacements) 0)
+       (= item (set-get replacements 0)) (= item (ReplaceStatement id statement))
+       (= rest (ReplacementMap (set-remove replacements item))))
+      ((set (ReplacementMap replacements) (map-insert rest id (vec-of statement)))) :ruleset memory-edits)

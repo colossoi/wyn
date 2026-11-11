@@ -1,198 +1,146 @@
-//! Complete execution and local allocation decisions, frozen before scalar lowering.
+//! Read dispatch interfaces from the scheduled statement tree for final emission.
 use super::{output_error as error, query::Query, OptimizeError};
 use crate::LookupMap;
-use egglog_engine::{sort::SetContainer, EGraph, RawValues, Value};
+use egglog_engine::{EGraph, Value};
 use std::num::NonZeroU32;
-use wyn_graph::topo_sort_by_dependencies;
 
 #[derive(Default)]
 pub(super) struct Execution {
     pub entries: LookupMap<i64, Vec<Value>>,
     dispatches: LookupMap<Value, Dispatch>,
-    locals: LookupMap<Value, Local>,
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct Dispatch {
-    pub extent: Value,
+    pub groups: [Value; 3],
+    pub local_size: (u32, u32, u32),
     pub width: NonZeroU32,
     pub grid: Option<(u32, u32, u32)>,
-}
-
-pub(super) struct Local {
-    pub workgroup: bool,
-    pub buffers: Vec<LocalBuffer>,
-    pub exports: Vec<LocalExport>,
-}
-
-pub(super) enum LocalBuffer {
-    Allocate {
-        resource: Value,
-        capacity: NonZeroU32,
-        layout: Value,
-    },
-    /// A runtime-sized result must be written into its caller's destination.
-    Output(Value),
-}
-
-impl LocalBuffer {
-    fn resource(&self) -> Value {
-        match self {
-            Self::Allocate { resource, .. } | Self::Output(resource) => *resource,
-        }
-    }
-}
-
-pub(super) struct LocalExport {
-    pub source: Value,
-    pub resource: Value,
-    pub array: bool,
 }
 
 impl Execution {
     pub fn select(graph: &EGraph) -> Result<Self, OptimizeError> {
         let query = Query(graph);
-        let integer = |value| graph.value_to_base::<i64>(value);
-        let positive = |value, label| {
-            let n = u32::try_from(integer(value)).map_err(|_| error(format!("{label} must fit u32")))?;
-            let Some(n) = NonZeroU32::new(n) else {
-                return Err(error(format!("{label} must be positive")));
-            };
-            Ok(n)
-        };
-        let mut domains = LookupMap::default();
-        query.for_each("PhaseDomain", |row| {
-            if domains.insert(row[0], (row[1], row[2])).is_some() {
-                return Err(error("ambiguous PhaseDomain"));
-            }
-            Ok(())
-        })?;
         let mut execution = Self::default();
-        query.for_each("Phase", |row| {
-            let Some(&(extent, width)) = domains.get(&row[0]) else {
-                return Err(error("stage domain missing"));
+        query.for_each("CurrentProgram", |program| {
+            let Some(fields) = query.enode("MemoryProgram", program[0])? else {
+                return Err(error("invalid memory program"));
             };
-            let width = positive(width, "stage width")?;
-            let grid = query.required("PhaseGrid", (row[0],))?;
-            let grid = if query.enode("AutomaticGrid", grid)?.is_some() {
-                None
-            } else {
-                let Some(fields) = query.enode("FixedGrid", grid)? else {
-                    return Err(error("invalid dispatch grid"));
+            let functions = query.vector(fields[0])?;
+            for entry in query.vector(fields[2])? {
+                let Some(entry) = query.enode("EntryPoint", entry)? else {
+                    return Err(error("invalid memory entry"));
                 };
-                let [x, y, z] = [0, 1, 2].map(|i| positive(fields[i], "grid dimension"));
-                let (x, y, z) = (x?.get(), y?.get(), z?.get());
-                if [x, y, z].into_iter().any(|axis| axis > 65_535) {
-                    return Err(error("dispatch grid axis must be in 1..=65535"));
-                }
-                Some((x, y, z))
-            };
-            execution.dispatches.insert(row[0], Dispatch { extent, width, grid });
-            Ok(())
-        })?;
-        query.for_function("LocalExecution", |keys, scope| {
-            if query.enode("InvocationScope", keys[1])?.is_none() {
-                return Ok(());
-            }
-            if query.enode("InvocationScope", scope)?.is_none() {
-                return Err(error("invocation-local execution cannot require a workgroup"));
-            }
-            let Some(group) = query.constructor("WorkgroupScope", RawValues(Vec::new()))? else {
-                return Err(error("workgroup execution scope missing"));
-            };
-            let selected = query.required("LocalExecution", (keys[0], group))?;
-            execution.locals.insert(
-                keys[0],
-                Local {
-                    workgroup: selected == group,
-                    buffers: Vec::new(),
-                    exports: Vec::new(),
-                },
-            );
-            Ok(())
-        })?;
-        query.for_each("LocalBuffer", |row| {
-            let Some(local) = execution.locals.get_mut(&row[0]) else {
-                return Err(error("local buffer has no execution plan"));
-            };
-            let resource = query.required("BufferSlot", (row[0], row[1], row[2]))?;
-            if query.lookup("StaticCapacityBound", (row[4],))?.is_none()
-                && query.lookup("BufferSlot", (row[0], "output", row[2]))? == Some(resource)
-            {
-                local.buffers.push(LocalBuffer::Output(resource));
-            } else {
-                let capacity = query.required("PhysicalLocalCapacity", (row[4],))?;
-                let capacity = positive(capacity, "local capacity")?;
-                let layout = query.required("LocalElementLayout", (resource,))?;
-                local.buffers.push(LocalBuffer::Allocate {
-                    resource,
-                    capacity,
-                    layout,
-                });
-            }
-            Ok(())
-        })?;
-        query.for_function("LocalExports", |keys, exports| {
-            let Some(local) = execution.locals.get_mut(&keys[0]) else {
-                return Ok(());
-            };
-            let Some(exports) = graph.value_to_container::<SetContainer>(exports) else {
-                return Err(error("invalid local export set"));
-            };
-            for &source in &exports.data {
-                let access = query.required("ValueRead", (source,))?;
-                let (resource, array) = if let Some(fields) = query.enode("ReadView", access)? {
-                    (fields[0], true)
-                } else {
-                    let Some(fields) = query.enode("ReadElement", access)? else {
-                        return Err(error("invalid local export read"));
+                let mut matched = false;
+                for &function in &functions {
+                    let Some(function) = query.enode("DefineFunction", function)? else {
+                        return Err(error("invalid memory function"));
                     };
-                    (fields[0], false)
-                };
-                if local.buffers.iter().any(|buffer| buffer.resource() == resource)
-                    || query.lookup("Backing", (resource,))?.is_some()
-                {
-                    local.exports.push(LocalExport {
-                        source,
-                        resource,
-                        array,
-                    });
+                    if function[0] == entry[0] {
+                        let owner = graph.value_to_base::<i64>(entry[1]);
+                        let mut stages = Vec::new();
+                        execution.body(query, function[3], &mut stages)?;
+                        execution.entries.insert(owner, stages);
+                        matched = true;
+                    }
+                }
+                if !matched {
+                    return Err(error("entry function is missing"));
                 }
             }
             Ok(())
         })?;
-        let mut dependencies = LookupMap::<_, Vec<_>>::default();
-        query.for_each("DispatchDependency", |row| {
-            dependencies.entry(row[1]).or_default().push(row[0]);
-            Ok(())
-        })?;
-        query.for_each("PhaseOwner", |row| {
-            execution.dispatch(row[0])?;
-            execution.entries.entry(integer(row[1])).or_default().push(row[0]);
-            Ok(())
-        })?;
-        for stages in execution.entries.values_mut() {
-            stages.sort();
-            *stages = topo_sort_by_dependencies(std::mem::take(stages), |key, out| {
-                out.extend(dependencies.get(&key).into_iter().flatten().copied());
-            })
-            .map_err(|_| error("dispatch plan contains a cycle"))?;
-        }
         Ok(execution)
+    }
+
+    fn body(
+        &mut self,
+        query: Query<'_>,
+        body: Value,
+        stages: &mut Vec<Value>,
+    ) -> Result<(), OptimizeError> {
+        let Some(body) = query.enode("Block", body)? else {
+            return Err(error("invalid memory body"));
+        };
+        for statement in query.vector(body[0])? {
+            let Some(fields) = query.enode("Let", statement)? else {
+                return Err(error("invalid memory statement"));
+            };
+            let expression = fields[3];
+            let grid = if let Some(launch) = query.enode("Launch", expression)? {
+                Some(launch[0])
+            } else if let Some(parallel) = query.enode("Parallel", expression)? {
+                query.enode("DeviceKernel", parallel[0])?.map(|kernel| kernel[0])
+            } else {
+                None
+            };
+            if let Some(grid) = grid {
+                let Some(grid) = query.enode("Grid3D", grid)? else {
+                    return Err(error("unresolved dispatch grid"));
+                };
+                let sizes = query.vector(grid[1])?;
+                let [x, y, z] = sizes.as_slice() else {
+                    return Err(error("dispatch needs three local dimensions"));
+                };
+                let [x, y, z] = [*x, *y, *z].map(|n| constant(query, n));
+                let (Some(x), Some(y), Some(z)) = (x?, y?, z?) else {
+                    return Err(error("local dimensions must be constant"));
+                };
+                let local_size = (x, y, z);
+                let width = x.checked_mul(y).and_then(|n| n.checked_mul(z)).and_then(NonZeroU32::new);
+                let Some(width) = width else {
+                    return Err(error("invalid workgroup size"));
+                };
+                let groups = query.vector(grid[0])?;
+                let [x, y, z] = groups.as_slice() else {
+                    return Err(error("dispatch needs three group dimensions"));
+                };
+                let groups = [*x, *y, *z];
+                let [x, y, z] = groups.map(|n| constant(query, n));
+                let grid = match (x?, y?, z?) {
+                    (Some(x), Some(y), Some(z)) => Some((x, y, z)),
+                    _ => None,
+                };
+                self.dispatches.insert(
+                    statement,
+                    Dispatch {
+                        groups,
+                        local_size,
+                        width,
+                        grid,
+                    },
+                );
+                stages.push(statement);
+            } else if let Some(branch) = query.enode("If", expression)? {
+                self.body(query, branch[2], stages)?;
+                self.body(query, branch[3], stages)?;
+            } else if let Some(loop_) = query.enode("Loop", expression)? {
+                self.body(query, loop_[3], stages)?;
+            } else if let Some(accumulator) = query.enode("WithAcc", expression)? {
+                let Some(lambda) = query.enode("FunctionBody", accumulator[1])? else {
+                    return Err(error("invalid accumulator body"));
+                };
+                self.body(query, lambda[2], stages)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn dispatch(&self, stage: Value) -> Result<&Dispatch, OptimizeError> {
         let Some(dispatch) = self.dispatches.get(&stage) else {
-            return Err(error("dispatch is outside the selected execution plan"));
+            return Err(error("statement is outside the emitted dispatch interfaces"));
         };
         Ok(dispatch)
     }
+}
 
-    pub fn local(&self, owner: Value) -> Result<&Local, OptimizeError> {
-        let Some(local) = self.locals.get(&owner) else {
-            return Err(error("local collective is outside the selected execution plan"));
-        };
-        Ok(local)
-    }
+fn constant(query: Query<'_>, index: Value) -> Result<Option<u32>, OptimizeError> {
+    let Some(fields) = query.enode("IndexConstant", index)? else {
+        return Ok(None);
+    };
+    let value = u32::try_from(query.0.value_to_base::<i64>(fields[0]))
+        .map_err(|_| error("negative or oversized grid dimension"))?;
+    Ok(Some(value))
 }
 
 #[cfg(test)]

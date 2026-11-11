@@ -12,6 +12,7 @@ use std::hash::Hash;
 
 use crate::ast::Span;
 use crate::flow::{ControlHeader, Terminator as FlowTerminator};
+use crate::LookupSet;
 
 mod control_flow;
 mod dce;
@@ -309,6 +310,7 @@ impl std::error::Error for BuilderError {}
 pub struct FuncBuilder<I, T> {
     func: Function<I, T>,
     current_block: Option<BlockId>,
+    terminated: LookupSet<BlockId>,
 }
 
 impl<I, T: Clone + Debug> FuncBuilder<I, T> {
@@ -318,6 +320,7 @@ impl<I, T: Clone + Debug> FuncBuilder<I, T> {
         Self {
             func,
             current_block: Some(entry),
+            terminated: LookupSet::default(),
         }
     }
 
@@ -354,7 +357,7 @@ impl<I, T: Clone + Debug> FuncBuilder<I, T> {
 
     pub fn switch_to_block(&mut self, block: BlockId) -> Result<(), BuilderError> {
         if let Some(current) = self.current_block {
-            if matches!(self.func.blocks[current].term, Terminator::Unreachable) {
+            if !self.has_terminator(current) {
                 return Err(BuilderError::UnterminatedBlock(current));
             }
         }
@@ -377,7 +380,7 @@ impl<I, T: Clone + Debug> FuncBuilder<I, T> {
         span: Option<Span>,
     ) -> Result<ValueId, BuilderError> {
         let block = self.current_block.ok_or(BuilderError::NoCurrentBlock)?;
-        if !matches!(self.func.blocks[block].term, Terminator::Unreachable) {
+        if self.has_terminator(block) {
             return Err(BuilderError::BlockAlreadyTerminated(block));
         }
         Ok(self.func.append_inst_with_span(block, data, ty, span))
@@ -393,7 +396,7 @@ impl<I, T: Clone + Debug> FuncBuilder<I, T> {
         span: Option<Span>,
     ) -> Result<InstId, BuilderError> {
         let block = self.current_block.ok_or(BuilderError::NoCurrentBlock)?;
-        if !matches!(self.func.blocks[block].term, Terminator::Unreachable) {
+        if self.has_terminator(block) {
             return Err(BuilderError::BlockAlreadyTerminated(block));
         }
         Ok(self.func.append_void_inst_with_span(block, data, span))
@@ -401,16 +404,22 @@ impl<I, T: Clone + Debug> FuncBuilder<I, T> {
 
     pub fn terminate(&mut self, term: Terminator) -> Result<(), BuilderError> {
         let block = self.current_block.ok_or(BuilderError::NoCurrentBlock)?;
-        if !matches!(self.func.blocks[block].term, Terminator::Unreachable) {
+        if self.has_terminator(block) {
             return Err(BuilderError::BlockAlreadyTerminated(block));
         }
         self.func.blocks[block].term = term;
+        self.terminated.insert(block);
         Ok(())
     }
 
+    fn has_terminator(&self, block: BlockId) -> bool {
+        // Unreachable is also the initial placeholder in a newly created block.
+        self.terminated.contains(&block) || !matches!(self.func.blocks[block].term, Terminator::Unreachable)
+    }
+
     pub fn finish(self) -> Result<Function<I, T>, BuilderError> {
-        for (bid, block) in &self.func.blocks {
-            if matches!(block.term, Terminator::Unreachable) && bid != self.func.entry {
+        for bid in self.func.blocks.keys() {
+            if !self.has_terminator(bid) && bid != self.func.entry {
                 return Err(BuilderError::UnterminatedBlock(bid));
             }
         }
@@ -422,3 +431,7 @@ impl<I, T: Clone + Debug> FuncBuilder<I, T> {
         self.func
     }
 }
+
+#[cfg(test)]
+#[path = "builder_tests.rs"]
+mod builder_tests;

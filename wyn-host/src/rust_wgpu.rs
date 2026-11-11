@@ -10,10 +10,10 @@ use syn::{
 use wyn_base::timing;
 
 use crate::{
-    Allocation, Binding, BlendMode, BufferUsage, CullMode, DepthTest, DrawCall, DrawCount, Entry, Expr,
-    FillMode, FrameResourceKind, FrontFace, HostError, IndexFormat, Operation, Pipeline, PrimitiveTopology,
-    Program, ResourceId, ResultKind, Scissor, ShaderFormat, ShaderStage, StorageImageFormat,
-    TextureViewDimension, VertexFormat, Viewport,
+    Allocation, Binding, BlendMode, BufferSource, BufferUsage, CullMode, DepthTest, DrawCall, DrawCount,
+    Entry, Expr, FillMode, FrameResourceKind, FrontFace, HostError, IndexFormat, Operation, Pipeline,
+    PrimitiveTopology, Program, ResourceId, ResultKind, ScalarSource, Scissor, ShaderFormat, ShaderStage,
+    StorageImageFormat, TextureViewDimension, VertexFormat, Viewport,
 };
 
 pub(crate) fn resource(id: ResourceId) -> Ident {
@@ -484,9 +484,11 @@ impl Program {
             } = operation
             {
                 let repeated = &self.interface.dispatch_loops[*region];
-                for (current, next) in &repeated.carried {
-                    resources.insert(self.scalar_resource(*pipeline, current)?);
-                    resources.insert(self.scalar_resource(*pipeline, next)?);
+                for carry in &repeated.carried {
+                    resources.insert(self.scalar_resource(*pipeline, &carry.binding)?);
+                    for binding in carry.initial.bindings().chain(carry.next.bindings()) {
+                        resources.insert(self.scalar_resource(*pipeline, binding)?);
+                    }
                 }
                 self.loop_resources(body, resources)?;
                 self.loop_resources(test, resources)?;
@@ -512,7 +514,7 @@ impl Program {
                 let bytes = self.rust_expr(bytes, entry)?;
                 let length = format_ident!("resource_{}_bytes", r.0);
                 let label = &self.interface.frame_graph.resources[r.0].name;
-                // Either carried buffer can become the result after a swap.
+                // Any carried buffer can become the result after rebinding.
                 // A cached handle must not let a later call overwrite it.
                 let allocate = if self.result_resource(entry, *r) || carried.contains(r) {
                     quote!(device.create_buffer(&descriptor))
@@ -560,6 +562,39 @@ impl Program {
         Ok(quote!(#(#scratch)* #(#code)*))
     }
 
+    fn rust_loop_bindings<'a>(
+        &self,
+        pipeline: usize,
+        bindings: impl Iterator<Item = (&'a ScalarSource, &'a BufferSource)>,
+    ) -> Result<TokenStream, HostError> {
+        let mut selections = Vec::new();
+        let mut assignments = Vec::new();
+        for (i, (current, next)) in bindings.enumerate() {
+            let current = resource(self.scalar_resource(pipeline, current)?);
+            let selected = format_ident!("carried_{i}");
+            let value = match next {
+                BufferSource::Binding(binding) => {
+                    let source = resource(self.scalar_resource(pipeline, binding)?);
+                    quote!(#source.clone())
+                }
+                BufferSource::Select { tag, cases } => {
+                    let tag = self.rust_scalar(pipeline, tag)?;
+                    let cases = cases
+                        .iter()
+                        .map(|(key, source)| {
+                            let source = resource(self.scalar_resource(pipeline, source)?);
+                            Ok(quote!(#key => #source.clone()))
+                        })
+                        .collect::<Result<Vec<_>, HostError>>()?;
+                    quote!(match #tag { #(#cases,)* _ => return Err(HostError::Invalid("invalid loop memory tag".into())) })
+                }
+            };
+            selections.push(quote!(let #selected = #value;));
+            assignments.push(quote!(#current = #selected;));
+        }
+        Ok(quote!({ #(#selections)* #(#assignments)* }))
+    }
+
     fn rust_operations(
         &self,
         operations: &[Operation],
@@ -575,35 +610,31 @@ impl Program {
                     let repeated = &self.interface.dispatch_loops[*region];
                     let test = self.rust_operations(test, entry, format, context)?;
                     let body = self.rust_operations(body, entry, format, context)?;
-                    let swaps = repeated.carried.iter().map(|(current, next)| {
-                        let current = self.scalar_resource(*pipeline, current)?;
-                        let next = self.scalar_resource(*pipeline, next)?;
-                        if current == next { return Ok(quote!()); }
-                        let current = resource(current);
-                        let next = resource(next);
-                        Ok(quote!(std::mem::swap(&mut #current, &mut #next);))
-                    }).collect::<Result<Vec<_>, HostError>>()?;
+                    let initial = self.rust_loop_bindings(*pipeline, repeated.carried.iter().map(|carry| (&carry.binding, &carry.initial)))?;
+                    let next = self.rust_loop_bindings(*pipeline, repeated.carried.iter().map(|carry| (&carry.binding, &carry.next)))?;
                     match &repeated.control {
                         crate::DispatchLoopControl::Counted { count, index } => {
                             let count = self.rust_scalar(*pipeline, count)?;
                             let index = resource(self.scalar_resource(*pipeline, index)?);
                             quote!({
+                                #initial
                                 let iterations = #count;
                                 for iteration in 0..iterations {
                                     support::write_buffer(device, encoder, &#index, 0, &(iteration as i32).to_le_bytes());
                                     #body
-                                    #(#swaps)*
+                                    #next
                                 }
                             })
                         }
                         crate::DispatchLoopControl::While { condition } => {
                             let condition = self.rust_scalar(*pipeline, condition)?;
                             quote!({
+                                #initial
                                 loop {
                                     #test
                                     if !(#condition) { break; }
                                     #body
-                                    #(#swaps)*
+                                    #next
                                 }
                             })
                         }

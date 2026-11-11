@@ -2,11 +2,9 @@
 
 mod analysis;
 mod apply;
-mod facts;
 mod validate;
 
-pub use apply::{apply_ownership, OwnershipApplied, OwnershipGlobal};
-pub use facts::OwnershipFacts;
+pub use apply::{apply_ownership, OwnershipApplied};
 pub use validate::{check, validate_ownership, OwnershipValidated};
 
 #[cfg(test)]

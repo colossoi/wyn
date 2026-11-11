@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use crate::{
-    Binding, BufferLen, BufferUsage, DepthTest, DispatchLoopControl, DispatchSize, DrawBufferRef, DrawCall,
-    DrawCount, FrameResource, FrameResourceKind, ModuleInterface, Pipeline, ResultShape, ScalarExpr,
-    ScalarSource, StorageTextureSize,
+    Binding, BufferLen, BufferSource, BufferUsage, DepthTest, DispatchLoopControl, DispatchSize,
+    DrawBufferRef, DrawCall, DrawCount, FrameResource, FrameResourceKind, ModuleInterface, Pipeline,
+    ResultShape, ScalarExpr, ScalarSource, StorageTextureSize,
 };
 
 #[derive(Debug, Error)]
@@ -808,9 +808,9 @@ impl Program {
             return Ok(());
         }
         let Some((allocation, refs, reads)) = pending.remove(&id) else {
-            return Err(HostError::Invalid(
-                "cyclic or escaping allocation dependency".into(),
-            ));
+            return Err(HostError::Invalid(format!(
+                "cyclic or escaping allocation dependency for resource {id:?}"
+            )));
         };
         for dependency in refs {
             Self::allocate_resource(dependency, operations, pending, available, initialized)?;
@@ -849,6 +849,15 @@ impl Program {
                 let mut local = available.clone();
                 let mut written = initialized.clone();
                 let repeated = &self.interface.dispatch_loops[*region];
+                for carry in &repeated.carried {
+                    let initial = self.buffer_dependencies(*pipeline, &carry.initial)?;
+                    if !initial.reads.is_subset(initialized) {
+                        return Err(HostError::Invalid(
+                            "loop carry has no initialized incoming storage".into(),
+                        ));
+                    }
+                    written.insert(self.scalar_resource(*pipeline, &carry.binding)?);
+                }
                 if let DispatchLoopControl::Counted { index, .. } = &repeated.control {
                     written.insert(self.scalar_resource(*pipeline, index)?);
                 }
@@ -859,12 +868,11 @@ impl Program {
                     ));
                 }
                 self.allocate_operations(body, pending, &mut local, &mut written)?;
-                for (current, next) in &repeated.carried {
-                    let current = self.scalar_resource(*pipeline, current)?;
-                    let next = self.scalar_resource(*pipeline, next)?;
-                    if !initialized.contains(&current) || !written.contains(&next) {
+                for carry in &repeated.carried {
+                    let selected = self.buffer_dependencies(*pipeline, &carry.next)?;
+                    if !selected.reads.is_subset(&written) {
                         return Err(HostError::Invalid(
-                            "loop carry has no initialized incoming storage".into(),
+                            "loop carry selects uninitialized storage".into(),
                         ));
                     }
                 }
@@ -877,13 +885,40 @@ impl Program {
         Ok(())
     }
 
+    fn buffer_dependencies(
+        &self,
+        pipeline: usize,
+        source: &BufferSource,
+    ) -> Result<Dependencies, HostError> {
+        let mut dependencies = Dependencies::default();
+        // Rebinding a buffer handle does not read its payload (which may be empty or uninitialized).
+        for binding in source.bindings() {
+            dependencies.resources.insert(self.scalar_resource(pipeline, binding)?);
+        }
+        if let BufferSource::Select { tag, cases } = source {
+            let keys: BTreeSet<_> = cases.iter().map(|(key, _)| key).collect();
+            if cases.is_empty() || keys.len() != cases.len() {
+                return Err(HostError::Invalid(
+                    "loop buffer selection requires distinct cases".into(),
+                ));
+            }
+            dependencies.scalar(tag, |source| self.scalar_resource(pipeline, source))?;
+        }
+        Ok(dependencies)
+    }
+
     fn operation_dependencies(&self, operation: &Operation) -> Result<Dependencies, HostError> {
         let mut dependencies = Dependencies::default();
         match operation {
             Operation::Allocate(_) => {
                 return Err(HostError::Invalid("entry was already scheduled".into()));
             }
-            Operation::Loop { pipeline, region, .. } => {
+            Operation::Loop {
+                pipeline,
+                region,
+                test,
+                body,
+            } => {
                 let repeated = &self.interface.dispatch_loops[*region];
                 dependencies.scalar(repeated.control.expression(), |source| {
                     self.scalar_resource(*pipeline, source)
@@ -891,11 +926,23 @@ impl Program {
                 if let DispatchLoopControl::Counted { index, .. } = &repeated.control {
                     dependencies.resources.insert(self.scalar_resource(*pipeline, index)?);
                 }
-                for (current, _) in &repeated.carried {
-                    let current = self.scalar_resource(*pipeline, current)?;
+                for carry in &repeated.carried {
+                    let current = self.scalar_resource(*pipeline, &carry.binding)?;
                     dependencies.resources.insert(current);
                     dependencies.writes.insert(current);
+                    dependencies.extend(self.buffer_dependencies(*pipeline, &carry.initial)?);
                 }
+                let mut produced = BTreeSet::new();
+                for operation in test.iter().chain(body) {
+                    produced.extend(self.operation_dependencies(operation)?.writes);
+                }
+                let mut selections = Dependencies::default();
+                for carry in &repeated.carried {
+                    selections.extend(self.buffer_dependencies(*pipeline, &carry.next)?);
+                }
+                selections.resources.retain(|resource| !produced.contains(resource));
+                selections.reads.retain(|resource| !produced.contains(resource));
+                dependencies.extend(selections);
             }
             Operation::Scalar { pipeline, task } => {
                 let task = &self.interface.scalar_tasks[*task];

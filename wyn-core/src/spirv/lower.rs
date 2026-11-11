@@ -140,9 +140,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         // result used in an array literal that spans multiple merge blocks).
         let entry_block = self.body.entry_block();
         for (block_id, block) in &self.body.inner.blocks {
-            if block.insts.is_empty() && matches!(block.term, Terminator::Unreachable) {
-                continue;
-            }
             if block_id == entry_block {
                 self.block_map.insert(block_id, self.current_block);
             } else {
@@ -208,9 +205,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 return;
             }
             let block = &body.inner.blocks[bid];
-            if block.insts.is_empty() && matches!(block.term, Terminator::Unreachable) {
-                return;
-            }
             visited.insert(bid);
             order.push(bid);
 

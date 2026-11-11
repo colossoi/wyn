@@ -205,7 +205,7 @@ fn bufferize(name: &str, body: &mut FuncBody) -> Result<()> {
 
 fn remove_unused_loads(body: &mut FuncBody) {
     let uses = ValueUses::analyze(&body.inner);
-    let unused: LookupSet<_> = body
+    let mut unused: LookupSet<_> = body
         .inner
         .insts
         .iter()
@@ -225,6 +225,17 @@ fn remove_unused_loads(body: &mut FuncBody) {
             None
         })
         .collect();
+    let used_places: LookupSet<_> = body
+        .inner
+        .insts
+        .iter()
+        .filter(|(id, _)| !unused.contains(id))
+        .flat_map(|(_, node)| node.data.place_uses())
+        .collect();
+    unused.extend(body.inner.insts.iter().filter_map(|(id, node)| match node.data {
+        InstKind::Alloca { result } if !used_places.contains(&result) => Some(id),
+        _ => None,
+    }));
     for &id in &unused {
         if let Some(n) = body.inner.insts.remove(id) {
             if let Some(v) = n.result {

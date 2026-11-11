@@ -1,98 +1,43 @@
-use egglog_engine::EGraph;
-
-fn graph() -> EGraph {
-    let mut graph = super::new_graph().unwrap();
-    let (_, paths) = include_str!("fusion.egg")
-        .split_once("; Demand-limited paths settle before testing absence and clear before union.")
-        .unwrap();
-    graph.parse_and_run_program(None, paths).unwrap();
-    graph
-}
-
-fn settle(graph: &mut EGraph, round: i64) {
-    graph.parse_and_run_program(None, &format!(
-        "(PlanningRound {round}) (RelevantPair a c) (RelevantPair c a) (RelevantPair a d) (run-schedule (saturate fusion-paths))"
-    )).unwrap();
-}
-fn check(graph: &mut EGraph, round: i64, facts: &str) {
-    graph.parse_and_run_program(None, &facts.replace("ROUND", &round.to_string())).unwrap();
-}
+use crate::compile_thru_tlc;
+use crate::egglog::{from_tlc, fuse, query::Query};
 
 #[test]
-fn native_paths_distinguish_direct_edges_barriers_and_contractions() {
-    let mut graph = graph();
-    graph
-        .parse_and_run_program(
-            None,
-            r#"
-        (let a (Group (OperationId 0))) (let b (Group (OperationId 1)))
-        (let c (Group (OperationId 2))) (let d (Group (OperationId 3)))
-        (GroupEdge a c) (GroupBefore a b) (GroupBefore b c)
-    "#,
-        )
+fn contractions_preserve_intervening_reads() {
+    let source = compile_thru_tlc(
+        "entry main(xs:[8]i32,j:i32) ([8]i32,i32) = let ys=map(|x|x+1,xs) in (map(|x|x*2,ys),ys[j])",
+    )
+    .unwrap();
+    let program = fuse(from_tlc(&source).unwrap()).unwrap();
+    let query = Query(&program.graph);
+    let root = query.row("CurrentProgram", |_| true).unwrap().unwrap()[0];
+    let root = query.constructor("ProgramRoot", (root,)).unwrap().unwrap();
+    let mut loads = 0;
+    query
+        .for_each("ContainsExp", |row| {
+            if row[0] == root && query.enode("Load", row[1])?.is_some() {
+                loads += 1;
+            }
+            Ok(())
+        })
         .unwrap();
-    settle(&mut graph, 0);
-    check(
-        &mut graph,
-        0,
-        r#"
-        (check (= (OrderIntermediate ROUND a c) true))
-        (check (= (GroupPath ROUND a c) true))
-        (check (= (GroupPath ROUND c a) false))
-        (check (= (GroupPath ROUND a d) false))
-    "#,
-    );
-    graph.parse_and_run_program(None, "(delete (PlanningRound 0)) (union a b)").unwrap();
-    settle(&mut graph, 1);
-    check(&mut graph, 1, "(check (= (OrderIntermediate ROUND a c) false))");
-    graph
-        .parse_and_run_program(
-            None,
-            "(delete (PlanningRound 1)) (GroupBefore c d) (GroupBefore d c)",
-        )
-        .unwrap();
-    settle(&mut graph, 2);
-    check(
-        &mut graph,
-        2,
-        r#"
-        (check (= (OrderIntermediate ROUND a c) true))
-        (check (= (OrderIntermediate ROUND c a) false))
-    "#,
+    assert!(
+        loads > 0,
+        "the exported intermediate read cannot disappear with its producer"
     );
 }
 
 #[test]
-fn native_paths_follow_contractions_and_stay_with_their_graph() {
-    let mut graph = graph();
-    graph
-        .parse_and_run_program(
-            None,
-            r#"
-        (let a (Group (OperationId 0))) (let b (Group (OperationId 1)))
-        (let c (Group (OperationId 2))) (let d (Group (OperationId 3)))
-        (GroupEdge a b) (GroupBefore a b) (GroupBefore b c)
-    "#,
-        )
-        .unwrap();
-    settle(&mut graph, 0);
-    let original = "(check (= (GroupPath ROUND a c) false)) (check (= (OrderIntermediate ROUND a c) true))";
-    check(&mut graph, 0, original);
-    let mut other = graph.clone();
-    other.parse_and_run_program(None, "(delete (PlanningRound 0)) (GroupEdge b c) (union a b)").unwrap();
-    settle(&mut other, 1);
-    check(
-        &mut other,
-        1,
-        "(check (= (GroupPath ROUND a c) true)) (check (= (OrderIntermediate ROUND a c) false))",
+fn rewrites_stay_with_their_program_revision() {
+    let source = compile_thru_tlc("entry main(xs:[8]i32) [8]i32=map(|x|x*2,map(|x|x+1,xs))").unwrap();
+    let program = from_tlc(&source).unwrap();
+    let mut original = program.graph.clone();
+    crate::egglog::memory::validate(&mut original).unwrap();
+    let root = Query(&original).row("CurrentProgram", |_| true).unwrap().unwrap()[0];
+    let fused = fuse(program).unwrap();
+    assert_eq!(
+        Query(&original).row("CurrentProgram", |_| true).unwrap().unwrap()[0],
+        root
     );
-    check(&mut graph, 0, original);
-    other
-        .parse_and_run_program(
-            None,
-            "(delete (PlanningRound 1)) (GroupBefore c d) (GroupBefore d c)",
-        )
-        .unwrap();
-    settle(&mut other, 2);
-    check(&mut other, 2, "(check (= (OrderIntermediate ROUND a c) true))");
+    let after = Query(&fused.graph).row("CurrentProgram", |_| true).unwrap().unwrap()[0];
+    assert_ne!(after, root);
 }

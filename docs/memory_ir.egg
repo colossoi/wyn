@@ -1,0 +1,177 @@
+; Representation sketch, not a compiler pass. Standalone egglog 3.
+; Reference spike before the requested reset:
+;   1be52b7cd1c5e34fa5e02804eec4d76d90f448eb
+; Reread Futhark checkout 964c8d1b79985831ee74e35ad882485fb0105d0f:
+;   src/Futhark/IR/Mem.hs                  MemInfo, MemBind, MemReturn, MemOp
+;   src/Futhark/IR/Mem/LMAD.hs             offset and (stride, shape) dimensions
+;   src/Futhark/IR/Syntax.hs               Let, Body, Loop, WithAcc, BasicOp
+;   src/Futhark/IR/SeqMem.hs, GPUMem.hs     memory annotations on the same AST
+;   src/Futhark/Pass/ExplicitAllocations.hs allocation and explicit copies
+;
+; This is the memory-explicit stage: arrays have primitive elements and rank
+; comes from their shape. Ragged data uses ordinary arrays of offsets/elements;
+; it is not a recursive array descriptor or a separate Segmented memory type.
+; Memory blocks, array VALUES, and array LAYOUTS are distinct concepts.
+;
+; Names are globally fresh SSA binders, not equivalence classes of contents.
+; Never union distinct names or reorder/union effectful statement occurrences.
+; Two identical Alloc expressions at different let bindings allocate twice.
+; An Update returns a new array name in the same block and consumes its input.
+; Sharing a block and LMAD does NOT make two array values interchangeable.
+;
+; Declarations alone do not enforce scope, consumption, bounds, or typing.
+; Futhark also checks these separately. No checker or rewrite system is included.
+
+(datatype Name (VName i64 String)) ; unique tag, human-readable base name
+(sort Names (Vec Name))
+(datatype PrimType
+  (I8) (I16) (I32) (I64) (U8) (U16) (U32) (U64)
+  (F16) (F32) (F64) (Bool) (UnitType))
+(datatype SubExp
+  (Var Name)
+  (IntValue PrimType i64)
+  (FloatValue PrimType f64)
+  (BoolValue bool)
+  (UnitValue))
+(sort SubExps (Vec SubExp))
+
+; Layout arithmetic is signed i64, as in Futhark's TPrimExp Int64 VName.
+; Only a small arithmetic vocabulary is needed to illustrate the representation.
+(datatype IndexExp
+  (IConst i64) (IVar Name)
+  (IAdd IndexExp IndexExp) (ISub IndexExp IndexExp)
+  (IMul IndexExp IndexExp) (IDiv IndexExp IndexExp))
+(sort Shape (Vec IndexExp))
+(datatype Space
+  (DefaultSpace)
+  (NamedSpace String) ; e.g. "device" or "local"; backend-defined
+  (ScalarSpace Shape PrimType)) ; statically sized private storage
+
+; Element offset = offset + sum(index[d] * stride[d]); multiply by element
+; byte size only at physical addressing. Negative and zero strides are allowed.
+; Current Futhark LMAD is ONE offset plus dimensions, not a chain of mappings.
+; Not every reshape is representable by an LMAD; materialisation may be needed.
+(datatype LMADDim (Dim IndexExp IndexExp)) ; stride, number of elements
+(sort LMADDims (Vec LMADDim))
+(datatype LMAD (Layout IndexExp LMADDims))
+(datatype MemBind (ArrayIn Name LMAD))
+
+(datatype ValueType (Prim PrimType) (Array PrimType Shape))
+(sort ValueTypes (Vec ValueType))
+(datatype MemInfo
+  (MemPrim PrimType)
+  (MemMem Space)
+  (MemArray PrimType Shape MemBind)
+  (MemAcc Name Shape ValueTypes)) ; token, update index space, payload types
+; MemAcc has no backing location. WithAcc supplies its backing arrays.
+; MemArray.shape must equal the LMAD dimension sizes (a checking obligation,
+; retained explicitly to match Futhark's logical type / memory annotation split).
+
+; A bound annotation cannot contain an existential result reference.
+; Return annotations can: ResultIndex i refers to result position i of the
+; enclosing result list. It is a size/layout witness, NOT a globally named value.
+(datatype ExtIndexExp
+  (FreeIndex IndexExp) (ResultIndex i64)
+  (ExtAdd ExtIndexExp ExtIndexExp) (ExtSub ExtIndexExp ExtIndexExp)
+  (ExtMul ExtIndexExp ExtIndexExp) (ExtDiv ExtIndexExp ExtIndexExp))
+(sort ExtShape (Vec ExtIndexExp))
+(datatype ExtLMADDim (ExtDim ExtIndexExp ExtIndexExp))
+(sort ExtLMADDims (Vec ExtLMADDim))
+(datatype ExtLMAD (ExtLayout ExtIndexExp ExtLMADDims))
+(datatype MemReturn
+  (ReturnsInBlock Name ExtLMAD)
+  (ReturnsNewBlock Space i64 ExtLMAD))
+; ReturnsNewBlock's integer identifies a memory-valued result position.
+; "New" means existential to the caller, not necessarily freshly allocated.
+(datatype ReturnInfo
+  (ReturnsPrim PrimType)
+  (ReturnsMem Space)
+  (ReturnsArray PrimType ExtShape MemReturn)
+  (ReturnsAcc Name Shape ValueTypes))
+(sort ReturnInfos (Vec ReturnInfo))
+
+(datatype Binding (Bind Name MemInfo))
+(sort Pattern (Vec Binding))
+(datatype Diet (Observe) (Consume))
+(datatype Param (Parameter Name Diet MemInfo))
+(sort Params (Vec Param))
+(datatype Argument (Arg SubExp Diet))
+(sort Arguments (Vec Argument))
+(datatype Merge (Carry Param SubExp))
+(sort Merges (Vec Merge))
+(datatype LoopForm
+  (ForLoop Name PrimType SubExp)
+  (WhileLoop Name)) ; boolean merge parameter, updated by the body
+(datatype Safety (Safe) (Unsafe))
+; Safe Update/UpdateAcc ignores an out-of-bounds write; Unsafe requires proof.
+(datatype DimIndex
+  (DimFix SubExp)
+  (DimSlice SubExp SubExp SubExp)) ; start, length, stride
+(sort Slice (Vec DimIndex))
+(sort Permutation (Vec i64))
+
+(datatype SegDim (Axis Name SubExp))
+(sort SegDims (Vec SegDim))
+(datatype SegSpace (IterationSpace Name SegDims)) ; flat index, named logical axes
+(datatype SegVirt (Virtualize) (NoVirtualize) (FullParticipation Permutation))
+(datatype Grid (UnspecifiedGrid) (KernelGrid SubExp SubExp)) ; blocks, block size
+(datatype SegLevel
+  (SegThread SegVirt Grid) (SegBlock SegVirt Grid) (SegThreadInBlock SegVirt))
+(datatype ResultManifest (ResultNoSimplify) (ResultMaySimplify) (ResultPrivate))
+
+; Pure egglog terms encode ordered bodies and their binding occurrences.
+; Nested bodies use lexical names, like Futhark; there is no capture-table IR.
+; Certificates are names bound by assertions/proofs, not a "checked" boolean.
+(datatype*
+  (Body (Block Stms Results))
+  (sort Stms (Vec Stm))
+  (Stm (Let Pattern Names Exp)) ; bound results, certificates, expression
+  (Result (Yield Names SubExp))
+  (sort Results (Vec Result))
+  (Exp
+    (Basic BasicOp)
+    (Apply String Arguments ReturnInfos Safety)
+    (If SubExp Body Body ReturnInfos) ; boolean subset of Futhark Match
+    (Loop Merges LoopForm Body)
+    (WithAcc AccInputs Lambda)
+    (Memory MemOp))
+  (BasicOp
+    (Use SubExp)
+    (Unary String SubExp) (Binary String SubExp SubExp)
+    (Compare String SubExp SubExp) (Convert PrimType SubExp)
+    (Assert SubExp String)
+    (ArrayLit SubExps ValueType)
+    (Iota SubExp SubExp SubExp PrimType)
+    (Replicate Shape SubExp) ; empty shape copies; output binding chooses storage
+    (Scratch PrimType Shape)
+    (Index Name Slice) ; scalar read or array slice; slices keep input block
+    (Update Safety Name Slice SubExp) ; consumes array, returns updated array
+    (Reshape Name Shape) (Rearrange Name Permutation)
+    (Manifest Name Permutation) ; explicit copy with requested dimension order
+    (UpdateAcc Safety Name SubExps SubExps)) ; consumes/returns accumulator
+  (MemOp
+    (Alloc SubExp Space) ; byte count; yields MemMem
+    (EnsureDirect Name) ; yields memory block AND direct array; may copy
+    (Inner SegOp))
+  (Lambda (LambdaBody Pattern ValueTypes Body))
+  (AccInput (AccumulatorInput Shape Names AccCombine)) ; index space, arrays, combiner
+  (sort AccInputs (Vec AccInput))
+  (AccCombine
+    (NoCombine)
+    (Combine Lambda SubExps)) ; reduction lambda and neutral elements
+
+  ; Minimal GPUMem extension: the SAME annotated statements inside a SegMap.
+  ; Other SegOps (red/scan/hist), tiling, and launch policy are intentionally
+  ; outside this memory-representation sketch, as is the full scalar op catalog.
+  (SegOp (SegMap SegLevel SegSpace ValueTypes KernelBody))
+  (KernelBody (KernelBlock Stms KernelResults))
+  (KernelResult (KernelYield ResultManifest Names SubExp))
+  (sort KernelResults (Vec KernelResult)))
+
+(datatype Function (FunctionDef String Params ReturnInfos Body))
+(sort Functions (Vec Function))
+(datatype Program (MemoryProgram Functions))
+; Function alias-result sets, attributes, and source locations are omitted.
+; Binding order, name scope, return-slot kinds, array/layout shape agreement,
+; consumption/alias safety, and the compatibility of branch/loop returns remain
+; obligations for a future checker. This file defines data, not those analyses.

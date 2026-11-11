@@ -1,0 +1,249 @@
+; Unified memory/parallel representation.
+;
+; One ordered statement language owns computation, memory, and nested scopes.
+; Fusion replaces statements and their bodies; scheduling changes their order
+; and execution level. Memory bindings travel with the values they describe.
+; There is no source-operation membership set, transfer subprogram, LocalLayout,
+; capture table, or independently selected allocation/placement representation.
+;
+; This is a first-order IR with logical and memory-explicit phases. Closure environments are explicit
+; function parameters. Products are multiple results; rectangular nested arrays
+; have multiple dimensions; ragged arrays are offset arrays plus payload arrays.
+; Scalars and fixed vectors are values, not one-element allocation descriptors.
+; Import normalizes components; allocation elaborates their bindings after fusion.
+;
+; Names and statement occurrences are globally fresh. Structural sharing does
+; not authorize unioning names or effectful occurrences. Allocating twice needs
+; two Let occurrences, even when their allocation expressions are identical.
+; All arithmetic in annotations is a lexical use, just like an instruction operand.
+
+(datatype StatementId
+  (StatementTag i64) (ScheduleStatement StatementId i64 i64) (CollectiveStatement StatementId i64 i64) (AllocationTag StatementId i64)
+  (FusionStatement StatementId) (CallStatement StatementId StatementId) (CallParameter StatementId i64) (CallResult StatementId i64))
+(datatype LayoutField (CapacityField) (OffsetField) (StrideField i64))
+(datatype ValueName (ValueId i64) (ScheduleValue StatementId i64 i64) (CollectiveValue StatementId i64 i64) (LayoutWitness ValueName LayoutField) (CallValue StatementId ValueName))
+(datatype BlockName (MemoryId i64) (ArrayMemory ValueName) (CallMemory StatementId BlockName))
+(datatype AccName (AccumulatorId i64) (CallAccumulator StatementId AccName))
+(sort AccNames (Vec AccName))
+(datatype FunctionName (FunctionId i64 String))
+(sort ValueNames (Vec ValueName))
+(sort Certificates (Vec ValueName))
+
+(datatype PrimType
+  (I8) (I16) (I32) (I64) (U8) (U16) (U32) (U64)
+  (F16) (F32) (F64) (Bool) (UnitType))
+; Product elements occur at packed ABI boundaries. Ordinary computation still
+; represents products as multiple results; conversion is an ordinary map.
+(datatype*
+  (ElementType (ScalarElement PrimType) (VectorElement PrimType i64) (MatrixElement PrimType i64 i64) (ProductElement ElementTypes))
+  (sort ElementTypes (Vec ElementType)))
+(datatype Atom (Var ValueName) (LiteralBits PrimType i64))
+(sort Atoms (Vec Atom))
+; Non-arithmetic atoms such as arrays occur only as Var, never as layout indices.
+(datatype IndexExp
+  (IndexConstant i64) (IndexValue ValueName)
+  (IndexAdd IndexExp IndexExp) (IndexSub IndexExp IndexExp)
+  (IndexMul IndexExp IndexExp) (IndexDiv IndexExp IndexExp)
+  (IndexMod IndexExp IndexExp) (IndexMin IndexExp IndexExp) (IndexMax IndexExp IndexExp))
+(sort Shape (Vec IndexExp))
+(datatype Space (HostSpace) (DeviceSpace) (WorkgroupSpace) (PrivateSpace))
+
+; Offsets/strides are signed element counts. Allocation size is separately bytes.
+; Logical shape IS the vector of dimension lengths; there is no second shape
+; attached to an array binding that can disagree with these lengths.
+(datatype LMADDim (Dim IndexExp IndexExp)) ; stride, logical length
+(sort LMADDims (Vec LMADDim))
+(datatype LMAD (Layout IndexExp LMADDims))
+(datatype MemBind (ArrayIn BlockName LMAD))
+(datatype ResourceType (TextureType) (SamplerType) (ImageType i64 i64)) ; image descriptor set and slot
+(datatype ValueInfo
+  (ScalarInfo ElementType)
+  (ArrayValue ElementType Shape) ; logical array, before allocation elaboration
+  (ArrayInfo ElementType MemBind)
+  (ResourceInfo ResourceType))
+(datatype AccInfo (AccumulatorInfo Shape ElementTypes))
+(datatype Binding
+  (BindValue ValueName ValueInfo)
+  (BindBlock BlockName IndexExp) ; handle and capacity in bytes
+  ; Address space belongs to Alloc. A handle returned by a branch/loop selects
+  ; an existing allocation; it does not allocate or assert a second space.
+  (BindAccumulator AccName AccInfo))
+(sort Pattern (Vec Binding))
+(datatype Diet (Observe) (Consume))
+(datatype Param (Parameter Binding Diet))
+(sort Params (Vec Param))
+; Index operands reuse annotation arithmetic for descriptor witnesses.
+(datatype Operand (ValueOperand Atom) (IndexOperand IndexExp) (BlockOperand BlockName) (AccOperand AccName))
+(sort Operands (Vec Operand))
+(datatype Argument (Pass Operand Diet))
+(sort Arguments (Vec Argument))
+
+; Result witnesses bind across branches, loops, calls, and compacted outputs.
+; Slot references are local to the whole result list, not names in either arm.
+; They cannot occur in a bound value's MemBind or LMAD.
+(datatype ExtIndex
+  (FreeIndex IndexExp) (ResultIndex i64)
+  (ExtAdd ExtIndex ExtIndex) (ExtSub ExtIndex ExtIndex)
+  (ExtMul ExtIndex ExtIndex) (ExtDiv ExtIndex ExtIndex)
+  (ExtMod ExtIndex ExtIndex) (ExtMin ExtIndex ExtIndex) (ExtMax ExtIndex ExtIndex))
+(datatype ExtDim (ExtendedDimension ExtIndex ExtIndex))
+(sort ExtDims (Vec ExtDim))
+(sort ExtShape (Vec ExtIndex))
+(datatype ExtLayout (ExtendedLayout ExtIndex ExtDims))
+(datatype ReturnBlock (ExistingBlock BlockName) (ResultBlock i64))
+(datatype ReturnInfo
+  (ReturnScalar ElementType)
+  (ReturnArrayValue ElementType ExtShape)
+  (ReturnArray ElementType ReturnBlock ExtLayout)
+  (ReturnMemory ExtIndex)
+  (ReturnAccumulator AccInfo)
+  (ReturnResource ResourceType))
+(sort ReturnInfos (Vec ReturnInfo))
+; ExistingBlock aliases an enclosing block. ResultBlock refers to a block-valued
+; result: existential to the caller, not necessarily a freshly allocated block.
+; Arrays and scalars use value slots; memory and accumulator slots are distinct.
+
+(datatype Merge (Carry Param Operand))
+(sort Merges (Vec Merge))
+(datatype LoopForm
+  (Counted ValueName IndexExp IndexExp IndexExp) ; index, start, count, step
+  (While ValueName)) ; boolean carried parameter, recomputed by the body
+(datatype DimIndex
+  (At IndexExp)
+  (Slice IndexExp IndexExp IndexExp)) ; start, length, stride
+(sort Indices (Vec IndexExp))
+(sort Slices (Vec DimIndex))
+(sort Permutation (Vec i64))
+(datatype BoundsMode (ProvenInBounds) (IgnoreOutOfBounds))
+
+; The logical domain is independent of its schedule. Ragged axes name ordinary
+; offset arrays: reading offsets is a dependency, not hidden shape metadata.
+; Dense extents are invariant across the domain. Each axis binds its index
+; for following ragged offsets and the parallel body.
+(datatype DomainAxis
+  (DenseAxis ValueName IndexExp)
+  (RaggedAxis ValueName ValueName IndexExp)) ; index, offsets, flattened parent index
+(sort DomainAxes (Vec DomainAxis))
+(datatype Domain (IterationSpace ValueName DomainAxes)) ; flat ordinal, axes
+(datatype Grid (AutomaticGrid) (Grid3D Shape Shape)) ; group counts, group sizes
+; Sequential execution is an ordinary Loop. A dispatched Fold uses the
+; workgroup reducer; nested parallel work belongs to one invocation.
+(datatype Execution (Unscheduled) (DeviceKernel Grid) (InvocationLocal))
+; Device-wide ordering is a dispatch dependency, never an in-kernel barrier.
+(datatype Fence (WorkgroupFence))
+(datatype FoldKind
+  (Total) (InclusiveScan) (ExclusiveScan)
+  (InclusiveScanAndTotal) (ExclusiveScanAndTotal))
+(datatype ConcatMode (Elements) (OffsetSequences))
+(datatype Commutativity (Commutative) (Ordered))
+(datatype CallBehavior (TotalCall) (MayTrapCall))
+
+; Ordinary bodies and parallel bodies differ only in their result convention.
+; Both contain exactly the same Stm/Exp language, including Alloc, Copy, If,
+; Loop, Parallel, and WithAcc. Nested computation is never an opaque source ID.
+(datatype*
+  (Body (Block Stms Results))
+  (sort Stms (Vec Stm))
+  (Stm (Let StatementId Pattern Certificates Exp))
+  (Result (Yield Certificates Operand))
+  (sort Results (Vec Result))
+  (Lambda (FunctionBody Params ReturnInfos Body))
+  (Exp
+    (Use Operand)
+    ; Opcode is from the existing scalar/vector intrinsic catalogue: no memory,
+    ; control, callbacks, or arbitrary hidden effects are allowed in PrimOp.
+    (PrimOp String Atoms)
+    (IndexOp IndexExp) ; materializes annotation arithmetic as a shader index
+    (Assert Atom String)
+    (Call FunctionName Arguments ReturnInfos)
+    (If Atom ReturnInfos Body Body)
+    (Loop Merges LoopForm ReturnInfos Body)
+    (Parallel Execution Domain ParallelBody)
+    ; Physical kernel: all invocations execute the body. Array results use
+    ; explicit stores; scalar results select the first invocation.
+    (Launch Grid Body)
+    (WithAcc AccInputs Lambda)
+    (Alloc Space IndexExp) ; bytes; Let binds a block, never an array value
+    (View ValueName Slices) ; aliases its source; result LMAD records the view
+    (Reshape ValueName Shape) ; view only; nonrepresentable layouts need Copy
+    (Permute ValueName Permutation)
+    (Load ValueName Indices)
+    (GenerateArray ArrayGenerator)
+    (Copy ValueName) ; result annotation chooses destination block and layout
+    (Update BoundsMode ValueName Slices Atom) ; consumes destination, returns its next value
+    ; A physical write preserves the destination handle. Kernel lowering uses
+    ; disjoint slices of fresh or uniquely owned output storage.
+    (Store BoundsMode ValueName Slices Atom)
+    (Accumulate BoundsMode AccName Indices Atoms) ; consumes/returns accumulator token
+    (Reserve AccName Indices Atom) ; fetch-add: next token and previous counter
+    (Barrier Fence))
+  (ArrayGenerator
+    (ArrayLiteral Atoms)
+    (Uninitialized ElementType Shape))
+  ; Array-producing expressions write their Let-bound ArrayInfo destinations.
+  ; Use/View/Reshape/Permute alias instead. The checker distinguishes these;
+  ; no separate storage-choice table can override the binding's block or LMAD.
+
+  (ParallelBody (ParallelBlock Stms ParallelResults))
+  (sort ParallelResults (Vec ParallelResult))
+  (ParallelResult
+    (Collect Results)
+    ; Returns segment offsets, payload length, and concatenated payload.
+    ; OffsetSequences joins zero-based offset vectors, sharing endpoints.
+    (Concatenate ConcatMode ValueName)
+    (Contribute AccNames)
+    (Fold FoldKind Reducer Results))
+  (Reducer (Reduction Commutativity Atoms Lambda)) ; neutral tuple, binary combiner
+  ; Collect writes each lane's values at its domain coordinates. Fold combines
+  ; along the innermost axis and can return totals, prefixes, or both.
+  ; Multiple result clauses support fused map/reduce/scan outputs. Statement
+  ; patterns name all outputs and carry their blocks/layouts, including count
+  ; witnesses. Reducer lambdas/neutrals are scoped outside the lane body.
+  ; Filtering is a predicate scan followed by indexed writes; bucket scatter
+  ; uses Reserve followed by Accumulate. Neither needs a second body language.
+
+  (AccInput (AccumulatorInput ValueNames AccPolicy)) ; existing initialized destinations
+  (sort AccInputs (Vec AccInput))
+  (AccPolicy
+    (DisjointWrites) (IdenticalWrites)
+    (CombineWrites Lambda) (FetchAddWrites)))
+; WithAcc consumes its destination arrays, binds accumulator parameters in its
+; lambda, and returns updated arrays plus ordinary lambda results. Tokens can
+; pass through nested branches/loops/parallel bodies, but cannot escape WithAcc.
+; Parallel tokens describe permitted contributions, not a serial order between
+; lanes. CombineWrites requires an associative combiner; DisjointWrites requires
+; nonoverlap. Reserve is permitted only for FetchAddWrites and returns a scalar
+; reservation index usable by later ordinary instructions in the same body.
+;
+; Parallel assignment uses explicit Copy snapshots followed by Update statements.
+; Loop carries rename simultaneously and do not imply copying backing storage.
+
+(datatype Function (DefineFunction FunctionName Params ReturnInfos Body))
+(sort Functions (Vec Function))
+(datatype ResourceAccess (ReadResource i64) (WriteResource i64))
+(sort ResourceAccesses (Vec ResourceAccess))
+(datatype External
+  (DeclareExternal FunctionName Params ReturnInfos CallBehavior ResourceAccesses))
+(sort Externals (Vec External))
+; External array mutation is expressed by Consume parameters and returned array
+; versions; resource effects identify parameter positions. Opaque resources
+; have no array LMAD. ABI decorations remain interface metadata, not memory IR.
+(datatype Entry (EntryPoint FunctionName i64)) ; existing public interface identity
+(sort Entries (Vec Entry))
+(datatype Program (MemoryProgram Functions Externals Entries))
+
+; Validation obligations (memory/regions.egg implements lexical scope checks):
+; - Every name has one binder; uses dominate, including annotation/certificate
+;   uses. Cloning/substitution must traverse statements AND all annotations.
+; - Return witnesses match slot kinds; branch/loop/call signatures instantiate
+;   to the enclosing pattern. Loop carries rename simultaneously.
+; - Array element type, LMAD bounds, block capacity, alignment, and address space
+;   agree. Padding belongs to block capacity, never to logical dimension lengths.
+; - Consume invalidates every observable alias. Reads, writes, reservations,
+;   traps, and barriers constrain statement scheduling; effects are derived.
+; - Execution nesting, uniform barriers, reduction signatures, token policies,
+;   and parallel destination nonoverlap are checked before accepting a program.
+; Datatypes separate block/value/token identities and bound/existential layouts;
+; they do not claim to prove these semantic obligations. Structural traversal
+; and renaming are derived from these declarations by memory.rs; these rules
+; operate inside egglog, without a program round trip through Rust.

@@ -1,7 +1,7 @@
 use super::{
-    Access, BackingRef, Binding, BufferUsage, ComputePipeline, ComputeStage, DispatchLoop,
+    Access, BackingRef, Binding, BufferSource, BufferUsage, ComputePipeline, ComputeStage, DispatchLoop,
     DispatchLoopControl, DispatchSize, FragmentOutput, FrameGraph, FramePass, FramePassKind,
-    FrameResourceExtent, FrameResourceKind, GraphicsInvocation, GraphicsPipeline, GraphicsStage,
+    FrameResourceExtent, FrameResourceKind, GraphicsInvocation, GraphicsPipeline, GraphicsStage, LoopCarry,
     ModuleInterface, Pipeline, ShaderStage, StageBindingUses, StorageImageFormat, StorageTextureSize,
     TextureSampleType, TextureViewDimension,
 };
@@ -36,10 +36,11 @@ fn selected_loops_stay_contiguous_and_wait_for_outer_dependencies() {
             count: ScalarExpr::I32(8),
             index: ScalarSource::Binding { set: 0, binding: 0 },
         },
-        carried: vec![(
-            ScalarSource::Binding { set: 0, binding: 1 },
-            ScalarSource::Binding { set: 0, binding: 2 },
-        )],
+        carried: vec![LoopCarry {
+            binding: ScalarSource::Binding { set: 0, binding: 1 },
+            initial: BufferSource::Binding(ScalarSource::Binding { set: 0, binding: 1 }),
+            next: BufferSource::Binding(ScalarSource::Binding { set: 0, binding: 2 }),
+        }],
     };
     assert_eq!(graph.topological_order().unwrap(), [0, 3, 4, 1, 2, 5]);
     assert_eq!(

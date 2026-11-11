@@ -1,72 +1,72 @@
+use crate::compile_thru_tlc;
+use crate::egglog::{from_tlc, fuse, query::Query};
+
 #[test]
 fn scan_barriers_survive_intermediate_map_contraction() {
-    let source = crate::compile_thru_tlc(
-        "entry main(xs:[64]i32) i32 = reduce((+),0i32,map(|x|x+1,scan((+),0i32,xs)))",
-    )
-    .unwrap();
-    let program = crate::egglog::from_tlc(&source).unwrap();
-    let mut program = crate::egglog::fuse(program).unwrap();
-    program
-        .graph
-        .parse_and_run_program(
-            None,
-            r#"
-        (check (SourceScanDependency scan reduction)
-               (= (SourceOperation scan) (OperationInfo region "scan"))
-               (= (SourceOperation reduction) (OperationInfo region "reduce")))
-        (fail (check (Current group plan) (PlanMember plan scan) (PlanMember plan reduction)
-               (= (SourceOperation scan) (OperationInfo region "scan"))
-               (= (SourceOperation reduction) (OperationInfo region "reduce"))))
-    "#,
-        )
+    let source =
+        compile_thru_tlc("entry main(xs:[64]i32) i32 = reduce((+),0i32,map(|x|x+1,scan((+),0i32,xs)))")
+            .unwrap();
+    let program = fuse(from_tlc(&source).unwrap()).unwrap();
+    let query = Query(&program.graph);
+    let program = query.row("CurrentProgram", |_| true).unwrap().unwrap()[0];
+    let root = query.constructor("ProgramRoot", (program,)).unwrap().unwrap();
+    let mut scans = 0;
+    let mut totals = 0;
+    query
+        .for_each("ContainsExp", |row| {
+            if row[0] != root {
+                return Ok(());
+            }
+            if let Some(parallel) = query.enode("Parallel", row[1])? {
+                let body = query.fields("ParallelBlock", parallel[2])?;
+                let mut scan = false;
+                let mut total = false;
+                for clause in query.vector(body[1])? {
+                    if let Some(fold) = query.enode("Fold", clause)? {
+                        total |= query.enode("Total", fold[0])?.is_some();
+                        scan |= query.enode("InclusiveScan", fold[0])?.is_some();
+                    }
+                }
+                assert!(
+                    !(scan && total),
+                    "a dependent total must wait for completed scan prefixes"
+                );
+                scans += usize::from(scan);
+                totals += usize::from(total);
+            }
+            Ok(())
+        })
         .unwrap();
+    assert_eq!((scans, totals), (1, 1));
 }
 
 #[test]
-fn source_use_sets_survive_group_initialization_and_merging() {
-    let source = crate::compile_thru_tlc("entry main(x:i32) i32 = x").unwrap();
-    let (mut graph, _) = crate::egglog::source::import(&source).unwrap();
-    crate::egglog::analysis::run(&mut graph).unwrap();
-    let mut facts = String::new();
-    for id in 1000..1258 {
-        facts.push_str(&format!(
-            "(set (SourceOperation (OperationId {id})) (OperationInfo (RegionId 1000) \"control\"))\n\
-             (set (SourceInput (OperationId {id}) 0) (SourceGlobal 1000))\n"
-        ));
+fn free_names_preserve_large_shared_fanout() {
+    let mut graph = super::new_graph().unwrap();
+    let mut statements = String::new();
+    for i in 0..256 {
+        statements.push_str(&format!("(Let (StatementTag {i}) (vec-of (BindValue (ValueId {}) (ScalarInfo (ScalarElement (I32))))) (vec-of) (Load (ValueId 0) (vec-of (IndexConstant {i}))))\n", i+1));
     }
-    facts.push_str("(set (SourceExtent (SourceGlobal 1000)) (Fixed 64))\n");
-    for consumer in 1002..1258 {
-        let producer = 1000 + consumer % 2;
-        facts.push_str(&format!(
-            "(SourceDepends (OperationId {consumer}) (OperationId {producer}) (Input))\n\
-             (SourceDepends (OperationId {consumer}) (OperationId {producer}) (LengthUse))\n"
-        ));
-    }
-    graph.parse_and_run_program(None, &facts).unwrap();
     graph
         .parse_and_run_program(
             None,
-            r#"
-            (run-schedule (saturate source-fusion))
-            (check (= (set-length (GroupUsesOf (Group (OperationId 1000)))) 256))
-            (check (= (set-length (GroupLengths (Group (OperationId 1000)))) 128))
-            (check (= (set-length (GroupUsesOf (Group (OperationId 1002)))) 0))
-            (union (Group (OperationId 1000)) (Group (OperationId 1001)))
-            (check (= (set-length (GroupUsesOf (Group (OperationId 1000)))) 512))
-            (check (= (set-length (GroupLengths (Group (OperationId 1000)))) 256))
-            (check (set-contains (GroupUsesOf (Group (OperationId 1000)))
-                                 (UseAt (OperationId 1003) (Input))))
-            "#,
+            &format!(
+                r#"
+        (let body (Block (vec-of {statements}) (vec-of)))
+        (run-schedule (saturate memory-names))
+        (check (set-contains (NamesBody body) (ValueNameRef (ValueId 0))))
+        (check (= (set-length (BindersBody body)) 256))
+    "#
+            ),
         )
         .unwrap();
 }
 
 #[test]
 fn independent_entries_canonicalize_stream_terms_before_selecting_inputs() {
-    let source = crate::compile_thru_tlc(include_str!(
+    let source = compile_thru_tlc(include_str!(
         "../../../../tests/compiler/library/independent_fusion_streams.wyn"
     ))
     .unwrap();
-    let program = crate::egglog::from_tlc(&source).unwrap();
-    crate::egglog::fuse(program).unwrap();
+    fuse(from_tlc(&source).unwrap()).unwrap();
 }

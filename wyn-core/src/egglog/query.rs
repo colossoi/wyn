@@ -1,11 +1,42 @@
 //! Borrowed access to native tables. No facts are retained outside the egraph.
 use super::OptimizeError;
+use egglog_engine::sort::VecContainer;
 use egglog_engine::{EGraph, IntoValues, Read, Value};
 
 #[derive(Clone, Copy)]
 pub(super) struct Query<'a>(pub &'a EGraph);
 
 impl Query<'_> {
+    pub fn fields(&self, name: &str, value: Value) -> Result<Vec<Value>, OptimizeError> {
+        let Some(fields) = self.enode(name, value)? else {
+            return Err(super::output_error(format!("expected {name}")));
+        };
+        Ok(fields)
+    }
+
+    pub fn application<'a>(
+        &self,
+        value: Value,
+        names: &'a [&str],
+    ) -> Result<(&'a str, Vec<Value>), OptimizeError> {
+        for &name in names {
+            if let Some(fields) = self.enode(name, value)? {
+                return Ok((name, fields));
+            }
+        }
+        Err(super::output_error(format!(
+            "unexpected memory IR node {value:?}"
+        )))
+    }
+
+    pub fn vector(&self, value: Value) -> Result<Vec<Value>, OptimizeError> {
+        let Some(values) = self.0.value_to_container::<VecContainer>(value) else {
+            return Err(OptimizeError::Output("expected a memory IR vector".into()));
+        };
+        Ok(values.data.clone())
+    }
+
+    #[cfg(test)]
     pub fn for_function(
         &self,
         name: &str,
@@ -68,6 +99,7 @@ impl Query<'_> {
         Ok(fields)
     }
 
+    #[cfg(test)]
     pub fn record(
         &self,
         table: &str,
@@ -89,11 +121,12 @@ impl Query<'_> {
     ) -> Result<Option<Vec<Value>>, OptimizeError> {
         let mut fields = None;
         let mut ambiguous = false;
-        self.0.constructor_enodes(name, |row| {
-            if matches(row.children) {
+        self.for_each(name, |row| {
+            if matches(row) {
                 ambiguous |= fields.is_some();
-                fields = Some(row.children.to_vec());
+                fields = Some(row.to_vec());
             }
+            Ok(())
         })?;
         if ambiguous {
             return Err(OptimizeError::Output(format!("ambiguous {name}")));
@@ -101,7 +134,34 @@ impl Query<'_> {
         Ok(fields)
     }
 
+    #[cfg(test)]
     pub fn flag(&self, name: &str, keys: impl IntoValues) -> Result<bool, OptimizeError> {
         Ok(self.0.value_to_base::<bool>(self.required(name, keys)?))
+    }
+}
+
+#[cfg(test)]
+impl Query<'_> {
+    pub fn operation_kind(&self, definition: Value) -> Result<String, OptimizeError> {
+        if let Some(fields) = self.enode("ScalarOperator", definition)? {
+            return Ok(self.0.value_to_base::<egglog_engine::sort::S>(fields[0]).to_string());
+        }
+        if let Some(fields) = self.enode("FoldOperator", definition)? {
+            return Ok(
+                if self.enode("FoldTotal", fields[0])?.is_some() { "reduce" } else { "scan" }.into(),
+            );
+        }
+        for (constructor, kind) in [
+            ("MapOperator", "map"),
+            ("PackOperator", "filter"),
+            ("WriteOperator", "scatter"),
+            ("IndexedOperator", "reduce-by-index"),
+            ("ReserveOperator", "bucket-scatter"),
+        ] {
+            if self.enode(constructor, definition)?.is_some() {
+                return Ok(kind.into());
+            }
+        }
+        Err(super::output_error("unknown operation"))
     }
 }

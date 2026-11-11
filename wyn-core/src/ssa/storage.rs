@@ -13,7 +13,7 @@ use egglog_engine::{EGraph, FullState, RawValues, Read, Value, Write};
 use slotmap::Key;
 
 /// How an instruction obtains storage for an array-containing result.
-pub(super) enum ResultStorage {
+pub(crate) enum ResultStorage {
     /// A value copy with independent local contents (descriptors are excluded).
     Fresh,
     /// The backend may retain the selected operand's storage.
@@ -36,13 +36,13 @@ pub(super) enum StorageUse {
 }
 
 impl ResultStorage {
-    pub(super) fn aliases_operand(&self, index: usize) -> bool {
+    pub(crate) fn aliases_operand(&self, index: usize) -> bool {
         matches!(self, Self::AliasAll) || matches!(self, Self::Alias(i) if *i == index)
     }
 }
 
 impl InstKind {
-    pub(super) fn result_storage(&self) -> ResultStorage {
+    pub(crate) fn result_storage(&self) -> ResultStorage {
         match self {
             Self::Load { .. } => ResultStorage::Fresh,
             Self::Op { tag, .. } => match tag {
@@ -145,7 +145,7 @@ pub(super) fn local_array(ty: &Type) -> bool {
         && matches!(ty.array_size(), Some(Type::Constructed(TypeName::Size(_), _)))
 }
 
-fn contains_view(ty: &Type) -> bool {
+pub(crate) fn contains_view(ty: &Type) -> bool {
     ty.array_variant().is_some_and(is_array_variant_view)
         || ty.elem_type().is_some_and(contains_view)
         || matches!(ty, Type::Constructed(TypeName::Tuple(_), xs) if xs.iter().any(contains_view))

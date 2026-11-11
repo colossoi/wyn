@@ -1,91 +1,47 @@
-//! Native scalar admission and optimization over the shared source graph.
-//! Selected-expression evaluation stays in this graph through emission.
-use super::query::Query;
-use super::{parse_program, timing, OptimizeError, ScalarOptimization};
-use egglog_engine::{EGraph, RawValues, Write};
+//! Scalar rewriting uses the same statements, scopes, and effects as memory.
+use super::{memory, OptimizeError, ScalarOptimization};
+use egglog_engine::EGraph;
 
-pub(super) mod evaluation;
-pub(super) mod extract;
 mod fold;
 
-#[cfg(test)]
-#[path = "scalar/analysis_tests.rs"]
-mod analysis_tests;
-
-mod selected;
-pub(super) use selected::Selected;
-
-const RULES: &str = concat!(
-    include_str!("scalar/schema.egg"),
-    "\n",
-    include_str!("scalar/extents.egg"),
-    "\n",
-    include_str!("scalar/analysis.egg"),
-    "\n",
-    include_str!("scalar/inline.egg"),
-    "\n",
-    include_str!("scalar/micro.egg"),
-);
-
-pub(super) fn admit(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
     fold::register(graph);
-    graph.parse_and_run_program(Some("scalar rules".into()), RULES)?;
     graph.parse_and_run_program(
-        Some("scalar admission".into()),
-        include_str!("scalar/admission.egg"),
+        Some("scalar rewrites".into()),
+        include_str!("scalar/simplify.egg"),
     )?;
-    graph.parse_and_run_program(Some("host preferences".into()), include_str!("scalar/host.egg"))?;
-    graph.parse_and_run_program(None, "(run-schedule (saturate scalar-admission) (saturate scalar-demands) (saturate host-targets) (saturate scalar-import) (run readout))")?;
+    let mut types = String::new();
+    for (primitive, name, integer) in [
+        ("I8", "i8", true),
+        ("I16", "i16", true),
+        ("I32", "i32", true),
+        ("I64", "i64", true),
+        ("U8", "u8", true),
+        ("U16", "u16", true),
+        ("U32", "u32", true),
+        ("U64", "u64", true),
+        ("F16", "f16", false),
+        ("F32", "f32", false),
+        ("F64", "f64", false),
+        ("Bool", "bool", false),
+    ] {
+        types.push_str(&format!("(set (ScalarTypeName ({primitive})) \"{name}\")\n"));
+        if integer {
+            types.push_str(&format!("(IntegerScalar ({primitive}))\n"));
+        }
+    }
+    graph.parse_and_run_program(Some("scalar types".into()), &types)?;
     Ok(())
 }
 
-pub(super) fn run(graph: &mut EGraph, policy: ScalarOptimization) -> Result<Selected, OptimizeError> {
-    let _timing = timing::span("egglog scalar optimization");
-    let schedule = parse_program(
-        "scalar fixed point",
-        match policy {
-            ScalarOptimization::Basic => include_str!("scalar/basic.egg"),
-            ScalarOptimization::Full => include_str!("scalar/schedule.egg"),
-        },
-    )?;
-    let facts = Query(graph);
-    facts.for_each("FlowRegion", |fields| {
-        facts.required("ExprContextForScope", (fields[0],))?;
-        Ok(())
-    })?;
-    timing::time("egglog scalar / admission", || {
-        graph.parse_and_run_program(
-            Some("native scalar import".into()),
-            include_str!("scalar/import.egg"),
-        )?;
-        if policy == ScalarOptimization::Full {
-            graph.update(|mut sink| sink.add("ExprImportInlining", RawValues(vec![])))?;
-        }
-        graph.parse_and_run_program(None, "(run-schedule (saturate scalar-source-flags) (saturate scalar-source-forms) scalar-source-select (saturate (seq (saturate scalar-request) (saturate scalar-build))))")?;
-        for table in ["ExprImportComplete", "ExprTemplateComplete"] {
-            Query(graph).for_function(table, |_, complete| {
-                if graph.value_to_base::<bool>(complete) {
-                    Ok(())
-                } else {
-                    Err(OptimizeError::Output(
-                        "incomplete or cyclic scalar admission".into(),
-                    ))
-                }
-            })?;
-        }
-        Ok::<_, OptimizeError>(())
-    })?;
-    graph.parse_and_run_program(None, "(run-schedule (saturate scalar-extent-sources) (saturate scalar-extents) (saturate (seq scalar-substitute scalar-arguments)))")?;
-    timing::time("egglog scalar / fixed point", || graph.run_program(schedule))?;
-    timing::time("egglog scalar / effect summaries", || {
-        graph.parse_and_run_program(None, "(run-schedule (saturate scalar-effects))")
-    })?;
-    graph.parse_and_run_program(
-        Some("scalar host preferences".into()),
-        "(run-schedule (saturate scalar-host))",
-    )?;
-    graph.clear_function("ExprContextActive")?;
-    let selected = extract::select_roots(graph, policy)?;
-    evaluation::prepare(graph)?;
-    Ok(selected)
+pub(super) fn run(graph: &mut EGraph, policy: ScalarOptimization) -> Result<(), OptimizeError> {
+    if policy == ScalarOptimization::Full {
+        graph.parse_and_run_program(None, "(InlineScalarFunctions)")?;
+        memory::inline(graph)?;
+    }
+    memory::simplify(graph, true)
 }
+
+#[cfg(test)]
+#[path = "scalar_tests.rs"]
+mod tests;
