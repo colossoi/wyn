@@ -159,7 +159,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
                         _ => bail_spirv!("Bounded array must have Size(N) capacity"),
                     };
-                    let size_const = self.constructor.const_u32(n);
+                    let size_const = self.constructor.const_u32(n.max(1));
                     let buf_ty =
                         *self.constructor.builder.type_array(builder::TypeId::new(result_ty), size_const);
                     self.constructor.builder.register_array_element(

@@ -1,0 +1,10 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"row_major\"", ":source-name \"transpose\"", ":source-name \"tiled_commuted\""]
+
+entry row_major() [16]i32=let rows=map(|i|[10*i,10*i+1],iota(8)) in map(|a|let r=a/2 in if r<8 then rows[r][a%2] else -1,iota(16))
+entry transpose() [16]i32=let rows=map(|i|[10*i,10*i+1],iota(8)) in map(|a|let r=a%8 in if r<8 then rows[r][a/8] else -1,iota(16))
+entry tiled_commuted() [16]i32=let rows=map(|i|[10*i,10*i+1],iota(8)) in map(|a|let r=4*(a/8)+a%4 in if r<8 then rows[r][(a/4)%2] else -1,iota(16))

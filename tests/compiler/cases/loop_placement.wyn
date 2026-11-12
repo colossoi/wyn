@@ -6,19 +6,19 @@
 --! contains = [":source-name \"sibling_loop_0_reproduce\"", ":source-name \"sibling_loop_1_reproduce\"", ":source-name \"sibling_loop_2_reproduce\"", ":source-name \"sibling_loop_3_reproduce\""]
 --! [[shader]]
 --! entry = "sibling_loop_0_reproduce"
---! loop_depths = [0, 0, 0]
+--! loop_depths = [0, 1, 1]
 --! [[shader]]
 --! entry = "sibling_loop_1_reproduce"
---! loop_depths = [0, 0, 0]
+--! loop_depths = [0, 1, 1]
 --! [[shader]]
 --! entry = "sibling_loop_2_reproduce"
---! loop_depths = [0, 0, 0]
+--! loop_depths = [0, 1, 1]
 --! [[shader]]
 --! entry = "sibling_loop_3_reproduce"
---! loop_depths = [0, 0, 0]
+--! loop_depths = [0, 1, 1]
 
 
-
+-- The outer loop traverses the dispatch grid; source loop nesting remains inside it.
 -- earlier_loop_result_is_not_recomputed_inside_its_consumer
 def sibling_loop_0_walk(sibling_loop_0_xs:[]i32, seed:i32) i32 =
             let (total,j) = loop (total,j) = (0i32,0i32)

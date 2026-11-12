@@ -766,6 +766,8 @@ pub struct DrawBufferRef {
     pub binding: u32,
     pub name: String,
     pub resource: Option<String>,
+    /// Producer pipeline scope and logical count, independent of allocation capacity.
+    pub elements: Option<(usize, Expr)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

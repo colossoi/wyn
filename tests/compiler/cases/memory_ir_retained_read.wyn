@@ -1,0 +1,13 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"retained_read\""]
+--! [[host]]
+--! entry = "retained_read"
+--! result_layouts = ["(:array :length 8 :stride 4 :range :caller :element :i32)", ":i32"]
+--! result_min_bytes = [32, 4]
+
+entry retained_read(xs:[8]i32,j:i32) ([8]i32,i32) =
+  let ys=map(|x|x+1,xs) in (map(|x|x*2,ys),ys[j])

@@ -1,0 +1,15 @@
+name: Unit tests and time limits
+on: [push, pull_request]
+jobs:
+  unit-tests:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: rustup toolchain install 1.96.0 --profile minimal
+      - run: rustup override set 1.96.0
+      - run: python scripts/test_units_test.py
+      - run: python scripts/test_units.py

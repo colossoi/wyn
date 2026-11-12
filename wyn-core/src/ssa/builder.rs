@@ -166,6 +166,10 @@ impl FuncBuilder {
         })
     }
 
+    pub(crate) fn place_elem_ty(&self, place: PlaceId) -> &Type<TypeName> {
+        &self.places[place].elem_ty
+    }
+
     /// Bind an addressable physical function parameter to a place. The
     /// generic SSA parameter value remains as its signature identity; uses
     /// inside the body go through the returned `PlaceId`.

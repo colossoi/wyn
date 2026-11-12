@@ -1,0 +1,18 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"sliced_input\""]
+
+entry sliced_input(xs:[]i32) []i32 = xs[1..length(xs)]
+entry sliced_twice(xs:[]i32) []i32 = xs[1..length(xs)][1..length(xs)-1]
+entry sliced_literal(n:i32) []i32 = [3i32,5i32,7i32,9i32][0..n]
+entry sliced_bounded(n:i32) []i32 = [3i32,5i32,7i32,9i32][0..n][1..n]
+entry sliced_range(n:i32) []i32 = iota(n)[1..n]
+entry sliced_dispatch(xs:[]i32) []i32 = map(|x| x+1, map(|x| x*2,xs)[1..length(xs)])
+entry sliced_local(xs:[]i32) []i32 = map(|x| let row=[x,x+1,x+2] in row[1..3][0],xs)
+
+entry sliced_shader_length(xs:[]i32) []i32 = [2i32,4i32,6i32,8i32][0..xs[0]]
+entry sliced_product_rows(xs:[]i32) [][](i32,bool) = [[(1i32,true),(2i32,false)],[(3i32,false),(4i32,true)]][0..length(xs)]
+entry sliced_empty() []i32 = [1i32,2i32][2..2]

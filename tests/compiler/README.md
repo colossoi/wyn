@@ -26,6 +26,9 @@ Run all fixtures:
 cargo test -p wyn --test compiler_fixtures
 ```
 
+The repository Cargo configuration sets `RUST_MIN_STACK=16777216` for tests.
+Keep this 16 MiB stack (or larger) when running test executables directly.
+
 Select filenames containing a substring and show per-case output:
 
 ```sh
@@ -33,7 +36,7 @@ WYN_TEST_FILTER=type_hole cargo test -p wyn --test compiler_fixtures -- --nocapt
 ```
 
 An empty selection fails. The runner reports failing filenames and continues through
-other cases. It runs one worker per available CPU (logical core), capped at 24, with a shared
+other cases. It runs one worker per available CPU (logical core), capped at 4, with a shared
 queue so workers take the next fixture as they finish. If the CPU count is unavailable,
 it uses one worker. Fixtures can also be
 passed directly to `wyn check` or `wyn build`; the expectation block is just comments.
@@ -191,6 +194,8 @@ public declaration properties. `result_layouts` contains quoted WHL layout forms
 Execution checks include `result_bytes`, `result_at_least_bytes`, `result_words`
 (32-bit bit patterns), `dispatches`, and `no_device_reads`. `captured_results` is a
 boolean per returned tuple element indicating whether a draw reads that resource.
+`result_aliases` checks the returned backing resources (ignoring tuple order),
+using input names such as `input-xs`; views retain their source's identity.
 `texture_draw_chain` checks two draws writing the returned scene, a later dispatch
 reading that scene and writing the returned sample buffer, and a final draw reading
 that buffer. Buffer views retain their underlying resource identity in these checks.
@@ -226,7 +231,7 @@ keep separate fixtures when helper sharing across entries is the property tested
 laid-out function-local storage. `shader_entries` checks the SPIR-V entry count.
 
 `[[shader]]` also accepts `targets`, `entry_count`, `binary` and `math` operation
-counts, `selects_present`, `ifs_present`, and `local_array_traffic`. For WGSL,
+counts, `self_binary` counts for binary operations whose operands are the same value, `selects_present`, `ifs_present`, and `local_array_traffic`. For WGSL,
 `parameter_loads = { "0" = 1 }` checks loads through kernel parameter zero,
 resolving its actual binding through emitted WHL, and
 `workgroup_array_scalar = "u32"` requires reachable workgroup arrays with that

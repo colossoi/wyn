@@ -324,9 +324,13 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 }
 
                 op::OpTag::Tuple | op::OpTag::ArrayLit | op::OpTag::Vector => {
-                    let elem_ids: Vec<_> =
-                        operands.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
-                    self.constructor.composite_or_constant(result_ty, elem_ids)?
+                    if matches!(tag, op::OpTag::ArrayLit) && operands.is_empty() {
+                        *self.constructor.builder.const_null(builder::TypeId::new(result_ty))
+                    } else {
+                        let elem_ids: Vec<_> =
+                            operands.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
+                        self.constructor.composite_or_constant(result_ty, elem_ids)?
+                    }
                 }
 
                 op::OpTag::ArrayRange { has_step } => {
@@ -470,6 +474,11 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             }
                         }
                         op::PureViewSource::Inherited => {
+                            if let (Some(result), Some(parent)) = (inst.result, operands[count].as_ssa()) {
+                                if let Some(&id) = self.workgroup_view.get(&parent) {
+                                    self.workgroup_view.insert(result, id);
+                                }
+                            }
                             let parent = self.get_value_ref(operands[count])?;
                             let offset = self.constructor.builder.composite_extract(
                                 self.constructor.u32_type,

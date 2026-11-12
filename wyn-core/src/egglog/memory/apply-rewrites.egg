@@ -1,0 +1,10 @@
+; Each optimizer applies only its own completed candidate set.
+(ruleset REWRITE_RULESET)
+(rule ((CurrentProgram program) (RewriteDemand REWRITE_PASS program)
+       (= edits (PendingRewrite REWRITE_PASS program)) (> (set-length edits) 0))
+      ((RenameProgramDemand (set-get edits 0) program)) :ruleset REWRITE_RULESET)
+(rule ((CurrentProgram program) (RewriteDemand REWRITE_PASS program)
+       (= edits (PendingRewrite REWRITE_PASS program)) (> (set-length edits) 0)
+       (= next (RenameProgram (set-get edits 0) program)) (!= next program))
+      ((delete (RewriteDemand REWRITE_PASS program))
+       (delete (CurrentProgram program)) (CurrentProgram next)) :ruleset REWRITE_RULESET)

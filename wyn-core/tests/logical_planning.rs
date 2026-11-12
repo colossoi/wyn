@@ -1,0 +1,51 @@
+//! Public-boundary checks for planning without early memory representation.
+#[path = "support/pipeline.rs"]
+mod pipeline;
+use wyn_core::{egglog, PipelineTopologyPolicy};
+
+fn plan(source: &str) {
+    let source = pipeline::source(source);
+    let imported = egglog::from_tlc(&source).expect("logical import");
+    let fused = egglog::fuse(imported).expect("logical fusion");
+    let placed = egglog::place(fused, PipelineTopologyPolicy::AllowGenerated).expect("logical placement");
+    // schedule validates that no physical array bindings or loads/stores were
+    // introduced, and every surviving parallel body has an execution strategy.
+    egglog::schedule(placed).expect("complete logical strategy selection");
+}
+
+#[test]
+fn nested_maps_keep_logical_values_through_planning() {
+    plan("entry main(xs:[]i32,n:i32) [][]i32=map(|x|map(|y|x+y,iota(n)),xs)");
+}
+
+#[test]
+fn compaction_accepts_whole_rows_without_offsets() {
+    plan("entry main(xs:[][4]i32) [][4]i32=filter(|row|row[0]>0,xs)");
+}
+
+#[test]
+fn variable_row_collection_does_not_require_early_flattening() {
+    plan("entry main(xs:[]i32) [][]i32=map(|x|iota(x),xs)");
+}
+
+#[test]
+fn nested_collections_preserve_product_elements() {
+    plan("entry main(xs:[]i32) [][](i32,bool)=map(|x|map(|i|(x+i,i%2==0),iota(x)),xs)");
+}
+
+#[test]
+fn scalar_reduction_keeps_its_callback_until_emission() {
+    plan("entry main(xs:[]i32) i32=reduce((+),0i32,xs)");
+}
+
+#[test]
+fn nested_bucket_scatter_keeps_its_callback_and_coordinate_maps() {
+    plan("entry main(n:i32) ([][][]i32,[]u32,u32)=bucket_scatter_1d([[iota(0),iota(1)],[iota(2),iota(0)]],[(0,iota(n)),(1,iota(n+1))])");
+}
+
+#[test]
+fn growing_scan_preserves_reducer_scope() {
+    plan(include_str!(
+        "../../tests/compiler/cases/memory_ir_scan_growing.wyn"
+    ));
+}

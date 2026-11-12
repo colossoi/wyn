@@ -1,0 +1,10 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"local_scatter_keeps_updates_inside_each_invocation_0_result\""]
+
+entry local_scatter_keeps_updates_inside_each_invocation_0_result(xs:[]i32) []i32=map(|x:i32|let a=scatter([1,2,3],[0,1],[x,x+1]) in a[0]+a[1],xs)
+
+-- local_filter_preserves_its_live_length

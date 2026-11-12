@@ -605,6 +605,11 @@ impl Program {
         let mut code = vec![];
         for (ordinal, operation) in operations.iter().enumerate() {
             code.push(match operation {
+                Operation::Bind { name, value } => {
+                    let name = format_ident!("{}", name.replace('-', "_"));
+                    let value = crate::scalar_emit::rust_scalar(value, &|source| Ok((source.resource()?, false)))?;
+                    quote!(let #name = #value;)
+                }
                 Operation::Allocate(allocation) => self.rust_allocation(allocation, entry, context)?,
                 Operation::Loop { pipeline, region, test, body } => {
                     let repeated = &self.interface.dispatch_loops[*region];
@@ -640,8 +645,10 @@ impl Program {
                         }
                     }
                 }
-                Operation::Scalar { pipeline, task } => {
-                    self.rust_scalar_task(*pipeline, &self.interface.scalar_tasks[*task])?
+                Operation::Scalar { pipeline, task, value } => {
+                    let mut task = self.interface.scalar_tasks[*task].clone();
+                    task.value = value.clone();
+                    self.rust_scalar_task(*pipeline, &task)?
                 }
                 Operation::Dispatch { pipeline, stage, groups } => {
                     let (create, run) = self.rust_dispatch(*pipeline, *stage, groups, entry, format)?;
@@ -1059,11 +1066,8 @@ impl Program {
     }
 
     fn rust_draw_call(&self, p: usize, draw: &DrawCall, entry: &Entry) -> Result<TokenStream, HostError> {
-        let count = |c: &DrawCount, r: ResourceId| -> Result<TokenStream, HostError> {
-            let expr = match c {
-                DrawCount::Fixed(n) => Expr::Integer((*n).into()),
-                DrawCount::BufferLength => Expr::Input(format!("count-resource-{}", r.0)),
-            };
+        let count = |c: &DrawCount, buffer: &crate::DrawBufferRef| -> Result<TokenStream, HostError> {
+            let expr = self.draw_count(p, c, buffer)?;
             let expr = self.rust_expr(&expr, entry)?;
             Ok(quote!(dimension(#expr)?))
         };
@@ -1090,7 +1094,7 @@ impl Program {
                 first_instance,
             } => {
                 let r = self.draw_resource(p, indices)?;
-                let n = count(index_count, r)?;
+                let n = count(index_count, indices)?;
                 let id = resource(r);
                 let format = index(index_format);
                 quote! {pass.set_index_buffer(#id.slice(..),#format);pass.draw_indexed(#first_index..support::draw_end(#first_index,#n)?,#vertex_offset,#first_instance..support::draw_end(#first_instance,#instance_count)?);}
@@ -1101,7 +1105,7 @@ impl Program {
                 draw_count,
             } => {
                 let r = self.draw_resource(p, commands)?;
-                let n = count(draw_count, r)?;
+                let n = count(draw_count, commands)?;
                 let id = resource(r);
                 quote!(pass.multi_draw_indirect(&#id,#offset,#n);)
             }
@@ -1113,7 +1117,7 @@ impl Program {
                 draw_count,
             } => {
                 let r = self.draw_resource(p, commands)?;
-                let n = count(draw_count, r)?;
+                let n = count(draw_count, commands)?;
                 let id = resource(r);
                 let indices = resource(self.draw_resource(p, indices)?);
                 let format = index(index_format);

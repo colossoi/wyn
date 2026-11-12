@@ -1203,6 +1203,7 @@ fn draw_buffer_source(
                 return None;
             }
             return Some(interface::DrawBufferOperand::Input(host::DrawBufferRef {
+                elements: None,
                 set: AUTO_STORAGE_SET,
                 binding: root_parameter_binding(&root_entry.declaration.params[index])?,
                 name: root_entry.declaration.params.get(index)?.name.clone(),

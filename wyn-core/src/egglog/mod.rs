@@ -36,7 +36,7 @@ pub enum OptimizeError {
     Output(String),
 }
 
-/// Internalize typed TLC into normalized components and explicit lexical bodies.
+/// Internalize typed TLC, preserving logical products and array nesting.
 pub fn from_tlc(source: &OwnershipApplied) -> Result<Program<'_, Imported>, OptimizeError> {
     let _timing = timing::span("egglog import");
     let (graph, symbols) = from_tlc::import(source)?;
@@ -52,9 +52,16 @@ pub fn from_tlc(source: &OwnershipApplied) -> Result<Program<'_, Imported>, Opti
 pub fn fuse(mut program: Program<'_, Imported>) -> Result<Program<'_, Fused>, OptimizeError> {
     timing::time("egglog structural analysis", || analysis::run(&mut program.graph))?;
     memory::inline(&mut program.graph)?;
+    // Fuse adjacent producers before hoisting invariant work between them.
     memory::simplify(&mut program.graph, false)?;
-    fusion::run(&mut program.graph)?;
+    // Reducing simplification exposes equal domains; fusion exposes dead collections.
+    let simplify = memory::simplification_schedule(false);
+    program.graph.parse_and_run_program(
+        None,
+        &format!("(run-schedule (saturate (seq {} {simplify})))", fusion::SCHEDULE),
+    )?;
     memory::simplify(&mut program.graph, true)?;
+    memory::validate(&mut program.graph)?;
     Ok(program.advance(Fused))
 }
 
@@ -78,7 +85,7 @@ pub fn place_with_cost_model(
     Ok(program.advance(Placed))
 }
 
-/// Select dispatch recipes, resource requirements, and ordering constraints.
+/// Select logical execution strategies. SSA emission completes physical scheduling.
 pub fn schedule(program: Program<'_, Placed>) -> Result<Program<'_, Scheduled>, OptimizeError> {
     schedule_with_subgroups(program, false)
 }
@@ -139,27 +146,18 @@ pub fn optimize_with_policy(
 /// Validate the program before host and shader emission.
 pub fn prepare_host(mut program: Program<'_, Optimized>) -> Result<HostPrepared<'_>, OptimizeError> {
     let _timing = timing::span("egglog host preparation");
-    program.graph.parse_and_run_program(
-        None,
-        "(run-schedule (saturate (seq
-        (saturate fusion-index memory-names) (saturate memory-scopes)
-        (saturate schedule-cost memory-origin) (saturate memory-effects simplify-analysis)
-        (saturate placement-context) (saturate placement-scopes)
-        (saturate kernel-prelude-analysis memory-effects memory-rename) (saturate kernel-prelude-select)
-        (saturate memory-rewrite memory-rename))))",
-    )?;
-    memory::validate(&mut program.graph)?;
-    program.graph.parse_and_run_program(None, "(run-schedule (saturate memory-origin schedule-cost) (saturate memory-allocation) (saturate memory-publication))")?;
+    analysis::run(&mut program.graph)?;
     Ok(HostPrepared { program })
 }
 
 /// Plan evaluation and lower shader SSA together with its host interfaces.
 pub fn to_ssa(program: HostPrepared<'_>, target: CodegenTarget) -> Result<Elaborated, OptimizeError> {
+    let _timing = timing::span("SSA emission");
     to_ssa::lower(&program.program, target)
 }
 
-/// TLC retains source and public-interface metadata. The graph owns all
-/// executable bodies, transformations, and allocation decisions.
+/// TLC retains source and public-interface metadata. The graph owns the logical
+/// program and execution choices until direct SSA emission.
 pub struct Program<'source, Stage> {
     source: &'source OwnershipApplied,
     graph: EGraph,
@@ -182,7 +180,7 @@ pub struct Imported;
 pub struct Fused;
 pub struct Placed;
 
-/// Dispatch recipes, execution domains, storage, and effect order are fixed.
+/// Logical execution strategies are selected; storage is determined during SSA emission.
 pub struct Scheduled;
 
 pub struct InterfacesPrepared;
@@ -195,9 +193,6 @@ pub struct HostPrepared<'source> {
 
 #[cfg(test)]
 mod pipeline_tests;
-
-#[cfg(test)]
-mod descriptor_tests;
 
 #[cfg(test)]
 fn optimize_for_test(program: Program<'_, Scheduled>) -> Result<Program<'_, Optimized>, OptimizeError> {

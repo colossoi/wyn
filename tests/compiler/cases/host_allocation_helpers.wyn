@@ -8,6 +8,16 @@
 --! inputs = { resolution = [13, 29] }
 --! result_bytes = 128
 --! no_device_reads = true
+--! [[host]]
+--! entry = "record_size_0_main"
+--! inputs = { c = [5, 11] }
+--! result_bytes = 20
+--! no_device_reads = true
+--! [[host]]
+--! entry = "record_size_1_main"
+--! inputs = { c = [5, 11] }
+--! result_bytes = 24
+--! no_device_reads = true
 --! [[artifacts]]
 --! path = "output.wynhost"
 --! contains = [":source-name \"allocated\""]

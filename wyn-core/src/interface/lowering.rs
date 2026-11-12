@@ -56,6 +56,8 @@ pub(crate) fn is_storage_image_ty(ty: &Type<TypeName>) -> bool {
 pub(crate) fn entry_output_arity(entry: &EntryDecl, ret_type: &Type<TypeName>) -> usize {
     match strip_existentials(ret_type) {
         Type::Constructed(TypeName::Unit | TypeName::SideEffect | TypeName::StorageTexture, _) => 0,
+        _ if entry.buffer_demand => 1,
+        _ if entry.source_entry.is_some() => entry.outputs.len(),
         Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) => fields.len(),
         _ => usize::from(!entry.outputs.is_empty()),
     }
@@ -86,7 +88,20 @@ pub(crate) fn build_entry_outputs(
                                    attribute: Option<&ResolvedAttribute>|
      -> Option<BindingRef> {
         if is_compute && !matches!(ty, Type::Constructed(TypeName::Unit, _)) {
-            storage_output_binding(attribute)
+            let selected = if entry.source_entry.is_some()
+                && matches!(
+                    attribute,
+                    Some(Attribute::Storage {
+                        set: AUTO_STORAGE_SET,
+                        ..
+                    })
+                ) {
+                destinations.get(slot).copied().flatten()
+            } else {
+                None
+            };
+            selected
+                .or_else(|| storage_output_binding(attribute))
                 .or_else(|| destinations.get(slot).copied().flatten())
                 .or_else(|| Some(BindingRef::new(AUTO_STORAGE_SET, binding_ids.next_id())))
         } else {
@@ -113,7 +128,11 @@ pub(crate) fn build_entry_outputs(
         return Ok(vec![]);
     }
 
-    if entry.outputs.iter().all(|o| o.attribute.is_none()) && output_arity == 1 {
+    if (entry.buffer_demand
+        || entry.source_entry.is_some()
+        || entry.outputs.iter().all(|o| o.attribute.is_none()))
+        && output_arity == 1
+    {
         if !matches!(ret_type, Type::Constructed(TypeName::Unit, _)) {
             let ty = canonical_storage_buffer_ty(ret_type);
             let attribute = entry.outputs.first().and_then(|output| output.attribute.as_ref());
@@ -122,7 +141,11 @@ pub(crate) fn build_entry_outputs(
             Ok(vec![EntryOutput {
                 ty,
                 kind: entry_output_kind(storage_binding, None, false, 0),
-                host: OutputHost { length, target: None },
+                host: OutputHost {
+                    length,
+                    target: None,
+                    elements: None,
+                },
             }])
         } else {
             Ok(vec![])
@@ -149,6 +172,7 @@ pub(crate) fn build_entry_outputs(
                     host: OutputHost {
                         length,
                         target: target_of(attribute).map(str::to_owned),
+                        elements: None,
                     },
                 })
             })
@@ -169,6 +193,7 @@ pub(crate) fn build_entry_outputs(
             host: OutputHost {
                 length,
                 target: target_of(first_attr).map(str::to_owned),
+                elements: None,
             },
         }])
     }

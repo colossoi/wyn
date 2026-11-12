@@ -7,13 +7,13 @@
 --! contains = [":source-name \"nested_loop_0_reproduce\"", ":source-name \"nested_loop_1_reproduce\""]
 --! [[shader]]
 --! entry = "nested_loop_0_reproduce"
---! loop_depths = [0, 0, 1]
+--! loop_depths = [0, 1, 2]
 --! [[shader]]
 --! entry = "nested_loop_1_reproduce"
---! loop_depths = [0, 0, 1, 1]
+--! loop_depths = [0, 1, 2, 2]
 
 
-
+-- The outer loop traverses the dispatch grid; source loop nesting remains inside it.
 -- loop_binding_placement_preserves_guards_and_outer_iterations
 def nested_loop_0_walk(nested_loop_0_xs:[]i32,seed:i32) i32 = loop value=0 for k<4 do
             if k < seed then

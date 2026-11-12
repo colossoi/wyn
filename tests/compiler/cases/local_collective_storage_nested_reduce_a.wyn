@@ -1,0 +1,10 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"nested_device_collectives_reach_wgsl_0_main\""]
+
+entry nested_device_collectives_reach_wgsl_0_main(xs: []i32) []i32 = map(|x: i32| reduce(|a: i32, b: i32| a + b, 0, map(|y: i32| y + x, iota(5))), xs)
+
+-- nested_reduction_stays_inside_the_map_invocation

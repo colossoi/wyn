@@ -1,0 +1,10 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"compact_fold\""]
+
+entry compact_fold(xs:[]i32) ([]i32,i32) =
+  let ys=map(|x|x+1,xs) in (filter(|x|x>0,ys),reduce((+),0i32,ys))
+entry fold_compacted(xs:[]i32) i32 = reduce((+),0i32,filter(|x|x>0,xs))

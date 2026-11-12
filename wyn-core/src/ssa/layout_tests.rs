@@ -18,6 +18,30 @@ fn u64_storage_layout_matches_emulated_wgsl_vec2u32() {
     assert_eq!(storage_elem_stride(&ty), Some(8));
 }
 
+#[test]
+fn runtime_array_descriptors_have_fixed_storage_layouts() {
+    let dynamic = Type::Constructed(TypeName::SizePlaceholder, vec![]);
+    let view =
+        types::view_array_with_size(&scalar(TypeName::Float(64)), dynamic.clone(), types::no_buffer());
+    assert_eq!(storage_elem_stride(&view), Some(8));
+    assert_eq!(std430_alignment(&view), Some(4));
+    let virtual_array = types::make_array1(
+        scalar(TypeName::Int(32)),
+        Type::Constructed(TypeName::ArrayVariantVirtual, vec![]),
+        dynamic,
+        types::no_buffer(),
+    );
+    assert_eq!(storage_elem_stride(&virtual_array), Some(12));
+    assert_eq!(
+        storage_elem_stride(&types::sized_array(3, view.clone())),
+        Some(24)
+    );
+    let tuple = types::tuple(vec![scalar(TypeName::UInt(32)), view, virtual_array]);
+    let layout = block_layout(&tuple, StorageLayout::Std430).unwrap();
+    assert_eq!(layout.member_offsets, vec![0, 4, 12]);
+    assert_eq!(layout.size, 24);
+}
+
 fn vec(elem: TypeName, n: usize) -> Type {
     Type::Constructed(
         TypeName::Vec,

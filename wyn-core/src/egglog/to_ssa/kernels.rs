@@ -1,9 +1,15 @@
 //! Parallel results share one domain traversal and one reducer calling convention.
 use super::{error, Body, OptimizeError, Typed};
 use crate::builtins::catalog;
+use crate::egglog::to_ssa::host;
 use crate::egglog::to_ssa::runtime_binding;
-use crate::op::{BinaryOperator, OpTag};
-use crate::types;
+use crate::host::Expr;
+use crate::op::{BinaryOperator, OpTag, PureViewSource};
+use crate::ssa::layout::{storage_elem_stride, storage_value_type};
+use crate::ssa::types::{BlockId, InstKind};
+use crate::types::{self, Type, TypeExt, TypeName};
+use crate::BindingRef;
+use crate::LookupSet;
 use egglog_engine::{RawValues, Value};
 
 enum FoldMode {
@@ -22,12 +28,67 @@ struct Fold {
     totals: Vec<Value>,
 }
 
+// Physical SSA operands only; callback bodies remain in the common IR.
+pub(super) enum CollectivePhase<'a> {
+    Chunks {
+        range: (Typed, Typed),
+        group: Typed,
+        partials: &'a [(BindingRef, Type)],
+    },
+    Carries {
+        partials: &'a [(BindingRef, Type)],
+        carries: &'a [(BindingRef, Type)],
+        groups: Typed,
+        width: u32,
+    },
+    Apply {
+        range: (Typed, Typed),
+        group: Typed,
+        carries: &'a [(BindingRef, Type)],
+    },
+}
+
+fn collection_shape(ty: &Type, dimensions: &[Option<usize>]) -> Result<Type, OptimizeError> {
+    let Some((size, rest)) = dimensions.split_first() else {
+        return Ok(ty.clone());
+    };
+    if let Type::Constructed(name @ (TypeName::Tuple(_) | TypeName::Record(_)), fields) = ty {
+        return Ok(Type::Constructed(
+            name.clone(),
+            fields.iter().map(|field| collection_shape(field, dimensions)).collect::<Result<_, _>>()?,
+        ));
+    }
+    let Some(element) = ty.elem_type() else {
+        return Err(error("collection shape exceeds array rank"));
+    };
+    let element = collection_shape(element, rest)?;
+    Ok(if let Some(size) = size {
+        types::sized_array(*size, element)
+    } else {
+        types::make_array1(
+            element,
+            types::array_variant_composite(),
+            ty.array_size().cloned().ok_or_else(|| error("collection dimension missing"))?,
+            types::no_buffer(),
+        )
+    })
+}
+
 impl Body<'_, '_, '_> {
     pub(super) fn parallel(
         &mut self,
         arguments: &[Value],
         _destinations: &[Value],
         pattern: &[Value],
+    ) -> Result<Vec<Typed>, OptimizeError> {
+        self.parallel_phase(arguments, pattern, None)
+    }
+
+    pub(super) fn parallel_phase(
+        &mut self,
+        arguments: &[Value],
+        pattern: &[Value],
+        phase: Option<CollectivePhase<'_>>,
     ) -> Result<Vec<Typed>, OptimizeError> {
         let dispatch = if self.query().enode("DeviceKernel", arguments[0])?.is_some() {
             let Some(statement) = self.active_dispatch else {
@@ -42,6 +103,8 @@ impl Body<'_, '_, '_> {
         let body = self.query().fields("ParallelBlock", arguments[2])?;
         let mut bindings = pattern.iter().copied();
         let mut collects = Vec::new();
+        let mut compacts = Vec::new();
+        let mut contributes = false;
         let mut folds = Vec::new();
         let mut output_names = |count: usize| -> Result<Vec<Value>, OptimizeError> {
             (0..count)
@@ -55,13 +118,19 @@ impl Body<'_, '_, '_> {
         };
         let mut fold_data = Vec::new();
         for result in self.query().vector(body[1])? {
-            let (kind, fields) = self.query().application(result, &["Collect", "Fold", "Contribute"])?;
+            let (kind, fields) =
+                self.query().application(result, &["Collect", "Compact", "Fold", "Contribute"])?;
             match kind {
                 "Collect" => {
                     let values = self.query().vector(fields[0])?;
                     for (name, value) in output_names(values.len())?.into_iter().zip(values) {
                         collects.push((name, value));
                     }
+                }
+                "Compact" => {
+                    let results = self.query().vector(fields[1])?;
+                    let outputs = output_names(results.len())?.into_iter().zip(results).collect::<Vec<_>>();
+                    compacts.push((fields[0], outputs));
                 }
                 "Fold" => {
                     let (mode, _) = self.query().application(
@@ -92,6 +161,7 @@ impl Body<'_, '_, '_> {
                     fold_data.push((mode, reducer[2], atoms, fields[2], prefixes, totals));
                 }
                 "Contribute" => {
+                    contributes = true;
                     let tokens = self.query().vector(fields[0])?;
                     output_names(tokens.len())?;
                 }
@@ -102,7 +172,44 @@ impl Body<'_, '_, '_> {
             return Err(error("parallel result arity mismatch"));
         }
         for (mode, reducer, atoms, values, prefixes, totals) in fold_data {
-            let neutral = atoms.into_iter().map(|atom| self.atom(atom)).collect::<Result<Vec<_>, _>>()?;
+            let lambda = self.query().fields("FunctionBody", reducer)?;
+            let parameters = self.query().vector(lambda[0])?;
+            let mut neutral = Vec::new();
+            for (i, atom) in atoms.into_iter().enumerate() {
+                let Some(parameter) = parameters.get(i) else {
+                    return Err(error("reducer has no state parameter"));
+                };
+                let parameter = self.query().fields("Parameter", *parameter)?;
+                let Some((_, mut ty)) = runtime_binding(self.query(), parameter[0])? else {
+                    return Err(error("reducer state has no runtime value"));
+                };
+                ty = super::reducer_state_type(self.query(), self.function, reducer, i, atom, ty)?;
+                let value = self.atom(atom)?;
+                if ty.is_array()
+                    && !matches!(ty.array_size(), Some(Type::Constructed(TypeName::Size(_), _)))
+                {
+                    let count = match value.ty.array_size() {
+                        Some(Type::Constructed(TypeName::Size(size), _)) => Some(*size),
+                        _ => None,
+                    };
+                    if !self
+                        .query()
+                        .contains("ReducerPreservesOuterLength", (self.function, reducer, i as i64))?
+                    {
+                        return Err(error(
+                            "array-valued collective has no proven fixed reducer state shape",
+                        ));
+                    }
+                    let Some(count) = count else {
+                        return Err(error("array-valued collective has no proven fixed neutral shape"));
+                    };
+                    let Some(element) = ty.elem_type() else {
+                        return Err(error("array reducer element type missing"));
+                    };
+                    ty = types::sized_array(count, element.clone());
+                }
+                neutral.push(self.canonical_value(value, &ty)?);
+            }
             folds.push(Fold {
                 mode,
                 reducer,
@@ -115,12 +222,238 @@ impl Body<'_, '_, '_> {
         if !folds.is_empty() && axes.is_empty() {
             return Err(error("fold has no innermost axis"));
         }
+        if let Some(CollectivePhase::Carries {
+            partials,
+            carries,
+            groups,
+            width,
+        }) = &phase
+        {
+            let Some(_) = dispatch else {
+                return Err(error("collective carry dispatch missing"));
+            };
+            self.collective_carries(&folds, partials, carries, groups.clone(), *width)?;
+            return Ok(vec![]);
+        }
+        if let Some(CollectivePhase::Apply {
+            range,
+            group,
+            carries,
+        }) = &phase
+        {
+            let Some(dispatch) = dispatch else {
+                return Err(error("collective application dispatch missing"));
+            };
+            self.apply_carries(
+                &folds,
+                carries,
+                group.clone(),
+                range.clone(),
+                dispatch.width.get(),
+            )?;
+            return Ok(vec![]);
+        }
+        let mut collected = collects.iter().map(|(name, _)| *name).collect::<LookupSet<_>>();
+        collected.extend(compacts.iter().flat_map(|(_, outputs)| outputs.iter().map(|(name, _)| *name)));
+        for fold in &folds {
+            collected.extend(fold.prefixes.iter().copied());
+            if axes.len() > 1 {
+                collected.extend(fold.totals.iter().copied());
+            }
+        }
+        for &binding in pattern {
+            if let Some((name, ty)) = runtime_binding(self.query(), binding)? {
+                if !collected.contains(&name) {
+                    continue;
+                }
+                let rank = if folds.iter().any(|fold| fold.totals.contains(&name)) {
+                    axes.len() - 1
+                } else {
+                    axes.len()
+                };
+                let dimensions = axes[..rank]
+                    .iter()
+                    .map(|&axis| {
+                        let axis = self.query().fields("DenseAxis", axis)?;
+                        self.query()
+                            .lookup("StaticIndex", (self.function, axis[1]))?
+                            .map(|size| {
+                                usize::try_from(self.query().0.value_to_base::<i64>(size).max(0))
+                                    .map_err(|_| error("collection dimension exceeds usize"))
+                            })
+                            .transpose()
+                    })
+                    .collect::<Result<Vec<_>, OptimizeError>>()?;
+                let ty = collection_shape(&ty, &dimensions)?;
+                let Some(&axis) = axes.first() else {
+                    return Err(error("collection requires an axis"));
+                };
+                let axis = self.query().fields("DenseAxis", axis)?;
+                let count = self.index_expression(axis[1])?;
+                let length = if dispatch.is_some() {
+                    let length =
+                        host::guarded_index(self.query(), &self.host_values, axis[1], self.guard.as_ref())?;
+                    Some(Expr::Max(Box::new(length), Box::new(Expr::Integer(0))))
+                } else {
+                    None
+                };
+                let shape = if dispatch.is_some() && rank > 1 && dimensions[1..].contains(&None) {
+                    let mut shape = Vec::new();
+                    for &axis in &axes[..rank] {
+                        let axis = self.query().fields("DenseAxis", axis)?;
+                        let count = self.index_expression(axis[1])?;
+                        let length = host::guarded_index(
+                            self.query(),
+                            &self.host_values,
+                            axis[1],
+                            self.guard.as_ref(),
+                        )?;
+                        shape.push((count, Expr::Max(Box::new(length), Box::new(Expr::Integer(0)))));
+                    }
+                    Some(shape)
+                } else {
+                    None
+                };
+                let block = self.current()?;
+                self.collection_requests.insert(name, (ty, count, length, shape, block));
+            }
+        }
+        let atomic_updates =
+            contributes && compacts.is_empty() && folds.is_empty() && self.atomic_contributions(body[1])?;
+        if !compacts.is_empty() || (contributes && !atomic_updates) {
+            let mut initial = vec![Self::number(0); compacts.len()];
+            initial.extend(folds.iter().flat_map(|fold| fold.neutral.clone()));
+            let statements = body[0];
+            let run = |body: &mut Self| {
+                let outer = if folds.is_empty() { &axes[..0] } else { &axes[..axes.len() - 1] };
+                let inner = if folds.is_empty() { &axes[..] } else { &axes[axes.len() - 1..] };
+                let state = body.domain_axis(
+                    outer,
+                    0,
+                    domain[0],
+                    vec![],
+                    Self::number(0),
+                    initial.clone(),
+                    None,
+                    &mut |body, coordinates, state| {
+                        let mut initial = state[..compacts.len()].to_vec();
+                        initial.extend(folds.iter().flat_map(|fold| fold.neutral.clone()));
+                        let ordinal = body.named(domain[0])?;
+                        let state = body.domain_axis(
+                            inner,
+                            0,
+                            domain[0],
+                            coordinates.to_vec(),
+                            ordinal,
+                            initial,
+                            None,
+                            &mut |body, _, state| {
+                                let folded = body.parallel_lane(
+                                    statements,
+                                    arguments[1],
+                                    &collects,
+                                    &folds,
+                                    state[compacts.len()..].to_vec(),
+                                )?;
+                                let mut next = Vec::new();
+                                for ((predicate, outputs), count) in compacts.iter().zip(&state) {
+                                    let keep = body.atom(*predicate)?;
+                                    let count = body.branch(
+                                        keep,
+                                        |body| {
+                                            for &(name, result) in outputs {
+                                                let yielded = body.query().fields("Yield", result)?;
+                                                let Some(value) = body.operand(yielded[1])? else {
+                                                    return Err(error(
+                                                        "compaction value has no SSA representation",
+                                                    ));
+                                                };
+                                                body.write_array(name, &[count.clone()], value)?;
+                                            }
+                                            body.binary(BinaryOperator::Add, count.clone(), Self::number(1))
+                                        },
+                                        |_body| Ok(count.clone()),
+                                    )?;
+                                    next.push(count);
+                                }
+                                next.extend(folded);
+                                Ok(next)
+                            },
+                        )?;
+                        let mut offset = compacts.len();
+                        for fold in &folds {
+                            for (i, &name) in fold.totals.iter().enumerate() {
+                                if collected.contains(&name) {
+                                    body.write_array(name, coordinates, state[offset + i].clone())?;
+                                }
+                            }
+                            offset += fold.neutral.len();
+                        }
+                        Ok(state)
+                    },
+                )?;
+                body.pack_results(state)
+            };
+            let counts = if let Some(dispatch) = dispatch {
+                let (group, _) = self.workgroups(dispatch.grid)?;
+                let first_group = self.binary(BinaryOperator::Equal, group, Self::number(0))?;
+                if !compacts.is_empty() && folds.is_empty() && !contributes && axes.len() == 1 {
+                    self.branch(
+                        first_group,
+                        |body| {
+                            body.compact_group(
+                                arguments[1],
+                                statements,
+                                &collects,
+                                &compacts,
+                                dispatch.width.get(),
+                            )
+                        },
+                        |body| body.pack_results(initial.clone()),
+                    )?
+                } else {
+                    let lane = self.local_id()?;
+                    let first_lane = self.binary(BinaryOperator::Equal, lane, Self::number(0))?;
+                    let leader = self.binary(BinaryOperator::LogicalAnd, first_group, first_lane)?;
+                    self.branch(leader, run, |body| body.pack_results(initial.clone()))?
+                }
+            } else {
+                run(self)?
+            };
+            let counts = self.unpack_results(counts, initial.len())?;
+            for (i, (_, outputs)) in compacts.iter().enumerate() {
+                let count = counts[i].clone();
+                for &(name, _) in outputs {
+                    let array = self.named(name)?;
+                    let view = self.slice_array(array, Self::number(0), count.clone(), Self::number(1))?;
+                    self.values.insert(name, view);
+                }
+            }
+            let mut offset = compacts.len();
+            for fold in &folds {
+                for (i, &name) in fold.totals.iter().enumerate() {
+                    if !collected.contains(&name) {
+                        let value = counts[offset + i].clone();
+                        self.values.insert(name, value);
+                    }
+                }
+                offset += fold.neutral.len();
+            }
+            let mut values = Vec::new();
+            for &binding in pattern {
+                if let Some((name, _)) = runtime_binding(self.query(), binding)? {
+                    values.push(self.named(name)?);
+                }
+            }
+            return Ok(values);
+        }
         if let Some(dispatch) = dispatch {
             let enabled = self
                 .query()
                 .lookup("SubgroupsEnabled", RawValues(Vec::new()))?
                 .is_some_and(|value| self.query().0.value_to_base::<bool>(value));
-            let native = !folds.is_empty()
+            let native = enabled
+                && !folds.is_empty()
                 && folds.iter().try_fold(true, |native, fold| {
                     let addition = self
                         .query()
@@ -129,7 +462,15 @@ impl Body<'_, '_, '_> {
                     Ok::<_, OptimizeError>(
                         native
                             && addition
-                            && fold.neutral.iter().all(|value| self.integer_literal(value) == Some(0)),
+                            && fold.neutral.iter().all(|value| {
+                                self.integer_literal(value) == Some(0)
+                                    || matches!(
+                                        value.value,
+                                        crate::ssa::types::ValueRef::Const(
+                                            crate::ssa::types::ConstantValue::F32(0)
+                                        )
+                                    )
+                            }),
                     )
                 })?;
             if enabled && native {
@@ -137,7 +478,9 @@ impl Body<'_, '_, '_> {
             }
         }
         let outer = if folds.is_empty() { &axes[..] } else { &axes[..axes.len() - 1] };
-        let partition = if let Some(dispatch) = dispatch {
+        let partition = if phase.is_some() {
+            None
+        } else if let Some(dispatch) = dispatch {
             let (group, groups) = self.workgroups(dispatch.grid)?;
             if folds.is_empty() {
                 let base = self.binary(
@@ -162,8 +505,7 @@ impl Body<'_, '_, '_> {
         let mut initial = Vec::new();
         for fold in &folds {
             for (&name, value) in fold.totals.iter().zip(&fold.neutral) {
-                let info = self.query().required("BindingInfo", (self.function, name))?;
-                if self.query().enode("ScalarInfo", info)?.is_some() {
+                if !collected.contains(&name) {
                     initial.push(value.clone());
                 }
             }
@@ -194,6 +536,11 @@ impl Body<'_, '_, '_> {
                         &collects,
                         &folds,
                         dispatch.width.get(),
+                        if let Some(CollectivePhase::Chunks { range, .. }) = &phase {
+                            Some(range.clone())
+                        } else {
+                            None
+                        },
                     )?
                 } else {
                     let initial = folds.iter().flat_map(|fold| fold.neutral.clone()).collect::<Vec<_>>();
@@ -210,14 +557,29 @@ impl Body<'_, '_, '_> {
                         },
                     )?
                 };
+                if let Some(CollectivePhase::Chunks { group, partials, .. }) = &phase {
+                    let lane = body_lower.local_id()?;
+                    let leader = body_lower.binary(BinaryOperator::Equal, lane, Self::number(0))?;
+                    body_lower.when(leader, |body| {
+                        let (_, groups) = body.workgroups(None)?;
+                        for ((binding, element), value) in partials.iter().zip(&state) {
+                            let storage = super::entry::storage_view(
+                                body,
+                                *binding,
+                                element.clone(),
+                                groups.clone(),
+                            )?;
+                            body.store(storage, group.clone(), value.clone())?;
+                        }
+                        Ok(())
+                    })?;
+                }
                 let mut state = state.into_iter();
                 let mut scalars = Vec::new();
                 for fold in &folds {
                     let total = state.by_ref().take(fold.neutral.len()).collect::<Vec<_>>();
                     for (&name, value) in fold.totals.iter().zip(total) {
-                        let info =
-                            body_lower.query().required("BindingInfo", (body_lower.function, name))?;
-                        if body_lower.query().enode("ArrayInfo", info)?.is_some() {
+                        if collected.contains(&name) {
                             if dispatch.is_some() {
                                 let lane = body_lower.local_id()?;
                                 let leader =
@@ -236,13 +598,267 @@ impl Body<'_, '_, '_> {
                 Ok(scalars)
             },
         )?;
-        let count = pattern.iter().try_fold(0, |count, &binding| {
-            Ok::<_, OptimizeError>(count + usize::from(runtime_binding(self.query(), binding)?.is_some()))
-        })?;
-        if scalar_results.len() != count {
+        let mut scalars = scalar_results.into_iter();
+        let mut values = Vec::new();
+        for &binding in pattern {
+            if let Some((name, _)) = runtime_binding(self.query(), binding)? {
+                if collected.contains(&name) {
+                    let array = self.named(name)?;
+                    values.push(self.snapshot(array)?);
+                } else {
+                    let Some(value) = scalars.next() else {
+                        return Err(error("parallel scalar result arity mismatch"));
+                    };
+                    values.push(value);
+                }
+            }
+        }
+        if scalars.next().is_some() {
             return Err(error("parallel scalar result arity mismatch"));
         }
-        Ok(scalar_results)
+        Ok(values)
+    }
+
+    pub(super) fn collection_storage(
+        &mut self,
+        ty: &Type,
+        count: Typed,
+        length: Option<&Expr>,
+        capacity: Option<i64>,
+        block: BlockId,
+    ) -> Result<Typed, OptimizeError> {
+        if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = ty {
+            let mut storage = Vec::new();
+            for field in fields {
+                storage.push(self.collection_storage(field, count.clone(), length, capacity, block)?);
+            }
+            let ty = types::tuple(storage.iter().map(|value| value.ty.clone()).collect());
+            let value = self.builder.func_mut().append_inst(
+                block,
+                InstKind::Op {
+                    tag: OpTag::Tuple,
+                    operands: storage.into_iter().map(|value| value.value).collect(),
+                },
+                ty.clone(),
+            );
+            return Ok(Typed {
+                value: value.into(),
+                ty,
+            });
+        }
+        let Some(element) = ty.elem_type().cloned() else {
+            return Err(error("collection binding must be an array or product of arrays"));
+        };
+        if let Some(length) = length {
+            let Some(stride) = storage_elem_stride(&storage_value_type(&element)) else {
+                return Err(error("collection element requires representation lowering"));
+            };
+            let capacity = capacity.map(Expr::Integer).unwrap_or_else(|| length.clone());
+            let bytes = Expr::Multiply(Box::new(capacity), Box::new(Expr::Integer(stride.into())));
+            let (_, storage) = self.device_buffer_at(&element, bytes, count, block)?;
+            self.host_lengths.insert(storage.value.clone(), length.clone());
+            return Ok(storage);
+        }
+        let capacity = self.integer_literal(&count).or(capacity).or_else(|| match ty.array_size() {
+            Some(Type::Constructed(TypeName::Size(size), _)) => i64::try_from(*size).ok(),
+            _ => None,
+        });
+        let Some(capacity) = capacity else {
+            return Err(error("local collection requires a capacity bound"));
+        };
+        let capacity =
+            usize::try_from(capacity.max(0)).map_err(|_| error("collection capacity exceeds usize"))?;
+        self.local_array_with_length(types::sized_array(capacity, element), count)
+    }
+
+    pub(super) fn ranked_collection_storage(
+        &mut self,
+        ty: &Type,
+        shape: &[(Typed, Expr)],
+        block: BlockId,
+    ) -> Result<Typed, OptimizeError> {
+        if let Type::Constructed(name @ (TypeName::Tuple(_) | TypeName::Record(_)), fields) = ty {
+            let values = fields
+                .iter()
+                .map(|field| self.ranked_collection_storage(field, shape, block))
+                .collect::<Result<Vec<_>, _>>()?;
+            let ty = Type::Constructed(
+                name.clone(),
+                values.iter().map(|value| value.ty.clone()).collect(),
+            );
+            let value = self.builder.func_mut().append_inst(
+                block,
+                InstKind::Op {
+                    tag: OpTag::Tuple,
+                    operands: values.into_iter().map(|value| value.value).collect(),
+                },
+                ty.clone(),
+            );
+            return Ok(Typed {
+                value: value.into(),
+                ty,
+            });
+        }
+        let mut element = ty;
+        for _ in shape {
+            element = element.elem_type().ok_or_else(|| error("collection shape exceeds array rank"))?;
+        }
+        self.ranked_buffer(element.clone(), shape, block)
+    }
+
+    pub(super) fn ranked_buffer(
+        &mut self,
+        element: Type,
+        shape: &[(Typed, Expr)],
+        block: BlockId,
+    ) -> Result<Typed, OptimizeError> {
+        let element = storage_value_type(&element);
+        let stride =
+            storage_elem_stride(&element).ok_or_else(|| error("collection leaf has no storage stride"))?;
+        let Some((first, rest)) = shape.split_first() else {
+            return Err(error("ranked buffer requires a dimension"));
+        };
+        let mut count = first.0.clone();
+        let mut length = first.1.clone();
+        for (dimension, extent) in rest {
+            let value = self.builder.func_mut().append_inst(
+                block,
+                InstKind::Op {
+                    tag: OpTag::BinOp(BinaryOperator::Multiply),
+                    operands: vec![count.value, dimension.value],
+                },
+                types::i32(),
+            );
+            count = Typed {
+                value: value.into(),
+                ty: types::i32(),
+            };
+            length = Expr::Multiply(Box::new(length), Box::new(extent.clone()));
+        }
+        let bytes = Expr::Multiply(Box::new(length), Box::new(Expr::Integer(stride.into())));
+        let (binding, _) = self.device_buffer_at(&element, bytes, count, block)?;
+        let mut fields = vec![element, types::array_variant_view()];
+        fields.extend(shape.iter().map(|_| Type::Constructed(TypeName::SizePlaceholder, vec![])));
+        fields.push(types::buffer_tag(binding));
+        let ty = Type::Constructed(TypeName::Array, fields);
+        let mut operands = vec![Self::number(0).value];
+        operands.extend(shape.iter().map(|(dimension, _)| dimension.value));
+        let value = self.builder.func_mut().append_inst(
+            block,
+            InstKind::Op {
+                tag: OpTag::StorageView(PureViewSource::Storage(binding)),
+                operands,
+            },
+            ty.clone(),
+        );
+        let value = Typed {
+            value: value.into(),
+            ty,
+        };
+        self.host_lengths.insert(value.value, first.1.clone());
+        self.host_shapes.insert(
+            value.value,
+            shape.iter().map(|(_, extent)| extent.clone()).collect(),
+        );
+        Ok(value)
+    }
+
+    fn collective_carries(
+        &mut self,
+        folds: &[Fold],
+        partials: &[(BindingRef, Type)],
+        carries: &[(BindingRef, Type)],
+        groups: Typed,
+        width: u32,
+    ) -> Result<(), OptimizeError> {
+        let lane = self.local_id()?;
+        let neutral = folds.iter().flat_map(|fold| fold.neutral.clone()).collect::<Vec<_>>();
+        let totals = self.counted(
+            Self::number(0),
+            groups.clone(),
+            Self::number(width),
+            neutral.clone(),
+            |body, tile, state| {
+                let index = body.binary(BinaryOperator::Add, tile, lane.clone())?;
+                let active = body.binary(BinaryOperator::Less, index.clone(), groups.clone())?;
+                let values = body.branch(
+                    active.clone(),
+                    |body| {
+                        let mut values = Vec::new();
+                        for ((binding, element), initial) in partials.iter().zip(&neutral) {
+                            let buffer = super::entry::storage_view(
+                                body,
+                                *binding,
+                                element.clone(),
+                                groups.clone(),
+                            )?;
+                            let value = body.index(buffer, index.clone())?;
+                            values.push(body.canonical_value(value, &initial.ty)?);
+                        }
+                        body.pack_results(values)
+                    },
+                    |body| body.pack_results(neutral.clone()),
+                )?;
+                let values = body.unpack_results(values, neutral.len())?;
+                let (exclusive, totals) = body.workgroup_fold(folds, &values, lane.clone(), width)?;
+                let exclusive = body.combine_folds(folds, &state, &exclusive)?;
+                body.when(active, |body| {
+                    for ((binding, element), value) in carries.iter().zip(&exclusive) {
+                        let buffer =
+                            super::entry::storage_view(body, *binding, element.clone(), groups.clone())?;
+                        body.store(buffer, index.clone(), value.clone())?;
+                    }
+                    Ok(())
+                })?;
+                body.combine_folds(folds, &state, &totals)
+            },
+        )?;
+        let mut totals = totals.into_iter();
+        for fold in folds {
+            let values = totals.by_ref().take(fold.neutral.len()).collect::<Vec<_>>();
+            for (&name, value) in fold.totals.iter().zip(values) {
+                self.values.insert(name, value);
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_carries(
+        &mut self,
+        folds: &[Fold],
+        carries: &[(BindingRef, Type)],
+        group: Typed,
+        range: (Typed, Typed),
+        width: u32,
+    ) -> Result<(), OptimizeError> {
+        let (_, groups) = self.workgroups(None)?;
+        let mut state = Vec::new();
+        for (binding, element) in carries {
+            let buffer = super::entry::storage_view(self, *binding, element.clone(), groups.clone())?;
+            state.push(self.index(buffer, group.clone())?);
+        }
+        let lane = self.local_id()?;
+        let start = self.binary(BinaryOperator::Add, range.0, lane)?;
+        self.counted(start, range.1, Self::number(width), vec![], |body, index, _| {
+            let mut offset = 0;
+            for fold in folds {
+                let end = offset + fold.neutral.len();
+                if !fold.prefixes.is_empty() {
+                    let mut args = state[offset..end].to_vec();
+                    for &name in &fold.prefixes {
+                        let array = body.named(name)?;
+                        args.push(body.index(array, index.clone())?);
+                    }
+                    let values = body.lambda(fold.reducer, args)?;
+                    for (&name, value) in fold.prefixes.iter().zip(values) {
+                        body.write_array(name, &[index.clone()], value)?;
+                    }
+                }
+                offset = end;
+            }
+            Ok(vec![])
+        })?;
+        Ok(())
     }
 
     fn domain_coordinates(&mut self, domain: Value) -> Result<Vec<Typed>, OptimizeError> {
@@ -352,19 +968,9 @@ impl Body<'_, '_, '_> {
     }
 
     fn axis_bounds(&mut self, axis: Value, ordinal: Typed) -> Result<(Value, Typed, Typed), OptimizeError> {
-        let (kind, fields) = self.query().application(axis, &["DenseAxis", "RaggedAxis"])?;
-        let (base, count) = if kind == "DenseAxis" {
-            let count = self.index_expression(fields[1])?;
-            let base = self.binary(BinaryOperator::Multiply, ordinal, count.clone())?;
-            (base, count)
-        } else {
-            let parent = self.index_expression(fields[2])?;
-            let next = self.binary(BinaryOperator::Add, parent.clone(), Self::number(1))?;
-            let start = self.read_array(fields[1], &[parent])?;
-            let end = self.read_array(fields[1], &[next])?;
-            let count = self.binary(BinaryOperator::Subtract, end, start.clone())?;
-            (start, count)
-        };
+        let fields = self.query().fields("DenseAxis", axis)?;
+        let count = self.index_expression(fields[1])?;
+        let base = self.binary(BinaryOperator::Multiply, ordinal, count.clone())?;
         Ok((fields[0], base, count))
     }
 
@@ -429,7 +1035,9 @@ impl Body<'_, '_, '_> {
             if values.len() != fold.neutral.len() {
                 return Err(error("reducer changes its accumulator arity"));
             }
-            result.extend(values);
+            for (value, neutral) in values.into_iter().zip(&fold.neutral) {
+                result.push(self.canonical_value(value, &neutral.ty)?);
+            }
             offset = end;
         }
         Ok(result)
@@ -445,12 +1053,14 @@ impl Body<'_, '_, '_> {
         collects: &[(Value, Value)],
         folds: &[Fold],
         width: u32,
+        range: Option<(Typed, Typed)>,
     ) -> Result<Vec<Typed>, OptimizeError> {
         let (name, base, count) = self.axis_bounds(axis, ordinal)?;
+        let (start, count) = range.unwrap_or_else(|| (Self::number(0), count));
         let lane = self.local_id()?;
         let initial = folds.iter().flat_map(|fold| fold.neutral.clone()).collect::<Vec<_>>();
         self.counted(
-            Self::number(0),
+            start,
             count.clone(),
             Self::number(width),
             initial.clone(),
@@ -472,15 +1082,16 @@ impl Body<'_, '_, '_> {
                         }
                         let mut values = Vec::new();
                         for fold in folds {
-                            values.extend(body.results(fold.values)?);
+                            let contributions = body.results(fold.values)?;
+                            for (value, neutral) in contributions.into_iter().zip(&fold.neutral) {
+                                values.push(body.canonical_value(value, &neutral.ty)?);
+                            }
                         }
-                        body.tuple(values)
+                        body.pack_results(values)
                     },
-                    |body| body.tuple(initial.clone()),
+                    |body| body.pack_results(initial.clone()),
                 )?;
-                let values = (0..initial.len())
-                    .map(|i| body.field(values.clone(), i))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let values = body.unpack_results(values, initial.len())?;
                 let (exclusive, totals) = body.workgroup_fold(folds, &values, lane.clone(), width)?;
                 let inclusive = body.combine_folds(folds, &exclusive, &values)?;
                 let exclusive = body.combine_folds(folds, &carried, &exclusive)?;
@@ -507,12 +1118,172 @@ impl Body<'_, '_, '_> {
 
     fn workgroup_fold(
         &mut self,
-        _folds: &[Fold],
+        folds: &[Fold],
         values: &[Typed],
-        _lane: Typed,
+        lane: Typed,
         width: u32,
     ) -> Result<(Vec<Typed>, Vec<Typed>), OptimizeError> {
-        let (_, exclusive, totals) = self.subgroup_scan(values.to_vec(), width)?;
+        if self.subgroup.is_some() {
+            let (_, exclusive, totals) = self.subgroup_scan(values.to_vec(), width)?;
+            return Ok((exclusive, totals));
+        }
+        let neutral = folds.iter().flat_map(|fold| fold.neutral.clone()).collect::<Vec<_>>();
+        self.workgroup_scan(values, &neutral, lane, width, |body, left, right| {
+            body.combine_folds(folds, left, right)
+        })
+    }
+
+    fn workgroup_scan(
+        &mut self,
+        values: &[Typed],
+        neutral: &[Typed],
+        lane: Typed,
+        width: u32,
+        combine: impl Fn(&mut Self, &[Typed], &[Typed]) -> Result<Vec<Typed>, OptimizeError>,
+    ) -> Result<(Vec<Typed>, Vec<Typed>), OptimizeError> {
+        let buffers = values
+            .iter()
+            .map(|value| self.workgroup_array(width, &value.ty))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut initial = vec![Self::number(1)];
+        initial.extend_from_slice(values);
+        let inclusive = self.while_loop(
+            initial,
+            |body, state| body.binary(BinaryOperator::Less, state[0].clone(), Self::number(width)),
+            |body, state| {
+                for (buffer, value) in buffers.iter().zip(&state[1..]) {
+                    body.store(buffer.clone(), lane.clone(), value.clone())?;
+                }
+                body.workgroup_barrier()?;
+                let active = body.binary(BinaryOperator::GreaterEqual, lane.clone(), state[0].clone())?;
+                let next = body.branch(
+                    active,
+                    |body| {
+                        let previous =
+                            body.binary(BinaryOperator::Subtract, lane.clone(), state[0].clone())?;
+                        let left = buffers
+                            .iter()
+                            .map(|buffer| body.index(buffer.clone(), previous.clone()))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let combined = combine(body, &left, &state[1..])?;
+                        body.pack_results(combined)
+                    },
+                    |body| body.pack_results(state[1..].to_vec()),
+                )?;
+                // No lane overwrites scratch until all lanes have read this step.
+                body.workgroup_barrier()?;
+                let mut result =
+                    vec![body.binary(BinaryOperator::Multiply, state[0].clone(), Self::number(2))?];
+                result.extend(body.unpack_results(next, values.len())?);
+                Ok(result)
+            },
+        )?;
+        for (buffer, value) in buffers.iter().zip(&inclusive[1..]) {
+            self.store(buffer.clone(), lane.clone(), value.clone())?;
+        }
+        self.workgroup_barrier()?;
+        let active = self.binary(BinaryOperator::Greater, lane.clone(), Self::number(0))?;
+        let exclusive = self.branch(
+            active,
+            |body| {
+                let previous = body.binary(BinaryOperator::Subtract, lane, Self::number(1))?;
+                let values = buffers
+                    .iter()
+                    .map(|buffer| body.index(buffer.clone(), previous.clone()))
+                    .collect::<Result<Vec<_>, _>>()?;
+                body.pack_results(values)
+            },
+            |body| body.pack_results(neutral.to_vec()),
+        )?;
+        let exclusive = self.unpack_results(exclusive, values.len())?;
+        let totals = buffers
+            .iter()
+            .map(|buffer| self.index(buffer.clone(), Self::number(width - 1)))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.workgroup_barrier()?;
         Ok((exclusive, totals))
+    }
+
+    fn compact_group(
+        &mut self,
+        domain: Value,
+        statements: Value,
+        collects: &[(Value, Value)],
+        compacts: &[(Value, Vec<(Value, Value)>)],
+        width: u32,
+    ) -> Result<Typed, OptimizeError> {
+        let space = self.query().fields("IterationSpace", domain)?;
+        let axes = self.query().vector(space[1])?;
+        let axis = self.query().fields("DenseAxis", axes[0])?;
+        let count = self.index_expression(axis[1])?;
+        let lane = self.local_id()?;
+        let neutral = vec![Self::number(0); compacts.len()];
+        let totals = self.counted(
+            Self::number(0),
+            count.clone(),
+            Self::number(width),
+            neutral.clone(),
+            |body, tile, carried| {
+                let index = body.binary(BinaryOperator::Add, tile, lane.clone())?;
+                body.values.insert(space[0], index.clone());
+                body.values.insert(axis[0], index.clone());
+                let active = body.binary(BinaryOperator::Less, index, count)?;
+                let flags = compacts
+                    .iter()
+                    .map(|_| {
+                        let flag = body.local_place(Self::number(0).ty)?;
+                        body.store_place(flag, Self::number(0))?;
+                        Ok(flag)
+                    })
+                    .collect::<Result<Vec<_>, OptimizeError>>()?;
+                let mut payloads = Vec::new();
+                body.when(active, |body| {
+                    body.parallel_lane(statements, domain, collects, &[], vec![])?;
+                    for ((predicate, outputs), flag) in compacts.iter().zip(&flags) {
+                        let keep = body.atom(*predicate)?;
+                        let keep = body.cast(keep, &Self::number(0).ty)?;
+                        body.store_place(*flag, keep)?;
+                        let mut fields = Vec::new();
+                        for &(name, result) in outputs {
+                            let result = body.query().fields("Yield", result)?;
+                            let Some(value) = body.operand(result[1])? else {
+                                return Err(error("compaction payload has no value"));
+                            };
+                            let temporary = body.local_place(value.ty.clone())?;
+                            body.store_place(temporary, value)?;
+                            fields.push((name, temporary));
+                        }
+                        payloads.push(fields);
+                    }
+                    Ok(())
+                })?;
+                let flags =
+                    flags.into_iter().map(|flag| body.load_place(flag)).collect::<Result<Vec<_>, _>>()?;
+                let (prefixes, totals) =
+                    body.workgroup_scan(&flags, &neutral, lane.clone(), width, |body, left, right| {
+                        left.iter()
+                            .zip(right)
+                            .map(|(a, b)| body.binary(BinaryOperator::Add, a.clone(), b.clone()))
+                            .collect()
+                    })?;
+                let mut next = Vec::new();
+                for ((((flag, prefix), total), base), fields) in
+                    flags.into_iter().zip(prefixes).zip(totals).zip(carried).zip(payloads)
+                {
+                    let keep = body.binary(BinaryOperator::NotEqual, flag, Self::number(0))?;
+                    let destination = body.binary(BinaryOperator::Add, base.clone(), prefix)?;
+                    body.when(keep, |body| {
+                        for (name, temporary) in fields {
+                            let value = body.load_place(temporary)?;
+                            body.write_array(name, &[destination.clone()], value)?;
+                        }
+                        Ok(())
+                    })?;
+                    next.push(body.binary(BinaryOperator::Add, base, total)?);
+                }
+                Ok(next)
+            },
+        )?;
+        self.pack_results(totals)
     }
 }

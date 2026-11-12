@@ -36,24 +36,7 @@ fn size_hint_survives_egglog_optimization() {
     assert!(entries > 0);
 }
 
-#[test]
-fn dead_fused_outputs_do_not_evaluate_their_elements() {
-    let module = placed_source(
-        "entry main(xs:[8]i32) [8]i32 =
-        let dead=map(|x|x*x,xs) in let live=map(|x|x+17,xs) in
-        scatter((#[scratch] dead),iota(8),live)",
-    );
-    for entry in &module.entry_points {
-        assert!(
-            !entry.body.inner.insts.values().any(|instruction| matches!(&instruction.data,
-                crate::ssa::types::InstKind::Op {tag:crate::op::OpTag::BinOp(crate::op::BinaryOperator::Multiply),operands}
-                    if operands.len()==2 && operands[0]==operands[1])),
-            "unused producer arithmetic in {}",
-            entry.name
-        );
-    }
-}
-
+// Scratch element liveness is checked in memory_ir_dead_elements.wyn.
 #[test]
 fn host_preparation_preserves_the_authoritative_memory_program() {
     let tlc =
@@ -100,26 +83,6 @@ fn scalar_policy_controls_optional_templates() {
             assert_eq!(calls, 0);
         }
     }
-}
-
-#[test]
-fn record_update_survives_to_ssa_and_lowers_in_both_backends() {
-    let source = include_str!("../../../testfiles/regressions/record_update.wyn");
-    let program = compile_thru_ssa(source).unwrap();
-    let count = program
-        .functions
-        .iter()
-        .map(|f| &f.body)
-        .chain(program.entry_points.iter().map(|e| &e.body))
-        .flat_map(|body| body.inner.insts.values())
-        .filter(|inst| {
-            matches!(&inst.data,
-            crate::ssa::types::InstKind::Op {
-                tag: crate::op::OpTag::Intrinsic { id, .. }, ..
-            } if *id == crate::builtins::catalog().known().record_with)
-        })
-        .count();
-    assert!(count >= 7, "dependent field updates must survive to SSA");
 }
 
 #[test]
@@ -209,44 +172,7 @@ fn interfaces_for_test(
 
 // Inspect both emitted shader formats under the CLI's default and -O policies.
 
-#[test]
-fn narrowing_loop_capacity_requires_bounded_backedge() {
-    let source = include_str!("../../../testfiles/regressions/narrowing_loop_capacity.wyn")
-        .replace("(mid+1,hi)", "(hi+1,hi)");
-    let tlc = crate::compile_thru_tlc(&source).unwrap();
-    let program = super::place(
-        super::fuse(super::from_tlc(&tlc).unwrap()).unwrap(),
-        crate::PipelineTopologyPolicy::AllowGenerated,
-    ).unwrap();
-    let query = Query(&program.graph);
-    let current = query.row("CurrentProgram", |_| true).unwrap().unwrap()[0];
-    let mut scans = 0;
-    query.for_each("ProgramFunction", |member| {
-        if member[0] != current { return Ok(()); }
-        let function = member[1];
-        let root = query.constructor("FunctionRoot", (function,))?.unwrap();
-        query.for_each("ContainsExp", |row| {
-            if row[0] != root { return Ok(()); }
-            let Some(parallel) = query.enode("Parallel", row[1])? else { return Ok(()); };
-            let body = query.fields("ParallelBlock", parallel[2])?;
-            for clause in query.vector(body[1])? {
-                let Some(fold) = query.enode("Fold", clause)? else { continue; };
-                if query.enode("Total", fold[0])?.is_some() { continue; }
-                scans += 1;
-                let domain = query.fields("IterationSpace", parallel[1])?;
-                let axes = query.vector(domain[1])?;
-                let axis = query.fields("DenseAxis", *axes.last().unwrap())?;
-                if let Some(bound) = query.lookup("ExtentUpper", (function, axis[1]))? {
-                    assert!(program.graph.value_to_base::<i64>(bound) >= 34,
-                        "backedge can produce 34 elements");
-                }
-            }
-            Ok(())
-        })
-    }).unwrap();
-    assert_eq!(scans, 1);
-}
-
+// Loop capacity is checked through both backends in memory_ir_loop_capacity.wyn.
 #[test]
 fn helper_substitution_keeps_argument_contexts_and_shared_products() {
     use crate::op::{BinaryOperator, OpTag};
@@ -360,39 +286,4 @@ fn scalar_admission_uses_ir_literal_edits() {
     "#).unwrap();
 }
 
-#[test]
-fn parallel_loops_lower_without_source_operator_kinds_or_neutrals() {
-    let source = r#"
-entry guarded_write(xs:[]i32) [3]i32=let ys=filter(|x|x!=0,xs) let dest=[-1,-1,-1] in scatter(dest,map(|x|x-1,ys),map(|x|100/x,ys))
-entry owned_indexed() [3]i32=let dest=[0,0,0] in reduce_by_index(dest,|a,b|a+b+1,0,[0,1,0,2,1],[2,3,4,5,6])
-entry bucket_counts() ([2]u32,u32)=let dest=[[-1,-1],[-1,-1]] in let (ys,counts,overflow)=bucket_scatter_2d(dest,[[(-1,9),(0,10),(0,11)],[(0,12),(1,20),(2,9)]]) in (counts,overflow)
-entry sum(xs:[17]i32) i32=reduce((+),0,map(|x|x+1,xs))
-entry prefix(xs:[17]i32) [17]i32=map(|x|x*2,scan((+),0,xs))
-entry packed_prefix(xs:[]i32) []i32=map(|x|x*2,scan((+),0,map(|x|100/x,filter(|x|x!=0,xs))))
-entry packed(xs:[17]i32) []i32=map(|x|100/x,filter(|x|x!=0,xs))
-entry masked(xs:[17]i32) (i32,i32)=let ys=filter(|x|x>0,xs) in (length(ys),reduce((+),0,ys))
-entry indexed(dest:*[3]i32,xs:[5]i32,k:i32) [3]i32=reduce_by_index(dest,|a,b|a+b+k,0,map(|x|x%3,xs),xs)
-entry buckets(dest:*[2][2]i32) ([2][2]i32,[2]u32,u32)=bucket_scatter_2d(dest,[[(-1,9),(0,10),(0,11)],[(0,12),(1,20),(2,9)]])
-entry varying(xs:[]i32) []i32=map(|n|reduce((+),0,iota(n)),xs)
-entry branching(xs:[][17]i32) []i32=map(|row|if row[0]>0 then reduce((+),0,row) else 0,xs)
-entry local_pack(xs:[][17]i32) []i32=map(|row|reduce((+),0,filter(|x|x>0,row)),xs)
-entry conditional_loop(xs:[4]i32,n:i32) [4]i32=map(|x|loop y=x while (if y<n then y>=0 else false) do y+1,xs)
-entry counted_loop(xs:[4]i32) [4]i32=map(|x|loop y=x for i<33 do y+i,xs)
-entry chained(xs:[17]i32) []i32=filter(|x|x<50,map(|x|100/x,filter(|x|x!=0,xs)))
-entry chained_total(xs:[17]i32) (i32,i32)=let ys=filter(|x|x<20,map(|x|x+1,filter(|x|x>0,xs))) in (length(ys),reduce((+),0,ys))
-"#;
-    let tlc = crate::compile_thru_tlc(source).unwrap();
-    let mut program =
-        super::optimize_with_policy(interfaces_for_test(&tlc), ScalarOptimization::Basic).unwrap();
-    // The source operator tables no longer exist; final emission reads this root.
-    super::memory::validate(&mut program.graph).unwrap();
-    let ssa = super::finish_for_test(program, crate::CodegenTarget::Wgsl).unwrap();
-    let wgsl = crate::lower_ssa_to_wgsl(ssa).unwrap();
-    let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(&module)
-    .unwrap();
-}
+// Parallel emission contracts live in memory_ir_parallel_*.wyn CLI fixtures.

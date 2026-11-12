@@ -1,0 +1,15 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"allocated_loop_6_main\""]
+
+entry allocated_loop_6_main(allocated_loop_6_n:i32) []i32 =
+         let out=loop out=iota(allocated_loop_6_n) for i<2 do out[1..length(out)]
+         in map(|x|x+1,out)
+
+
+-- compiler_repro_runtime_array_loop
+-- Runtime array state retains its input extent across element updates.
+-- Expected runtime_loop_0_main([3, 7, -2]) = [4, 8, -1], and runtime_loop_0_main([]) = [].

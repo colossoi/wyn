@@ -3,14 +3,16 @@ use super::entry::GeneratedBuffers;
 use super::{builder_error, error, Compiler, OptimizeError, Typed};
 use crate::egglog::bindings::Bindings;
 use crate::egglog::query::Query;
-use crate::host::ScalarExpr;
+use crate::host::{Expr, ScalarExpr};
 use crate::op::OpTag;
 use crate::ssa::builder::{BuilderError, FuncBuilder};
 use crate::ssa::types::{BlockId, FuncBody, InstKind, PlaceId, Terminator, ValueRef};
 use crate::types::{self, Type};
-use crate::{BindingRef, FunctionId, LookupMap};
+use crate::{BindingRef, FunctionId, LookupMap, LookupSet};
 use egglog_engine::Value;
 
+mod atomics;
+mod bucket;
 mod control;
 mod memory;
 mod subgroups;
@@ -24,10 +26,16 @@ pub(super) struct Body<'a, 'p, 'source> {
     local_arrays: LookupMap<ValueRef, PlaceId>,
     next_workgroup_array: u32,
     pub subgroup: Option<subgroups::Subgroup>,
-    pub memories: LookupMap<i32, Typed>,
     pub storage_accesses: LookupMap<BindingRef, crate::ResourceAccess>,
     pub active_dispatch: Option<Value>,
     pub host_values: Bindings<Value, ScalarExpr>,
+    pub host_lengths: LookupMap<ValueRef, Expr>,
+    pub host_shapes: LookupMap<ValueRef, Vec<Expr>>,
+    pub collection_requests:
+        LookupMap<Value, (Type, Typed, Option<Expr>, Option<Vec<(Typed, Expr)>>, BlockId)>,
+    pub collection_values: LookupMap<Value, Typed>,
+    pub reused_buffers: LookupSet<BindingRef>,
+    pub transported_values: LookupMap<Value, ValueRef>,
     pub guard: Option<ScalarExpr>,
     pub generated: Option<GeneratedBuffers>,
 }
@@ -58,10 +66,15 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
             local_arrays: LookupMap::default(),
             next_workgroup_array: 0,
             subgroup: None,
-            memories: LookupMap::default(),
             storage_accesses: LookupMap::default(),
             active_dispatch: None,
             host_values: Bindings::default(),
+            host_lengths: LookupMap::default(),
+            host_shapes: LookupMap::default(),
+            collection_requests: LookupMap::default(),
+            collection_values: LookupMap::default(),
+            reused_buffers: LookupSet::default(),
+            transported_values: LookupMap::default(),
             guard: None,
             generated: None,
         }
@@ -85,7 +98,12 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         self.builder = FuncBuilder::new(vec![], types::unit());
         self.values = Bindings::default();
         self.local_arrays.clear();
-        self.memories.clear();
+        self.host_lengths.clear();
+        self.host_shapes.clear();
+        self.collection_requests.clear();
+        self.collection_values.clear();
+        self.reused_buffers.clear();
+        self.transported_values.clear();
         self.storage_accesses.clear();
         self.next_workgroup_array = 0;
         self.active_dispatch = None;

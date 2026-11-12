@@ -1,0 +1,9 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"runtime_nested_rows\""]
+
+-- Known gap: materialized rows need allocations whose sizes depend on a kernel input.
+entry runtime_nested_rows(xs:[]i32) [][]i32 = map(|x|map(|i|i+x,iota(x)),xs)

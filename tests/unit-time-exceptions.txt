@@ -1,0 +1,68 @@
+# DO NOT add exceptions or broaden this list without explicit user approval.
+# Renaming existing entries and removing entries are allowed.
+# When changing or renaming a listed test, consider reducing it below 3 seconds.
+# If a new test trips the timing gate, first consider whether it belongs in
+# integration coverage instead of adding an exception here.
+# Do not regenerate the list automatically.
+# Frozen baseline: 2026-11-12, normal test profile, 16 MiB stacks, 8 threads.
+# One-time user approval used 2026-11-12: compiler_repro_local_capacity_plan (3.06s isolated).
+# Excludes source-to-artifact regressions migrated to public integration coverage.
+# One exact test target and fully qualified test name per line.
+
+wyn_core::egglog::from_tlc::tests::evaluation_edges_stay_direct_and_borrowed_values_do_not_repeat_effects
+wyn_core::egglog::from_tlc::tests::runtime_maps_preserve_collection_until_shape_analysis
+wyn_core::egglog::fusion::reachability_tests::rewrites_stay_with_their_program_revision
+wyn_core::egglog::fusion::tests::scan_barriers_survive_intermediate_map_contraction
+wyn_core::egglog::memory::tests::execution_planning_preserves_logical_array_types
+wyn_core::egglog::memory::tests::logical_import_preserves_storage_products_and_rectangular_rows
+wyn_core::egglog::memory::tests::read_only_indexing_keeps_its_guard_without_a_domain_bounds_proof
+wyn_core::egglog::memory::tests::source_import_builds_closed_scalar_control_and_parallel_bodies
+wyn_core::egglog::planning::tests::accumulator_state_order_is_read_from_the_plan
+wyn_core::egglog::planning::tests::calibrated_costs_select_among_the_same_legal_map_executions
+wyn_core::egglog::planning::tests::collective_width_tracks_materialized_accumulator_size
+wyn_core::egglog::planning::tests::compiler_repro_local_capacity_plan
+wyn_core::egglog::planning::tests::compiler_repro_nested_capacity_plan
+wyn_core::egglog::planning::tests::conditional_distribution_preserves_empty_and_partial_evaluation
+wyn_core::egglog::planning::tests::dependent_or_partial_regions_stay_inside_parallel_callbacks
+wyn_core::egglog::planning::tests::flat_and_ranked_collectives_share_dimension_metadata
+wyn_core::egglog::planning::tests::fused_outputs_traverse_independent_rectangular_domains
+wyn_core::egglog::planning::tests::indexed_reducers_share_native_recognition_and_keep_cas_fallback
+wyn_core::egglog::planning::tests::invariant_array_regions_are_evaluated_outside_parallel_callbacks
+wyn_core::egglog::planning::tests::invariant_fusion_moves_all_members_together
+wyn_core::egglog::planning::tests::invariant_memory_computations_move_out_of_loops_and_stay_guarded_by_branches
+wyn_core::egglog::planning::tests::invariant_reductions_and_scans_move_with_their_memory_results
+wyn_core::egglog::planning::tests::loop_capacity_obligations_use_the_length_preservation_proof
+wyn_core::egglog::planning::tests::loop_placement_accounts_for_iteration_work_before_storage
+wyn_core::egglog::planning::tests::nested_collectives_are_costed_as_part_of_the_lane_body
+wyn_core::egglog::planning::tests::nested_loop_work_uses_constant_trip_counts
+wyn_core::egglog::planning::tests::product_loops_track_array_component_length_proofs
+wyn_core::egglog::planning::tests::ranked_inputs_keep_their_independent_coordinate_mappings
+wyn_core::egglog::planning::tests::rectangular_maps_expand_launch_without_expanding_row_capacity
+wyn_core::egglog::planning::tests::rectangular_maps_select_arbitrary_rank_and_preserve_sequential_prefixes
+wyn_core::egglog::planning::tests::rectangular_planning_and_emission_use_fused_structure
+wyn_core::egglog::planning::tests::rectangular_runtime_dimensions_must_be_uniform_across_outer_coordinates
+wyn_core::egglog::planning::tests::result_tree_counts_are_available_to_fusion_choices
+wyn_core::egglog::planning::tests::retained_fusion_outputs_block_motion_when_any_member_depends_on_the_iteration
+wyn_core::egglog::planning::tests::scan_input_cannot_capture_a_fused_total
+wyn_core::egglog::planning::tests::segmented_collectives_select_workgroups_for_each_outer_coordinate
+wyn_core::egglog::planning::tests::sliced_local_collections_retain_their_source_capacity
+wyn_core::egglog::planning::tests::subgroup_addition_is_opt_in_and_uses_small_segments
+wyn_core::egglog::planning::tests::updated_slice_preserves_its_descriptor
+wyn_core::egglog::scalar::tests::shared_helpers_keep_separate_entry_and_loop_parameters
+wyn_core::egglog::to_ssa::tests::collective_phase_accesses_exclude_unused_inputs_and_producer_captures
+wyn_core::egglog::to_ssa::tests::fused_intermediate_element_types_do_not_restrict_final_reuse
+wyn_core::egglog::to_ssa::tests::fused_map_chain_keeps_permission_to_reuse_its_external_input
+wyn_core::egglog::to_ssa::tests::fused_outputs_reuse_distinct_consumed_inputs
+wyn_core::egglog::to_ssa::tests::in_place_results_keep_the_host_input_binding_and_upload_role
+wyn_core::egglog::to_ssa::tests::independent_entries_keep_their_own_dispatches_and_results
+wyn_core::egglog::to_ssa::tests::reuse_requires_ownership_pointwise_access_and_no_live_alias
+wyn_core::egglog::to_ssa::tests::scalar_projection_setup_is_evaluated_inside_its_map
+wyn_core::egglog::to_ssa::tests::selected_grid_dimensions_are_positive
+wyn_core::egglog::to_ssa::tests::varying_collection_emits_shaders_and_host_loop
+wyn_core::ssa::optimize::tests::branch_clamp_reuses_normalization_and_dependent_projection
+wyn_core::ssa::optimize::tests::division_and_remainder_are_reused_from_enclosing_loop_scopes
+wyn_core::ssa::optimize::tests::division_and_remainder_used_by_a_condition_are_reused_in_both_arms
+wyn_core::ssa::optimize::tests::division_reuse_respects_loop_dominance_and_carried_values
+wyn_core::tlc::stage_extract::tests::graphics_aliases_preserve_computed_capture_identity
+wyn_core::tlc::stage_extract::tests::graphics_aliases_preserve_computed_projection_identity
+wyn_core::tlc::stage_extract::tests::graphics_aliases_preserve_input_capture_identity

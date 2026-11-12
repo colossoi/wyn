@@ -1,0 +1,10 @@
+--! command = "build"
+--! exit = 0
+--! args = ["--graphics"]
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"tuple_helper_2_main\""]
+
+def tuple_helper_2_duplicate<[tuple_helper_2_n], A>(tuple_helper_2_xs:[tuple_helper_2_n]A) [tuple_helper_2_n](A,A)=map(|x|(x,x),tuple_helper_2_xs)
+entry tuple_helper_2_main(tuple_helper_2_xs:[]i32) []i32=map(|((a,b),(c,d))|a+b+c+d,tuple_helper_2_duplicate(tuple_helper_2_duplicate(tuple_helper_2_xs)))

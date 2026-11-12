@@ -4,6 +4,30 @@ use crate::PipelineTopologyPolicy;
 use crate::{compile_thru_tlc, host, CodegenTarget};
 
 #[test]
+fn logical_array_bindings_preserve_physical_boolean_storage() {
+    use crate::types::{self, Type, TypeName};
+    let logical = types::sized_array(4, types::bool_type());
+    let storage = types::view_array_with_size(
+        &Type::Constructed(TypeName::UInt(32), vec![]),
+        Type::Constructed(TypeName::SizePlaceholder, vec![]),
+        types::buffer_tag(crate::BindingRef::new(0, 2)),
+    );
+    assert!(super::same_value_structure(&storage, &logical));
+    assert!(super::same_value_structure(
+        &types::tuple(vec![storage.clone()]),
+        &types::tuple(vec![logical]),
+    ));
+    assert!(!super::same_value_structure(
+        &storage,
+        &types::sized_array(4, types::i32())
+    ));
+    assert!(!super::same_value_structure(
+        &Type::Constructed(TypeName::UInt(32), vec![]),
+        &types::bool_type(),
+    ));
+}
+
+#[test]
 fn fused_map_chain_keeps_permission_to_reuse_its_external_input() {
     let output = pipeline("entry main(xs:*[]i32) []i32 = let ys=map(|x:i32|x+1,xs) in map(|x:i32|x*2,ys)");
     let Pipeline::Compute(p) = &output.pipelines[0] else {
@@ -187,20 +211,6 @@ fn sliced_fused_map_normalizes() {
         "entry main(xs: []i32) [4]i32 =
         let a=map(|x:i32|x+1,xs) in map(|x:i32|x*2,a[2..6])",
     );
-}
-
-#[test]
-fn memory_rewrites_lower_through_nested_scopes() {
-    for source in [
-        "entry main(xs:[]i32) [4]i32=map(|p|reduce((+),0i32,xs),iota(4))",
-        "entry main(xs:[]i32,j:i32) [4]i32=map(|p|scan((+),0i32,xs)[j],iota(4))",
-        "entry main(xs:[]i32) [2]i32=map(|x|x+1,xs[1..7][2..4])",
-        "entry main(xs:[]i32,b:bool) [4]i32=map(|p|if b then reduce((+),0i32,xs) else p,iota(4))",
-        "entry main(xs:[]i32,n:i32) i32=loop x=0i32 for i<n do x+reduce((+),0i32,xs)",
-        "entry main() [4]i32=map(|p|let a=map(|i|i+2,iota(8)) in let b=map(|i|i+1,iota(8)) in a[0]+b[0],iota(4))",
-    ] {
-        pipeline(source);
-    }
 }
 
 fn pipeline(source: &str) -> host::ModuleInterface {

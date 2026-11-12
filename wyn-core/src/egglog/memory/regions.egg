@@ -30,21 +30,25 @@
 ; incoming capability, but a loop must carry it through its merge parameter.
 (function AccumulatorNames (Names) Names :no-merge)
 (relation AccumulatorNamesDemand (Names))
+(function NamesHead (Names) Name :no-merge)
+(function NamesTail (Names) Names :no-merge)
 (function ConsumedTokens (Exp) Names :no-merge)
 (rule ((ContainsExp root expression) (= used (NamesExp expression)) (= bound (BindersExp expression)))
       ((AccumulatorNamesDemand (set-diff used bound))) :ruleset memory-scopes)
 (rule ((AccumulatorNamesDemand names) (= names (set-empty)))
       ((set (AccumulatorNames names) (set-empty))) :ruleset memory-scopes)
 (rule ((AccumulatorNamesDemand names) (> (set-length names) 0))
-      ((AccumulatorNamesDemand (set-remove names (set-get names 0)))) :ruleset memory-scopes)
-(rule ((AccumulatorNamesDemand names) (> (set-length names) 0) (= first (set-get names 0))
-       (= rest (AccumulatorNames (set-remove names first))) (= first (AccNameRef name)))
+      ((set (NamesHead names) (set-get names 0))
+       (set (NamesTail names) (set-remove names (set-get names 0)))
+       (AccumulatorNamesDemand (set-remove names (set-get names 0)))) :ruleset memory-scopes)
+(rule ((= first (NamesHead names)) (= tail (NamesTail names))
+       (= rest (AccumulatorNames tail)) (= first (AccNameRef name)))
       ((set (AccumulatorNames names) (set-insert rest first))) :ruleset memory-scopes)
-(rule ((AccumulatorNamesDemand names) (> (set-length names) 0) (= first (set-get names 0))
-       (= rest (AccumulatorNames (set-remove names first))) (= first (ValueNameRef name)))
+(rule ((= first (NamesHead names)) (= tail (NamesTail names))
+       (= rest (AccumulatorNames tail)) (= first (ValueNameRef name)))
       ((set (AccumulatorNames names) rest)) :ruleset memory-scopes)
-(rule ((AccumulatorNamesDemand names) (> (set-length names) 0) (= first (set-get names 0))
-       (= rest (AccumulatorNames (set-remove names first))) (= first (BlockNameRef name)))
+(rule ((= first (NamesHead names)) (= tail (NamesTail names))
+       (= rest (AccumulatorNames tail)) (= first (BlockNameRef name)))
       ((set (AccumulatorNames names) rest)) :ruleset memory-scopes)
 (rule ((ContainsExp root expression) (= used (NamesExp expression)) (= bound (BindersExp expression))
        (= tokens (AccumulatorNames (set-diff used bound))))
@@ -125,8 +129,8 @@
 (rule ((CheckStatement context id pattern (Parallel execution domain body) available)
        (= uses (NamesExecution execution)))
       ((RequiredNames context uses available)) :ruleset memory-scopes)
-; Rectangular axes share invariant extents. Dependent lengths use RaggedAxis
-; with explicit offsets, or a lexically nested Parallel body.
+; A domain's extents cannot depend on its own coordinates. Dependent lengths
+; remain in a lexically nested Parallel body until a legal domain transformation.
 (rule ((CheckStatement context id pattern (Parallel execution domain body) available)
        (= domain (IterationSpace flat axes)) (= indices (BindersDomain domain))
        (WalkDomainAxes axes i) (< i (vec-length axes)) (= (vec-get axes i) (DenseAxis index extent))
@@ -141,9 +145,7 @@
 (rule ((CheckAxisAt context axes available i) (< i (vec-length axes))
        (= (vec-get axes i) (DenseAxis name length)) (= uses (NamesIndexExp length)))
       ((RequiredNames context uses available)) :ruleset memory-scopes)
-(rule ((CheckAxisAt context axes available i) (< i (vec-length axes))
-       (= (vec-get axes i) (RaggedAxis name offsets parent)) (= uses (NamesIndexExp parent)))
-      ((RequiredNames context (set-insert uses (ValueNameRef offsets)) available)) :ruleset memory-scopes)
+
 (rule ((CheckParallel context (ParallelBlock statements results) lanes outer))
       ((CheckSequence context statements lanes)) :ruleset memory-scopes)
 (relation ParallelResultAt (ScopeContext ParallelResults Names i64))
@@ -156,6 +158,10 @@
        (= (vec-get results i) (Collect values)) (= uses (NamesResults values)))
       ((RequiredNames context uses available)) :ruleset memory-scopes)
 (rule ((ParallelResultAt context results available i) (< i (vec-length results))
+       (= (vec-get results i) (Compact condition values))
+       (= uses (NamesResults values)) (= predicate (NamesAtom condition)))
+      ((RequiredNames context (set-union uses predicate) available)) :ruleset memory-scopes)
+(rule ((ParallelResultAt context results available i) (< i (vec-length results))
        (= (vec-get results i) (Fold kind (Reduction commutative neutral combine) values))
        (CheckParallel context (ParallelBlock statements results) lanes outer)
        (= uses (NamesResults values)) (= initial (NamesAtoms neutral)))
@@ -164,6 +170,8 @@
        (CheckLambda (ReducerScope context i) combine outer)) :ruleset memory-scopes)
 (rule ((CheckStatement context id pattern (WithAcc inputs body) available))
       ((CheckLambda (NestedScope context id 0) body available)) :ruleset memory-scopes)
+(rule ((CheckStatement context id pattern (BucketScatter destination lambda sources mappings rank) available))
+      ((CheckLambda (NestedScope context id 0) lambda available)) :ruleset memory-scopes)
 (relation AccInputAt (ScopeContext StatementId AccInputs Names i64))
 (rule ((CheckStatement context id pattern (WithAcc inputs body) available))
       ((AccInputAt context id inputs available 0)) :ruleset memory-scopes)
@@ -232,6 +240,12 @@
 (function TokenCapability (Function AccName) AccInput :no-merge)
 (relation TokenAlias (Function AccName AccName))
 (function ClauseOffset (ParallelResults i64) i64 :no-merge)
+(relation FoldSlots (FoldKind i64 i64))
+(FoldSlots (Total) 0 1)
+(FoldSlots (InclusiveScan) 1 0)
+(FoldSlots (ExclusiveScan) 1 0)
+(FoldSlots (InclusiveScanAndTotal) 1 1)
+(FoldSlots (ExclusiveScanAndTotal) 1 1)
 (function ClauseArity (ParallelResult) i64 :no-merge)
 (relation TokenResults (Function Pattern Body))
 (rule ((ContainsExp (FunctionRoot function) (WithAcc inputs (FunctionBody params returns body)))
@@ -265,12 +279,9 @@
 (rule ((= clause (Collect results))) ((set (ClauseArity clause) (vec-length results))) :ruleset memory-scopes)
 (rule ((= clause (Contribute tokens))) ((set (ClauseArity clause) (vec-length tokens))) :ruleset memory-scopes)
 (rule ((= clause (Fold kind (Reduction commutative neutral combine) results))
-       (!= kind (InclusiveScanAndTotal)) (!= kind (ExclusiveScanAndTotal)))
-      ((set (ClauseArity clause) (vec-length neutral))) :ruleset memory-scopes)
-(rule ((= clause (Fold (InclusiveScanAndTotal) (Reduction commutative neutral combine) results)))
-      ((set (ClauseArity clause) (* 2 (vec-length neutral)))) :ruleset memory-scopes)
-(rule ((= clause (Fold (ExclusiveScanAndTotal) (Reduction commutative neutral combine) results)))
-      ((set (ClauseArity clause) (* 2 (vec-length neutral)))) :ruleset memory-scopes)
+       (FoldSlots kind prefix total))
+      ((set (ClauseArity clause) (* (+ prefix total) (vec-length neutral)))) :ruleset memory-scopes)
+
 (rule ((= body (ParallelBlock statements results))) ((set (ClauseOffset results 0) 0)) :ruleset memory-scopes)
 (rule ((= offset (ClauseOffset results i)) (< i (vec-length results)) (= arity (ClauseArity (vec-get results i))))
       ((set (ClauseOffset results (+ i 1)) (+ offset arity))) :ruleset memory-scopes)
@@ -282,39 +293,63 @@
 
 ; Signature checking projects only slot kinds from the authoritative bindings.
 ; Shape witnesses remain in ReturnInfo; no inferred layout can replace them.
-(datatype SlotKind
+(datatype*
+ (sort SlotKinds (Vec SlotKind))
+ (SlotKind
+  (LogicalSlot LogicalType)
+  (ProductSlot SlotKinds) (NestedArraySlot SlotKind i64)
   (ScalarSlot ElementType) (ArraySlot ElementType i64) (MemorySlot)
-  (AccumulatorSlot AccInfo) (ResourceSlot ResourceType))
+  (AccumulatorSlot AccInfo) (ResourceSlot ResourceType)))
+(function LogicalSlotKind (LogicalType) SlotKind :no-merge)
+(function CollectedSlot (SlotKind i64) SlotKind :no-merge)
+(relation CollectSlotDemand (SlotKind i64))
+(function ProductSlotPrefix (LogicalTypes i64) SlotKinds :no-merge)
+(rule ((= ty (ElementValue element))) ((set (LogicalSlotKind ty) (ScalarSlot element))) :ruleset memory-scopes)
+(rule ((= ty (ResourceValue resource))) ((set (LogicalSlotKind ty) (ResourceSlot resource))) :ruleset memory-scopes)
+(rule ((= ty (ArrayType ownership extents element)) (= item (LogicalSlotKind element)))
+      ((CollectSlotDemand item (vec-length extents))) :ruleset memory-scopes)
+(rule ((= ty (ArrayType ownership extents element)) (= item (LogicalSlotKind element))
+       (= collected (CollectedSlot item (vec-length extents))))
+      ((set (LogicalSlotKind ty) collected)) :ruleset memory-scopes)
+(rule ((= ty (ProductType fields))) ((set (ProductSlotPrefix fields 0) (vec-of))) :ruleset memory-scopes)
+(rule ((= prefix (ProductSlotPrefix fields i)) (< i (vec-length fields)) (= field (LogicalSlotKind (vec-get fields i))))
+      ((set (ProductSlotPrefix fields (+ i 1)) (vec-push prefix field))) :ruleset memory-scopes)
+(rule ((= ty (ProductType fields)) (= fields2 (ProductSlotPrefix fields (vec-length fields))))
+      ((set (LogicalSlotKind ty) (ProductSlot fields2))) :ruleset memory-scopes)
 (function ValueSlot (ValueInfo) SlotKind :no-merge)
 (function BindingSlot (Binding) SlotKind :no-merge)
 (function ReturnKind (ReturnInfo) SlotKind :no-merge)
 (function OperandSlot (Function Operand) SlotKind :no-merge)
+(rule ((= info (LogicalValue ty)) (= kind (LogicalSlotKind ty))) ((set (ValueSlot info) kind)) :ruleset memory-scopes)
+(rule ((= info (LogicalReturn ty)) (= kind (LogicalSlotKind ty))) ((set (ReturnKind info) kind)) :ruleset memory-scopes)
 (relation CheckSignature (ScopeContext ReturnInfos Results))
 (relation CheckPatternSignature (ScopeContext Pattern ReturnInfos))
 (relation CheckSlot (ScopeContext SlotKind Operand))
+(rule ((ParallelResultAt context results available i) (< i (vec-length results))
+       (= (vec-get results i) (Compact condition values)))
+      ((CheckSlot context (ScalarSlot (ScalarElement (Bool))) (ValueOperand condition))) :ruleset memory-scopes)
 (relation ExecutableScope (ScopeContext))
 (rule ((CheckFunction function)) ((ExecutableScope (FunctionScope function))) :ruleset memory-scopes)
 (rule ((= context (NestedScope parent id i)) (ExecutableScope parent)) ((ExecutableScope context)) :ruleset memory-scopes)
 (rule ((= context (ReducerScope parent i)) (ExecutableScope parent)) ((ExecutableScope context)) :ruleset memory-scopes)
 (rule ((= info (ScalarInfo element))) ((set (ValueSlot info) (ScalarSlot element))) :ruleset memory-scopes)
-(rule ((= info (ArrayValue element shape))) ((set (ValueSlot info) (ArraySlot element (vec-length shape)))) :ruleset memory-scopes)
-(rule ((= info (ArrayInfo element (ArrayIn block (Layout offset dims)))))
-      ((set (ValueSlot info) (ArraySlot element (vec-length dims)))) :ruleset memory-scopes)
+
+
+
+
 (rule ((= info (ResourceInfo resource))) ((set (ValueSlot info) (ResourceSlot resource))) :ruleset memory-scopes)
 (rule ((= binding (BindValue name info)) (= kind (ValueSlot info))) ((set (BindingSlot binding) kind)) :ruleset memory-scopes)
-(rule ((= binding (BindBlock name bytes))) ((set (BindingSlot binding) (MemorySlot))) :ruleset memory-scopes)
+
 (rule ((= binding (BindAccumulator name info))) ((set (BindingSlot binding) (AccumulatorSlot info))) :ruleset memory-scopes)
 (rule ((= info (ReturnScalar element))) ((set (ReturnKind info) (ScalarSlot element))) :ruleset memory-scopes)
-(rule ((= info (ReturnArrayValue element shape))) ((set (ReturnKind info) (ArraySlot element (vec-length shape)))) :ruleset memory-scopes)
-(rule ((= info (ReturnArray element block (ExtendedLayout offset dims))))
-      ((set (ReturnKind info) (ArraySlot element (vec-length dims)))) :ruleset memory-scopes)
-(rule ((= info (ReturnMemory bytes))) ((set (ReturnKind info) (MemorySlot))) :ruleset memory-scopes)
+
+
+
 (rule ((= info (ReturnAccumulator accumulator))) ((set (ReturnKind info) (AccumulatorSlot accumulator))) :ruleset memory-scopes)
 (rule ((= info (ReturnResource resource))) ((set (ReturnKind info) (ResourceSlot resource))) :ruleset memory-scopes)
 (rule ((ContainsBinding (FunctionRoot function) binding) (= binding (BindValue name info)) (= kind (BindingSlot binding)))
       ((set (OperandSlot function (ValueOperand (Var name))) kind)) :ruleset memory-scopes)
-(rule ((ContainsBinding (FunctionRoot function) (BindBlock name bytes)))
-      ((set (OperandSlot function (BlockOperand name)) (MemorySlot))) :ruleset memory-scopes)
+
 (rule ((ContainsBinding (FunctionRoot function) (BindAccumulator name info)))
       ((set (OperandSlot function (AccOperand name)) (AccumulatorSlot info))) :ruleset memory-scopes)
 (rule ((ContainsOperand (FunctionRoot function) operand) (= operand (IndexOperand index)))
@@ -360,10 +395,8 @@
 (relation CheckReturnIndex (ScopeContext ReturnInfos i64 SlotKind))
 (rule ((ContainsReturnInfos root returns))
       ((ContainsReturnInfos (ReturnRoot returns) returns)) :ruleset memory-names)
-(rule ((CheckSignature context returns results) (ContainsExtIndex (ReturnRoot returns) (ResultIndex i)))
-      ((CheckReturnIndex context returns i (ScalarSlot (ScalarElement (I32))))) :ruleset memory-scopes)
-(rule ((CheckSignature context returns results) (ContainsReturnBlock (ReturnRoot returns) (ResultBlock i)))
-      ((CheckReturnIndex context returns i (MemorySlot))) :ruleset memory-scopes)
+
+
 (rule ((CheckReturnIndex context returns i expected) (< i 0))
       ((InvalidScope context "negative result witness index")) :ruleset memory-scopes)
 (rule ((CheckReturnIndex context returns i expected) (>= i (vec-length returns)))
@@ -408,33 +441,51 @@
       ((set (DomainIndexPrefix axes (+ i 1)) (vec-push prefix (IndexValue name)))) :ruleset memory-scopes)
 (rule ((= domain (IterationSpace flat axes)) (= indices (DomainIndexPrefix axes (vec-length axes))))
       ((set (DomainIndices domain) indices)) :ruleset memory-scopes)
-; Segmented collections are flat payloads; offsets retain the row structure.
-(rule ((= domain (IterationSpace flat axes)) (WalkDomainAxes axes i) (< i (vec-length axes))
-       (= (vec-get axes i) (RaggedAxis name offsets parent)))
-      ((set (DomainIndices domain) (vec-of (IndexValue flat)))) :ruleset memory-scopes)
+; Collection preserves nested logical values. TLC represents zipped products
+; as products of arrays, so collection distributes over their fields.
+
 (rule ((= domain (IterationSpace flat axes)) (> (vec-length axes) 0))
       ((set (OuterDomain domain) (IterationSpace flat (vec-remove axes (- (vec-length axes) 1))))) :ruleset memory-scopes)
-(function CollectedSlot (SlotKind i64) SlotKind :no-merge)
-(relation CollectSlotDemand (SlotKind i64))
 (rule ((CollectSlotDemand kind 0)) ((set (CollectedSlot kind 0) kind)) :ruleset memory-scopes)
-(rule ((CollectSlotDemand kind dimensions) (= kind (ScalarSlot element)) (> dimensions 0))
-      ((set (CollectedSlot kind dimensions) (ArraySlot element dimensions))) :ruleset memory-scopes)
-(rule ((CollectSlotDemand kind dimensions) (= kind (ArraySlot element rank)) (> dimensions 0))
-      ((set (CollectedSlot kind dimensions) (ArraySlot element (+ rank dimensions)))) :ruleset memory-scopes)
-(relation FoldSlots (FoldKind i64 i64))
-(FoldSlots (Total) 0 1)
-(FoldSlots (InclusiveScan) 1 0)
-(FoldSlots (ExclusiveScan) 1 0)
-(FoldSlots (InclusiveScanAndTotal) 1 1)
-(FoldSlots (ExclusiveScanAndTotal) 1 1)
+(rule ((CollectSlotDemand kind dimensions) (> dimensions 0))
+      ((CollectSlotDemand kind (- dimensions 1))) :ruleset memory-scopes)
+(relation NonProductSlot (SlotKind))
+(rule ((= kind (ScalarSlot element))) ((NonProductSlot kind)) :ruleset memory-scopes)
+(rule ((= kind (ResourceSlot resource))) ((NonProductSlot kind)) :ruleset memory-scopes)
+(rule ((= kind (NestedArraySlot element rank))) ((NonProductSlot kind)) :ruleset memory-scopes)
+(rule ((CollectSlotDemand kind dimensions) (NonProductSlot kind) (> dimensions 0) (= inner (CollectedSlot kind (- dimensions 1))))
+      ((set (CollectedSlot kind dimensions) (NestedArraySlot inner 1))) :ruleset memory-scopes)
+(function CollectedProductPrefix (SlotKinds i64 i64) SlotKinds :no-merge)
+(rule ((CollectSlotDemand (ProductSlot fields) dimensions) (> dimensions 0))
+      ((set (CollectedProductPrefix fields dimensions 0) (vec-of))) :ruleset memory-scopes)
+(rule ((= prefix (CollectedProductPrefix fields dimensions i)) (< i (vec-length fields)))
+      ((CollectSlotDemand (vec-get fields i) dimensions)) :ruleset memory-scopes)
+(rule ((= prefix (CollectedProductPrefix fields dimensions i)) (< i (vec-length fields))
+       (= field (CollectedSlot (vec-get fields i) dimensions)))
+      ((set (CollectedProductPrefix fields dimensions (+ i 1)) (vec-push prefix field))) :ruleset memory-scopes)
+(rule ((CollectSlotDemand kind dimensions) (= kind (ProductSlot fields)) (> dimensions 0)
+       (= collected (CollectedProductPrefix fields dimensions (vec-length fields))))
+      ((set (CollectedSlot kind dimensions) (ProductSlot collected))) :ruleset memory-scopes)
+
+
+
+
+
+
 (relation CheckCollected (ScopeContext Pattern i64 Results i64))
+(relation CheckClauseBindings (ScopeContext Pattern i64 ParallelResult i64))
 (rule ((CheckStatement context id pattern (Parallel execution domain (ParallelBlock statements clauses)) available)
        (= count (ClauseOffset clauses (vec-length clauses))) (!= count (vec-length pattern)))
       ((InvalidScope context "parallel result count differs from its pattern")) :ruleset memory-scopes)
 (rule ((CheckStatement context id pattern (Parallel execution (IterationSpace flat axes) (ParallelBlock statements clauses)) available)
-       (WalkParallelResults clauses i) (< i (vec-length clauses)) (= (vec-get clauses i) (Collect results))
+       (WalkParallelResults clauses i) (< i (vec-length clauses))
        (= offset (ClauseOffset clauses i)) (= indices (DomainIndices (IterationSpace flat axes))))
-      ((CheckCollected context pattern offset results (vec-length indices))) :ruleset memory-scopes)
+      ((CheckClauseBindings context pattern offset (vec-get clauses i) (vec-length indices))) :ruleset memory-scopes)
+(rule ((CheckClauseBindings context pattern offset (Collect results) dimensions))
+      ((CheckCollected context pattern offset results dimensions)) :ruleset memory-scopes)
+(rule ((CheckClauseBindings context pattern offset (Compact condition results) dimensions))
+      ((CheckCollected context pattern offset results dimensions)) :ruleset memory-scopes)
+
 (rule ((CheckCollected context pattern offset results dimensions) (WalkResults results i) (< i (vec-length results))
        (= (vec-get results i) (Yield certs operand)) (= function (ScopeRoot context)) (= item (OperandSlot function operand)))
       ((CollectSlotDemand item dimensions)) :ruleset memory-scopes)
@@ -509,62 +560,28 @@
 (rule ((CheckStatement context id pattern (WithAcc inputs (FunctionBody params returns (Block statements results))) available)
        (< (vec-length results) (vec-length inputs)))
       ((InvalidScope context "accumulator scope loses a capability")) :ruleset memory-scopes)
-(rule ((CheckStatement context id vector-pattern-0 (Alloc space actual) available) (!= declared actual)
-       (= (vec-length vector-pattern-0) 1)
-       (= (vec-get vector-pattern-0 0) (BindBlock block declared)))
-      ((InvalidScope context "allocation capacity differs from its block binding")) :ruleset memory-scopes)
+
 
 (rule ((CheckStatement context id pattern (Parallel execution (IterationSpace flat (vec-of)) (ParallelBlock statements clauses)) available)
        (WalkParallelResults clauses i) (< i (vec-length clauses)) (= (vec-get clauses i) (Fold kind reducer values)))
       ((InvalidScope context "fold requires an iteration axis")) :ruleset memory-scopes)
 
 
-(rule ((= clause (Concatenate mode source))) ((set (ClauseArity clause) 3)) :ruleset memory-scopes)
-(rule ((ParallelResultAt context clauses available i) (< i (vec-length clauses))
-       (= (vec-get clauses i) (Concatenate mode source)))
-      ((RequiredNames context (set-of (ValueNameRef source)) available)) :ruleset memory-scopes)
-(rule ((CheckStatement context id pattern (Parallel execution domain (ParallelBlock statements clauses)) available)
-       (WalkParallelResults clauses i) (< i (vec-length clauses)) (= (vec-get clauses i) (Concatenate mode source))
-       (= offset (ClauseOffset clauses i)) (= function (ScopeRoot context))
-       (= item (OperandSlot function (ValueOperand (Var source))))
-       (< (+ offset 2) (vec-length pattern)) (= expected (BindingSlot (vec-get pattern (+ offset 2)))))
-      ((CheckSlot context expected (ValueOperand (Var source)))) :ruleset memory-scopes)
-(rule ((CheckStatement context id pattern (Parallel execution (IterationSpace flat axes) (ParallelBlock statements clauses)) available)
-       (WalkParallelResults clauses i) (< i (vec-length clauses)) (= (vec-get clauses i) (Concatenate mode source))
-       (!= (vec-length axes) 1))
-      ((InvalidScope context "concatenation requires one ordered iteration axis")) :ruleset memory-scopes)
-(rule ((CheckStatement context id pattern (Parallel execution domain (ParallelBlock statements clauses)) available)
-       (WalkParallelResults clauses i) (< i (vec-length clauses)) (= (vec-get clauses i) (Concatenate mode source))
-       (= offset (ClauseOffset clauses i)) (< (+ offset 2) (vec-length pattern))
-       (= actual (BindingSlot (vec-get pattern offset))) (!= actual (ArraySlot (ScalarElement (I32)) 1)))
-      ((InvalidScope context "concatenation offsets must be an i32 vector")) :ruleset memory-scopes)
-(rule ((CheckStatement context id pattern (Parallel execution domain (ParallelBlock statements clauses)) available)
-       (WalkParallelResults clauses i) (< i (vec-length clauses)) (= (vec-get clauses i) (Concatenate mode source))
-       (= offset (ClauseOffset clauses i)) (< (+ offset 2) (vec-length pattern))
-       (= actual (BindingSlot (vec-get pattern (+ offset 1)))) (!= actual (ScalarSlot (ScalarElement (I32)))))
-      ((InvalidScope context "concatenation length must be an i32 scalar")) :ruleset memory-scopes)
-(rule ((CheckParallel context (ParallelBlock statements clauses) lanes outer)
-       (WalkParallelResults clauses i) (< i (vec-length clauses)) (= (vec-get clauses i) (Concatenate (OffsetSequences) source)))
-      ((CheckSlot context (ArraySlot (ScalarElement (I32)) 1) (ValueOperand (Var source)))) :ruleset memory-scopes)
 
-(rule ((CheckStatement context id pattern (Launch grid body) available))
-      ((CheckBody (NestedScope context id 0) body available)) :ruleset memory-scopes)
-(rule ((CheckStatement context id pattern (Launch grid (Block statements results)) available)
-       (!= (vec-length pattern) (vec-length results)))
-      ((InvalidScope context "kernel result arity mismatch")) :ruleset memory-scopes)
-(rule ((CheckStatement context id pattern (Launch grid (Block statements results)) available)
-       (WalkPattern pattern i) (< i (vec-length pattern)) (< i (vec-length results))
-       (= expected (BindingSlot (vec-get pattern i))) (= (vec-get results i) (Yield proofs operand)))
-      ((CheckSlot (NestedScope context id 0) expected operand)) :ruleset memory-scopes)
-(rule ((CheckStatement context id pattern (Launch grid body) available)
-       (WalkPattern pattern i) (< i (vec-length pattern)) (= (vec-get pattern i) (BindValue name (ArrayValue element shape))))
-      ((InvalidScope context "kernel arrays must be explicit memory writes")) :ruleset memory-scopes)
-(rule ((CheckStatement context id pattern (Launch grid body) available)
-       (WalkPattern pattern i) (< i (vec-length pattern)) (= (vec-get pattern i) (BindValue name (ArrayInfo element storage))))
-      ((InvalidScope context "kernel arrays must be explicit memory writes")) :ruleset memory-scopes)
 
-(rule ((ContainsStm (FunctionRoot function) (Let id pattern certs (Launch grid body))))
-      ((TokenResults function pattern body)) :ruleset memory-scopes)
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 (rule ((= (TokenCapability function token) (AccumulatorInput arrays policy)))
       ((set (TokenWrites function token) (set-empty))) :ruleset memory-effects)
@@ -578,8 +595,7 @@
 (rule ((= indices (DomainIndices domain)))
       ((set (PointSlices indices 0) (vec-of))) :ruleset memory-names)
 
-(rule ((CheckStatement context id pattern (Store mode array slices value) available) (!= pattern (vec-of)))
-      ((InvalidScope context "memory stores do not bind results")) :ruleset memory-scopes)
+
 
 ; Domain and counted-loop indices are scalar binders without a Pattern node.
 (rule ((= (OperandSlot function (ValueOperand (Var name))) (ScalarSlot element)))

@@ -1,8 +1,8 @@
 use super::{builder_error, error, Body, OptimizeError, Typed};
 use crate::flow::ControlHeader;
 use crate::op::{BinaryOperator, OpTag};
+use crate::ssa::layout::storage_value_type;
 use crate::ssa::types::{ConstantValue, InstKind, Terminator, ValueRef};
-use crate::types;
 
 impl Body<'_, '_, '_> {
     pub(in crate::egglog::to_ssa) fn branch(
@@ -31,13 +31,14 @@ impl Body<'_, '_, '_> {
         self.values.restore(outer_values);
         self.builder.switch_to_block_unchecked(no);
         let b = no_value(self)?;
-        let no_end = self.current()?;
-        if a.ty != b.ty {
+        if storage_value_type(&a.ty) != storage_value_type(&b.ty) {
             return Err(error(format!(
                 "branch arms do not match their selected representation: {:?} vs {:?}",
                 a.ty, b.ty
             )));
         }
+        let b = self.cast(b, &a.ty)?;
+        let no_end = self.current()?;
         self.builder.switch_to_block_unchecked(yes_end);
         self.terminate(Terminator::Branch {
             target: end,
@@ -184,6 +185,36 @@ impl Body<'_, '_, '_> {
                         ..
                     } => n.parse().ok(),
                     InstKind::Op {
+                        tag: OpTag::Project { index },
+                        operands,
+                    } if operands.len() == 1 => {
+                        let ValueRef::Ssa(aggregate) = operands[0] else {
+                            return None;
+                        };
+                        let producer = function.inst_of_value(aggregate)?;
+                        let InstKind::Op {
+                            tag,
+                            operands: fields,
+                        } = &function.insts[producer].data
+                        else {
+                            return None;
+                        };
+                        if !matches!(
+                            tag,
+                            OpTag::Tuple
+                                | OpTag::StorageView(
+                                    crate::op::PureViewSource::Storage(_)
+                                        | crate::op::PureViewSource::Workgroup { .. }
+                                )
+                        ) {
+                            return None;
+                        }
+                        self.integer_literal(&Typed {
+                            value: *fields.get(*index as usize)?,
+                            ty: value.ty.clone(),
+                        })
+                    }
+                    InstKind::Op {
                         tag: OpTag::BinOp(operator),
                         operands,
                     } if operands.len() == 2 => {
@@ -205,6 +236,38 @@ impl Body<'_, '_, '_> {
                         }
                     }
                     _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    pub(in crate::egglog::to_ssa) fn literal_bits(&self, value: &Typed) -> Option<i64> {
+        if let Some(n) = self.integer_literal(value) {
+            return Some(n);
+        }
+        if let ValueRef::Const(ConstantValue::F32(bits)) = value.value {
+            return Some(i64::from(bits));
+        }
+        let ValueRef::Ssa(id) = value.value else {
+            return None;
+        };
+        let function = self.builder.func();
+        let inst = function.inst_of_value(id)?;
+        let InstKind::Op { tag, .. } = &function.insts[inst].data else {
+            return None;
+        };
+        match tag {
+            OpTag::Bool(value) => Some(i64::from(*value)),
+            OpTag::Uint(value) => value.parse::<u64>().ok().map(|bits| bits as i64),
+            OpTag::Float(literal) => {
+                if matches!(
+                    value.ty,
+                    crate::types::Type::Constructed(crate::types::TypeName::Float(64), _)
+                ) {
+                    literal.parse::<f64>().ok().map(|value| value.to_bits() as i64)
+                } else {
+                    literal.parse::<f32>().ok().map(|value| i64::from(value.to_bits()))
                 }
             }
             _ => None,
@@ -249,33 +312,5 @@ impl Body<'_, '_, '_> {
             |body| body.tuple(Vec::new()),
         )?;
         Ok(())
-    }
-}
-
-impl Body<'_, '_, '_> {
-    /// Retry an atomic update until its `(observed, exchanged)` result succeeds.
-    pub(in crate::egglog::to_ssa) fn retry(
-        &mut self,
-        initial: Typed,
-        emit: impl FnOnce(&mut Self, Typed) -> Result<Typed, OptimizeError>,
-    ) -> Result<Typed, OptimizeError> {
-        let mut results = self.while_loop(
-            vec![initial],
-            |body, state| {
-                let exchanged = body.field(state[0].clone(), 1)?;
-                let no = body.op(OpTag::Bool(false), vec![], types::bool_type())?;
-                body.binary(BinaryOperator::Equal, exchanged, no)
-            },
-            |body, mut state| {
-                let Some(state) = state.pop() else {
-                    return Err(error("atomic retry state is missing"));
-                };
-                Ok(vec![emit(body, state)?])
-            },
-        )?;
-        let Some(result) = results.pop() else {
-            return Err(error("atomic retry result is missing"));
-        };
-        Ok(result)
     }
 }

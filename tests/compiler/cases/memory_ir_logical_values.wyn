@@ -1,0 +1,15 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! warnings = []
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"logical_values\""]
+
+-- Products remain whole values across branches and loop carries until SSA.
+entry logical_values(x:i32,b:bool) i32 =
+  let initial = if b then (x,1i32) else (2i32,x) in
+  let (a,c) = loop pair=initial for _i<3 do
+    let (a,c) = pair in
+    (c,a+c)
+  in a+c

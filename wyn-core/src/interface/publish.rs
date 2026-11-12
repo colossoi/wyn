@@ -32,6 +32,7 @@ pub(crate) struct InputHost {
 pub(crate) struct OutputHost {
     pub length: Option<crate::host::BufferLen>,
     pub target: Option<String>,
+    pub elements: Option<(usize, host::Expr)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

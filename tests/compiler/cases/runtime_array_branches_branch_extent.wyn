@@ -1,0 +1,9 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"branch_extent\""]
+
+entry branch_extent(xs: []i32) []i32 =
+  if length(xs)>10 then replicate(0,0i32) else xs

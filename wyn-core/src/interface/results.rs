@@ -11,26 +11,27 @@ pub(crate) fn result_layout(ty: &Type) -> ResultLayout {
     result_layout_with_storage(ty, &storage_value_type(ty))
 }
 
+pub(crate) fn array_element(ty: &Type) -> Option<(Type, Type)> {
+    if let Some(fields) = crate::types::as_soa_tuple(ty) {
+        let fields = fields.iter().map(array_element).collect::<Option<Vec<_>>>()?;
+        let size = fields.first()?.1.clone();
+        if !fields.iter().all(|(_, n)| *n == size) {
+            return None;
+        }
+        Some((
+            crate::types::tuple(fields.into_iter().map(|(t, _)| t).collect()),
+            size,
+        ))
+    } else {
+        Some((ty.elem_type()?.clone(), ty.array_size()?.clone()))
+    }
+}
+
 /// Logical counts describe values; physical types supply strides and field offsets.
 pub(crate) fn result_layout_with_storage(ty: &Type, physical: &Type) -> ResultLayout {
     let ty = strip_existentials(ty);
     // A root SoA result is published as one array of logical tuple elements.
     // Nested fields inside a scalar storage record retain their own arrays.
-    fn array_element(ty: &Type) -> Option<(Type, Type)> {
-        if let Some(fields) = crate::types::as_soa_tuple(ty) {
-            let fields = fields.iter().map(array_element).collect::<Option<Vec<_>>>()?;
-            let size = fields.first()?.1.clone();
-            if !fields.iter().all(|(_, n)| *n == size) {
-                return None;
-            }
-            Some((
-                crate::types::tuple(fields.into_iter().map(|(t, _)| t).collect()),
-                size,
-            ))
-        } else {
-            Some((ty.elem_type()?.clone(), ty.array_size()?.clone()))
-        }
-    }
     if crate::types::as_soa_tuple(ty).is_some() {
         if let Some((element, size)) = array_element(ty) {
             let array = crate::types::make_array1(

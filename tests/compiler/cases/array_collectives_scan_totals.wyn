@@ -1,0 +1,37 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"scan_total_0_streamed\"", ":source-name \"scan_total_0_nested\"", ":source-name \"scan_total_0_conditional\"", ":source-name \"scan_total_0_cooperative\"", ":source-name \"scan_total_0_local_scatter\""]
+
+def scan_total_0_row<[scan_total_0_n]>(scan_total_0_xs: [scan_total_0_n]i32) [scan_total_0_n]i32 =
+  let prefix = scan((+), 0, scan_total_0_xs) in
+  let total = reduce((+), 0, scan_total_0_xs) in
+  map(|x| x + total, prefix)
+
+
+entry scan_total_0_streamed() [513]i32 = scan_total_0_row(map(|i| i + 1, iota(513)))
+
+
+entry scan_total_0_nested() [2][513]i32 =
+  map(|j| scan_total_0_row(map(|i| i + j + 1, iota(513))), iota(2))
+
+
+entry scan_total_0_conditional() [2][17]i32 =
+  map(|j| if j == 0 then scan_total_0_row(map(|i| i + 1, iota(17))) else copy(iota(17)), iota(2))
+
+
+entry scan_total_0_cooperative() [2][513]i32 =
+  map(|j| loop scan_total_0_xs = map(|i| i + j + 1, iota(513)) for k < 2 do scan_total_0_row(scan_total_0_xs), iota(2))
+
+
+entry scan_total_0_local_scatter() [2][17]i32 =
+  map(|j|
+    let scan_total_0_xs = map(|i| i + j, iota(17)) in
+    let ones = map(|_| 1, scan_total_0_xs) in
+    let prefix = scan((+), 0, ones) in
+    let total = reduce((+), 0, ones) in
+    scatter((#[scratch] copy(scan_total_0_xs)), map(|p| total - p, prefix), scan_total_0_xs), iota(2))
+
+

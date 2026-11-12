@@ -1,0 +1,11 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"sized_scratch\""]
+--! [[host]]
+--! entry = "sized_scratch"
+--! minimum_calls = { "gpu-alloc" = 1 }
+
+entry sized_scratch(xs:[]i32) []i32 = scatter(scratch(length(xs)),iota(length(xs)),xs)

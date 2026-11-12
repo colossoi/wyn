@@ -1,0 +1,23 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"composed\""]
+--! [[host]]
+--! entry = "composed"
+--! result_bytes = 40
+--! no_device_reads = true
+--! [[shader]]
+--! entry = "composed"
+--! targets = ["wgsl"]
+--! local_array_traffic = [0, 0, 0]
+--! [[spirv]]
+--! entry = "composed"
+--! array_traffic = [0, 0, 0]
+
+-- Compose a base slice with row stride 18 and a reversed column coordinate.
+-- The first result reads xs[20], then xs[19..16]; the next row starts at xs[38].
+entry composed(xs:[43]i32) [2][5]i32 =
+  let view=xs[7..43] in
+  map(|i|map(|j|view[9*(1+2*i)+4-j],iota(5)),iota(2))

@@ -103,14 +103,14 @@ fn array_load_checks_follow_calls_without_counting_other_entries() {
     let expected: Instructions =
         toml::from_str("entry = 'wanted'\ncounts = { Load = 1 }\narray_traffic = [1,1,0]\narray_phis = 0")
             .unwrap();
-    instructions(&bytes, &[expected], None);
+    instructions(&bytes, &[expected], None, None);
     for config in [
         "entry = 'unrelated'\ncounts = { Load = 1 }",
         "entry = 'wanted'\nmaximum = { Load = 0 }",
         "entry = 'missing'\ncounts = { Load = 0 }",
     ] {
         let expected: Instructions = toml::from_str(config).unwrap();
-        assert!(std::panic::catch_unwind(|| instructions(&bytes, &[expected], None)).is_err());
+        assert!(std::panic::catch_unwind(|| instructions(&bytes, &[expected], None, None)).is_err());
     }
     for (entry, minimum) in [("wanted", 2), ("unrelated", 1), ("missing", 1)] {
         assert!(std::panic::catch_unwind(|| check(
@@ -165,7 +165,12 @@ pub struct Instructions {
     aggregate_forwarding: bool,
 }
 
-pub fn instructions(bytes: &[u8], expectations: &[Instructions], helpers: Option<usize>) {
+pub fn instructions(
+    bytes: &[u8],
+    expectations: &[Instructions],
+    helpers: Option<usize>,
+    host: Option<&str>,
+) {
     let module = wspirv::dr::load_bytes(bytes).unwrap();
     if let Some(helpers) = helpers {
         assert_eq!(
@@ -191,10 +196,16 @@ pub fn instructions(bytes: &[u8], expectations: &[Instructions], helpers: Option
     let definitions: BTreeMap<_, _> =
         module.all_inst_iter().filter_map(|i| i.result_id.map(|id| (id, i))).collect();
     for expected in expectations {
+        let aliases =
+            host.map(|source| super::support::source_shaders(source, &expected.entry)).unwrap_or_default();
         let mut pending = Vec::new();
         for entry in &module.entry_points {
             if let [_, Operand::IdRef(id), Operand::LiteralString(name), ..] = entry.operands.as_slice() {
-                if name == &expected.entry || name.starts_with(&format!("{}_", expected.entry)) {
+                if if aliases.is_empty() {
+                    name == &expected.entry || name.starts_with(&format!("{}_", expected.entry))
+                } else {
+                    aliases.contains(name)
+                } {
                     pending.push(*id);
                 }
             }

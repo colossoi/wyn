@@ -1,0 +1,17 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"compiler_repro_array_loop_0_check\""]
+
+entry compiler_repro_array_loop_0_check(xs: []f32) []f32 =
+  map(|x: f32|
+    let result = loop values = replicate(3, x) for step < 2 do
+      map(|v: f32| v * 0.5, values) in
+    result[0], xs)
+
+-- cooperative_loop_parallel_assignment_preserves_array_sources
+-- Expected [[1,2,11,21],[3,4,11,21]] on both GPU backends.
+-- Cooperative loop arrays must preserve parallel assignment: copying one
+-- field must not overwrite another field's still-live source.

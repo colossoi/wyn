@@ -1,48 +1,69 @@
 use super::Execution;
 use crate::egglog::query::Query;
-use crate::egglog::{from_tlc, fuse, place, schedule};
-use crate::{compile_thru_tlc, PipelineTopologyPolicy};
 
 #[test]
 fn emitted_dispatches_reference_the_authoritative_statements() {
-    let source = compile_thru_tlc("entry main(xs:[64]i32) [64]i32=map(|x|x+1,xs)").unwrap();
-    let program = schedule(
-        place(
-            fuse(from_tlc(&source).unwrap()).unwrap(),
-            PipelineTopologyPolicy::AllowGenerated,
+    let mut graph = egglog_engine::EGraph::default();
+    graph
+        .parse_and_run_program(
+            None,
+            concat!(
+                include_str!("memory/schema.egg"),
+                "\n(relation CurrentProgram (Program))"
+            ),
         )
-        .unwrap(),
-    )
-    .unwrap();
-    let query = Query(&program.graph);
-    let execution = Execution::select(&program.graph).unwrap();
+        .unwrap();
+    graph
+        .parse_and_run_program(
+            None,
+            r#"
+        (let name (FunctionId 0 "main"))
+        (let statement (Let (StatementTag 0) (vec-of) (vec-of)
+            (Parallel (DeviceKernel (AutomaticGrid))
+                (IterationSpace (ValueId 0) (vec-of (DenseAxis (ValueId 1) (IndexConstant 64))))
+                (ParallelBlock (vec-of) (vec-of)))))
+        (let function (DefineFunction name (vec-of) (vec-of)
+            (Block (vec-of statement) (vec-of))))
+        (CurrentProgram (MemoryProgram (vec-of function) (vec-of) (vec-of (EntryPoint name 0))))
+    "#,
+        )
+        .unwrap();
+    let query = Query(&graph);
+    let execution = Execution::select(&graph).unwrap();
     assert_eq!(execution.entries.len(), 1);
     let stages = execution.entries.values().next().unwrap();
     assert_eq!(stages.len(), 1);
     let statement = query.enode("Let", stages[0]).unwrap().unwrap();
-    let launch = query.fields("Launch", statement[3]).unwrap();
-    assert!(query.enode("Grid3D", launch[0]).unwrap().is_some());
+    let parallel = query.fields("Parallel", statement[3]).unwrap();
+    let kernel = query.fields("DeviceKernel", parallel[0]).unwrap();
+    assert!(query.enode("AutomaticGrid", kernel[0]).unwrap().is_some());
     let current = query.row("CurrentProgram", |_| true).unwrap().unwrap()[0];
-    let root = query.constructor("ProgramRoot", (current,)).unwrap().unwrap();
-    assert!(query.contains("ContainsStm", (root, stages[0])).unwrap());
-    let grid = query.fields("Grid3D", launch[0]).unwrap();
-    let local = query.vector(grid[1]).unwrap().into_iter().map(|dimension| {
-        let constant = query.fields("IndexConstant", dimension).unwrap();
-        program.graph.value_to_base::<i64>(constant[0]) as u32
-    }).collect::<Vec<_>>();
-    assert_eq!(local, [64, 1, 1], "64 elements use one full workgroup");
-    assert_eq!(execution.dispatch(stages[0]).unwrap().width.get(), local.iter().product::<u32>());
+    let current = query.fields("MemoryProgram", current).unwrap();
+    let function = query.vector(current[0]).unwrap()[0];
+    let function = query.fields("DefineFunction", function).unwrap();
+    let block = query.fields("Block", function[3]).unwrap();
+    assert_eq!(query.vector(block[0]).unwrap(), *stages);
+    let dispatch = execution.dispatch(stages[0]).unwrap();
+    assert_eq!(dispatch.local_size, (128, 1, 1));
+    assert!(
+        dispatch.groups.is_none(),
+        "derive group counts during SSA emission"
+    );
+    assert_eq!(
+        dispatch.width.get(),
+        dispatch.local_size.0 * dispatch.local_size.1 * dispatch.local_size.2
+    );
 }
 
 #[test]
 fn malformed_grids_are_rejected_during_interface_readout() {
     for (grid, expected) in [
-        ("(AutomaticGrid)", "unresolved dispatch grid"),
+        ("(AutomaticGrid)", "automatic dispatch requires an iteration axis"),
         ("(Grid3D (vec-of (IndexConstant 1) (IndexConstant 1) (IndexConstant 1)) (vec-of (IndexConstant 0) (IndexConstant 1) (IndexConstant 1)))", "invalid workgroup size"),
         ("(Grid3D (vec-of (IndexConstant 1) (IndexConstant 1) (IndexConstant 1)) (vec-of (IndexConstant 32)))", "three local dimensions"),
     ] {
         let mut graph = egglog_engine::EGraph::default();
-        crate::egglog::memory::load(&mut graph).unwrap();
+        graph.parse_and_run_program(None, concat!(include_str!("memory/schema.egg"), "\n(relation CurrentProgram (Program))")).unwrap();
         graph.parse_and_run_program(None, &format!(r#"
           (let name (FunctionId 0 "main"))
           (let function (DefineFunction name (vec-of) (vec-of) (Block

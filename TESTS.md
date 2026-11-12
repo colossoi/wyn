@@ -38,8 +38,18 @@ provide a suitable dedicated integration harness. Do not hide expensive work by
 ignoring the test or splitting one slow operation into superficial assertions.
 
 The three-second rule is the placement policy, not an automatically enforced
-Cargo timeout. Existing slow unit tests need follow-up; the current suite is not
-yet compliant. Resource caps for a whole test executable are a separate safeguard.
+Cargo timeout. Run `python scripts/test_units.py` for the enforced workspace unit
+gate, also run by CI. It uses 16 MiB stacks, eight test threads matching the baseline,
+and libtest elapsed times; compilation is excluded. Functional failures also fail
+the gate. Integration tests and doctests are separate.
+Unlisted tests over three seconds are rerun individually to confirm the limit
+without parallel contention. Reruns cannot clear a functional failure.
+
+Existing slow units are explicitly listed in `tests/unit-time-exceptions.txt`.
+Adding or broadening exceptions requires explicit user approval. Renaming and
+removing existing entries is allowed. When changing or renaming an excepted test,
+consider reducing it below three seconds. The runner never updates this list.
+Existing exceptions still need follow-up; the current suite is not yet compliant.
 
 ## Test locations
 

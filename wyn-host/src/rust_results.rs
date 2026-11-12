@@ -23,8 +23,7 @@ pub(crate) fn name(source: &str) -> String {
 impl Program {
     pub(crate) fn rust_results(&self, entry: &Entry) -> Result<TokenStream, HostError> {
         let mut values = vec![];
-        let mut source_results =
-            self.interface.source_results.iter().filter(|r| r.entry == entry.name).collect::<Vec<_>>();
+        let mut source_results = entry.source_results.iter().collect::<Vec<_>>();
         source_results.sort_by_key(|r| r.result);
         for (index, &id) in entry.results.iter().enumerate() {
             let descriptor = source_results.get(index);

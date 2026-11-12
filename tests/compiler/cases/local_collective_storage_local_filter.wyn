@@ -1,0 +1,8 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"local_filter_preserves_its_live_length_0_result\""]
+
+entry local_filter_preserves_its_live_length_0_result(xs:[]i32) []i32=map(|x:i32|length(filter(|y:i32|y>x,[1,2,3])),xs)

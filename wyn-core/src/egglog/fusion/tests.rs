@@ -45,7 +45,7 @@ fn free_names_preserve_large_shared_fanout() {
     let mut graph = super::new_graph().unwrap();
     let mut statements = String::new();
     for i in 0..256 {
-        statements.push_str(&format!("(Let (StatementTag {i}) (vec-of (BindValue (ValueId {}) (ScalarInfo (ScalarElement (I32))))) (vec-of) (Load (ValueId 0) (vec-of (IndexConstant {i}))))\n", i+1));
+        statements.push_str(&format!("(Let (StatementTag {i}) (vec-of (BindValue (ValueId {}) (ScalarInfo (ScalarElement (I32))))) (vec-of) (PrimOp \"+\" (vec-of (Var (ValueId 0)) (LiteralBits (I32) {i}))))\n", i+1));
     }
     graph
         .parse_and_run_program(
@@ -62,11 +62,5 @@ fn free_names_preserve_large_shared_fanout() {
         .unwrap();
 }
 
-#[test]
-fn independent_entries_canonicalize_stream_terms_before_selecting_inputs() {
-    let source = compile_thru_tlc(include_str!(
-        "../../../../tests/compiler/library/independent_fusion_streams.wyn"
-    ))
-    .unwrap();
-    fuse(from_tlc(&source).unwrap()).unwrap();
-}
+// Cross-entry canonicalization is exercised through both backends by
+// tests/compiler/cases/independent_fusion_*.wyn.

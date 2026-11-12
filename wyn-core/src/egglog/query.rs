@@ -36,7 +36,6 @@ impl Query<'_> {
         Ok(values.data.clone())
     }
 
-    #[cfg(test)]
     pub fn for_function(
         &self,
         name: &str,
@@ -99,21 +98,6 @@ impl Query<'_> {
         Ok(fields)
     }
 
-    #[cfg(test)]
-    pub fn record(
-        &self,
-        table: &str,
-        constructor: &str,
-        keys: impl IntoValues,
-    ) -> Result<Option<Vec<Value>>, OptimizeError> {
-        let Some(value) = self.lookup(table, keys)? else {
-            return Ok(None);
-        };
-        self.enode(constructor, value)?
-            .map(Some)
-            .ok_or_else(|| OptimizeError::Output(format!("invalid {constructor} in {table}")))
-    }
-
     pub fn row(
         &self,
         name: &str,
@@ -137,31 +121,5 @@ impl Query<'_> {
     #[cfg(test)]
     pub fn flag(&self, name: &str, keys: impl IntoValues) -> Result<bool, OptimizeError> {
         Ok(self.0.value_to_base::<bool>(self.required(name, keys)?))
-    }
-}
-
-#[cfg(test)]
-impl Query<'_> {
-    pub fn operation_kind(&self, definition: Value) -> Result<String, OptimizeError> {
-        if let Some(fields) = self.enode("ScalarOperator", definition)? {
-            return Ok(self.0.value_to_base::<egglog_engine::sort::S>(fields[0]).to_string());
-        }
-        if let Some(fields) = self.enode("FoldOperator", definition)? {
-            return Ok(
-                if self.enode("FoldTotal", fields[0])?.is_some() { "reduce" } else { "scan" }.into(),
-            );
-        }
-        for (constructor, kind) in [
-            ("MapOperator", "map"),
-            ("PackOperator", "filter"),
-            ("WriteOperator", "scatter"),
-            ("IndexedOperator", "reduce-by-index"),
-            ("ReserveOperator", "bucket-scatter"),
-        ] {
-            if self.enode(constructor, definition)?.is_some() {
-                return Ok(kind.into());
-            }
-        }
-        Err(super::output_error("unknown operation"))
     }
 }

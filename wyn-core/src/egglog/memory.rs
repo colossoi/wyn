@@ -1,5 +1,6 @@
 //! Structural operations derived from the memory IR declarations.
 use super::{output_error, parse_program, query::Query, OptimizeError};
+use crate::{LookupMap, LookupSet};
 use egglog_engine::ast::{Command, Subdatatypes, Variant};
 use egglog_engine::EGraph;
 use std::collections::BTreeMap;
@@ -18,6 +19,14 @@ pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
     graph.parse_and_run_program(Some("memory effects".into()), include_str!("memory/effects.egg"))?;
     graph.parse_and_run_program(Some("memory scopes".into()), include_str!("memory/regions.egg"))?;
     graph.parse_and_run_program(
+        Some("logical analysis".into()),
+        concat!(
+            include_str!("memory/analysis.egg"),
+            "\n",
+            include_str!("memory/work.egg")
+        ),
+    )?;
+    graph.parse_and_run_program(
         Some("memory fusion".into()),
         concat!(
             include_str!("memory/rewrites.egg"),
@@ -26,36 +35,51 @@ pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
             "\n",
             include_str!("fusion/import.egg"),
             "\n",
+            include_str!("fusion/compaction.egg"),
+            "\n",
+            include_str!("fusion/compact-fold.egg"),
+            "\n",
             include_str!("fusion/fusion.egg"),
         ),
     )?;
+    for pass in [
+        "",
+        "inline",
+        "simplify",
+        "dead-collections",
+        "compact-count",
+        "hoist",
+        "fusion",
+        "distribution",
+        "placement",
+    ] {
+        let (ruleset, key) = if pass.is_empty() {
+            ("memory-rewrite".to_owned(), "pass".to_owned())
+        } else {
+            (format!("memory-rewrite-{pass}"), format!("\"{pass}\""))
+        };
+        let rules = include_str!("memory/apply-rewrites.egg")
+            .replace("REWRITE_RULESET", &ruleset)
+            .replace("REWRITE_PASS", &key);
+        graph.parse_and_run_program(Some("rewrite application".into()), &rules)?;
+    }
     graph.parse_and_run_program(Some("region inlining".into()), include_str!("memory/inline.egg"))?;
     graph.parse_and_run_program(
         Some("region simplification".into()),
-        include_str!("memory/simplify.egg"),
+        concat!(
+            include_str!("memory/simplify.egg"),
+            "\n",
+            include_str!("memory/compact-lengths.egg")
+        ),
     )?;
     super::scalar::load(graph)?;
     super::planning::load(graph)?;
-    let (declarations, rules) = allocation_structure()?;
-    graph.parse_and_run_program(Some("allocation traversal declarations".into()), &declarations)?;
-    graph.parse_and_run_program(
-        Some("allocation elaboration".into()),
-        include_str!("planning/allocation.egg"),
-    )?;
-    graph.parse_and_run_program(Some("allocation traversal".into()), &rules)?;
-    graph.parse_and_run_program(
-        Some("kernel memory lowering".into()),
-        include_str!("planning/kernels.egg"),
-    )?;
-    graph.parse_and_run_program(
-        Some("coordinate fusion".into()),
-        include_str!("fusion/reindex.egg"),
-    )?;
     Ok(())
 }
 
 /// Inline structured helpers by substituting complete regions and annotations.
 pub(super) fn inline(graph: &mut EGraph) -> Result<(), OptimizeError> {
+    let _timing = super::timing::span("egglog inlining");
     validate(graph)?;
     graph.parse_and_run_program(
         None,
@@ -64,131 +88,118 @@ pub(super) fn inline(graph: &mut EGraph) -> Result<(), OptimizeError> {
             (saturate memory-origin inline-discover)
             (saturate inline-prepare memory-rename)
             (saturate inline-select)
-            (saturate memory-rewrite memory-rename))))",
+            (saturate memory-rewrite-inline memory-rename))))",
     )?;
     validate(graph)
 }
 
 pub(super) fn simplify(graph: &mut EGraph, hoist: bool) -> Result<(), OptimizeError> {
-    // Combine uniform branches before hoisting can materialize only one arm.
-    let hoists = if hoist {
-        "(saturate fusion-forward dispatch-shapes local-storage-analysis distribution-analysis fusion-domains memory-rename memory-effects)
-         (saturate conditional-select) (saturate memory-rewrite memory-rename)
-         (saturate simplify-hoists)
-         (saturate collection-effects) (saturate memory-effects)
-         (saturate collection-analysis) (saturate collection-select)
-         (saturate memory-rewrite memory-rename)"
-    } else {
-        ""
-    };
+    let _timing = super::timing::span("egglog simplification");
     validate(graph)?;
     graph.parse_and_run_program(
         None,
-        &format!(
-            "(run-schedule (saturate (seq
-            (saturate fusion-index memory-names)
-            (saturate memory-scopes)
-            (saturate schedule-cost memory-origin)
-            (saturate memory-effects simplify-analysis scalar-analysis)
-            (saturate scalar-copies)
-            (saturate simplify-copies simplify-removals scalar-candidates)
-            {hoists}
-            (saturate simplify-select scalar-select inline-select memory-edits)
-            (saturate memory-rewrite memory-rename))))"
-        ),
+        &format!("(run-schedule (saturate {}))", simplification_schedule(hoist)),
     )?;
     validate(graph)
 }
 
+pub(super) fn simplification_schedule(hoist: bool) -> String {
+    let hoists = if hoist { "(saturate simplify-hoists)" } else { "" };
+    let apply_hoists = if hoist { "(saturate memory-rewrite-hoist memory-rename)" } else { "" };
+    format!(
+        "(seq
+            (saturate fusion-index memory-names)
+            (saturate memory-scopes)
+            (saturate schedule-cost memory-origin)
+            (saturate memory-effects simplify-analysis scalar-analysis compact-length-analysis)
+            (saturate simplify-result-analysis)
+            (saturate simplify-result-select memory-edits)
+            (saturate memory-rewrite-dead-collections memory-rename)
+            (saturate scalar-copies)
+            (saturate simplify-copies simplify-removals scalar-candidates)
+            (saturate compact-length-select memory-edits)
+            (saturate memory-rewrite-compact-count memory-rename)
+            {hoists}
+            (saturate simplify-select scalar-select inline-select memory-edits)
+            (saturate memory-rewrite-simplify memory-rename)
+            (saturate memory-rewrite-inline memory-rename)
+            {apply_hoists})"
+    )
+}
+
 /// Reject malformed lexical scopes before transformations or final emission.
 pub(super) fn validate(graph: &mut EGraph) -> Result<(), OptimizeError> {
-    graph.parse_and_run_program(
-        None,
-        "(run-schedule (saturate fusion-index memory-names) (saturate memory-scopes))",
-    )?;
+    let _timing = super::timing::span("memory validation");
+    super::timing::time("memory scope analysis", || {
+        graph.parse_and_run_program(
+            None,
+            "(run-schedule (saturate fusion-index memory-names) (saturate memory-scopes))",
+        )
+    })?;
+    let _readout = super::timing::span("memory validation readout");
     let query = Query(graph);
     if query.row("CurrentProgram", |_| true)?.is_none() {
         return Err(output_error("memory program has no current root"));
     }
-    let check = |function| {
-        query.required("NamesFunction", (function,))?;
-        query.for_each("InvalidFunction", |invalid| {
-            if invalid[0] == function {
-                return Err(output_error("memory function contains duplicate binders"));
-            }
-            Ok(())
-        })?;
-        query.for_each("CheckSlot", |slot| {
-            if query.lookup("ScopeRoot", (slot[0],))? == Some(function)
-                && query.lookup("OperandSlot", (function, slot[2]))?.is_none()
-            {
-                return Err(output_error("memory operand has no declared type"));
-            }
-            Ok(())
-        })?;
-        query.for_each("InvalidScope", |invalid| {
-            if query.lookup("ScopeRoot", (invalid[0],))? == Some(function) {
-                let message = graph.value_to_base::<egglog_engine::sort::S>(invalid[1]);
-                return Err(output_error(format!(
-                    "invalid memory scope: {}",
-                    message.as_str()
-                )));
-            }
-            Ok(())
-        })
-    };
+    let mut programs = LookupSet::default();
+    query.for_each("CurrentProgram", |row| {
+        programs.insert(row[0]);
+        Ok(())
+    })?;
+    let mut functions = LookupSet::default();
     query.for_each("ProgramFunction", |row| {
-        if query.contains("CurrentProgram", (row[0],))? {
-            check(row[1])?;
+        if programs.contains(&row[0]) {
+            functions.insert(row[1]);
         }
         Ok(())
     })?;
     query.for_each("ProgramExternal", |row| {
-        if query.contains("CurrentProgram", (row[0],))? {
+        if programs.contains(&row[0]) {
             let Some(context) = query.constructor("ExternalScope", (row[1],))? else {
                 return Err(output_error("external signature was not checked"));
             };
-            check(query.required("ScopeRoot", (context,))?)?;
+            functions.insert(query.required("ScopeRoot", (context,))?);
         }
         Ok(())
-    })
-}
-
-/// Elaborate logical arrays after fusion. Rust only checks completion; the
-/// transformation and root replacement both execute inside egglog.
-pub(super) fn allocate(graph: &mut EGraph) -> Result<(), OptimizeError> {
-    validate(graph)?;
-    graph.parse_and_run_program(None,
-        "(run-schedule
-            (saturate schedule-cost placement-context) (saturate placement-scopes)
-            (saturate (seq (saturate dispatch-shapes) (saturate memory-names) (saturate local-storage-analysis)))
-            (saturate schedule-cost dispatch-shapes allocation-bounds)
-            (saturate allocation-sizes) memory-allocation-current (saturate schedule-cost memory-origin) (saturate memory-effects)
-            (saturate fusion-forward memory-reuse) (saturate memory-reuse-propose)
-            (saturate memory-reuse-select) (saturate memory-allocation))
-         (run-schedule memory-allocation-demand (saturate memory-elaborate))")?;
-    Query(graph).for_each("CurrentProgram", |row| {
-        Query(graph).required("AllocateProgram", (row[0],))?;
+    })?;
+    for &function in &functions {
+        query.required("NamesFunction", (function,))?;
+    }
+    let mut roots = LookupMap::default();
+    query.for_function("ScopeRoot", |row, root| {
+        if functions.contains(&root) {
+            roots.insert(row[0], root);
+        }
         Ok(())
     })?;
-    graph.parse_and_run_program(None, "(run-schedule memory-allocation-commit)")?;
-    validate(graph)?;
-    graph.parse_and_run_program(None, "(run-schedule (saturate schedule-cost))")?;
-    let query = Query(graph);
-    query.for_each("CurrentProgram", |row| {
-        let Some(root) = query.constructor("ProgramRoot", (row[0],))? else {
-            return Err(output_error("allocated program was not indexed"));
-        };
-        for (index, logical) in [
-            ("ContainsValueInfo", "ArrayValue"),
-            ("ContainsReturnInfo", "ReturnArrayValue"),
-        ] {
-            query.for_each(index, |value| {
-                if value[0] == root && query.enode(logical, value[1])?.is_some() {
-                    return Err(output_error("allocation left a logical array in the program"));
-                }
-                Ok(())
-            })?;
+    let mut operands = LookupSet::default();
+    query.for_function("OperandSlot", |row, _| {
+        if functions.contains(&row[0]) {
+            operands.insert((row[0], row[1]));
+        }
+        Ok(())
+    })?;
+    query.for_each("InvalidFunction", |invalid| {
+        if functions.contains(&invalid[0]) {
+            return Err(output_error("memory function contains duplicate binders"));
+        }
+        Ok(())
+    })?;
+    query.for_each("CheckSlot", |slot| {
+        if let Some(&function) = roots.get(&slot[0]) {
+            if !operands.contains(&(function, slot[2])) {
+                return Err(output_error("memory operand has no declared type"));
+            }
+        }
+        Ok(())
+    })?;
+    query.for_each("InvalidScope", |invalid| {
+        if roots.contains_key(&invalid[0]) {
+            let message = graph.value_to_base::<egglog_engine::sort::S>(invalid[1]);
+            return Err(output_error(format!(
+                "invalid memory scope: {}",
+                message.as_str()
+            )));
         }
         Ok(())
     })
@@ -241,11 +252,12 @@ fn structure() -> Result<String, OptimizeError> {
          (function ArrayElement (ValueInfo) ElementType :no-merge)\n\
          (relation DirectArrayAccess (Exp ValueName))\n\
          (function WritesResult (Exp) bool :no-merge)\n\
+         (function DirectNamesExp (Exp) Names :merge (set-union old new))\n\
          (function DestinationEffects (Function Pattern) Accesses :merge (set-union old new))\n\
          (function ResultEffects (Function Exp Pattern) Accesses :merge (set-union old new))\n\
          (relation RepeatableOpcode (String))\n\
-         (function PrimitiveEffects (String ElementType) Accesses :no-merge)\n\
-         (function PrimitiveResultType (Function Exp) ElementType :no-merge)\n\
+         (function PrimitiveEffects (String ValueInfo) Accesses :no-merge)\n\
+         (function PrimitiveResultType (Function Exp) ValueInfo :no-merge)\n\
          (function CallEffects (Function FunctionName) Accesses :merge (set-union old new))\n\
          (function LoadBoundsEffects (Function Exp) Accesses :merge (set-union old new))\n\
          (function IndexDivisionEffects (Function IndexExp) Accesses :merge (set-union old new))\n\
@@ -297,6 +309,9 @@ fn structure() -> Result<String, OptimizeError> {
         }
         match declaration {
             Declaration::Vector(element) => {
+                if matches!(declarations.get(element), Some(Declaration::Vector(_))) {
+                    rules.push_str(&format!("(rule ((Walk{sort} node i) (< i (vec-length node))) ((Walk{element} (vec-get node i) 0)) :ruleset memory-names)\n"));
+                }
                 if declarations.contains_key(element) {
                     rules.push_str(&format!("(rule ((Contains{sort} root node) (Walk{sort} node i) (< i (vec-length node))) ((Contains{element} root (vec-get node i))) :ruleset memory-names)\n"));
                 }
@@ -333,13 +348,20 @@ fn vector_rules(rules: &mut String, sort: &str, element: &str, structured: bool)
         (String::new(), "(set-empty)")
     };
     rules.push_str(&format!(
-        "(function Effects{sort}Prefix (Function {sort} i64) Accesses :merge (set-union old new))\n\
-         (rule ((Effects{sort}Demand function node)) ((set (Effects{sort}Prefix function node 0) (set-empty))) :ruleset memory-effects)\n\
-         (rule ((= prefix (Effects{sort}Prefix function node i)) (< i (vec-length node)) {effect_premise}) ((set (Effects{sort}Prefix function node (+ i 1)) (set-union prefix {effects}))) :ruleset memory-effects)\n\
-         (rule ((= effects (Effects{sort}Prefix function node (vec-length node)))) ((set (Effects{sort} function node) effects)) :ruleset memory-effects)\n"
+        "(relation Effects{sort}RangeDemand (Function {sort} i64 i64))\n\
+         (function Effects{sort}Range (Function {sort} i64 i64) Accesses :merge (set-union old new))\n\
+         (rule ((Effects{sort}Demand function node)) ((Effects{sort}RangeDemand function node 0 (vec-length node))) :ruleset memory-effects)\n\
+         (rule ((Effects{sort}RangeDemand function node i i)) ((set (Effects{sort}Range function node i i) (set-empty))) :ruleset memory-effects)\n\
+         (rule ((Effects{sort}RangeDemand function node i j) (> (- j i) 1) (= mid (+ i (/ (- j i) 2))))\n\
+             ((Effects{sort}RangeDemand function node i mid) (Effects{sort}RangeDemand function node mid j)) :ruleset memory-effects)\n\
+         (rule ((Effects{sort}RangeDemand function node i j) (> (- j i) 1) (= mid (+ i (/ (- j i) 2)))\n\
+             (= left (Effects{sort}Range function node i mid)) (= right (Effects{sort}Range function node mid j)))\n\
+             ((set (Effects{sort}Range function node i j) (set-union left right))) :ruleset memory-effects)\n\
+         (rule ((Effects{sort}RangeDemand function node i j) (= j (+ i 1)) {effect_premise}) ((set (Effects{sort}Range function node i j) {effects})) :ruleset memory-effects)\n\
+         (rule ((= effects (Effects{sort}Range function node 0 (vec-length node)))) ((set (Effects{sort} function node) effects)) :ruleset memory-effects)\n"
     ));
     if structured {
-        rules.push_str(&format!("(rule ((= prefix (Effects{sort}Prefix function node i)) (< i (vec-length node))) ((Effects{element}Demand function (vec-get node i))) :ruleset memory-effects)\n"));
+        rules.push_str(&format!("(rule ((Effects{sort}RangeDemand function node i j) (= j (+ i 1))) ((Effects{element}Demand function (vec-get node i))) :ruleset memory-effects)\n"));
     }
     let (uses, bound, names, demand, rename, child) = if structured {
         (
@@ -367,20 +389,45 @@ fn vector_rules(rules: &mut String, sort: &str, element: &str, structured: bool)
     };
     rules.push_str(&format!(
         "(rule ((= node (vec-of))) ((set (Names{sort} node) (set-empty)) (set (Binders{sort} node) (set-empty))) :ruleset memory-names)\n\
-         (rule ((Walk{sort} node i) (< i (vec-length node)) (= child (vec-get node i)) {names}) ((set (Names{sort} node) {uses}) (set (Binders{sort} node) {bound}) (Walk{sort} node (+ i 1))) :ruleset memory-names)\n\
-         (function Rename{sort}Prefix (Renaming {sort} i64) {sort} :no-merge)\n\
-         (rule ((Rename{sort}Demand env node)) ((set (Rename{sort}Prefix env node 0) (vec-of))) :ruleset memory-rename)\n\
-         (rule ((= prefix (Rename{sort}Prefix env node i)) (< i (vec-length node)) {unchanged}) ({demand}) :ruleset memory-rename)\n\
-         (rule ((= prefix (Rename{sort}Prefix env node i)) (< i (vec-length node)) {unchanged} {rename}) ((set (Rename{sort}Prefix env node (+ i 1)) (vec-push prefix {child}))) :ruleset memory-rename)\n\
-         (rule ((= result (Rename{sort}Prefix env node (vec-length node)))) ((set (Rename{sort} env node) result)) :ruleset memory-rename)\n",
+         (rule ((Walk{sort} node i) (< i (vec-length node))) ((Walk{sort} node (+ i 1))) :ruleset memory-names)\n\
+         (relation Names{sort}RangeDemand ({sort} i64 i64))\n\
+         (function Names{sort}Range ({sort} i64 i64) Names :merge (set-union old new))\n\
+         (function Binders{sort}Range ({sort} i64 i64) Names :merge (set-union old new))\n\
+         (rule ((Walk{sort} node 0)) ((Names{sort}RangeDemand node 0 (vec-length node))) :ruleset memory-names)\n\
+         (rule ((Names{sort}RangeDemand node i i)) ((set (Names{sort}Range node i i) (set-empty)) (set (Binders{sort}Range node i i) (set-empty))) :ruleset memory-names)\n\
+         (rule ((Names{sort}RangeDemand node i j) (> (- j i) 1) (= mid (+ i (/ (- j i) 2))))\n\
+             ((Names{sort}RangeDemand node i mid) (Names{sort}RangeDemand node mid j)) :ruleset memory-names)\n\
+         (rule ((Names{sort}RangeDemand node i j) (> (- j i) 1) (= mid (+ i (/ (- j i) 2)))\n\
+             (= left (Names{sort}Range node i mid)) (= right (Names{sort}Range node mid j))\n\
+             (= bound-left (Binders{sort}Range node i mid)) (= bound-right (Binders{sort}Range node mid j)))\n\
+             ((set (Names{sort}Range node i j) (set-union left right))\n\
+              (set (Binders{sort}Range node i j) (set-union bound-left bound-right))) :ruleset memory-names)\n\
+         (rule ((Names{sort}RangeDemand node i j) (= j (+ i 1)) (= child (vec-get node i)) {names})\n\
+             ((set (Names{sort}Range node i j) {uses}) (set (Binders{sort}Range node i j) {bound})) :ruleset memory-names)\n\
+         (rule ((= names (Names{sort}Range node 0 (vec-length node))) (= bound (Binders{sort}Range node 0 (vec-length node))))\n\
+             ((set (Names{sort} node) names) (set (Binders{sort} node) bound)) :ruleset memory-names)\n\
+         (relation Rename{sort}RangeDemand (Renaming {sort} i64 i64))\n\
+         (function Rename{sort}Range (Renaming {sort} i64 i64) {sort} :no-merge)\n\
+         (rule ((Rename{sort}Demand env node)) ((Rename{sort}RangeDemand env node 0 (vec-length node))) :ruleset memory-rename)\n\
+         (rule ((Rename{sort}RangeDemand env node i i)) ((set (Rename{sort}Range env node i i) (vec-of))) :ruleset memory-rename)\n\
+         (rule ((Rename{sort}RangeDemand env node i j) (> (- j i) 1) (= mid (+ i (/ (- j i) 2))))\n\
+             ((Rename{sort}RangeDemand env node i mid) (Rename{sort}RangeDemand env node mid j)) :ruleset memory-rename)\n\
+         (rule ((Rename{sort}RangeDemand env node i j) (> (- j i) 1) (= mid (+ i (/ (- j i) 2)))\n\
+             (= left (Rename{sort}Range env node i mid)) (= right (Rename{sort}Range env node mid j)))\n\
+             ((set (Rename{sort}Range env node i j) (vec-append left right))) :ruleset memory-rename)\n\
+         (rule ((Rename{sort}RangeDemand env node i j) (= j (+ i 1)) {unchanged}) ({demand}) :ruleset memory-rename)\n\
+         (rule ((Rename{sort}RangeDemand env node i j) (= j (+ i 1)) {unchanged} {rename}) ((set (Rename{sort}Range env node i j) (vec-of {child}))) :ruleset memory-rename)\n\
+         (rule ((= result (Rename{sort}Range env node 0 (vec-length node)))) ((set (Rename{sort} env node) result)) :ruleset memory-rename)\n",
     ));
     if sort == "Stms" {
         // Replacements are already constructed in their destination scope. Do not
         // revisit them: a replacement may intentionally retain its statement ID.
-        rules.push_str("(rule ((= prefix (RenameStmsPrefix env node i)) (< i (vec-length node))\n\
+        rules.push_str(
+            "(rule ((RenameStmsRangeDemand env node i j) (= j (+ i 1))\n\
             (= env (Rename m0 m1 m2 m3 edits)) (= (vec-get node i) (Let id pattern certs expression))\n\
             (= replacement (map-get edits id)))\n\
-            ((set (RenameStmsPrefix env node (+ i 1)) (vec-append prefix replacement))) :ruleset memory-rename)\n");
+            ((set (RenameStmsRange env node i j) replacement)) :ruleset memory-rename)\n",
+        );
     }
 }
 
@@ -393,6 +440,7 @@ fn variant_rules(
     let arguments: Vec<_> = (0..variant.types.len()).map(|i| format!("a{i}")).collect();
     let term = format!("({} {})", variant.name, arguments.join(" "));
     let mut uses = String::from("(set-empty)");
+    let mut direct_uses = String::from("(set-empty)");
     let mut bound = String::from("(set-empty)");
     let mut premises = String::new();
     let mut demands = String::new();
@@ -409,6 +457,9 @@ fn variant_rules(
             " (= u{i} (Names{child} a{i})) (= b{i} (Binders{child} a{i}))"
         ));
         uses = format!("(set-union {uses} u{i})");
+        if !matches!(child.as_str(), "Body" | "Lambda" | "ParallelBody") {
+            direct_uses = format!("(set-union {direct_uses} u{i})");
+        }
         bound = format!("(set-union {bound} b{i})");
         demands.push_str(&format!(" (Rename{child}Demand env a{i})"));
         rename_premises.push_str(&format!(" (= r{i} (Rename{child} env a{i}))"));
@@ -422,6 +473,11 @@ fn variant_rules(
             "(rule ((Contains{sort} root node) (= node {term})) ({contained}) :ruleset memory-names)\n"
         ));
     }
+    if sort == "Exp" {
+        rules.push_str(&format!(
+            "(rule ((= node {term}) {premises}) ((set (DirectNamesExp node) {direct_uses})) :ruleset memory-names)\n"
+        ));
+    }
     if !walk.is_empty() {
         rules.push_str(&format!(
             "(rule ((= node {term})) ({walk}) :ruleset memory-names)\n"
@@ -429,13 +485,7 @@ fn variant_rules(
     }
     if matches!(
         variant.name.as_str(),
-        "BindValue"
-            | "BindBlock"
-            | "BindAccumulator"
-            | "Counted"
-            | "DenseAxis"
-            | "RaggedAxis"
-            | "IterationSpace"
+        "BindValue" | "BindAccumulator" | "Counted" | "DenseAxis" | "IterationSpace"
     ) {
         let leaf = &variant.types[0];
         let wrapper = NAMES.iter().find(|(name, _, _)| name == leaf).map(|(_, _, wrapper)| *wrapper);
@@ -492,19 +542,17 @@ fn effect_rules(
             }
         }
         let direct = match variant.name.as_str() {
-            "Use" | "IndexOp" | "View" | "Reshape" | "Permute" | "If" | "Loop" | "Parallel" | "Launch"
-            | "GenerateArray" | "Alloc" => "(set-empty)",
-            "Load" => {
-                premises.push_str(
-                    " (= direct (ArrayReads function a0)) (= bounds (LoadBoundsEffects function node))",
-                );
-                "(set-union direct bounds)"
+            "Use" | "IndexOp" | "View" | "If" | "Loop" | "Parallel" | "GenerateArray" | "Product"
+            | "Project" | "Length" | "Scratch" => "(set-empty)",
+            "Index" => {
+                premises.push_str(" (= direct (ArrayReads function a0))");
+                "(set-insert direct (OrderedEffect))"
             }
             "Copy" => {
                 premises.push_str(" (= direct (ArrayReads function a0))");
                 "direct"
             }
-            "Update" | "Store" => {
+            "Update" => {
                 premises.push_str(" (= direct (ArrayWrites function a1))");
                 "direct"
             }
@@ -524,7 +572,7 @@ fn effect_rules(
                 premises.push_str(" (= writes (TokenWrites function a0))");
                 "writes"
             }
-            "Assert" | "WithAcc" | "Barrier" => "(set-of (OrderedEffect))",
+            "Assert" | "WithAcc" | "BucketScatter" => "(set-of (OrderedEffect))",
             other => {
                 return Err(output_error(format!(
                     "missing memory effect classification for {other}"
@@ -534,7 +582,7 @@ fn effect_rules(
         effects = format!("(set-union {effects} {direct})");
         let writes = matches!(
             variant.name.as_str(),
-            "Copy" | "GenerateArray" | "Parallel" | "Alloc"
+            "Copy" | "GenerateArray" | "Parallel" | "Alloc" | "Scratch"
         );
         rules.push_str(&format!("(rule ((= expression {term})) ((set (WritesResult expression) {writes})) :ruleset memory-effects)\n"));
     }
@@ -549,176 +597,3 @@ fn effect_rules(
 #[cfg(test)]
 #[path = "memory_tests.rs"]
 mod tests;
-
-fn allocation_structure() -> Result<(String, String), OptimizeError> {
-    let mut declarations = String::new();
-    let mut rules = String::new();
-    declarations.push_str(
-        "(function NormalizedIndex (IndexExp) IndexExp :no-merge)\n\
-        (function ConstantIndex (IndexExp) bool :no-merge)\n",
-    );
-    rules.push_str("(rule ((= x (IndexConstant n))) ((set (NormalizedIndex x) x) (set (ConstantIndex x) true)) :ruleset memory-allocation)\n\
-        (rule ((= x (IndexValue name))) ((set (NormalizedIndex x) x) (set (ConstantIndex x) false)) :ruleset memory-allocation)\n");
-    for (constructor, operator, guards) in [
-        ("IndexAdd", "+", "(!= b (IndexConstant 0)) (!= a (IndexConstant 0))"),
-        ("IndexSub", "-", "(!= b (IndexConstant 0))"),
-        ("IndexMul", "*", "(!= a (IndexConstant 0)) (!= b (IndexConstant 0)) (!= a (IndexConstant 1)) (!= b (IndexConstant 1))"),
-        ("IndexDiv", "/", "(!= b (IndexConstant 1))"),
-        ("IndexMod", "%", "(!= b (IndexConstant 1))"),
-        ("IndexMin", "min", ""), ("IndexMax", "max", ""),
-    ] {
-        let nonzero = if matches!(constructor, "IndexDiv" | "IndexMod") { "(!= y 0)" } else { "" };
-        rules.push_str(&format!(
-            "(rule ((= expression ({constructor} left right))) ((set (ConstantIndex expression) false)) :ruleset memory-allocation)\n\
-             (rule ((= expression ({constructor} left right)) (= (NormalizedIndex left) (IndexConstant x)) (= (NormalizedIndex right) (IndexConstant y)) {nonzero}) ((set (NormalizedIndex expression) (IndexConstant ({operator} x y)))) :ruleset memory-allocation)\n\
-             (rule ((= expression ({constructor} left right)) (= a (NormalizedIndex left)) (= b (NormalizedIndex right)) (= ca (ConstantIndex a)) (= cb (ConstantIndex b)) (= (and ca cb) false) {guards}) ((set (NormalizedIndex expression) ({constructor} a b))) :ruleset memory-allocation)\n"
-        ));
-    }
-    for pattern in ["(IndexAdd a b)", "(IndexSub a b)"] {
-        rules.push_str(&format!("(rule ((= expression {pattern}) (= (NormalizedIndex b) (IndexConstant 0)) (= result (NormalizedIndex a))) ((set (NormalizedIndex expression) result)) :ruleset memory-allocation)\n"));
-    }
-    for (pattern, side, constant, result) in [
-        ("IndexAdd", "a", 0, "y"),
-        ("IndexMul", "a", 0, "(IndexConstant 0)"),
-        ("IndexMul", "b", 0, "(IndexConstant 0)"),
-        ("IndexMul", "a", 1, "y"),
-        ("IndexMul", "b", 1, "x"),
-        ("IndexDiv", "b", 1, "x"),
-        ("IndexMod", "b", 1, "(IndexConstant 0)"),
-    ] {
-        rules.push_str(&format!("(rule ((= expression ({pattern} a b)) (= x (NormalizedIndex a)) (= y (NormalizedIndex b)) (= (NormalizedIndex {side}) (IndexConstant {constant}))) ((set (NormalizedIndex expression) {result})) :ruleset memory-allocation)\n"));
-    }
-    for constructor in [
-        "IndexAdd", "IndexSub", "IndexMul", "IndexDiv", "IndexMod", "IndexMin", "IndexMax",
-    ] {
-        rules.push_str(&format!(
-            "(rule ((ResolveIndex function ({constructor} a b))) ((ResolveIndex function a) (ResolveIndex function b)) :ruleset memory-allocation)\n\
-             (rule ((ResolveIndex function ({constructor} a b)) (= x (ResolvedIndex function a)) (= y (ResolvedIndex function b))) ((set (ResolvedIndex function ({constructor} a b)) ({constructor} x y))) :ruleset memory-allocation)\n"
-        ));
-    }
-    for (vector, element) in [
-        ("Pattern", "Binding"),
-        ("Params", "Param"),
-        ("Merges", "Merge"),
-        ("Stms", "Stm"),
-    ] {
-        declarations.push_str(&format!(
-            "(relation Allocate{vector}Demand (ScopeContext {vector}))\n\
-             (function Allocate{vector} (ScopeContext {vector}) {vector} :no-merge)\n\
-             (function Allocate{vector}Prefix (ScopeContext {vector} i64) {vector} :no-merge)\n"
-        ));
-        rules.push_str(&format!(
-            "(rule ((Allocate{vector}Demand context input)) ((set (Allocate{vector}Prefix context input 0) (vec-of))) :ruleset memory-elaborate)\n\
-             (rule ((= prefix (Allocate{vector}Prefix context input i)) (< i (vec-length input))) ((Allocate{element}Demand context (vec-get input i))) :ruleset memory-elaborate)\n\
-             (rule ((= prefix (Allocate{vector}Prefix context input i)) (< i (vec-length input)) (= next (Allocate{element} context (vec-get input i)))) ((set (Allocate{vector}Prefix context input (+ i 1)) (vec-append prefix next))) :ruleset memory-elaborate)\n\
-             (rule ((= output (Allocate{vector}Prefix context input (vec-length input)))) ((set (Allocate{vector} context input) output)) :ruleset memory-elaborate)\n"
-        ));
-    }
-    for (primitive, bytes) in [
-        ("I8", 1),
-        ("U8", 1),
-        ("I16", 2),
-        ("U16", 2),
-        ("F16", 2),
-        ("I32", 4),
-        ("U32", 4),
-        ("F32", 4),
-        ("Bool", 4),
-        ("I64", 8),
-        ("U64", 8),
-        ("F64", 8),
-        ("UnitType", 0),
-    ] {
-        rules.push_str(&format!("(set (PrimitiveBytes ({primitive})) {bytes})\n"));
-    }
-    for info in [
-        "(ScalarInfo element)",
-        "(ArrayInfo element location)",
-        "(ResourceInfo resource)",
-    ] {
-        rules.push_str(&format!(
-            "(rule ((AllocateBindingDemand context binding) (= binding (BindValue name {info}))) ((set (AllocateBinding context binding) (vec-of binding))) :ruleset memory-elaborate)\n\
-             (rule ((= binding (BindValue name {info}))) ((set (BindingWidth binding) 1)) :ruleset memory-elaborate)\n"
-        ));
-    }
-    for info in ["(ScalarInfo element)", "(ResourceInfo resource)"] {
-        rules.push_str(&format!("(rule ((= (LogicalInfo function name) {info})) ((set (PackedOperand function (ValueOperand (Var name))) (vec-of (ValueOperand (Var name))))) :ruleset memory-elaborate)\n"));
-    }
-    for binding in ["(BindBlock block capacity)", "(BindAccumulator token info)"] {
-        rules.push_str(&format!(
-            "(rule ((AllocateBindingDemand context binding) (= binding {binding})) ((set (AllocateBinding context binding) (vec-of binding))) :ruleset memory-elaborate)\n\
-             (rule ((= binding {binding})) ((set (BindingWidth binding) 1)) :ruleset memory-elaborate)\n\
-             (rule ((= prefix (AllocationPrefix context id pattern i)) (< i (vec-length pattern)) (= (vec-get pattern i) {binding})) ((set (AllocationPrefix context id pattern (+ i 1)) prefix)) :ruleset memory-elaborate)\n"
-        ));
-    }
-    for operand in [
-        "(ValueOperand (LiteralBits primitive bits))",
-        "(IndexOperand index)",
-        "(BlockOperand block)",
-        "(AccOperand token)",
-    ] {
-        rules.push_str(&format!(
-            "(rule ((EffectContext function) (= operand {operand})) ((set (PackedOperand function operand) (vec-of operand))) :ruleset memory-elaborate)\n"
-        ));
-    }
-    for info in [
-        "(ReturnScalar element)",
-        "(ReturnAccumulator accumulator)",
-        "(ReturnResource resource)",
-    ] {
-        rules.push_str(&format!(
-            "(rule ((= info {info})) ((set (ReturnWidth info) 1)) :ruleset memory-elaborate)\n\
-             (rule ((= prefix (AllocateReturnPrefix context returns i)) (< i (vec-length returns)) (= info (vec-get returns i)) (= info {info})) ((set (AllocateReturn context returns i info) (vec-of info))) :ruleset memory-elaborate)\n"
-        ));
-    }
-    for constructor in [
-        "ExtAdd", "ExtSub", "ExtMul", "ExtDiv", "ExtMod", "ExtMin", "ExtMax",
-    ] {
-        rules.push_str(&format!(
-            "(rule ((AllocateExtIndexDemand returns ({constructor} a b))) ((AllocateExtIndexDemand returns a) (AllocateExtIndexDemand returns b)) :ruleset memory-elaborate)\n\
-             (rule ((AllocateExtIndexDemand returns original) (= original ({constructor} a b)) (= x (AllocateExtIndex returns a)) (= y (AllocateExtIndex returns b))) ((set (AllocateExtIndex returns original) ({constructor} x y))) :ruleset memory-elaborate)\n"
-        ));
-    }
-    for result in ["(Collect values)", "(Contribute tokens)"] {
-        rules.push_str(&format!(
-            "(rule ((= prefix (AllocateParallelPrefix context results i)) (< i (vec-length results)) (= result (vec-get results i)) (= result {result})) ((set (AllocateParallelPrefix context results (+ i 1)) (vec-push prefix result))) :ruleset memory-elaborate)\n"
-        ));
-    }
-    for policy in ["DisjointWrites", "IdenticalWrites", "FetchAddWrites"] {
-        rules.push_str(&format!(
-            "(rule ((= prefix (AllocateAccInputPrefix context id inputs i)) (< i (vec-length inputs)) (= (vec-get inputs i) (AccumulatorInput arrays ({policy})))) ((set (AllocateAccInputPrefix context id inputs (+ i 1)) (vec-push prefix (vec-get inputs i)))) :ruleset memory-elaborate)\n"
-        ));
-    }
-    for command in parse_program("memory IR", SCHEMA)? {
-        let Command::Datatypes { datatypes, .. } = command else {
-            continue;
-        };
-        for (_, name, definition) in datatypes {
-            if name != "Exp" {
-                continue;
-            }
-            let Subdatatypes::Variants(variants) = definition else {
-                return Err(output_error("Exp must be a datatype"));
-            };
-            for variant in variants {
-                match variant.name.as_str() {
-                    "Call" | "If" | "Loop" | "Parallel" | "Launch" | "WithAcc" | "Reshape" => continue,
-                    "Use" | "PrimOp" | "IndexOp" | "Assert" | "Alloc" | "View" | "Permute" | "Load"
-                    | "GenerateArray" | "Copy" | "Update" | "Store" | "Accumulate" | "Reserve"
-                    | "Barrier" => {}
-                    other => {
-                        return Err(output_error(format!(
-                            "missing allocation elaboration for {other}"
-                        )))
-                    }
-                }
-                let arguments =
-                    (0..variant.types.len()).map(|i| format!("a{i}")).collect::<Vec<_>>().join(" ");
-                rules.push_str(&format!(
-                    "(rule ((AllocateExpDemand context id expression) (= expression ({} {arguments}))) ((set (AllocateExp context id expression) expression)) :ruleset memory-elaborate)\n", variant.name
-                ));
-            }
-        }
-    }
-    Ok((declarations, rules))
-}

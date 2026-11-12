@@ -223,7 +223,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             }
                         };
                         let elem_spirv = self.constructor.polytype_to_spirv(&elem_ty)?;
-                        let size_const = self.constructor.const_u32(n);
+                        let size_const = self.constructor.const_u32(n.max(1));
                         let buf_type = *self
                             .constructor
                             .builder

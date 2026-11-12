@@ -96,6 +96,13 @@ impl Constructor {
         // with forced fresh ids below.
         self.polytype_to_spirv(ty)?;
 
+        if let Some(fields) = ssa::layout::array_descriptor_fields(ty) {
+            let descriptor = types::tuple(fields);
+            let storage = self.storage_polytype_to_spirv(&descriptor)?;
+            self.storage_polytype_cache.insert(ty.clone(), storage);
+            return Ok(storage);
+        }
+
         let result = match ty {
             PolyType::Constructed(TypeName::Tuple(_), members) => {
                 let Some(layout) = ssa::layout::block_layout(ty, interface::StorageLayout::Std430) else {
@@ -140,11 +147,11 @@ impl Constructor {
                     };
                     let count = u32::try_from(*count)
                         .map_err(|_| err_spirv!("storage array dimension exceeds SPIR-V limits"))?;
-                    let count_id = self.const_u32(count);
+                    let count_id = self.const_u32(count.max(1));
                     current =
                         *self.builder.type_buffer_array(builder::TypeId::new(current), count_id, stride);
                     stride = stride
-                        .checked_mul(count)
+                        .checked_mul(count.max(1))
                         .ok_or_else(|| err_spirv!("storage array byte size exceeds SPIR-V limits"))?;
                 }
                 current
@@ -173,6 +180,19 @@ impl Constructor {
         }
         let (source_ty, destination_ty) =
             if add_decorations { (logical_ty, storage_ty) } else { (storage_ty, logical_ty) };
+        if let Some(fields) = ssa::layout::array_descriptor_fields(ty) {
+            let mut converted = Vec::new();
+            for (index, field) in fields.iter().enumerate() {
+                let source = if add_decorations {
+                    self.polytype_to_spirv(field)?
+                } else {
+                    self.storage_polytype_to_spirv(field)?
+                };
+                let value = self.builder.composite_extract(source, None, value, [index as u32])?;
+                converted.push(self.convert_storage_value(value, field, add_decorations)?);
+            }
+            return Ok(self.builder.composite_construct(destination_ty, None, converted)?);
+        }
         match ty {
             PolyType::Constructed(TypeName::Tuple(_), members) => {
                 let mut converted_members = Vec::with_capacity(members.len());
@@ -220,6 +240,9 @@ impl Constructor {
                 };
 
                 let source_child_ty = self.get_array_element_type(source_ty)?;
+                if count == 0 {
+                    return Ok(*self.builder.const_null(builder::TypeId::new(destination_ty)));
+                }
                 let mut converted_elements = Vec::with_capacity(count);
                 for index in 0..count {
                     let source_element =

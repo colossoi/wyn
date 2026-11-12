@@ -481,11 +481,48 @@ fn allocate(
     } = analysis;
     let mut places = LookupMap::default();
     let mut reused = LookupSet::default();
+    let dominators = DominatorTree::build(body.inner.entry, |block, out| {
+        out.extend(body.inner.blocks[block].term.successors());
+    });
+    let mut allocations = LookupMap::default();
+    let origin_roots = origins
+        .iter()
+        .flat_map(|(root, values)| values.iter().map(|value| (*value, *root)))
+        .collect::<LookupMap<_, _>>();
+    let mut accesses = LookupMap::<_, Vec<_>>::default();
+    for (block, data) in &body.inner.blocks {
+        for (position, &inst) in data.insts.iter().enumerate() {
+            let node = &body.inner.insts[inst];
+            for root in node
+                .data
+                .value_uses()
+                .into_iter()
+                .filter_map(|value| value.as_ssa().and_then(|value| analysis.roots.get(&value)))
+                .chain(node.result.and_then(|value| origin_roots.get(&value)))
+            {
+                accesses.entry(*root).or_default().push((block, position));
+            }
+            if let InstKind::Alloca { result } = node.data {
+                allocations.insert(result, (block, position));
+            }
+        }
+    }
     for &root in candidates {
         let Some(sources) = origins.get(&root).filter(|xs| !xs.is_empty()) else {
             continue;
         };
-        let existing = existing.get(&root).copied();
+        // Liveness permits destructive reuse, but the original place must also
+        // exist on every path where the complete version web will access it.
+        let existing = existing.get(&root).copied().filter(|place| {
+            let Some(&(allocation, index)) = allocations.get(place) else {
+                return false;
+            };
+            accesses.get(&root).is_none_or(|accesses| {
+                accesses.iter().all(|&(block, position)| {
+                    dominators.dominates(allocation, block) && (allocation != block || index < position)
+                })
+            })
+        });
         let place = existing.unwrap_or_else(|| {
             let place = body.places.insert(PlaceInfo {
                 elem_ty: body.get_value_type(root).clone(),

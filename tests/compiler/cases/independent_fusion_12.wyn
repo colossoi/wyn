@@ -1,0 +1,10 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"packed_prefix_tiles\"", ":source-name \"packed_tiles\"", ":source-name \"empty_pack\""]
+
+entry packed_prefix_tiles() []i32=scan((+),0,filter(|x|x%3==0,iota(257)))
+entry packed_tiles() []i32=filter(|x|x%3==0,iota(257))
+entry empty_pack() []i32=filter(|x|x<0,iota(65))

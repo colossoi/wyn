@@ -501,6 +501,7 @@ impl Program {
                 writeln!(out, "    )")?;
             }
             match op {
+                Operation::Bind { name, value } => writeln!(out, "    (setq {name} {})", crate::scalar_emit::whl_scalar(value, &ScalarSource::resource)?)?,
                 Operation::Allocate(allocation) => self.write_allocation(out, allocation)?,
                 Operation::Loop { pipeline, region, test, body } => {
                     let repeated = &self.interface.dispatch_loops[*region];
@@ -521,7 +522,11 @@ impl Program {
                     self.write_loop_bindings(out, *pipeline, repeated.carried.iter().map(|carry| (&carry.binding, &carry.next)))?;
                     writeln!(out, "    )")?;
                 }
-                Operation::Scalar { pipeline, task } => writeln!(out, "    {}", self.whl_scalar_task(*pipeline, &self.interface.scalar_tasks[*task])?)?,
+                Operation::Scalar { pipeline, task, value } => {
+                    let mut task = self.interface.scalar_tasks[*task].clone();
+                    task.value = value.clone();
+                    writeln!(out, "    {}", self.whl_scalar_task(*pipeline, &task)?)?;
+                }
                 Operation::Dispatch { pipeline: p, stage: s, groups } => writeln!(out, "    (gpu-dispatch 'kernel-{p}-{s}\n      :groups (list {} {} {})\n      :args (list {}))", groups[0].to_whl()?, groups[1].to_whl()?, groups[2].to_whl()?, self.arguments(*p, Some(*s))?)?,
                 Operation::Draw { pipeline } => self.write_draw(out, *pipeline)?,
             }
@@ -554,8 +559,7 @@ impl Program {
             writeln!(out, "    ({scalar} :u32)")?;
         }
         write!(out, "  )\n  :results '(")?;
-        let mut source_results =
-            self.interface.source_results.iter().filter(|r| r.entry == entry.name).collect::<Vec<_>>();
+        let mut source_results = entry.source_results.iter().collect::<Vec<_>>();
         source_results.sort_by_key(|r| r.result);
         for (i, &id) in entry.results.iter().enumerate() {
             let source_result = source_results.get(i);
@@ -610,6 +614,9 @@ impl Program {
         writeln!(out, "  (let* (")?;
         for allocation in entry.allocations() {
             writeln!(out, "    ({} nil)", resource(allocation.resource()))?;
+        }
+        for name in entry.scalar_bindings() {
+            writeln!(out, "    ({name} nil)")?;
         }
         writeln!(out, "  )")?;
         self.write_operations(out, &entry.operations)?;
@@ -778,10 +785,7 @@ impl Program {
             IndexFormat::Uint16 => ":u16",
             IndexFormat::Uint32 => ":u32",
         };
-        let count = |c: &DrawCount, id: ResourceId| match c {
-            DrawCount::Fixed(n) => n.to_string(),
-            DrawCount::BufferLength => format!("count-resource-{}", id.0),
-        };
+        let count = |c: &DrawCount, buffer: &crate::DrawBufferRef| self.draw_count(p, c, buffer)?.to_whl();
         match &g.invocation.draw {
             DrawCall::Direct {
                 vertex_count,
@@ -807,7 +811,7 @@ impl Program {
                     ":indexed {} {} {} {instance_count} {first_index} {vertex_offset} {first_instance}",
                     resource(id),
                     index_name(index_format),
-                    count(index_count, id)
+                    count(index_count, indices)?
                 )?;
             }
             DrawCall::Indirect {
@@ -820,7 +824,7 @@ impl Program {
                     out,
                     ":indirect {} {offset} {} 16",
                     resource(id),
-                    count(draw_count, id)
+                    count(draw_count, commands)?
                 )?;
             }
             DrawCall::IndexedIndirect {
@@ -837,7 +841,7 @@ impl Program {
                     resource(self.draw_resource(p, indices)?),
                     index_name(index_format),
                     resource(id),
-                    count(draw_count, id)
+                    count(draw_count, commands)?
                 )?;
             }
         }

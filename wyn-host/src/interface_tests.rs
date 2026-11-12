@@ -611,6 +611,7 @@ fn device_sized_storage_is_allocated_after_its_count_and_before_its_writer() {
         [
             crate::Operation::Allocate(_),
             crate::Operation::Dispatch { stage: 0, .. },
+            crate::Operation::Bind { .. },
             crate::Operation::Allocate(_),
             crate::Operation::Dispatch { stage: 1, .. },
         ]

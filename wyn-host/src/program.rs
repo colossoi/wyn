@@ -5,8 +5,10 @@ use thiserror::Error;
 use crate::{
     Binding, BufferLen, BufferSource, BufferUsage, DepthTest, DispatchLoopControl, DispatchSize,
     DrawBufferRef, DrawCall, DrawCount, FrameResource, FrameResourceKind, ModuleInterface, Pipeline,
-    ResultShape, ScalarExpr, ScalarSource, StorageTextureSize,
+    ResultShape, ScalarExpr, ScalarSource, SourceResultBinding, StorageTextureSize,
 };
+
+mod readbacks;
 
 #[derive(Debug, Error)]
 pub enum HostError {
@@ -220,6 +222,10 @@ impl Allocation {
 
 #[derive(Clone, Debug)]
 pub enum Operation {
+    Bind {
+        name: String,
+        value: ScalarExpr,
+    },
     Allocate(Allocation),
     Loop {
         pipeline: usize,
@@ -230,6 +236,7 @@ pub enum Operation {
     Scalar {
         pipeline: usize,
         task: usize,
+        value: ScalarExpr,
     },
     Dispatch {
         pipeline: usize,
@@ -244,7 +251,7 @@ pub enum Operation {
 impl Operation {
     pub(crate) fn pipeline(&self) -> Option<usize> {
         match self {
-            Self::Allocate(_) => None,
+            Self::Allocate(_) | Self::Bind { .. } => None,
             Self::Loop { pipeline, .. }
             | Self::Scalar { pipeline, .. }
             | Self::Dispatch { pipeline, .. }
@@ -264,9 +271,16 @@ pub struct Entry {
     pub scalar_inputs: BTreeSet<String>,
     pub operations: Vec<Operation>,
     pub results: Vec<ResourceId>,
+    pub source_results: Vec<SourceResultBinding>,
 }
 
 impl Entry {
+    pub(crate) fn scalar_bindings(&self) -> impl Iterator<Item = &str> {
+        walk_operations(&self.operations).filter_map(|operation| match operation {
+            Operation::Bind { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+    }
     pub fn allocations(&self) -> impl Iterator<Item = &Allocation> {
         walk_operations(&self.operations).filter_map(|op| match op {
             Operation::Allocate(allocation) => Some(allocation),
@@ -368,6 +382,22 @@ impl Program {
             }
             program.interface.source_results[i].shape = shape;
         }
+        for pipeline in 0..program.interface.pipelines.len() {
+            let Pipeline::Graphics(graphics) = &program.interface.pipelines[pipeline] else {
+                continue;
+            };
+            let draw = graphics.invocation.draw.try_map_buffers(|buffer| {
+                let mut buffer = buffer.clone();
+                if let Some((producer, count)) = &mut buffer.elements {
+                    program.resolve_size_sources(*producer, count)?;
+                }
+                Ok::<_, HostError>(buffer)
+            })?;
+            let Pipeline::Graphics(graphics) = &mut program.interface.pipelines[pipeline] else {
+                unreachable!()
+            };
+            graphics.invocation.draw = draw;
+        }
         let order = program
             .interface
             .frame_graph
@@ -405,11 +435,13 @@ impl Program {
                 scalar_inputs: BTreeSet::new(),
                 operations: vec![],
                 results: vec![],
+                source_results: vec![],
             });
             let start = entry.operations.len();
             let key = (pipeline, pass.stage_index);
             entry_stages.entry(entry.name.clone()).or_default().push(key);
-            let mut replaced = false;
+            let mut replaced = matches!(&operation, Operation::Dispatch { groups, .. }
+                if groups.iter().any(|group| matches!(group, Expr::Integer(0))));
             if let Operation::Dispatch { stage, .. } = &operation {
                 let Pipeline::Compute(compute) = &program.interface.pipelines[pipeline] else {
                     return Err(HostError::Invalid(
@@ -418,7 +450,16 @@ impl Program {
                 };
                 for (task, scalar) in program.interface.scalar_tasks.iter().enumerate() {
                     if scalar.stage == compute.stages[*stage].entry_point {
-                        entry.operations.push(Operation::Scalar { pipeline, task });
+                        let mut value = Expr::Scalar(scalar.value.clone());
+                        program.resolve_size_sources(pipeline, &mut value)?;
+                        let Expr::Scalar(value) = value else {
+                            unreachable!()
+                        };
+                        entry.operations.push(Operation::Scalar {
+                            pipeline,
+                            task,
+                            value,
+                        });
                         replaced |= scalar.replaces_dispatch;
                     }
                 }
@@ -437,9 +478,17 @@ impl Program {
                 scalar_inputs: BTreeSet::new(),
                 operations: vec![],
                 results: vec![],
+                source_results: vec![],
             });
         }
         for (_, mut entry) in entries {
+            entry.source_results = program
+                .interface
+                .source_results
+                .iter()
+                .filter(|result| result.entry == entry.name)
+                .cloned()
+                .collect();
             let stages = &entry_stages[&entry.name];
             let positions: BTreeMap<_, _> = stages.iter().enumerate().map(|(i, key)| (*key, i)).collect();
             entry.operations = program.structured_operations(
@@ -449,6 +498,7 @@ impl Program {
                 &mut BTreeSet::new(),
             )?;
             program.prepare_entry(&mut entry)?;
+            program.cache_readbacks(&mut entry)?;
             program.entries.push(entry);
         }
         Ok(program)
@@ -618,6 +668,27 @@ impl Program {
                 .any(|r| r.shape.offsets().iter().any(|s| s.resource().is_ok_and(|r| r == id)))
     }
 
+    pub(crate) fn draw_count(
+        &self,
+        pipeline: usize,
+        count: &DrawCount,
+        buffer: &DrawBufferRef,
+    ) -> Result<Expr, HostError> {
+        Ok(match count {
+            DrawCount::Fixed(n) => Expr::Integer(i64::from(*n)),
+            DrawCount::BufferLength => {
+                if let Some((_, count)) = &buffer.elements {
+                    count.clone()
+                } else {
+                    Expr::Input(format!(
+                        "count-resource-{}",
+                        self.draw_resource(pipeline, buffer)?.0
+                    ))
+                }
+            }
+        })
+    }
+
     pub fn resource_binding(&self, id: ResourceId) -> Option<&Binding> {
         self.interface.frame_graph.resources[id.0]
             .bindings
@@ -676,34 +747,6 @@ impl Program {
                     let id = ResourceId(id);
                     dependencies.resources.insert(id);
                     entry.results.push(id);
-                }
-                match &g.invocation.draw {
-                    DrawCall::Indexed {
-                        index_count: DrawCount::BufferLength,
-                        indices,
-                        ..
-                    } => {
-                        dependencies.scalar_inputs.insert(format!(
-                            "count-resource-{}",
-                            self.draw_resource(pipeline, indices)?.0
-                        ));
-                    }
-                    DrawCall::Indirect {
-                        draw_count: DrawCount::BufferLength,
-                        commands,
-                        ..
-                    }
-                    | DrawCall::IndexedIndirect {
-                        draw_count: DrawCount::BufferLength,
-                        commands,
-                        ..
-                    } => {
-                        dependencies.scalar_inputs.insert(format!(
-                            "count-resource-{}",
-                            self.draw_resource(pipeline, commands)?.0
-                        ));
-                    }
-                    _ => {}
                 }
             }
         }
@@ -910,6 +953,7 @@ impl Program {
     fn operation_dependencies(&self, operation: &Operation) -> Result<Dependencies, HostError> {
         let mut dependencies = Dependencies::default();
         match operation {
+            Operation::Bind { value, .. } => dependencies.scalar(value, ScalarSource::resource)?,
             Operation::Allocate(_) => {
                 return Err(HostError::Invalid("entry was already scheduled".into()));
             }
@@ -944,12 +988,16 @@ impl Program {
                 selections.reads.retain(|resource| !produced.contains(resource));
                 dependencies.extend(selections);
             }
-            Operation::Scalar { pipeline, task } => {
+            Operation::Scalar {
+                pipeline,
+                task,
+                value,
+            } => {
                 let task = &self.interface.scalar_tasks[*task];
                 let id = self.scalar_resource(*pipeline, &task.destination)?;
                 dependencies.resources.insert(id);
                 dependencies.writes.insert(id);
-                dependencies.scalar(&task.value, |source| self.scalar_resource(*pipeline, source))?;
+                dependencies.scalar(value, |source| self.scalar_resource(*pipeline, source))?;
             }
             Operation::Dispatch { pipeline, .. } | Operation::Draw { pipeline } => {
                 let stage = if let Operation::Dispatch { stage, groups, .. } = operation {
@@ -958,6 +1006,23 @@ impl Program {
                     }
                     *stage
                 } else {
+                    if let Pipeline::Graphics(graphics) = &self.interface.pipelines[*pipeline] {
+                        let count = match &graphics.invocation.draw {
+                            DrawCall::Indexed {
+                                index_count, indices, ..
+                            } => Some(self.draw_count(*pipeline, index_count, indices)?),
+                            DrawCall::Indirect {
+                                draw_count, commands, ..
+                            }
+                            | DrawCall::IndexedIndirect {
+                                draw_count, commands, ..
+                            } => Some(self.draw_count(*pipeline, draw_count, commands)?),
+                            DrawCall::Direct { .. } => None,
+                        };
+                        if let Some(count) = count {
+                            count.dependencies(&mut dependencies)?;
+                        }
+                    }
                     0
                 };
                 let Some(pass) = self

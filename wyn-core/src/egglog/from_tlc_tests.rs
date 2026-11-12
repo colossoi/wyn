@@ -1,7 +1,7 @@
 use super::import;
+use crate::compile_thru_tlc;
 use crate::egglog::query::Query;
 use crate::tlc::{self, DefMeta, TermKind};
-use crate::{compile_thru_tlc, types};
 use egglog_engine::{EGraph, Value};
 
 fn function_body(graph: &EGraph) -> Vec<Value> {
@@ -165,76 +165,7 @@ fn scatter_reads_include_branch_dependencies_without_turning_them_into_operand_u
     assert_eq!(branch_reads, 2);
 }
 
-#[test]
-fn source_import_resolves_coerced_tuple_fields_in_their_visible_scope() {
-    let mut program = compile_thru_tlc("entry main(x: i32) i32 = x + 1").unwrap();
-    let [literal_id, tuple_id, coerced_id, projected_id] = std::array::from_fn(|_| program.next_term_id());
-    let entry = program.defs.iter_mut().find(|def| matches!(def.meta, DefMeta::EntryPoint(_))).unwrap();
-    let TermKind::Lambda(lambda) = &mut entry.body.kind else {
-        panic!("entry lambda")
-    };
-    let scalar = (*lambda.body).clone();
-    let ty = scalar.ty.clone();
-    let span = scalar.span;
-    let tuple_ty = types::Type::Constructed(types::TypeName::Tuple(2), vec![ty.clone(), ty.clone()]);
-    let other = tlc::Term {
-        id: literal_id,
-        ty: ty.clone(),
-        span,
-        kind: TermKind::IntLit("7".into()),
-    };
-    let tuple = tlc::Term {
-        id: tuple_id,
-        ty: tuple_ty.clone(),
-        span,
-        kind: TermKind::Tuple(vec![other, scalar]),
-    };
-    let coerced = tlc::Term {
-        id: coerced_id,
-        ty: tuple_ty.clone(),
-        span,
-        kind: TermKind::Coerce {
-            inner: Box::new(tuple),
-            target_ty: tuple_ty,
-        },
-    };
-    let projected = tlc::Term {
-        id: projected_id,
-        ty,
-        span,
-        kind: TermKind::TupleProj {
-            tuple: Box::new(coerced),
-            idx: 1,
-        },
-    };
-    *lambda.body = projected;
-    let (mut graph, _) = import(&program).unwrap();
-    crate::egglog::analysis::run(&mut graph).unwrap();
-    let query = Query(&graph);
-    let body = function_body(&graph);
-    let results = query.vector(body[1]).unwrap();
-    let result = query.fields("Yield", results[0]).unwrap();
-    let atom = query.fields("ValueOperand", result[1]).unwrap()[0];
-    let name = query.fields("Var", atom).unwrap()[0];
-    let statements = query.vector(body[0]).unwrap();
-    let producer = statements
-        .into_iter()
-        .find(|&statement| {
-            let statement = query.fields("Let", statement).unwrap();
-            query
-                .vector(statement[1])
-                .unwrap()
-                .into_iter()
-                .any(|binding| query.fields("BindValue", binding).unwrap()[0] == name)
-        })
-        .unwrap();
-    let expression = query.fields("Let", producer).unwrap()[3];
-    assert!(
-        query.enode("PrimOp", expression).unwrap().is_some(),
-        "projection must return the computed field"
-    );
-}
-
+// Product projection is checked in memory_ir_product_projection.wyn.
 #[test]
 fn runtime_maps_preserve_collection_until_shape_analysis() {
     for source in [
