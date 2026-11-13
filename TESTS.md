@@ -53,6 +53,20 @@ Existing exceptions still need follow-up; the current suite is not yet compliant
 
 ## Test locations
 
+Run `python scripts/test_integrations.py` for the workspace integration gate.
+It gives each Rust integration test and each source fixture a hard five-minute
+execution deadline, with 16 MiB stacks and four workers. A fixture's deadline
+covers all its shader targets. Compilation of the Rust harnesses is excluded.
+On a timeout or failure, the gate stops immediately and terminates active test
+process trees, including compiler children. Timeouts are failures, never retries
+or allowed timing exceptions. `--filter TEXT` selects case labels for debugging.
+
+Each case runs in its own process so even a stuck in-process compiler can be
+terminated. Prelude reuse within a test's source-example loop is preserved;
+process-local caches do not carry between separate test cases. The CLI fixtures
+share one compiler snapshot per gate run. Direct `cargo test` remains useful for
+debugging but does not enforce this deadline.
+
 | Kind | Location and runner | What belongs here |
 | --- | --- | --- |
 | Internal unit tests | Inline `#[cfg(test)]` modules and `*_tests.rs` / `tests.rs` modules within a crate; `cargo test -p CRATE --lib` (or its binary tests). | Small algorithm/data-structure contracts, malformed internal representations, and phase-specific assertions. Tiny source rejection collections also belong here. Example: literal-expansion rejection cases in `wyn-core/src/literal_expansion_tests.rs`. Keep the complete test under three seconds. |

@@ -30,7 +30,9 @@ use crate::interface::{
 };
 use crate::op::{BinaryOperator, OpTag, PureViewSource};
 use crate::ssa::context::BackendGlobal;
-use crate::ssa::layout::{block_layout, storage_elem_stride, storage_value_type, type_byte_size};
+use crate::ssa::layout::{
+    block_layout, std430_type_layout, storage_elem_stride, storage_value_type, type_byte_size,
+};
 use crate::ssa::stage::Elaborated;
 use crate::ssa::types::{InstKind, ValueRef};
 use crate::tlc::{extract_lambda_params_ref, DefMeta};
@@ -82,7 +84,7 @@ pub(super) fn lower(
             .into_iter()
             .map(|param| Ok(query.fields("Parameter", param)?[0]))
             .collect::<Result<Vec<_>, OptimizeError>>()?;
-        let mut pc_offset = 0;
+        let mut pc_offset = 0u32;
         let mut parameter_inputs = Vec::new();
         let mut templates = Vec::new();
         for (index, (_, ty)) in parameters.iter().enumerate() {
@@ -148,9 +150,10 @@ pub(super) fn lower(
                         decoration: extract_io_decoration(declared),
                     }
                 } else {
-                    let Some(size) = type_byte_size(&storage_value_type(ty)) else {
+                    let Some((size, align)) = std430_type_layout(&storage_value_type(ty)) else {
                         return Err(error("push constant has no static size"));
                     };
+                    pc_offset = pc_offset.div_ceil(align) * align;
                     let slot = PushConstantSlot {
                         offset: pc_offset,
                         size,
@@ -507,7 +510,7 @@ pub(super) fn lower(
                 } else {
                     &default
                 };
-                let physical_layout = storage_value_type(&logical);
+                let physical_layout = storage_value_type(&output.ty);
                 for result in results {
                     pipeline.source_results.push(SourceResultBinding {
                         entry: declaration
@@ -798,8 +801,42 @@ pub(super) fn lower(
             }
         }
     }
-    pipeline.frame_graph =
+    let mut frame_graph =
         FrameGraph::from_selected_pipelines(&pipeline.pipelines, &dependencies).map_err(error)?;
+    // Concrete aliases are known here, including reads between writes to a render target.
+    let mut writers = LookupMap::<(&str, usize), usize>::default();
+    let mut readers = LookupMap::<(&str, usize), Vec<usize>>::default();
+    for index in 0..frame_graph.passes.len() {
+        let pass = &frame_graph.passes[index];
+        let owner = match &pipeline.pipelines[pass.pipeline_index] {
+            Pipeline::Compute(compute) => compute.stages[pass.stage_index].owner.as_str(),
+            Pipeline::Graphics(graphics) => {
+                graphics.stages.first().ok_or_else(|| error("draw has no shader stage"))?.owner.as_str()
+            }
+        };
+        let mut before = Vec::new();
+        for access in &pass.reads {
+            let key = (owner, access.resource);
+            if let Some(&writer) = writers.get(&key) {
+                before.push(writer);
+            }
+            readers.entry(key).or_default().push(index);
+        }
+        for access in &pass.writes {
+            let key = (owner, access.resource);
+            if let Some(writer) = writers.insert(key, index).filter(|&writer| writer != index) {
+                before.push(writer);
+            }
+            before.extend(
+                readers.remove(&key).unwrap_or_default().into_iter().filter(|&reader| reader != index),
+            );
+        }
+        let dependencies = &mut frame_graph.passes[index].depends_on;
+        dependencies.extend(before);
+        dependencies.sort_unstable();
+        dependencies.dedup();
+    }
+    pipeline.frame_graph = frame_graph;
     Ok(Elaborated::from_parts(
         std::mem::take(&mut compiler.functions),
         entries.into_iter().map(EntryPoint::into_shader).collect(),
@@ -1205,7 +1242,11 @@ impl EntryEmission<'_, '_, '_> {
         let generated = self.body.query().required("GeneratedDispatches", RawValues(Vec::new()))?;
         let generated =
             self.body.query().0.value_to_base::<bool>(generated) && self.kind == EntryKind::Compute;
+        let mut grouped = None;
         for (i, &statement) in statements.iter().enumerate() {
+            if grouped == Some(statement) {
+                continue;
+            }
             let mut live = statement_names(self.body.query(), &statements[i + 1..])?;
             live.extend(after.iter().copied());
             let fields = self.body.query().fields("Let", statement)?;
@@ -1237,13 +1278,41 @@ impl EntryEmission<'_, '_, '_> {
                 let mut captures = names_in(self.body.query(), "NamesParallelBody", parallel[2])?;
                 let bound = names_in(self.body.query(), "BindersParallelBody", parallel[2])?;
                 captures.retain(|name| !bound.contains(name));
+                let epilogue =
+                    if generated && self.body.compiler.execution.dispatch(statement)?.groups.is_none() {
+                        if let Some(&next) = statements.get(i + 1) {
+                            self.body
+                                .query()
+                                .contains("ScanEpilogue", (self.body.function, statement, next))?
+                                .then_some(next)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                if let Some(next) = epilogue {
+                    let next = self.body.query().fields("Let", next)?;
+                    let next = self.body.query().fields("Parallel", next[3])?;
+                    let used = names_in(self.body.query(), "NamesParallelBody", next[2])?;
+                    let bound = names_in(self.body.query(), "BindersParallelBody", next[2])?;
+                    captures.extend(used.difference(&bound).copied());
+                }
                 self.materialize_cpu_captures(&captures)?;
                 self.body.active_dispatch = Some(statement);
-                let last = terminal && i + 1 == statements.len();
-                if self.chunked_collective(statement, &live, last)? {
+                let last = terminal && i + 1 + usize::from(epilogue.is_some()) == statements.len();
+                grouped = epilogue;
+                if self.chunked_collective(statement, &live, last, epilogue)? {
                     continue;
                 }
                 self.body.statement(statement)?;
+                if let Some(next) = epilogue {
+                    let domain = self.body.query().fields("IterationSpace", parallel[1])?;
+                    let axis = self.body.query().vector(domain[1])?[0];
+                    let axis = self.body.query().fields("DenseAxis", axis)?;
+                    let count = self.body.index_expression(axis[1])?;
+                    self.scan_epilogue(next, (Body::number(0), count))?;
+                }
                 self.pending = true;
                 if !last {
                     self.flush(&live, vec![], true)?;

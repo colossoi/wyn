@@ -1,9 +1,15 @@
 //! Structural operations derived from the memory IR declarations.
-use super::{output_error, parse_program, query::Query, OptimizeError};
+#[cfg(debug_assertions)]
+use super::query::Query;
+use super::{output_error, parse_program, OptimizeError};
+#[cfg(debug_assertions)]
 use crate::{LookupMap, LookupSet};
 use egglog_engine::ast::{Command, Subdatatypes, Variant};
 use egglog_engine::EGraph;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+#[path = "memory/container_reads.rs"]
+mod container_reads;
 
 const SCHEMA: &str = include_str!("memory/schema.egg");
 const NAMES: [(&str, &str, &str); 4] = [
@@ -14,11 +20,40 @@ const NAMES: [(&str, &str, &str); 4] = [
 ];
 
 pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
-    graph.parse_and_run_program(Some("memory IR".into()), SCHEMA)?;
-    graph.parse_and_run_program(Some("memory structure".into()), &structure()?)?;
-    graph.parse_and_run_program(Some("memory effects".into()), include_str!("memory/effects.egg"))?;
-    graph.parse_and_run_program(Some("memory scopes".into()), include_str!("memory/regions.egg"))?;
-    graph.parse_and_run_program(
+    let _timing = super::timing::span("egglog schema and rules");
+    super::timing::evaluate(graph, Some("memory IR".into()), SCHEMA)?;
+    super::timing::evaluate(
+        graph,
+        Some("analysis slot types".into()),
+        include_str!("memory/slot-kinds.egg"),
+    )?;
+    let (declarations, rules) = structure()?;
+    super::timing::evaluate(graph, Some("memory structure types".into()), &declarations)?;
+    super::timing::evaluate(
+        graph,
+        Some("analysis collections".into()),
+        include_str!("memory/collections.egg"),
+    )?;
+    container_reads::register(graph);
+    super::timing::evaluate(graph, Some("memory structure".into()), &rules)?;
+    super::timing::evaluate(
+        graph,
+        Some("memory effects".into()),
+        include_str!("memory/effects.egg"),
+    )?;
+    super::timing::evaluate(
+        graph,
+        Some("memory scopes".into()),
+        include_str!("memory/regions.egg"),
+    )?;
+    #[cfg(debug_assertions)]
+    super::timing::evaluate(
+        graph,
+        Some("memory validation".into()),
+        include_str!("memory/validate.egg"),
+    )?;
+    super::timing::evaluate(
+        graph,
         Some("logical analysis".into()),
         concat!(
             include_str!("memory/analysis.egg"),
@@ -26,7 +61,8 @@ pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
             include_str!("memory/work.egg")
         ),
     )?;
-    graph.parse_and_run_program(
+    super::timing::evaluate(
+        graph,
         Some("memory fusion".into()),
         concat!(
             include_str!("memory/rewrites.egg"),
@@ -49,6 +85,7 @@ pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "dead-collections",
         "compact-count",
         "hoist",
+        "conditional",
         "fusion",
         "distribution",
         "placement",
@@ -61,10 +98,15 @@ pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
         let rules = include_str!("memory/apply-rewrites.egg")
             .replace("REWRITE_RULESET", &ruleset)
             .replace("REWRITE_PASS", &key);
-        graph.parse_and_run_program(Some("rewrite application".into()), &rules)?;
+        super::timing::evaluate(graph, Some("rewrite application".into()), &rules)?;
     }
-    graph.parse_and_run_program(Some("region inlining".into()), include_str!("memory/inline.egg"))?;
-    graph.parse_and_run_program(
+    super::timing::evaluate(
+        graph,
+        Some("region inlining".into()),
+        include_str!("memory/inline.egg"),
+    )?;
+    super::timing::evaluate(
+        graph,
         Some("region simplification".into()),
         concat!(
             include_str!("memory/simplify.egg"),
@@ -81,8 +123,8 @@ pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
 pub(super) fn inline(graph: &mut EGraph) -> Result<(), OptimizeError> {
     let _timing = super::timing::span("egglog inlining");
     validate(graph)?;
-    graph.parse_and_run_program(
-        None,
+    super::timing::run(
+        graph,
         "(run-schedule (saturate (seq
             (saturate fusion-index memory-names)
             (saturate memory-origin inline-discover)
@@ -96,15 +138,22 @@ pub(super) fn inline(graph: &mut EGraph) -> Result<(), OptimizeError> {
 pub(super) fn simplify(graph: &mut EGraph, hoist: bool) -> Result<(), OptimizeError> {
     let _timing = super::timing::span("egglog simplification");
     validate(graph)?;
-    graph.parse_and_run_program(
-        None,
+    super::timing::run(
+        graph,
         &format!("(run-schedule (saturate {}))", simplification_schedule(hoist)),
     )?;
     validate(graph)
 }
 
 pub(super) fn simplification_schedule(hoist: bool) -> String {
-    let hoists = if hoist { "(saturate simplify-hoists)" } else { "" };
+    let hoists = if hoist {
+        "(saturate conditional-analysis distribution-analysis fusion-domains memory-rename)
+         (saturate conditional-select)
+         (saturate memory-rewrite-conditional memory-rename)
+         (saturate simplify-hoists)"
+    } else {
+        ""
+    };
     let apply_hoists = if hoist { "(saturate memory-rewrite-hoist memory-rename)" } else { "" };
     format!(
         "(seq
@@ -112,6 +161,7 @@ pub(super) fn simplification_schedule(hoist: bool) -> String {
             (saturate memory-scopes)
             (saturate schedule-cost memory-origin)
             (saturate memory-effects simplify-analysis scalar-analysis compact-length-analysis)
+            (saturate simplify-uses)
             (saturate simplify-result-analysis)
             (saturate simplify-result-select memory-edits)
             (saturate memory-rewrite-dead-collections memory-rename)
@@ -121,21 +171,37 @@ pub(super) fn simplification_schedule(hoist: bool) -> String {
             (saturate memory-rewrite-compact-count memory-rename)
             {hoists}
             (saturate simplify-select scalar-select inline-select memory-edits)
+            (saturate memory-local-rewrites)
+            (saturate memory-edits)
+            (saturate memory-local-rewrite-select)
             (saturate memory-rewrite-simplify memory-rename)
             (saturate memory-rewrite-inline memory-rename)
             {apply_hoists})"
     )
 }
 
-/// Reject malformed lexical scopes before transformations or final emission.
+#[cfg(not(debug_assertions))]
+pub(super) fn validate(_graph: &mut EGraph) -> Result<(), OptimizeError> {
+    Ok(())
+}
+
+/// Audit compiler invariants in debug builds; optimization schedules derive their own facts.
+#[cfg(debug_assertions)]
 pub(super) fn validate(graph: &mut EGraph) -> Result<(), OptimizeError> {
-    let _timing = super::timing::span("memory validation");
     super::timing::time("memory scope analysis", || {
-        graph.parse_and_run_program(
+        super::timing::evaluate(
+            graph,
             None,
             "(run-schedule (saturate fusion-index memory-names) (saturate memory-scopes))",
         )
     })?;
+    #[cfg(debug_assertions)]
+    validate_scopes(graph)?;
+    Ok(())
+}
+
+#[cfg(debug_assertions)]
+fn validate_scopes(graph: &EGraph) -> Result<(), OptimizeError> {
     let _readout = super::timing::span("memory validation readout");
     let query = Query(graph);
     if query.row("CurrentProgram", |_| true)?.is_none() {
@@ -212,7 +278,7 @@ enum Declaration {
 
 /// Generate syntax traversals once from declarations, never from program data.
 /// Renaming stays in egglog and covers annotations whenever the schema grows.
-fn structure() -> Result<String, OptimizeError> {
+fn structure() -> Result<(String, String), OptimizeError> {
     let mut declarations = BTreeMap::new();
     for command in parse_program("memory IR", SCHEMA)? {
         match command {
@@ -238,6 +304,25 @@ fn structure() -> Result<String, OptimizeError> {
                 }
             }
             _ => return Err(output_error("memory schema must contain only data declarations")),
+        }
+    }
+    // Only schema types containing identifiers can change during substitution.
+    let mut renamable: BTreeSet<_> = NAMES.iter().map(|(name, _, _)| *name).collect();
+    loop {
+        let previous = renamable.len();
+        for (sort, declaration) in &declarations {
+            let changes = match declaration {
+                Declaration::Vector(element) => renamable.contains(element.as_str()),
+                Declaration::Variants(variants) => {
+                    variants.iter().flat_map(|v| &v.types).any(|child| renamable.contains(child.as_str()))
+                }
+            };
+            if changes {
+                renamable.insert(sort.as_str());
+            }
+        }
+        if renamable.len() == previous {
+            break;
         }
     }
     let mut rules = String::from(
@@ -280,8 +365,16 @@ fn structure() -> Result<String, OptimizeError> {
         ));
         if matches!(declarations[sort], Declaration::Vector(_)) {
             rules.push_str(&format!("(relation Walk{sort} ({sort} i64))\n"));
+            let Declaration::Vector(element) = &declarations[sort] else {
+                unreachable!()
+            };
+            rules.push_str(&format!(
+                "(function {sort}At ({sort} i64) {element} :no-merge)\n\
+                 (function {sort}RangeMid ({sort} i64 i64) i64 :no-merge)\n"
+            ));
         }
     }
+    let types = std::mem::take(&mut rules);
     for (sort, declaration) in &declarations {
         if let Some(index) = NAMES.iter().position(|(name, _, _)| name == sort) {
             let names = if index < 3 {
@@ -302,30 +395,30 @@ fn structure() -> Result<String, OptimizeError> {
                 ));
             }
             rules.push_str(&format!(
-                "(rule ((Rename{sort}Demand env node) (= env (Rename m0 m1 m2 m3 edits)) (map-not-contains m{index} node)) ((set (Rename{sort} env node) node)) :ruleset memory-rename)\n\
-                 (rule ((Rename{sort}Demand env node) (= env (Rename m0 m1 m2 m3 edits)) (= next (map-get m{index} node))) ((set (Rename{sort} env node) next)) :ruleset memory-rename)\n"
+                "(rule ((Rename{sort}Demand env node) (= env (Rename m0 m1 m2 m3 edits)) (map-excludes m{index} node)) ((set (Rename{sort} env node) node)) :ruleset memory-rename)\n\
+                 (rule ((Rename{sort}Demand env node) (= env (Rename m0 m1 m2 m3 edits)) (= next (map-at m{index} node))) ((set (Rename{sort} env node) next)) :ruleset memory-rename)\n"
             ));
             continue;
         }
         match declaration {
             Declaration::Vector(element) => {
                 if matches!(declarations.get(element), Some(Declaration::Vector(_))) {
-                    rules.push_str(&format!("(rule ((Walk{sort} node i) (< i (vec-length node))) ((Walk{element} (vec-get node i) 0)) :ruleset memory-names)\n"));
+                    rules.push_str(&format!("(rule ((Walk{sort} node i) (< i (vec-size node))) ((Walk{element} (vec-at node i) 0)) :ruleset memory-names)\n"));
                 }
                 if declarations.contains_key(element) {
-                    rules.push_str(&format!("(rule ((Contains{sort} root node) (Walk{sort} node i) (< i (vec-length node))) ((Contains{element} root (vec-get node i))) :ruleset memory-names)\n"));
+                    rules.push_str(&format!("(rule ((Contains{sort} root node) (Walk{sort} node i) (< i (vec-size node))) ((Contains{element} root (vec-at node i))) :ruleset memory-names)\n"));
                 }
                 vector_rules(&mut rules, sort, element, declarations.contains_key(element));
             }
             Declaration::Variants(variants) => {
                 for variant in variants {
-                    variant_rules(&mut rules, sort, variant, &declarations);
+                    variant_rules(&mut rules, sort, variant, &declarations, &renamable);
                     effect_rules(&mut rules, sort, variant, &declarations)?;
                 }
             }
         }
     }
-    Ok(rules)
+    Ok((types, rules))
 }
 
 fn vector(sort: &str, args: &[egglog_engine::ast::Expr]) -> Result<Declaration, OptimizeError> {
@@ -339,9 +432,17 @@ fn vector(sort: &str, args: &[egglog_engine::ast::Expr]) -> Result<Declaration, 
 }
 
 fn vector_rules(rules: &mut String, sort: &str, element: &str, structured: bool) {
+    // Materialize the vector/position key before joining an element's metadata.
+    // Primitive reads in rule bodies are evaluated after the relational join.
+    for pass in ["memory-names", "memory-rename", "memory-effects"] {
+        rules.push_str(&format!(
+            "(rule ((Walk{sort} node i) (< i (vec-size node)))\n\
+             ((set ({sort}At node i) (vec-at node i)) (Walk{sort} node (+ i 1))) :ruleset {pass})\n"
+        ));
+    }
     let (effect_premise, effects) = if structured {
         (
-            format!("(= effects (Effects{element} function (vec-get node i)))"),
+            format!("(= effects (Effects{element} function ({sort}At node i)))"),
             "effects",
         )
     } else {
@@ -350,26 +451,26 @@ fn vector_rules(rules: &mut String, sort: &str, element: &str, structured: bool)
     rules.push_str(&format!(
         "(relation Effects{sort}RangeDemand (Function {sort} i64 i64))\n\
          (function Effects{sort}Range (Function {sort} i64 i64) Accesses :merge (set-union old new))\n\
-         (rule ((Effects{sort}Demand function node)) ((Effects{sort}RangeDemand function node 0 (vec-length node))) :ruleset memory-effects)\n\
+         (rule ((Effects{sort}Demand function node)) ((Walk{sort} node 0) (Effects{sort}RangeDemand function node 0 (vec-size node))) :ruleset memory-effects)\n\
          (rule ((Effects{sort}RangeDemand function node i i)) ((set (Effects{sort}Range function node i i) (set-empty))) :ruleset memory-effects)\n\
          (rule ((Effects{sort}RangeDemand function node i j) (> (- j i) 1) (= mid (+ i (/ (- j i) 2))))\n\
-             ((Effects{sort}RangeDemand function node i mid) (Effects{sort}RangeDemand function node mid j)) :ruleset memory-effects)\n\
-         (rule ((Effects{sort}RangeDemand function node i j) (> (- j i) 1) (= mid (+ i (/ (- j i) 2)))\n\
+             ((set ({sort}RangeMid node i j) mid) (Effects{sort}RangeDemand function node i mid) (Effects{sort}RangeDemand function node mid j)) :ruleset memory-effects)\n\
+         (rule ((Effects{sort}RangeDemand function node i j) (> (- j i) 1) (= mid ({sort}RangeMid node i j))\n\
              (= left (Effects{sort}Range function node i mid)) (= right (Effects{sort}Range function node mid j)))\n\
              ((set (Effects{sort}Range function node i j) (set-union left right))) :ruleset memory-effects)\n\
          (rule ((Effects{sort}RangeDemand function node i j) (= j (+ i 1)) {effect_premise}) ((set (Effects{sort}Range function node i j) {effects})) :ruleset memory-effects)\n\
-         (rule ((= effects (Effects{sort}Range function node 0 (vec-length node)))) ((set (Effects{sort} function node) effects)) :ruleset memory-effects)\n"
+         (rule ((= effects (Effects{sort}Range function node 0 (vec-size node)))) ((set (Effects{sort} function node) effects)) :ruleset memory-effects)\n"
     ));
     if structured {
-        rules.push_str(&format!("(rule ((Effects{sort}RangeDemand function node i j) (= j (+ i 1))) ((Effects{element}Demand function (vec-get node i))) :ruleset memory-effects)\n"));
+        rules.push_str(&format!("(rule ((Effects{sort}RangeDemand function node i j) (= j (+ i 1))) ((Effects{element}Demand function (vec-at node i))) :ruleset memory-effects)\n"));
     }
     let (uses, bound, names, demand, rename, child) = if structured {
         (
             "uses",
             "bound",
             format!("(= uses (Names{element} child)) (= bound (Binders{element} child))"),
-            format!("(Rename{element}Demand env (vec-get node i))"),
-            format!("(= child (Rename{element} env (vec-get node i)))"),
+            format!("(Rename{element}Demand env (vec-at node i))"),
+            format!("(= child (Rename{element} env ({sort}At node i)))"),
             "child",
         )
     } else {
@@ -379,53 +480,53 @@ fn vector_rules(rules: &mut String, sort: &str, element: &str, structured: bool)
             String::new(),
             String::new(),
             String::new(),
-            "(vec-get node i)",
+            "(vec-at node i)",
         )
     };
     let unchanged = if sort == "Stms" {
-        "(= env (Rename m0 m1 m2 m3 edits)) (= (vec-get node i) (Let id pattern certs expression)) (map-not-contains edits id)"
+        "(= env (Rename m0 m1 m2 m3 edits)) (= (StmsAt node i) (Let id pattern certs expression)) (map-excludes edits id)"
     } else {
         ""
     };
     rules.push_str(&format!(
         "(rule ((= node (vec-of))) ((set (Names{sort} node) (set-empty)) (set (Binders{sort} node) (set-empty))) :ruleset memory-names)\n\
-         (rule ((Walk{sort} node i) (< i (vec-length node))) ((Walk{sort} node (+ i 1))) :ruleset memory-names)\n\
+         (rule ((Walk{sort} node i) (< i (vec-size node))) ((Walk{sort} node (+ i 1))) :ruleset memory-names)\n\
          (relation Names{sort}RangeDemand ({sort} i64 i64))\n\
          (function Names{sort}Range ({sort} i64 i64) Names :merge (set-union old new))\n\
          (function Binders{sort}Range ({sort} i64 i64) Names :merge (set-union old new))\n\
-         (rule ((Walk{sort} node 0)) ((Names{sort}RangeDemand node 0 (vec-length node))) :ruleset memory-names)\n\
+         (rule ((Walk{sort} node 0)) ((Names{sort}RangeDemand node 0 (vec-size node))) :ruleset memory-names)\n\
          (rule ((Names{sort}RangeDemand node i i)) ((set (Names{sort}Range node i i) (set-empty)) (set (Binders{sort}Range node i i) (set-empty))) :ruleset memory-names)\n\
          (rule ((Names{sort}RangeDemand node i j) (> (- j i) 1) (= mid (+ i (/ (- j i) 2))))\n\
-             ((Names{sort}RangeDemand node i mid) (Names{sort}RangeDemand node mid j)) :ruleset memory-names)\n\
-         (rule ((Names{sort}RangeDemand node i j) (> (- j i) 1) (= mid (+ i (/ (- j i) 2)))\n\
+             ((set ({sort}RangeMid node i j) mid) (Names{sort}RangeDemand node i mid) (Names{sort}RangeDemand node mid j)) :ruleset memory-names)\n\
+         (rule ((Names{sort}RangeDemand node i j) (> (- j i) 1) (= mid ({sort}RangeMid node i j))\n\
              (= left (Names{sort}Range node i mid)) (= right (Names{sort}Range node mid j))\n\
              (= bound-left (Binders{sort}Range node i mid)) (= bound-right (Binders{sort}Range node mid j)))\n\
              ((set (Names{sort}Range node i j) (set-union left right))\n\
               (set (Binders{sort}Range node i j) (set-union bound-left bound-right))) :ruleset memory-names)\n\
-         (rule ((Names{sort}RangeDemand node i j) (= j (+ i 1)) (= child (vec-get node i)) {names})\n\
+         (rule ((Names{sort}RangeDemand node i j) (= j (+ i 1)) (= child ({sort}At node i)) {names})\n\
              ((set (Names{sort}Range node i j) {uses}) (set (Binders{sort}Range node i j) {bound})) :ruleset memory-names)\n\
-         (rule ((= names (Names{sort}Range node 0 (vec-length node))) (= bound (Binders{sort}Range node 0 (vec-length node))))\n\
+         (rule ((= names (Names{sort}Range node 0 (vec-size node))) (= bound (Binders{sort}Range node 0 (vec-size node))))\n\
              ((set (Names{sort} node) names) (set (Binders{sort} node) bound)) :ruleset memory-names)\n\
          (relation Rename{sort}RangeDemand (Renaming {sort} i64 i64))\n\
          (function Rename{sort}Range (Renaming {sort} i64 i64) {sort} :no-merge)\n\
-         (rule ((Rename{sort}Demand env node)) ((Rename{sort}RangeDemand env node 0 (vec-length node))) :ruleset memory-rename)\n\
+         (rule ((Rename{sort}Demand env node)) ((Walk{sort} node 0) (Rename{sort}RangeDemand env node 0 (vec-size node))) :ruleset memory-rename)\n\
          (rule ((Rename{sort}RangeDemand env node i i)) ((set (Rename{sort}Range env node i i) (vec-of))) :ruleset memory-rename)\n\
          (rule ((Rename{sort}RangeDemand env node i j) (> (- j i) 1) (= mid (+ i (/ (- j i) 2))))\n\
-             ((Rename{sort}RangeDemand env node i mid) (Rename{sort}RangeDemand env node mid j)) :ruleset memory-rename)\n\
-         (rule ((Rename{sort}RangeDemand env node i j) (> (- j i) 1) (= mid (+ i (/ (- j i) 2)))\n\
+             ((set ({sort}RangeMid node i j) mid) (Rename{sort}RangeDemand env node i mid) (Rename{sort}RangeDemand env node mid j)) :ruleset memory-rename)\n\
+         (rule ((Rename{sort}RangeDemand env node i j) (> (- j i) 1) (= mid ({sort}RangeMid node i j))\n\
              (= left (Rename{sort}Range env node i mid)) (= right (Rename{sort}Range env node mid j)))\n\
              ((set (Rename{sort}Range env node i j) (vec-append left right))) :ruleset memory-rename)\n\
          (rule ((Rename{sort}RangeDemand env node i j) (= j (+ i 1)) {unchanged}) ({demand}) :ruleset memory-rename)\n\
          (rule ((Rename{sort}RangeDemand env node i j) (= j (+ i 1)) {unchanged} {rename}) ((set (Rename{sort}Range env node i j) (vec-of {child}))) :ruleset memory-rename)\n\
-         (rule ((= result (Rename{sort}Range env node 0 (vec-length node)))) ((set (Rename{sort} env node) result)) :ruleset memory-rename)\n",
+         (rule ((= result (Rename{sort}Range env node 0 (vec-size node)))) ((set (Rename{sort} env node) result)) :ruleset memory-rename)\n",
     ));
     if sort == "Stms" {
         // Replacements are already constructed in their destination scope. Do not
         // revisit them: a replacement may intentionally retain its statement ID.
         rules.push_str(
             "(rule ((RenameStmsRangeDemand env node i j) (= j (+ i 1))\n\
-            (= env (Rename m0 m1 m2 m3 edits)) (= (vec-get node i) (Let id pattern certs expression))\n\
-            (= replacement (map-get edits id)))\n\
+            (= env (Rename m0 m1 m2 m3 edits)) (= (StmsAt node i) (Let id pattern certs expression))\n\
+            (= replacement (map-at edits id)))\n\
             ((set (RenameStmsRange env node i j) replacement)) :ruleset memory-rename)\n",
         );
     }
@@ -436,6 +537,7 @@ fn variant_rules(
     sort: &str,
     variant: &Variant,
     declarations: &BTreeMap<String, Declaration>,
+    renamable: &BTreeSet<&str>,
 ) {
     let arguments: Vec<_> = (0..variant.types.len()).map(|i| format!("a{i}")).collect();
     let term = format!("({} {})", variant.name, arguments.join(" "));
@@ -461,9 +563,11 @@ fn variant_rules(
             direct_uses = format!("(set-union {direct_uses} u{i})");
         }
         bound = format!("(set-union {bound} b{i})");
-        demands.push_str(&format!(" (Rename{child}Demand env a{i})"));
-        rename_premises.push_str(&format!(" (= r{i} (Rename{child} env a{i}))"));
-        renamed[i] = format!("r{i}");
+        if renamable.contains(child.as_str()) {
+            demands.push_str(&format!(" (Rename{child}Demand env a{i})"));
+            rename_premises.push_str(&format!(" (= r{i} (Rename{child} env a{i}))"));
+            renamed[i] = format!("r{i}");
+        }
         if matches!(declarations[child], Declaration::Vector(_)) {
             walk.push_str(&format!(" (Walk{child} a{i} 0)"));
         }
@@ -479,9 +583,9 @@ fn variant_rules(
         ));
     }
     if !walk.is_empty() {
-        rules.push_str(&format!(
-            "(rule ((= node {term})) ({walk}) :ruleset memory-names)\n"
-        ));
+        for pass in ["memory-names", "memory-rename", "memory-effects"] {
+            rules.push_str(&format!("(rule ((= node {term})) ({walk}) :ruleset {pass})\n"));
+        }
     }
     if matches!(
         variant.name.as_str(),

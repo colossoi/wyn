@@ -3,6 +3,23 @@ use crate::egglog::OptimizeError;
 use egglog_engine::EGraph;
 
 #[test]
+fn unused_values_follow_complete_uses_and_the_current_program() -> Result<(), OptimizeError> {
+    let mut graph = EGraph::default();
+    load(&mut graph)?;
+    graph.parse_and_run_program(None, include_str!("tests/use_snapshots.egg"))?;
+    Ok(())
+}
+
+#[test]
+fn substitution_preserves_static_types_and_renames_nested_indices() -> Result<(), OptimizeError> {
+    let mut graph = EGraph::default();
+    load(&mut graph)?;
+    graph.parse_and_run_program(None, include_str!("tests/renaming_metadata.egg"))?;
+    graph.parse_and_run_program(None, include_str!("tests/vector_positions.egg"))?;
+    Ok(())
+}
+
+#[test]
 fn applied_rewrites_do_not_replay_when_another_pass_revisits_the_same_body() -> Result<(), OptimizeError> {
     let mut graph = EGraph::default();
     load(&mut graph)?;
@@ -254,12 +271,12 @@ fn consumption_follows_product_components_and_excludes_shape_witnesses() -> Resu
         r#"
         (check (CurrentProgram program) (ProgramExternal program
           (DeclareExternal name params returns behavior accesses))
-          (= (vec-length params) 1)
-          (= (vec-get params 0) (Parameter (BindValue array (LogicalValue (ProductType fields)))
+          (= (vec-size params) 1)
+          (= (vec-at params 0) (Parameter (BindValue array (LogicalValue (ProductType fields)))
               (ProductDiet (vec-of (Consume) (Observe))))))
         (check (CurrentProgram program) (ContainsExp (ProgramRoot program) (Call name args returns))
-          (= (vec-length args) 1)
-          (= (vec-get args 0) (Pass array (ProductDiet (vec-of (Consume) (Observe))))))
+          (= (vec-size args) 1)
+          (= (vec-at args 0) (Pass array (ProductDiet (vec-of (Consume) (Observe))))))
     "#,
     )?;
     Ok(())
@@ -278,12 +295,12 @@ fn read_only_indexing_keeps_its_guard_without_a_domain_bounds_proof() -> Result<
             r#"
             (check (CurrentProgram p) (ProgramFunction p f)
                 (ContainsExp (FunctionRoot f) expression) (= expression (Index array indices))
-                (= effects (EffectsExp f expression)) (set-contains effects (OrderedEffect)))
+                (= effects (EffectsExp f expression)) (set-includes effects (OrderedEffect)))
             (fail (check (CurrentProgram p) (ProgramFunction p f)
                 (= f (DefineFunction name params returns (Block statements results)))
                 (ContainsEntry (ProgramRoot p) (EntryPoint name identity))
-                (WalkStms statements i) (< i (vec-length statements))
-                (= (vec-get statements i) (Let id pattern certs (Index array indices)))))
+                (WalkStms statements i) (< i (vec-size statements))
+                (= (vec-at statements i) (Let id pattern certs (Index array indices)))))
         "#,
         )?;
     }
@@ -404,5 +421,79 @@ fn accumulator_name_filter_preserves_only_capabilities() -> Result<(), OptimizeE
         (check (= (AccumulatorNames (set-empty)) (set-empty)))
     "#,
     )?;
+    Ok(())
+}
+
+#[test]
+fn invariant_auditing_is_enabled_only_in_debug_builds() -> Result<(), OptimizeError> {
+    let mut graph = EGraph::default();
+    load(&mut graph)?;
+    graph.parse_and_run_program(
+        None,
+        r#"
+        (let function (DefineFunction (FunctionId 0 "invalid") (vec-of)
+            (vec-of (ReturnScalar (ScalarElement (I32))))
+            (Block (vec-of) (vec-of (Yield (vec-of) (ValueOperand (Var (ValueId 99))))))))
+        (CurrentProgram (MemoryProgram (vec-of function) (vec-of) (vec-of)))
+    "#,
+    )?;
+    assert_eq!(super::validate(&mut graph).is_err(), cfg!(debug_assertions));
+    graph.parse_and_run_program(
+        None,
+        "(run-schedule (saturate fusion-index memory-names) (saturate memory-scopes))
+         (check (= (ScopeRoot (FunctionScope function)) function))",
+    )?;
+    let invalid = crate::egglog::query::Query(&graph).row("InvalidScope", |_| true)?.is_some();
+    assert_eq!(invalid, cfg!(debug_assertions));
+    Ok(())
+}
+
+#[test]
+fn borrowed_vector_indexing_preserves_bounds_and_sort_overloads() -> Result<(), OptimizeError> {
+    let mut graph = EGraph::default();
+    load(&mut graph)?;
+    graph.parse_and_run_program(
+        None,
+        r#"
+        (let numbers (vec-of 7 19))
+        (let names (vec-of (Var (ValueId 3)) (Var (ValueId 8))))
+        (check (= (vec-at numbers 0) 7))
+        (check (= (vec-at numbers 1) 19))
+        (check (= (vec-at names 1) (Var (ValueId 8))))
+        (fail (check (= (vec-at numbers -1) 7)))
+        (fail (check (= (vec-at numbers 2) 7)))
+        (let empty (vec-pop (vec-of 7)))
+        (fail (check (= (vec-at empty 0) 7)))
+        (relation IndexedNumber (i64))
+        (ruleset vector-read)
+        (rule ((= value (vec-at numbers 1))) ((IndexedNumber value)) :ruleset vector-read)
+        (run-schedule vector-read)
+        (check (IndexedNumber 19))
+    "#,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn compact_bindings_preserve_clause_offsets_and_liveness() -> Result<(), OptimizeError> {
+    let mut graph = EGraph::default();
+    load(&mut graph)?;
+    graph.parse_and_run_program(None, include_str!("tests/compact_bindings.egg"))?;
+    Ok(())
+}
+
+#[test]
+fn collection_extents_preserve_domains_and_clause_offsets() -> Result<(), OptimizeError> {
+    let mut graph = EGraph::default();
+    load(&mut graph)?;
+    graph.parse_and_run_program(None, include_str!("tests/collection_extents.egg"))?;
+    Ok(())
+}
+
+#[test]
+fn local_rewrites_batch_functions_without_combining_competing_edits() -> Result<(), OptimizeError> {
+    let mut graph = EGraph::default();
+    load(&mut graph)?;
+    graph.parse_and_run_program(None, include_str!("tests/local_rewrites.egg"))?;
     Ok(())
 }

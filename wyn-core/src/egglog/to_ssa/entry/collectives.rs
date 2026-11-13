@@ -7,6 +7,7 @@ impl EntryEmission<'_, '_, '_> {
         statement: Value,
         after: &LookupSet<Value>,
         terminal: bool,
+        epilogue: Option<Value>,
     ) -> Result<bool, OptimizeError> {
         let query = self.body.query();
         let statement_fields = query.fields("Let", statement)?;
@@ -170,11 +171,14 @@ impl EntryEmission<'_, '_, '_> {
                 &arguments,
                 &pattern,
                 Some(CollectivePhase::Apply {
-                    range,
+                    range: range.clone(),
                     group,
                     carries: &carries,
                 }),
             )?;
+            if let Some(epilogue) = epilogue {
+                self.scan_epilogue(epilogue, range)?;
+            }
             self.pending = true;
             self.dispatch_override = Some((
                 dispatch.local_size,
@@ -190,6 +194,19 @@ impl EntryEmission<'_, '_, '_> {
             }
         }
         Ok(true)
+    }
+
+    pub(super) fn scan_epilogue(
+        &mut self,
+        statement: Value,
+        range: (Typed, Typed),
+    ) -> Result<(), OptimizeError> {
+        let fields = self.body.query().fields("Let", statement)?;
+        let arguments = self.body.query().fields("Parallel", fields[3])?;
+        let pattern = self.body.query().vector(fields[1])?;
+        let values =
+            self.body.parallel_phase(&arguments, &pattern, Some(CollectivePhase::Epilogue { range }))?;
+        self.body.bind(&pattern, values)
     }
 
     fn buffer_elements(&mut self, binding: BindingRef) -> Result<Typed, OptimizeError> {

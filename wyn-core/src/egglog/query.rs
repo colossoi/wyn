@@ -36,6 +36,7 @@ impl Query<'_> {
         Ok(values.data.clone())
     }
 
+    #[cfg(debug_assertions)]
     pub fn for_function(
         &self,
         name: &str,

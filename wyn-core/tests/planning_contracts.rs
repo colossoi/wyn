@@ -7,6 +7,37 @@ use wyn_core::host::{self, Binding, BufferLen, BufferUsage, DispatchSize, Expr, 
 use wyn_core::{lower_ssa_to_wgsl_with_program, CodegenTarget};
 
 #[test]
+fn parameter_blocks_preserve_aggregate_padding_and_member_alignment() {
+    for (source, offsets) in [
+        ("type params={direction:vec3f32}
+          entry main(values:[]f32,frame:params,bias:f32) []f32=map(|v|v*frame.direction.x+bias,values)", vec![0,16]),
+        ("type params={direction:vec4f32}
+          entry main(values:[]f32,frame:params,bias:f32) []f32=map(|v|v*frame.direction.x+bias,values)", vec![0,16]),
+        ("entry main(values:[]f32,head:f32,direction:vec4f32,bias:f32) []f32=map(|v|head+v*direction.x+bias,values)", vec![0,16,32]),
+        ("entry main(values:[]f32,direction:vec3f32,bias:f32) []f32=map(|v|v*direction.x+bias,values)", vec![0,12]),
+    ] {
+        let source = pipeline::source(source);
+        let ssa = pipeline::lower(&source, CodegenTarget::Portable);
+        let spirv = wyn_core::lower_ssa_to_spirv(ssa.clone()).unwrap();
+        let module = naga::front::spv::Frontend::new(spirv.spirv.into_iter(), &Default::default()).parse().unwrap();
+        let (_, block) = module.global_variables.iter().find(|(_, v)| v.space == naga::AddressSpace::PushConstant).unwrap();
+        let naga::TypeInner::Struct { members, .. } = &module.types[block.ty].inner else { panic!("parameter block"); };
+        assert_eq!(members.iter().map(|m| m.offset).collect::<Vec<_>>(), offsets);
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&module).unwrap();
+        let wgsl = lower_ssa_to_wgsl_with_program(ssa).unwrap();
+        let module = naga::front::wgsl::parse_str(&wgsl.wgsl).unwrap();
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&module).unwrap();
+        let [Pipeline::Compute(compute)] = wgsl.program.interface.pipelines.as_slice() else { panic!("compute pipeline"); };
+        let blocks = compute.bindings.iter().filter_map(|binding| match binding {
+            Binding::StorageBuffer { members, .. } if !members.is_empty() => Some(members),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].iter().map(|m| m.offset).collect::<Vec<_>>(), offsets);
+    }
+}
+
+#[test]
 fn published_collective_dependencies_survive_both_backends() {
     let source = pipeline::source("entry main(xs:[]i32) i32=reduce((+),0,xs)");
     let ssa = pipeline::lower(&source, CodegenTarget::Portable);
@@ -19,6 +50,81 @@ fn published_collective_dependencies_survive_both_backends() {
         assert_eq!(graph.passes.len(), 2, "chunk and combine dispatches");
         assert!(depends_on(graph, 1, 0), "combine must wait for chunk results");
         assert_eq!(graph.topological_order().unwrap(), [0, 1]);
+    }
+}
+
+#[test]
+fn texture_reads_are_ordered_between_draws_that_overwrite_the_target() {
+    let source = pipeline::source(include_str!(
+        "../../tests/compiler/library/graphics_aliases_preserve_host_buffer_identity.wyn"
+    ));
+    let output = lower_ssa_to_wgsl_with_program(pipeline::lower(&source, CodegenTarget::Wgsl)).unwrap();
+    let program = output.program;
+    let [sampled, target] = program.entries[0].results.as_slice() else {
+        panic!("sampled array and render target");
+    };
+    let graph = &program.interface.frame_graph;
+    let draw = |operation| {
+        graph.passes.iter().position(|pass|
+        matches!(&program.interface.pipelines[pass.pipeline_index], Pipeline::Graphics(g) if g.source_operation == Some(operation))).unwrap()
+    };
+    let reader =
+        graph.passes.iter().position(|pass| pass.writes.iter().any(|a| a.resource == sampled.0)).unwrap();
+    assert!(graph.passes[reader].reads.iter().any(|a| a.resource == target.0));
+    assert!(
+        depends_on(graph, reader, draw(0)),
+        "read follows the first draw: {:?}",
+        graph.passes
+    );
+    assert!(
+        depends_on(graph, draw(1), reader),
+        "overwrite follows the read: {:?}",
+        graph.passes
+    );
+}
+
+#[test]
+fn empty_array_results_publish_their_actual_storage_stride() {
+    let artifact = compile(
+        "entry empty() [0]i32=map(|x|x+1,iota(0))
+        entry rows() [3][0]i32=map(|x|if x>0 then map(|y|1/x+y,iota(0)) else map(|y|x-y,iota(0)),[0,1,-1])
+        entry fields() [2]([0]i32,i32)=map(|x|(iota(0),x),[1,2])",
+    );
+    assert_eq!(artifact.interface.source_results.len(), 4);
+    for result in &artifact.interface.source_results {
+        let host::ResultLayout::Array { stride, length, .. } = result.layout else {
+            panic!("array result");
+        };
+        assert_eq!(stride, 4, "{}: host stride", result.entry);
+        assert_eq!(
+            length,
+            Some(match result.entry.as_str() {
+                "empty" => 0,
+                "rows" => 3,
+                "fields" => 2,
+                _ => unreachable!(),
+            })
+        );
+        let (_, global) = artifact
+            .shader
+            .global_variables
+            .iter()
+            .find(|(_, v)| {
+                v.binding.as_ref().is_some_and(|b| b.group == result.set && b.binding == result.binding)
+            })
+            .unwrap();
+        let array = match &artifact.shader.types[global.ty].inner {
+            naga::TypeInner::Struct { members, .. } => members[0].ty,
+            _ => global.ty,
+        };
+        let naga::TypeInner::Array {
+            stride: shader_stride,
+            ..
+        } = artifact.shader.types[array].inner
+        else {
+            panic!("storage array");
+        };
+        assert_eq!(stride, shader_stride, "{}: host and shader agree", result.entry);
     }
 }
 
@@ -490,6 +596,52 @@ fn segment_lengths_are_bound_inside_each_workgroup() {
                 Some(4),
                 "row lengths do not determine the number of segments"
             ),
+        }
+    }
+}
+
+#[test]
+fn pointwise_scan_consumers_share_the_final_prefix_dispatch() {
+    for (extent, stages) in [("0", 1), ("17", 1), ("257", 3), ("", 3)] {
+        let source = pipeline::source(&format!(
+            "entry main(xs:[{extent}]i32,bias:i32) ([{extent}]i32,[{extent}]i32)=
+             let prefix=scan((+),0,xs) in (prefix,map(|x|x*x+bias,prefix))"
+        ));
+        let ssa = pipeline::lower(&source, CodegenTarget::Portable);
+        let wgsl = lower_ssa_to_wgsl_with_program(ssa.clone()).unwrap();
+        let module = naga::front::wgsl::parse_str(&wgsl.wgsl).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+        let spirv = wyn_core::lower_ssa_to_spirv(ssa).unwrap();
+        let module =
+            naga::front::spv::Frontend::new(spirv.spirv.into_iter(), &Default::default()).parse().unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+        for program in [wgsl.program, spirv.program] {
+            let [Pipeline::Compute(compute)] = program.interface.pipelines.as_slice() else {
+                panic!("compute pipeline");
+            };
+            assert_eq!(compute.stages.len(), stages, "extent {extent}");
+            assert_eq!(program.interface.source_results.len(), 2);
+            for result in &program.interface.source_results {
+                let buffer = compute
+                    .bindings
+                    .iter()
+                    .position(|b| b.slot() == Some((result.set, result.binding)))
+                    .unwrap();
+                assert!(
+                    compute.stages.last().unwrap().writes.contains(&buffer),
+                    "both prefixes and mapped values complete in the last dispatch"
+                );
+            }
         }
     }
 }

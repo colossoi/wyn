@@ -40,6 +40,7 @@ pub enum OptimizeError {
 pub fn from_tlc(source: &OwnershipApplied) -> Result<Program<'_, Imported>, OptimizeError> {
     let _timing = timing::span("egglog import");
     let (graph, symbols) = from_tlc::import(source)?;
+    timing::tables(&graph, "after-import");
     Ok(Program {
         source,
         graph,
@@ -56,8 +57,8 @@ pub fn fuse(mut program: Program<'_, Imported>) -> Result<Program<'_, Fused>, Op
     memory::simplify(&mut program.graph, false)?;
     // Reducing simplification exposes equal domains; fusion exposes dead collections.
     let simplify = memory::simplification_schedule(false);
-    program.graph.parse_and_run_program(
-        None,
+    timing::run(
+        &mut program.graph,
         &format!("(run-schedule (saturate (seq {} {simplify})))", fusion::SCHEDULE),
     )?;
     memory::simplify(&mut program.graph, true)?;
@@ -105,7 +106,11 @@ pub fn schedule_with_cost_model(
     costs: cost::CostModel,
 ) -> Result<Program<'_, Scheduled>, OptimizeError> {
     let costs = costs.validate().map_err(output_error)?;
-    program.graph.parse_and_run_program(None, &format!("(set (SubgroupsEnabled) {enabled})"))?;
+    timing::evaluate(
+        &mut program.graph,
+        None,
+        &format!("(set (SubgroupsEnabled) {enabled})"),
+    )?;
     let _timing = timing::span("egglog scheduling");
     planning::schedule(&mut program.graph, costs)?;
     Ok(program.advance(Scheduled))
@@ -117,7 +122,11 @@ pub fn prepare_interfaces(
 ) -> Result<Program<'_, InterfacesPrepared>, OptimizeError> {
     let _timing = timing::span("egglog interface preparation");
     memory::validate(&mut program.graph)?;
-    program.graph.parse_and_run_program(None, "(run-schedule (saturate simplify-analysis))")?;
+    timing::evaluate(
+        &mut program.graph,
+        None,
+        "(run-schedule (saturate simplify-analysis))",
+    )?;
     Ok(program.advance(InterfacesPrepared))
 }
 
@@ -139,7 +148,12 @@ pub fn optimize_with_policy(
     policy: ScalarOptimization,
 ) -> Result<Program<'_, Optimized>, OptimizeError> {
     scalar::run(&mut program.graph, policy)?;
-    program.graph.parse_and_run_program(None, "(run-schedule (saturate simplify-analysis))")?;
+    timing::evaluate(
+        &mut program.graph,
+        None,
+        "(run-schedule (saturate simplify-analysis))",
+    )?;
+    timing::tables(&program.graph, "after-optimization");
     Ok(program.advance(Optimized))
 }
 
@@ -147,6 +161,7 @@ pub fn optimize_with_policy(
 pub fn prepare_host(mut program: Program<'_, Optimized>) -> Result<HostPrepared<'_>, OptimizeError> {
     let _timing = timing::span("egglog host preparation");
     analysis::run(&mut program.graph)?;
+    planning::epilogues(&mut program.graph)?;
     Ok(HostPrepared { program })
 }
 

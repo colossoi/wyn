@@ -30,6 +30,9 @@ struct Fold {
 
 // Physical SSA operands only; callback bodies remain in the common IR.
 pub(super) enum CollectivePhase<'a> {
+    Epilogue {
+        range: (Typed, Typed),
+    },
     Chunks {
         range: (Typed, Typed),
         group: Typed,
@@ -510,94 +513,117 @@ impl Body<'_, '_, '_> {
                 }
             }
         }
-        let scalar_results = self.domain_axis(
-            outer,
-            0,
-            domain[0],
-            Vec::new(),
-            Self::number(0),
-            initial,
-            partition,
-            &mut |body_lower, coordinates, _| {
-                if folds.is_empty() {
-                    body_lower.parallel_lane(body[0], arguments[1], &collects, &folds, vec![])?;
-                    return Ok(vec![]);
-                }
-                let outer_domain = body_lower.query().required("OuterDomain", (arguments[1],))?;
-                let total_coordinates = body_lower.domain_coordinates(outer_domain)?;
-                let ordinal = body_lower.named(domain[0])?;
-                let state = if let Some(dispatch) = dispatch {
-                    body_lower.cooperative_segment(
-                        arguments[1],
-                        axes[axes.len() - 1],
-                        domain[0],
-                        ordinal,
-                        body[0],
-                        &collects,
-                        &folds,
-                        dispatch.width.get(),
-                        if let Some(CollectivePhase::Chunks { range, .. }) = &phase {
-                            Some(range.clone())
-                        } else {
-                            None
-                        },
-                    )?
-                } else {
-                    let initial = folds.iter().flat_map(|fold| fold.neutral.clone()).collect::<Vec<_>>();
-                    body_lower.domain_axis(
-                        &axes[axes.len() - 1..],
-                        0,
-                        domain[0],
-                        coordinates.to_vec(),
-                        ordinal,
-                        initial,
-                        None,
-                        &mut |body_lower, _, state| {
-                            body_lower.parallel_lane(body[0], arguments[1], &collects, &folds, state)
-                        },
-                    )?
-                };
-                if let Some(CollectivePhase::Chunks { group, partials, .. }) = &phase {
-                    let lane = body_lower.local_id()?;
-                    let leader = body_lower.binary(BinaryOperator::Equal, lane, Self::number(0))?;
-                    body_lower.when(leader, |body| {
-                        let (_, groups) = body.workgroups(None)?;
-                        for ((binding, element), value) in partials.iter().zip(&state) {
-                            let storage = super::entry::storage_view(
-                                body,
-                                *binding,
-                                element.clone(),
-                                groups.clone(),
-                            )?;
-                            body.store(storage, group.clone(), value.clone())?;
-                        }
-                        Ok(())
-                    })?;
-                }
-                let mut state = state.into_iter();
-                let mut scalars = Vec::new();
-                for fold in &folds {
-                    let total = state.by_ref().take(fold.neutral.len()).collect::<Vec<_>>();
-                    for (&name, value) in fold.totals.iter().zip(total) {
-                        if collected.contains(&name) {
-                            if dispatch.is_some() {
-                                let lane = body_lower.local_id()?;
-                                let leader =
-                                    body_lower.binary(BinaryOperator::Equal, lane, Self::number(0))?;
-                                body_lower.when(leader, |body| {
-                                    body.write_array(name, &total_coordinates, value)
-                                })?;
+        // The same lane owns each prefix and its pointwise consumer, so no
+        // cross-workgroup visibility or additional barrier is required.
+        let scalar_results = if let Some(CollectivePhase::Epilogue { range }) = &phase {
+            let Some(dispatch) = dispatch else {
+                return Err(error("scan epilogue dispatch missing"));
+            };
+            let axis = self.query().fields("DenseAxis", axes[0])?;
+            let lane = self.local_id()?;
+            let start = self.binary(BinaryOperator::Add, range.0.clone(), lane)?;
+            self.counted(
+                start,
+                range.1.clone(),
+                Self::number(dispatch.width.get()),
+                vec![],
+                |body_lower, index, _| {
+                    body_lower.values.insert(axis[0], index.clone());
+                    body_lower.values.insert(domain[0], index);
+                    body_lower.parallel_lane(body[0], arguments[1], &collects, &folds, vec![])
+                },
+            )?
+        } else {
+            self.domain_axis(
+                outer,
+                0,
+                domain[0],
+                Vec::new(),
+                Self::number(0),
+                initial,
+                partition,
+                &mut |body_lower, coordinates, _| {
+                    if folds.is_empty() {
+                        body_lower.parallel_lane(body[0], arguments[1], &collects, &folds, vec![])?;
+                        return Ok(vec![]);
+                    }
+                    let outer_domain = body_lower.query().required("OuterDomain", (arguments[1],))?;
+                    let total_coordinates = body_lower.domain_coordinates(outer_domain)?;
+                    let ordinal = body_lower.named(domain[0])?;
+                    let state = if let Some(dispatch) = dispatch {
+                        body_lower.cooperative_segment(
+                            arguments[1],
+                            axes[axes.len() - 1],
+                            domain[0],
+                            ordinal,
+                            body[0],
+                            &collects,
+                            &folds,
+                            dispatch.width.get(),
+                            if let Some(CollectivePhase::Chunks { range, .. }) = &phase {
+                                Some(range.clone())
                             } else {
-                                body_lower.write_array(name, &total_coordinates, value)?;
+                                None
+                            },
+                        )?
+                    } else {
+                        let initial =
+                            folds.iter().flat_map(|fold| fold.neutral.clone()).collect::<Vec<_>>();
+                        body_lower.domain_axis(
+                            &axes[axes.len() - 1..],
+                            0,
+                            domain[0],
+                            coordinates.to_vec(),
+                            ordinal,
+                            initial,
+                            None,
+                            &mut |body_lower, _, state| {
+                                body_lower.parallel_lane(body[0], arguments[1], &collects, &folds, state)
+                            },
+                        )?
+                    };
+                    if let Some(CollectivePhase::Chunks { group, partials, .. }) = &phase {
+                        let lane = body_lower.local_id()?;
+                        let leader = body_lower.binary(BinaryOperator::Equal, lane, Self::number(0))?;
+                        body_lower.when(leader, |body| {
+                            let (_, groups) = body.workgroups(None)?;
+                            for ((binding, element), value) in partials.iter().zip(&state) {
+                                let storage = super::entry::storage_view(
+                                    body,
+                                    *binding,
+                                    element.clone(),
+                                    groups.clone(),
+                                )?;
+                                body.store(storage, group.clone(), value.clone())?;
                             }
-                        } else {
-                            scalars.push(value);
+                            Ok(())
+                        })?;
+                    }
+                    let mut state = state.into_iter();
+                    let mut scalars = Vec::new();
+                    for fold in &folds {
+                        let total = state.by_ref().take(fold.neutral.len()).collect::<Vec<_>>();
+                        for (&name, value) in fold.totals.iter().zip(total) {
+                            if collected.contains(&name) {
+                                if dispatch.is_some() {
+                                    let lane = body_lower.local_id()?;
+                                    let leader =
+                                        body_lower.binary(BinaryOperator::Equal, lane, Self::number(0))?;
+                                    body_lower.when(leader, |body| {
+                                        body.write_array(name, &total_coordinates, value)
+                                    })?;
+                                } else {
+                                    body_lower.write_array(name, &total_coordinates, value)?;
+                                }
+                            } else {
+                                scalars.push(value);
+                            }
                         }
                     }
-                }
-                Ok(scalars)
-            },
-        )?;
+                    Ok(scalars)
+                },
+            )?
+        };
         let mut scalars = scalar_results.into_iter();
         let mut values = Vec::new();
         for &binding in pattern {

@@ -691,6 +691,8 @@ fn compiler_repro_nested_capacity_plan() {
 
 #[test]
 fn result_tree_counts_are_available_to_fusion_choices() {
+    // Scan consumers share a final dispatch rather than a pre-reduction body;
+    // planning_contracts covers the resulting public execution plan.
     let cases = [
         (
             "entry main(xs:[]i32) ([]i32,[]i32)=(map(|x|x+1,xs),map(|x|x*2,xs))",
@@ -715,10 +717,6 @@ fn result_tree_counts_are_available_to_fusion_choices() {
         (
             "entry main(xs:[]i32) i32=length(filter(|x|x>0,xs))",
             vec![(0, false, true)],
-        ),
-        (
-            "entry main(xs:[]i32) []i32=map(|x|x+1,scan((+),0,xs))",
-            vec![(1, true, false)],
         ),
         (
             "entry main(xs:[]i32) ([]i32,i32)=(scan((+),0,xs),reduce((+),0,xs))",
@@ -787,15 +785,15 @@ fn accumulator_state_order_is_read_from_the_plan() {
         (rule ((CurrentProgram program) (ProgramFunction program function)
             (ContainsStm (FunctionRoot function) (Let id pattern certs
                 (Parallel execution domain (ParallelBlock statements clauses))))
-            (= (vec-length pattern) 2) (= (vec-length clauses) 2)
-            (= (vec-get clauses 0) (Fold first-kind first-reducer first-values))
-            (= (vec-get clauses 1) (Fold second-kind second-reducer second-values)))
+            (= (vec-size pattern) 2) (= (vec-size clauses) 2)
+            (= (vec-at clauses 0) (Fold first-kind first-reducer first-values))
+            (= (vec-at clauses 1) (Fold second-kind second-reducer second-values)))
           ((set (PendingRewrite "test-reorder" program) (set-of
               (Rename (map-empty) (map-empty) (map-empty) (map-empty)
                   (map-insert (map-empty) id (vec-of (Let id
-                      (vec-of (vec-get pattern 1) (vec-get pattern 0)) certs
+                      (vec-of (vec-at pattern 1) (vec-at pattern 0)) certs
                       (Parallel execution domain (ParallelBlock statements
-                          (vec-of (vec-get clauses 1) (vec-get clauses 0))))))))))
+                          (vec-of (vec-at clauses 1) (vec-at clauses 0))))))))))
            (RewriteDemand "test-reorder" program) (ReorderedAccumulatorTuple))
           :ruleset test-reorder-accumulators)
         (run-schedule test-reorder-accumulators (saturate memory-rewrite memory-rename))
@@ -1538,5 +1536,28 @@ fn calibrated_costs_select_among_the_same_legal_map_executions() {
         let program =
             super::super::optimize_with_policy(program, super::super::ScalarOptimization::Basic).unwrap();
         finish_for_test(program, CodegenTarget::Wgsl).unwrap();
+    }
+}
+
+#[test]
+fn scan_epilogues_require_pointwise_reads_and_completed_captures() {
+    let template = super::super::fusion::new_graph().unwrap();
+    for (index, bias, opcode, expected) in [
+        ("(Var (ValueId 11))", "(LiteralBits (I32) 1)", "+", true),
+        ("(LiteralBits (I32) 0)", "(LiteralBits (I32) 1)", "+", false),
+        ("(Var (ValueId 11))", "(Var (ValueId 3))", "+", false),
+        ("(Var (ValueId 11))", "(LiteralBits (I32) 0)", "/", false),
+    ] {
+        let mut graph = template.clone();
+        let fixture = include_str!("tests/scan_epilogue.egg")
+            .replace("INDEX", index)
+            .replace("BIAS", bias)
+            .replace("OPCODE", opcode);
+        graph.parse_and_run_program(None, &fixture).unwrap();
+        super::epilogues(&mut graph).unwrap();
+        assert_eq!(
+            Query(&graph).row("ScanEpilogue", |_| true).unwrap().is_some(),
+            expected
+        );
     }
 }

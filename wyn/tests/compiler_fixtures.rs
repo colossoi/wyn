@@ -396,15 +396,24 @@ fn compiler_fixtures() {
         OutputDirectory(std::env::temp_dir().join(format!("wyn_fixture_compiler_{}", std::process::id())));
     fs::create_dir(&compiler.0).expect("create compiler snapshot directory");
     let compiler = compiler.0.join("wyn.exe");
-    fs::copy(env!("CARGO_BIN_EXE_wyn"), &compiler).expect("snapshot fixture compiler");
+    let compiler = if let Some(snapshot) = std::env::var_os("WYN_TEST_COMPILER") {
+        PathBuf::from(snapshot)
+    } else {
+        fs::copy(env!("CARGO_BIN_EXE_wyn"), &compiler).expect("snapshot fixture compiler");
+        compiler
+    };
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     // Package fixtures stay inside their package so imports obey the normal root boundary.
-    let mut paths: Vec<_> = ["tests/compiler/cases", "pkg/sort/test/compiler"]
-        .into_iter()
-        .flat_map(|directory| fs::read_dir(root.join(directory)).unwrap())
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "wyn"))
-        .collect();
+    let mut paths: Vec<_> = if let Some(file) = std::env::var_os("WYN_TEST_FILE") {
+        vec![fs::canonicalize(file).expect("resolve selected fixture")]
+    } else {
+        ["tests/compiler/cases", "pkg/sort/test/compiler"]
+            .into_iter()
+            .flat_map(|directory| fs::read_dir(root.join(directory)).unwrap())
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "wyn"))
+            .collect()
+    };
     let filter = std::env::var("WYN_TEST_FILTER").unwrap_or_default();
     paths.retain(|path| path.file_stem().unwrap().to_string_lossy().contains(&filter));
     paths.sort();

@@ -1,24 +1,43 @@
 ; Passes collect candidates against an immutable program revision, then run
 ; memory-rewrite. A replacement traverses all binders and annotations together.
-(sort ProgramRewrites (Set Renaming))
 (function PendingRewrite (String Program) ProgramRewrites :merge (set-union old new))
 (relation RewriteDemand (String Program))
 
 ; Build a replacement map only after the complete set of independent edits is known.
 (ruleset memory-edits)
-(datatype StatementEdit (ReplaceStatement StatementId Stm))
-(sort StatementEdits (Set StatementEdit))
 (relation ReplacementMapDemand (StatementEdits))
 (function ReplacementMap (StatementEdits) StatementReplacements :no-merge)
 (function StatementEditsHead (StatementEdits) StatementEdit :no-merge)
 (function StatementEditsTail (StatementEdits) StatementEdits :no-merge)
 (rule ((ReplacementMapDemand replacements) (= replacements (set-empty)))
       ((set (ReplacementMap replacements) (map-empty))) :ruleset memory-edits)
-(rule ((ReplacementMapDemand replacements) (> (set-length replacements) 0))
-      ((set (StatementEditsHead replacements) (set-get replacements 0))
-       (set (StatementEditsTail replacements) (set-remove replacements (set-get replacements 0)))
-       (ReplacementMapDemand (set-remove replacements (set-get replacements 0)))) :ruleset memory-edits)
+(rule ((ReplacementMapDemand replacements) (> (set-size replacements) 0))
+      ((set (StatementEditsHead replacements) (set-at replacements 0))
+       (set (StatementEditsTail replacements) (set-remove replacements (set-at replacements 0)))
+       (ReplacementMapDemand (set-remove replacements (set-at replacements 0)))) :ruleset memory-edits)
 (rule ((ReplacementMapDemand replacements) (= item (StatementEditsHead replacements))
        (= tail (StatementEditsTail replacements)) (= item (ReplaceStatement id statement))
        (= rest (ReplacementMap tail)))
       ((set (ReplacementMap replacements) (map-insert rest id (vec-of statement)))) :ruleset memory-edits)
+(rule ((ReplacementMapDemand replacements) (= item (StatementEditsHead replacements))
+       (= tail (StatementEditsTail replacements)) (= item (ReplaceStatements id statements))
+       (= rest (ReplacementMap tail)))
+      ((set (ReplacementMap replacements) (map-insert rest id statements))) :ruleset memory-edits)
+
+; Only local body edits use this path: choose one competing candidate per
+; function, then combine edits from disjoint functions before rewriting the program.
+; Collect, build, and select run separately so partial batches cannot be applied.
+(function LocalRewriteCandidates (String Program Function) StatementEditGroups :merge (set-union old new))
+(function LocalRewriteEdits (String Program) StatementEdits :merge (set-union old new))
+(ruleset memory-local-rewrites)
+(ruleset memory-local-rewrite-select)
+(rule ((CurrentProgram program) (= choices (LocalRewriteCandidates pass program function))
+       (> (set-size choices) 0))
+      ((set (LocalRewriteEdits pass program) (set-at choices 0))) :ruleset memory-local-rewrites)
+(rule ((CurrentProgram program) (= edits (LocalRewriteEdits pass program)))
+      ((ReplacementMapDemand edits)) :ruleset memory-edits)
+(rule ((CurrentProgram program) (= edits (LocalRewriteEdits pass program))
+       (= replacements (ReplacementMap edits)))
+      ((set (PendingRewrite pass program) (set-of
+          (Rename (map-empty) (map-empty) (map-empty) (map-empty) replacements)))
+       (RewriteDemand pass program)) :ruleset memory-local-rewrite-select)

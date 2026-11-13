@@ -54,8 +54,8 @@ fn free_names_preserve_large_shared_fanout() {
                 r#"
         (let body (Block (vec-of {statements}) (vec-of)))
         (run-schedule (saturate memory-names))
-        (check (set-contains (NamesBody body) (ValueNameRef (ValueId 0))))
-        (check (= (set-length (BindersBody body)) 256))
+        (check (set-includes (NamesBody body) (ValueNameRef (ValueId 0))))
+        (check (= (set-size (BindersBody body)) 256))
     "#
             ),
         )

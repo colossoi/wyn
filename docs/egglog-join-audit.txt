@@ -1,0 +1,588 @@
+Egglog join audit — 2026-11-12
+Workspace: tmp/parallel-ir-import; branch: codex/parallel-ir-import
+
+STATUS
+The initial audit and measurements below describe the pre-fix source.
+The fix round now implements shared typed vector-position lookups, keyed range
+midpoints, free-name projection, and 245 handwritten vector reads/patterns.
+The source-location appendix is the original audit snapshot, not current lines.
+Focused substitution/position/temporary-vector regression passes.
+Unit run: 1304 passed, one previously allowed failure, 13 ignored; zero timing
+violations. Broad gates are RED, including failures beyond the allowed cases;
+see docs/egglog-join-validation.txt. Unchecked items retain their verification
+work; implementing projections does not establish every site or speedup.
+
+CAUSE
+Egglog 3.0 puts primitive calls in post-join instructions. A vec-at, vec-of,
+set-diff, or other computation can appear to connect two table lookups in the
+source while leaving the actual table join disconnected or weakly constrained.
+The engine enumerates unrelated candidates, then executes the primitive and
+rejects mismatches. Reordering source clauses does not repair that connection.
+
+SCOPE AND EVIDENCE
+Read all 22 non-test .egg files under wyn-core/src/egglog, the schema-driven
+generator in memory.rs, and the rule-loading/Rust-embedded scheduling code.
+The source inventory contains 684 handwritten rule definitions. It is paired
+with 801 distinct rules reported by the completed 1024-entry release run.
+These counts overlap and are NOT counts of confirmed bugs. Native reports do
+not prove coverage of rules that the workload never exercised.
+
+Static inventory (includes harmless candidates, full source, locations, and
+available native measurements): tmp/egglog-join-audit.json
+Inventory builder: tmp/audit_egglog_joins.py
+Original two rule probes: tmp/probe_scope_joins.py
+Additional family probes: tmp/probe_audit_joins.py
+Counter runner: tmp/scope_join_probe.rs
+Probe results: tmp/scope-join-probe/results.json and
+               tmp/join-audit-probes/results.json
+Native profile: tmp/scaling-granular-1024/map_add-1024-normal-0.txt
+Profile binary SHA256:
+7c3587514cc5bdf35dc32f5c430e9a6c84d0231b3fd87530969a788eb7cd30e0
+
+The additional probes use reduced schemas/facts preserving each join pattern.
+They count an identity primitive around the relevant computation and check
+every expected output, not just output row counts. Every probe was run with a
+16 MiB stack. Timings below come from the existing full compiler profile;
+candidate counts come from the isolated probes. Do not equate the two.
+
+FIX CHECKLIST, PRIORITIZED
+
+[ ] 1. Original scope rules. Confirmed quadratic.
+    memory/regions.egg:53 — ConsumedTokens uses a computed set-diff as the
+    AccumulatorNames table key.
+    memory/regions.egg:86 — advancing ScopeAt destructures vec-at into Let.
+    Both: 1024 independent items caused 1,048,576 observed checks; keyed-fact
+    versions caused 1024 and produced the same expected outputs.
+    Full-profile rule cost: 134.333 seconds combined.
+    Fix: retain an expression -> free-name-set fact and a demanded
+    statement-vector/index -> statement fact; join consumers on these keys.
+
+[ ] 2. Generated vector name/binder analysis. Confirmed quadratic family.
+    memory.rs:418 (vector_rules), especially :482.
+    Names{sort}RangeDemand -> vec-at -> Names{element}/Binders{element}.
+    A rule template duplicates the disconnected join across vector types.
+    The schema has 28 vector sorts, 27 with structured elements. Review and
+    repair the template, not just its Stms instantiation.
+    A representative probe: 1,048,576 -> 1024 checks at N=1024.
+    Thirteen reported instantiations consumed 44.512 seconds in the profile.
+    Fix: a typed, demanded element-position relation generated from the schema.
+    Reuse it in names, binders, effects, and renaming where appropriate.
+
+[ ] 3. Generated statement renaming. Confirmed quadratic family.
+    memory.rs:462, :496-497, :503-506.
+    The unchanged-statement, replacement, and renamed-child rules all
+    destructure a vector element into a global Let constructor table.
+    A renaming environment may be shared across a whole program, so the env
+    key does not automatically constrain this work to one function.
+    Representative probe: 1,048,576 -> 1024 checks at N=1024.
+    Three reported Stms rules consumed 31.879 seconds in the profile.
+    Fix: use the same element-position fact before inspecting Let or its edit.
+    Also inspect the general Rename{element} env (vec-at node i) template and
+    Effects{element} function (vec-at node i). Shared keys can reduce a join
+    without eliminating its unwanted fanout.
+
+[ ] 4. Binding lookup, including hidden singleton-container patterns.
+    Confirmed quadratic family. Both explicit vec-at and a pattern such as
+    (Let id (vec-of (BindValue name info)) ...) are affected.
+    Representative singleton probe: 1,048,576 -> 1024 checks at N=1024.
+    Concrete hot examples:
+      memory/analysis.egg:116 — integer literal -> StaticIndex
+      memory/analysis.egg:200 — Length -> CountLength (hidden vec-of)
+      memory/analysis.egg:300 — integer bounds propagation
+      scalar/simplify.egg:29 — ConstantAtom propagation
+      scalar/simplify.egg:42 — ScalarOperation classification
+      memory/effects.egg:21 — PrimitiveResultType
+      memory/compact-lengths.egg:30 — CompactLengthSites (hidden vec-of)
+    These seven rules alone consumed 52.257 seconds in the profile.
+    Fix: reuse PatternBindingAt, preserving singleton-length checks; project
+    compound/singleton containers before matching their element constructors.
+    Remaining sites are enumerated in the source-location appendix below.
+
+[ ] 5. Multiple vector projections in one rule. Cubic family confirmed.
+    memory/inline.egg:78 pairs params[i] with arguments[i], but the two
+    constructor tables are joined independently before the vector reads.
+    At N=128, the reduced reproduction made 2,097,152 checks (N^3) for 128
+    outputs. Projecting the corresponding pair first reduced this to 128.
+    Related sites requiring the same treatment/review:
+      fusion/import.egg:17, :26 — corresponding domain axes
+      memory/analysis.egg:166, :216 — loop carries and returned values
+      memory/analysis.egg:227 — result binding and both branch result vectors
+      memory/regions.egg:206 — pattern and accumulator-result correspondence
+      planning/logical.egg:161 — ReturnedPattern correspondence
+      planning/scan-epilogue.egg:30, :39 — clause/binding/yield correspondence
+    Some share additional keys and need not be cubic; do not assume one
+    exponent for all sites. Fix by projecting corresponding pieces together
+    from the demanded owner/position before matching constructors.
+
+[ ] 6. Prefix walkers with weak shared keys. Confirmed quadratic family.
+    memory/simplify.egg:34, :38 — RetainedFunctions shares a program key with
+    LiveFunction, but still pairs each vector position with unrelated names.
+    These two rules consumed 16.326 seconds in the profile.
+    memory/work.egg:44 — SequenceWork shares a function key with BoundedWork,
+    but shared expressions (e.g. identical literals) connect it to Let
+    statements belonging to other functions before vec-at rejects them.
+    This rule consumed 10.602 seconds in the profile.
+    Both reduced reproductions: 1,048,576 -> 1024 checks at N=1024.
+    Fix: join the selected vector element directly, not merely its program,
+    function, expression, or output type.
+
+[ ] 7. Finish the same conversion in traversal/planning/fusion rules.
+    Review every listed vector-element bridge in the appendix. Important
+    examples include ClauseOffset, DomainIndexPrefix, ForwardedPrefix,
+    DiscardableClauses, DenseAxes, DomainOrdinal, type/product byte walkers,
+    accumulator inputs, and fusion consumer/result matching.
+    These use the confirmed pattern; per-site exponents and speedups have not
+    all been measured. Reuse existing DomainAxisAt, ParallelClauseAt, and
+    PatternBindingAt where they already express the required connection.
+
+[ ] 8. Debug validation has parallel copies of these patterns.
+    memory/validate.egg:13 mirrors the sequence rule; :171, :175, :215, :223,
+    :245, :285, :291 combine multiple projections. The appendix lists all
+    candidates. Keep validation debug-only, but share corrected projection
+    facts so unit/debug runs do not retain the same scaling defects.
+
+[ ] 9. Unexplained hot indexed rule: investigate separately.
+    memory/simplify.egg:429, FirstDeadCollection, consumed 18.280 seconds and
+    reported zero successful matches. This already uses ParallelClauseAt and
+    PatternBindingAt. The audit has NOT established its root cause. Do not
+    claim the preceding fixes eliminate all bad joins or explain this cost.
+
+[ ] 10. Follow-up: inlining still selects one call replacement per program revision.
+    memory/inline.egg submits separate singleton Renaming candidates to
+    PendingRewrite; memory/apply-rewrites.egg chooses set-get edits 0.
+    This can require repeated program traversal. It is distinct from the
+    delayed primitive joins fixed here. The post-fix Tinyporto attempt timed
+    out during inlining at five minutes; this is a candidate to measure, not
+    proof of the cause. No batching change or speedup claim has been made.
+
+DO NOT TURN EVERY PRIMITIVE INTO A TABLE
+Primitive computations used only in rule heads, terminal arithmetic/filter
+operations with bound inputs, and literal empty containers do not by themselves
+introduce this defect. The flow.egg rules use explicit relational keys and have
+no instance of the delayed container-element bridge found above.
+
+The generic shared-first-key probe demonstrates that a partially connected
+join can still be quadratic. However, current production effect sets are built
+from SharedRead, SharedWrite, and OrderedEffect. Their finite domain bounds
+Commutes/ReadOnlyEffects variants. Do not report that generic probe as proof of
+an unbounded production effect-set problem. Revisit if richer effects are used.
+
+Generated range-midpoint/end-index queries and intentional pairwise analyses
+(e.g. same-expression CSE and transitive relations) are different from an
+unrelated global product. They remain review candidates where appropriate;
+the scanner's component count is evidence for inspection, not a bug verdict.
+
+VALIDATION FOR THE FIX ROUND
+Keep projections demand-driven and keyed by immutable owner plus position.
+Preserve bounds checks, singleton/cardinality checks, scope/ownership facts,
+and scheduling dependencies. No new semantic IR or Rust transformation pass
+is required. After applying a family, check outputs and counts, then rerun the
+small compiler scaling cases before spending time on the large cases.
+Post-fix gates and measurements are in docs/egglog-join-validation.txt.
+The probe measurements below/above are historical evidence, not post-fix
+whole-program speedup measurements.
+
+SOURCE-LOCATION APPENDIX
+Generated from the structural inventory. Each entry identifies a primitive
+whose output participates in a table match. These are REVIEW CANDIDATES, not
+an assertion that every listed rule is quadratic. Includes endpoint arithmetic
+and finite-domain cases to avoid silently dropping them from the audit.
+
+BEGIN GENERATED SITE INVENTORY
+
+
+generated-or-rust-embedded (132 candidate rules)
+  native rule 00a9a6936e65: (+ i 1) -> EffectsDomainAxesRangeDemand
+  native rule 03dd43651e2a: (vec-length node) -> RenameStmsRange
+  native rule 0ace10d415de: (+ i 1) -> RenameParamsRangeDemand
+  native rule 0b5989dd0675: (vec-length node) -> NamesAtomsRange; (vec-length node) -> BindersAtomsRange
+  native rule 0d2f21718417: (+ i 1) -> EffectsReturnInfosRangeDemand; (vec-at node i) -> EffectsReturnInfo
+  native rule 0ec851f8b039: (+ i 1) -> EffectsResultsRangeDemand
+  native rule 0f0dd2e8ded4: (+ i 1) -> NamesReturnInfosRangeDemand; (vec-at node i) -> NamesReturnInfo, BindersReturnInfo
+  native rule 0f4a441d562c: (+ i 1) -> EffectsParallelResultsRangeDemand
+  native rule 101594f67637: (+ i 1) -> NamesStmsRangeDemand; (vec-at node i) -> NamesStm, BindersStm
+  native rule 11c8091c6963: (+ i 1) -> NamesExternalsRangeDemand; (vec-at node i) -> NamesExternal, BindersExternal
+  native rule 145521fa58cb: (+ i 1) -> NamesPatternRangeDemand; (vec-at node i) -> NamesBinding, BindersBinding
+  native rule 156643c7ac6a: (+ i 1) -> RenameExternalsRangeDemand; (vec-at node i) -> RenameExternal
+  native rule 16984cf55c5b: (+ i 1) -> EffectsCertificatesRangeDemand
+  native rule 169d563ea53c: (vec-length node) -> EffectsParallelResultsRange
+  native rule 1771eb5abd73: (+ i 1) -> EffectsAtomsRangeDemand; (vec-at node i) -> EffectsAtom
+  native rule 19662e2b5b9a: (vec-length node) -> EffectsResultsRange
+  native rule 1b065b088eea: (+ i (/ (- j i) 2)) -> EffectsAtomsRange
+  native rule 1c3b537b63ef: (+ i (/ (- j i) 2)) -> RenameParamsRange
+  native rule 1d49da142084: (vec-length node) -> NamesDomainAxesRange; (vec-length node) -> BindersDomainAxesRange
+  native rule 1d8d9cba08a2: (+ i (/ (- j i) 2)) -> RenameDomainAxesRange
+  native rule 22e25d42528c: (+ i 1) -> RenamePatternRangeDemand; (vec-at node i) -> RenameBinding
+  native rule 25d1d7d599ed: (vec-length node) -> NamesParallelResultsRange; (vec-length node) -> BindersParallelResultsRange
+  native rule 2681c00d719c: (+ i 1) -> RenameStmsRangeDemand; (vec-at node i) -> Let; (vec-at node i) -> RenameStm
+  native rule 27d64279f6ec: (+ i 1) -> EffectsPatternRangeDemand; (vec-at node i) -> EffectsBinding
+  native rule 28561448b066: (+ i (/ (- j i) 2)) -> NamesParamsRange, BindersParamsRange
+  native rule 29b7ec3a3567: (vec-length node) -> NamesParamsRange; (vec-length node) -> BindersParamsRange
+  native rule 2a479d2f1c2d: (vec-length node) -> RenamePatternRange
+  native rule 2afe05da6313: (+ i (/ (- j i) 2)) -> NamesDomainAxesRange, BindersDomainAxesRange
+  native rule 2b9871459f02: (vec-length node) -> RenameAtomsRange
+  native rule 2d71687e06c4: (vec-length node) -> RenameFunctionsRange
+  native rule 2e9137647064: (+ i 1) -> RenameCertificatesRangeDemand
+  native rule 2f4bc20b4179: (vec-length node) -> NamesPatternRange; (vec-length node) -> BindersPatternRange
+  native rule 3040774eb27b: (+ i (/ (- j i) 2)) -> RenameResultsRange
+  native rule 3397fa83209a: (+ i (/ (- j i) 2)) -> RenameExternalsRange
+  native rule 3534e1e04668: (+ i 1) -> NamesDomainAxesRangeDemand; (vec-at node i) -> NamesDomainAxis, BindersDomainAxis
+  native rule 3696934e6c06: (+ i (/ (- j i) 2)) -> NamesExternalsRange, BindersExternalsRange
+  native rule 36d0abac8ab8: (vec-length node) -> RenameParamsRange
+  native rule 3e0bad0ed6af: (+ i (/ (- j i) 2)) -> EffectsReturnInfosRange
+  native rule 3fe013c50990: (+ i 1) -> RenameStmsRangeDemand; (vec-at node i) -> Let
+  native rule 418192098c75: (+ i 1) -> RenameParallelResultsRangeDemand
+  native rule 45a2b1d8255f: (+ i (/ (- j i) 2)) -> NamesStmsRange, BindersStmsRange
+  native rule 4bfff854394a: (+ i (/ (- j i) 2)) -> EffectsResultsRange
+  native rule 4c74f5367889: (+ i 1) -> EffectsReturnInfosRangeDemand
+  native rule 4cee5b44070d: (vec-length node) -> EffectsCertificatesRange
+  native rule 4d09e8153916: (set-get edits 0) -> RenameProgram
+  native rule 511ef89f9dad: (vec-length node) -> NamesCertificatesRange; (vec-length node) -> BindersCertificatesRange
+  native rule 520fea3bd779: (+ i 1) -> EffectsExtentsRangeDemand; (vec-at node i) -> EffectsExtent
+  native rule 531613276be2: (+ i 1) -> EffectsCertificatesRangeDemand; (vec-at node i) -> EffectsValueName
+  native rule 541827584d63: (+ i 1) -> NamesParallelResultsRangeDemand; (vec-at node i) -> NamesParallelResult, BindersParallelResult
+  native rule 5c6cd8477dd9: (+ i 1) -> NamesEntriesRangeDemand; (vec-at node i) -> NamesEntry, BindersEntry
+  native rule 5e08b25541c0: (+ i 1) -> NamesCertificatesRangeDemand; (vec-at node i) -> NamesValueName, BindersValueName
+  native rule 60f30d146b9c: (+ i (/ (- j i) 2)) -> EffectsDomainAxesRange
+  native rule 6254b63ee402: (+ i (/ (- j i) 2)) -> RenameCertificatesRange
+  native rule 62a2f0b906d2: (+ i 1) -> NamesParamsRangeDemand; (vec-at node i) -> NamesParam, BindersParam
+  native rule 63db18ba9a5d: (set-empty) -> Copies
+  native rule 64bb73446a6b: (+ i (/ (- j i) 2)) -> NamesResultsRange, BindersResultsRange
+  native rule 65684ad82da3: (+ i 1) -> EffectsExtentsRangeDemand
+  native rule 66718897e71b: (+ i 1) -> RenameParamsRangeDemand; (vec-at node i) -> RenameParam
+  native rule 6a5e862a2689: (set-get edits 0) -> RenameProgram
+  native rule 6cc0d90e215c: (+ i 1) -> NamesAtomsRangeDemand; (vec-at node i) -> NamesAtom, BindersAtom
+  native rule 6ddb0999e63e: (+ i (/ (- j i) 2)) -> EffectsStmsRange
+  native rule 6f168e289360: (vec-length node) -> RenameDomainAxesRange
+  native rule 7286654795de: (vec-length node) -> EffectsReturnInfosRange
+  native rule 76dc4b764917: (vec-length node) -> NamesFunctionsRange; (vec-length node) -> BindersFunctionsRange
+  native rule 7880201f324b: (+ i (/ (- j i) 2)) -> NamesFunctionsRange, BindersFunctionsRange
+  native rule 7d44f8de067e: (+ i 1) -> RenameDomainAxesRangeDemand; (vec-at node i) -> RenameDomainAxis
+  native rule 7ec9f662d9c8: (+ i 1) -> RenameFunctionsRangeDemand
+  native rule 87b79d1adab2: (+ i (/ (- j i) 2)) -> NamesReturnInfosRange, BindersReturnInfosRange
+  native rule 8982413efee1: (vec-length node) -> RenameReturnInfosRange
+  native rule 8a70424444a7: (+ i (/ (- j i) 2)) -> NamesAtomsRange, BindersAtomsRange
+  native rule 8a8967854a7b: (vec-length node) -> EffectsParamsRange
+  native rule 8c45d018b31b: (+ i 1) -> RenameDomainAxesRangeDemand
+  native rule 948ac1e72c69: (+ i (/ (- j i) 2)) -> RenamePatternRange
+  native rule 956729054bec: (+ i 1) -> RenamePatternRangeDemand
+  native rule 95a8813e86f0: (+ i 1) -> EffectsAtomsRangeDemand
+  native rule 9784b7c2f584: (+ i 1) -> RenameReturnInfosRangeDemand
+  native rule 99f21e77d9bb: (+ i 1) -> RenameExternalsRangeDemand
+  native rule 9e92488d6524: (+ i (/ (- j i) 2)) -> EffectsCertificatesRange
+  native rule 9f4b4f362f97: (+ i 1) -> EffectsParallelResultsRangeDemand; (vec-at node i) -> EffectsParallelResult
+  native rule 9feae0dc5e3c: (+ i (/ (- j i) 2)) -> EffectsParamsRange
+  native rule a3b8485bdee8: (+ i (/ (- j i) 2)) -> RenameAtomsRange
+  native rule a3bc3ccf5be9: (+ i 1) -> RenameReturnInfosRangeDemand; (vec-at node i) -> RenameReturnInfo
+  native rule a409748d79c8: (+ i 1) -> EffectsResultsRangeDemand; (vec-at node i) -> EffectsResult
+  native rule a61e31ce8419: (+ i 1) -> EffectsStmsRangeDemand
+  native rule a9c2968fa33f: (+ i (/ (- j i) 2)) -> RenameReturnInfosRange
+  native rule aef388f9d446: (+ i 1) -> RenameResultsRangeDemand
+  native rule af7d18b710d9: (+ i 1) -> RenameParallelResultsRangeDemand; (vec-at node i) -> RenameParallelResult
+  native rule b04bb755ed8d: (+ i 1) -> EffectsPatternRangeDemand
+  native rule b0fffbb08c85: (+ i (/ (- j i) 2)) -> RenameStmsRange
+  native rule b6f48ba239d5: (+ i (/ (- j i) 2)) -> RenameParallelResultsRange
+  native rule b9d80762b661: (vec-length node) -> RenameExternalsRange
+  native rule ba80e973dedd: (vec-of (BindValue name (ScalarInfo (ScalarElement type)))) -> Let; (vec-of) -> Let
+  native rule bc322e816a62: (+ i (/ (- j i) 2)) -> NamesPatternRange, BindersPatternRange
+  native rule bd4c7a7ed2e4: (+ i 1) -> RenameStmsRangeDemand; (vec-at node i) -> Let
+  native rule bdb8f556d76d: (+ i 1) -> RenameAtomsRangeDemand; (vec-at node i) -> RenameAtom
+  native rule be2b6bc23812: (+ i 1) -> EffectsParamsRangeDemand
+  native rule be3a6e26f4e4: (+ i 1) -> EffectsDomainAxesRangeDemand; (vec-at node i) -> EffectsDomainAxis
+  native rule bf113af2bbf5: (+ i (/ (- j i) 2)) -> NamesCertificatesRange, BindersCertificatesRange
+  native rule bf187140091b: (+ i (/ (- j i) 2)) -> NamesExtentsRange, BindersExtentsRange
+  native rule bf55f07b6ea9: (+ i (/ (- j i) 2)) -> NamesParallelResultsRange, BindersParallelResultsRange
+  native rule bfe1237b66a5: (+ i 1) -> EffectsParamsRangeDemand; (vec-at node i) -> EffectsParam
+  native rule c1f564b56017: (+ i 1) -> RenameResultsRangeDemand; (vec-at node i) -> RenameResult
+  native rule c4cd147297e7: (vec-length node) -> RenameParallelResultsRange
+  native rule c535656be5c3: (+ i (/ (- j i) 2)) -> NamesEntriesRange, BindersEntriesRange
+  native rule c9de08a57275: (vec-length node) -> RenameCertificatesRange
+  native rule cc7503b036b8: (+ i 1) -> RenameAtomsRangeDemand
+  native rule cd125889e512: (+ i 1) -> RenameCertificatesRangeDemand; (vec-at node i) -> RenameValueName
+  native rule ce2b1c903d64: (+ i 1) -> RenameFunctionsRangeDemand; (vec-at node i) -> RenameFunction
+  native rule ced9feb05975: (+ i (/ (- j i) 2)) -> EffectsExtentsRange
+  native rule d01ecaf5deb4: (vec-length node) -> NamesResultsRange; (vec-length node) -> BindersResultsRange
+  native rule d2a325b20ec2: (+ i (/ (- j i) 2)) -> RenameFunctionsRange
+  native rule d3c03a9438b9: (+ i (/ (- j i) 2)) -> EffectsParallelResultsRange
+  native rule daa1c25f95a9: (vec-length node) -> RenameResultsRange
+  native rule db12661053fd: (+ i (/ (- j i) 2)) -> EffectsPatternRange
+  native rule df17e4e6ce36: (vec-length node) -> EffectsDomainAxesRange
+  native rule df7c0c41b899: (vec-length node) -> NamesExtentsRange; (vec-length node) -> BindersExtentsRange
+  native rule e06d48367964: (vec-at pattern 0) -> BindValue; (vec-at arguments 0) -> ConstantAtom
+  native rule e20ef4b41535: (vec-length node) -> EffectsPatternRange
+  native rule e216462d45ab: (set-get edits 0) -> RenameProgram
+  native rule e44a4c46573c: (vec-length node) -> NamesEntriesRange; (vec-length node) -> BindersEntriesRange
+  native rule e5826826a29e: (vec-length node) -> EffectsExtentsRange
+  native rule e72efdce51dd: (+ i 1) -> EffectsStmsRangeDemand; (vec-at node i) -> EffectsStm
+  native rule e7963fc753d0: (vec-length node) -> EffectsStmsRange
+  native rule e81fa811dcf5: (set-empty) -> Copies; (set-empty) -> DeadStatements; (set-empty) -> EffectsStm
+  native rule ed1bd5437468: (vec-length node) -> NamesExternalsRange; (vec-length node) -> BindersExternalsRange
+  native rule f14105ce64ee: (+ i 1) -> NamesExtentsRangeDemand; (vec-at node i) -> NamesExtent, BindersExtent
+  native rule f1538a88bdf0: (+ i 1) -> NamesResultsRangeDemand; (vec-at node i) -> NamesResult, BindersResult
+  native rule f619f45d1d52: (vec-length node) -> NamesReturnInfosRange; (vec-length node) -> BindersReturnInfosRange
+  native rule f745dfaecb7f: (map-empty) -> Rename
+  native rule f8054cd8bfdb: (vec-length node) -> NamesStmsRange; (vec-length node) -> BindersStmsRange
+  native rule f9ab1f6eab54: (vec-length node) -> EffectsAtomsRange
+  native rule ff7a5fdd3b5f: (+ i 1) -> NamesFunctionsRangeDemand; (vec-at node i) -> NamesFunction, BindersFunction
+
+wyn-core/src/egglog/fusion/compact-fold.egg (4 candidate rules)
+  line 7: (vec-of (Fold (Total) (Reduction order neutral combine) values)) -> ParallelBlock
+  line 16: (vec-at params i) -> Parameter
+  line 26: (vec-of (Fold (Total) (Reduction order neutral combine) values)) -> ParallelBlock; (vec-at params i) -> Parameter; (vec-at values i) -> Yield
+  line 34: (vec-of (Compact predicate payload)) -> ParallelBlock; (vec-of (Fold (Total) (Reduction order neutral combine) values)) -> ParallelBlock; (vec-length neutral) -> CompactMaskCompatible, CompactMaskPattern, CompactMaskResults, CompactNeutralResults
+
+wyn-core/src/egglog/fusion/compaction.egg (6 candidate rules)
+  line 4: (vec-of (BindValue array info)) -> Let; (vec-of (Compact predicate values)) -> ParallelBlock
+  line 9: (set-empty) -> EffectsStm
+  line 15: (vec-of (BindValue array info)) -> Let; (vec-of (Compact predicate values)) -> ParallelBlock; (vec-of (DenseAxis index count)) -> IterationSpace
+  line 25: (vec-of (BindValue array info)) -> Let; (vec-of (Yield proofs value)) -> Compact; (vec-of (Compact predicate (vec-of (Yield proofs value)))) -> ParallelBlock; (vec-of (DenseAxis index count)) -> IterationSpace; (vec-of (Var index)) -> Index
+  line 42: (map-empty) -> Rename
+  line 48: (vec-of (Compact predicate values)) -> ParallelBlock; (vec-of (Collect results)) -> ParallelBlock; (set-empty) -> EffectsStm
+
+wyn-core/src/egglog/fusion/fusion.egg (5 candidate rules)
+  line 5: (vec-at results i) -> Fold
+  line 35: (vec-at clauses i) -> Collect; (vec-at pattern (+ offset j)) -> BindValue; (vec-at values j) -> Yield
+  line 45: (vec-at clauses i) -> Collect; (vec-at pattern (+ offset j)) -> BindValue; (vec-at values j) -> Yield; (vec-length atoms) -> MatchingIndices
+  line 65: (map-empty) -> Rename
+  line 127: (set-remove ea (OrderedEffect)) -> Commutes; (set-remove eb (OrderedEffect)) -> Commutes
+
+wyn-core/src/egglog/fusion/import.egg (7 candidate rules)
+  line 17: (vec-at xs i) -> DenseAxis; (vec-at ys i) -> DenseAxis
+  line 27: (vec-at xs i) -> DenseAxis; (vec-at ys i) -> DenseAxis; (map-empty) -> Rename
+  line 33: (vec-length xs) -> MatchDomainAt
+  line 39: (vec-at results i) -> Collect
+  line 41: (vec-length results) -> ForwardedPrefix
+  line 47: (vec-at atoms i) -> Var; (vec-at indices i) -> IndexValue
+  line 68: (vec-at results i) -> Contribute; (vec-length tokens) -> ForwardedTokens
+
+wyn-core/src/egglog/memory/analysis.egg (27 candidate rules)
+  line 106: (vec-at pattern 0) -> BindValue
+  line 110: (vec-at extents dimension) -> FixedExtent; (vec-at pattern 0) -> BindValue
+  line 116: (vec-at pattern 0) -> BindValue
+  line 119: (vec-at pattern 0) -> BindValue
+  line 158: (vec-of (BindValue value info)) -> Let
+  line 161: (vec-of (BindValue value info)) -> Let
+  line 166: (vec-at merges i) -> Carry; (vec-at results i) -> Yield
+  line 183: (vec-at pattern i) -> BindValue
+  line 193: (vec-at parameters i) -> Parameter; (vec-at results i) -> Yield
+  line 200: (vec-of (BindValue name info)) -> Let
+  line 202: (vec-of (BindValue name info)) -> Let
+  line 210: (vec-of (BindValue name info)) -> Let
+  line 212: (vec-of (BindValue name info)) -> Let
+  line 214: (vec-of (BindValue name info)) -> Let
+  line 216: (vec-at merges i) -> Carry; (vec-at results i) -> Yield
+  line 227: (vec-at pattern i) -> BindValue; (vec-at yes-results i) -> Yield; (vec-at no-results i) -> Yield
+  line 241: (vec-at pattern i) -> BindValue
+  line 247: (vec-at extents 0) -> FixedExtent
+  line 251: (vec-of (BindValue name info)) -> Let; (vec-of (Slice start count (IndexConstant stride))) -> View
+  line 255: (vec-at pattern 0) -> BindValue
+  line 259: (vec-at pattern 0) -> BindValue
+  line 263: (vec-at pattern 0) -> BindValue
+  line 267: (vec-at pattern 0) -> BindValue
+  line 273: (+ offset j) -> PatternBindingAt
+  line 300: (vec-at pattern 0) -> BindValue
+  line 304: (vec-at pattern 0) -> BindValue; (vec-at arguments 0) -> IntegerLower, IntegerUpper; (vec-at arguments 1) -> IntegerLower, IntegerUpper
+  line 314: (vec-length axes) -> FoldSlots; (vec-at axes 0) -> DenseAxis; (vec-at clauses i) -> Fold; (vec-length neutral) -> FoldSlots; (vec-at neutral 0) -> LiteralBits; (vec-length values) -> FoldSlots; (vec-at values 0) -> Yield; (vec-at pattern (+ offset prefix)) -> BindValue
+
+wyn-core/src/egglog/memory/apply-rewrites.egg (1 candidate rules)
+  line 6: (set-get edits 0) -> RenameProgram
+
+wyn-core/src/egglog/memory/compact-lengths.egg (3 candidate rules)
+  line 30: (vec-of (BindValue name info)) -> Let
+  line 37: (vec-of (BindValue count info)) -> Let
+  line 49: (vec-of (BindValue count info)) -> Let; (vec-of (DenseAxis index size)) -> IterationSpace
+
+wyn-core/src/egglog/memory/effects.egg (5 candidate rules)
+  line 21: (vec-at pattern 0) -> BindValue
+  line 38: (set-empty) -> InspectReadOnly
+  line 39: (set-get effects 0) -> ReadOnlyAccess
+  line 41: (set-get effects 0) -> ReadOnlyAccess; (set-remove effects first) -> ReadOnlyEffects
+  line 46: (set-remove effects (OrderedEffect)) -> ReadOnlyEffects
+
+wyn-core/src/egglog/memory/inline.egg (11 candidate rules)
+  line 41: (set-empty) -> InlineNamesDemand
+  line 59: (set-empty) -> InlineIdsDemand
+  line 78: (vec-at params i) -> Parameter; (vec-at arguments i) -> Pass
+  line 82: (vec-at results i) -> Yield
+  line 86: (vec-length params) -> InlineParameters; (vec-length pattern) -> InlineResults
+  line 129: (vec-length params) -> InlineParameters; (vec-length results) -> InlineResults
+  line 150: (set-empty) -> EffectsFunction
+  line 170: (vec-at params i) -> Parameter
+  line 173: (vec-length returns) -> ReducerOutputPrefix
+  line 176: (vec-length returns) -> ReducerOutputPrefix
+  line 179: (vec-length returns) -> ReducerOutputPrefix
+
+wyn-core/src/egglog/memory/regions.egg (25 candidate rules)
+  line 38: (set-empty) -> AccumulatorNamesDemand
+  line 53: (set-diff used bound) -> AccumulatorNames
+  line 86: (vec-at statements i) -> Let
+  line 113: (vec-length statements) -> ScopeAt
+  line 119: (vec-at results i) -> Fold
+  line 132: (vec-at inputs i) -> AccumulatorInput
+  line 155: (vec-at axes i) -> BindersDomainAxis
+  line 181: (vec-at params i) -> Parameter
+  line 187: (vec-at pattern 0) -> BindAccumulator
+  line 190: (vec-at pattern 0) -> BindAccumulator
+  line 193: (vec-at vector-pattern-0 0) -> BindAccumulator
+  line 202: (vec-at merges i) -> Carry
+  line 206: (vec-at pattern i) -> BindAccumulator; (vec-at results i) -> Yield
+  line 220: (vec-at results i) -> ClauseArity
+  line 224: (vec-at clauses i) -> Compact; (vec-at values 0) -> Yield
+  line 230: (vec-at results i) -> Contribute; (vec-at pattern (+ offset j)) -> BindAccumulator
+  line 248: (vec-length extents) -> CollectedSlot
+  line 253: (vec-at fields i) -> LogicalSlotKind
+  line 255: (vec-length fields) -> ProductSlotPrefix
+  line 315: (vec-at axes i) -> DenseAxis
+  line 317: (vec-length axes) -> DomainIndexPrefix
+  line 335: (- dimensions 1) -> CollectedSlot
+  line 342: (vec-at fields i) -> CollectedSlot
+  line 345: (vec-length fields) -> CollectedProductPrefix
+  line 360: (vec-at arrays i) -> ArrayWrites
+
+wyn-core/src/egglog/memory/rewrites.egg (1 candidate rules)
+  line 15: (set-empty) -> ReplacementMapDemand
+
+wyn-core/src/egglog/memory/simplify.egg (36 candidate rules)
+  line 11: (vec-of (BindValue name (ScalarInfo (ScalarElement type)))) -> Let; (vec-of) -> Let
+  line 34: (vec-at functions i) -> DefineFunction
+  line 38: (vec-at functions i) -> DefineFunction
+  line 42: (vec-length functions) -> RetainedFunctions
+  line 78: (vec-at pattern 0) -> BindValue
+  line 90: (set-empty) -> CopyRenamingDemand
+  line 120: (set-empty) -> RemoveStatementsDemand
+  line 129: (set-empty) -> Copies
+  line 141: (set-empty) -> Copies; (set-empty) -> DeadStatements; (set-empty) -> EffectsStm
+  line 182: (vec-at statements i) -> Let, MovableEffects
+  line 190: (set-empty) -> Copies; (set-empty) -> DeadStatements; (vec-at statements i) -> Let, MovableEffects, NamesStm, BindersStm; (set-remove enclosing (OrderedEffect)) -> Commutes
+  line 208: (set-empty) -> HoistPrefixDemand
+  line 224: (map-empty) -> Rename
+  line 244: (vec-at slices i) -> At
+  line 247: (vec-at bindings 0) -> BindValue; (vec-length slices) -> PointIndices
+  line 260: (vec-at extents 0) -> FixedExtent
+  line 264: (vec-at pattern 0) -> BindValue
+  line 267: (vec-at pattern 0) -> BindValue
+  line 270: (+ offset j) -> PatternBindingAt
+  line 279: (+ offset j) -> PatternBindingAt
+  line 287: (vec-at pattern 0) -> BindValue; (vec-at slices 0) -> Slice
+  line 296: (vec-at pattern 0) -> BindValue
+  line 313: (vec-at statements i) -> EffectsStm
+  line 317: (vec-at statements i) -> Let
+  line 320: (vec-at statements i) -> Let; (vec-of (Var index)) -> Index; (vec-at axes axis) -> DenseAxis
+  line 327: (vec-at statements i) -> Let; (vec-of (Var index)) -> Index; (vec-at axes axis) -> DenseAxis
+  line 335: (vec-at statements i) -> Let; (vec-of (Var index)) -> Index; (vec-at axes axis) -> DenseAxis; (vec-of (BindValue length info)) -> Let
+  line 342: (vec-at statements i) -> Let; (vec-of (Var index)) -> Index; (vec-at axes axis) -> DenseAxis; (vec-at extents 0) -> FixedExtent
+  line 350: (vec-at results i) -> Collect
+  line 354: (vec-at statements i) -> Let
+  line 361: (vec-length statements) -> DiscardableMapPrefix; (vec-length results) -> DiscardableClauses
+  line 380: (vec-at statements i) -> Let; (vec-of (Var index)) -> Index; (vec-of (DenseAxis index (IndexValue length))) -> IterationSpace; (vec-of (BindValue length info)) -> Let
+  line 388: (vec-at statements i) -> Let; (vec-of position) -> Index; (vec-of (DenseAxis index (IndexValue length))) -> IterationSpace; (vec-of (BindValue length info)) -> Let
+  line 400: (vec-length statements) -> DiscardableMapPrefix; (vec-length results) -> DiscardableClauses
+  line 407: (vec-at statements i) -> MovableEffects
+  line 411: (vec-at results i) -> Fold
+
+wyn-core/src/egglog/memory/validate.egg (35 candidate rules)
+  line 13: (vec-at statements i) -> Let
+  line 43: (vec-length statements) -> ScopeAt
+  line 58: (vec-at merges i) -> Carry
+  line 71: (vec-at axes i) -> DenseAxis
+  line 80: (vec-at axes i) -> BindersDomainAxis
+  line 84: (vec-at axes i) -> DenseAxis
+  line 88: (vec-at results i) -> Collect
+  line 92: (vec-at results i) -> Compact
+  line 97: (vec-at results i) -> Fold
+  line 107: (vec-at pattern i) -> BindersBinding
+  line 115: (vec-at params i) -> Parameter
+  line 123: (vec-at merges i) -> Carry
+  line 129: (vec-at results i) -> Contribute
+  line 133: (vec-at results i) -> Compact
+  line 171: (vec-at returns i) -> ReturnKind; (vec-at results i) -> Yield
+  line 175: (vec-at returns i) -> ReturnKind; (vec-at pattern i) -> BindingSlot
+  line 179: (vec-at merges i) -> Carry
+  line 195: (vec-at returns i) -> ReturnKind
+  line 215: (vec-at arguments i) -> Pass; (vec-at params i) -> Parameter
+  line 223: (vec-at declared i) -> ReturnKind; (vec-at returns i) -> ReturnKind
+  line 230: (vec-length clauses) -> ClauseOffset
+  line 245: (vec-at results i) -> Yield; (vec-at pattern (+ offset i)) -> BindingSlot
+  line 251: (vec-at clauses i) -> Fold
+  line 257: (vec-at clauses i) -> Fold
+  line 263: (vec-at clauses i) -> Fold; (vec-at returns j) -> ReturnKind
+  line 271: (vec-at clauses i) -> Fold
+  line 278: (vec-at clauses i) -> Fold
+  line 285: (vec-at returns i) -> ReturnKind; (vec-at pattern (+ offset i)) -> BindingSlot
+  line 291: (vec-at clauses i) -> Fold; (vec-at params j) -> Parameter; (vec-at returns slot) -> ReturnKind
+  line 300: (vec-at results i) -> Yield; (vec-at results j) -> Yield
+  line 305: (vec-at merges i) -> Carry; (vec-at merges j) -> Carry
+  line 310: (vec-at results i) -> Yield
+  line 324: (vec-of) -> IterationSpace; (vec-at clauses i) -> Fold
+  line 327: (vec-at results i) -> Yield
+  line 331: (vec-at returns i) -> ReturnKind
+
+wyn-core/src/egglog/memory/work.egg (12 candidate rules)
+  line 44: (vec-at statements i) -> Let
+  line 47: (vec-length statements) -> SequenceWork
+  line 63: (vec-at axes i) -> DenseAxis
+  line 66: (vec-length axes) -> DomainWork; (vec-length statements) -> SequenceWork
+  line 79: (vec-at fields i) -> ElementBytes
+  line 81: (vec-length fields) -> ElementProductBytes
+  line 86: (vec-at extents i) -> FixedExtent
+  line 88: (vec-length extents) -> ExtentProduct
+  line 91: (vec-at fields i) -> LogicalBytes
+  line 93: (vec-length fields) -> ProductBytes
+  line 100: (vec-at merges i) -> Carry
+  line 103: (vec-at merges i) -> Carry
+
+wyn-core/src/egglog/planning/conditional.egg (2 candidate rules)
+  line 45: (vec-at values i) -> ConditionalResultInfo
+  line 58: (vec-length yp) -> ReturnedPattern; (vec-length np) -> ReturnedPattern; (vec-length yvalues) -> ConditionalPattern, ConditionalReturns, ConditionalResults
+
+wyn-core/src/egglog/planning/logical.egg (23 candidate rules)
+  line 12: (vec-at neutral i) -> Var; (vec-of (BindValue value (LogicalValue (ArrayType ownership extents element)))) -> Let; (set-empty) -> MovableEffects
+  line 23: (vec-at axes i) -> DenseAxis
+  line 25: (vec-length axes) -> DenseAxes
+  line 48: (vec-at inputs i) -> AccumulatorInput
+  line 80: (vec-at results i) -> Compact
+  line 96: (vec-at results i) -> Fold
+  line 102: (vec-at axes i) -> DenseAxis
+  line 105: (vec-at axes i) -> DenseAxis
+  line 108: (vec-at axes i) -> DenseAxis
+  line 114: (vec-at statements i) -> Let, EffectsStm; (set-empty) -> EffectsStm
+  line 118: (vec-at statements i) -> Let
+  line 126: (vec-at axes i) -> DenseAxis
+  line 130: (vec-at axes i) -> DenseAxis
+  line 133: (vec-length axes) -> CanonicalAxes
+  line 140: (- (vec-length statements) 1) -> RepeatablePrefix; (vec-at statements last) -> Let
+  line 161: (vec-at pattern i) -> BindValue; (vec-at results i) -> Yield; (vec-of) -> Yield
+  line 165: (vec-at results i) -> Fold
+  line 175: (vec-length outer-axes) -> DomainOrdinal; (vec-length inner-axes) -> DomainOrdinal
+  line 208: (vec-at params i) -> Parameter
+  line 214: (vec-length results) -> DiscardableClauses
+  line 236: (vec-at bindings 0) -> BindValue
+  line 253: (vec-at clauses i) -> Collect; (vec-at pattern (+ offset j)) -> BindValue
+  line 261: (vec-at pattern 0) -> BindValue
+
+wyn-core/src/egglog/planning/scan-epilogue.egg (7 candidate rules)
+  line 12: (vec-at clauses i) -> Collect
+  line 14: (vec-at clauses i) -> Fold
+  line 19: (vec-length axes) -> FoldSlots; (vec-length clauses) -> EpilogueClauses; (vec-of (Collect values)) -> ParallelBlock; (vec-at clauses i) -> Fold
+  line 30: (vec-at clauses i) -> EpilogueClause; (vec-at pattern (+ offset j)) -> BindValue; (vec-at values j) -> Yield
+  line 39: (vec-at clauses i) -> EpilogueClause; (vec-at pattern (+ offset j)) -> BindValue; (vec-at values j) -> Yield; (vec-length atoms) -> MatchingIndices
+  line 55: (map-empty) -> Rename
+  line 61: (map-empty) -> Rename; (set-empty) -> EffectsStm
+
+wyn-core/src/egglog/scalar/simplify.egg (11 candidate rules)
+  line 14: (vec-of (Yield proofs (ValueOperand atom))) -> Block; (set-empty) -> EffectsBody
+  line 18: (vec-of (BindValue name (ScalarInfo (ScalarElement primitive)))) -> Let
+  line 29: (vec-at vector-pattern-0 0) -> BindValue
+  line 34: (vec-at vector-pattern-0 0) -> BindValue
+  line 42: (vec-at pattern 0) -> BindValue
+  line 62: (vec-at vector-pattern-0 0) -> BindValue
+  line 88: (vec-at vector-pattern-0 0) -> BindValue
+  line 95: (set-empty) -> Copies
+  line 103: (vec-at pattern 0) -> BindValue; (vec-at arguments 0) -> ConstantAtom
+  line 111: (vec-at arguments 0) -> Var; (vec-at pattern 0) -> BindValue
+  line 164: (vec-length results) -> InlineResults
+
+Native rule IDs are SHA256 prefixes of the reported rule text. Unmapped
+entries include generated rules, Rust-embedded rules, and desugared variants;
+they are not all separate source defects. The generator families above provide
+the source repair points. Exact rule bodies are in the JSON inventory.

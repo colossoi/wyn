@@ -61,12 +61,12 @@ fn partial_and_effectful_operands_keep_their_evaluation_guards() -> Result<(), O
         (check (CurrentProgram p) (ContainsExp (ProgramRoot p) (Call name args returns)))
         (fail (check (CurrentProgram p) (ProgramFunction p f)
             (= f (DefineFunction name params returns (Block statements results)))
-            (WalkStms statements i) (< i (vec-length statements))
-            (= (vec-get statements i) (Let id pattern certs (PrimOp "/" args)))))
+            (WalkStms statements i) (< i (vec-size statements))
+            (= (vec-at statements i) (Let id pattern certs (PrimOp "/" args)))))
         (fail (check (CurrentProgram p) (ProgramFunction p f)
             (= f (DefineFunction name params returns (Block statements results)))
-            (WalkStms statements i) (< i (vec-length statements))
-            (= (vec-get statements i) (Let id pattern certs (Call target args signature)))))
+            (WalkStms statements i) (< i (vec-size statements))
+            (= (vec-at statements i) (Let id pattern certs (Call target args signature)))))
     "#,
     )?;
     Ok(())
@@ -84,7 +84,7 @@ fn shared_helpers_keep_separate_entry_and_loop_parameters() -> Result<(), Optimi
     graph.parse_and_run_program(
         None,
         r#"
-        (check (CurrentProgram (MemoryProgram functions externals entries)) (= (vec-length entries) 2) (= (vec-length functions) 2))
+        (check (CurrentProgram (MemoryProgram functions externals entries)) (= (vec-size entries) 2) (= (vec-size functions) 2))
         (fail (check (CurrentProgram p) (ContainsExp (ProgramRoot p) (Call name args returns))))
     "#,
     )?;
@@ -142,7 +142,7 @@ fn function_pruning_keeps_called_helpers_and_removes_substituted_callbacks() -> 
     graph.parse_and_run_program(
         None,
         r#"
-        (check (CurrentProgram (MemoryProgram functions externals entries)) (= (vec-length functions) 2))
+        (check (CurrentProgram (MemoryProgram functions externals entries)) (= (vec-size functions) 2))
         (check (CurrentProgram p) (ContainsExp (ProgramRoot p) (Call name arguments returns)))
     "#,
     )?;
@@ -150,7 +150,7 @@ fn function_pruning_keeps_called_helpers_and_removes_substituted_callbacks() -> 
     graph.parse_and_run_program(
         None,
         r#"
-        (check (CurrentProgram (MemoryProgram functions externals entries)) (= (vec-length functions) 1))
+        (check (CurrentProgram (MemoryProgram functions externals entries)) (= (vec-size functions) 1))
         (fail (check (CurrentProgram p) (ContainsExp (ProgramRoot p) (Call name arguments returns))))
     "#,
     )?;

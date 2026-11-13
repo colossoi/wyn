@@ -1,0 +1,148 @@
+Egglog join fix validation — 2026-11-12
+
+Production changes: schema-generated typed vector-position lookups and keyed
+range splits; 245 handwritten vector reads/singleton patterns; staged free-name
+lookup; cursor projections for temporary indices and region-call arguments.
+All transformations remain in egglog. No additional program IR or round trip.
+
+Latest unit run: 1304 passed, 1 failed, 13 ignored; 122.307 seconds excluding
+build, 16 MiB stacks, eight threads (one slow fixture compiler also active).
+Zero confirmed unlisted timing violations. The runner exits 1, not success.
+The failure is varying_collection_emits_shaders_and_host_loop: per-lane runtime
+row allocation, previously allowed unfinished. It also fails in pre-audit logs
+(tmp/demand-unit-gate.txt, tmp/vec-at-unit-gate.txt).
+
+Formatting and current workspace/all-target build pass. Workspace doctests pass.
+Tinyporto release attempt timed out after 301.415 seconds during inlining.
+The CLI fixture gate ran for 2397.26 seconds and reported 20 failed fixtures:
+  graphics_texture_dependency.wyn
+  guarded_graphics_producers.wyn
+  local_storage_optimized_18_0.wyn
+  memory_ir_boundary_products.wyn
+  memory_ir_branch_backings.wyn
+  memory_ir_scan_runtime_rows.wyn
+  memory_ir_scope_preservation.wyn
+  tuple_reduce_seeds.wyn
+  guarded_materializations.wyn
+  inferred_tree_extents.wyn
+  filtered_indirect_draw.wyn
+  memory_ir_rectangular_branch.wyn
+  memory_ir_runtime_rows.wyn
+  memory_ir_scan_growing.wyn
+  segmented_collectives.wyn
+  u64_dynamic_shift.wyn
+  filter_helpers.wyn
+  local_storage_18_0.wyn
+  memory_ir_buffer_reuse.wyn
+  nested_array_layouts.wyn
+
+inferred_tree_extents was manually stopped after over 25 minutes on SPIR-V;
+record this as a timeout. The emitted_contracts target was stopped after
+675.849 seconds with only batched_traversal_has_shared_state_and_no_partial_lane_barriers
+still active; its already-reported outcomes are retained in the log.
+These timeouts are current-run bounds, not a new checked-in test policy.
+
+Known baseline comparisons: retained contracts-before-renaming.exe and current
+release both omit library/dependency.wyn:1 from the unsupported-u64 diagnostic.
+Both emit two compute entries for the ranked-producer regression that expects
+one. Evidence: tmp/join-diagnostic-comparison and tmp/join-coordinate-comparison.
+This establishes those two pre-existing failures; it does not classify all
+remaining integration failures as pre-existing or allowed.
+
+Remaining integration targets have finished (exit 101, 970.825 seconds).
+Six target binaries failed, including the one manually stopped. The failure
+list below is broader than the allowed cases. Only the two baseline examples
+above have been explicitly checked against the retained earlier compiler.
+Detailed logs: tmp/join-fix-gates/units-final.txt, integration.txt,
+remaining-integration.txt, and doctests.txt.
+
+PUBLIC INTEGRATION OUTCOMES
+local_modules_cli: 8 passed, 1 failed, 0 ignored, 0 unreported (timeout if emitted_contracts).
+  FAIL compile_reports_backend_error_in_imported_source
+package_manager_functional: 6 passed, 0 failed, 0 ignored, 0 unreported (timeout if emitted_contracts).
+shader_validation: 1 passed, 0 failed, 0 ignored, 0 unreported (timeout if emitted_contracts).
+array_slices: 1 passed, 0 failed, 0 ignored, 0 unreported (timeout if emitted_contracts).
+compiler_regressions: 4 passed, 4 failed, 0 ignored, 0 unreported (timeout if emitted_contracts).
+  FAIL output_coordinate_maps_cover_every_axis_of_ranked_producers
+  FAIL radix_step_has_three_phases
+  FAIL four_bit_radix_step_has_three_phases
+  FAIL fluid_radix_scan_avoids_empty_groups_and_oversized_carries
+conditional_producers: 4 passed, 0 failed, 0 ignored, 0 unreported (timeout if emitted_contracts).
+dispatch_grid: 1 passed, 0 failed, 0 ignored, 0 unreported (timeout if emitted_contracts).
+emitted_contracts: 66 passed, 31 failed, 0 ignored, 1 unreported (timeout if emitted_contracts).
+  FAIL authored_outputs_consume_selected_capacities
+  FAIL indirect_draw_waits_for_both_count_epilogue_and_compacted_vertices
+  FAIL resolution_allocation_expressions_keep_cpu_parameters
+  FAIL output_copies_preserve_views_and_use_parallel_dispatches
+  FAIL grouped_entries_keep_storage_and_dispatch_contracts
+  FAIL source_contracts::source_host::filter_count_draw_record_is_published_by_compaction
+  FAIL source_contracts::source_host::host_sized_outputs_publish_uniform_dependencies_and_storage_stride
+  FAIL source_contracts::source_host::filter_post_map_record_outputs_reach_wgsl
+  FAIL source_contracts::constant_math::unused_shader_inputs_keep_their_interfaces_without_runtime_setup
+  FAIL source_contracts::constant_math::constant_shader_math_folds_after_inlining_and_preserves_dynamic_depth_order
+  FAIL source_contracts::source_host::reduction_publication_has_scratch_writers_readers_and_a_source_result
+  FAIL source_contracts::source_host::runtime_input_lengths_and_output_allocations_share_the_published_bindings
+  FAIL source_contracts::source_host_output::graphics_aliases_preserve_host_buffer_identity
+  FAIL source_contracts::source_host_output::finish_dispatch_waits_for_all_reduction_results
+  FAIL source_contracts::source_host_output::published_shader_names_identify_source_phases_and_stay_consistent
+  FAIL source_contracts::source_host_output::runtime_array_joins_wait_for_producers_in_branch_arms
+  FAIL source_contracts::source_pipeline::fused_collectives_share_producer_elements
+  FAIL source_contracts::source_pipeline::cooperative_branch_results_stay_shared_across_calls_and_updates
+  FAIL source_contracts::source_pipeline::ranked_bucket_scatter_inside_map_reaches_both_backends
+  FAIL source_contracts::source_pipeline::runtime_array_metadata_shares_storage_and_fits_binding_limits
+  FAIL source_contracts::source_pipeline::radix_host_loop_dispatches_three_phases_per_pass
+  FAIL source_contracts::source_pipeline::dispatch_branch_scalar_projections_do_not_copy_array_siblings
+  FAIL source_contracts::source_spirv::fixed_array_output_constructs_only_the_indexed_value
+  FAIL source_contracts::source_pipeline::radix_scratch_initializer_has_no_array_allocation
+  FAIL source_contracts::source_spirv::scatter_into_storage_buffer_lowers
+  FAIL source_contracts::source_wgsl::wgsl_distinctness_indexes_512_element_array_without_inner_copies
+  FAIL source_contracts::source_wgsl::wgsl_map_over_unique_storage_view_updates_backing_buffer
+  FAIL tuple_projections_keep_result_capacity_on_both_backends
+  FAIL fluid_leaf_bounds_are_computed_outside_the_bfs
+  FAIL source_contracts::source_host::computed_graphics_captures_share_the_producer_binding
+  FAIL source_contracts::source_host_output::graphics_capture_uses_the_produced_buffer_after_its_writer
+  TIMEOUT source_contracts::source_pipeline::batched_traversal_has_shared_state_and_no_partial_lane_barriers
+  Only labels/outcomes from completed tests survived this target timeout;
+  their captured failure diagnostics require focused reruns.
+host_contracts: 2 passed, 2 failed, 0 ignored, 0 unreported (timeout if emitted_contracts).
+  FAIL tuple_loop_outputs_and_scalar_bounds_reach_host_backends
+  FAIL dispatch_loops_share_product_carries_and_control_across_backends
+host_execution: 28 passed, 0 failed, 0 ignored, 0 unreported (timeout if emitted_contracts).
+local_package_plan: 1 passed, 0 failed, 0 ignored, 0 unreported (timeout if emitted_contracts).
+logical_planning: 7 passed, 0 failed, 0 ignored, 0 unreported (timeout if emitted_contracts).
+memory_program: 10 passed, 0 failed, 0 ignored, 0 unreported (timeout if emitted_contracts).
+planning_contracts: 7 passed, 10 failed, 0 ignored, 0 unreported (timeout if emitted_contracts).
+  FAIL fused_scan_and_filter_count_have_distinct_accumulator_storage
+  FAIL output_coordinate_maps_accept_permutations_and_reject_overlapping_digits
+  FAIL outputs_that_capture_a_total_wait_for_the_collective_barrier
+  FAIL guarded_streams_feed_updates_and_prefixes_without_a_compaction_buffer
+  FAIL independent_update_scopes_share_a_traversal_and_keep_distinct_exports
+  FAIL closed_array_regions_distribute_before_physical_placement
+  FAIL ranked_fusion_preserves_prefix_evaluation_and_retained_rows
+  FAIL workgroup_candidates_cover_uniform_control_flow_and_varying_inner_domains
+  FAIL tiled_outputs_require_complete_tiles_and_preserve_other_consumers
+  FAIL segment_lengths_are_bound_inside_each_workgroup
+runtime_producers: 1 passed, 0 failed, 0 ignored, 0 unreported (timeout if emitted_contracts).
+segmented_arrays: 1 passed, 1 failed, 0 ignored, 0 unreported (timeout if emitted_contracts).
+  FAIL segmented_shapes_allocate_after_their_counts_and_publish_every_level
+
+RELEASE PROFILING FIXTURE
+tests/compiler/cases/collective_backend_contracts.wyn -> SPIR-V; graphics, -O,
+Rust-WGPU host, 16 MiB stack. Three separate CLI processes, after gates ended.
+Whole-compile seconds: 4.477237, 4.470757, 4.471184; median 4.471184.
+Compiler SHA256: 8a79e20c0871d0141925aefb0f104fd5744f56c6ec089d84d342bbe69f439e21
+Middle run, milliseconds (simplification summed across passes):
+  egglog schema and rules: 621.515
+  egglog structural analysis: 39.670
+  egglog inlining: 66.915
+  egglog simplification: 2598.685
+  egglog placement: 6.084
+  egglog scheduling: 131.935
+  egglog: 3928.411
+  backend / prepare SPIR-V: 202.456
+  backend / emit SPIR-V: 3.025
+The separate instrumented run took 6.171 seconds; do not use that as the
+ordinary compile time. Native rule reports and per-call timings are in
+tmp/join-fix-contracts-trace/contracts-1-normal-0.txt. The 1.2-second target
+is not met. Supplementary ordinary 16/32/128 independent-map-entry compiles
+took 1.726/2.388/7.544 seconds; these are single samples, not a speedup claim.

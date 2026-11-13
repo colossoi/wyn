@@ -6,7 +6,8 @@ mod fold;
 
 pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
     fold::register(graph);
-    graph.parse_and_run_program(
+    super::timing::evaluate(
+        graph,
         Some("scalar rewrites".into()),
         include_str!("scalar/simplify.egg"),
     )?;
@@ -30,13 +31,13 @@ pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
             types.push_str(&format!("(IntegerScalar ({primitive}))\n"));
         }
     }
-    graph.parse_and_run_program(Some("scalar types".into()), &types)?;
+    super::timing::evaluate(graph, Some("scalar types".into()), &types)?;
     Ok(())
 }
 
 pub(super) fn run(graph: &mut EGraph, policy: ScalarOptimization) -> Result<(), OptimizeError> {
     if policy == ScalarOptimization::Full {
-        graph.parse_and_run_program(None, "(InlineScalarFunctions)")?;
+        super::timing::evaluate(graph, None, "(InlineScalarFunctions)")?;
         memory::inline(graph)?;
     }
     memory::simplify(graph, true)
