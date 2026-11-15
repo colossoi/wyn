@@ -10,56 +10,60 @@ impl EntryEmission<'_, '_, '_> {
         epilogue: Option<Value>,
     ) -> Result<bool, OptimizeError> {
         let query = self.body.query();
-        let statement_fields = query.fields("Let", statement)?;
-        let arguments = query.fields("Parallel", statement_fields[3])?;
-        let domain = query.fields("IterationSpace", arguments[1])?;
-        let axes = query.vector(domain[1])?;
+        let domain = query.required("OperationDomain", statement)?;
+        let axes = super::super::domain_axes(query, domain)?;
         let dispatch = *self.body.compiler.execution.dispatch(statement)?;
         if axes.len() != 1 || dispatch.groups.is_some() {
             return Ok(false);
         }
-        let axis = query.fields("DenseAxis", axes[0])?;
+        let axis = axes[0];
         if query
-            .lookup("StaticIndex", (self.body.function, axis[1]))?
+            .lookup("StaticIndex", axis.extent)?
             .is_some_and(|n| query.0.value_to_base::<i64>(n) <= i64::from(dispatch.width.get()))
         {
             return Ok(false);
         }
-        let block = query.fields("ParallelBlock", arguments[2])?;
         let mut types = Vec::new();
         let mut reducer_names = LookupSet::default();
         let mut prefixes = false;
-        for clause in query.vector(block[1])? {
-            let Some(fold) = query.enode("Fold", clause)? else {
-                if query.enode("Collect", clause)?.is_some() {
+        for clause in 0..crate::egglog::analysis::count(query, "ResultCount", statement)? {
+            let kind = query.required("ResultKindOf", (statement, clause))?;
+            let Some(fold) = query.enode("Folded", kind)? else {
+                if query.enode("Collected", kind)?.is_some() {
                     continue;
                 }
                 return Ok(false);
             };
             prefixes |= query.enode("Total", fold[0])?.is_none();
-            let reducer = query.fields("Reduction", fold[1])?;
-            let effects = query.required("EffectsLambda", (self.body.function, reducer[2]))?;
-            if !query.contains("ReadOnlyEffects", (effects,))? {
+            let reducer = query.required("ResultReducer", (statement, clause))?;
+            if query.contains("RegionTrap", reducer)? {
                 return Ok(false);
             }
-            let used = names_in(query, "NamesReducer", fold[1])?;
-            let bound = names_in(query, "BindersReducer", fold[1])?;
-            reducer_names.extend(used.difference(&bound).copied());
-            let lambda = query.fields("FunctionBody", reducer[2])?;
-            let params = query.vector(lambda[0])?;
-            for (i, (&parameter, neutral)) in params.iter().zip(query.vector(reducer[1])?).enumerate() {
-                let parameter = query.fields("Parameter", parameter)?;
-                let Some((_, ty)) = super::super::runtime_binding(query, parameter[0])? else {
+            let mut writes = false;
+            query.for_each("RegionWrite", |row| {
+                writes |= row[0] == reducer;
+                Ok(())
+            })?;
+            if writes {
+                return Ok(false);
+            }
+            reducer_names.extend(names_in(query, "RegionCapture", reducer)?);
+            let params = query.sequence("RegionParameter", reducer)?;
+            let count = crate::egglog::analysis::count(query, "ResultNeutralCount", (statement, clause))?;
+            let neutral = query.indexed(
+                "ResultNeutral",
+                &[statement, query.0.base_to_value(clause)],
+                count,
+            )?;
+            for (i, (&parameter, neutral)) in params.iter().zip(neutral).enumerate() {
+                if let Some(name) = query.value_name(neutral)? {
+                    reducer_names.insert(name);
+                }
+                let Some((_, ty)) = super::super::runtime_binding(query, parameter)? else {
                     return Ok(false);
                 };
-                let ty = super::super::reducer_state_type(
-                    query,
-                    self.body.function,
-                    reducer[2],
-                    i,
-                    neutral,
-                    ty,
-                )?;
+                let ty =
+                    super::super::reducer_state_type(query, self.body.function, reducer, i, neutral, ty)?;
                 let ty = storage_value_type(&ty);
                 if storage_elem_stride(&ty).is_none() {
                     return Ok(false);
@@ -70,7 +74,7 @@ impl EntryEmission<'_, '_, '_> {
         if types.is_empty() {
             return Ok(false);
         }
-        let pattern = query.vector(statement_fields[1])?;
+        let pattern = query.sequence("Output", statement)?;
         let mut output_names = LookupSet::default();
         for &binding in &pattern {
             if let Some((name, _)) = super::super::runtime_binding(query, binding)? {
@@ -80,8 +84,13 @@ impl EntryEmission<'_, '_, '_> {
         let mut inside = after.clone();
         inside.extend(output_names.iter().copied());
         inside.extend(reducer_names.iter().copied());
-        inside.extend(names_in(query, "NamesDomain", arguments[1])?);
-        let count = host::guarded_index(query, &self.body.host_values, axis[1], self.body.guard.as_ref())?;
+        inside.extend(domain_names(query, domain)?);
+        let count = host::guarded_index(
+            query,
+            &self.body.host_values,
+            axis.extent,
+            self.body.guard.as_ref(),
+        )?;
         let count = Expr::Max(Box::new(count), Box::new(Expr::Integer(0)));
         let groups = Expr::Max(
             Box::new(Expr::Integer(1)),
@@ -94,14 +103,14 @@ impl EntryEmission<'_, '_, '_> {
             )),
         );
         let carry_width = query
-            .lookup("StaticIndex", (self.body.function, axis[1]))?
+            .lookup("StaticIndex", axis.extent)?
             .map(|count| {
                 let count = query.0.value_to_base::<i64>(count).max(0) as u64;
                 let groups = count.div_ceil(u64::from(dispatch.width.get())).clamp(1, 256) as u32;
                 groups.next_power_of_two().max(32).min(dispatch.width.get())
             })
             .unwrap_or(dispatch.width.get());
-        let (group, group_count, range) = self.chunk_range(axis[1])?;
+        let (group, group_count, range) = self.chunk_range(axis.extent)?;
         let mut partials = Vec::new();
         let mut carries = Vec::new();
         for ty in types {
@@ -117,7 +126,7 @@ impl EntryEmission<'_, '_, '_> {
             }
         }
         let values = self.body.parallel_phase(
-            &arguments,
+            statement,
             &pattern,
             Some(CollectivePhase::Chunks {
                 range,
@@ -127,6 +136,9 @@ impl EntryEmission<'_, '_, '_> {
         )?;
         self.body.bind(&pattern, values)?;
         self.pending = true;
+        if terminal {
+            reducer_names.extend(after.iter().filter(|name| !output_names.contains(name)).copied());
+        }
         self.restore_names = Some(reducer_names);
         self.dispatch_override = Some((
             dispatch.local_size,
@@ -140,7 +152,7 @@ impl EntryEmission<'_, '_, '_> {
         self.body.active_dispatch = Some(statement);
         let group_count = self.buffer_elements(partials[0].0)?;
         self.body.parallel_phase(
-            &arguments,
+            statement,
             &pattern,
             Some(CollectivePhase::Carries {
                 partials: &partials,
@@ -166,9 +178,9 @@ impl EntryEmission<'_, '_, '_> {
 
         if prefixes {
             self.body.active_dispatch = Some(statement);
-            let (group, _, range) = self.chunk_range(axis[1])?;
+            let (group, _, range) = self.chunk_range(axis.extent)?;
             self.body.parallel_phase(
-                &arguments,
+                statement,
                 &pattern,
                 Some(CollectivePhase::Apply {
                     range: range.clone(),
@@ -201,11 +213,9 @@ impl EntryEmission<'_, '_, '_> {
         statement: Value,
         range: (Typed, Typed),
     ) -> Result<(), OptimizeError> {
-        let fields = self.body.query().fields("Let", statement)?;
-        let arguments = self.body.query().fields("Parallel", fields[3])?;
-        let pattern = self.body.query().vector(fields[1])?;
+        let pattern = self.body.query().sequence("Output", statement)?;
         let values =
-            self.body.parallel_phase(&arguments, &pattern, Some(CollectivePhase::Epilogue { range }))?;
+            self.body.parallel_phase(statement, &pattern, Some(CollectivePhase::Epilogue { range }))?;
         self.body.bind(&pattern, values)
     }
 

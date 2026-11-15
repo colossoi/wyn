@@ -1,77 +1,104 @@
-use super::*;
-use crate::compile_thru_tlc;
+use super::{place, schedule, CostModel};
+use crate::egglog::dataflow::ir::{self, Code};
+use crate::egglog::query::Query;
+use crate::egglog::{analysis, test_graph};
+use crate::PipelineTopologyPolicy;
+use egglog_engine::Write;
 
 #[test]
-fn placement_preserves_scopes_and_allocation_follows_scheduling() -> Result<(), OptimizeError> {
-    let source =
-        compile_thru_tlc("entry main(xs:[4]i32) [4]i32=map(|x|reduce((+),0i32,map(|y|x+y,xs)),xs)")
+fn placement_preserves_scopes_and_allocation_follows_scheduling() {
+    let mut graph =
+        test_graph::import("entry main(xs:[4]i32) [4]i32=map(|x|reduce((+),0i32,map(|y|x+y,xs)),xs)")
             .unwrap();
-    let (mut graph, _) = crate::egglog::from_tlc::import(&source)?;
-    crate::egglog::fusion::run(&mut graph)?;
+    let root = test_graph::root(&graph);
     place(
         &mut graph,
         PipelineTopologyPolicy::AllowGenerated,
         CostModel::default(),
-    )?;
-    graph.parse_and_run_program(
-        None,
-        r#"
-        (check (CurrentProgram program)
-          (ContainsExecution (ProgramRoot program) (DeviceKernel (AutomaticGrid))))
-        (check (CurrentProgram program)
-          (ContainsExecution (ProgramRoot program) (InvocationLocal)))
-    "#,
-    )?;
-    schedule(&mut graph, CostModel::default())?;
-    graph.parse_and_run_program(
-        None,
-        r#"
-        (check (CurrentProgram program) (ContainsExp (ProgramRoot program) (Alloc space size)))
-    "#,
-    )?;
-    Ok(())
+    )
+    .unwrap();
+    assert_eq!(test_graph::root(&graph), root);
+    schedule(&mut graph, CostModel::default()).unwrap();
+    let query = Query(&graph);
+    let mut device = false;
+    let mut local = false;
+    query
+        .for_each("LiveOperation", |row| {
+            if query.contains("ParallelOperation", row[0])? {
+                let execution = query.required("OperationExecution", row[0])?;
+                device |= query.enode("DeviceKernel", execution)?.is_some();
+                local |= query.enode("InvocationLocal", execution)?.is_some();
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert!(device && local);
+    assert!(!graph.get_function_names().iter().any(|name| name == "Alloc"));
 }
 
 #[test]
-fn authored_only_keeps_parallel_work_inside_its_invocation() -> Result<(), OptimizeError> {
-    let source = compile_thru_tlc("entry main(xs:[4]i32) [4]i32=map(|x|x+1,xs)").unwrap();
-    let (mut graph, _) = crate::egglog::from_tlc::import(&source)?;
+fn authored_only_keeps_parallel_work_inside_its_invocation() {
+    let mut graph = test_graph::import("entry main(xs:[4]i32) [4]i32=map(|x|x+1,xs)").unwrap();
     place(
         &mut graph,
         PipelineTopologyPolicy::AuthoredOnly,
         CostModel::default(),
-    )?;
-    schedule(&mut graph, CostModel::default())?;
+    )
+    .unwrap();
+    schedule(&mut graph, CostModel::default()).unwrap();
     let query = Query(&graph);
-    query.for_each("CurrentProgram", |program| {
-        let root = query.constructor("ProgramRoot", (program[0],))?.unwrap();
-        query.for_each("ContainsExecution", |execution| {
-            if execution[0] == root {
-                assert!(query.enode("InvocationLocal", execution[1])?.is_some());
+    let mut count = 0;
+    query
+        .for_each("LiveOperation", |row| {
+            if query.contains("ParallelOperation", row[0])? {
+                assert!(query
+                    .enode("InvocationLocal", query.required("OperationExecution", row[0])?)?
+                    .is_some());
+                count += 1;
             }
             Ok(())
         })
-    })
+        .unwrap();
+    assert!(count > 0);
 }
 
 #[test]
-fn forward_dependencies_are_rejected_before_scheduling() -> Result<(), OptimizeError> {
-    let mut graph = EGraph::default();
-    memory::load(&mut graph)?;
-    graph.parse_and_run_program(None, r#"
-        (let scalar (ScalarInfo (ScalarElement (I32))))
-        (let function (DefineFunction (FunctionId 0 "bad") (vec-of) (vec-of)
-          (Block (vec-of
-            (Let (StatementTag 0) (vec-of (BindValue (ValueId 0) scalar)) (vec-of) (Use (ValueOperand (Var (ValueId 1)))))
-            (Let (StatementTag 1) (vec-of (BindValue (ValueId 1) scalar)) (vec-of) (Use (ValueOperand (LiteralBits (I32) 1)))))
-            (vec-of))))
-        (CurrentProgram (MemoryProgram (vec-of function) (vec-of) (vec-of)))
-    "#)?;
+fn forward_dependencies_are_rejected_before_scheduling() {
+    let mut graph = test_graph::import("entry main(x:i32) i32=let y=x+1 in y*y").unwrap();
+    analysis::run(&mut graph).unwrap();
+    let query = Query(&graph);
+    let mut add = None;
+    let mut multiply = None;
+    query
+        .for_each("LiveOperation", |row| {
+            match ir::code(&graph, query.required("OperationPayload", row[0])?) {
+                Code::Scalar(crate::egglog::payload::Payload::Binary(crate::op::BinaryOperator::Add)) => {
+                    add = Some(row[0])
+                }
+                Code::Scalar(crate::egglog::payload::Payload::Binary(
+                    crate::op::BinaryOperator::Multiply,
+                )) => multiply = Some(row[0]),
+                _ => {}
+            }
+            Ok(())
+        })
+        .unwrap();
+    let (add, multiply) = (add.unwrap(), multiply.unwrap());
+    let a = query.required("OperationOrder", add).unwrap();
+    let b = query.required("OperationOrder", multiply).unwrap();
+    graph
+        .update(|mut sink| {
+            sink.remove("OperationOrder", add)?;
+            sink.remove("OperationOrder", multiply)?;
+            sink.set("OperationOrder", add, b)?;
+            sink.set("OperationOrder", multiply, a)?;
+            Ok(())
+        })
+        .unwrap();
     assert!(place(
         &mut graph,
         PipelineTopologyPolicy::AllowGenerated,
         CostModel::default()
     )
     .is_err());
-    Ok(())
 }

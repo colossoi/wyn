@@ -1,6 +1,7 @@
 //! Direct emission of the ordered memory IR into typed SSA.
 use super::entry::GeneratedBuffers;
 use super::{builder_error, error, Compiler, OptimizeError, Typed};
+use crate::ast::Span;
 use crate::egglog::bindings::Bindings;
 use crate::egglog::query::Query;
 use crate::host::{Expr, ScalarExpr};
@@ -22,6 +23,7 @@ pub(super) struct Body<'a, 'p, 'source> {
     pub compiler: &'a mut Compiler<'p, 'source>,
     pub builder: FuncBuilder,
     pub function: Value,
+    span: Option<Span>,
     pub values: Bindings<Value, Typed>,
     local_arrays: LookupMap<ValueRef, PlaceId>,
     next_workgroup_array: u32,
@@ -29,7 +31,6 @@ pub(super) struct Body<'a, 'p, 'source> {
     pub storage_accesses: LookupMap<BindingRef, crate::ResourceAccess>,
     pub active_dispatch: Option<Value>,
     pub host_values: Bindings<Value, ScalarExpr>,
-    pub host_lengths: LookupMap<ValueRef, Expr>,
     pub host_shapes: LookupMap<ValueRef, Vec<Expr>>,
     pub collection_requests:
         LookupMap<Value, (Type, Typed, Option<Expr>, Option<Vec<(Typed, Expr)>>, BlockId)>,
@@ -62,6 +63,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
             compiler,
             builder,
             function,
+            span: None,
             values,
             local_arrays: LookupMap::default(),
             next_workgroup_array: 0,
@@ -69,7 +71,6 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
             storage_accesses: LookupMap::default(),
             active_dispatch: None,
             host_values: Bindings::default(),
-            host_lengths: LookupMap::default(),
             host_shapes: LookupMap::default(),
             collection_requests: LookupMap::default(),
             collection_values: LookupMap::default(),
@@ -98,7 +99,6 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         self.builder = FuncBuilder::new(vec![], types::unit());
         self.values = Bindings::default();
         self.local_arrays.clear();
-        self.host_lengths.clear();
         self.host_shapes.clear();
         self.collection_requests.clear();
         self.collection_values.clear();
@@ -160,8 +160,10 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
             }
         }
         let operands = arguments.into_iter().map(|argument| argument.value).collect();
-        let value =
-            self.builder.push_inst(InstKind::Op { tag, operands }, ty.clone()).map_err(builder_error)?;
+        let value = self
+            .builder
+            .push_inst_with_span(InstKind::Op { tag, operands }, ty.clone(), self.span)
+            .map_err(builder_error)?;
         Ok(Typed {
             value: value.into(),
             ty,

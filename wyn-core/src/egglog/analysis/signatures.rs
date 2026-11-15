@@ -1,0 +1,290 @@
+//! Check signatures and capability boundaries on the selected graph.
+use super::{count, typed, Query};
+use crate::egglog::{output_error, OptimizeError};
+use crate::LookupSet;
+use egglog_engine::Value;
+
+pub(super) fn function(query: Query<'_>, function: Value) -> Result<(), OptimizeError> {
+    if query.contains("External", function)? {
+        return Ok(());
+    }
+    let root = query.required("FunctionRoot", function)?;
+    let results = count(query, "FunctionResultCount", function)?;
+    if count(query, "RegionYieldCount", root)? != results {
+        return Err(output_error("function result count differs from its signature"));
+    }
+    for slot in 0..results {
+        let name = query.required("RegionYield", (root, slot))?;
+        returns(
+            query,
+            name,
+            query.required("FunctionResultType", (function, slot))?,
+        )?;
+        if query.lookup("EntryOrder", function)?.is_some() && query.enode("AccNameRef", name)?.is_some() {
+            return Err(output_error(
+                "entry result cannot expose an accumulator capability",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), OptimizeError> {
+    if query.contains("CallOperation", operation)? {
+        let target = query.required("CallTarget", operation)?;
+        let external = query.contains("External", target)?;
+        let root = if external { None } else { Some(query.required("FunctionRoot", target)?) };
+        for slot in 0..count(query, "InputCount", operation)? {
+            let argument = query.required("Input", (operation, slot))?;
+            let expected = if let Some(root) = root {
+                typed(query, query.required("RegionParameter", (root, slot))?)?
+            } else {
+                query.required("ExternalParameterType", (target, slot))?
+            };
+            if !compatible(query, typed(query, argument)?, expected)? {
+                return Err(output_error("call argument type differs from its signature"));
+            }
+            let expected_diet = if let Some(root) = root {
+                query.required("ParameterDiet", (root, slot))?
+            } else {
+                query.required("ExternalParameterDiet", (target, slot))?
+            };
+            if query.required("InputDiet", (operation, slot))? != expected_diet {
+                return Err(output_error("call argument diet differs from its signature"));
+            }
+        }
+        let results = count(query, "FunctionResultCount", target)?;
+        if count(query, "OutputCount", operation)? != results {
+            return Err(output_error("call result count differs from its signature"));
+        }
+        for slot in 0..results {
+            let expected = query.required("FunctionResultType", (target, slot))?;
+            let output = query.required("Output", (operation, slot))?;
+            if query.required("CallReturnType", (operation, slot))? != expected {
+                return Err(output_error("call result type differs from its signature"));
+            }
+            returns(query, output, expected)?;
+        }
+    }
+    if query.contains("BranchOperation", operation)? {
+        boolean(query, query.required("Input", (operation, 0_i64))?)?;
+        for edge in 0_i64..2 {
+            let child = query.required("ControlRegion", (operation, edge))?;
+            if count(query, "RegionYieldCount", child)? != count(query, "OutputCount", operation)? {
+                return Err(output_error("branch result count differs from its signature"));
+            }
+            for slot in 0..count(query, "OutputCount", operation)? {
+                let result = query.required("Output", (operation, slot))?;
+                returns(query, result, query.required("RegionReturnType", (child, slot))?)?;
+            }
+        }
+    }
+    if query.contains("WhileLoopOperation", operation)? {
+        let condition = query.required("LoopCondition", operation)?;
+        let Some(condition) = query.constructor("ValueNameRef", condition)? else {
+            return Err(output_error("loop predicate has no value identity"));
+        };
+        boolean(query, condition)?;
+    }
+    if query.contains("ParallelOperation", operation)? {
+        let domain = query.required("OperationDomain", operation)?;
+        let rank = count(query, "DomainRank", domain)?;
+        let lane = query.required("ControlRegion", (operation, 0_i64))?;
+        if count(query, "RegionParameterCount", lane)? != rank + 1 {
+            return Err(output_error("parallel parameters differ from its domain"));
+        }
+        let ordinal = query.name(query.required("RegionParameter", (lane, 0_i64))?)?;
+        if query.required("DomainOrdinal", domain)? != ordinal {
+            return Err(output_error("parallel ordinal is not its lane parameter"));
+        }
+        for slot in 0..rank {
+            let axis = query.name(query.required("RegionParameter", (lane, slot + 1))?)?;
+            if query.required("DomainAxis", (domain, slot))? != axis {
+                return Err(output_error("parallel coordinate is not its lane parameter"));
+            }
+        }
+        let clauses = count(query, "ResultCount", operation)?;
+        for slot in 0..count(query, "OutputCount", operation)? {
+            let clause = query.0.value_to_base::<i64>(query.required("OutputClause", (operation, slot))?);
+            if clause < 0 || clause >= clauses {
+                return Err(output_error("parallel output refers to a missing result clause"));
+            }
+            let field = query.0.value_to_base::<i64>(query.required("OutputField", (operation, slot))?);
+            if field < 0 || field >= count(query, "ResultValueCount", (operation, clause))? {
+                return Err(output_error("parallel output refers to a missing result field"));
+            }
+        }
+        for clause in 0..clauses {
+            let kind = query.required("ResultKindOf", (operation, clause))?;
+            if query.enode("Compacted", kind)?.is_some() {
+                let predicate = query.required("ResultPredicate", (operation, clause))?;
+                let Some(predicate) = query.constructor("ValueNameRef", predicate)? else {
+                    return Err(output_error("compact predicate has no value identity"));
+                };
+                boolean(query, predicate)?;
+            }
+            if query.enode("Folded", kind)?.is_some() {
+                let reducer = query.required("ResultReducer", (operation, clause))?;
+                let neutral = count(query, "ResultNeutralCount", (operation, clause))?;
+                if rank == 0
+                    || count(query, "RegionParameterCount", reducer)? != 2 * neutral
+                    || count(query, "RegionYieldCount", reducer)? != neutral
+                    || count(query, "ResultValueCount", (operation, clause))? != neutral
+                {
+                    return Err(output_error(
+                        "reducer must take two accumulator tuples and preserve their arity",
+                    ));
+                }
+                for slot in 0..neutral {
+                    let initial = query.required("ResultNeutral", (operation, clause, slot))?;
+                    let parameter = query.required("RegionParameter", (reducer, slot))?;
+                    let other = query.required("RegionParameter", (reducer, slot + neutral))?;
+                    if !compatible(query, typed(query, initial)?, typed(query, parameter)?)?
+                        || !compatible(query, typed(query, parameter)?, typed(query, other)?)?
+                    {
+                        return Err(output_error(
+                            "reducer parameter type differs from its accumulator",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    if query.contains("AccumulatorOperation", operation)? {
+        let body = query.required("ControlRegion", (operation, 0_i64))?;
+        let groups = count(query, "AccumulatorGroupCount", operation)?;
+        if count(query, "RegionParameterCount", body)? < groups
+            || count(query, "RegionYieldCount", body)? < groups
+        {
+            return Err(output_error("accumulator scope loses a capability"));
+        }
+        for group in 0..groups {
+            let result = query.required("RegionYield", (body, group))?;
+            let token = query.fields("AccNameRef", result)?[0];
+            let Some(capability) = query.lookup("TokenCapability", token)? else {
+                return Err(output_error(
+                    "accumulator operand outside its scope or missing its capability",
+                ));
+            };
+            let family = query.fields("TokenBindingAt", capability)?;
+            if family[0] != operation || query.0.value_to_base::<i64>(family[1]) != group {
+                return Err(output_error("accumulator scope returns a different capability"));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn region(query: Query<'_>, region: Value) -> Result<(), OptimizeError> {
+    let mut orders = LookupSet::default();
+    for operation in query.operations(region)? {
+        let order = query.0.value_to_base::<i64>(query.required("OperationOrder", operation)?);
+        if !orders.insert(order) {
+            return Err(output_error("two operation occurrences share an execution order"));
+        }
+    }
+    for parameter in query.sequence("RegionParameter", region)? {
+        if let Some(token) = query.enode("AccNameRef", parameter)? {
+            if let Some(info) =
+                query.enode("AccumulatorInfo", query.required("AccumulatorType", token[0])?)?
+            {
+                query.for_each("ShapeUse", |row| {
+                    if row[0] == info[0] {
+                        let Some(name) = query.constructor("ValueNameRef", row[1])? else {
+                            return Err(output_error("accumulator shape has no value identity"));
+                        };
+                        if !query.contains("AvailableIn", (region, name))? {
+                            return Err(output_error(
+                                "accumulator parameter shape is unavailable at entry",
+                            ));
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+    }
+    let mut tokens = LookupSet::default();
+    for slot in 0..count(query, "RegionYieldCount", region)? {
+        let name = query.required("RegionYield", (region, slot))?;
+        if let Some(token) = query.enode("AccNameRef", name)? {
+            if !tokens.insert(token[0]) {
+                return Err(output_error("body returns the same accumulator capability twice"));
+            }
+        }
+        returns(query, name, query.required("RegionReturnType", (region, slot))?)?;
+    }
+    Ok(())
+}
+
+fn boolean(query: Query<'_>, name: Value) -> Result<(), OptimizeError> {
+    let info = typed(query, name)?;
+    if let Some(info) = query.enode("ScalarInfo", info)? {
+        if let Some(element) = query.enode("ScalarElement", info[0])? {
+            if query.enode("Bool", element[0])?.is_some() {
+                return Ok(());
+            }
+        }
+    }
+    Err(output_error("control predicate is not Boolean"))
+}
+
+fn returns(query: Query<'_>, name: Value, signature: Value) -> Result<(), OptimizeError> {
+    let info = typed(query, name)?;
+    for (declared, actual) in [
+        ("ReturnScalar", "ScalarInfo"),
+        ("ReturnResource", "ResourceInfo"),
+        ("LogicalReturn", "LogicalValue"),
+    ] {
+        if let Some(expected) = query.enode(declared, signature)? {
+            if let Some(actual) = query.enode(actual, info)? {
+                if actual[0] == expected[0]
+                    || (declared == "LogicalReturn" && logical_compatible(query, actual[0], expected[0])?)
+                {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    if let Some(expected) = query.enode("ReturnAccumulator", signature)? {
+        if query.enode("AccNameRef", name)?.is_some() && info == expected[0] {
+            return Ok(());
+        }
+    }
+    Err(output_error("result binding type differs from its signature"))
+}
+
+// Signature slots preserve element structure and rank; ownership and lengths have separate proofs.
+pub(super) fn compatible(query: Query<'_>, a: Value, b: Value) -> Result<bool, OptimizeError> {
+    if a == b {
+        return Ok(true);
+    }
+    let (Some(a), Some(b)) = (query.enode("LogicalValue", a)?, query.enode("LogicalValue", b)?) else {
+        return Ok(false);
+    };
+    logical_compatible(query, a[0], b[0])
+}
+
+fn logical_compatible(query: Query<'_>, a: Value, b: Value) -> Result<bool, OptimizeError> {
+    if a == b {
+        return Ok(true);
+    }
+    if let (Some(a), Some(b)) = (query.enode("ArrayType", a)?, query.enode("ArrayType", b)?) {
+        return Ok(query.vector(a[1])?.len() == query.vector(b[1])?.len()
+            && logical_compatible(query, a[2], b[2])?);
+    }
+    if let (Some(a), Some(b)) = (query.enode("ProductType", a)?, query.enode("ProductType", b)?) {
+        let a = query.vector(a[0])?;
+        let b = query.vector(b[0])?;
+        if a.len() != b.len() {
+            return Ok(false);
+        }
+        for (a, b) in a.into_iter().zip(b) {
+            if !logical_compatible(query, a, b)? {
+                return Ok(false);
+            }
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}

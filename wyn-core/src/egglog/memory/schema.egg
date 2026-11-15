@@ -1,50 +1,39 @@
-; Unified memory/parallel representation.
-;
-; One ordered statement language owns computation, memory, and nested scopes.
-; Fusion replaces statements and their bodies; scheduling changes their order
-; and execution level. Logical types travel with the values they describe.
-; There is no source-operation membership set, transfer subprogram, LocalLayout,
-; capture table, or independently selected allocation/placement representation.
-;
-; This is a first-order logical IR. Closure environments are explicit function
-; parameters. Products and nested arrays survive fusion and execution planning.
-; Concrete layouts, allocation, and memory operations are emitted into SSA in
-; Rust after planning.
-;
-; Names and statement occurrences are globally fresh. Structural sharing does
-; not authorize unioning names or effectful occurrences. Two effectful evaluations
-; need two Let occurrences, even when their expressions are identical.
-; All arithmetic in annotations is a lexical use, just like an instruction operand.
-
+; Type and index proofs accompany a flat graph of operation occurrences.
+; Executable bodies and operand lists are not egglog syntax trees.
 (datatype FunctionName (FunctionId i64 String))
-(datatype StatementId
-  (StatementTag i64) (ScheduleStatement StatementId i64 i64)
-  (FusionStatement StatementId) (CallStatement StatementId StatementId) (CallParameter StatementId i64) (CallResult StatementId i64))
-(datatype ValueName (ValueId i64) (ScheduleValue StatementId i64 i64) (CallValue StatementId ValueName))
-(datatype BlockName (MemoryId i64) (CallMemory StatementId BlockName))
-(datatype AccName (AccumulatorId i64) (CallAccumulator StatementId AccName))
-(sort AccNames (Vec AccName))
-(sort ValueNames (Vec ValueName))
-(sort Certificates (Vec ValueName))
+(datatype ValueName (ValueId i64) (ClonedValue OperationKey ValueName))
+(datatype AccName (AccumulatorId i64) (ClonedAccumulator OperationKey AccName))
+(datatype Name (ValueNameRef ValueName) (AccNameRef AccName))
+(constructor DerivedRegion (OperationKey i64 i64) RegionKey)
+(constructor DerivedOperation (OperationKey i64 i64) OperationKey)
+(constructor DerivedValue (OperationKey i64 i64) ValueName)
+(constructor ClonedOperation (OperationKey OperationKey) OperationKey)
+(constructor ClonedRegion (OperationKey RegionKey) RegionKey)
+(constructor FlowNamed (ValueName) SourceValue)
+(constructor FlowAccumulator (AccName) SourceValue)
+(constructor OperationEvaluation (OperationKey) SourceValue)
 
 (datatype PrimType
   (I8) (I16) (I32) (I64) (U8) (U16) (U32) (U64)
   (F16) (F32) (F64) (Bool) (UnitType))
-; Product elements describe packed ABI values; logical products retain their fields.
 (datatype*
-  (ElementType (ScalarElement PrimType) (VectorElement PrimType i64) (MatrixElement PrimType i64 i64) (ProductElement ElementTypes))
+  (ElementType
+    (ScalarElement PrimType) (VectorElement PrimType i64)
+    (MatrixElement PrimType i64 i64) (ProductElement ElementTypes))
   (sort ElementTypes (Vec ElementType)))
-(datatype Atom (Var ValueName) (LiteralBits PrimType i64))
-(sort Atoms (Vec Atom))
-; Non-arithmetic atoms such as arrays occur only as Var, never as layout indices.
+
+; Index arithmetic is used only by shape, bounds, coordinate and launch proofs.
 (datatype IndexExp
   (IndexConstant i64) (IndexValue ValueName)
   (IndexAdd IndexExp IndexExp) (IndexSub IndexExp IndexExp)
   (IndexMul IndexExp IndexExp) (IndexDiv IndexExp IndexExp)
   (IndexMod IndexExp IndexExp) (IndexMin IndexExp IndexExp) (IndexMax IndexExp IndexExp))
 (sort Shape (Vec IndexExp))
+(datatype DimIndex (At IndexExp) (Slice IndexExp IndexExp IndexExp))
+(sort Indices (Vec IndexExp))
+(sort Slices (Vec DimIndex))
 
-(datatype ResourceType (TextureType) (SamplerType) (ImageType i64 i64)) ; image descriptor set and slot
+(datatype ResourceType (TextureType) (SamplerType) (ImageType i64 i64))
 (datatype Extent (FixedExtent i64) (UnspecifiedExtent))
 (sort Extents (Vec Extent))
 (datatype ArrayOwnership (ValueArray) (StorageArray))
@@ -56,171 +45,161 @@
     (ResourceValue ResourceType))
   (sort LogicalTypes (Vec LogicalType)))
 (datatype ValueInfo
-  (LogicalValue LogicalType)
-  (ScalarInfo ElementType)
-
-  (ResourceInfo ResourceType))
-(datatype AccInfo (AccumulatorInfo Shape ElementTypes) (LogicalAccumulator LogicalType)) ; indexed dimensions and destination element types
-(datatype Binding
-  (BindValue ValueName ValueInfo)
-  (BindAccumulator AccName AccInfo))
-(sort Pattern (Vec Binding))
+  (LogicalValue LogicalType) (ScalarInfo ElementType) (ResourceInfo ResourceType))
+(datatype AccInfo (AccumulatorInfo Shape ElementTypes) (LogicalAccumulator LogicalType))
 (datatype*
   (Diet (Observe) (Consume) (ProductDiet Diets))
   (sort Diets (Vec Diet)))
-(datatype Param (Parameter Binding Diet))
-(sort Params (Vec Param))
-; Index operands reuse annotation arithmetic for descriptor witnesses.
-(datatype Operand (ValueOperand Atom) (IndexOperand IndexExp)  (AccOperand AccName))
-(sort Operands (Vec Operand))
-(datatype Argument (Pass Operand Diet))
-(sort Arguments (Vec Argument))
-
 (datatype ReturnInfo
-  (LogicalReturn LogicalType)
-  (ReturnScalar ElementType)
-
-  (ReturnAccumulator AccInfo)
-  (ReturnResource ResourceType))
-(sort ReturnInfos (Vec ReturnInfo))
-; Values and accumulator capabilities occupy distinct result slots.
-
-(datatype Merge (Carry Param Operand))
-(sort Merges (Vec Merge))
-(datatype LoopForm
-  (Counted ValueName IndexExp IndexExp IndexExp) ; index, start, count, step
-  (While ValueName)) ; boolean carried parameter, recomputed by the body
-(datatype DimIndex
-  (At IndexExp)
-  (Slice IndexExp IndexExp IndexExp)) ; start, length, stride
-(sort Indices (Vec IndexExp))
-(sort Slices (Vec DimIndex))
-(sort Permutation (Vec i64))
-(sort CoordinateMaps (Vec Permutation))
-(datatype BoundsMode (ProvenInBounds) (IgnoreOutOfBounds))
-
-; The logical domain is independent of its schedule. Each dense extent is
-; invariant across the domain; its axis binds an index for the parallel body.
-(datatype DomainAxis
-  (DenseAxis ValueName IndexExp)
-  )
-(sort DomainAxes (Vec DomainAxis))
-(datatype Domain (IterationSpace ValueName DomainAxes)) ; flat ordinal, axes
-(datatype Grid (AutomaticGrid) (Grid3D Shape Shape)) ; group counts, group sizes
-; Sequential execution is an ordinary Loop. A dispatched Fold uses the
-; workgroup reducer; nested parallel work belongs to one invocation.
-(datatype Execution (Unscheduled) (DeviceKernel Grid) (InvocationLocal))
-; Device-wide ordering is a dispatch dependency, never an in-kernel barrier.
-
-(datatype Commutativity (Commutative) (Ordered))
+  (LogicalReturn LogicalType) (ReturnScalar ElementType)
+  (ReturnAccumulator AccInfo) (ReturnResource ResourceType))
 (datatype CallBehavior (TotalCall) (MayTrapCall))
-
-; Ordinary bodies and parallel bodies differ only in their result convention.
-; Both contain exactly the same Stm/Exp language, including Copy, If,
-; Loop, Parallel, and WithAcc. Nested computation is never an opaque source ID.
-(datatype*
-  (FoldKind
-    (Total) (InclusiveScan) (ExclusiveScan)
-    (InclusiveScanAndTotal) (ExclusiveScanAndTotal)
-    )
-  (Body (Block Stms Results))
-  (sort Stms (Vec Stm))
-  (Stm (Let StatementId Pattern Certificates Exp))
-  (Result (Yield Certificates Operand))
-  (sort Results (Vec Result))
-  (Lambda (FunctionBody Params ReturnInfos Body))
-  (Exp
-    (Product Atoms)
-    (Project Atom i64)
-    (Length ValueName i64)
-    (Index ValueName Atoms)
-    (Scratch ValueName)
-    (Use Operand)
-    ; Opcode is from the existing scalar/vector intrinsic catalogue: no memory,
-    ; control, callbacks, or arbitrary hidden effects are allowed in PrimOp.
-    (PrimOp String Atoms)
-    (IndexOp IndexExp) ; materializes annotation arithmetic as a shader index
-    (Assert Atom String)
-    (Call FunctionName Arguments ReturnInfos)
-    (If Atom ReturnInfos Body Body)
-    (Loop Merges LoopForm ReturnInfos Body)
-    (Parallel Execution Domain ParallelBody)
-
-    (WithAcc AccInputs Lambda)
-    (BucketScatter ValueName Lambda ValueNames CoordinateMaps i64)
-    (View ValueName Slices) ; aliases its source, preserving slice semantics
-
-    (GenerateArray ArrayGenerator)
-    (Copy ValueName)
-    (Update BoundsMode ValueName Slices Atom) ; consumes destination, returns its next value
-
-    (Accumulate BoundsMode AccName Indices Atoms) ; index prefix selects scalar cells or whole rows; consumes/returns token
-    (Reserve AccName Indices Atom) ; fetch-add: next token and previous counter
-    )
-  (ArrayGenerator
-    (ArrayLiteral Atoms)
-    (RangeValues Atom IndexExp Atom)
-    (UninitializedShape Shape)
-    )
-
-  (ParallelBody (ParallelBlock Stms ParallelResults))
-  (sort ParallelResults (Vec ParallelResult))
-  (ParallelResult
-    (Collect Results)
-    (Compact Atom Results)
-
-    (Contribute AccNames)
-    (Fold FoldKind Reducer Results))
-  (Reducer (Reduction Commutativity Atoms Lambda)) ; neutral tuple, binary combiner
-  ; Collect writes each lane's values at its domain coordinates. Fold combines
-  ; along the innermost axis and can return totals, prefixes, or both.
-  ; Multiple result clauses support fused map/reduce/scan outputs. Statement
-  ; patterns name all logical outputs. Reducer lambdas/neutrals are scoped
-  ; outside the lane body. Compaction retains its predicate until SSA emission.
-
-  (AccInput (AccumulatorInput ValueNames AccPolicy)) ; existing initialized destinations
-  (sort AccInputs (Vec AccInput))
-  (AccPolicy
-    (DisjointWrites) (IdenticalWrites)
-    (CombineWrites Lambda) (FetchAddWrites)))
-; WithAcc consumes its destination arrays, binds accumulator parameters in its
-; lambda, and returns updated arrays plus ordinary lambda results. Tokens can
-; pass through nested branches/loops/parallel bodies, but cannot escape WithAcc.
-; Parallel tokens describe permitted contributions, not a serial order between
-; lanes. CombineWrites requires an associative combiner; DisjointWrites requires
-; nonoverlap. Reserve is permitted only for FetchAddWrites and returns a scalar
-; reservation index usable by later ordinary instructions in the same body.
-;
-; Parallel assignment uses explicit Copy snapshots followed by Update statements.
-; Loop carries rename simultaneously and do not imply copying backing storage.
-
-(datatype Function (DefineFunction FunctionName Params ReturnInfos Body))
-(sort Functions (Vec Function))
 (datatype ResourceAccess (ReadResource i64) (WriteResource i64))
-(sort ResourceAccesses (Vec ResourceAccess))
-(datatype External
-  (DeclareExternal FunctionName Params ReturnInfos CallBehavior ResourceAccesses))
-(sort Externals (Vec External))
-; External array mutation is expressed by Consume parameters and returned array
-; versions; resource effects identify parameter positions. Opaque resources
-; are not arrays. ABI decorations remain interface metadata.
 
-(datatype Entry (EntryPoint FunctionName i64) )
-(sort Entries (Vec Entry))
-(datatype Program (MemoryProgram Functions Externals Entries))
+(datatype Domain (DomainId i64) (ClonedDomain OperationKey Domain))
+(function DomainRank (Domain) i64 :no-merge)
+(function DomainOrdinal (Domain) ValueName :no-merge)
+(function DomainAxis (Domain i64) ValueName :no-merge)
+(function DomainExtent (Domain i64) IndexExp :no-merge)
+(datatype Grid (AutomaticGrid) (Grid3D Shape Shape))
+(datatype Execution (Unscheduled) (DeviceKernel Grid) (InvocationLocal))
+(datatype RegionRole
+  (ThenRegion) (ElseRegion) (LoopRegion) (LaneRegion)
+  (ReducerRegion) (AccumulatorRegion) (CombinerRegion))
+(datatype FoldKind
+  (Total) (InclusiveScan) (ExclusiveScan)
+  (InclusiveScanAndTotal) (ExclusiveScanAndTotal))
+(datatype ResultKind (Collected) (Compacted) (Contributed) (Folded FoldKind))
+(datatype ResultRole (CollectedOutput) (CompactedOutput) (PrefixOutput) (TotalOutput) (UpdatedOutput))
+(datatype AccPolicy (DisjointWrites) (IdenticalWrites) (CombineWrites) (FetchAddWrites))
 
-; Validation obligations (memory/regions.egg implements lexical scope checks):
-; - Every name has one binder; uses dominate, including annotation/certificate
-;   uses. Cloning/substitution must traverse statements AND all annotations.
-; - Return witnesses match slot kinds; branch/loop/call signatures instantiate
-;   to the enclosing pattern. Loop carries rename simultaneously.
-; - Array element types and logical dimensions agree across operations.
-;   Concrete bounds, capacity, alignment, and address space belong to SSA emission.
-; - Consume invalidates every observable alias. Reads, writes, reservations,
-;   traps, and barriers constrain statement scheduling; effects are derived.
-; - Execution nesting, uniform barriers, reduction signatures, token policies,
-;   and parallel destination nonoverlap are checked before accepting a program.
-; Datatypes separate value and accumulator identities;
-; they do not claim to prove these semantic obligations. Structural traversal
-; and renaming are derived from these declarations by memory.rs; these rules
-; operate inside egglog, without a program round trip through Rust.
+; These keyed cells are the sole authority for executable connectivity.
+(function GraphEditRevision () i64 :no-merge)
+(set (GraphEditRevision) 0)
+(relation Operation (OperationKey))
+(relation Region (RegionKey))
+(function InstructionWork (OperationKey) i64 :no-merge)
+(function OperationSpan (OperationKey) SourceSpan :no-merge)
+(function OperationPayload (OperationKey) OperationCode :no-merge)
+(function OperationRegion (OperationKey) RegionKey :no-merge)
+(function OperationOrder (OperationKey) i64 :no-merge)
+(function Input (OperationKey i64) Name :no-merge)
+(function InputCount (OperationKey) i64 :no-merge)
+(function InputDiet (OperationKey i64) Diet :no-merge)
+(function Output (OperationKey i64) Name :no-merge)
+(function OutputCount (OperationKey) i64 :no-merge)
+(function ValueType (ValueName) ValueInfo :no-merge)
+(function AccumulatorType (AccName) AccInfo :no-merge)
+(relation OperationCertificate (OperationKey ValueName))
+
+(function RegionParameter (RegionKey i64) Name :no-merge)
+(function RegionParameterCount (RegionKey) i64 :no-merge)
+(function ParameterDiet (RegionKey i64) Diet :no-merge)
+(function RegionReturnType (RegionKey i64) ReturnInfo :no-merge)
+(function RegionYield (RegionKey i64) Name :no-merge)
+(function RegionYieldCount (RegionKey) i64 :no-merge)
+(relation YieldCertificate (RegionKey i64 ValueName))
+(function ControlRegion (OperationKey i64) RegionKey :no-merge)
+(function ControlRole (OperationKey i64) RegionRole :no-merge)
+(function EdgeArgument (OperationKey i64 i64) Name :no-merge)
+(function LoopInitial (OperationKey i64) Name :no-merge)
+(function LoopBackedge (OperationKey i64) Name :no-merge)
+(function LoopIndex (OperationKey) ValueName :no-merge)
+(function LoopStart (OperationKey) IndexExp :no-merge)
+(function LoopCount (OperationKey) IndexExp :no-merge)
+(function LoopStep (OperationKey) IndexExp :no-merge)
+(function LoopCondition (OperationKey) ValueName :no-merge)
+
+(function OperationIndex (OperationKey i64) IndexExp :no-merge)
+(function OperationSlices (OperationKey) Slices :no-merge)
+(function OperationShape (OperationKey) Shape :no-merge)
+(function OperationDomain (OperationKey) Domain :no-merge)
+(function OperationWidth (OperationKey) i64 :no-merge)
+(function OperationExecution (OperationKey) Execution :no-merge)
+(function ResultKindOf (OperationKey i64) ResultKind :no-merge)
+(function ResultCount (OperationKey) i64 :no-merge)
+(function ResultValueCount (OperationKey i64) i64 :no-merge)
+(function ResultValue (OperationKey i64 i64) Name :no-merge)
+(function ResultPredicate (OperationKey i64) ValueName :no-merge)
+(function ResultReducer (OperationKey i64) RegionKey :no-merge)
+(function ResultNeutral (OperationKey i64 i64) Name :no-merge)
+(function ResultNeutralCount (OperationKey i64) i64 :no-merge)
+(function ResultCommutative (OperationKey i64) bool :no-merge)
+(function OutputClause (OperationKey i64) i64 :no-merge)
+(function OutputField (OperationKey i64) i64 :no-merge)
+(function OutputRole (OperationKey i64) ResultRole :no-merge)
+
+(function AccumulatorPolicy (OperationKey i64) AccPolicy :no-merge)
+(function AccumulatorGroupCount (OperationKey) i64 :no-merge)
+(function AccumulatorArrayCount (OperationKey i64) i64 :no-merge)
+(function AccumulatorArray (OperationKey i64 i64) ValueName :no-merge)
+(function AccumulatorParameter (OperationKey i64) AccName :no-merge)
+(function AccumulatorCombiner (OperationKey i64) RegionKey :no-merge)
+
+(function RetainAllFunctions () bool :merge (or old new))
+(set (RetainAllFunctions) false)
+(relation Function (FunctionName))
+(relation External (FunctionName))
+(function ExternalParameterName (FunctionName i64) ValueName :no-merge)
+(function ExternalParameterType (FunctionName i64) ValueInfo :no-merge)
+(function ExternalParameterDiet (FunctionName i64) Diet :no-merge)
+(function ExternalParameterCount (FunctionName) i64 :no-merge)
+(function FunctionRoot (FunctionName) RegionKey :no-merge)
+(function FunctionResultType (FunctionName i64) ReturnInfo :no-merge)
+(function FunctionResultCount (FunctionName) i64 :no-merge)
+(function FunctionBehavior (FunctionName) CallBehavior :no-merge)
+(function FunctionResourceAccess (FunctionName i64) ResourceAccess :no-merge)
+(function CallTarget (OperationKey) FunctionName :no-merge)
+(function CallReturnType (OperationKey i64) ReturnInfo :no-merge)
+(function EntryOrder (FunctionName) i64 :no-merge)
+(function InvocationEntry (FunctionName) bool :merge (or old new))
+(function EntryGrid (FunctionName) Grid :no-merge)
+(function GeneratedDispatches () bool :no-merge)
+(function SubgroupsEnabled () bool :merge (or old new))
+(set (SubgroupsEnabled) false)
+
+; Immutable semantic properties are published from Rust's payload catalogue.
+(function LiteralBits (OperationKey) i64 :no-merge)
+(function ScalarPayload (OperationKey) InstructionPayload :no-merge)
+(function ScalarTypeName (PrimType) String :no-merge)
+(relation IntegerScalar (PrimType))
+(relation IntegerIdentity (InstructionPayload i64))
+(relation LeftIntegerIdentity (InstructionPayload i64))
+(relation SubtractionPayload (InstructionPayload))
+(relation MultiplicationPayload (InstructionPayload))
+(relation IndexCastPayload (InstructionPayload))
+(relation AdditionPayload (InstructionPayload))
+(relation SelectPayload (InstructionPayload))
+(relation NativeIntegerOpcode (InstructionPayload))
+(relation CopyOperation (OperationKey))
+(relation ConstantOperation (OperationKey))
+(relation ProductOperation (OperationKey))
+(relation ProjectionOperation (OperationKey i64))
+(relation LengthOperation (OperationKey i64))
+(relation IndexCalculationOperation (OperationKey))
+(relation IndexOperation (OperationKey))
+(relation CallOperation (OperationKey))
+(relation BranchOperation (OperationKey))
+(relation CountedLoopOperation (OperationKey))
+(relation WhileLoopOperation (OperationKey))
+(relation ParallelOperation (OperationKey))
+(relation AccumulatorOperation (OperationKey))
+(relation DiscardableOperation (OperationKey))
+(relation RepeatableOperation (OperationKey))
+(relation OrderedOperation (OperationKey))
+(relation LaneDependentOperation (OperationKey))
+(relation ReadsInput (OperationKey i64))
+(relation ConsumesInput (OperationKey i64))
+(relation WritesInput (OperationKey i64))
+(relation AliasesInput (OperationKey i64 i64))
+(relation FreshOutput (OperationKey i64))
+
+(relation MaterializedCopyOperation (OperationKey))
+
+(relation ViewOperation (OperationKey))
+
+(relation ArrayLiteralOperation (OperationKey))
+
+(relation RangeOperation (OperationKey))
+
+(relation PreservesInputShape (OperationKey i64 i64))

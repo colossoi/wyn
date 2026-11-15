@@ -56,9 +56,10 @@ fn length_observers_do_not_block_content_reuse() {
     };
     assert_eq!(
         p.bindings.len(),
-        3,
-        "shared input/result array and scalar ABI bindings"
+        2,
+        "shared input/result array and a directly published scalar transport binding"
     );
+    assert_ne!(output.source_results[0].binding, output.source_results[1].binding);
 }
 
 #[test]
@@ -131,27 +132,16 @@ fn reuse_requires_ownership_pointwise_access_and_no_live_alias() {
 
 #[test]
 fn selected_grid_dimensions_are_positive() {
-    use crate::egglog::{execution::Execution, memory};
+    use crate::egglog::execution::Execution;
     for x in [0, 1, 32] {
-        let mut graph = egglog_engine::EGraph::default();
-        memory::load(&mut graph).unwrap();
-        graph
-            .parse_and_run_program(
-                None,
-                &format!(
-                    r#"
+        let graph=crate::egglog::test_graph::fixture(&[(0,crate::egglog::dataflow::ir::Code::Parallel)],&format!(r#"
             (let name (FunctionId 0 "grid"))
             (let grid (Grid3D (vec-of (IndexConstant 2) (IndexConstant 3) (IndexConstant 4))
                 (vec-of (IndexConstant {x}) (IndexConstant 1) (IndexConstant 1))))
-            (let function (DefineFunction name (vec-of) (vec-of) (Block
-                (vec-of (Let (StatementTag 0) (vec-of) (vec-of)
-                    (Parallel (DeviceKernel grid) (IterationSpace (ValueId 0) (vec-of))
-                        (ParallelBlock (vec-of) (vec-of))))) (vec-of))))
-            (CurrentProgram (MemoryProgram (vec-of function) (vec-of) (vec-of (EntryPoint name 0))))
-        "#
-                ),
-            )
-            .unwrap();
+            (set (FunctionRoot name) (RegionId 0)) (set (EntryOrder name) 0)
+            (set (OperationRegion (OperationId 0)) (RegionId 0)) (set (OperationOrder (OperationId 0)) 0)
+            (set (OperationExecution (OperationId 0)) (DeviceKernel grid)) (set (OperationWidth (OperationId 0)) {x})
+        "#)).unwrap();
         let result = Execution::select(&graph);
         if x == 0 {
             assert!(result.is_err());

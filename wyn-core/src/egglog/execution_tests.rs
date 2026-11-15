@@ -1,48 +1,45 @@
 use super::Execution;
+use crate::egglog::dataflow::ir::{self, Code};
+use crate::egglog::memory;
 use crate::egglog::query::Query;
+use egglog_engine::EGraph;
 
-#[test]
-fn emitted_dispatches_reference_the_authoritative_statements() {
-    let mut graph = egglog_engine::EGraph::default();
+fn graph(grid: &str, rank: i64) -> EGraph {
+    let mut graph = EGraph::default();
+    memory::load(&mut graph).unwrap();
+    graph.update(|mut sink| Ok(ir::operation(&mut sink, 0, Code::Parallel, &[]))).unwrap().unwrap();
     graph
         .parse_and_run_program(
             None,
-            concat!(
-                include_str!("memory/schema.egg"),
-                "\n(relation CurrentProgram (Program))"
+            &format!(
+                r#"
+        (let name (FunctionId 0 "main"))
+        (set (FunctionRoot name) (RegionId 0)) (set (EntryOrder name) 0)
+        (set (OperationRegion (OperationId 0)) (RegionId 0)) (set (OperationOrder (OperationId 0)) 0)
+        (set (OperationExecution (OperationId 0)) (DeviceKernel {grid}))
+        (set (OperationWidth (OperationId 0)) 128)
+        (set (OperationDomain (OperationId 0)) (DomainId 0)) (set (DomainRank (DomainId 0)) {rank})
+    "#
             ),
         )
         .unwrap();
     graph
-        .parse_and_run_program(
-            None,
-            r#"
-        (let name (FunctionId 0 "main"))
-        (let statement (Let (StatementTag 0) (vec-of) (vec-of)
-            (Parallel (DeviceKernel (AutomaticGrid))
-                (IterationSpace (ValueId 0) (vec-of (DenseAxis (ValueId 1) (IndexConstant 64))))
-                (ParallelBlock (vec-of) (vec-of)))))
-        (let function (DefineFunction name (vec-of) (vec-of)
-            (Block (vec-of statement) (vec-of))))
-        (CurrentProgram (MemoryProgram (vec-of function) (vec-of) (vec-of (EntryPoint name 0))))
-    "#,
-        )
-        .unwrap();
+}
+
+#[test]
+fn emitted_dispatches_reference_the_authoritative_statements() {
+    let graph = graph("(AutomaticGrid)", 1);
     let query = Query(&graph);
     let execution = Execution::select(&graph).unwrap();
     assert_eq!(execution.entries.len(), 1);
     let stages = execution.entries.values().next().unwrap();
     assert_eq!(stages.len(), 1);
-    let statement = query.enode("Let", stages[0]).unwrap().unwrap();
-    let parallel = query.fields("Parallel", statement[3]).unwrap();
-    let kernel = query.fields("DeviceKernel", parallel[0]).unwrap();
+    let selected = query.required("OperationExecution", stages[0]).unwrap();
+    let kernel = query.fields("DeviceKernel", selected).unwrap();
     assert!(query.enode("AutomaticGrid", kernel[0]).unwrap().is_some());
-    let current = query.row("CurrentProgram", |_| true).unwrap().unwrap()[0];
-    let current = query.fields("MemoryProgram", current).unwrap();
-    let function = query.vector(current[0]).unwrap()[0];
-    let function = query.fields("DefineFunction", function).unwrap();
-    let block = query.fields("Block", function[3]).unwrap();
-    assert_eq!(query.vector(block[0]).unwrap(), *stages);
+    let function = query.first("EntryOrder").unwrap().unwrap()[0];
+    let root = query.required("FunctionRoot", function).unwrap();
+    assert_eq!(query.operations(root).unwrap(), *stages);
     let dispatch = execution.dispatch(stages[0]).unwrap();
     assert_eq!(dispatch.local_size, (128, 1, 1));
     assert!(
@@ -57,22 +54,13 @@ fn emitted_dispatches_reference_the_authoritative_statements() {
 
 #[test]
 fn malformed_grids_are_rejected_during_interface_readout() {
-    for (grid, expected) in [
-        ("(AutomaticGrid)", "automatic dispatch requires an iteration axis"),
-        ("(Grid3D (vec-of (IndexConstant 1) (IndexConstant 1) (IndexConstant 1)) (vec-of (IndexConstant 0) (IndexConstant 1) (IndexConstant 1)))", "invalid workgroup size"),
-        ("(Grid3D (vec-of (IndexConstant 1) (IndexConstant 1) (IndexConstant 1)) (vec-of (IndexConstant 32)))", "three local dimensions"),
+    for (grid,expected) in [
+        ("(AutomaticGrid)","automatic dispatch requires an iteration axis"),
+        ("(Grid3D (vec-of (IndexConstant 1) (IndexConstant 1) (IndexConstant 1)) (vec-of (IndexConstant 0) (IndexConstant 1) (IndexConstant 1)))","invalid workgroup size"),
+        ("(Grid3D (vec-of (IndexConstant 1) (IndexConstant 1) (IndexConstant 1)) (vec-of (IndexConstant 32)))","three dimensions"),
     ] {
-        let mut graph = egglog_engine::EGraph::default();
-        graph.parse_and_run_program(None, concat!(include_str!("memory/schema.egg"), "\n(relation CurrentProgram (Program))")).unwrap();
-        graph.parse_and_run_program(None, &format!(r#"
-          (let name (FunctionId 0 "main"))
-          (let function (DefineFunction name (vec-of) (vec-of) (Block
-            (vec-of (Let (StatementTag 0) (vec-of) (vec-of)
-              (Parallel (DeviceKernel {grid}) (IterationSpace (ValueId 0) (vec-of))
-                (ParallelBlock (vec-of) (vec-of))))) (vec-of))))
-          (CurrentProgram (MemoryProgram (vec-of function) (vec-of) (vec-of (EntryPoint name 0))))
-        "#)).unwrap();
-        let Err(error) = Execution::select(&graph) else { panic!("accepted {grid}"); };
-        assert!(error.to_string().contains(expected), "{error}");
+        let graph=graph(grid,0);
+        let Err(error)=Execution::select(&graph) else {panic!("accepted {grid}");};
+        assert!(error.to_string().contains(expected),"{error}");
     }
 }

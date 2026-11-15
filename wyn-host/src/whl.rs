@@ -625,7 +625,10 @@ impl Program {
         for (i, &id) in entry.results.iter().enumerate() {
             let value = if let Some(result) = source_results.get(i).filter(|r| !r.shape.is_static()) {
                 let ResultLayout::Array { stride, .. } = &result.layout else {
-                    return Err(HostError::Invalid("shaped result must be an array".into()));
+                    return Err(HostError::Invalid(format!(
+                        "shaped result {}.{} must be an array, got {:?}",
+                        result.entry, result.result, result.layout
+                    )));
                 };
                 let bytes = result
                     .shape

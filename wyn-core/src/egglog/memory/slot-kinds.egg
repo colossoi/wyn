@@ -1,8 +1,0 @@
-; Analysis slot types are declared before registering vector primitives.
-(datatype*
- (sort SlotKinds (Vec SlotKind))
- (SlotKind
-  (LogicalSlot LogicalType)
-  (ProductSlot SlotKinds) (NestedArraySlot SlotKind i64)
-  (ScalarSlot ElementType) (ArraySlot ElementType i64) (MemorySlot)
-  (AccumulatorSlot AccInfo) (ResourceSlot ResourceType)))

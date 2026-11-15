@@ -1,7 +1,11 @@
-//! Translate typed TLC into logical operations in the common statement IR.
+//! Import typed TLC into flat operation, region, and value relationships.
 use super::bindings::Bindings;
+use super::dataflow::ir::{self, Bounds, Code, Name, OperationId, Parameter, RegionId};
+use super::payload::Payload;
 use super::{fusion, output_error, OptimizeError};
+use crate::ast::Span;
 use crate::builtins::{by_id, catalog, BuiltinId, Purity};
+use crate::op::BinaryOperator;
 use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
 use crate::tlc::stage::OwnershipApplied;
 use crate::tlc::{
@@ -9,7 +13,7 @@ use crate::tlc::{
 };
 use crate::types::{self, extract_function_signature, strip_existentials, Diet, Type, TypeExt, TypeName};
 use crate::SymbolId;
-use egglog_engine::sort::{SetContainer, VecContainer};
+use egglog_engine::sort::{Boxed, VecContainer};
 use egglog_engine::{Core, EGraph, FullState, IntoValues, RawValues, Value, Write};
 use wyn_base::{IdSource, Interner};
 
@@ -33,7 +37,10 @@ pub(super) fn import(
             source,
             names: IdSource::new(),
             statements: IdSource::new(),
+            regions: IdSource::new(),
+            domains: IdSource::new(),
             bindings: Bindings::default(),
+            span: Span::generated(),
         };
         Ok(import.program())
     })??;
@@ -54,7 +61,35 @@ enum Imported<'source> {
 
 #[derive(Default)]
 struct Scope {
-    statements: Vec<Value>,
+    statements: Vec<OperationId>,
+    parameters: Vec<Parameter>,
+}
+
+struct Domain {
+    key: Value,
+    parameters: Vec<Parameter>,
+}
+
+enum Clause {
+    Collect(Vec<Name>),
+    Compact {
+        predicate: Value,
+        values: Vec<Name>,
+    },
+    Contribute(Vec<Name>),
+    Fold {
+        kind: Value,
+        scan: bool,
+        neutral: Vec<Name>,
+        combine: RegionId,
+        values: Vec<Name>,
+    },
+}
+
+struct AccumulatorInput {
+    array: Value,
+    policy: Value,
+    combine: Option<RegionId>,
 }
 
 struct Import<'graph, 'db, 'ids, 'source> {
@@ -63,7 +98,10 @@ struct Import<'graph, 'db, 'ids, 'source> {
     source: &'source OwnershipApplied,
     names: IdSource<i64>,
     statements: IdSource<i64>,
+    regions: IdSource<i64>,
+    domains: IdSource<i64>,
     bindings: Bindings<SymbolId, Imported<'source>>,
+    span: Span,
 }
 
 impl<'source> Import<'_, '_, '_, 'source> {
@@ -87,26 +125,28 @@ impl<'source> Import<'_, '_, '_, 'source> {
         self.node(constructor, id)
     }
 
-    fn operand(&mut self, leaf: &Leaf) -> Result<Value, OptimizeError> {
-        let atom = self.node("Var", leaf.name)?;
-        self.node("ValueOperand", atom)
+    fn binding(&self, leaf: &Leaf) -> Name {
+        Name::Value(leaf.name)
     }
 
-    fn binding(&mut self, leaf: &Leaf) -> Result<Value, OptimizeError> {
-        self.node("BindValue", (leaf.name, leaf.info))
+    fn operation(&mut self, code: Code, inputs: &[Name]) -> Result<OperationId, OptimizeError> {
+        let id = self.statements.next_id();
+        let operation = ir::operation(&mut self.sink, id, code, inputs)?;
+        if !self.span.is_generated() {
+            let span = self.sink.base_to_value(Boxed(self.span));
+            self.sink.set("OperationSpan", operation.0, span)?;
+        }
+        Ok(operation)
     }
 
     fn statement(
         &mut self,
-        pattern: Vec<Value>,
-        expression: Value,
+        pattern: Vec<Name>,
+        expression: OperationId,
         scope: &mut Scope,
     ) -> Result<(), OptimizeError> {
-        let number = self.statements.next_id();
-        let id = self.node("StatementTag", number)?;
-        let pattern = self.vector(pattern);
-        let certificates = self.vector(Vec::new());
-        scope.statements.push(self.node("Let", (id, pattern, certificates, expression))?);
+        ir::outputs(&mut self.sink, expression, &pattern)?;
+        scope.statements.push(expression);
         Ok(())
     }
 
@@ -149,7 +189,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
 
     fn atom(&mut self, term: &'source Term, scope: &mut Scope) -> Result<Value, OptimizeError> {
         let value = Self::leaf(self.visit(term, scope)?)?;
-        self.node("Var", value.name)
+        Ok(value.name)
     }
 
     fn primitive_type(&mut self, ty: &Type) -> Result<Value, OptimizeError> {
@@ -223,19 +263,13 @@ impl<'source> Import<'_, '_, '_, 'source> {
         bits: i64,
         scope: &mut Scope,
     ) -> Result<Imported<'source>, OptimizeError> {
-        let primitive = self.primitive_type(ty)?;
-        let atom = self.node("LiteralBits", (primitive, bits))?;
-        let operand = self.node("ValueOperand", atom)?;
-        let expression = self.node("Use", operand)?;
-        let leaf = self.scalar(ty)?;
-        let binding = self.binding(&leaf)?;
-        self.statement(vec![binding], expression, scope)?;
-        Ok(Imported::Leaf(leaf))
+        let operation = self.operation(Code::Constant { ty: ty.clone(), bits }, &[])?;
+        self.emit(operation, ty, scope)
     }
 
     fn primitive(
         &mut self,
-        opcode: &str,
+        payload: Payload,
         atoms: Vec<Value>,
         ty: &Type,
         pure: bool,
@@ -243,22 +277,47 @@ impl<'source> Import<'_, '_, '_, 'source> {
     ) -> Result<Imported<'source>, OptimizeError> {
         let scalar = ty.as_tensor().map_or(ty, |tensor| tensor.elem);
         let pure = pure
-            || (matches!(opcode, "/" | "%") && matches!(scalar, Type::Constructed(TypeName::Float(_), _)));
-        let data = if pure { Vec::new() } else { vec![self.unit("OrderedEffect")?] };
-        let effects = self.sink.container_to_value(SetContainer {
-            data: data.into_iter().collect(),
-            do_rebuild: true,
-        });
-        let leaf = self.scalar(ty)?;
-        self.sink.set("PrimitiveEffects", (opcode, leaf.info), effects)?;
+            || (matches!(
+                payload,
+                Payload::Binary(BinaryOperator::Divide | BinaryOperator::Remainder)
+            ) && matches!(scalar, Type::Constructed(TypeName::Float(_), _)));
+        let repeatable = match payload {
+            Payload::Binary(_) => true,
+            Payload::Intrinsic { id, overload } => {
+                let builtin = by_id(id);
+                let Some(overload) = builtin.overloads().get(overload) else {
+                    return Err(output_error("invalid builtin overload"));
+                };
+                builtin.raw.purity == Purity::Pure && overload.lowering.is_reusable()
+            }
+            _ => pure,
+        };
+        let inputs = atoms.into_iter().map(Name::Value).collect::<Vec<_>>();
+        let operation = self.operation(Code::Scalar(payload), &inputs)?;
         if pure {
-            self.sink.add("RepeatableOpcode", opcode)?;
+            self.sink.add("DiscardableOperation", operation.0)?;
+        } else {
+            self.sink.add("OrderedOperation", operation.0)?;
         }
-        let atoms = self.vector(atoms);
-        let expression = self.node("PrimOp", (opcode, atoms))?;
-        let binding = self.binding(&leaf)?;
-        self.statement(vec![binding], expression, scope)?;
-        Ok(Imported::Leaf(leaf))
+        if repeatable {
+            self.sink.add("RepeatableOperation", operation.0)?;
+        }
+        if let Payload::Intrinsic { id, .. } = payload {
+            let known = catalog().known();
+            if [
+                known.thread_id,
+                known.thread_id_y,
+                known.thread_id_z,
+                known.local_id,
+                known.workgroup_id,
+                known.num_workgroups,
+            ]
+            .contains(&id)
+            {
+                self.sink.add("LaneDependentOperation", operation.0)?;
+            }
+        }
+        self.emit(operation, ty, scope)
     }
 
     fn index(&mut self, term: &'source Term, scope: &mut Scope) -> Result<Value, OptimizeError> {
@@ -308,12 +367,9 @@ impl<'source> Import<'_, '_, '_, 'source> {
             self.bindings.restore(checkpoint);
             return result;
         }
-        let (opcode, pure) = match &function.kind {
-            TermKind::BinOp(operator) => {
-                self.sink.add("RepeatableOpcode", operator.op.symbol())?;
-                (operator.op.symbol().to_owned(), operator.op.is_speculatable())
-            }
-            TermKind::UnOp(operator) => (operator.op.symbol().to_owned(), true),
+        let (payload, pure) = match &function.kind {
+            TermKind::BinOp(operator) => (Payload::Binary(operator.op), operator.op.is_speculatable()),
+            TermKind::UnOp(operator) => (Payload::Unary(operator.op), true),
             TermKind::Var(VarRef::Builtin { id, overload_idx }) => {
                 if let Some(value) = self.array_builtin(*id, &arguments, ty, scope)? {
                     return Ok(value);
@@ -322,25 +378,11 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 let Some(overload) = builtin.overloads().get(*overload_idx) else {
                     return Err(output_error("invalid builtin overload"));
                 };
-                let opcode = format!("builtin:{}:{overload_idx}", builtin.dispatch_name());
-                if builtin.raw.purity == Purity::Pure && overload.lowering.is_reusable() {
-                    self.sink.add("RepeatableOpcode", opcode.as_str())?;
-                }
-                let known = catalog().known();
-                if [
-                    known.thread_id,
-                    known.thread_id_y,
-                    known.thread_id_z,
-                    known.local_id,
-                    known.workgroup_id,
-                    known.num_workgroups,
-                ]
-                .contains(id)
-                {
-                    self.sink.add("LaneBuiltin", opcode.as_str())?;
-                }
                 (
-                    opcode,
+                    Payload::Intrinsic {
+                        id: *id,
+                        overload: *overload_idx,
+                    },
                     builtin.raw.purity == Purity::Pure && overload.lowering.is_speculatable(),
                 )
             }
@@ -359,9 +401,9 @@ impl<'source> Import<'_, '_, '_, 'source> {
                     "array operation was not normalized to memory statements",
                 ));
             }
-            atoms.push(self.node("Var", leaf.name)?);
+            atoms.push(leaf.name);
         }
-        self.primitive(&opcode, atoms, ty, pure, scope)
+        self.primitive(payload, atoms, ty, pure, scope)
     }
 
     fn logical_type(&mut self, ty: &Type) -> Result<Value, OptimizeError> {
@@ -420,8 +462,10 @@ impl<'source> Import<'_, '_, '_, 'source> {
             let element = self.element(ty)?;
             self.node("ScalarInfo", element)?
         };
+        let name = self.fresh("ValueId")?;
+        self.sink.set("ValueType", name, info)?;
         Ok(Leaf {
-            name: self.fresh("ValueId")?,
+            name,
             info,
             ty: ty.clone(),
         })
@@ -459,32 +503,46 @@ impl<'source> Import<'_, '_, '_, 'source> {
 
     fn emit(
         &mut self,
-        expression: Value,
+        expression: OperationId,
         ty: &Type,
         scope: &mut Scope,
     ) -> Result<Imported<'source>, OptimizeError> {
         let value = self.scalar(ty)?;
-        let binding = self.binding(&value)?;
+        let binding = self.binding(&value);
         self.statement(vec![binding], expression, scope)?;
         Ok(Imported::Leaf(value))
     }
 
-    fn finish(&mut self, scope: Scope, value: &Imported<'source>) -> Result<Value, OptimizeError> {
+    fn finish_region(
+        &mut self,
+        scope: Scope,
+        results: &[Name],
+        returns: &[Value],
+    ) -> Result<RegionId, OptimizeError> {
+        let id = self.regions.next_id();
+        let region = ir::region(&mut self.sink, id, &scope.statements)?;
+        ir::parameters(&mut self.sink, region, &scope.parameters)?;
+        ir::yields(&mut self.sink, region, results)?;
+        for (index, &info) in returns.iter().enumerate() {
+            self.sink.set("RegionReturnType", (region.0, index as i64), info)?;
+        }
+        Ok(region)
+    }
+
+    fn finish(&mut self, scope: Scope, value: &Imported<'source>) -> Result<RegionId, OptimizeError> {
         let value = Self::leaf(value.clone())?;
-        let operand = self.operand(&value)?;
-        let certificates = self.vector(Vec::new());
-        let result = self.node("Yield", (certificates, operand))?;
-        let results = self.vector(vec![result]);
-        let statements = self.vector(scope.statements);
-        self.node("Block", (statements, results))
+        let result = self.binding(&value);
+        let info = self.return_info(&value.ty)?;
+        self.finish_region(scope, &[result], &[info])
     }
 
     fn program(&mut self) -> Result<(), OptimizeError> {
-        let mut functions = Vec::new();
-        let mut externals = Vec::new();
-        let mut entries = Vec::new();
+        if !self.source.defs.iter().any(|definition| matches!(definition.meta, DefMeta::EntryPoint(_))) {
+            self.sink.set("RetainAllFunctions", RawValues(Vec::new()), true)?;
+        }
         for definition in &self.source.defs {
             let name = self.function_name(definition.name)?;
+            self.sink.set("InvocationEntry", name, false)?;
             let (body, source_params) = extract_lambda_params_ref(&definition.body);
             let checkpoint = self.bindings.checkpoint();
             let mut params = Vec::new();
@@ -495,34 +553,53 @@ impl<'source> Import<'_, '_, '_, 'source> {
             };
             for (i, (symbol, ty)) in source_params.iter().enumerate() {
                 let value = self.scalar(ty)?;
-                let binding = self.binding(&value)?;
                 let diet = self.diet(&definition.param_diets.get(i).cloned().unwrap_or_default())?;
-                params.push(self.node("Parameter", (binding, diet))?);
+                params.push(Parameter {
+                    name: self.binding(&value),
+                    info: value.info,
+                    diet,
+                });
                 self.bindings.insert(*symbol, Imported::Leaf(value));
             }
             for (i, ty) in external_params.iter().enumerate() {
                 let value = self.scalar(ty)?;
-                let binding = self.binding(&value)?;
                 let diet = self.diet(&definition.param_diets.get(i).cloned().unwrap_or_default())?;
-                params.push(self.node("Parameter", (binding, diet))?);
+                params.push(Parameter {
+                    name: self.binding(&value),
+                    info: value.info,
+                    diet,
+                });
             }
-            let params = self.vector(params);
             let result = self.return_info(&result_type)?;
-            let returns = self.vector(vec![result]);
+            self.sink.set("FunctionResultCount", name, 1_i64)?;
+            self.sink.set("FunctionResultType", (name, 0_i64), result)?;
             if matches!(&body.kind, TermKind::Extern(_)) {
+                self.sink.add("External", name)?;
+                self.sink.set("ExternalParameterCount", name, params.len() as i64)?;
                 let behavior = self.unit("MayTrapCall")?;
-                let resources = self.vector(Vec::new());
-                externals.push(self.node("DeclareExternal", (name, params, returns, behavior, resources))?);
+                self.sink.set("FunctionBehavior", name, behavior)?;
+                for (index, parameter) in params.iter().enumerate() {
+                    let Name::Value(parameter_name) = parameter.name else {
+                        return Err(output_error("external parameter is an accumulator capability"));
+                    };
+                    self.sink.set("ExternalParameterName", (name, index as i64), parameter_name)?;
+                    self.sink.set("ExternalParameterType", (name, index as i64), parameter.info)?;
+                    self.sink.set("ExternalParameterDiet", (name, index as i64), parameter.diet)?;
+                }
             } else {
-                let mut scope = Scope::default();
+                let mut scope = Scope {
+                    parameters: params,
+                    ..Scope::default()
+                };
                 let value = self.visit(body, &mut scope)?;
                 let body = self.finish(scope, &value)?;
-                functions.push(self.node("DefineFunction", (name, params, returns, body))?);
+                self.sink.add("Function", name)?;
+                self.sink.set("FunctionRoot", name, body.0)?;
             }
             self.bindings.restore(checkpoint);
             if let DefMeta::EntryPoint(entry) = &definition.meta {
                 let id = self.symbols.intern(&definition.name);
-                entries.push(self.node("EntryPoint", (name, id))?);
+                self.sink.set("EntryOrder", name, id)?;
                 if entry.declaration.entry_kind != crate::interface::EntryKind::Compute {
                     self.sink.set("InvocationEntry", name, true)?;
                 }
@@ -531,8 +608,8 @@ impl<'source> Import<'_, '_, '_, 'source> {
                         .into_iter()
                         .map(|n| self.node("IndexConstant", i64::from(n)))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let one = self.node("IndexConstant", 1i64)?;
-                    let width = self.node("IndexConstant", 128i64)?;
+                    let one = self.node("IndexConstant", 1_i64)?;
+                    let width = self.node("IndexConstant", 128_i64)?;
                     let groups = self.vector(groups);
                     let sizes = self.vector(vec![width, one, one]);
                     self.node("Grid3D", (groups, sizes))?
@@ -542,11 +619,6 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 self.sink.set("EntryGrid", name, grid)?;
             }
         }
-        let functions = self.vector(functions);
-        let externals = self.vector(externals);
-        let entries = self.vector(entries);
-        let program = self.node("MemoryProgram", (functions, externals, entries))?;
-        self.sink.add("CurrentProgram", program)?;
         Ok(())
     }
 
@@ -561,21 +633,35 @@ impl<'source> Import<'_, '_, '_, 'source> {
         let Some(definition) = self.source.defs.iter().find(|definition| definition.name == symbol) else {
             return Err(output_error("call target has no definition"));
         };
-        let mut passed = Vec::new();
+        let mut inputs = Vec::new();
+        let mut diets = Vec::new();
         for (i, argument) in arguments.into_iter().enumerate() {
             let value = Self::leaf(argument)?;
-            let operand = self.operand(&value)?;
-            let diet = self.diet(&definition.param_diets.get(i).cloned().unwrap_or_default())?;
-            passed.push(self.node("Pass", (operand, diet))?);
+            inputs.push(self.binding(&value));
+            diets.push(self.diet(&definition.param_diets.get(i).cloned().unwrap_or_default())?);
         }
-        let passed = self.vector(passed);
+        let operation = self.operation(Code::Call, &inputs)?;
+        self.sink.set("CallTarget", operation.0, name)?;
+        for (index, &diet) in diets.iter().enumerate() {
+            self.sink.set("InputDiet", (operation.0, index as i64), diet)?;
+        }
         let result = self.return_info(ty)?;
-        let returns = self.vector(vec![result]);
-        let expression = self.node("Call", (name, passed, returns))?;
-        self.emit(expression, ty, scope)
+        self.sink.set("CallReturnType", (operation.0, 0_i64), result)?;
+        self.emit(operation, ty, scope)
     }
 
     fn visit(
+        &mut self,
+        term: &'source Term,
+        scope: &mut Scope,
+    ) -> Result<Imported<'source>, OptimizeError> {
+        let previous = std::mem::replace(&mut self.span, term.span);
+        let result = self.visit_term(term, scope);
+        self.span = previous;
+        result
+    }
+
+    fn visit_term(
         &mut self,
         term: &'source Term,
         scope: &mut Scope,
@@ -598,17 +684,19 @@ impl<'source> Import<'_, '_, '_, 'source> {
             TermKind::Tuple(fields) => {
                 let fields =
                     fields.iter().map(|field| self.atom(field, scope)).collect::<Result<Vec<_>, _>>()?;
-                let fields = self.vector(fields);
-                let operation = self.node("Product", fields)?;
+                let fields = fields.into_iter().map(Name::Value).collect::<Vec<_>>();
+                let operation = self.operation(Code::Product, &fields)?;
                 self.emit(operation, &term.ty, scope)
             }
             TermKind::TupleProj { tuple, idx } => {
                 let value = Self::leaf(self.visit(tuple, scope)?)?;
-                let atom = self.node("Var", value.name)?;
+                let atom = value.name;
                 if value.ty.is_vec() {
-                    self.primitive(&format!("project:{idx}"), vec![atom], &term.ty, true, scope)
+                    let index =
+                        u32::try_from(*idx).map_err(|_| output_error("vector projection is too large"))?;
+                    self.primitive(Payload::Project(index), vec![atom], &term.ty, true, scope)
                 } else {
-                    let operation = self.node("Project", (atom, *idx as i64))?;
+                    let operation = self.operation(Code::Project { index: *idx }, &[Name::Value(atom)])?;
                     self.emit(operation, &term.ty, scope)
                 }
             }
@@ -660,9 +748,13 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 let no = self.visit(else_branch, &mut right)?;
                 let yes = self.finish(left, &yes)?;
                 let no = self.finish(right, &no)?;
-                let result = self.return_info(&term.ty)?;
-                let returns = self.vector(vec![result]);
-                let expression = self.node("If", (condition, returns, yes, no))?;
+                let expression = self.operation(Code::Branch, &[Name::Value(condition)])?;
+                self.sink.set("ControlRegion", (expression.0, 0_i64), yes.0)?;
+                self.sink.set("ControlRegion", (expression.0, 1_i64), no.0)?;
+                let then_role = self.unit("ThenRegion")?;
+                let else_role = self.unit("ElseRegion")?;
+                self.sink.set("ControlRole", (expression.0, 0_i64), then_role)?;
+                self.sink.set("ControlRole", (expression.0, 1_i64), else_role)?;
                 self.emit(expression, &term.ty, scope)
             }
             TermKind::ArrayExpr(array) => self.array(array, scope),
@@ -670,8 +762,8 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 let array = Self::leaf(self.visit(array, scope)?)?;
                 let index = self.atom(index, scope)?;
                 if array.ty.is_vec() {
-                    let array = self.node("Var", array.name)?;
-                    self.primitive("vector-index", vec![array, index], &term.ty, true, scope)
+                    let array = array.name;
+                    self.primitive(Payload::Index, vec![array, index], &term.ty, true, scope)
                 } else {
                     let operation = self.index_operation(array.name, index)?;
                     self.emit(operation, &term.ty, scope)
@@ -680,7 +772,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             TermKind::VecLit(fields) => {
                 let atoms =
                     fields.iter().map(|field| self.atom(field, scope)).collect::<Result<Vec<_>, _>>()?;
-                self.primitive("vector", atoms, &term.ty, true, scope)
+                self.primitive(Payload::Vector, atoms, &term.ty, true, scope)
             }
             TermKind::Soac(operator) => self.soac(operator, &term.ty, scope),
             TermKind::Loop { .. } => self.loop_expression(term, scope),
@@ -692,17 +784,18 @@ impl<'source> Import<'_, '_, '_, 'source> {
         &mut self,
         arrays: &'source [SourceArray],
         scope: &mut Scope,
-    ) -> Result<Value, OptimizeError> {
-        let arrays = arrays
+    ) -> Result<Vec<Name>, OptimizeError> {
+        arrays
             .iter()
-            .map(|array| Self::leaf(self.array(array, scope)?).map(|value| value.name))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(self.vector(arrays))
+            .map(|array| {
+                let value = Self::leaf(self.array(array, scope)?)?;
+                Ok(Name::Value(value.name))
+            })
+            .collect()
     }
 
-    fn index_operation(&mut self, source: Value, atom: Value) -> Result<Value, OptimizeError> {
-        let indices = self.vector(vec![atom]);
-        self.node("Index", (source, indices))
+    fn index_operation(&mut self, source: Value, index: Value) -> Result<OperationId, OptimizeError> {
+        self.operation(Code::Index, &[Name::Value(source), Name::Value(index)])
     }
 
     fn row_type(ty: &Type) -> Result<Type, OptimizeError> {
@@ -723,38 +816,114 @@ impl<'source> Import<'_, '_, '_, 'source> {
         }
     }
 
-    fn iteration(&mut self, input: &Leaf, scope: &mut Scope) -> Result<(Value, Leaf), OptimizeError> {
-        let length = self.node("Length", (input.name, 0i64))?;
+    fn iteration(&mut self, input: &Leaf, scope: &mut Scope) -> Result<(Domain, Leaf), OptimizeError> {
+        let length = self.operation(Code::Length { axis: 0 }, &[Name::Value(input.name)])?;
         let length = Self::leaf(self.emit(length, &types::i32(), scope)?)?;
         let count = self.node("IndexValue", length.name)?;
         let index = self.scalar(&types::i32())?;
-        let axis = self.node("DenseAxis", (index.name, count))?;
-        let axes = self.vector(vec![axis]);
-        let ordinal = self.fresh("ValueId")?;
-        Ok((self.node("IterationSpace", (ordinal, axes))?, index))
+        let ordinal = self.scalar(&types::i32())?;
+        let id = self.domains.next_id();
+        let domain = self.node("DomainId", id)?;
+        self.sink.set("DomainRank", domain, 1_i64)?;
+        self.sink.set("DomainOrdinal", domain, ordinal.name)?;
+        self.sink.set("DomainAxis", (domain, 0_i64), index.name)?;
+        self.sink.set("DomainExtent", (domain, 0_i64), count)?;
+        let observe = self.unit("Observe")?;
+        let parameters = [&ordinal, &index]
+            .into_iter()
+            .map(|value| Parameter {
+                name: Name::Value(value.name),
+                info: value.info,
+                diet: observe,
+            })
+            .collect();
+        Ok((
+            Domain {
+                key: domain,
+                parameters,
+            },
+            index,
+        ))
+    }
+
+    fn parallel_operation(
+        &mut self,
+        domain: Domain,
+        mut inner: Scope,
+        clauses: Vec<Clause>,
+    ) -> Result<OperationId, OptimizeError> {
+        inner.parameters = domain.parameters;
+        let body = self.finish_region(inner, &[], &[])?;
+        let operation = self.operation(Code::Parallel, &[])?;
+        self.sink.set("OperationDomain", operation.0, domain.key)?;
+        self.sink.set("ControlRegion", (operation.0, 0_i64), body.0)?;
+        let role = self.unit("LaneRegion")?;
+        self.sink.set("ControlRole", (operation.0, 0_i64), role)?;
+        let execution = self.unit("Unscheduled")?;
+        self.sink.set("OperationExecution", operation.0, execution)?;
+        self.sink.set("ResultCount", operation.0, clauses.len() as i64)?;
+        let mut output = 0_i64;
+        for (index, clause) in clauses.into_iter().enumerate() {
+            let index = index as i64;
+            let (kind, role, values) = match clause {
+                Clause::Collect(values) => (self.unit("Collected")?, self.unit("CollectedOutput")?, values),
+                Clause::Compact { predicate, values } => {
+                    self.sink.set("ResultPredicate", (operation.0, index), predicate)?;
+                    (self.unit("Compacted")?, self.unit("CompactedOutput")?, values)
+                }
+                Clause::Contribute(values) => {
+                    (self.unit("Contributed")?, self.unit("UpdatedOutput")?, values)
+                }
+                Clause::Fold {
+                    kind,
+                    scan,
+                    neutral,
+                    combine,
+                    values,
+                } => {
+                    self.sink.set("ResultReducer", (operation.0, index), combine.0)?;
+                    self.sink.set("ResultCommutative", (operation.0, index), false)?;
+                    self.sink.set("ResultNeutralCount", (operation.0, index), neutral.len() as i64)?;
+                    for (field, value) in neutral.into_iter().enumerate() {
+                        let value = value.fact(&mut self.sink)?;
+                        self.sink.set("ResultNeutral", (operation.0, index, field as i64), value)?;
+                    }
+                    (
+                        self.node("Folded", kind)?,
+                        self.unit(if scan { "PrefixOutput" } else { "TotalOutput" })?,
+                        values,
+                    )
+                }
+            };
+            self.sink.set("ResultKindOf", (operation.0, index), kind)?;
+            self.sink.set("ResultValueCount", (operation.0, index), values.len() as i64)?;
+            for (field, value) in values.into_iter().enumerate() {
+                self.sink.set("OutputClause", (operation.0, output), index)?;
+                self.sink.set("OutputField", (operation.0, output), field as i64)?;
+                self.sink.set("OutputRole", (operation.0, output), role)?;
+                output += 1;
+                let value = value.fact(&mut self.sink)?;
+                self.sink.set("ResultValue", (operation.0, index, field as i64), value)?;
+            }
+        }
+        Ok(operation)
     }
 
     fn parallel(
         &mut self,
-        domain: Value,
+        domain: Domain,
         inner: Scope,
-        clauses: Vec<Value>,
+        clauses: Vec<Clause>,
         ty: &Type,
         scope: &mut Scope,
     ) -> Result<Imported<'source>, OptimizeError> {
-        let statements = self.vector(inner.statements);
-        let clauses = self.vector(clauses);
-        let body = self.node("ParallelBlock", (statements, clauses))?;
-        let execution = self.unit("Unscheduled")?;
-        let expression = self.node("Parallel", (execution, domain, body))?;
-        self.emit(expression, ty, scope)
+        let operation = self.parallel_operation(domain, inner, clauses)?;
+        self.emit(operation, ty, scope)
     }
 
-    fn result(&mut self, value: &Imported<'source>) -> Result<Value, OptimizeError> {
+    fn result(&self, value: &Imported<'source>) -> Result<Name, OptimizeError> {
         let value = Self::leaf(value.clone())?;
-        let operand = self.operand(&value)?;
-        let certs = self.vector(Vec::new());
-        self.node("Yield", (certs, operand))
+        Ok(Name::Value(value.name))
     }
 
     fn array(
@@ -768,9 +937,8 @@ impl<'source> Import<'_, '_, '_, 'source> {
             ArrayExpr::Literal(elements) => {
                 let elements =
                     elements.iter().map(|term| self.atom(term, scope)).collect::<Result<Vec<_>, _>>()?;
-                let elements = self.vector(elements);
-                let generator = self.node("ArrayLiteral", elements)?;
-                let expression = self.node("GenerateArray", generator)?;
+                let inputs = elements.into_iter().map(Name::Value).collect::<Vec<_>>();
+                let expression = self.operation(Code::ArrayLiteral, &inputs)?;
                 self.emit(expression, &array.array_type(), scope)
             }
             ArrayExpr::Zip(inputs) => {
@@ -782,7 +950,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                     return Err(output_error("zip has no inputs"));
                 };
                 let (domain, index) = self.iteration(first, scope)?;
-                let position = self.node("Var", index.name)?;
+                let position = index.name;
                 let mut inner = Scope::default();
                 let mut fields = Vec::new();
                 let mut types = Vec::new();
@@ -790,15 +958,14 @@ impl<'source> Import<'_, '_, '_, 'source> {
                     let row_type = Self::row_type(&source.ty)?;
                     let expression = self.index_operation(source.name, position)?;
                     let value = Self::leaf(self.emit(expression, &row_type, &mut inner)?)?;
-                    fields.push(self.node("Var", value.name)?);
+                    fields.push(value.name);
                     types.push(row_type);
                 }
-                let fields = self.vector(fields);
-                let expression = self.node("Product", fields)?;
+                let inputs = fields.into_iter().map(Name::Value).collect::<Vec<_>>();
+                let expression = self.operation(Code::Product, &inputs)?;
                 let value = self.emit(expression, &types::tuple(types), &mut inner)?;
                 let result = self.result(&value)?;
-                let results = self.vector(vec![result]);
-                let clause = self.node("Collect", results)?;
+                let clause = Clause::Collect(vec![result]);
                 self.parallel(domain, inner, vec![clause], &array.array_type(), scope)
             }
             ArrayExpr::Range { start, len, step } => {
@@ -812,11 +979,11 @@ impl<'source> Import<'_, '_, '_, 'source> {
                         Type::Constructed(TypeName::Float(_), _) => i64::from(1.0f32.to_bits()),
                         _ => 1,
                     };
-                    let primitive = self.primitive_type(&start.ty)?;
-                    self.node("LiteralBits", (primitive, bits))?
+                    Self::leaf(self.literal(&start.ty, bits, scope)?)?.name
                 };
-                let generator = self.node("RangeValues", (start_atom, length, step))?;
-                let expression = self.node("GenerateArray", generator)?;
+                let expression =
+                    self.operation(Code::Range, &[Name::Value(start_atom), Name::Value(step)])?;
+                self.sink.set("OperationIndex", (expression.0, 0_i64), length)?;
                 self.emit(expression, &array.array_type(), scope)
             }
         }
@@ -849,21 +1016,21 @@ impl<'source> Import<'_, '_, '_, 'source> {
             return Err(output_error("array operand missing"));
         };
         let expression = if id == known.length || id == known.storage_len {
-            self.node("Length", (source.name, 0i64))?
+            self.operation(Code::Length { axis: 0 }, &[Name::Value(source.name)])?
         } else if id == known.scratch_annotation {
-            self.node("Scratch", source.name)?
+            self.operation(Code::Scratch, &[Name::Value(source.name)])?
         } else if id == known.scratch_alloc {
             let count = self.node("IndexValue", source.name)?;
             let shape = self.vector(vec![count]);
-            let generator = self.node("UninitializedShape", shape)?;
-            self.node("GenerateArray", generator)?
+            let operation = self.operation(Code::Uninitialized, &[])?;
+            self.sink.set("OperationShape", operation.0, shape)?;
+            operation
         } else {
             let Some(index) = values.get(1) else {
                 return Err(output_error("array index missing"));
             };
-            let index_atom = self.node("Var", index.name)?;
             if id == known.storage_index {
-                self.index_operation(source.name, index_atom)?
+                self.index_operation(source.name, index.name)?
             } else {
                 let index = self.node("IndexValue", index.name)?;
                 let Some(value) = values.get(2) else {
@@ -872,24 +1039,31 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 if id == known.slice {
                     let end = self.node("IndexValue", value.name)?;
                     let count = self.node("IndexSub", (end, index))?;
-                    let one = self.node("IndexConstant", 1i64)?;
+                    let one = self.node("IndexConstant", 1_i64)?;
                     let slice = self.node("Slice", (index, count, one))?;
                     let slices = self.vector(vec![slice]);
-                    self.node("View", (source.name, slices))?
+                    let operation = self.operation(Code::View, &[Name::Value(source.name)])?;
+                    self.sink.set("OperationSlices", operation.0, slices)?;
+                    operation
                 } else {
                     let destination = if id == known.array_with
                         && !source.ty.array_variant().is_some_and(types::is_array_variant_view)
                     {
-                        let copy = self.node("Copy", source.name)?;
+                        let copy = self.operation(Code::Copy, &[Name::Value(source.name)])?;
                         Self::leaf(self.emit(copy, &source.ty, scope)?)?.name
                     } else {
                         source.name
                     };
-                    let value = self.node("Var", value.name)?;
                     let slice = self.node("At", index)?;
                     let slices = self.vector(vec![slice]);
-                    let bounds = self.unit("IgnoreOutOfBounds")?;
-                    self.node("Update", (bounds, destination, slices, value))?
+                    let operation = self.operation(
+                        Code::Update {
+                            bounds: Bounds::Ignore,
+                        },
+                        &[Name::Value(destination), Name::Value(value.name)],
+                    )?;
+                    self.sink.set("OperationSlices", operation.0, slices)?;
+                    operation
                 }
             }
         };
@@ -949,7 +1123,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                     return Err(output_error("map has no inputs"));
                 };
                 let (domain, index) = self.iteration(first, scope)?;
-                let position = self.node("Var", index.name)?;
+                let position = index.name;
                 let mut inner = Scope::default();
                 let mut arguments = Vec::new();
                 for input in inputs {
@@ -958,44 +1132,47 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 }
                 let value = self.apply_callback(lam, arguments, &mut inner)?;
                 let result = self.result(&value)?;
-                let results = self.vector(vec![result]);
-                let clause = self.node("Collect", results)?;
+                let clause = Clause::Collect(vec![result]);
                 self.parallel(domain, inner, vec![clause], ty, scope)
             }
             SoacOp::Reduce { op, ne, input } | SoacOp::Scan { op, ne, input } => {
                 let input = Self::leaf(self.array(input, scope)?)?;
                 let neutral = self.atom(ne, scope)?;
-                let neutral = self.vector(vec![neutral]);
                 let combine = self.callback(op, scope)?;
-                let order = self.unit("Ordered")?;
-                let reducer = self.node("Reduction", (order, neutral, combine))?;
                 let (domain, index) = self.iteration(&input, scope)?;
-                let position = self.node("Var", index.name)?;
+                let position = index.name;
                 let mut inner = Scope::default();
                 let expression = self.index_operation(input.name, position)?;
                 let value = self.emit(expression, &Self::row_type(&input.ty)?, &mut inner)?;
                 let result = self.result(&value)?;
-                let results = self.vector(vec![result]);
                 let kind = self.unit(if matches!(operator, SoacOp::Scan { .. }) {
                     "InclusiveScan"
                 } else {
                     "Total"
                 })?;
-                let clause = self.node("Fold", (kind, reducer, results))?;
+                let clause = Clause::Fold {
+                    kind,
+                    scan: matches!(operator, SoacOp::Scan { .. }),
+                    neutral: vec![Name::Value(neutral)],
+                    combine,
+                    values: vec![result],
+                };
                 self.parallel(domain, inner, vec![clause], ty, scope)
             }
             SoacOp::Filter { pred, input } => {
                 let input = Self::leaf(self.array(input, scope)?)?;
                 let (domain, index) = self.iteration(&input, scope)?;
-                let position = self.node("Var", index.name)?;
+                let position = index.name;
                 let mut inner = Scope::default();
                 let expression = self.index_operation(input.name, position)?;
                 let value = self.emit(expression, &Self::row_type(&input.ty)?, &mut inner)?;
                 let condition = Self::leaf(self.apply_callback(pred, vec![value.clone()], &mut inner)?)?;
-                let condition = self.node("Var", condition.name)?;
+                let condition = condition.name;
                 let result = self.result(&value)?;
-                let results = self.vector(vec![result]);
-                let clause = self.node("Compact", (condition, results))?;
+                let clause = Clause::Compact {
+                    predicate: condition,
+                    values: vec![result],
+                };
                 self.parallel(domain, inner, vec![clause], ty, scope)
             }
             SoacOp::Scatter { dest, lam, inputs } => self.scatter(dest, lam, inputs, ty, scope),
@@ -1014,27 +1191,24 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 domain_rank,
             } => {
                 let destination = Self::leaf(self.visit(dest, scope)?)?;
-                let inputs = self.array_names(inputs, scope)?;
+                let arrays = self.array_names(inputs, scope)?;
+                let mut inputs = vec![Name::Value(destination.name)];
+                inputs.extend(arrays);
                 let callback = self.callback(lam, scope)?;
                 let coordinates = input_dimensions
                     .iter()
-                    .map(|axes| {
-                        let values =
-                            axes.iter().map(|&axis| self.sink.base_to_value(i64::from(axis))).collect();
-                        self.vector(values)
-                    })
+                    .map(|axes| axes.iter().map(|&axis| i64::from(axis)).collect())
                     .collect();
-                let coordinates = self.vector(coordinates);
-                let expression = self.node(
-                    "BucketScatter",
-                    (
-                        destination.name,
-                        callback,
-                        inputs,
+                let expression = self.operation(
+                    Code::BucketScatter {
                         coordinates,
-                        i64::from(*domain_rank),
-                    ),
+                        depth: *domain_rank as usize,
+                    },
+                    &inputs,
                 )?;
+                self.sink.set("ControlRegion", (expression.0, 0_i64), callback.0)?;
+                let role = self.unit("LaneRegion")?;
+                self.sink.set("ControlRole", (expression.0, 0_i64), role)?;
                 self.emit(expression, ty, scope)
             }
         }
@@ -1044,59 +1218,69 @@ impl<'source> Import<'_, '_, '_, 'source> {
         &mut self,
         destination: &Leaf,
         policy: Value,
-        inputs: &mut Vec<Value>,
-        parameters: &mut Vec<Value>,
+        combine: Option<RegionId>,
+        inputs: &mut Vec<AccumulatorInput>,
+        parameters: &mut Vec<Parameter>,
     ) -> Result<(Value, Value), OptimizeError> {
         let ty = self.logical_type(&destination.ty)?;
         let info = self.node("LogicalAccumulator", ty)?;
         let token = self.fresh("AccumulatorId")?;
-        let binding = self.node("BindAccumulator", (token, info))?;
+        self.sink.set("AccumulatorType", token, info)?;
         let consume = self.unit("Consume")?;
-        parameters.push(self.node("Parameter", (binding, consume))?);
-        let arrays = self.vector(vec![destination.name]);
-        inputs.push(self.node("AccumulatorInput", (arrays, policy))?);
+        parameters.push(Parameter {
+            name: Name::Accumulator(token),
+            info,
+            diet: consume,
+        });
+        inputs.push(AccumulatorInput {
+            array: destination.name,
+            policy,
+            combine,
+        });
         Ok((token, info))
     }
 
     fn contribute(
         &mut self,
         tokens: Vec<(Value, Value)>,
-        domain: Value,
+        domain: Domain,
         lane: Scope,
-        inputs: Vec<Value>,
-        parameters: Vec<Value>,
+        inputs: Vec<AccumulatorInput>,
+        parameters: Vec<Parameter>,
         ty: &Type,
         scope: &mut Scope,
     ) -> Result<Imported<'source>, OptimizeError> {
-        let names = self.vector(tokens.iter().map(|(name, _)| *name).collect());
-        let clause = self.node("Contribute", names)?;
-        let clauses = self.vector(vec![clause]);
-        let statements = self.vector(lane.statements);
-        let body = self.node("ParallelBlock", (statements, clauses))?;
-        let execution = self.unit("Unscheduled")?;
-        let expression = self.node("Parallel", (execution, domain, body))?;
+        let names = tokens.iter().map(|&(name, _)| Name::Accumulator(name)).collect();
+        let parallel = self.parallel_operation(domain, lane, vec![Clause::Contribute(names)])?;
         let mut pattern = Vec::new();
         let mut returns = Vec::new();
-        let mut results = Vec::new();
-        let certs = self.vector(Vec::new());
         for (_, info) in tokens {
             let name = self.fresh("AccumulatorId")?;
-            pattern.push(self.node("BindAccumulator", (name, info))?);
+            self.sink.set("AccumulatorType", name, info)?;
+            pattern.push(Name::Accumulator(name));
             returns.push(self.node("ReturnAccumulator", info)?);
-            let operand = self.node("AccOperand", name)?;
-            results.push(self.node("Yield", (certs, operand))?);
         }
-        let mut body = Scope::default();
-        self.statement(pattern, expression, &mut body)?;
-        let statements = self.vector(body.statements);
-        let results = self.vector(results);
-        let body = self.node("Block", (statements, results))?;
-        let parameters = self.vector(parameters);
-        let returns = self.vector(returns);
-        let lambda = self.node("FunctionBody", (parameters, returns, body))?;
-        let inputs = self.vector(inputs);
-        let expression = self.node("WithAcc", (inputs, lambda))?;
-        self.emit(expression, ty, scope)
+        let mut body = Scope {
+            parameters,
+            ..Scope::default()
+        };
+        self.statement(pattern.clone(), parallel, &mut body)?;
+        let body = self.finish_region(body, &pattern, &returns)?;
+        let operation = self.operation(Code::WithAcc, &[])?;
+        self.sink.set("ControlRegion", (operation.0, 0_i64), body.0)?;
+        let role = self.unit("AccumulatorRegion")?;
+        self.sink.set("ControlRole", (operation.0, 0_i64), role)?;
+        self.sink.set("AccumulatorGroupCount", operation.0, inputs.len() as i64)?;
+        for (group, input) in inputs.into_iter().enumerate() {
+            let group = group as i64;
+            self.sink.set("AccumulatorPolicy", (operation.0, group), input.policy)?;
+            self.sink.set("AccumulatorArrayCount", (operation.0, group), 1_i64)?;
+            self.sink.set("AccumulatorArray", (operation.0, group, 0_i64), input.array)?;
+            if let Some(combine) = input.combine {
+                self.sink.set("AccumulatorCombiner", (operation.0, group), combine.0)?;
+            }
+        }
+        self.emit(operation, ty, scope)
     }
 
     fn accumulate(
@@ -1109,12 +1293,16 @@ impl<'source> Import<'_, '_, '_, 'source> {
     ) -> Result<(Value, Value), OptimizeError> {
         let index = self.node("IndexValue", index)?;
         let indices = self.vector(vec![index]);
-        let values = self.vector(vec![value]);
-        let bounds = self.unit("IgnoreOutOfBounds")?;
-        let expression = self.node("Accumulate", (bounds, token, indices, values))?;
+        let operation = self.operation(
+            Code::Accumulate {
+                bounds: Bounds::Ignore,
+            },
+            &[Name::Accumulator(token), Name::Value(value)],
+        )?;
+        self.sink.set("OperationShape", operation.0, indices)?;
         let next = self.fresh("AccumulatorId")?;
-        let binding = self.node("BindAccumulator", (next, info))?;
-        self.statement(vec![binding], expression, scope)?;
+        self.sink.set("AccumulatorType", next, info)?;
+        self.statement(vec![Name::Accumulator(next)], operation, scope)?;
         Ok((next, info))
     }
 
@@ -1125,8 +1313,8 @@ impl<'source> Import<'_, '_, '_, 'source> {
         ty: &Type,
         scope: &mut Scope,
     ) -> Result<Leaf, OptimizeError> {
-        let atom = self.node("Var", value.name)?;
-        let expression = self.node("Project", (atom, index as i64))?;
+        let atom = value.name;
+        let expression = self.operation(Code::Project { index }, &[Name::Value(atom)])?;
         Self::leaf(self.emit(expression, ty, scope)?)
     }
 
@@ -1135,8 +1323,8 @@ impl<'source> Import<'_, '_, '_, 'source> {
         destination: &Leaf,
         contribution: &Leaf,
         policy: Value,
-        inputs: &mut Vec<Value>,
-        parameters: &mut Vec<Value>,
+        inputs: &mut Vec<AccumulatorInput>,
+        parameters: &mut Vec<Parameter>,
         tokens: &mut Vec<(Value, Value)>,
         scope: &mut Scope,
         lane: &mut Scope,
@@ -1149,10 +1337,10 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 strip_existentials(index_ty),
                 Type::Constructed(TypeName::Int(_) | TypeName::UInt(_), _)
             ) {
-                let (token, info) = self.accumulator(destination, policy, inputs, parameters)?;
+                let (token, info) = self.accumulator(destination, policy, None, inputs, parameters)?;
                 let index = self.project(contribution, 0, index_ty, lane)?;
                 let value = self.project(contribution, 1, value_ty, lane)?;
-                let value = self.node("Var", value.name)?;
+                let value = value.name;
                 tokens.push(self.accumulate(token, info, index.name, value, lane)?);
                 return Ok(());
             }
@@ -1196,7 +1384,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         let destination = if destination.ty.array_variant().is_some_and(types::is_array_variant_view) {
             destination
         } else {
-            let copy = self.node("Copy", destination.name)?;
+            let copy = self.operation(Code::Copy, &[Name::Value(destination.name)])?;
             Self::leaf(self.emit(copy, &destination.ty, scope)?)?
         };
         let sources = sources
@@ -1207,7 +1395,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
             return Err(output_error("scatter has no input"));
         };
         let (domain, index) = self.iteration(first, scope)?;
-        let position = self.node("Var", index.name)?;
+        let position = index.name;
         let mut lane = Scope::default();
         let mut arguments = Vec::new();
         for source in sources {
@@ -1246,30 +1434,35 @@ impl<'source> Import<'_, '_, '_, 'source> {
         let destination = if destination.ty.array_variant().is_some_and(types::is_array_variant_view) {
             destination
         } else {
-            let copy = self.node("Copy", destination.name)?;
+            let copy = self.operation(Code::Copy, &[Name::Value(destination.name)])?;
             Self::leaf(self.emit(copy, &destination.ty, scope)?)?
         };
         self.visit(neutral, scope)?;
         let indices = Self::leaf(self.array(indices, scope)?)?;
         let values = Self::leaf(self.array(values, scope)?)?;
         let combine = self.callback(callback, scope)?;
-        let policy = self.node("CombineWrites", combine)?;
+        let policy = self.unit("CombineWrites")?;
         let mut inputs = Vec::new();
         let mut parameters = Vec::new();
-        let (token, info) = self.accumulator(&destination, policy, &mut inputs, &mut parameters)?;
+        let (token, info) =
+            self.accumulator(&destination, policy, Some(combine), &mut inputs, &mut parameters)?;
         let (domain, index) = self.iteration(&indices, scope)?;
-        let position = self.node("Var", index.name)?;
+        let position = index.name;
         let mut lane = Scope::default();
         let expression = self.index_operation(indices.name, position)?;
         let index = Self::leaf(self.emit(expression, &Self::row_type(&indices.ty)?, &mut lane)?)?;
         let expression = self.index_operation(values.name, position)?;
         let value = Self::leaf(self.emit(expression, &Self::row_type(&values.ty)?, &mut lane)?)?;
-        let value = self.node("Var", value.name)?;
+        let value = value.name;
         let token = self.accumulate(token, info, index.name, value, &mut lane)?;
         self.contribute(vec![token], domain, lane, inputs, parameters, ty, scope)
     }
 
-    fn callback(&mut self, callback: &'source Callback, scope: &mut Scope) -> Result<Value, OptimizeError> {
+    fn callback(
+        &mut self,
+        callback: &'source Callback,
+        scope: &mut Scope,
+    ) -> Result<RegionId, OptimizeError> {
         let checkpoint = self.bindings.checkpoint();
         let mut captures = Vec::new();
         for (name, _, term) in &callback.data.captures {
@@ -1281,13 +1474,20 @@ impl<'source> Import<'_, '_, '_, 'source> {
         let mut arguments = Vec::new();
         for (name, ty) in &callback.lam.params {
             let value = self.scalar(ty)?;
-            let binding = self.binding(&value)?;
+            let binding = self.binding(&value);
             let diet = self.unit("Observe")?;
-            parameters.push(self.node("Parameter", (binding, diet))?);
+            parameters.push(Parameter {
+                name: binding,
+                info: value.info,
+                diet,
+            });
             self.bindings.insert(*name, Imported::Leaf(value.clone()));
             arguments.push(Imported::Leaf(value));
         }
-        let mut inner = Scope::default();
+        let mut inner = Scope {
+            parameters,
+            ..Scope::default()
+        };
         let body = &callback.lam.body;
         let result = if matches!(body.kind, TermKind::Var(VarRef::Symbol(_))) {
             let Imported::Callable(function, closure) = self.visit(body, &mut inner)? else {
@@ -1300,10 +1500,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         };
         let body = self.finish(inner, &result)?;
         self.bindings.restore(checkpoint);
-        let result = self.return_info(&callback.lam.ret_ty)?;
-        let returns = self.vector(vec![result]);
-        let parameters = self.vector(parameters);
-        self.node("FunctionBody", (parameters, returns, body))
+        Ok(body)
     }
 
     fn loop_expression(
@@ -1331,26 +1528,30 @@ impl<'source> Import<'_, '_, '_, 'source> {
         let mut carried_values = vec![carried.clone()];
         let zero = self.node("IndexConstant", 0i64)?;
         let one = self.node("IndexConstant", 1i64)?;
+        let mut induction = None;
+        let mut condition = None;
         let form = match kind {
             LoopKind::ForRange { var, var_ty, bound } => {
                 let bound = self.index(bound, scope)?;
                 let index = self.scalar(&types::i32())?;
-                let atom = self.node("Var", index.name)?;
-                let value = self.primitive("index-cast", vec![atom], var_ty, true, &mut inner)?;
+                let atom = index.name;
+                let value = self.primitive(Payload::IndexCast, vec![atom], var_ty, true, &mut inner)?;
                 self.bindings.insert(*var, value);
-                self.node("Counted", (index.name, zero, bound, one))?
+                induction = Some((index, bound));
+                Code::CountedLoop
             }
             LoopKind::For { var, var_ty, iter } => {
                 let array = Self::leaf(self.visit(iter, scope)?)?;
-                let length = self.node("Length", (array.name, 0i64))?;
+                let length = self.operation(Code::Length { axis: 0 }, &[Name::Value(array.name)])?;
                 let count = Self::leaf(self.emit(length, &types::i32(), scope)?)?;
                 let count = self.node("IndexValue", count.name)?;
                 let index = self.scalar(&types::i32())?;
-                let atom = self.node("Var", index.name)?;
+                let atom = index.name;
                 let item = self.index_operation(array.name, atom)?;
                 let value = self.emit(item, var_ty, &mut inner)?;
                 self.bindings.insert(*var, value);
-                self.node("Counted", (index.name, zero, count, one))?
+                induction = Some((index, count));
+                Code::CountedLoop
             }
             LoopKind::While { cond } => {
                 self.bindings.insert(*loop_var, Imported::Leaf(initial));
@@ -1359,9 +1560,10 @@ impl<'source> Import<'_, '_, '_, 'source> {
                     self.bindings.insert(*symbol, value);
                 }
                 initial_values.push(Self::leaf(self.visit(cond, scope)?)?);
-                let condition = self.scalar(&types::bool_type())?;
-                carried_values.push(condition.clone());
-                self.node("While", condition.name)?
+                let parameter = self.scalar(&types::bool_type())?;
+                carried_values.push(parameter.clone());
+                condition = Some(parameter.name);
+                Code::WhileLoop
             }
         };
         self.bindings.insert(*loop_var, Imported::Leaf(carried));
@@ -1381,32 +1583,47 @@ impl<'source> Import<'_, '_, '_, 'source> {
         }
         self.bindings.restore(checkpoint);
         let observe = self.unit("Observe")?;
-        let mut merges = Vec::new();
         let mut results = Vec::new();
         let mut returns = Vec::new();
         let mut pattern = Vec::new();
         let output = self.scalar(&term.ty)?;
-        for (i, ((initial, carried), next)) in
-            initial_values.iter().zip(&carried_values).zip(&next_values).enumerate()
-        {
-            let binding = self.binding(carried)?;
-            let parameter = self.node("Parameter", (binding, observe))?;
-            let operand = self.operand(initial)?;
-            merges.push(self.node("Carry", (parameter, operand))?);
-            let operand = self.operand(next)?;
-            let certs = self.vector(Vec::new());
-            results.push(self.node("Yield", (certs, operand))?);
+        for (i, (carried, next)) in carried_values.iter().zip(&next_values).enumerate() {
+            inner.parameters.push(Parameter {
+                name: self.binding(carried),
+                info: carried.info,
+                diet: observe,
+            });
+            results.push(self.binding(next));
             returns.push(self.return_info(&next.ty)?);
             let value = if i == 0 { output.clone() } else { self.scalar(&next.ty)? };
-            pattern.push(self.binding(&value)?);
+            pattern.push(self.binding(&value));
         }
-        let statements = self.vector(inner.statements);
-        let results = self.vector(results);
-        let body = self.node("Block", (statements, results))?;
-        let merges = self.vector(merges);
-        let returns = self.vector(returns);
-        let expression = self.node("Loop", (merges, form, returns, body))?;
-        self.statement(pattern, expression, scope)?;
+        if let Some((index, _)) = &induction {
+            inner.parameters.push(Parameter {
+                name: self.binding(index),
+                info: index.info,
+                diet: observe,
+            });
+        }
+        let body = self.finish_region(inner, &results, &returns)?;
+        let operation = self.operation(form, &[])?;
+        self.sink.set("ControlRegion", (operation.0, 0_i64), body.0)?;
+        let role = self.unit("LoopRegion")?;
+        self.sink.set("ControlRole", (operation.0, 0_i64), role)?;
+        for (index, initial) in initial_values.iter().enumerate() {
+            let name = self.binding(initial).fact(&mut self.sink)?;
+            self.sink.set("EdgeArgument", (operation.0, 0_i64, index as i64), name)?;
+        }
+        if let Some((index, count)) = induction {
+            self.sink.set("LoopIndex", operation.0, index.name)?;
+            self.sink.set("LoopStart", operation.0, zero)?;
+            self.sink.set("LoopCount", operation.0, count)?;
+            self.sink.set("LoopStep", operation.0, one)?;
+        }
+        if let Some(condition) = condition {
+            self.sink.set("LoopCondition", operation.0, condition)?;
+        }
+        self.statement(pattern, operation, scope)?;
         Ok(Imported::Leaf(output))
     }
 }

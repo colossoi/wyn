@@ -5,6 +5,13 @@
 --! path = "output.wynhost"
 --! contains = [":source-name \"branch_backings\""]
 
--- Known gap: reconcile nested descriptors referring to different payload buffers.
+-- Reconcile descriptors and their payloads at every nested array level.
 entry branch_backings(xs:[]i32,b:bool) [][]i32 =
   if b then [map(|x| x+1,xs)] else [map(|x| x+2,xs)]
+
+entry nested_backings(xs:[]i32,b:bool) [][][]i32 =
+  if b then [[map(|x| x+1,xs)]] else [[map(|x| x+2,xs)]]
+
+entry product_backings(xs:[]i32,b:bool) []([]i32,[]i32) =
+  if b then [(map(|x| x+1,xs),map(|x| x+2,xs))]
+  else [(map(|x| x+3,xs),map(|x| x+4,xs))]

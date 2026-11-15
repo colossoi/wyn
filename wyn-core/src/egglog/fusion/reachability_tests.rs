@@ -1,5 +1,5 @@
 use crate::compile_thru_tlc;
-use crate::egglog::{from_tlc, fuse, query::Query};
+use crate::egglog::{from_tlc, fuse};
 
 // Exported intermediate reads are checked in memory_ir_retained_read.wyn.
 #[test]
@@ -8,12 +8,9 @@ fn rewrites_stay_with_their_program_revision() {
     let program = from_tlc(&source).unwrap();
     let mut original = program.graph.clone();
     crate::egglog::memory::validate(&mut original).unwrap();
-    let root = Query(&original).row("CurrentProgram", |_| true).unwrap().unwrap()[0];
+    let root = crate::egglog::dataflow::edit::revision(&original).unwrap();
     let fused = fuse(program).unwrap();
-    assert_eq!(
-        Query(&original).row("CurrentProgram", |_| true).unwrap().unwrap()[0],
-        root
-    );
-    let after = Query(&fused.graph).row("CurrentProgram", |_| true).unwrap().unwrap()[0];
+    assert_eq!(crate::egglog::dataflow::edit::revision(&original).unwrap(), root);
+    let after = crate::egglog::dataflow::edit::revision(&fused.graph).unwrap();
     assert_ne!(after, root);
 }

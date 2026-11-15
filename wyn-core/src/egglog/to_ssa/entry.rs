@@ -6,6 +6,7 @@ use crate::binding_layout::{
     extract_texture_resource, extract_uniform_binding,
 };
 use crate::builtins::catalog;
+use crate::egglog::dataflow::ir::{self, Code};
 use crate::egglog::query::Query;
 use crate::flow::ExecutionModel;
 use crate::host::{
@@ -41,7 +42,6 @@ use crate::types::{
 };
 use crate::LookupSet;
 use crate::{BindingRef, CodegenTarget, LookupMap, ResourceAccess, StableMap};
-use egglog_engine::sort::SetContainer;
 use egglog_engine::{RawValues, Value};
 use wyn_base::IdSource;
 
@@ -63,8 +63,8 @@ pub(super) fn lower(
     let mut next_generated = compiler.program.source.global_context.auto_storage_binding_ids.peek_id();
     for root in roots {
         let query = super::Query(&compiler.program.graph);
-        let entry = query.fields("EntryPoint", root)?;
-        let symbol = *compiler.program.symbols.resolve(query.0.value_to_base::<i64>(entry[1]));
+        let order = query.required("EntryOrder", root)?;
+        let symbol = *compiler.program.symbols.resolve(query.0.value_to_base::<i64>(order));
         let Some(source) = compiler.program.source.defs.iter().find(|definition| definition.name == symbol)
         else {
             return Err(error("entry source metadata missing"));
@@ -74,16 +74,11 @@ pub(super) fn lower(
         };
         let declaration = &metadata.declaration;
         let (source_body, parameters) = extract_lambda_params_ref(&source.body);
-        let Some(&function) = compiler.definitions.get(&entry[0]) else {
-            return Err(error("entry memory function missing"));
+        let function = root;
+        let Some(&region) = compiler.definitions.get(&function) else {
+            return Err(error("entry graph function missing"));
         };
-        let fields = query.fields("DefineFunction", function)?;
-        let block = query.fields("Block", fields[3])?;
-        let params = query
-            .vector(fields[1])?
-            .into_iter()
-            .map(|param| Ok(query.fields("Parameter", param)?[0]))
-            .collect::<Result<Vec<_>, OptimizeError>>()?;
+        let params = query.sequence("RegionParameter", region)?;
         let mut pc_offset = 0u32;
         let mut parameter_inputs = Vec::new();
         let mut templates = Vec::new();
@@ -256,14 +251,14 @@ pub(super) fn lower(
             loops: vec![],
         };
         emission.restart()?;
-        let live = live_names(emission.body.query(), &[], block[1])?;
+        let live = live_names(emission.body.query(), &[], region)?;
         emission
-            .statements(block[0], &live, true)
+            .statements(region, &live, true)
             .map_err(|failure| error(format!("entry {}: {failure}", declaration.name)))?;
         let output_arity = crate::interface::lowering::entry_output_arity(declaration, &source_body.ty);
         let whole_result =
             declaration.buffer_demand || (declaration.source_entry.is_some() && output_arity == 1);
-        let mut output_values = emission.body.results(block[1])?;
+        let mut output_values = emission.body.results(region)?;
         if !whole_result
             && matches!(
                 strip_existentials(&source_body.ty),
@@ -273,9 +268,7 @@ pub(super) fn lower(
         {
             output_values = emission.body.unpack(output_values.remove(0))?;
         }
-        let (output_values, output_shapes) = emission.prepare_array_outputs(block[1], output_values)?;
-        let capacities =
-            if output_arity == 0 { vec![] } else { output_capacities(&emission.body, &output_values)? };
+        let (output_values, output_shapes) = emission.prepare_array_outputs(region, output_values)?;
         let Some(generated) = emission.body.generated.as_ref() else {
             return Err(error("entry buffers missing"));
         };
@@ -314,20 +307,22 @@ pub(super) fn lower(
             output_values
                 .iter()
                 .map(|value| {
-                    (array_offset(&emission.body, value) == Some(0))
-                        .then(|| types::array_view_buffer(&value.ty))
-                        .flatten()
-                        .filter(|binding| {
-                            declaration.outputs.iter().all(|output| output.attribute.is_none())
-                                || generated
-                                    .declarations
-                                    .iter()
-                                    .any(|declaration| declaration.binding == *binding)
-                        })
+                    result_buffer(&emission.body, value).filter(|binding| {
+                        declaration.outputs.iter().all(|output| output.attribute.is_none())
+                            || generated
+                                .declarations
+                                .iter()
+                                .any(|declaration| declaration.binding == *binding)
+                    })
                 })
                 .collect()
         } else {
             vec![]
+        };
+        let capacities = if output_arity == 0 {
+            vec![]
+        } else {
+            output_capacities(&emission.body, &output_values, &destinations)?
         };
         let mut outputs = build_entry_outputs(
             declaration,
@@ -457,6 +452,7 @@ pub(super) fn lower(
                         let Some(next) = element.elem_type() else {
                             return Err(error("result element missing"));
                         };
+                        let next = strip_existentials(next);
                         if next.is_array() {
                             fixed_rows &=
                                 matches!(next.array_size(), Some(Type::Constructed(TypeName::Size(_), _)));
@@ -540,7 +536,7 @@ pub(super) fn lower(
                 .filter_map(|name| emission.body.host_values.get(name).map(|value| (*name, value.clone())))
                 .collect::<StableMap<_, _>>()
                 .into();
-            host::cpu_body(emission.body.query(), function, &parameters, fields[3])?
+            host::cpu_body(emission.body.query(), function, &parameters, region)?
         } else {
             None
         };
@@ -549,9 +545,13 @@ pub(super) fn lower(
         }
         emission.pending |= write_results(&mut emission.body, &output_values, &outputs)?;
         if !emission.pending && !emission.entries.is_empty() {
+            let Some(generated) = emission.body.generated.as_ref() else {
+                return Err(error("entry buffers missing"));
+            };
             let Some(last) = emission.entries.last_mut() else {
                 return Err(error("entry publication has no shader"));
             };
+            last.storage_bindings = generated.declarations.clone();
             last.outputs.extend(outputs);
         } else {
             emission.flush(&LookupSet::default(), outputs, true)?;
@@ -560,7 +560,7 @@ pub(super) fn lower(
             let Some(stage) = emission.entries.last() else {
                 return Err(error("CPU scalar result has no interface stage"));
             };
-            let logical_results = emission.body.query().vector(block[1])?.len();
+            let logical_results = emission.body.query().sequence("RegionYield", region)?.len();
             let result = if logical_results == 1 && output_values.len() > 1 {
                 ScalarExpr::Field {
                     tuple: Box::new(result),
@@ -870,13 +870,36 @@ struct EntryEmission<'a, 'p, 'source> {
 }
 
 impl EntryEmission<'_, '_, '_> {
+    fn restored_results(&mut self, region: Value, count: usize) -> Result<Vec<Typed>, OptimizeError> {
+        let mut values = self.body.results(region)?;
+        if values.len() == 1 && count != 1 {
+            values = self.body.unpack(values.remove(0))?;
+        }
+        if values.len() != count {
+            return Err(error("output transport changed value arity"));
+        }
+        Ok(values)
+    }
+
     fn prepare_array_outputs(
         &mut self,
         results: Value,
         mut values: Vec<Typed>,
     ) -> Result<(Vec<Typed>, Vec<Option<ResultShape>>), OptimizeError> {
+        let reads_results = values.iter().any(|value| {
+            types::as_soa_tuple(&value.ty).is_some()
+                || (output_shape(&self.body, value).is_err()
+                    && (value.ty.array_rank().is_some_and(|rank| rank > 1)
+                        || value.ty.elem_type().is_some_and(TypeExt::is_array)))
+        });
+        if reads_results && self.body.active_dispatch.is_some() {
+            let live = live_names(self.body.query(), &[], results)?;
+            self.flush(&live, vec![], true)?;
+            values = self.restored_results(results, values.len())?;
+        }
         let mut counts = Vec::new();
-        for value in &values {
+        let mut shapes = vec![None; values.len()];
+        for (index, value) in values.iter().enumerate() {
             let product = types::as_soa_tuple(&value.ty)
                 .and_then(|_| crate::interface::results::array_element(&value.ty));
             if product.is_none() && (!value.ty.is_array() || output_shape(&self.body, value).is_ok()) {
@@ -900,12 +923,37 @@ impl EntryEmission<'_, '_, '_> {
             )?;
             let zero = self.body.literal(0, &types::i32())?;
             let totals = self.body.array_totals(value.clone(), 0, vec![zero; rank])?;
-            for (i, total) in totals.into_iter().enumerate() {
-                self.body.store(storage.clone(), Body::number(i as u32), total)?;
+            let publish = |body: &mut Body<'_, '_, '_>| {
+                for (i, total) in totals.into_iter().enumerate() {
+                    body.store(storage.clone(), Body::number(i as u32), total)?;
+                }
+                Ok(())
+            };
+            if let Some(leader) = publication_leader(&mut self.body)? {
+                self.body.when(leader, publish)?;
+            } else {
+                publish(&mut self.body)?;
             }
-            counts.push(Some((binding, rank, leaf.clone())));
+            self.pending = true;
+            self.pending_observable = true;
+            if rank == 1 && array_offset(&self.body, value) == Some(0) {
+                let length = Expr::Scalar(ScalarExpr::Read {
+                    source: scalar_source(binding),
+                    offset: 0,
+                    ty: ScalarType::I32,
+                });
+                self.body.host_shapes.insert(value.value, vec![length.clone()]);
+                shapes[index] = Some(ResultShape::Rectangular(vec![length]));
+                counts.push(None);
+                continue;
+            }
+            counts.push(Some((
+                binding,
+                rank,
+                leaf.clone(),
+                output_shape(&self.body, value).ok(),
+            )));
         }
-        let mut shapes = vec![None; values.len()];
         if counts.iter().all(Option::is_none) {
             return Ok((values, shapes));
         }
@@ -913,22 +961,21 @@ impl EntryEmission<'_, '_, '_> {
         self.pending_observable = true;
         let live = live_names(self.body.query(), &[], results)?;
         self.flush(&live, vec![], true)?;
-        let mut restored = self.body.results(results)?;
-        if restored.len() == 1 && values.len() != 1 {
-            restored = self.body.unpack(restored.remove(0))?;
-        }
-        if restored.len() != values.len() {
-            return Err(error("output transport changed value arity"));
-        }
-        values = restored;
+        values = self.restored_results(results, values.len())?;
         let mut materialized = false;
         for (i, plan) in counts.into_iter().enumerate() {
-            let Some((binding, rank, leaf)) = plan else {
+            let Some((binding, rank, leaf, known_shape)) = plan else {
+                if let Some(ResultShape::Rectangular(shape)) = &shapes[i] {
+                    self.body.host_shapes.insert(values[i].value, shape.clone());
+                }
                 continue;
             };
             let totals = storage_view(&mut self.body, binding, types::i32(), Body::number(rank as u32))?;
             let lengths = (0..rank)
                 .map(|depth| {
+                    if let Some(extent) = known_shape.as_ref().and_then(|shape| shape.get(depth)) {
+                        return extent.clone();
+                    }
                     Expr::Scalar(ScalarExpr::Read {
                         source: scalar_source(binding),
                         offset: depth as u32 * 4,
@@ -937,7 +984,7 @@ impl EntryEmission<'_, '_, '_> {
                 })
                 .collect::<Vec<_>>();
             if rank == 1 && array_offset(&self.body, &values[i]) == Some(0) {
-                self.body.host_lengths.insert(values[i].value, lengths[0].clone());
+                self.body.host_shapes.insert(values[i].value, lengths.clone());
                 shapes[i] = Some(ResultShape::Rectangular(lengths));
                 continue;
             }
@@ -968,7 +1015,7 @@ impl EntryEmission<'_, '_, '_> {
                 Box::new(Expr::Integer(stride.into())),
             );
             let (_, payload) = self.body.device_buffer(&leaf, bytes, length)?;
-            self.body.host_lengths.insert(payload.value, lengths[rank - 1].clone());
+            self.body.host_shapes.insert(payload.value, vec![lengths[rank - 1].clone()]);
             let zero = self.body.literal(0, &types::i32())?;
             self.body.flatten_array(values[i].clone(), &payload, &offsets, 0, vec![zero; rank])?;
             values[i] = payload;
@@ -1069,32 +1116,26 @@ impl EntryEmission<'_, '_, '_> {
                 DispatchSize::Computed { elements, groups }
             } else {
                 let query = self.body.query();
-                let statement = query.fields("Let", statement)?;
-                let parallel = query.fields("Parallel", statement[3])?;
-                let domain = query.fields("IterationSpace", parallel[1])?;
-                let mut axes = query.vector(domain[1])?;
-                let block = query.fields("ParallelBlock", parallel[2])?;
-                let collective = query.vector(block[1])?.into_iter().try_fold(false, |found, clause| {
-                    Ok::<_, OptimizeError>(found || query.enode("Fold", clause)?.is_some())
-                })?;
-                let atomic_updates = self.body.atomic_contributions(block[1])?;
-                let compact = query.vector(block[1])?.into_iter().try_fold(false, |found, clause| {
-                    Ok::<_, OptimizeError>(
-                        found
-                            || query.enode("Compact", clause)?.is_some()
-                            || (query.enode("Contribute", clause)?.is_some() && !atomic_updates),
-                    )
-                })?;
+                let domain = query.required("OperationDomain", statement)?;
+                let mut axes = super::domain_axes(query, domain)?;
+                let mut collective = false;
+                let mut compact = false;
+                let atomic_updates = self.body.atomic_contributions(statement)?;
+                for clause in 0..crate::egglog::analysis::count(query, "ResultCount", statement)? {
+                    let kind = query.required("ResultKindOf", (statement, clause))?;
+                    collective |= query.enode("Folded", kind)?.is_some();
+                    compact |= query.enode("Compacted", kind)?.is_some()
+                        || (query.enode("Contributed", kind)?.is_some() && !atomic_updates);
+                }
                 if collective {
                     axes.pop();
                 }
                 let mut elements = Expr::Integer(1);
                 for axis in axes {
-                    let axis = query.fields("DenseAxis", axis)?;
                     let length = host::guarded_index(
                         query,
                         &self.body.host_values,
-                        axis[1],
+                        axis.extent,
                         self.body.guard.as_ref(),
                     )?;
                     elements = Expr::Multiply(
@@ -1234,11 +1275,11 @@ impl EntryEmission<'_, '_, '_> {
 
     fn statements(
         &mut self,
-        statements: Value,
+        region: Value,
         after: &LookupSet<Value>,
         terminal: bool,
     ) -> Result<(), OptimizeError> {
-        let statements = self.body.query().vector(statements)?;
+        let statements = self.body.query().operations(region)?;
         let generated = self.body.query().required("GeneratedDispatches", RawValues(Vec::new()))?;
         let generated =
             self.body.query().0.value_to_base::<bool>(generated) && self.kind == EntryKind::Compute;
@@ -1249,16 +1290,18 @@ impl EntryEmission<'_, '_, '_> {
             }
             let mut live = statement_names(self.body.query(), &statements[i + 1..])?;
             live.extend(after.iter().copied());
-            let fields = self.body.query().fields("Let", statement)?;
-            let expression = fields[3];
+            let code = ir::code(
+                self.body.query().0,
+                self.body.query().required("OperationPayload", statement)?,
+            );
+            let pattern = self.body.query().sequence("Output", statement)?;
             let dispatch = self.body.compiler.execution.dispatch(statement).is_ok();
-            if self.body.query().contains("RequiresSnapshot", (self.body.function, statement))? {
+            if self.body.query().contains("RequiresSnapshot", statement)? {
                 let mut before = statement_names(self.body.query(), &[statement])?;
                 before.extend(live.iter().copied());
                 self.flush(&before, vec![], false)?;
             }
-            if self.body.query().enode("Copy", expression)?.is_some() {
-                let pattern = self.body.query().vector(fields[1])?;
+            if matches!(code, Code::Copy) {
                 if let [binding] = pattern.as_slice() {
                     if let Some((output, ty)) = super::runtime_binding(self.body.query(), *binding)? {
                         if let Some(storage) = self.body.reuse_storage(output, &ty)? {
@@ -1274,17 +1317,12 @@ impl EntryEmission<'_, '_, '_> {
                 if self.pending_ordered || !self.launch_evaluates_prefix(statement)? {
                     self.flush(&before, vec![], false)?;
                 }
-                let parallel = self.body.query().fields("Parallel", expression)?;
-                let mut captures = names_in(self.body.query(), "NamesParallelBody", parallel[2])?;
-                let bound = names_in(self.body.query(), "BindersParallelBody", parallel[2])?;
-                captures.retain(|name| !bound.contains(name));
+                let lane = self.body.query().required("ControlRegion", (statement, 0_i64))?;
+                let mut captures = names_in(self.body.query(), "RegionCapture", lane)?;
                 let epilogue =
                     if generated && self.body.compiler.execution.dispatch(statement)?.groups.is_none() {
                         if let Some(&next) = statements.get(i + 1) {
-                            self.body
-                                .query()
-                                .contains("ScanEpilogue", (self.body.function, statement, next))?
-                                .then_some(next)
+                            self.body.query().contains("ScanEpilogue", (statement, next))?.then_some(next)
                         } else {
                             None
                         }
@@ -1292,90 +1330,102 @@ impl EntryEmission<'_, '_, '_> {
                         None
                     };
                 if let Some(next) = epilogue {
-                    let next = self.body.query().fields("Let", next)?;
-                    let next = self.body.query().fields("Parallel", next[3])?;
-                    let used = names_in(self.body.query(), "NamesParallelBody", next[2])?;
-                    let bound = names_in(self.body.query(), "BindersParallelBody", next[2])?;
-                    captures.extend(used.difference(&bound).copied());
+                    let lane = self.body.query().required("ControlRegion", (next, 0_i64))?;
+                    captures.extend(names_in(self.body.query(), "RegionCapture", lane)?);
                 }
                 self.materialize_cpu_captures(&captures)?;
                 self.body.active_dispatch = Some(statement);
-                let last = terminal && i + 1 + usize::from(epilogue.is_some()) == statements.len();
+                // Total, memory-free epilogues can use the completed values in
+                // this dispatch; memory readers still need a dispatch barrier.
+                let last =
+                    terminal
+                        && statements[i + 1 + usize::from(epilogue.is_some())..].iter().try_fold(
+                            true,
+                            |safe, &next| -> Result<_, OptimizeError> {
+                                Ok(safe
+                                    && self.body.query().lookup("PureOperation", next)?.is_some_and(
+                                        |value| self.body.query().0.value_to_base::<bool>(value),
+                                    )
+                                    && self.body.compiler.execution.dispatch(next).is_err())
+                            },
+                        )?;
                 grouped = epilogue;
                 if self.chunked_collective(statement, &live, last, epilogue)? {
                     continue;
                 }
                 self.body.statement(statement)?;
                 if let Some(next) = epilogue {
-                    let domain = self.body.query().fields("IterationSpace", parallel[1])?;
-                    let axis = self.body.query().vector(domain[1])?[0];
-                    let axis = self.body.query().fields("DenseAxis", axis)?;
-                    let count = self.body.index_expression(axis[1])?;
+                    let domain = self.body.query().required("OperationDomain", statement)?;
+                    let extent = self.body.query().required("DomainExtent", (domain, 0_i64))?;
+                    let count = self.body.index_expression(extent)?;
                     self.scan_epilogue(next, (Body::number(0), count))?;
                 }
                 self.pending = true;
                 if !last {
                     self.flush(&live, vec![], true)?;
                 }
-            } else if let Some(branch) = self.body.query().enode("If", expression)? {
+            } else if matches!(code, Code::Branch) {
                 let mut buffer_result = false;
                 if generated {
-                    for binding in self.body.query().vector(fields[1])? {
+                    for &binding in &pattern {
                         if let Some((_, ty)) = super::runtime_binding(self.body.query(), binding)? {
                             buffer_result |= contains_array_descriptor(&ty);
                         }
                     }
                 }
-                if buffer_result || self.has_host_effect(branch[2])? || self.has_host_effect(branch[3])? {
-                    self.branch(fields[1], &branch, &live)?;
+                let yes = self.body.query().required("ControlRegion", (statement, 0_i64))?;
+                let no = self.body.query().required("ControlRegion", (statement, 1_i64))?;
+                if buffer_result || self.has_host_effect(yes)? || self.has_host_effect(no)? {
+                    self.branch(statement, &live)?;
                 } else {
                     self.statement_effects(statement)?;
                     self.body.statement(statement)?;
                     self.pending = true;
                 }
-            } else if let Some(loop_) = self.body.query().enode("Loop", expression)? {
-                if generated && self.cpu_loop(fields[1], &loop_)? {
+            } else if matches!(code, Code::CountedLoop | Code::WhileLoop) {
+                if generated && self.cpu_loop(statement)? {
                     continue;
                 }
+                let lane = self.body.query().required("ControlRegion", (statement, 0_i64))?;
                 let mut buffer_carry = false;
                 if generated {
-                    for merge in self.body.query().vector(loop_[0])? {
-                        let merge = self.body.query().fields("Carry", merge)?;
-                        let parameter = self.body.query().fields("Parameter", merge[0])?;
-                        if let Some((_, ty)) = super::runtime_binding(self.body.query(), parameter[0])? {
+                    for parameter in self.body.query().sequence("RegionParameter", lane)? {
+                        if let Some((_, ty)) = super::runtime_binding(self.body.query(), parameter)? {
                             buffer_carry |= contains_array_descriptor(&ty);
                         }
                     }
                 }
-                if buffer_carry || self.has_host_effect(loop_[3])? {
-                    self.loop_body(expression, fields[1], &loop_, &live)?;
+                if buffer_carry || self.has_host_effect(lane)? {
+                    self.loop_body(statement, &live)?;
                 } else {
                     self.statement_effects(statement)?;
                     self.body.statement(statement)?;
                     self.pending = true;
                 }
-            } else if let Some(accumulator) = self.body.query().enode("WithAcc", expression)? {
-                let lambda = self.body.query().fields("FunctionBody", accumulator[1])?;
-                let block = self.body.query().fields("Block", lambda[2])?;
-                let mut needed = live_names(self.body.query(), &[], block[1])?;
-                let captures = names_in(self.body.query(), "NamesAccInputs", accumulator[0])?;
-                let binders = names_in(self.body.query(), "BindersAccInputs", accumulator[0])?;
-                needed.extend(captures.difference(&binders).copied());
+            } else if matches!(code, Code::WithAcc) {
+                let lane = self.body.query().required("ControlRegion", (statement, 0_i64))?;
+                let mut needed = live_names(self.body.query(), &[], lane)?;
+                needed.extend(names_in(self.body.query(), "OperationUse", statement)?);
                 needed.extend(live.iter().copied());
-                self.statements(block[0], &needed, terminal && i + 1 == statements.len())?;
+                self.statements(lane, &needed, terminal && i + 1 == statements.len())?;
                 let mut values = Vec::new();
-                for input in self.body.query().vector(accumulator[0])? {
-                    let input = self.body.query().fields("AccumulatorInput", input)?;
-                    for name in self.body.query().vector(input[0])? {
-                        let value = self.body.named(name)?;
-                        values.push(value);
+                for group in 0..crate::egglog::analysis::count(
+                    self.body.query(),
+                    "AccumulatorGroupCount",
+                    statement,
+                )? {
+                    for slot in 0..crate::egglog::analysis::count(
+                        self.body.query(),
+                        "AccumulatorArrayCount",
+                        (statement, group),
+                    )? {
+                        let name =
+                            self.body.query().required("AccumulatorArray", (statement, group, slot))?;
+                        values.push(self.body.named(name)?);
                     }
                 }
-                values.extend(self.body.results(block[1])?);
-                let pattern = self.body.query().vector(fields[1])?;
-                if pattern.len() == 1 && values.len() > 1 {
-                    values = vec![self.body.tuple(values)?];
-                }
+                values.extend(self.body.results(lane)?);
+                let values = self.body.scope_outputs(&pattern, values)?;
                 self.body.bind(&pattern, values)?;
                 self.pending = true;
             } else {
@@ -1388,32 +1438,32 @@ impl EntryEmission<'_, '_, '_> {
     }
 
     fn statement_effects(&mut self, statement: Value) -> Result<(), OptimizeError> {
-        let fields = self.body.query().fields("Let", statement)?;
-        let expression = fields[3];
         host::remember(
             Query(&self.body.compiler.program.graph),
             self.body.function,
             &mut self.body.host_values,
             statement,
         )?;
-        let effects = self.body.query().required("EffectsStm", (self.body.function, statement))?;
-        let Some(effects) = self.body.query().0.value_to_container::<SetContainer>(effects) else {
-            return Err(error("invalid statement effect set"));
-        };
-        self.pending_observable |= !effects.data.is_empty();
-        // A prefix read still executes before every lane's work, including
-        // empty domains. Ownership analysis forbids reusing its source.
-        if !effects.data.is_empty() && self.body.query().enode("Index", expression)?.is_none() {
-            let ordered = self.body.query().constructor("OrderedEffect", RawValues(Vec::new()))?;
-            let pattern = self.body.query().vector(fields[1])?;
+        let query = self.body.query();
+        let mut memory = false;
+        for table in ["OperationRead", "OperationWrite"] {
+            query.for_each(table, |row| {
+                memory |= row[0] == statement;
+                Ok(())
+            })?;
+        }
+        let trap = query.contains("OperationTrap", statement)?;
+        self.pending_observable |= memory || trap;
+        if (memory || trap) && !query.contains("IndexOperation", statement)? {
+            let pattern = query.sequence("Output", statement)?;
             let value = if let [binding] = pattern.as_slice() {
-                super::runtime_binding(self.body.query(), *binding)?
+                super::runtime_binding(query, *binding)?
                     .and_then(|(name, _)| self.body.host_values.get(&name).cloned())
                     .filter(host::cpu_available)
             } else {
                 None
             };
-            if effects.data.len() == 1 && ordered.is_some_and(|effect| effects.data.contains(&effect)) {
+            if trap && !memory {
                 if let Some(value) = value {
                     self.pending_host_ordered.push(value);
                 } else {
@@ -1426,24 +1476,21 @@ impl EntryEmission<'_, '_, '_> {
         Ok(())
     }
 
-    fn has_host_effect(&self, block: Value) -> Result<bool, OptimizeError> {
-        let block = self.body.query().fields("Block", block)?;
-        for statement in self.body.query().vector(block[0])? {
-            if self.body.compiler.execution.dispatch(statement).is_ok() {
+    fn has_host_effect(&self, region: Value) -> Result<bool, OptimizeError> {
+        let query = self.body.query();
+        for operation in query.operations(region)? {
+            if self.body.compiler.execution.dispatch(operation).is_ok() {
                 return Ok(true);
             }
-            let fields = self.body.query().fields("Let", statement)?;
-            if let Some(branch) = self.body.query().enode("If", fields[3])? {
-                if self.has_host_effect(branch[2])? || self.has_host_effect(branch[3])? {
-                    return Ok(true);
+            let mut children = Vec::new();
+            query.for_function("ControlRegion", |keys, child| {
+                if keys[0] == operation {
+                    children.push(child);
                 }
-            } else if let Some(loop_) = self.body.query().enode("Loop", fields[3])? {
-                if self.has_host_effect(loop_[3])? {
-                    return Ok(true);
-                }
-            } else if let Some(accumulator) = self.body.query().enode("WithAcc", fields[3])? {
-                let lambda = self.body.query().fields("FunctionBody", accumulator[1])?;
-                if self.has_host_effect(lambda[2])? {
+                Ok(())
+            })?;
+            for child in children {
+                if self.has_host_effect(child)? {
                     return Ok(true);
                 }
             }
@@ -1460,19 +1507,15 @@ impl EntryEmission<'_, '_, '_> {
             return Ok(false);
         }
         let query = self.body.query();
-        let statement = query.fields("Let", statement)?;
-        let parallel = query.fields("Parallel", statement[3])?;
-        let block = query.fields("ParallelBlock", parallel[2])?;
-        for clause in query.vector(block[1])? {
-            if query.enode("Collect", clause)?.is_none() {
+        for clause in 0..crate::egglog::analysis::count(query, "ResultCount", statement)? {
+            if query.enode("Collected", query.required("ResultKindOf", (statement, clause))?)?.is_none() {
                 return Ok(false);
             }
         }
-        let domain = query.fields("IterationSpace", parallel[1])?;
+        let domain = query.required("OperationDomain", statement)?;
         let mut sizes = Vec::new();
-        for axis in query.vector(domain[1])? {
-            let axis = query.fields("DenseAxis", axis)?;
-            if let Some(size) = host::scalar_index(query, &self.body.host_values, axis[1])? {
+        for axis in super::domain_axes(query, domain)? {
+            if let Some(size) = host::scalar_index(query, &self.body.host_values, axis.extent)? {
                 sizes.push(size);
             }
         }
@@ -1482,8 +1525,8 @@ impl EntryEmission<'_, '_, '_> {
             .all(|value| sizes.iter().any(|size| host::evaluates(size, value))))
     }
 
-    fn cpu_loop(&mut self, pattern: Value, loop_: &[Value]) -> Result<bool, OptimizeError> {
-        let pattern = self.body.query().vector(pattern)?;
+    fn cpu_loop(&mut self, loop_: Value) -> Result<bool, OptimizeError> {
+        let pattern = self.body.query().sequence("Output", loop_)?;
         let mut outputs = Vec::new();
         for &binding in &pattern {
             let Some((name, ty)) = super::runtime_binding(self.body.query(), binding)? else {
@@ -1638,23 +1681,17 @@ impl EntryEmission<'_, '_, '_> {
         }
     }
 
-    fn loop_body(
-        &mut self,
-        expression: Value,
-        pattern: Value,
-        loop_: &[Value],
-        after: &LookupSet<Value>,
-    ) -> Result<(), OptimizeError> {
-        let pattern = self.body.query().vector(pattern)?;
-        let merges = self.body.query().vector(loop_[0])?;
-        let block = self.body.query().fields("Block", loop_[3])?;
-        let mut before = names_in(self.body.query(), "NamesMerges", loop_[0])?;
+    fn loop_body(&mut self, expression: Value, after: &LookupSet<Value>) -> Result<(), OptimizeError> {
+        let pattern = self.body.query().sequence("Output", expression)?;
+        let region = self.body.query().required("ControlRegion", (expression, 0_i64))?;
+        let merges = self.body.query().sequence("RegionParameter", region)?;
+        let counted = self.body.query().contains("CountedLoopOperation", expression)?;
+        let mut before = names_in(self.body.query(), "OperationUse", expression)?;
         before.extend(after.iter().copied());
-        before.extend(names_in(self.body.query(), "NamesLoopForm", loop_[1])?);
         before.extend(live_names(
             self.body.query(),
-            &self.body.query().vector(block[0])?,
-            block[1],
+            &self.body.query().operations(region)?,
+            region,
         )?);
         self.flush(&before, vec![], false)?;
         let incoming = self.saved.clone();
@@ -1666,19 +1703,20 @@ impl EntryEmission<'_, '_, '_> {
             .collect::<StableMap<_, _>>();
         let mut carried_values = Vec::new();
         for (index, (merge, output)) in merges.into_iter().zip(&pattern).enumerate() {
-            let merge = self.body.query().fields("Carry", merge)?;
-            let parameter = self.body.query().fields("Parameter", merge[0])?[0];
+            let parameter = merge;
+            let argument = self.body.query().required("EdgeArgument", (expression, 0_i64, index as i64))?;
             if let Some((name, ty)) = super::runtime_binding(self.body.query(), parameter)? {
-                let Some(value) = self.body.operand(merge[1])? else {
+                let Some(value) = self.body.operand(argument)? else {
                     return Err(error("loop initial value missing"));
                 };
                 let Some((output, _)) = super::runtime_binding(self.body.query(), *output)? else {
                     return Err(error("loop output missing"));
                 };
-                let host_length = if self.body.query().contains(
-                    "LoopPreservesOuterLength",
-                    (self.body.function, expression, index as i64),
-                )? {
+                let host_length = if self
+                    .body
+                    .query()
+                    .contains("LoopPreservesOuterLength", (expression, index as i64))?
+                {
                     self.body.host_array_length(&value).ok()
                 } else {
                     None
@@ -1702,21 +1740,28 @@ impl EntryEmission<'_, '_, '_> {
                 carried_values.push((name, output, initial, current, slots));
             }
         }
-        let control = if let Some(form) = self.body.query().enode("Counted", loop_[1])? {
-            let Some(count) = host::scalar_index(self.body.query(), &self.body.host_values, form[2])?
+        let control = if counted {
+            let Some(count) = host::scalar_index(
+                self.body.query(),
+                &self.body.host_values,
+                self.body.query().required("LoopCount", expression)?,
+            )?
             else {
                 return Err(error("loop count has no host value"));
             };
-            let slot = self.scalar_slot(form[0], &types::i32())?;
+            let slot = self.scalar_slot(
+                self.body.query().required("LoopIndex", expression)?,
+                &types::i32(),
+            )?;
             let zero = self.body.literal(0, &types::i32())?;
-            self.body.values.insert(form[0], zero);
-            before.insert(form[0]);
+            self.body.values.insert(self.body.query().required("LoopIndex", expression)?, zero);
+            before.insert(self.body.query().required("LoopIndex", expression)?);
             DispatchLoopControl::Counted {
                 count,
                 index: scalar_source(slot),
             }
         } else {
-            let condition = self.body.query().fields("While", loop_[1])?[0];
+            let condition = self.body.query().required("LoopCondition", expression)?;
             let Some((_, _, _, SavedValue::Buffer(slot, _), _)) =
                 carried_values.iter().find(|(name, ..)| *name == condition)
             else {
@@ -1735,7 +1780,7 @@ impl EntryEmission<'_, '_, '_> {
         for (name, _, _, current, _) in &carried_values {
             self.install_saved(*name, current.clone());
         }
-        if let Some(form) = self.body.query().enode("Counted", loop_[1])? {
+        if counted {
             let DispatchLoopControl::Counted {
                 index: ScalarSource::Binding { set, binding },
                 ..
@@ -1743,28 +1788,43 @@ impl EntryEmission<'_, '_, '_> {
             else {
                 return Err(error("loop ordinal binding missing"));
             };
-            self.read_slot(form[0], BindingRef::new(*set, *binding), &types::i32());
+            self.read_slot(
+                self.body.query().required("LoopIndex", expression)?,
+                BindingRef::new(*set, *binding),
+                &types::i32(),
+            );
         }
         self.restart()?;
-        if let Some(form) = self.body.query().enode("Counted", loop_[1])? {
-            let ordinal = self.body.named(form[0])?;
-            let start = self.body.index_expression(form[1])?;
-            let step = self.body.index_expression(form[3])?;
+        if counted {
+            let ordinal = self.body.named(self.body.query().required("LoopIndex", expression)?)?;
+            let start = self.body.index_expression(self.body.query().required("LoopStart", expression)?)?;
+            let step = self.body.index_expression(self.body.query().required("LoopStep", expression)?)?;
             let delta = self.body.binary(BinaryOperator::Multiply, ordinal, step)?;
             let value = self.body.binary(BinaryOperator::Add, start, delta)?;
-            self.body.values.insert(form[0], value);
-            let Some(ordinal) = self.body.host_values.get(&form[0]).cloned() else {
+            self.body.values.insert(self.body.query().required("LoopIndex", expression)?, value);
+            let Some(ordinal) =
+                self.body.host_values.get(&self.body.query().required("LoopIndex", expression)?).cloned()
+            else {
                 return Err(error("loop ordinal missing"));
             };
-            let Some(start) = host::scalar_index(self.body.query(), &self.body.host_values, form[1])?
+            let Some(start) = host::scalar_index(
+                self.body.query(),
+                &self.body.host_values,
+                self.body.query().required("LoopStart", expression)?,
+            )?
             else {
                 return Err(error("loop start missing"));
             };
-            let Some(step) = host::scalar_index(self.body.query(), &self.body.host_values, form[3])? else {
+            let Some(step) = host::scalar_index(
+                self.body.query(),
+                &self.body.host_values,
+                self.body.query().required("LoopStep", expression)?,
+            )?
+            else {
                 return Err(error("loop step missing"));
             };
             self.body.host_values.insert(
-                form[0],
+                self.body.query().required("LoopIndex", expression)?,
                 ScalarExpr::Apply {
                     op: "add".into(),
                     ty: ScalarType::I32,
@@ -1779,10 +1839,10 @@ impl EntryEmission<'_, '_, '_> {
                 },
             );
         }
-        let mut live = live_names(self.body.query(), &[], block[1])?;
+        let mut live = live_names(self.body.query(), &[], region)?;
         live.extend(after.iter().copied());
-        self.statements(block[0], &live, false)?;
-        let values = self.body.results(block[1])?;
+        self.statements(region, &live, false)?;
+        let values = self.body.results(region)?;
         if values.len() != carried_values.len() {
             return Err(error("loop carry arity mismatch"));
         }
@@ -1844,24 +1904,22 @@ impl EntryEmission<'_, '_, '_> {
         self.saved.insert(name, saved);
     }
 
-    fn branch(
-        &mut self,
-        pattern: Value,
-        branch: &[Value],
-        after: &LookupSet<Value>,
-    ) -> Result<(), OptimizeError> {
-        let yes = self.body.query().fields("Block", branch[2])?;
-        let no = self.body.query().fields("Block", branch[3])?;
-        let mut before = live_names(self.body.query(), &self.body.query().vector(yes[0])?, yes[1])?;
+    fn branch(&mut self, operation: Value, after: &LookupSet<Value>) -> Result<(), OptimizeError> {
+        let pattern = self.body.query().sequence("Output", operation)?;
+        let yes = self.body.query().required("ControlRegion", (operation, 0_i64))?;
+        let no = self.body.query().required("ControlRegion", (operation, 1_i64))?;
+        let condition_name =
+            self.body.query().name(self.body.query().required("Input", (operation, 0_i64))?)?;
+        let mut before = live_names(self.body.query(), &self.body.query().operations(yes)?, yes)?;
         before.extend(live_names(
             self.body.query(),
-            &self.body.query().vector(no[0])?,
-            no[1],
+            &self.body.query().operations(no)?,
+            no,
         )?);
-        before.extend(names_in(self.body.query(), "NamesAtom", branch[0])?);
+        before.insert(condition_name);
         before.extend(after.iter().copied());
         self.flush(&before, vec![], false)?;
-        let Some(condition) = host::atom(self.body.query(), &self.body.host_values, branch[0])? else {
+        let Some(condition) = host::atom(self.body.query(), &self.body.host_values, condition_name)? else {
             return Err(error("branch condition has no host value"));
         };
         let incoming = self.saved.clone();
@@ -1895,10 +1953,10 @@ impl EntryEmission<'_, '_, '_> {
             } else {
                 enabled
             });
-            let mut live = live_names(self.body.query(), &[], block[1])?;
+            let mut live = live_names(self.body.query(), &[], block)?;
             live.extend(after.iter().copied());
-            self.statements(block[0], &live, false)?;
-            let values = self.body.results(block[1])?;
+            self.statements(block, &live, false)?;
+            let values = self.body.results(block)?;
             let saved =
                 values.into_iter().map(|value| self.capture(value, true)).collect::<Result<Vec<_>, _>>()?;
             self.flush(after, vec![], true)?;
@@ -1908,13 +1966,12 @@ impl EntryEmission<'_, '_, '_> {
         self.saved = incoming;
         self.body.host_values = incoming_host.into();
         self.restart()?;
-        let pattern = self.body.query().vector(pattern)?;
         let [yes, no]: [Vec<SavedValue>; 2] = arms.try_into().map_err(|_| error("branch arms missing"))?;
         if yes.len() != no.len() {
             return Err(error("branch arity mismatch"));
         }
         let mut selected = Vec::new();
-        let test = self.body.atom(branch[0])?;
+        let test = self.body.atom(condition_name)?;
         for (yes, no) in yes.iter().zip(&no) {
             selected.push(self.merge_saved(&condition, test.clone(), yes, no)?);
         }
@@ -1941,84 +1998,118 @@ impl EntryEmission<'_, '_, '_> {
             }
             return self.body.tuple(fields);
         }
-        if let (
-            SavedValue::Array {
-                element: yes_ty,
-                descriptor: Some(yes_descriptor),
-                tail: yes_tail,
-                host_length: yes_length,
-                ..
-            },
-            SavedValue::Array {
-                element: no_ty,
-                descriptor: Some(no_descriptor),
-                tail: no_tail,
-                host_length: no_length,
-                ..
-            },
-        ) = (yes, no)
-        {
-            if yes_ty != no_ty || yes_tail.len() != no_tail.len() {
-                return Err(error(
-                    "branch arrays require a shared nested payload representation",
-                ));
+        if matches!((yes, no), (SavedValue::Array { .. }, SavedValue::Array { .. })) {
+            let left = saved_slots(&self.body, yes)?;
+            let right = saved_slots(&self.body, no)?;
+            if left.len() != right.len() {
+                return Err(error("branch arrays have different storage structures"));
             }
-            let rank = yes_tail.len() + 1;
-            let dimensions = self.body.branch(
-                test.clone(),
-                |body| {
-                    let array = restore_value(body, yes)?;
-                    let dimensions = body.view_dimensions(array)?;
-                    body.pack_results(dimensions)
+            let mut yes_bindings = LookupMap::default();
+            let mut no_bindings = LookupMap::default();
+            let mut copies = Vec::new();
+            for ((a, a_ty), (b, b_ty)) in left.into_iter().zip(right) {
+                let element = storage_value_type(&erase_buffers(&a_ty));
+                if element != storage_value_type(&erase_buffers(&b_ty)) {
+                    return Err(error("branch arrays have different physical element types"));
+                }
+                let binding = if a == b {
+                    a
+                } else {
+                    let bytes = Expr::Scalar(ScalarExpr::If {
+                        condition: Box::new(condition.clone()),
+                        yes: Box::new(ScalarExpr::BufferLength {
+                            source: scalar_source(a),
+                            stride: 1,
+                        }),
+                        no: Box::new(ScalarExpr::BufferLength {
+                            source: scalar_source(b),
+                            stride: 1,
+                        }),
+                    });
+                    let (binding, _) = self.body.device_buffer(&element, bytes, Body::number(0))?;
+                    copies.push((a, b, binding, element));
+                    binding
+                };
+                yes_bindings.insert(a, binding);
+                no_bindings.insert(b, binding);
+            }
+            let mut result = remap_saved(yes, &yes_bindings);
+            if let (
+                SavedValue::Array {
+                    element: a,
+                    tail: a_tail,
+                    ..
                 },
-                |body| {
-                    let array = restore_value(body, no)?;
-                    let dimensions = body.view_dimensions(array)?;
-                    body.pack_results(dimensions)
+                SavedValue::Array {
+                    element: b,
+                    tail: b_tail,
+                    ..
                 },
-            )?;
-            let dimensions = self.body.unpack_results(dimensions, rank)?;
-            let mut shape = Vec::new();
-            for (axis, dimension) in dimensions.into_iter().enumerate() {
-                let extent = |length: &Option<Expr>, tail: &[(Type, Option<Expr>)], descriptor| {
-                    let known = if axis == 0 { length.clone() } else { tail[axis - 1].1.clone() };
-                    known.unwrap_or_else(|| {
-                        Expr::Scalar(ScalarExpr::Read {
-                            source: scalar_source(descriptor),
-                            offset: (axis as u32 + 1) * 4,
-                            ty: ScalarType::I32,
+            ) = (&result, remap_saved(no, &no_bindings))
+            {
+                if *a != b || a_tail.iter().map(|(ty, _)| ty).ne(b_tail.iter().map(|(ty, _)| ty)) {
+                    return Err(error("branch arrays have incompatible nested alias structures"));
+                }
+            }
+            if let (
+                SavedValue::Array {
+                    host_length, tail, ..
+                },
+                SavedValue::Array {
+                    host_length: a,
+                    length: a_length,
+                    tail: a_tail,
+                    ..
+                },
+                SavedValue::Array {
+                    host_length: b,
+                    length: b_length,
+                    tail: b_tail,
+                    ..
+                },
+            ) = (&mut result, yes, no)
+            {
+                let choose = |a: Option<Expr>, b: Option<Expr>| {
+                    let (a, b) = (a?, b?);
+                    Some(if a == b {
+                        a
+                    } else {
+                        Expr::Scalar(ScalarExpr::If {
+                            condition: Box::new(condition.clone()),
+                            yes: Box::new(host::scalar_extent(&a)?),
+                            no: Box::new(host::scalar_extent(&b)?),
                         })
                     })
                 };
-                let yes = extent(yes_length, yes_tail, *yes_descriptor);
-                let no = extent(no_length, no_tail, *no_descriptor);
-                let yes = host::scalar_extent(&yes)
-                    .ok_or_else(|| error("branch extent has no scalar witness"))?;
-                let no =
-                    host::scalar_extent(&no).ok_or_else(|| error("branch extent has no scalar witness"))?;
-                shape.push((
-                    dimension,
-                    Expr::Scalar(ScalarExpr::If {
-                        condition: Box::new(condition.clone()),
-                        yes: Box::new(yes),
-                        no: Box::new(no),
-                    }),
-                ));
+                *host_length = choose(
+                    a.clone().or(a_length.map(Expr::Integer)),
+                    b.clone().or(b_length.map(Expr::Integer)),
+                );
+                for ((_, extent), ((_, a), (_, b))) in tail.iter_mut().zip(a_tail.iter().zip(b_tail)) {
+                    *extent = choose(a.clone(), b.clone());
+                }
             }
-            let block = self.body.current()?;
-            let destination = self.body.ranked_buffer(yes_ty.clone(), &shape, block)?;
-            self.body.branch(
-                test,
-                |body| {
-                    let source = restore_value(body, yes)?;
-                    body.copy_elements(source, destination.clone(), shape[0].0.clone())
-                },
-                |body| {
-                    let source = restore_value(body, no)?;
-                    body.copy_elements(source, destination.clone(), shape[0].0.clone())
-                },
-            )?;
-            return Ok(destination);
+            // Descriptors keep their offsets: copy their entire backing buffers,
+            // including nested payloads, before interpreting the selected descriptor.
+            let copy = |body: &mut Body<'_, '_, '_>, take_yes: bool| {
+                for (a, b, destination, element) in &copies {
+                    let source = if take_yes { *a } else { *b };
+                    let count = body.op(
+                        OpTag::Intrinsic {
+                            id: catalog().known().storage_len,
+                            overload_idx: 0,
+                        },
+                        vec![Body::number(source.set), Body::number(source.binding)],
+                        Body::number(0).ty,
+                    )?;
+                    let source = storage_view(body, source, element.clone(), count.clone())?;
+                    let destination = storage_view(body, *destination, element.clone(), count.clone())?;
+                    body.copy_elements(source, destination, count)?;
+                }
+                body.op(OpTag::Unit, vec![], types::unit())
+            };
+            self.body.branch(test, |body| copy(body, true), |body| copy(body, false))?;
+            return restore_value(&mut self.body, &result);
         }
         self.body.branch(
             test,
@@ -2038,7 +2129,7 @@ fn scalar_source(binding: BindingRef) -> ScalarSource {
 fn statement_names(query: Query<'_>, statements: &[Value]) -> Result<LookupSet<Value>, OptimizeError> {
     let mut names = LookupSet::default();
     for &statement in statements {
-        names.extend(names_in(query, "NamesStm", statement)?);
+        names.extend(names_in(query, "OperationUse", statement)?);
     }
     Ok(names)
 }
@@ -2051,14 +2142,29 @@ fn contains_array_descriptor(ty: &Type) -> bool {
 }
 
 fn names_in(query: Query<'_>, table: &str, value: Value) -> Result<LookupSet<Value>, OptimizeError> {
-    let set = query.required(table, (value,))?;
-    let Some(set) = query.0.value_to_container::<SetContainer>(set) else {
-        return Err(error("invalid free-name set"));
-    };
-    set.data
-        .iter()
-        .map(|&name| Ok(query.application(name, &["ValueNameRef", "BlockNameRef", "AccNameRef"])?.1[0]))
-        .collect()
+    let mut names = LookupSet::default();
+    query.for_each(table, |row| {
+        if row[0] == value {
+            if let Some(name) = query.value_name(row[1])? {
+                names.insert(name);
+            }
+        }
+        Ok(())
+    })?;
+    Ok(names)
+}
+
+fn domain_names(query: Query<'_>, domain: Value) -> Result<LookupSet<Value>, OptimizeError> {
+    let mut names = LookupSet::default();
+    for axis in super::domain_axes(query, domain)? {
+        query.for_each("IndexUse", |row| {
+            if row[0] == axis.extent {
+                names.insert(row[1]);
+            }
+            Ok(())
+        })?;
+    }
+    Ok(names)
 }
 
 pub(super) struct GeneratedBuffers {
@@ -2099,9 +2205,8 @@ impl Body<'_, '_, '_> {
         generated.next =
             generated.next.checked_add(1).ok_or_else(|| error("descriptor slots exhausted"))?;
         let name = format!("{}_memory_{}", generated.owner, binding.binding);
-        let length = BufferLen::Computed {
-            bytes: Expr::Max(Box::new(bytes), Box::new(Expr::Integer(stride.into()))),
-        };
+        let bytes = Expr::Max(Box::new(bytes), Box::new(Expr::Integer(stride.into())));
+        let length = buffer_capacity(bytes)?;
         generated.declarations.push(StorageBindingDecl {
             binding,
             role: StorageRole::Intermediate,
@@ -2338,7 +2443,11 @@ fn live_names(
     results: Value,
 ) -> Result<LookupSet<Value>, OptimizeError> {
     let mut names = statement_names(query, statements)?;
-    names.extend(names_in(query, "NamesResults", results)?);
+    for name in query.sequence("RegionYield", results)? {
+        if let Some(name) = query.value_name(name)? {
+            names.insert(name);
+        }
+    }
     Ok(names)
 }
 
@@ -2435,10 +2544,9 @@ fn restore_value(body: &mut Body<'_, '_, '_>, saved: &SavedValue) -> Result<Type
                     ty: ScalarType::I32,
                 })
             };
-            body.host_lengths.insert(array.value, host_length.clone());
+            let mut shape = vec![host_length];
             if !tail.is_empty() {
                 let descriptor = descriptor.ok_or_else(|| error("saved shape descriptor missing"))?;
-                let mut shape = vec![host_length];
                 shape.extend(tail.iter().enumerate().map(|(axis, (_, extent))| {
                     extent.clone().unwrap_or_else(|| {
                         Expr::Scalar(ScalarExpr::Read {
@@ -2448,8 +2556,8 @@ fn restore_value(body: &mut Body<'_, '_, '_>, saved: &SavedValue) -> Result<Type
                         })
                     })
                 }));
-                body.host_shapes.insert(array.value, shape);
             }
+            body.host_shapes.insert(array.value, shape);
             Ok(array)
         }
         SavedValue::Constant(n, ty) => body.literal(*n, ty),
@@ -2465,13 +2573,13 @@ fn restore_value(body: &mut Body<'_, '_, '_>, saved: &SavedValue) -> Result<Type
                     _ => None,
                 };
                 if let Some(ty) = scalar {
-                    body.host_lengths.insert(
+                    body.host_shapes.insert(
                         value.value,
-                        Expr::Scalar(ScalarExpr::Read {
+                        vec![Expr::Scalar(ScalarExpr::Read {
                             source: scalar_source(*binding),
                             offset: 8,
                             ty,
-                        }),
+                        })],
                     );
                 }
             }
@@ -2480,32 +2588,8 @@ fn restore_value(body: &mut Body<'_, '_, '_>, saved: &SavedValue) -> Result<Type
     }
 }
 
-fn save(
-    body: &mut Body<'_, '_, '_>,
-    live: &LookupSet<Value>,
-    parameters: &LookupSet<Value>,
-    saved: &mut StableMap<Value, SavedValue>,
-) -> Result<(), OptimizeError> {
-    // A view keeps its layout witnesses and backing handle live as well.
-    let mut live = live.clone();
-    let mut pending = live.iter().copied().collect::<Vec<_>>();
-    while let Some(name) = pending.pop() {
-        if let Some(info) = body.query().lookup("BindingInfo", (body.function, name))? {
-            for dependency in names_in(body.query(), "NamesValueInfo", info)? {
-                if live.insert(dependency) {
-                    pending.push(dependency);
-                }
-            }
-        }
-    }
-    saved.retain(|name, _| live.contains(name));
-    let values = body
-        .values
-        .iter()
-        .filter(|(name, _)| live.contains(name) && !parameters.contains(name))
-        .map(|(&name, value)| (name, value.clone()))
-        .collect::<Vec<_>>();
-    let leader = if let Some(statement) = body.active_dispatch {
+fn publication_leader(body: &mut Body<'_, '_, '_>) -> Result<Option<Typed>, OptimizeError> {
+    Ok(if let Some(statement) = body.active_dispatch {
         let dispatch = *body.compiler.execution.dispatch(statement)?;
         let (group, _) = body.workgroups(dispatch.grid)?;
         let first = body.binary(BinaryOperator::Equal, group, Body::number(0))?;
@@ -2514,7 +2598,23 @@ fn save(
         Some(body.binary(BinaryOperator::LogicalAnd, first, first_lane)?)
     } else {
         None
-    };
+    })
+}
+
+fn save(
+    body: &mut Body<'_, '_, '_>,
+    live: &LookupSet<Value>,
+    parameters: &LookupSet<Value>,
+    saved: &mut StableMap<Value, SavedValue>,
+) -> Result<(), OptimizeError> {
+    saved.retain(|name, _| live.contains(name));
+    let values = body
+        .values
+        .iter()
+        .filter(|(name, _)| live.contains(name) && !parameters.contains(name))
+        .map(|(&name, value)| (name, value.clone()))
+        .collect::<Vec<_>>();
+    let leader = publication_leader(body)?;
     for (name, value) in values {
         if saved.contains_key(&name) && body.transported_values.get(&name) == Some(&value.value) {
             continue;
@@ -2740,6 +2840,9 @@ fn output_shape(body: &Body<'_, '_, '_>, value: &Typed) -> Result<Vec<Expr>, Opt
     };
     let mut ty = value.ty.elem_type();
     while let Some(element) = ty.filter(|ty| ty.is_array()) {
+        if element.array_variant().is_some_and(types::is_array_variant_bounded) {
+            return Err(error("a row capacity does not establish a uniform row length"));
+        }
         let Some(Type::Constructed(TypeName::Size(size), _)) = element.array_size() else {
             return Err(error("nested output requires explicit row shape witnesses"));
         };
@@ -2751,11 +2854,25 @@ fn output_shape(body: &Body<'_, '_, '_>, value: &Typed) -> Result<Vec<Expr>, Opt
     Ok(shape)
 }
 
-fn output_capacities(body: &Body<'_, '_, '_>, values: &[Typed]) -> Result<Vec<BufferLen>, OptimizeError> {
+fn buffer_capacity(bytes: Expr) -> Result<BufferLen, OptimizeError> {
+    match bytes.constant().map_err(|failure| error(failure.to_string()))? {
+        Some(bytes) => Ok(BufferLen::Fixed {
+            bytes: u64::try_from(bytes).map_err(|_| error("negative buffer capacity"))?,
+        }),
+        None => Ok(BufferLen::Computed { bytes }),
+    }
+}
+
+fn output_capacities(
+    body: &Body<'_, '_, '_>,
+    values: &[Typed],
+    destinations: &[Option<BindingRef>],
+) -> Result<Vec<BufferLen>, OptimizeError> {
     values
         .iter()
-        .map(|value| {
-            if let Some(binding) = types::array_view_buffer(&value.ty) {
+        .enumerate()
+        .map(|(index, value)| {
+            if let Some(binding) = destinations.get(index).copied().flatten() {
                 if let Some(declaration) = body.generated.as_ref().and_then(|generated| {
                     generated.declarations.iter().find(|declaration| declaration.binding == binding)
                 }) {
@@ -2766,12 +2883,11 @@ fn output_capacities(body: &Body<'_, '_, '_>, values: &[Typed]) -> Result<Vec<Bu
                 let Some(stride) = storage_elem_stride(&storage_value_type(element)) else {
                     return Err(error("output array element has no storage stride"));
                 };
-                Ok(BufferLen::Computed {
-                    bytes: Expr::Multiply(
-                        Box::new(body.host_array_length(value)?),
-                        Box::new(Expr::Integer(stride.into())),
-                    ),
-                })
+                let bytes = Expr::Multiply(
+                    Box::new(body.host_array_length(value)?),
+                    Box::new(Expr::Integer(stride.into())),
+                );
+                buffer_capacity(bytes)
             } else {
                 let Some(bytes) = type_byte_size(&storage_value_type(&value.ty)) else {
                     return Err(error("output value has no static size"));
@@ -2814,6 +2930,22 @@ fn array_offset(body: &Body<'_, '_, '_>, value: &Typed) -> Option<i64> {
         }
         _ => None,
     }
+}
+
+fn result_buffer(body: &Body<'_, '_, '_>, value: &Typed) -> Option<BindingRef> {
+    if value.ty.is_array() {
+        return (array_offset(body, value) == Some(0))
+            .then(|| types::array_view_buffer(&value.ty))
+            .flatten();
+    }
+    if body.literal_bits(value).is_some() {
+        return None;
+    }
+    let generated = body.generated.as_ref()?;
+    body.transported_values.iter().find_map(|(name, operand)| {
+        let (binding, ty) = generated.scalar_slots.get(name)?;
+        (*operand == value.value && *ty == value.ty).then_some(*binding)
+    })
 }
 
 fn write_results(
@@ -2897,6 +3029,9 @@ fn write_results(
                 },
             )?;
         } else {
+            if output.storage_binding().is_some_and(|binding| result_buffer(body, value) == Some(binding)) {
+                continue;
+            }
             writes = true;
             if let Some(binding) = output.storage_binding() {
                 let destination = storage_view(body, binding, output.ty.clone(), Body::number(1))?;
@@ -3019,7 +3154,7 @@ fn bind_input(
                     .ok_or_else(|| error("input element stride missing"))?,
                 })
             };
-            body.host_lengths.insert(value.value, host_length);
+            body.host_shapes.insert(value.value, vec![host_length]);
             inputs.push(input);
             return Ok((value, None));
         }

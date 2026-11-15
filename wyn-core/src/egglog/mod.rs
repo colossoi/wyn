@@ -2,10 +2,10 @@
 //! Pass order is enforced by typestate:
 //! [`from_tlc`] → [`fuse`] → [`place`] → [`schedule`] → [`prepare_interfaces`]
 //! → [`optimize`] → [`prepare_host`] → [`to_ssa`].
+use self::dataflow::edit;
 use crate::ssa::stage::Elaborated;
 use crate::tlc::stage::OwnershipApplied;
 use crate::{CodegenTarget, PipelineTopologyPolicy, SymbolId};
-use egglog_engine::ast::{Command, Parser};
 use egglog_engine::EGraph;
 use egglog_engine::Error;
 use wyn_base::Interner;
@@ -18,9 +18,12 @@ mod execution;
 mod from_tlc;
 mod fusion;
 mod memory;
+mod payload;
 mod planning;
 mod query;
 mod scalar;
+#[cfg(test)]
+mod test_graph;
 mod timing;
 mod to_ssa;
 
@@ -54,14 +57,14 @@ pub fn fuse(mut program: Program<'_, Imported>) -> Result<Program<'_, Fused>, Op
     timing::time("egglog structural analysis", || analysis::run(&mut program.graph))?;
     memory::inline(&mut program.graph)?;
     // Fuse adjacent producers before hoisting invariant work between them.
-    memory::simplify(&mut program.graph, false)?;
-    // Reducing simplification exposes equal domains; fusion exposes dead collections.
-    let simplify = memory::simplification_schedule(false);
-    timing::run(
-        &mut program.graph,
-        &format!("(run-schedule (saturate (seq {} {simplify})))", fusion::SCHEDULE),
-    )?;
-    memory::simplify(&mut program.graph, true)?;
+    loop {
+        let revision = edit::revision(&program.graph)?;
+        fusion::run(&mut program.graph)?;
+        memory::simplify(&mut program.graph, true)?;
+        if edit::revision(&program.graph)? == revision {
+            break;
+        }
+    }
     memory::validate(&mut program.graph)?;
     Ok(program.advance(Fused))
 }
@@ -122,11 +125,7 @@ pub fn prepare_interfaces(
 ) -> Result<Program<'_, InterfacesPrepared>, OptimizeError> {
     let _timing = timing::span("egglog interface preparation");
     memory::validate(&mut program.graph)?;
-    timing::evaluate(
-        &mut program.graph,
-        None,
-        "(run-schedule (saturate simplify-analysis))",
-    )?;
+    analysis::run(&mut program.graph)?;
     Ok(program.advance(InterfacesPrepared))
 }
 
@@ -136,7 +135,7 @@ pub fn optimize(program: Program<'_, InterfacesPrepared>) -> Result<Program<'_, 
 }
 
 /// Basic retains reducing rewrites and safety analysis; Full additionally
-/// inlines nonrecursive helpers through the common region renamer.
+/// inlines nonrecursive helpers with fresh graph identities.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScalarOptimization {
     Basic,
@@ -148,11 +147,7 @@ pub fn optimize_with_policy(
     policy: ScalarOptimization,
 ) -> Result<Program<'_, Optimized>, OptimizeError> {
     scalar::run(&mut program.graph, policy)?;
-    timing::evaluate(
-        &mut program.graph,
-        None,
-        "(run-schedule (saturate simplify-analysis))",
-    )?;
+    analysis::run(&mut program.graph)?;
     timing::tables(&program.graph, "after-optimization");
     Ok(program.advance(Optimized))
 }
@@ -221,12 +216,6 @@ fn finish_for_test(
 ) -> Result<Elaborated, OptimizeError> {
     let program = prepare_host(program)?;
     to_ssa(program, target)
-}
-
-fn parse_program(filename: &str, source: &str) -> Result<Vec<Command>, OptimizeError> {
-    Parser::default()
-        .get_program_from_string(Some(filename.into()), source)
-        .map_err(|error| OptimizeError::Output(error.to_string()))
 }
 
 pub(super) fn output_error(message: impl Into<String>) -> OptimizeError {

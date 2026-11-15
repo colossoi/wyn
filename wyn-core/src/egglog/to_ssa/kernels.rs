@@ -1,5 +1,5 @@
 //! Parallel results share one domain traversal and one reducer calling convention.
-use super::{error, Body, OptimizeError, Typed};
+use super::{domain_axes, error, Axis, Body, OptimizeError, Typed};
 use crate::builtins::catalog;
 use crate::egglog::to_ssa::host;
 use crate::egglog::to_ssa::runtime_binding;
@@ -22,7 +22,7 @@ enum FoldMode {
 struct Fold {
     mode: FoldMode,
     reducer: Value,
-    values: Value,
+    values: Vec<Value>,
     neutral: Vec<Typed>,
     prefixes: Vec<Value>,
     totals: Vec<Value>,
@@ -80,20 +80,20 @@ fn collection_shape(ty: &Type, dimensions: &[Option<usize>]) -> Result<Type, Opt
 impl Body<'_, '_, '_> {
     pub(super) fn parallel(
         &mut self,
-        arguments: &[Value],
-        _destinations: &[Value],
+        operation: Value,
         pattern: &[Value],
     ) -> Result<Vec<Typed>, OptimizeError> {
-        self.parallel_phase(arguments, pattern, None)
+        self.parallel_phase(operation, pattern, None)
     }
 
     pub(super) fn parallel_phase(
         &mut self,
-        arguments: &[Value],
+        operation: Value,
         pattern: &[Value],
         phase: Option<CollectivePhase<'_>>,
     ) -> Result<Vec<Typed>, OptimizeError> {
-        let dispatch = if self.query().enode("DeviceKernel", arguments[0])?.is_some() {
+        let execution = self.query().required("OperationExecution", operation)?;
+        let dispatch = if self.query().enode("DeviceKernel", execution)?.is_some() {
             let Some(statement) = self.active_dispatch else {
                 return Err(error("device parallel region requires a dispatch entry"));
             };
@@ -101,93 +101,102 @@ impl Body<'_, '_, '_> {
         } else {
             None
         };
-        let domain = self.query().fields("IterationSpace", arguments[1])?;
-        let axes = self.query().vector(domain[1])?;
-        let body = self.query().fields("ParallelBlock", arguments[2])?;
-        let mut bindings = pattern.iter().copied();
+        let domain = self.query().required("OperationDomain", operation)?;
+        let ordinal_name = self.query().required("DomainOrdinal", domain)?;
+        let axes = domain_axes(self.query(), domain)?;
+        let region = self.query().required("ControlRegion", (operation, 0_i64))?;
         let mut collects = Vec::new();
         let mut compacts = Vec::new();
         let mut contributes = false;
         let mut folds = Vec::new();
-        let mut output_names = |count: usize| -> Result<Vec<Value>, OptimizeError> {
-            (0..count)
-                .map(|_| {
-                    let Some(binding) = bindings.next() else {
-                        return Err(error("parallel result arity mismatch"));
-                    };
-                    Ok(self.query().application(binding, &["BindValue", "BindAccumulator"])?.1[0])
-                })
-                .collect()
-        };
         let mut fold_data = Vec::new();
-        for result in self.query().vector(body[1])? {
-            let (kind, fields) =
-                self.query().application(result, &["Collect", "Compact", "Fold", "Contribute"])?;
-            match kind {
-                "Collect" => {
-                    let values = self.query().vector(fields[0])?;
-                    for (name, value) in output_names(values.len())?.into_iter().zip(values) {
-                        collects.push((name, value));
+        for clause in 0..crate::egglog::analysis::count(self.query(), "ResultCount", operation)? {
+            let kind = self.query().required("ResultKindOf", (operation, clause))?;
+            let count =
+                crate::egglog::analysis::count(self.query(), "ResultValueCount", (operation, clause))?;
+            let values = self.query().indexed(
+                "ResultValue",
+                &[operation, self.query().0.base_to_value(clause)],
+                count,
+            )?;
+            let output_names = |role: &str| -> Result<Vec<Value>, OptimizeError> {
+                let query = self.query();
+                let mut names = Vec::new();
+                for slot in 0..crate::egglog::analysis::count(query, "OutputCount", operation)? {
+                    let selected = query.required("OutputClause", (operation, slot))?;
+                    if query.0.value_to_base::<i64>(selected) == clause
+                        && query.enode(role, query.required("OutputRole", (operation, slot))?)?.is_some()
+                    {
+                        names.push(query.name(query.required("Output", (operation, slot))?)?);
                     }
                 }
-                "Compact" => {
-                    let results = self.query().vector(fields[1])?;
-                    let outputs = output_names(results.len())?.into_iter().zip(results).collect::<Vec<_>>();
-                    compacts.push((fields[0], outputs));
-                }
-                "Fold" => {
-                    let (mode, _) = self.query().application(
-                        fields[0],
-                        &[
-                            "Total",
-                            "InclusiveScan",
-                            "ExclusiveScan",
-                            "InclusiveScanAndTotal",
-                            "ExclusiveScanAndTotal",
-                        ],
-                    )?;
-                    let reducer = self.query().fields("Reduction", fields[1])?;
-                    let atoms = self.query().vector(reducer[1])?;
-                    let prefixes = if mode == "Total" { Vec::new() } else { output_names(atoms.len())? };
-                    let totals = if mode == "Total" || mode.ends_with("AndTotal") {
-                        output_names(atoms.len())?
-                    } else {
-                        Vec::new()
-                    };
-                    let mode = if mode == "Total" {
-                        FoldMode::Total
-                    } else {
-                        FoldMode::Scan {
-                            exclusive: mode.starts_with("Exclusive"),
-                        }
-                    };
-                    fold_data.push((mode, reducer[2], atoms, fields[2], prefixes, totals));
-                }
-                "Contribute" => {
-                    contributes = true;
-                    let tokens = self.query().vector(fields[0])?;
-                    output_names(tokens.len())?;
-                }
-                _ => unreachable!(),
+                Ok(names)
+            };
+            if self.query().enode("Collected", kind)?.is_some() {
+                collects.extend(output_names("CollectedOutput")?.into_iter().zip(values));
+            } else if self.query().enode("Compacted", kind)?.is_some() {
+                let predicate = self.query().required("ResultPredicate", (operation, clause))?;
+                compacts.push((
+                    predicate,
+                    output_names("CompactedOutput")?.into_iter().zip(values).collect::<Vec<_>>(),
+                ));
+            } else if let Some(fold) = self.query().enode("Folded", kind)? {
+                let (kind, _) = self.query().application(
+                    fold[0],
+                    &[
+                        "Total",
+                        "InclusiveScan",
+                        "ExclusiveScan",
+                        "InclusiveScanAndTotal",
+                        "ExclusiveScanAndTotal",
+                    ],
+                )?;
+                let mode = if kind == "Total" {
+                    FoldMode::Total
+                } else {
+                    FoldMode::Scan {
+                        exclusive: kind.starts_with("Exclusive"),
+                    }
+                };
+                let reducer = self.query().required("ResultReducer", (operation, clause))?;
+                let count = crate::egglog::analysis::count(
+                    self.query(),
+                    "ResultNeutralCount",
+                    (operation, clause),
+                )?;
+                let neutral = self.query().indexed(
+                    "ResultNeutral",
+                    &[operation, self.query().0.base_to_value(clause)],
+                    count,
+                )?;
+                fold_data.push((
+                    mode,
+                    reducer,
+                    neutral,
+                    values,
+                    output_names("PrefixOutput")?,
+                    output_names("TotalOutput")?,
+                ));
+            } else if self.query().enode("Contributed", kind)?.is_some() {
+                contributes = true;
+            } else {
+                return Err(error("unknown collective result role"));
             }
         }
-        if bindings.next().is_some() {
-            return Err(error("parallel result arity mismatch"));
-        }
         for (mode, reducer, atoms, values, prefixes, totals) in fold_data {
-            let lambda = self.query().fields("FunctionBody", reducer)?;
-            let parameters = self.query().vector(lambda[0])?;
+            let parameters = self.query().sequence("RegionParameter", reducer)?;
             let mut neutral = Vec::new();
             for (i, atom) in atoms.into_iter().enumerate() {
                 let Some(parameter) = parameters.get(i) else {
                     return Err(error("reducer has no state parameter"));
                 };
-                let parameter = self.query().fields("Parameter", *parameter)?;
-                let Some((_, mut ty)) = runtime_binding(self.query(), parameter[0])? else {
+                let Some((_, mut ty)) = runtime_binding(self.query(), *parameter)? else {
                     return Err(error("reducer state has no runtime value"));
                 };
                 ty = super::reducer_state_type(self.query(), self.function, reducer, i, atom, ty)?;
-                let value = self.atom(atom)?;
+                let Some(value) = self.operand(atom)? else {
+                    return Err(error("collective neutral is a capability"));
+                };
                 if ty.is_array()
                     && !matches!(ty.array_size(), Some(Type::Constructed(TypeName::Size(_), _)))
                 {
@@ -195,10 +204,7 @@ impl Body<'_, '_, '_> {
                         Some(Type::Constructed(TypeName::Size(size), _)) => Some(*size),
                         _ => None,
                     };
-                    if !self
-                        .query()
-                        .contains("ReducerPreservesOuterLength", (self.function, reducer, i as i64))?
-                    {
+                    if !self.query().contains("ReducerPreservesOuterLength", (reducer, i as i64))? {
                         return Err(error(
                             "array-valued collective has no proven fixed reducer state shape",
                         ));
@@ -277,9 +283,8 @@ impl Body<'_, '_, '_> {
                 let dimensions = axes[..rank]
                     .iter()
                     .map(|&axis| {
-                        let axis = self.query().fields("DenseAxis", axis)?;
                         self.query()
-                            .lookup("StaticIndex", (self.function, axis[1]))?
+                            .lookup("StaticIndex", axis.extent)?
                             .map(|size| {
                                 usize::try_from(self.query().0.value_to_base::<i64>(size).max(0))
                                     .map_err(|_| error("collection dimension exceeds usize"))
@@ -291,11 +296,14 @@ impl Body<'_, '_, '_> {
                 let Some(&axis) = axes.first() else {
                     return Err(error("collection requires an axis"));
                 };
-                let axis = self.query().fields("DenseAxis", axis)?;
-                let count = self.index_expression(axis[1])?;
+                let count = self.index_expression(axis.extent)?;
                 let length = if dispatch.is_some() {
-                    let length =
-                        host::guarded_index(self.query(), &self.host_values, axis[1], self.guard.as_ref())?;
+                    let length = host::guarded_index(
+                        self.query(),
+                        &self.host_values,
+                        axis.extent,
+                        self.guard.as_ref(),
+                    )?;
                     Some(Expr::Max(Box::new(length), Box::new(Expr::Integer(0))))
                 } else {
                     None
@@ -303,12 +311,11 @@ impl Body<'_, '_, '_> {
                 let shape = if dispatch.is_some() && rank > 1 && dimensions[1..].contains(&None) {
                     let mut shape = Vec::new();
                     for &axis in &axes[..rank] {
-                        let axis = self.query().fields("DenseAxis", axis)?;
-                        let count = self.index_expression(axis[1])?;
+                        let count = self.index_expression(axis.extent)?;
                         let length = host::guarded_index(
                             self.query(),
                             &self.host_values,
-                            axis[1],
+                            axis.extent,
                             self.guard.as_ref(),
                         )?;
                         shape.push((count, Expr::Max(Box::new(length), Box::new(Expr::Integer(0)))));
@@ -321,19 +328,21 @@ impl Body<'_, '_, '_> {
                 self.collection_requests.insert(name, (ty, count, length, shape, block));
             }
         }
-        let atomic_updates =
-            contributes && compacts.is_empty() && folds.is_empty() && self.atomic_contributions(body[1])?;
+        let atomic_updates = contributes
+            && compacts.is_empty()
+            && folds.is_empty()
+            && self.atomic_contributions(operation)?;
         if !compacts.is_empty() || (contributes && !atomic_updates) {
             let mut initial = vec![Self::number(0); compacts.len()];
             initial.extend(folds.iter().flat_map(|fold| fold.neutral.clone()));
-            let statements = body[0];
+            let statements = region;
             let run = |body: &mut Self| {
                 let outer = if folds.is_empty() { &axes[..0] } else { &axes[..axes.len() - 1] };
                 let inner = if folds.is_empty() { &axes[..] } else { &axes[axes.len() - 1..] };
                 let state = body.domain_axis(
                     outer,
                     0,
-                    domain[0],
+                    ordinal_name,
                     vec![],
                     Self::number(0),
                     initial.clone(),
@@ -341,11 +350,11 @@ impl Body<'_, '_, '_> {
                     &mut |body, coordinates, state| {
                         let mut initial = state[..compacts.len()].to_vec();
                         initial.extend(folds.iter().flat_map(|fold| fold.neutral.clone()));
-                        let ordinal = body.named(domain[0])?;
+                        let ordinal = body.named(ordinal_name)?;
                         let state = body.domain_axis(
                             inner,
                             0,
-                            domain[0],
+                            ordinal_name,
                             coordinates.to_vec(),
                             ordinal,
                             initial,
@@ -353,7 +362,7 @@ impl Body<'_, '_, '_> {
                             &mut |body, _, state| {
                                 let folded = body.parallel_lane(
                                     statements,
-                                    arguments[1],
+                                    domain,
                                     &collects,
                                     &folds,
                                     state[compacts.len()..].to_vec(),
@@ -365,8 +374,7 @@ impl Body<'_, '_, '_> {
                                         keep,
                                         |body| {
                                             for &(name, result) in outputs {
-                                                let yielded = body.query().fields("Yield", result)?;
-                                                let Some(value) = body.operand(yielded[1])? else {
+                                                let Some(value) = body.operand(result)? else {
                                                     return Err(error(
                                                         "compaction value has no SSA representation",
                                                     ));
@@ -405,7 +413,7 @@ impl Body<'_, '_, '_> {
                         first_group,
                         |body| {
                             body.compact_group(
-                                arguments[1],
+                                domain,
                                 statements,
                                 &collects,
                                 &compacts,
@@ -458,10 +466,7 @@ impl Body<'_, '_, '_> {
             let native = enabled
                 && !folds.is_empty()
                 && folds.iter().try_fold(true, |native, fold| {
-                    let addition = self
-                        .query()
-                        .lookup("NativeAddition", (fold.reducer,))?
-                        .is_some_and(|value| self.query().0.value_to_base::<bool>(value));
+                    let addition = self.query().contains("NativeAddition", fold.reducer)?;
                     Ok::<_, OptimizeError>(
                         native
                             && addition
@@ -519,7 +524,7 @@ impl Body<'_, '_, '_> {
             let Some(dispatch) = dispatch else {
                 return Err(error("scan epilogue dispatch missing"));
             };
-            let axis = self.query().fields("DenseAxis", axes[0])?;
+            let axis = axes[0];
             let lane = self.local_id()?;
             let start = self.binary(BinaryOperator::Add, range.0.clone(), lane)?;
             self.counted(
@@ -528,35 +533,34 @@ impl Body<'_, '_, '_> {
                 Self::number(dispatch.width.get()),
                 vec![],
                 |body_lower, index, _| {
-                    body_lower.values.insert(axis[0], index.clone());
-                    body_lower.values.insert(domain[0], index);
-                    body_lower.parallel_lane(body[0], arguments[1], &collects, &folds, vec![])
+                    body_lower.values.insert(axis.name, index.clone());
+                    body_lower.values.insert(ordinal_name, index);
+                    body_lower.parallel_lane(region, domain, &collects, &folds, vec![])
                 },
             )?
         } else {
             self.domain_axis(
                 outer,
                 0,
-                domain[0],
+                ordinal_name,
                 Vec::new(),
                 Self::number(0),
                 initial,
                 partition,
                 &mut |body_lower, coordinates, _| {
                     if folds.is_empty() {
-                        body_lower.parallel_lane(body[0], arguments[1], &collects, &folds, vec![])?;
+                        body_lower.parallel_lane(region, domain, &collects, &folds, vec![])?;
                         return Ok(vec![]);
                     }
-                    let outer_domain = body_lower.query().required("OuterDomain", (arguments[1],))?;
-                    let total_coordinates = body_lower.domain_coordinates(outer_domain)?;
-                    let ordinal = body_lower.named(domain[0])?;
+                    let total_coordinates = coordinates.to_vec();
+                    let ordinal = body_lower.named(ordinal_name)?;
                     let state = if let Some(dispatch) = dispatch {
                         body_lower.cooperative_segment(
-                            arguments[1],
+                            domain,
                             axes[axes.len() - 1],
-                            domain[0],
+                            ordinal_name,
                             ordinal,
-                            body[0],
+                            region,
                             &collects,
                             &folds,
                             dispatch.width.get(),
@@ -572,13 +576,13 @@ impl Body<'_, '_, '_> {
                         body_lower.domain_axis(
                             &axes[axes.len() - 1..],
                             0,
-                            domain[0],
+                            ordinal_name,
                             coordinates.to_vec(),
                             ordinal,
                             initial,
                             None,
                             &mut |body_lower, _, state| {
-                                body_lower.parallel_lane(body[0], arguments[1], &collects, &folds, state)
+                                body_lower.parallel_lane(region, domain, &collects, &folds, state)
                             },
                         )?
                     };
@@ -682,7 +686,7 @@ impl Body<'_, '_, '_> {
             let capacity = capacity.map(Expr::Integer).unwrap_or_else(|| length.clone());
             let bytes = Expr::Multiply(Box::new(capacity), Box::new(Expr::Integer(stride.into())));
             let (_, storage) = self.device_buffer_at(&element, bytes, count, block)?;
-            self.host_lengths.insert(storage.value.clone(), length.clone());
+            self.host_shapes.insert(storage.value.clone(), vec![length.clone()]);
             return Ok(storage);
         }
         let capacity = self.integer_literal(&count).or(capacity).or_else(|| match ty.array_size() {
@@ -781,7 +785,6 @@ impl Body<'_, '_, '_> {
             value: value.into(),
             ty,
         };
-        self.host_lengths.insert(value.value, first.1.clone());
         self.host_shapes.insert(
             value.value,
             shape.iter().map(|(_, extent)| extent.clone()).collect(),
@@ -888,8 +891,7 @@ impl Body<'_, '_, '_> {
     }
 
     fn domain_coordinates(&mut self, domain: Value) -> Result<Vec<Typed>, OptimizeError> {
-        let indices = self.query().required("DomainIndices", (domain,))?;
-        self.query().vector(indices)?.into_iter().map(|index| self.index_expression(index)).collect()
+        domain_axes(self.query(), domain)?.into_iter().map(|axis| self.named(axis.name)).collect()
     }
 
     fn parallel_lane(
@@ -901,17 +903,18 @@ impl Body<'_, '_, '_> {
         state: Vec<Typed>,
     ) -> Result<Vec<Typed>, OptimizeError> {
         let coordinates = self.domain_coordinates(domain)?;
-        self.statements(statements)?;
+        self.statements(&self.query().operations(statements)?)?;
         for &(output, result) in collects {
-            let yielded = self.query().fields("Yield", result)?;
-            let value = self.query().fields("ValueOperand", yielded[1])?;
-            self.write_atom(output, &coordinates, value[0])?;
+            let Some(value) = self.operand(result)? else {
+                return Err(error("collected result is a capability"));
+            };
+            self.write_array(output, &coordinates, value)?;
         }
         let mut state = state.into_iter();
         let mut next = Vec::new();
         for fold in folds {
             let previous = state.by_ref().take(fold.neutral.len()).collect::<Vec<_>>();
-            let contribution = self.results(fold.values)?;
+            let contribution = self.yield_values(&fold.values)?;
             let mut args = previous.clone();
             args.extend(contribution);
             let combined = self.lambda(fold.reducer, args)?;
@@ -930,7 +933,7 @@ impl Body<'_, '_, '_> {
 
     fn domain_axis(
         &mut self,
-        axes: &[Value],
+        axes: &[Axis],
         depth: usize,
         flat: Value,
         coordinates: Vec<Typed>,
@@ -941,35 +944,29 @@ impl Body<'_, '_, '_> {
     ) -> Result<Vec<Typed>, OptimizeError> {
         if depth == 0 && !axes.is_empty() {
             if let Some((start, step)) = &partition {
-                let dense = axes
+                let shape = axes
                     .iter()
-                    .map(|&axis| self.query().enode("DenseAxis", axis))
-                    .collect::<Result<Option<Vec<_>>, _>>()?;
-                if let Some(dense) = dense {
-                    let shape = dense
-                        .iter()
-                        .map(|axis| self.index_expression(axis[1]))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let count = self.shape_count(&shape)?;
-                    let base = self.binary(BinaryOperator::Multiply, ordinal, count.clone())?;
-                    return self.counted(
-                        start.clone(),
-                        count,
-                        step.clone(),
-                        initial,
-                        |body, index, state| {
-                            let indices = body.coordinates(index.clone(), &shape)?;
-                            for (axis, index) in dense.iter().zip(&indices) {
-                                body.values.insert(axis[0], index.clone());
-                            }
-                            let ordinal = body.binary(BinaryOperator::Add, base, index)?;
-                            body.values.insert(flat, ordinal);
-                            let mut coordinates = coordinates;
-                            coordinates.extend(indices);
-                            emit(body, &coordinates, state)
-                        },
-                    );
-                }
+                    .map(|axis| self.index_expression(axis.extent))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let count = self.shape_count(&shape)?;
+                let base = self.binary(BinaryOperator::Multiply, ordinal, count.clone())?;
+                return self.counted(
+                    start.clone(),
+                    count,
+                    step.clone(),
+                    initial,
+                    |body, index, state| {
+                        let indices = body.coordinates(index.clone(), &shape)?;
+                        for (axis, index) in axes.iter().zip(&indices) {
+                            body.values.insert(axis.name, index.clone());
+                        }
+                        let ordinal = body.binary(BinaryOperator::Add, base, index)?;
+                        body.values.insert(flat, ordinal);
+                        let mut coordinates = coordinates;
+                        coordinates.extend(indices);
+                        emit(body, &coordinates, state)
+                    },
+                );
             }
         }
         let Some(&axis) = axes.get(depth) else {
@@ -993,11 +990,10 @@ impl Body<'_, '_, '_> {
         })
     }
 
-    fn axis_bounds(&mut self, axis: Value, ordinal: Typed) -> Result<(Value, Typed, Typed), OptimizeError> {
-        let fields = self.query().fields("DenseAxis", axis)?;
-        let count = self.index_expression(fields[1])?;
+    fn axis_bounds(&mut self, axis: Axis, ordinal: Typed) -> Result<(Value, Typed, Typed), OptimizeError> {
+        let count = self.index_expression(axis.extent)?;
         let base = self.binary(BinaryOperator::Multiply, ordinal, count.clone())?;
-        Ok((fields[0], base, count))
+        Ok((axis.name, base, count))
     }
 
     pub(super) fn workgroups(
@@ -1072,7 +1068,7 @@ impl Body<'_, '_, '_> {
     fn cooperative_segment(
         &mut self,
         domain: Value,
-        axis: Value,
+        axis: Axis,
         flat: Value,
         ordinal: Typed,
         statements: Value,
@@ -1100,15 +1096,16 @@ impl Body<'_, '_, '_> {
                 let values = body.branch(
                     active.clone(),
                     |body| {
-                        body.statements(statements)?;
+                        body.statements(&body.query().operations(statements)?)?;
                         for &(output, result) in collects {
-                            let yielded = body.query().fields("Yield", result)?;
-                            let value = body.query().fields("ValueOperand", yielded[1])?;
-                            body.write_atom(output, &coordinates, value[0])?;
+                            let Some(value) = body.operand(result)? else {
+                                return Err(error("collected result is a capability"));
+                            };
+                            body.write_array(output, &coordinates, value)?;
                         }
                         let mut values = Vec::new();
                         for fold in folds {
-                            let contributions = body.results(fold.values)?;
+                            let contributions = body.yield_values(&fold.values)?;
                             for (value, neutral) in contributions.into_iter().zip(&fold.neutral) {
                                 values.push(body.canonical_value(value, &neutral.ty)?);
                             }
@@ -1238,10 +1235,10 @@ impl Body<'_, '_, '_> {
         compacts: &[(Value, Vec<(Value, Value)>)],
         width: u32,
     ) -> Result<Typed, OptimizeError> {
-        let space = self.query().fields("IterationSpace", domain)?;
-        let axes = self.query().vector(space[1])?;
-        let axis = self.query().fields("DenseAxis", axes[0])?;
-        let count = self.index_expression(axis[1])?;
+        let axes = domain_axes(self.query(), domain)?;
+        let ordinal_name = self.query().required("DomainOrdinal", domain)?;
+        let axis = axes[0];
+        let count = self.index_expression(axis.extent)?;
         let lane = self.local_id()?;
         let neutral = vec![Self::number(0); compacts.len()];
         let totals = self.counted(
@@ -1251,8 +1248,8 @@ impl Body<'_, '_, '_> {
             neutral.clone(),
             |body, tile, carried| {
                 let index = body.binary(BinaryOperator::Add, tile, lane.clone())?;
-                body.values.insert(space[0], index.clone());
-                body.values.insert(axis[0], index.clone());
+                body.values.insert(ordinal_name, index.clone());
+                body.values.insert(axis.name, index.clone());
                 let active = body.binary(BinaryOperator::Less, index, count)?;
                 let flags = compacts
                     .iter()
@@ -1271,8 +1268,7 @@ impl Body<'_, '_, '_> {
                         body.store_place(*flag, keep)?;
                         let mut fields = Vec::new();
                         for &(name, result) in outputs {
-                            let result = body.query().fields("Yield", result)?;
-                            let Some(value) = body.operand(result[1])? else {
+                            let Some(value) = body.operand(result)? else {
                                 return Err(error("compaction payload has no value"));
                             };
                             let temporary = body.local_place(value.ty.clone())?;

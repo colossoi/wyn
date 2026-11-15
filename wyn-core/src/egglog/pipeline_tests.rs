@@ -42,9 +42,9 @@ fn host_preparation_preserves_the_authoritative_memory_program() {
     let tlc =
         crate::compile_thru_tlc("entry main(xs:[]i32,bias:i32) []i32=map(|x|x+bias*bias,xs)").unwrap();
     let program = super::optimize_with_policy(interfaces_for_test(&tlc), ScalarOptimization::Full).unwrap();
-    let before = Query(&program.graph).row("CurrentProgram", |_| true).unwrap().unwrap()[0];
+    let before = super::dataflow::edit::revision(&program.graph).unwrap();
     let program = super::prepare_host(program).unwrap();
-    let after = Query(&program.program.graph).row("CurrentProgram", |_| true).unwrap().unwrap()[0];
+    let after = super::dataflow::edit::revision(&program.program.graph).unwrap();
     assert_eq!(before, after, "host readout must not rebuild executable bodies");
     let ssa = super::to_ssa(program, crate::CodegenTarget::Portable).unwrap();
     assert!(ssa.entry_points.iter().any(|entry| entry.inputs.iter().any(|input| input.name == "bias")));
@@ -60,22 +60,10 @@ fn scalar_policy_controls_optional_templates() {
         let mut scalars = program.graph.clone();
         super::scalar::run(&mut scalars, policy).unwrap();
         let query = Query(&scalars);
-        let root = query.row("CurrentProgram", |_| true).unwrap().unwrap()[0];
-        let program = query.fields("MemoryProgram", root).unwrap();
-        let entry = query.fields("EntryPoint", query.vector(program[2]).unwrap()[0]).unwrap()[0];
-        let function = query
-            .vector(program[0])
-            .unwrap()
-            .into_iter()
-            .find(|&function| query.fields("DefineFunction", function).unwrap()[0] == entry)
-            .unwrap();
-        let syntax = query.constructor("FunctionRoot", (function,)).unwrap().unwrap();
         let mut calls = 0;
         query
-            .for_each("ContainsExp", |row| {
-                if row[0] == syntax && query.enode("Call", row[1])?.is_some() {
-                    calls += 1;
-                }
+            .for_each("LiveOperation", |row| {
+                calls += usize::from(query.contains("CallOperation", row[0])?);
                 Ok(())
             })
             .unwrap();
@@ -265,25 +253,25 @@ fn placed_source(source: &str) -> crate::ssa::stage::Reachable {
 fn scalar_admission_uses_ir_literal_edits() {
     let tlc = crate::compile_thru_tlc("entry main(x:i32) i32=x+1").unwrap();
     let mut program = interfaces_for_test(&tlc);
-    program
-        .graph
-        .parse_and_run_program(
-            None,
-            r#"
-        (ruleset test-edit)
-        (rule ((CurrentProgram program) (ProgramFunction program function)
-            (ContainsStm (FunctionRoot function) statement)
-            (= statement (Let id pattern certs (PrimOp "+" arguments))))
-          ((ScalarReplacement program statement (LiteralBits (I32) 7))) :ruleset test-edit)
-        (run-schedule test-edit)
-    "#,
-        )
-        .unwrap();
+    let operation = Query(&program.graph).first("ScalarPayload").unwrap().unwrap()[0];
+    super::dataflow::edit::set_code(
+        &mut program.graph,
+        operation,
+        super::dataflow::ir::Code::Constant {
+            ty: crate::types::i32(),
+            bits: 7,
+        },
+    )
+    .unwrap();
+    super::dataflow::edit::inputs(&mut program.graph, operation, &[]).unwrap();
     scalar::run(&mut program.graph, ScalarOptimization::Basic).unwrap();
-    program.graph.parse_and_run_program(None, r#"
-        (check (CurrentProgram program) (ProgramFunction program function)
-            (ContainsStm (FunctionRoot function) (Let id pattern certs (Use (ValueOperand (LiteralBits (I32) 7))))))
-    "#).unwrap();
+    let root = super::test_graph::root(&program.graph);
+    let query = Query(&program.graph);
+    let result = query.required("RegionYield", (root, 0_i64)).unwrap();
+    assert_eq!(
+        program.graph.value_to_base::<i64>(query.required("ConstantValue", result).unwrap()),
+        7
+    );
 }
 
 // Parallel emission contracts live in memory_ir_parallel_*.wyn CLI fixtures.

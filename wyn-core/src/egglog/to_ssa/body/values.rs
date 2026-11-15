@@ -28,10 +28,8 @@ impl Body<'_, '_, '_> {
                 let path = self.query().constructor("FieldPath", (root, i as i64))?;
                 let component = if let (Some(initial), Some(path)) = (initial, path) {
                     self.query()
-                        .row("ProductComponent", |row| {
-                            row[0] == self.function && row[1] == initial && row[2] == path
-                        })?
-                        .map(|row| row[3])
+                        .row("ProductComponent", |row| row[0] == initial && row[1] == path)?
+                        .map(|row| row[2])
                 } else {
                     None
                 };
@@ -43,8 +41,8 @@ impl Body<'_, '_, '_> {
         if value.ty.array_variant().is_some_and(types::is_array_variant_view) {
             let exact = if let Some(initial) = initial {
                 self.query()
-                    .lookup("LogicalOuterCount", (self.function, initial))?
-                    .map(|count| self.query().lookup("StaticIndex", (self.function, count)))
+                    .lookup("LogicalOuterCount", initial)?
+                    .map(|count| self.query().lookup("StaticIndex", count))
                     .transpose()?
                     .flatten()
                     .and_then(|size| usize::try_from(self.query().0.value_to_base::<i64>(size)).ok())
@@ -116,7 +114,7 @@ impl Body<'_, '_, '_> {
             Box::new(Expr::Integer(stride.into())),
         );
         let (_, payload) = self.device_buffer(&element, bytes, total)?;
-        self.host_lengths.insert(payload.value, host_total);
+        self.host_shapes.insert(payload.value, vec![host_total]);
         let mut offset = self.literal(0, &types::i32())?;
         let mut views = Vec::new();
         for (array, length) in arrays.into_iter().zip(lengths) {
@@ -298,7 +296,7 @@ impl Body<'_, '_, '_> {
         &self,
         array: &Typed,
     ) -> Result<Expr, OptimizeError> {
-        if let Some(length) = self.host_lengths.get(&array.value) {
+        if let Some(length) = self.host_shapes.get(&array.value).and_then(|shape| shape.first()) {
             return Ok(length.clone());
         }
         if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = &array.ty {
@@ -487,22 +485,38 @@ impl Body<'_, '_, '_> {
         {
             return Ok(value);
         }
-        if value.ty.is_array() && ty.array_variant().is_some_and(types::is_array_variant_composite) {
-            if let Some(Type::Constructed(TypeName::Size(count), _)) = ty.array_size() {
-                let count = u32::try_from(*count).map_err(|_| error("array capacity exceeds u32"))?;
-                let destination = self.local_array(ty.clone())?;
-                self.counted(
-                    Self::number(0),
-                    Self::number(count),
-                    Self::number(1),
-                    vec![],
-                    |body, index, _| {
-                        let element = body.index(value.clone(), index.clone())?;
-                        body.store(destination.clone(), index, element)?;
-                        Ok(vec![])
-                    },
-                )?;
-                return self.snapshot(destination);
+        if value.ty.is_array()
+            && ty.array_variant().is_some_and(|variant| {
+                types::is_array_variant_composite(variant) || types::is_array_variant_bounded(variant)
+            })
+        {
+            if let Some(Type::Constructed(TypeName::Size(capacity), _)) = ty.array_size() {
+                let bounded = ty.array_variant().is_some_and(types::is_array_variant_bounded);
+                let count = if bounded {
+                    if !matches!(value.ty.array_size(), Some(Type::Constructed(TypeName::Size(size), _)) if size <= capacity)
+                    {
+                        return Err(error(
+                            "bounded array conversion cannot narrow or assume a capacity",
+                        ));
+                    }
+                    self.array_length(value.clone())?
+                } else {
+                    Self::number(u32::try_from(*capacity).map_err(|_| error("array capacity exceeds u32"))?)
+                };
+                let Some(element) = ty.elem_type() else {
+                    return Err(error("array conversion element missing"));
+                };
+                let storage =
+                    if bounded { types::sized_array(*capacity, element.clone()) } else { ty.clone() };
+                let destination = self.local_array(storage)?;
+                self.copy_elements(value, destination.clone(), count.clone())?;
+                let array = self.snapshot(destination)?;
+                return if bounded {
+                    let count = self.cast(count, &types::i32())?;
+                    self.op(OpTag::Tuple, vec![array, count], ty.clone())
+                } else {
+                    Ok(array)
+                };
             }
         }
         if matches!(ty, Type::Constructed(TypeName::Int(_) | TypeName::UInt(_), _)) {
@@ -736,7 +750,11 @@ impl Body<'_, '_, '_> {
             };
             fields.remove(2);
             let ty = Type::Constructed(TypeName::Array, fields);
-            let host_shape = self.host_shapes.get(&array.value).map(|shape| shape[1..].to_vec());
+            let host_shape = self
+                .host_shapes
+                .get(&array.value)
+                .filter(|shape| shape.len() > 1)
+                .map(|shape| shape[1..].to_vec());
             let mut operands = vec![offset];
             operands.extend_from_slice(&shape[1..]);
             operands.push(array);
@@ -746,7 +764,6 @@ impl Body<'_, '_, '_> {
                 ty,
             )?;
             if let Some(shape) = host_shape {
-                self.host_lengths.insert(row.value, shape[0].clone());
                 self.host_shapes.insert(row.value, shape);
             }
             return Ok(row);

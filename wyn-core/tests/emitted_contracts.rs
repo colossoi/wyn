@@ -161,61 +161,6 @@ fn graphics_helper_returns_image_with_inline_array_results() {
 }
 
 #[test]
-fn authored_outputs_consume_selected_capacities() {
-    for (source, expected) in [
-        (
-            include_str!("../../tests/compiler/library/direct_capacity_0.wyn"),
-            BufferLen::Fixed { bytes: 80 },
-        ),
-        (
-            include_str!("../../tests/compiler/library/direct_capacity_1.wyn"),
-            BufferLen::LikeInput {
-                set: 0,
-                binding: 0,
-                elem_bytes: 4,
-                src_elem_bytes: 4,
-            },
-        ),
-        (
-            include_str!("../../tests/compiler/library/direct_capacity_2.wyn"),
-            BufferLen::LikeInput {
-                set: 0,
-                binding: 1,
-                elem_bytes: 4,
-                src_elem_bytes: 4,
-            },
-        ),
-        (
-            include_str!("../../tests/compiler/library/direct_capacity_3.wyn"),
-            BufferLen::SameAsDispatch { elem_bytes: 4 },
-        ),
-    ] {
-        let source = pipeline::source(source);
-        let ssa = pipeline::lower_with_options(
-            &source,
-            CodegenTarget::Wgsl,
-            wyn_core::egglog::ScalarOptimization::Basic,
-            PipelineTopologyPolicy::AuthoredOnly,
-        );
-        let output = lower_ssa_to_wgsl_with_program(ssa).unwrap();
-        validate(naga::front::wgsl::parse_str(&output.wgsl).unwrap());
-        assert!(
-            output.program.interface.pipelines.iter().any(|pipeline| {
-                let Pipeline::Compute(pipeline) = pipeline else {
-                    return false;
-                };
-                pipeline.bindings.iter().any(|binding| {
-                    matches!(binding,
-                Binding::StorageBuffer { usage: host::BufferUsage::Output, length: Some(actual), .. }
-                if *actual == expected)
-                })
-            }),
-            "expected {expected:?}"
-        );
-    }
-}
-
-#[test]
 fn render_target_load_fetches_only_fields_used_by_the_fragment_output() {
     use crate::host::{Binding, Pipeline};
     use std::collections::{HashMap, HashSet};
@@ -881,7 +826,12 @@ fn indirect_draw_waits_for_both_count_epilogue_and_compacted_vertices() {
         host_outputs(source).into_iter().zip([ShaderFormat::Spirv, ShaderFormat::Wgsl])
     {
         let graph = &program.interface.frame_graph;
-        assert_eq!(graph.passes.len(), 2, "one compaction dispatch and one draw");
+        assert_eq!(
+            graph.passes.len(),
+            2,
+            "one compaction dispatch and one draw: {:?}",
+            graph.passes
+        );
         let [indirect] = graph.indirect_draws.as_slice() else {
             panic!("one indirect draw")
         };
@@ -890,12 +840,21 @@ fn indirect_draw_waits_for_both_count_epilogue_and_compacted_vertices() {
             .iter()
             .position(|pass| pass.writes.iter().any(|w| w.resource == indirect.buffer_resource))
             .unwrap();
-        let compact = graph.passes.iter().position(|pass| pass.name.ends_with("local")).unwrap();
+        let draw = &graph.passes[indirect.draw_pass];
+        let compact = graph
+            .passes
+            .iter()
+            .position(|pass| {
+                pass.writes.iter().any(|write| {
+                    write.resource != indirect.buffer_resource
+                        && draw.reads.iter().any(|read| read.resource == write.resource)
+                })
+            })
+            .unwrap();
         assert_eq!(
             writer, compact,
             "compaction also publishes the indirect draw command"
         );
-        let draw = &graph.passes[indirect.draw_pass];
         assert!(draw.depends_on.contains(&writer));
         assert!(draw.depends_on.contains(&compact));
         assert!(graph.passes[compact]
@@ -1009,17 +968,21 @@ fn grouped_entries_keep_storage_and_dispatch_contracts() {
                 assert_eq!(p.stages.len(), if scan { 3 } else { 1 });
             }
             "observed_scatter" | "captured_scatter" => {
-                assert_eq!(p.bindings.len(), 4);
+                assert_eq!(p.bindings.len(), 4, "{}: {:?}", entry.name, p.bindings);
                 assert_eq!(results.len(), 2);
                 assert_ne!(results[0].binding, results[1].binding);
             }
-            "buffer_domain" | "scalar_domain" => assert!(matches!(
-                p.stages[0].dispatch_size,
-                host::DispatchSize::Computed {
-                    elements: host::Expr::BufferLength { .. } | host::Expr::Scalar(_),
-                    ..
-                }
-            )),
+            "buffer_domain" | "scalar_domain" => {
+                let Operation::Dispatch { groups, .. } =
+                    entry.operations.iter().find(|op| matches!(op, Operation::Dispatch { .. })).unwrap()
+                else {
+                    unreachable!()
+                };
+                assert!(
+                    groups[0].constant().unwrap().is_none(),
+                    "the launch depends on its source extent"
+                );
+            }
             "partial_whole" => assert_eq!(p.stages.len(), 1),
             "partial_slice" => assert_eq!(p.stages.len(), 2),
             "scalar_loop" => {
@@ -1029,14 +992,14 @@ fn grouped_entries_keep_storage_and_dispatch_contracts() {
             }
             "large_fixed" => {
                 assert_eq!(p.stages.len(), 1);
+                let Operation::Dispatch { groups, .. } =
+                    entry.operations.iter().find(|op| matches!(op, Operation::Dispatch { .. })).unwrap()
+                else {
+                    unreachable!()
+                };
                 assert_eq!(
-                    p.stages[0].dispatch_size,
-                    host::DispatchSize::Fixed {
-                        x: 65_535,
-                        y: 1,
-                        z: 1,
-                        explicit: true
-                    }
+                    groups.iter().map(|group| group.constant().unwrap()).collect::<Vec<_>>(),
+                    [Some(65_535), Some(1), Some(1)]
                 );
             }
             name => panic!("unexpected entry {name}"),

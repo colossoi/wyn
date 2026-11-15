@@ -144,7 +144,7 @@ fn tuple_loop_outputs_and_scalar_bounds_reach_host_backends() {
                     assert!(p.bindings.iter().any(|b| matches!(b,
                 Binding::StorageBuffer { set, binding, length: Some(BufferLen::Fixed { bytes }), .. }
                     if (*set, *binding) == (result.set, result.binding) && *bytes == u64::from(*stride) * 2
-            )));
+            )), "{} result {}: {:?}", result.entry, result.result, p.bindings);
                 }
             }
             for entry in &program.entries {

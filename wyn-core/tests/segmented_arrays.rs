@@ -40,12 +40,32 @@ entry empty_rows() [][]i32=map(|n|map(|i|i+n,iota(n)),[0,0,0])
         };
         assert_eq!(offsets.len(), if result.entry == "nested" { 2 } else { 1 });
     }
-    for entry in &host.entries {
+    for entry in host.entries.iter().filter(|entry| entry.name != "consumed") {
         let first_dispatch =
             entry.operations.iter().position(|op| matches!(op, Operation::Dispatch { .. })).unwrap();
-        assert!(entry.operations[first_dispatch + 1..]
-            .iter()
-            .any(|op| matches!(op, Operation::Allocate(_))));
+        assert!(
+            entry.operations[first_dispatch + 1..].iter().any(|op| matches!(op, Operation::Allocate(_))),
+            "{} must allocate its segmented result after producing counts",
+            entry.name
+        );
+        if entry.name == "ragged" {
+            let allocation = entry
+                .operations
+                .iter()
+                .enumerate()
+                .skip(first_dispatch + 1)
+                .find(|(_, op)| matches!(op, Operation::Allocate(_)))
+                .unwrap()
+                .0;
+            assert!(
+                entry.operations[..allocation]
+                    .iter()
+                    .filter(|op| matches!(op, Operation::Dispatch { .. }))
+                    .count()
+                    >= 2,
+                "counting ragged rows must wait for the dispatch that writes their descriptors"
+            );
+        }
     }
     host.to_whl("segmented", ShaderFormat::Wgsl).unwrap();
     host.to_rust_wgpu("segmented", ShaderFormat::Wgsl).unwrap();

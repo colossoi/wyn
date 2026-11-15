@@ -1,5 +1,6 @@
-//! Read dispatch interfaces from the scheduled statement tree for final emission.
-use super::{output_error as error, query::Query, OptimizeError};
+//! Read selected dispatch interfaces from flat operation and region cells.
+use super::query::Query;
+use super::{output_error as error, to_ssa, OptimizeError};
 use crate::ssa::layout::{storage_elem_stride, storage_value_type};
 use crate::LookupMap;
 use egglog_engine::{EGraph, Value};
@@ -23,172 +24,85 @@ impl Execution {
     pub fn select(graph: &EGraph) -> Result<Self, OptimizeError> {
         let query = Query(graph);
         let mut execution = Self::default();
-        query.for_each("CurrentProgram", |program| {
-            let Some(fields) = query.enode("MemoryProgram", program[0])? else {
-                return Err(error("invalid memory program"));
-            };
-            let functions = query.vector(fields[0])?;
-            for entry in query.vector(fields[2])? {
-                let entry = query.fields("EntryPoint", entry)?;
-                let mut matched = false;
-                for &definition in &functions {
-                    let Some(function) = query.enode("DefineFunction", definition)? else {
-                        return Err(error("invalid memory function"));
-                    };
-                    if function[0] == entry[0] {
-                        let owner = graph.value_to_base::<i64>(entry[1]);
-                        let mut stages = Vec::new();
-                        execution.body(query, definition, function[3], &mut stages)?;
-                        execution.entries.insert(owner, stages);
-                        matched = true;
-                    }
-                }
-                if !matched {
-                    return Err(error("entry function is missing"));
-                }
-            }
+        query.for_function("EntryOrder", |keys, owner| {
+            let root = query.required("FunctionRoot", keys[0])?;
+            let mut stages = Vec::new();
+            execution.region(query, root, &mut stages)?;
+            execution.entries.insert(graph.value_to_base::<i64>(owner), stages);
             Ok(())
         })?;
         Ok(execution)
     }
 
-    fn body(
+    fn region(
         &mut self,
         query: Query<'_>,
-        function: Value,
-        body: Value,
+        region: Value,
         stages: &mut Vec<Value>,
     ) -> Result<(), OptimizeError> {
-        let Some(body) = query.enode("Block", body)? else {
-            return Err(error("invalid memory body"));
-        };
-        for statement in query.vector(body[0])? {
-            let Some(fields) = query.enode("Let", statement)? else {
-                return Err(error("invalid memory statement"));
-            };
-            let expression = fields[3];
-            let grid = if let Some(parallel) = query.enode("Parallel", expression)? {
-                query.enode("DeviceKernel", parallel[0])?.map(|kernel| kernel[0])
-            } else {
-                None
-            };
+        for operation in query.operations(region)? {
+            let selected = query.lookup("OperationExecution", operation)?;
+            let grid =
+                selected.map(|selected| query.enode("DeviceKernel", selected)).transpose()?.flatten();
             if let Some(grid) = grid {
-                if query.enode("AutomaticGrid", grid)?.is_some() {
-                    let parallel = query.fields("Parallel", expression)?;
-                    let domain = query.fields("IterationSpace", parallel[1])?;
-                    let axes = query.vector(domain[1])?;
-                    if axes.is_empty() {
-                        return Err(error("automatic dispatch requires an iteration axis"));
-                    }
-                    let body = query.fields("ParallelBlock", parallel[2])?;
-                    let mut indexed_updates = false;
-                    let mut state_bytes = 0u64;
-                    for clause in query.vector(body[1])? {
-                        indexed_updates |= query.enode("Contribute", clause)?.is_some();
-                        if let Some(fold) = query.enode("Fold", clause)? {
-                            let reducer = query.fields("Reduction", fold[1])?;
-                            let lambda = query.fields("FunctionBody", reducer[2])?;
-                            for (i, (parameter, neutral)) in query
-                                .vector(lambda[0])?
-                                .into_iter()
-                                .zip(query.vector(reducer[1])?)
-                                .enumerate()
-                            {
-                                let parameter = query.fields("Parameter", parameter)?;
-                                let Some((_, ty)) = super::to_ssa::runtime_binding(query, parameter[0])?
-                                else {
-                                    return Err(error("collective state has no runtime type"));
-                                };
-                                let ty = super::to_ssa::reducer_state_type(
-                                    query, function, reducer[2], i, neutral, ty,
-                                )?;
-                                let bytes = storage_elem_stride(&storage_value_type(&ty)).unwrap_or(256);
-                                state_bytes = state_bytes.saturating_add(u64::from(bytes));
-                            }
-                        }
-                    }
-                    // Target 8 KiB of shared state, retaining at least one subgroup.
-                    let mut width = if indexed_updates {
-                        64
-                    } else if state_bytes > 0 {
-                        [256, 128, 64, 32]
-                            .into_iter()
-                            .find(|width| state_bytes.saturating_mul(u64::from(*width)) <= 8192)
-                            .unwrap_or(32)
-                    } else {
-                        128
-                    };
-                    if axes.len() > 1 && state_bytes > 0 {
-                        let axis = query.fields("DenseAxis", axes[axes.len() - 1])?;
-                        if let Some(size) = query.lookup("StaticIndex", (function, axis[1]))? {
-                            if let Ok(size) = u32::try_from(query.0.value_to_base::<i64>(size).max(0)) {
-                                if let Some(size) = size.checked_next_power_of_two() {
-                                    width = width.min(size.max(32));
-                                }
-                            }
-                        }
-                    }
-                    let Some(width) = NonZeroU32::new(width) else {
-                        return Err(error("invalid workgroup size"));
-                    };
-                    self.dispatches.insert(
-                        statement,
-                        Dispatch {
-                            groups: None,
-                            local_size: (width.get(), 1, 1),
-                            width,
-                            grid: None,
-                        },
-                    );
-                    stages.push(statement);
-                    continue;
-                }
-                let Some(grid) = query.enode("Grid3D", grid)? else {
-                    return Err(error("unresolved dispatch grid"));
-                };
-                let sizes = query.vector(grid[1])?;
-                let [x, y, z] = sizes.as_slice() else {
-                    return Err(error("dispatch needs three local dimensions"));
-                };
-                let [x, y, z] = [*x, *y, *z].map(|n| constant(query, n));
-                let (Some(x), Some(y), Some(z)) = (x?, y?, z?) else {
-                    return Err(error("local dimensions must be constant"));
-                };
-                let local_size = (x, y, z);
-                let width = x.checked_mul(y).and_then(|n| n.checked_mul(z)).and_then(NonZeroU32::new);
+                let width = u32::try_from(
+                    query.0.value_to_base::<i64>(query.required("OperationWidth", operation)?),
+                )
+                .ok()
+                .and_then(NonZeroU32::new);
                 let Some(width) = width else {
                     return Err(error("invalid workgroup size"));
                 };
-                let groups = query.vector(grid[0])?;
-                let [x, y, z] = groups.as_slice() else {
-                    return Err(error("dispatch needs three group dimensions"));
-                };
-                let groups = [*x, *y, *z];
-                let [x, y, z] = groups.map(|n| constant(query, n));
-                let grid = match (x?, y?, z?) {
-                    (Some(x), Some(y), Some(z)) => Some((x, y, z)),
-                    _ => None,
+                let (groups, local_size, grid) = if query.enode("AutomaticGrid", grid[0])?.is_some() {
+                    let domain = query.required("OperationDomain", operation)?;
+                    if super::analysis::count(query, "DomainRank", domain)? == 0 {
+                        return Err(error("automatic dispatch requires an iteration axis"));
+                    }
+                    (None, (width.get(), 1, 1), None)
+                } else {
+                    let fields = query.fields("Grid3D", grid[0])?;
+                    let groups = triple(query, fields[0])?;
+                    let local = triple(query, fields[1])?;
+                    let [x, y, z] = local.map(|index| constant(query, index));
+                    let (Some(x), Some(y), Some(z)) = (x?, y?, z?) else {
+                        return Err(error("local dimensions must be constant"));
+                    };
+                    if x.checked_mul(y).and_then(|n| n.checked_mul(z)) != Some(width.get()) {
+                        return Err(error("invalid workgroup size"));
+                    }
+                    let [gx, gy, gz] = groups.map(|index| constant(query, index));
+                    let grid = match (gx?, gy?, gz?) {
+                        (Some(x), Some(y), Some(z)) => Some((x, y, z)),
+                        _ => None,
+                    };
+                    if grid.is_some_and(|(x, y, z)| [x, y, z].into_iter().any(|n| n == 0 || n > 65_535)) {
+                        return Err(error("dispatch grid axis must be in 1..=65535"));
+                    }
+                    (Some(groups), (x, y, z), grid)
                 };
                 self.dispatches.insert(
-                    statement,
+                    operation,
                     Dispatch {
-                        groups: Some(groups),
+                        groups,
                         local_size,
                         width,
                         grid,
                     },
                 );
-                stages.push(statement);
-            } else if let Some(branch) = query.enode("If", expression)? {
-                self.body(query, function, branch[2], stages)?;
-                self.body(query, function, branch[3], stages)?;
-            } else if let Some(loop_) = query.enode("Loop", expression)? {
-                self.body(query, function, loop_[3], stages)?;
-            } else if let Some(accumulator) = query.enode("WithAcc", expression)? {
-                let Some(lambda) = query.enode("FunctionBody", accumulator[1])? else {
-                    return Err(error("invalid accumulator body"));
-                };
-                self.body(query, function, lambda[2], stages)?;
+                stages.push(operation);
+                continue;
+            }
+            // Nested execution is explicit; callbacks and reducer regions stay local.
+            let mut children = Vec::new();
+            query.for_function("ControlRegion", |keys, child| {
+                if keys[0] == operation {
+                    children.push((query.0.value_to_base::<i64>(keys[1]), child));
+                }
+                Ok(())
+            })?;
+            children.sort_by_key(|&(slot, _)| slot);
+            for (_, child) in children {
+                self.region(query, child, stages)?;
             }
         }
         Ok(())
@@ -196,17 +110,94 @@ impl Execution {
 
     pub fn dispatch(&self, stage: Value) -> Result<&Dispatch, OptimizeError> {
         let Some(dispatch) = self.dispatches.get(&stage) else {
-            return Err(error("statement is outside the emitted dispatch interfaces"));
+            return Err(error("operation is outside the emitted dispatch interfaces"));
         };
         Ok(dispatch)
     }
 }
 
+/// Apply the portable shared-state policy before storing the choice in egglog.
+pub(super) fn width(query: Query<'_>, operation: Value, selected: Value) -> Result<u32, OptimizeError> {
+    let Some(grid) = query.enode("DeviceKernel", selected)? else {
+        return Ok(1);
+    };
+    if let Some(grid) = query.enode("Grid3D", grid[0])? {
+        let [x, y, z] = triple(query, grid[1])?.map(|index| constant(query, index));
+        let (Some(x), Some(y), Some(z)) = (x?, y?, z?) else {
+            return Err(error("local dimensions must be constant"));
+        };
+        let Some(width) = x.checked_mul(y).and_then(|n| n.checked_mul(z)).filter(|&n| n > 0) else {
+            return Err(error("invalid workgroup size"));
+        };
+        return Ok(width);
+    }
+    let domain = query.required("OperationDomain", operation)?;
+    let rank = super::analysis::count(query, "DomainRank", domain)?;
+    if rank == 0 {
+        return Err(error("automatic dispatch requires an iteration axis"));
+    }
+    let mut indexed_updates = false;
+    let mut state_bytes = 0u64;
+    for clause in 0..super::analysis::count(query, "ResultCount", operation)? {
+        let kind = query.required("ResultKindOf", (operation, clause))?;
+        indexed_updates |= query.enode("Contributed", kind)?.is_some();
+        if query.enode("Folded", kind)?.is_some() {
+            let reducer = query.required("ResultReducer", (operation, clause))?;
+            let params = query.sequence("RegionParameter", reducer)?;
+            let count = super::analysis::count(query, "ResultNeutralCount", (operation, clause))?;
+            let neutral = query.indexed(
+                "ResultNeutral",
+                &[operation, query.0.base_to_value(clause)],
+                count,
+            )?;
+            for (i, (parameter, neutral)) in params.into_iter().zip(neutral).enumerate() {
+                let Some((_, ty)) = to_ssa::runtime_binding(query, parameter)? else {
+                    return Err(error("collective state has no runtime type"));
+                };
+                let ty = to_ssa::reducer_state_type(query, operation, reducer, i, neutral, ty)?;
+                let bytes = storage_elem_stride(&storage_value_type(&ty)).unwrap_or(256);
+                state_bytes = state_bytes.saturating_add(u64::from(bytes));
+            }
+        }
+    }
+    // Target 8 KiB of shared state, retaining at least one subgroup.
+    let mut width = if indexed_updates {
+        64
+    } else if state_bytes > 0 {
+        [256, 128, 64, 32]
+            .into_iter()
+            .find(|width| state_bytes.saturating_mul(u64::from(*width)) <= 8192)
+            .unwrap_or(32)
+    } else {
+        128
+    };
+    if rank > 1 && state_bytes > 0 {
+        let extent = query.required("DomainExtent", (domain, rank - 1))?;
+        if let Some(size) = query.lookup("StaticIndex", extent)? {
+            if let Ok(size) = u32::try_from(query.0.value_to_base::<i64>(size).max(0)) {
+                if let Some(size) = size.checked_next_power_of_two() {
+                    width = width.min(size.max(32));
+                }
+            }
+        }
+    }
+    Ok(width)
+}
+
+fn triple(query: Query<'_>, vector: Value) -> Result<[Value; 3], OptimizeError> {
+    query.vector(vector)?.try_into().map_err(|_| error("dispatch requires three dimensions"))
+}
+
 fn constant(query: Query<'_>, index: Value) -> Result<Option<u32>, OptimizeError> {
-    let Some(fields) = query.enode("IndexConstant", index)? else {
+    let value = if let Some(fields) = query.enode("IndexConstant", index)? {
+        Some(fields[0])
+    } else {
+        query.lookup("StaticIndex", index)?
+    };
+    let Some(value) = value else {
         return Ok(None);
     };
-    let value = u32::try_from(query.0.value_to_base::<i64>(fields[0]))
+    let value = u32::try_from(query.0.value_to_base::<i64>(value))
         .map_err(|_| error("negative or oversized grid dimension"))?;
     Ok(Some(value))
 }

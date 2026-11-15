@@ -2,10 +2,11 @@
 use super::{error, OptimizeError};
 use crate::builtins::catalog;
 use crate::egglog::bindings::Bindings;
+use crate::egglog::dataflow::ir::{self, Code};
 use crate::egglog::query::Query;
 use crate::host::{Expr, ScalarExpr, ScalarSource, ScalarType};
-use crate::types::Type;
-use egglog_engine::{sort::S, Value};
+use crate::types::{Type, TypeName};
+use egglog_engine::Value;
 
 pub(super) fn index(
     query: Query<'_>,
@@ -138,24 +139,8 @@ pub(super) fn atom(
     values: &Bindings<Value, ScalarExpr>,
     value: Value,
 ) -> Result<Option<ScalarExpr>, OptimizeError> {
-    if let Some(var) = query.enode("Var", value)? {
-        return Ok(values.get(&var[0]).cloned());
-    }
-    let literal = query.fields("LiteralBits", value)?;
-    let n = query.0.value_to_base::<i64>(literal[1]);
-    let (ty, _) = query.application(
-        literal[0],
-        &[
-            "I8", "I16", "I32", "I64", "U8", "U16", "U32", "U64", "F16", "F32", "F64", "Bool", "UnitType",
-        ],
-    )?;
-    Ok(match ty {
-        "I32" => Some(ScalarExpr::I32(n as i32)),
-        "U32" => Some(ScalarExpr::U32(n as u32)),
-        "F32" => Some(ScalarExpr::F32(n as u32)),
-        "Bool" => Some(ScalarExpr::Bool(n != 0)),
-        _ => None,
-    })
+    let _ = query;
+    Ok(values.get(&value).cloned())
 }
 
 pub(super) fn remember(
@@ -164,17 +149,29 @@ pub(super) fn remember(
     values: &mut Bindings<Value, ScalarExpr>,
     statement: Value,
 ) -> Result<(), OptimizeError> {
-    let statement = query.fields("Let", statement)?;
-    if let Some(branch) = query.enode("If", statement[3])? {
-        let condition = atom(query, values, branch[0])?;
-        let yes = results(query, function, values, branch[2])?;
-        let no = results(query, function, values, branch[3])?;
-        let pattern = query.vector(statement[1])?;
+    let code = ir::code(query.0, query.required("OperationPayload", statement)?);
+    let pattern = query.sequence("Output", statement)?;
+    let operands = query.sequence("Input", statement)?;
+    let atoms = operands.iter().map(|&name| query.name(name)).collect::<Result<Vec<_>, _>>()?;
+    if matches!(code, Code::Branch) {
+        let condition = atom(query, values, atoms[0])?;
+        let yes = results(
+            query,
+            function,
+            values,
+            query.required("ControlRegion", (statement, 0_i64))?,
+        )?;
+        let no = results(
+            query,
+            function,
+            values,
+            query.required("ControlRegion", (statement, 1_i64))?,
+        )?;
         if pattern.len() != yes.len() || pattern.len() != no.len() {
             return Err(error("host branch result arity mismatch"));
         }
         for ((binding, yes), no) in pattern.into_iter().zip(yes).zip(no) {
-            let Some(binding) = query.enode("BindValue", binding)? else {
+            let Some(name) = query.value_name(binding)? else {
                 continue;
             };
             let (Some(yes), Some(no)) = (yes, no) else {
@@ -191,245 +188,219 @@ pub(super) fn remember(
             } else {
                 continue;
             };
-            values.insert(binding[0], value);
+            values.insert(name, value);
         }
         return Ok(());
     }
-    let pattern = query.vector(statement[1])?;
     let [binding] = pattern.as_slice() else {
         return Ok(());
     };
-    let Some(binding) = query.enode("BindValue", *binding)? else {
+    let Some(name) = query.value_name(*binding)? else {
         return Ok(());
     };
-    let expression = statement[3];
-    if let Some(call) = query.enode("Call", expression)? {
-        if let Some(result) = scalar_call(query, values, &call, &mut 0, &mut vec![function])? {
-            values.insert(binding[0], field(result, 0));
+    let info = query.required("ValueType", name)?;
+    if matches!(code, Code::Call) {
+        if let Some(result) = scalar_call(query, values, statement, &mut 0, &mut vec![function])? {
+            values.insert(name, field(result, 0));
         }
         return Ok(());
     }
-    let value = if let Some(fields) = query.enode("Product", expression)? {
-        query
-            .vector(fields[0])?
-            .into_iter()
-            .map(|value| atom(query, values, value))
-            .collect::<Result<Option<Vec<_>>, _>>()?
-            .map(ScalarExpr::Tuple)
-    } else if let Some(fields) = query.enode("Project", expression)? {
-        atom(query, values, fields[0])?.map(|tuple| ScalarExpr::Field {
-            tuple: Box::new(tuple),
-            index: query.0.value_to_base::<i64>(fields[1]) as usize,
-        })
-    } else if let Some(fields) = query.enode("IndexOp", expression)? {
-        scalar_index(query, values, fields[0])?
-    } else if let Some(fields) = query.enode("Use", expression)? {
-        if let Some(operand) = query.enode("ValueOperand", fields[0])? {
-            atom(query, values, operand[0])?
-        } else if let Some(operand) = query.enode("IndexOperand", fields[0])? {
-            scalar_index(query, values, operand[0])?
-        } else {
-            None
-        }
-    } else if let Some(fields) = query.enode("PrimOp", expression)? {
-        let opcode = query.0.value_to_base::<S>(fields[0]);
-        let builtin = opcode
-            .strip_prefix("builtin:")
-            .and_then(|name| name.rsplit_once(':'))
-            .and_then(|(name, _)| catalog().lookup_by_any_name(name));
-        let opcode = opcode
-            .strip_prefix("builtin:")
-            .and_then(|name| name.rsplit_once(':'))
-            .map_or(opcode.as_str(), |(name, _)| {
-                name.rsplit_once('.').map_or(name, |(_, member)| member)
-            });
-        let atoms = query.vector(fields[1])?;
-        let Some(args) = atoms
+    let value = match code {
+        Code::Constant { ty, bits } => match scalar_type(&ty) {
+            Some(ScalarType::I32) => Some(ScalarExpr::I32(bits as i32)),
+            Some(ScalarType::U32) => Some(ScalarExpr::U32(bits as u32)),
+            Some(ScalarType::F32) => Some(ScalarExpr::F32(bits as u32)),
+            Some(ScalarType::Bool) => Some(ScalarExpr::Bool(bits != 0)),
+            None => None,
+        },
+        Code::Product => atoms
             .iter()
-            .copied()
-            .map(|value| atom(query, values, value))
+            .map(|&name| atom(query, values, name))
             .collect::<Result<Option<Vec<_>>, _>>()?
-        else {
-            return Ok(());
-        };
-        if opcode == "vector" || opcode == "tuple" {
-            values.insert(binding[0], ScalarExpr::Tuple(args));
-            return Ok(());
-        }
-        if let Some(index) = opcode.strip_prefix("project:").and_then(|index| index.parse().ok()) {
-            if let [value] = args.as_slice() {
-                values.insert(binding[0], field(value.clone(), index));
-            }
-            return Ok(());
-        }
-        if builtin.is_some_and(|builtin| builtin.id == catalog().known().record_with) {
-            let [record, _, replacement] = args.as_slice() else {
-                return Err(error("host record update arity mismatch"));
-            };
-            let index = query.lookup("ConstantAtom", (function, atoms[1]))?.unwrap_or(atoms[1]);
-            let Some(index) = query.enode("LiteralBits", index)? else {
+            .map(ScalarExpr::Tuple),
+        Code::Project { index } => atom(query, values, atoms[0])?.map(|value| field(value, index)),
+        Code::IndexValue => scalar_index(
+            query,
+            values,
+            query.required("OperationIndex", (statement, 0_i64))?,
+        )?,
+        Code::Use => atom(query, values, atoms[0])?,
+        Code::Scalar(payload) => {
+            let opcode = payload.spelling();
+            let builtin = opcode
+                .strip_prefix("builtin:")
+                .and_then(|name| name.rsplit_once(':'))
+                .and_then(|(name, _)| catalog().lookup_by_any_name(name));
+            let opcode = opcode
+                .strip_prefix("builtin:")
+                .and_then(|name| name.rsplit_once(':'))
+                .map_or(opcode.as_ref(), |(name, _)| {
+                    name.rsplit_once('.').map_or(name, |(_, member)| member)
+                });
+
+            let Some(args) = atoms
+                .iter()
+                .copied()
+                .map(|value| atom(query, values, value))
+                .collect::<Result<Option<Vec<_>>, _>>()?
+            else {
                 return Ok(());
             };
-            let index = query.0.value_to_base::<i64>(index[1]);
-            let info = query.fields("LogicalValue", binding[1])?;
-            let fields = query.fields("ProductType", info[0])?;
-            let fields = query.vector(fields[0])?;
-            if index < 0 || index as usize >= fields.len() {
-                return Err(error("host record field index out of bounds"));
+            if opcode == "vector" || opcode == "tuple" {
+                values.insert(name, ScalarExpr::Tuple(args));
+                return Ok(());
             }
-            values.insert(
-                binding[0],
-                ScalarExpr::Tuple(
-                    (0..fields.len())
-                        .map(|i| {
-                            if i == index as usize {
-                                replacement.clone()
-                            } else {
-                                field(record.clone(), i)
-                            }
-                        })
-                        .collect(),
-                ),
-            );
-            return Ok(());
-        }
-        let Some(info) = query.enode("ScalarInfo", binding[1])? else {
-            return Ok(());
-        };
-        let Some(element) = query.enode("ScalarElement", info[0])? else {
-            return Ok(());
-        };
-        let mut ty = if query.enode("I32", element[0])?.is_some() {
-            ScalarType::I32
-        } else if query.enode("U32", element[0])?.is_some() {
-            ScalarType::U32
-        } else if query.enode("F32", element[0])?.is_some() {
-            ScalarType::F32
-        } else if query.enode("Bool", element[0])?.is_some() {
-            ScalarType::Bool
-        } else {
-            return Ok(());
-        };
-        let target = super::primitive_type(query, element[0])?;
-        let source = atoms.first().map(|&atom| atom_type(query, function, atom)).transpose()?.flatten();
-        let conversion = match (&target, &source, builtin) {
-            (Type::Constructed(target, _), Some(Type::Constructed(source, _)), Some(builtin)) => {
-                catalog().conversion(target, source) == Some(builtin.id)
+            if let Some(index) = opcode.strip_prefix("project:").and_then(|index| index.parse().ok()) {
+                if let [value] = args.as_slice() {
+                    values.insert(name, field(value.clone(), index));
+                }
+                return Ok(());
             }
-            _ => false,
-        };
-        if conversion && source.as_ref().and_then(scalar_type) == Some(ScalarType::Bool) {
-            let (yes, no) = match ty {
-                ScalarType::I32 => (ScalarExpr::I32(1), ScalarExpr::I32(0)),
-                ScalarType::U32 => (ScalarExpr::U32(1), ScalarExpr::U32(0)),
-                ScalarType::F32 => (ScalarExpr::F32(1f32.to_bits()), ScalarExpr::F32(0)),
-                ScalarType::Bool => (ScalarExpr::Bool(true), ScalarExpr::Bool(false)),
+            if builtin.is_some_and(|builtin| builtin.id == catalog().known().record_with) {
+                let [record, _, replacement] = args.as_slice() else {
+                    return Err(error("host record update arity mismatch"));
+                };
+                let operand = query.required("Input", (statement, 1_i64))?;
+                let Some(index) = query.lookup("ConstantValue", operand)? else {
+                    return Ok(());
+                };
+                let index = query.0.value_to_base::<i64>(index);
+                let info = query.fields("LogicalValue", info)?;
+                let fields = query.fields("ProductType", info[0])?;
+                let fields = query.vector(fields[0])?;
+                if index < 0 || index as usize >= fields.len() {
+                    return Err(error("host record field index out of bounds"));
+                }
+                values.insert(
+                    name,
+                    ScalarExpr::Tuple(
+                        (0..fields.len())
+                            .map(|i| {
+                                if i == index as usize {
+                                    replacement.clone()
+                                } else {
+                                    field(record.clone(), i)
+                                }
+                            })
+                            .collect(),
+                    ),
+                );
+                return Ok(());
+            }
+            let Some(info) = query.enode("ScalarInfo", info)? else {
+                return Ok(());
             };
-            values.insert(
-                binding[0],
-                ScalarExpr::If {
-                    condition: Box::new(args[0].clone()),
-                    yes: Box::new(yes),
-                    no: Box::new(no),
+            let Some(element) = query.enode("ScalarElement", info[0])? else {
+                return Ok(());
+            };
+            let mut ty = if query.enode("I32", element[0])?.is_some() {
+                ScalarType::I32
+            } else if query.enode("U32", element[0])?.is_some() {
+                ScalarType::U32
+            } else if query.enode("F32", element[0])?.is_some() {
+                ScalarType::F32
+            } else if query.enode("Bool", element[0])?.is_some() {
+                ScalarType::Bool
+            } else {
+                return Ok(());
+            };
+            let target = super::primitive_type(query, element[0])?;
+            let source = atoms.first().map(|&atom| atom_type(query, function, atom)).transpose()?.flatten();
+            let conversion = match (&target, &source, builtin) {
+                (Type::Constructed(target, _), Some(Type::Constructed(source, _)), Some(builtin)) => {
+                    catalog().conversion(target, source) == Some(builtin.id)
+                }
+                _ => false,
+            };
+            if conversion && source.as_ref().and_then(scalar_type) == Some(ScalarType::Bool) {
+                let (yes, no) = match ty {
+                    ScalarType::I32 => (ScalarExpr::I32(1), ScalarExpr::I32(0)),
+                    ScalarType::U32 => (ScalarExpr::U32(1), ScalarExpr::U32(0)),
+                    ScalarType::F32 => (ScalarExpr::F32(1f32.to_bits()), ScalarExpr::F32(0)),
+                    ScalarType::Bool => (ScalarExpr::Bool(true), ScalarExpr::Bool(false)),
+                };
+                values.insert(
+                    name,
+                    ScalarExpr::If {
+                        condition: Box::new(args[0].clone()),
+                        yes: Box::new(yes),
+                        no: Box::new(no),
+                    },
+                );
+                return Ok(());
+            }
+            let op = match opcode {
+                _ if conversion => match ty {
+                    ScalarType::I32 => "to-i32",
+                    ScalarType::U32 => "to-u32",
+                    ScalarType::F32 => "to-f32",
+                    ScalarType::Bool => return Ok(()),
                 },
-            );
-            return Ok(());
-        }
-        let op = match opcode {
-            _ if conversion => match ty {
-                ScalarType::I32 => "to-i32",
-                ScalarType::U32 => "to-u32",
-                ScalarType::F32 => "to-f32",
-                ScalarType::Bool => return Ok(()),
-            },
-            "+" => "add",
-            "-" if args.len() == 1 => "neg",
-            "-" => "sub",
-            "*" => "mul",
-            "/" => "div",
-            "%" => "rem",
-            "==" => "eq",
-            "!=" => "ne",
-            "<" => "lt",
-            "<=" => "le",
-            ">" => "gt",
-            ">=" => "ge",
-            "&" | "&&" => "and",
-            "|" | "||" => "or",
-            "^" => "xor",
-            "<<" => "shl",
-            ">>" => "shr",
-            "!" | "~" => "not",
-            "index-cast" => "to-i32",
-            "select" => "select",
-            _ => return Ok(()),
-        };
-        if conversion || matches!(op, "to-i32" | "eq" | "ne" | "lt" | "le" | "gt" | "ge") {
-            let Some(operand_type) = source.as_ref().and_then(scalar_type) else {
-                return Ok(());
+                "+" => "add",
+                "-" if args.len() == 1 => "neg",
+                "-" => "sub",
+                "*" => "mul",
+                "/" => "div",
+                "%" => "rem",
+                "==" => "eq",
+                "!=" => "ne",
+                "<" => "lt",
+                "<=" => "le",
+                ">" => "gt",
+                ">=" => "ge",
+                "&" | "&&" => "and",
+                "|" | "||" => "or",
+                "^" => "xor",
+                "<<" => "shl",
+                ">>" => "shr",
+                "!" | "~" => "not",
+                "index-cast" => "to-i32",
+                "select" => "select",
+                _ => return Ok(()),
             };
-            ty = operand_type;
+            if conversion || matches!(op, "to-i32" | "eq" | "ne" | "lt" | "le" | "gt" | "ge") {
+                let Some(operand_type) = source.as_ref().and_then(scalar_type) else {
+                    return Ok(());
+                };
+                ty = operand_type;
+            }
+            Some(ScalarExpr::Apply {
+                op: op.into(),
+                ty,
+                args,
+            })
         }
-        Some(ScalarExpr::Apply {
-            op: op.into(),
-            ty,
-            args,
-        })
-    } else {
-        None
+        _ => None,
     };
     if let Some(value) = value {
-        values.insert(binding[0], value);
+        values.insert(name, value);
     }
     Ok(())
 }
 
-fn atom_type(query: Query<'_>, function: Value, atom: Value) -> Result<Option<Type>, OptimizeError> {
-    let primitive = if let Some(var) = query.enode("Var", atom)? {
-        let info = query.required("BindingInfo", (function, var[0]))?;
-        let Some(info) = query.enode("ScalarInfo", info)? else {
-            return Ok(None);
-        };
-        let Some(element) = query.enode("ScalarElement", info[0])? else {
-            return Ok(None);
-        };
-        element[0]
-    } else {
-        query.fields("LiteralBits", atom)?[0]
-    };
-    super::primitive_type(query, primitive).map(Some)
+fn atom_type(query: Query<'_>, _function: Value, name: Value) -> Result<Option<Type>, OptimizeError> {
+    super::value_type(query, query.required("ValueType", name)?).map(Some)
 }
 
 fn results(
     query: Query<'_>,
     function: Value,
     outer: &Bindings<Value, ScalarExpr>,
-    block: Value,
+    region: Value,
 ) -> Result<Vec<Option<ScalarExpr>>, OptimizeError> {
     let mut values =
         outer.iter().map(|(&name, value)| (name, value.clone())).collect::<crate::StableMap<_, _>>().into();
-    let block = query.fields("Block", block)?;
-    for statement in query.vector(block[0])? {
+    for statement in query.operations(region)? {
         remember(query, function, &mut values, statement)?;
     }
     query
-        .vector(block[1])?
+        .sequence("RegionYield", region)?
         .into_iter()
-        .map(|result| {
-            let result = query.fields("Yield", result)?;
-            if let Some(operand) = query.enode("ValueOperand", result[1])? {
-                atom(query, &values, operand[0])
-            } else if let Some(operand) = query.enode("IndexOperand", result[1])? {
-                scalar_index(query, &values, operand[0])
-            } else {
-                Ok(None)
-            }
-        })
+        .map(|name| operand(query, &values, name))
         .collect()
 }
 
 pub(super) fn scalar_type(ty: &crate::types::Type) -> Option<ScalarType> {
-    use crate::types::{Type, TypeName};
     match ty {
         Type::Constructed(TypeName::Int(32), _) => Some(ScalarType::I32),
         Type::Constructed(TypeName::UInt(32), _) => Some(ScalarType::U32),
@@ -454,7 +425,7 @@ pub(super) fn cpu_loop(
     query: Query<'_>,
     function: Value,
     outer: &Bindings<Value, ScalarExpr>,
-    loop_: &[Value],
+    loop_: Value,
 ) -> Result<Option<ScalarExpr>, OptimizeError> {
     let result = scalar_loop(query, function, outer, loop_, &mut 0, &mut vec![function])?;
     Ok(result.filter(cpu_available))
@@ -545,13 +516,10 @@ fn operand(
     values: &Bindings<Value, ScalarExpr>,
     value: Value,
 ) -> Result<Option<ScalarExpr>, OptimizeError> {
-    if let Some(value) = query.enode("ValueOperand", value)? {
-        atom(query, values, value[0])
-    } else if let Some(value) = query.enode("IndexOperand", value)? {
-        scalar_index(query, values, value[0])
-    } else {
-        Ok(None)
-    }
+    let Some(name) = query.value_name(value)? else {
+        return Ok(None);
+    };
+    atom(query, values, name)
 }
 
 fn scalar_body(
@@ -564,26 +532,42 @@ fn scalar_body(
 ) -> Result<Option<ScalarExpr>, OptimizeError> {
     let mut values: Bindings<_, _> =
         outer.iter().map(|(&name, value)| (name, value.clone())).collect::<crate::StableMap<_, _>>().into();
-    let block = query.fields("Block", body)?;
     let mut bindings = Vec::new();
-    for statement in query.vector(block[0])? {
-        let fields = query.fields("Let", statement)?;
-        let pattern = query.vector(fields[1])?;
+    for statement in query.operations(body)? {
+        let code = ir::code(query.0, query.required("OperationPayload", statement)?);
+        let pattern = query.sequence("Output", statement)?;
         let mut names = Vec::new();
         for binding in &pattern {
-            let Some(binding) = query.enode("BindValue", *binding)? else {
+            let Some(name) = query.value_name(*binding)? else {
                 return Ok(None);
             };
-            names.push(binding[0]);
+            names.push(name);
         }
-        let result = if let Some(branch) = query.enode("If", fields[3])? {
-            let Some(condition) = atom(query, &values, branch[0])? else {
+        let result = if matches!(code, Code::Branch) {
+            let condition = query.name(query.required("Input", (statement, 0_i64))?)?;
+            let Some(condition) = atom(query, &values, condition)? else {
                 return Ok(None);
             };
-            let Some(yes) = scalar_body(query, function, &values, branch[2], serial, calls)? else {
+            let Some(yes) = scalar_body(
+                query,
+                function,
+                &values,
+                query.required("ControlRegion", (statement, 0_i64))?,
+                serial,
+                calls,
+            )?
+            else {
                 return Ok(None);
             };
-            let Some(no) = scalar_body(query, function, &values, branch[3], serial, calls)? else {
+            let Some(no) = scalar_body(
+                query,
+                function,
+                &values,
+                query.required("ControlRegion", (statement, 1_i64))?,
+                serial,
+                calls,
+            )?
+            else {
                 return Ok(None);
             };
             ScalarExpr::If {
@@ -591,13 +575,13 @@ fn scalar_body(
                 yes: Box::new(yes),
                 no: Box::new(no),
             }
-        } else if let Some(loop_) = query.enode("Loop", fields[3])? {
-            let Some(result) = scalar_loop(query, function, &values, &loop_, serial, calls)? else {
+        } else if matches!(code, Code::CountedLoop | Code::WhileLoop) {
+            let Some(result) = scalar_loop(query, function, &values, statement, serial, calls)? else {
                 return Ok(None);
             };
             result
-        } else if let Some(call) = query.enode("Call", fields[3])? {
-            let Some(result) = scalar_call(query, &values, &call, serial, calls)? else {
+        } else if matches!(code, Code::Call) {
+            let Some(result) = scalar_call(query, &values, statement, serial, calls)? else {
                 return Ok(None);
             };
             result
@@ -620,9 +604,8 @@ fn scalar_body(
         }
     }
     let mut results = Vec::new();
-    for result in query.vector(block[1])? {
-        let result = query.fields("Yield", result)?;
-        let Some(value) = operand(query, &values, result[1])? else {
+    for result in query.sequence("RegionYield", body)? {
+        let Some(value) = operand(query, &values, result)? else {
             return Ok(None);
         };
         results.push(value);
@@ -637,47 +620,48 @@ fn scalar_loop(
     query: Query<'_>,
     function: Value,
     outer: &Bindings<Value, ScalarExpr>,
-    loop_: &[Value],
+    loop_: Value,
     serial: &mut usize,
     calls: &mut Vec<Value>,
 ) -> Result<Option<ScalarExpr>, OptimizeError> {
     let name = local(serial);
     let state = ScalarExpr::Local(name.clone());
-    let counted = query.enode("Counted", loop_[1])?;
-    let offset = usize::from(counted.is_some());
+    let counted = query.contains("CountedLoopOperation", loop_)?;
+    let region = query.required("ControlRegion", (loop_, 0_i64))?;
+    let offset = usize::from(counted);
     let mut values: Bindings<_, _> =
         outer.iter().map(|(&name, value)| (name, value.clone())).collect::<crate::StableMap<_, _>>().into();
-    let mut initial = if counted.is_some() { vec![ScalarExpr::I32(0)] } else { vec![] };
-    let merges = query.vector(loop_[0])?;
-    for (i, merge) in merges.iter().enumerate() {
-        let merge = query.fields("Carry", *merge)?;
-        let param = query.fields("Parameter", merge[0])?;
-        let Some(binding) = query.enode("BindValue", param[0])? else {
+    let mut initial = if counted { vec![ScalarExpr::I32(0)] } else { vec![] };
+    let count = crate::egglog::analysis::count(query, "OutputCount", loop_)? as usize;
+    for i in 0..count {
+        let parameter = query.required("RegionParameter", (region, i as i64))?;
+        let Some(binding) = query.value_name(parameter)? else {
             return Ok(None);
         };
-        let Some(value) = operand(query, outer, merge[1])? else {
+        let argument = query.required("EdgeArgument", (loop_, 0_i64, i as i64))?;
+        let Some(value) = operand(query, outer, argument)? else {
             return Ok(None);
         };
         initial.push(value);
-        values.insert(binding[0], field(state.clone(), i + offset));
+        values.insert(binding, field(state.clone(), i + offset));
     }
     let apply = |op: &str, args| ScalarExpr::Apply {
         op: op.into(),
         ty: ScalarType::I32,
         args,
     };
-    let condition = if let Some(form) = &counted {
-        let Some(start) = scalar_index(query, outer, form[1])? else {
+    let condition = if counted {
+        let Some(start) = scalar_index(query, outer, query.required("LoopStart", loop_)?)? else {
             return Ok(None);
         };
-        let Some(count) = scalar_index(query, outer, form[2])? else {
+        let Some(count) = scalar_index(query, outer, query.required("LoopCount", loop_)?)? else {
             return Ok(None);
         };
-        let Some(step) = scalar_index(query, outer, form[3])? else {
+        let Some(step) = scalar_index(query, outer, query.required("LoopStep", loop_)?)? else {
             return Ok(None);
         };
         values.insert(
-            form[0],
+            query.required("LoopIndex", loop_)?,
             apply(
                 "add",
                 vec![start, apply("mul", vec![field(state.clone(), 0), step])],
@@ -685,19 +669,19 @@ fn scalar_loop(
         );
         apply("lt", vec![field(state.clone(), 0), count])
     } else {
-        let form = query.fields("While", loop_[1])?;
-        let Some(condition) = values.get(&form[0]).cloned() else {
+        let condition = query.required("LoopCondition", loop_)?;
+        let Some(condition) = values.get(&condition).cloned() else {
             return Ok(None);
         };
         condition
     };
-    let Some(mut step) = scalar_body(query, function, &values, loop_[3], serial, calls)? else {
+    let Some(mut step) = scalar_body(query, function, &values, region, serial, calls)? else {
         return Ok(None);
     };
-    if counted.is_some() {
+    if counted {
         let step_name = local(serial);
         let mut fields = vec![apply("add", vec![field(state.clone(), 0), ScalarExpr::I32(1)])];
-        fields.extend((0..merges.len()).map(|i| field(ScalarExpr::Local(step_name.clone()), i)));
+        fields.extend((0..count).map(|i| field(ScalarExpr::Local(step_name.clone()), i)));
         step = ScalarExpr::Let {
             bindings: vec![(step_name, step)],
             result: Box::new(ScalarExpr::Tuple(fields)),
@@ -710,8 +694,7 @@ fn scalar_loop(
         step: Box::new(step),
     };
     let result_name = local(serial);
-    let results =
-        (0..merges.len()).map(|i| field(ScalarExpr::Local(result_name.clone()), i + offset)).collect();
+    let results = (0..count).map(|i| field(ScalarExpr::Local(result_name.clone()), i + offset)).collect();
     Ok(Some(ScalarExpr::Let {
         bindings: vec![(result_name, repeated)],
         result: Box::new(ScalarExpr::Tuple(results)),
@@ -721,48 +704,34 @@ fn scalar_loop(
 fn scalar_call(
     query: Query<'_>,
     values: &Bindings<Value, ScalarExpr>,
-    call: &[Value],
+    call: Value,
     serial: &mut usize,
     calls: &mut Vec<Value>,
 ) -> Result<Option<ScalarExpr>, OptimizeError> {
-    let program = query.row("CurrentProgram", |_| true)?;
-    let Some(program) = program else {
-        return Err(error("scalar call has no program"));
-    };
-    let program = query.fields("MemoryProgram", program[0])?;
-    let mut callee = None;
-    for definition in query.vector(program[0])? {
-        if query.fields("DefineFunction", definition)?[0] == call[0] {
-            callee = Some(definition);
-            break;
-        }
-    }
-    let Some(callee) = callee else {
+    let callee = query.required("CallTarget", call)?;
+    let Some(root) = query.lookup("FunctionRoot", callee)? else {
         return Ok(None);
     };
     if calls.contains(&callee) {
         return Ok(None);
     }
-    let definition = query.fields("DefineFunction", callee)?;
-    let params = query.vector(definition[1])?;
-    let arguments = query.vector(call[1])?;
+    let params = query.sequence("RegionParameter", root)?;
+    let arguments = query.sequence("Input", call)?;
     if params.len() != arguments.len() {
         return Err(error("scalar call arity mismatch"));
     }
     let mut arguments_values = Bindings::default();
-    for (param, argument) in params.into_iter().zip(arguments) {
-        let param = query.fields("Parameter", param)?;
-        let Some(binding) = query.enode("BindValue", param[0])? else {
+    for (parameter, argument) in params.into_iter().zip(arguments) {
+        let Some(name) = query.value_name(parameter)? else {
             return Ok(None);
         };
-        let argument = query.fields("Pass", argument)?;
-        let Some(value) = operand(query, values, argument[0])? else {
+        let Some(value) = operand(query, values, argument)? else {
             return Ok(None);
         };
-        arguments_values.insert(binding[0], value);
+        arguments_values.insert(name, value);
     }
     calls.push(callee);
-    let result = scalar_body(query, callee, &arguments_values, definition[3], serial, calls)?;
+    let result = scalar_body(query, callee, &arguments_values, root, serial, calls);
     calls.pop();
-    Ok(result)
+    result
 }

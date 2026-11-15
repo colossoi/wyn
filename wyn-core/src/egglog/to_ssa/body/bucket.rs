@@ -6,8 +6,21 @@ use crate::types::{self, Type, TypeExt, TypeName};
 use egglog_engine::Value;
 
 impl Body<'_, '_, '_> {
-    pub(super) fn bucket_scatter(&mut self, arguments: &[Value]) -> Result<Typed, OptimizeError> {
-        let mut destination = self.named(arguments[0])?;
+    pub(super) fn bucket_scatter(
+        &mut self,
+        operation: Value,
+        coordinates: &[Vec<i64>],
+        rank: usize,
+    ) -> Result<Typed, OptimizeError> {
+        let names = self
+            .query()
+            .sequence("Input", operation)?
+            .into_iter()
+            .map(|name| self.query().name(name))
+            .collect::<Result<Vec<_>, _>>()?;
+        let destination_name = names[0];
+        let callback = self.query().required("ControlRegion", (operation, 0_i64))?;
+        let mut destination = self.named(destination_name)?;
         if destination.ty.array_variant().is_some_and(types::is_array_variant_composite) {
             let source = self.snapshot(destination)?;
             destination = self.local_array(source.ty.clone())?;
@@ -20,7 +33,7 @@ impl Body<'_, '_, '_> {
                     value: source.value,
                 })
                 .map_err(builder_error)?;
-            self.values.insert(arguments[0], destination.clone());
+            self.values.insert(destination_name, destination.clone());
         }
         let buckets = self.array_length(destination.clone())?;
         let uint = Type::Constructed(TypeName::UInt(32), vec![]);
@@ -28,7 +41,7 @@ impl Body<'_, '_, '_> {
             let length = self.host_array_length(&destination)?;
             let bytes = Expr::Multiply(Box::new(length.clone()), Box::new(Expr::Integer(4)));
             let (_, counts) = self.device_buffer(&uint, bytes, buckets.clone())?;
-            self.host_lengths.insert(counts.value, length);
+            self.host_shapes.insert(counts.value, vec![length]);
             counts
         } else {
             let Some(Type::Constructed(TypeName::Size(capacity), _)) = destination.ty.array_size() else {
@@ -46,29 +59,16 @@ impl Body<'_, '_, '_> {
                 Ok(vec![])
             },
         )?;
-        let sources = self
-            .query()
-            .vector(arguments[2])?
-            .into_iter()
-            .map(|name| self.named(name))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mappings = self
-            .query()
-            .vector(arguments[3])?
-            .into_iter()
+        let sources = names[1..].iter().map(|&name| self.named(name)).collect::<Result<Vec<_>, _>>()?;
+        let mappings = coordinates
+            .iter()
             .map(|mapping| {
-                self.query()
-                    .vector(mapping)?
-                    .into_iter()
-                    .map(|axis| {
-                        usize::try_from(self.query().0.value_to_base::<i64>(axis))
-                            .map_err(|_| error("invalid bucket input axis"))
-                    })
+                mapping
+                    .iter()
+                    .map(|&axis| usize::try_from(axis).map_err(|_| error("invalid bucket input axis")))
                     .collect::<Result<Vec<_>, _>>()
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let rank = usize::try_from(self.query().0.value_to_base::<i64>(arguments[4]))
-            .map_err(|_| error("invalid bucket domain rank"))?;
         let overflow = self.bucket_axis(
             &sources,
             &mappings,
@@ -84,7 +84,7 @@ impl Body<'_, '_, '_> {
                     }
                     inputs.push(value);
                 }
-                let mut emission = body.lambda(arguments[1], inputs)?;
+                let mut emission = body.lambda(callback, inputs)?;
                 if emission.len() == 1 {
                     emission = body.unpack(emission.remove(0))?;
                 }
@@ -108,7 +108,7 @@ impl Body<'_, '_, '_> {
                                 body.branch(
                                     fits,
                                     |body| {
-                                        body.write_array(arguments[0], &[key, position], value)?;
+                                        body.write_array(destination_name, &[key, position], value)?;
                                         Ok(overflow.clone())
                                     },
                                     |body| {

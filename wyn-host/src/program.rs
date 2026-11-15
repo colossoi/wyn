@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use crate::{
-    Binding, BufferLen, BufferSource, BufferUsage, DepthTest, DispatchLoopControl, DispatchSize,
-    DrawBufferRef, DrawCall, DrawCount, FrameResource, FrameResourceKind, ModuleInterface, Pipeline,
-    ResultShape, ScalarExpr, ScalarSource, SourceResultBinding, StorageTextureSize,
+    arithmetic, Binding, BufferLen, BufferSource, BufferUsage, DepthTest, DispatchLoopControl,
+    DispatchSize, DrawBufferRef, DrawCall, DrawCount, FrameResource, FrameResourceKind, ModuleInterface,
+    Pipeline, ResultShape, ScalarExpr, ScalarSource, SourceResultBinding, StorageTextureSize,
 };
 
 mod readbacks;
@@ -118,6 +118,27 @@ impl Dependencies {
 }
 
 impl Expr {
+    /// Evaluate capacity arithmetic that does not depend on host inputs or resources.
+    pub fn constant(&self) -> Result<Option<i64>, HostError> {
+        let (left, right, operation): (_, _, fn(i64, i64) -> Result<i64, HostError>) = match self {
+            Self::Integer(value) => return Ok(Some(*value)),
+            Self::Scalar(ScalarExpr::I32(value)) => return Ok(Some(i64::from(*value))),
+            Self::Scalar(ScalarExpr::U32(value)) => return Ok(Some(i64::from(*value))),
+            Self::Add(a, b) => (a, b, arithmetic::add),
+            Self::Subtract(a, b) => (a, b, arithmetic::subtract),
+            Self::Multiply(a, b) => (a, b, arithmetic::multiply),
+            Self::Floor(a, b) => (a, b, arithmetic::floor),
+            Self::Ceiling(a, b) => (a, b, arithmetic::ceiling),
+            Self::Min(a, b) => (a, b, |a, b| Ok(a.min(b))),
+            Self::Max(a, b) => (a, b, |a, b| Ok(a.max(b))),
+            _ => return Ok(None),
+        };
+        match (left.constant()?, right.constant()?) {
+            (Some(left), Some(right)) => operation(left, right).map(Some),
+            _ => Ok(None),
+        }
+    }
+
     fn dependencies(&self, result: &mut Dependencies) -> Result<(), HostError> {
         match self {
             Self::Scalar(value) => result.scalar(value, ScalarSource::resource)?,
@@ -1138,3 +1159,7 @@ impl Program {
         Ok(None)
     }
 }
+
+#[cfg(test)]
+#[path = "program_tests.rs"]
+mod tests;

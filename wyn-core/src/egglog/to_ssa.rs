@@ -22,20 +22,22 @@ pub(super) fn lower(
     target: CodegenTarget,
 ) -> Result<Elaborated, OptimizeError> {
     let query = Query(&program.graph);
-    let Some(root) = query.row("CurrentProgram", |_| true)? else {
-        return Err(error("missing memory program"));
-    };
-    let fields = query.fields("MemoryProgram", root[0])?;
     let mut definitions = LookupMap::default();
-    for function in query.vector(fields[0])? {
-        let fields = query.fields("DefineFunction", function)?;
-        definitions.insert(fields[0], function);
-    }
+    query.for_function("FunctionRoot", |keys, root| {
+        definitions.insert(keys[0], root);
+        Ok(())
+    })?;
     let mut externals = LookupMap::default();
-    for external in query.vector(fields[1])? {
-        let fields = query.fields("DeclareExternal", external)?;
-        externals.insert(fields[0], external);
-    }
+    query.for_each("External", |row| {
+        externals.insert(row[0], row[0]);
+        Ok(())
+    })?;
+    let mut entries = Vec::new();
+    query.for_function("EntryOrder", |keys, order| {
+        entries.push((query.0.value_to_base::<i64>(order), keys[0]));
+        Ok(())
+    })?;
+    entries.sort_by_key(|&(order, _)| order);
     let mut compiler = Compiler {
         program,
         definitions,
@@ -45,7 +47,28 @@ pub(super) fn lower(
         callable_ids: LookupMap::default(),
         function_ids: IdSource::new(),
     };
-    entry::lower(&mut compiler, query.vector(fields[2])?, target)
+    entry::lower(
+        &mut compiler,
+        entries.into_iter().map(|(_, function)| function).collect(),
+        target,
+    )
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct Axis {
+    pub name: Value,
+    pub extent: Value,
+}
+
+pub(super) fn domain_axes(query: Query<'_>, domain: Value) -> Result<Vec<Axis>, OptimizeError> {
+    (0..super::analysis::count(query, "DomainRank", domain)?)
+        .map(|slot| {
+            Ok(Axis {
+                name: query.required("DomainAxis", (domain, slot))?,
+                extent: query.required("DomainExtent", (domain, slot))?,
+            })
+        })
+        .collect()
 }
 
 pub(super) struct Compiler<'a, 'source> {
@@ -64,45 +87,42 @@ impl Compiler<'_, '_> {
             return Ok(selected.clone());
         }
         let query = Query(&self.program.graph);
-        let (definition, fields, external) = if let Some(&definition) = self.definitions.get(&name) {
-            (definition, query.fields("DefineFunction", definition)?, false)
-        } else if let Some(&external) = self.externals.get(&name) {
-            (external, query.fields("DeclareExternal", external)?, true)
-        } else {
-            return Err(error("unknown memory function"));
-        };
+        let root = self.definitions.get(&name).copied();
+        let external = self.externals.contains_key(&name);
+        if root.is_none() && !external {
+            return Err(error("unknown graph function"));
+        }
         let name_fields = query.fields("FunctionId", name)?;
         let text = self.program.graph.value_to_base::<S>(name_fields[1]).to_string();
-        let params = query.vector(fields[1])?.into_iter().try_fold(Vec::new(), |mut out, param| {
-            let fields = query.fields("Parameter", param)?;
-            if query.enode("BindAccumulator", fields[0])?.is_some() {
-                return Err(error(
-                    "memory-bearing shader helper must be inlined before emission",
-                ));
-            }
-            if let Some(binding) = runtime_binding(query, fields[0])? {
+        let params = if let Some(root) = root {
+            query.sequence("RegionParameter", root)?.into_iter().try_fold(Vec::new(), |mut out, name| {
+                let Some(binding) = runtime_binding(query, name)? else {
+                    return Err(error(
+                        "memory-bearing shader helper must be inlined before emission",
+                    ));
+                };
                 out.push(binding);
-            }
-            Ok::<_, OptimizeError>(out)
-        })?;
-        let result_types = query
-            .vector(fields[2])?
-            .into_iter()
-            .filter_map(|info| {
-                match query.application(
-                    info,
-                    &[
-                        "ReturnScalar",
-                        "ReturnAccumulator",
-                        "ReturnResource",
-                        "LogicalReturn",
-                    ],
-                ) {
-                    Ok(("ReturnScalar", fields)) => Some(element_type(query, fields[0])),
-                    Ok(("ReturnAccumulator", _)) => None,
-                    Ok(("ReturnResource", fields)) => Some(resource_type(query, fields[0])),
-                    Ok(("LogicalReturn", fields)) => Some(logical_type(query, fields[0])),
-                    Ok(_) => unreachable!(),
+                Ok::<_, OptimizeError>(out)
+            })?
+        } else {
+            let count = super::analysis::count(query, "ExternalParameterCount", name)?;
+            (0..count)
+                .map(|slot| {
+                    let parameter = query.required("ExternalParameterName", (name, slot))?;
+                    let info = query.required("ExternalParameterType", (name, slot))?;
+                    Ok((parameter, value_type(query, info)?))
+                })
+                .collect::<Result<Vec<_>, OptimizeError>>()?
+        };
+        let count = super::analysis::count(query, "FunctionResultCount", name)?;
+        let result_types = (0..count)
+            .filter_map(|slot| {
+                match query
+                    .required("FunctionResultType", (name, slot))
+                    .and_then(|info| return_type(query, info))
+                {
+                    Ok(Some(ty)) => Some(Ok(ty)),
+                    Ok(None) => None,
                     Err(error) => Some(Err(error)),
                 }
             })
@@ -111,12 +131,15 @@ impl Compiler<'_, '_> {
             if let [ty] = result_types.as_slice() { ty.clone() } else { types::tuple(result_types) };
         let id = self.function_ids.next_id();
         self.callable_ids.insert(name, (id, result_type.clone()));
-        let mut body = Body::new(self, definition, params, result_type.clone());
+        let mut body = Body::new(self, name, params, result_type.clone());
         let body = if external {
             body.builder.terminate(crate::ssa::types::Terminator::Unreachable).map_err(builder_error)?;
             body.builder.finish().map_err(builder_error)?
         } else {
-            let values = body.block(fields[3])?;
+            let Some(root) = root else {
+                return Err(error("function body is missing"));
+            };
+            let values = body.block(root)?;
             let result = if values.len() == 1 {
                 values.into_iter().next().ok_or_else(|| error("call result missing"))?
             } else {
@@ -140,19 +163,38 @@ pub(super) fn runtime_binding(
     query: Query<'_>,
     binding: Value,
 ) -> Result<Option<(Value, Type)>, OptimizeError> {
-    let (kind, fields) = query.application(binding, &["BindValue", "BindAccumulator"])?;
+    let Some(name) = query.value_name(binding)? else {
+        return Ok(None);
+    };
+    let info = query.required("ValueType", name)?;
+    Ok(Some((name, value_type(query, info)?)))
+}
+
+pub(super) fn value_type(query: Query<'_>, info: Value) -> Result<Type, OptimizeError> {
+    let (kind, fields) = query.application(info, &["ScalarInfo", "ResourceInfo", "LogicalValue"])?;
     match kind {
-        "BindAccumulator" => Ok(None),
-        "BindValue" => {
-            let (kind, info) =
-                query.application(fields[1], &["ScalarInfo", "ResourceInfo", "LogicalValue"])?;
-            match kind {
-                "ScalarInfo" => Ok(Some((fields[0], element_type(query, info[0])?))),
-                "ResourceInfo" => Ok(Some((fields[0], resource_type(query, info[0])?))),
-                "LogicalValue" => Ok(Some((fields[0], logical_type(query, info[0])?))),
-                _ => unreachable!(),
-            }
-        }
+        "ScalarInfo" => element_type(query, fields[0]),
+        "ResourceInfo" => resource_type(query, fields[0]),
+        "LogicalValue" => logical_type(query, fields[0]),
+        _ => unreachable!(),
+    }
+}
+
+fn return_type(query: Query<'_>, info: Value) -> Result<Option<Type>, OptimizeError> {
+    let (kind, fields) = query.application(
+        info,
+        &[
+            "ReturnScalar",
+            "ReturnAccumulator",
+            "ReturnResource",
+            "LogicalReturn",
+        ],
+    )?;
+    match kind {
+        "ReturnScalar" => element_type(query, fields[0]).map(Some),
+        "ReturnAccumulator" => Ok(None),
+        "ReturnResource" => resource_type(query, fields[0]).map(Some),
+        "LogicalReturn" => logical_type(query, fields[0]).map(Some),
         _ => unreachable!(),
     }
 }
@@ -197,7 +239,7 @@ fn logical_type(query: Query<'_>, ty: Value) -> Result<Type, OptimizeError> {
 /// including when transport has erased that length from a buffer-view type.
 pub(super) fn reducer_state_type(
     query: Query<'_>,
-    function: Value,
+    _function: Value,
     reducer: Value,
     slot: usize,
     neutral: Value,
@@ -205,13 +247,13 @@ pub(super) fn reducer_state_type(
 ) -> Result<Type, OptimizeError> {
     if !ty.is_array()
         || matches!(ty.array_size(), Some(Type::Constructed(TypeName::Size(_), _)))
-        || !query.contains("ReducerPreservesOuterLength", (function, reducer, slot as i64))?
+        || !query.contains("ReducerPreservesOuterLength", (reducer, slot as i64))?
     {
         return Ok(ty);
     }
-    if let Some(name) = query.enode("Var", neutral)? {
-        if let Some(count) = query.lookup("LogicalOuterCount", (function, name[0]))? {
-            if let Some(size) = query.lookup("StaticIndex", (function, count))? {
+    if let Some(name) = query.value_name(neutral)? {
+        if let Some(count) = query.lookup("LogicalOuterCount", name)? {
+            if let Some(size) = query.lookup("StaticIndex", count)? {
                 let size = usize::try_from(query.0.value_to_base::<i64>(size))
                     .map_err(|_| error("negative reducer state extent"))?;
                 let Some(element) = ty.elem_type() else {

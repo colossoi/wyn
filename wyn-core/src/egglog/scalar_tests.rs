@@ -1,5 +1,12 @@
 use super::super::{from_tlc, memory, query::Query, OptimizeError, ScalarOptimization};
-use egglog_engine::EGraph;
+use crate::egglog::dataflow::{
+    edit,
+    ir::{self, Code, Name},
+};
+use crate::egglog::payload::Payload;
+use crate::op::BinaryOperator;
+use crate::types;
+use egglog_engine::{EGraph, Write};
 
 fn optimized(source: &str) -> Result<EGraph, OptimizeError> {
     let source = crate::compile_thru_tlc(source).unwrap();
@@ -13,19 +20,12 @@ fn optimized(source: &str) -> Result<EGraph, OptimizeError> {
 fn dominating_total_expressions_share_one_evaluation() -> Result<(), OptimizeError> {
     let graph = optimized("entry main(x:i32) i32=(x+1)*(x+1)")?;
     let query = Query(&graph);
-    let program = query.row("CurrentProgram", |_| true)?.unwrap()[0];
-    let root = query.constructor("ProgramRoot", (program,))?.unwrap();
     let mut additions = 0;
-    query.for_each("ContainsStm", |row| {
-        if row[0] != root {
-            return Ok(());
-        }
-        let statement = query.fields("Let", row[1])?;
-        if let Some(operation) = query.enode("PrimOp", statement[3])? {
-            if graph.value_to_base::<egglog_engine::sort::S>(operation[0]).as_str() == "+" {
-                additions += 1;
-            }
-        }
+    query.for_each("LiveOperation", |row| {
+        additions += usize::from(
+            ir::code(&graph, query.required("OperationPayload", row[0])?)
+                == Code::Scalar(Payload::Binary(BinaryOperator::Add)),
+        );
         Ok(())
     })?;
     assert_eq!(additions, 1);
@@ -41,118 +41,132 @@ fn partial_and_effectful_operands_keep_their_evaluation_guards() -> Result<(), O
         entry invoke(b:bool,x:i32) i32=if b then effect(x)+1 else 0
     "#,
     )?;
-    // Discard the result in this IR so TLC cannot erase the test scenario first.
-    graph.parse_and_run_program(
-        None,
-        r#"
-        (check (CurrentProgram p) (ContainsExp (ProgramRoot p) (Call name args returns)))
-        (ruleset discard-result)
-        (rule ((CurrentProgram p) (ContainsStm (ProgramRoot p) statement)
-            (= statement (Let id pattern certs (PrimOp "+" args))))
-          ((ScalarReplacement p statement (LiteralBits (I32) 0))) :ruleset discard-result)
-        (run-schedule discard-result)
-    "#,
-    )?;
+    let mut additions = Vec::new();
+    let query = Query(&graph);
+    query.for_each("LiveOperation", |row| {
+        if ir::code(&graph, query.required("OperationPayload", row[0])?)
+            == Code::Scalar(Payload::Binary(BinaryOperator::Add))
+        {
+            additions.push(row[0]);
+        }
+        Ok(())
+    })?;
+    for operation in additions {
+        edit::set_code(
+            &mut graph,
+            operation,
+            Code::Constant {
+                ty: types::i32(),
+                bits: 0,
+            },
+        )?;
+        edit::inputs(&mut graph, operation, &[])?;
+    }
     super::run(&mut graph, ScalarOptimization::Full)?;
-    graph.parse_and_run_program(
-        None,
-        r#"
-        (check (CurrentProgram p) (ContainsExp (ProgramRoot p) (PrimOp "/" args)))
-        (check (CurrentProgram p) (ContainsExp (ProgramRoot p) (Call name args returns)))
-        (fail (check (CurrentProgram p) (ProgramFunction p f)
-            (= f (DefineFunction name params returns (Block statements results)))
-            (WalkStms statements i) (< i (vec-size statements))
-            (= (vec-at statements i) (Let id pattern certs (PrimOp "/" args)))))
-        (fail (check (CurrentProgram p) (ProgramFunction p f)
-            (= f (DefineFunction name params returns (Block statements results)))
-            (WalkStms statements i) (< i (vec-size statements))
-            (= (vec-at statements i) (Let id pattern certs (Call target args signature)))))
-    "#,
-    )?;
+    let query = Query(&graph);
+    let mut divisions = 0;
+    let mut calls = 0;
+    query.for_each("LiveOperation", |row| {
+        let code = ir::code(&graph, query.required("OperationPayload", row[0])?);
+        let division = code == Code::Scalar(Payload::Binary(BinaryOperator::Divide));
+        let call = matches!(code, Code::Call);
+        if division || call {
+            let region = query.required("OperationRegion", row[0])?;
+            assert!(
+                query.row("RegionOwnedBy", |row| row[0] == region)?.is_some(),
+                "partial evaluation escaped its branch"
+            );
+        }
+        divisions += usize::from(division);
+        calls += usize::from(call);
+        Ok(())
+    })?;
+    assert_eq!((divisions, calls), (1, 1));
     Ok(())
 }
 
 #[test]
 fn shared_helpers_keep_separate_entry_and_loop_parameters() -> Result<(), OptimizeError> {
-    let mut graph = optimized(
+    let graph = optimized(
         r#"
         def walk(x:f32,n:i32) f32=loop sum=0.0f32 for k<n do sum+x*x+f32(k)
         entry first(xs:[]f32,n:i32) []f32=map(|x|walk(x,n)+x*2.0f32,xs)
         entry second(xs:[]f32,n:i32) []f32=map(|x|walk(x+1.0f32,n)+x*3.0f32,xs)
     "#,
     )?;
-    graph.parse_and_run_program(
-        None,
-        r#"
-        (check (CurrentProgram (MemoryProgram functions externals entries)) (= (vec-size entries) 2) (= (vec-size functions) 2))
-        (fail (check (CurrentProgram p) (ContainsExp (ProgramRoot p) (Call name args returns))))
-    "#,
-    )?;
+    let query = Query(&graph);
+    let mut functions = 0;
+    let mut entries = 0;
+    let mut calls = 0;
+    query.for_each("LiveFunction", |_| {
+        functions += 1;
+        Ok(())
+    })?;
+    query.for_function("EntryOrder", |_, _| {
+        entries += 1;
+        Ok(())
+    })?;
+    query.for_each("LiveOperation", |row| {
+        calls += usize::from(query.contains("CallOperation", row[0])?);
+        Ok(())
+    })?;
+    assert_eq!((functions, entries, calls), (2, 2, 0));
     Ok(())
 }
 
 #[test]
 fn unrelated_syntax_does_not_add_evaluation_dependencies() -> Result<(), OptimizeError> {
     let mut graph = optimized("entry main(x:i32) i32=x")?;
-    let original = Query(&graph).row("CurrentProgram", |_| true)?.unwrap()[0];
-    graph.parse_and_run_program(
-        None,
-        r#"
-        (Let (StatementTag 999) (vec-of (BindValue (ValueId 999) (ScalarInfo (ScalarElement (I32)))))
-            (vec-of) (PrimOp "/" (vec-of (Var (ValueId 999)) (LiteralBits (I32) 0))))
-    "#,
-    )?;
+    let entry = Query(&graph).first("EntryOrder")?.unwrap()[0];
+    let root = Query(&graph).required("FunctionRoot", entry)?;
+    let before = Query(&graph).sequence("RegionYield", root)?;
+    graph.update(|mut sink| {
+        Ok((|| -> Result<(), OptimizeError> {
+            let value = sink.add("ValueId", 999_i64)?;
+            ir::operation(
+                &mut sink,
+                999,
+                Code::Scalar(Payload::Binary(BinaryOperator::Divide)),
+                &[Name::Value(value), Name::Value(value)],
+            )?;
+            Ok(())
+        })())
+    })??;
     super::run(&mut graph, ScalarOptimization::Full)?;
-    assert_eq!(
-        Query(&graph).row("CurrentProgram", |_| true)?.unwrap()[0],
-        original
-    );
+    assert_eq!(Query(&graph).sequence("RegionYield", root)?, before);
+    assert!(Query(&graph).operations(root)?.is_empty());
     Ok(())
 }
 
 #[test]
 fn function_pruning_keeps_called_helpers_and_removes_substituted_callbacks() -> Result<(), OptimizeError> {
-    let mut graph = EGraph::default();
-    memory::load(&mut graph)?;
-    graph.parse_and_run_program(
-        None,
-        r#"
-        (let i32 (ScalarInfo (ScalarElement (I32))))
-        (let returns (vec-of (ReturnScalar (ScalarElement (I32)))))
-        (let helper (FunctionId 0 "helper"))
-        (let entry (FunctionId 1 "main"))
-        (let dead (FunctionId 2 "substituted_callback"))
-        (let helper-body (Block (vec-of)
-            (vec-of (Yield (vec-of) (ValueOperand (Var (ValueId 0)))))))
-        (let params (vec-of (Parameter (BindValue (ValueId 0) i32) (Observe))))
-        (let main-params (vec-of (Parameter (BindValue (ValueId 1) i32) (Observe))))
-        (let main-body (Block (vec-of
-            (Let (StatementTag 0) (vec-of (BindValue (ValueId 2) i32)) (vec-of)
-                (Call helper (vec-of (Pass (ValueOperand (Var (ValueId 1))) (Observe))) returns)))
-            (vec-of (Yield (vec-of) (ValueOperand (Var (ValueId 2)))))))
-        (CurrentProgram (MemoryProgram (vec-of
-            (DefineFunction helper params returns helper-body)
-            (DefineFunction entry main-params returns main-body)
-            (DefineFunction dead (vec-of) returns
-                (Block (vec-of) (vec-of (Yield (vec-of) (ValueOperand (LiteralBits (I32) 1)))))))
-            (vec-of) (vec-of (EntryPoint entry 0))))
-    "#,
-    )?;
-    super::run(&mut graph, ScalarOptimization::Basic)?;
-    graph.parse_and_run_program(
-        None,
-        r#"
-        (check (CurrentProgram (MemoryProgram functions externals entries)) (= (vec-size functions) 2))
-        (check (CurrentProgram p) (ContainsExp (ProgramRoot p) (Call name arguments returns)))
-    "#,
-    )?;
-    super::run(&mut graph, ScalarOptimization::Full)?;
-    graph.parse_and_run_program(
-        None,
-        r#"
-        (check (CurrentProgram (MemoryProgram functions externals entries)) (= (vec-size functions) 1))
-        (fail (check (CurrentProgram p) (ContainsExp (ProgramRoot p) (Call name arguments returns))))
-    "#,
-    )?;
+    let tlc = crate::compile_thru_tlc("def helper(x:i32) i32=x+1 entry main(x:i32) i32=helper(x)").unwrap();
+    let (mut graph, _) = from_tlc::import(&tlc)?;
+    // Keep an uncalled function in the graph, independent of TLC's own pruning.
+    let helper = Query(&graph).first("Function")?.unwrap()[0];
+    let root = Query(&graph).required("FunctionRoot", helper)?;
+    graph.update(|mut sink| {
+        let dead = sink.add("FunctionId", (999_i64, "substituted_callback"))?;
+        sink.add("Function", dead)?;
+        sink.set("FunctionRoot", dead, root)?;
+        sink.set("FunctionResultCount", dead, 1_i64)?;
+        Ok(())
+    })?;
+    for (policy, expected) in [(ScalarOptimization::Basic, 2), (ScalarOptimization::Full, 1)] {
+        super::run(&mut graph, policy)?;
+        let query = Query(&graph);
+        let mut functions = 0;
+        let mut calls = 0;
+        query.for_each("LiveFunction", |_| {
+            functions += 1;
+            Ok(())
+        })?;
+        query.for_each("LiveOperation", |row| {
+            calls += usize::from(query.contains("CallOperation", row[0])?);
+            Ok(())
+        })?;
+        assert_eq!(functions, expected);
+        assert_eq!(calls, usize::from(policy == ScalarOptimization::Basic));
+    }
     Ok(())
 }

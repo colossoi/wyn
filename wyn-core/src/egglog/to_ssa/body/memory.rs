@@ -1,15 +1,18 @@
 //! Emit statements in lexical order; descriptor arithmetic comes from bindings.
 use super::{builder_error, error, Body, OptimizeError, Typed, Value};
+use crate::ast::Span;
 use crate::builtins::{catalog, select};
+use crate::egglog::dataflow::ir::{self, Bounds, Code};
+use crate::egglog::payload::Payload;
 use crate::egglog::query::Query;
-use crate::egglog::to_ssa::{host, primitive_type, runtime_binding, same_value_structure};
+use crate::egglog::to_ssa::{host, runtime_binding, same_value_structure};
 use crate::host::Expr;
-use crate::op::{BinaryOperator, OpTag, PureViewSource, UnaryOperator};
+use crate::op::{BinaryOperator, OpTag, PureViewSource};
 use crate::ssa::layout::{storage_elem_stride, storage_value_type};
 use crate::ssa::types::InstKind;
 use crate::types::{self, Type, TypeExt, TypeName};
 use crate::ResourceAccess;
-use egglog_engine::sort::{SetContainer, S, Z};
+use egglog_engine::sort::{Boxed, Z};
 
 fn collection_type(declared: &Type, element: &Type, axes: usize) -> Result<Type, OptimizeError> {
     if axes == 0 {
@@ -59,17 +62,8 @@ impl Body<'_, '_, '_> {
         Ok(value.clone())
     }
 
-    pub fn atom(&mut self, atom: Value) -> Result<Typed, OptimizeError> {
-        let (kind, fields) = self.query().application(atom, &["Var", "LiteralBits"])?;
-        if kind == "Var" {
-            return self.named(fields[0]);
-        }
-        let ty = primitive_type(self.query(), fields[0])?;
-        let bits = self.compiler.program.graph.value_to_base::<i64>(fields[1]);
-        if ty == types::unit() {
-            return self.op(OpTag::Unit, vec![], ty);
-        }
-        self.literal(bits, &ty)
+    pub fn atom(&mut self, name: Value) -> Result<Typed, OptimizeError> {
+        self.named(name)
     }
 
     pub fn index_expression(&mut self, expression: Value) -> Result<Typed, OptimizeError> {
@@ -119,35 +113,33 @@ impl Body<'_, '_, '_> {
     }
 
     pub fn operand(&mut self, operand: Value) -> Result<Option<Typed>, OptimizeError> {
-        let (kind, fields) =
-            self.query().application(operand, &["ValueOperand", "IndexOperand", "AccOperand"])?;
-        match kind {
-            "AccOperand" => Ok(None),
-            "IndexOperand" => self.index_expression(fields[0]).map(Some),
-            "ValueOperand" => self.atom(fields[0]).map(Some),
-            _ => unreachable!(),
-        }
+        let Some(name) = self.query().value_name(operand)? else {
+            return Ok(None);
+        };
+        self.named(name).map(Some)
     }
 
-    pub fn results(&mut self, results: Value) -> Result<Vec<Typed>, OptimizeError> {
+    pub fn yield_values(&mut self, names: &[Value]) -> Result<Vec<Typed>, OptimizeError> {
         let mut values = Vec::new();
-        for result in self.query().vector(results)? {
-            let fields = self.query().fields("Yield", result)?;
-            if let Some(value) = self.operand(fields[1])? {
+        for &name in names {
+            if let Some(value) = self.operand(name)? {
                 values.push(self.snapshot(value)?);
             }
         }
         Ok(values)
     }
 
-    pub fn block(&mut self, block: Value) -> Result<Vec<Typed>, OptimizeError> {
-        let fields = self.query().fields("Block", block)?;
-        self.statements(fields[0])?;
-        self.results(fields[1])
+    pub fn results(&mut self, region: Value) -> Result<Vec<Typed>, OptimizeError> {
+        self.yield_values(&self.query().sequence("RegionYield", region)?)
     }
 
-    pub fn statements(&mut self, statements: Value) -> Result<(), OptimizeError> {
-        for statement in self.query().vector(statements)? {
+    pub fn block(&mut self, region: Value) -> Result<Vec<Typed>, OptimizeError> {
+        self.statements(&self.query().operations(region)?)?;
+        self.results(region)
+    }
+
+    pub fn statements(&mut self, statements: &[Value]) -> Result<(), OptimizeError> {
+        for &statement in statements {
             self.statement(statement)?;
         }
         Ok(())
@@ -175,17 +167,10 @@ impl Body<'_, '_, '_> {
         Ok(())
     }
 
-    pub fn lambda(&mut self, lambda: Value, arguments: Vec<Typed>) -> Result<Vec<Typed>, OptimizeError> {
-        let fields = self.query().fields("FunctionBody", lambda)?;
+    pub fn lambda(&mut self, region: Value, arguments: Vec<Typed>) -> Result<Vec<Typed>, OptimizeError> {
         let checkpoint = self.values.checkpoint();
-        let pattern = self
-            .query()
-            .vector(fields[0])?
-            .into_iter()
-            .map(|param| Ok(self.query().fields("Parameter", param)?[0]))
-            .collect::<Result<Vec<_>, OptimizeError>>()?;
-        self.bind(&pattern, arguments)?;
-        let result = self.block(fields[2]);
+        self.bind(&self.query().sequence("RegionParameter", region)?, arguments)?;
+        let result = self.block(region);
         self.values.restore(checkpoint);
         result
     }
@@ -222,67 +207,54 @@ impl Body<'_, '_, '_> {
     }
 
     pub(in crate::egglog::to_ssa) fn statement(&mut self, statement: Value) -> Result<(), OptimizeError> {
+        let span = self
+            .query()
+            .lookup("OperationSpan", statement)?
+            .map(|span| self.query().0.value_to_base::<Boxed<Span>>(span).0);
+        let previous = std::mem::replace(&mut self.span, span);
+        let result = self.emit_statement(statement);
+        self.span = previous;
+        result
+    }
+
+    fn emit_statement(&mut self, statement: Value) -> Result<(), OptimizeError> {
         host::remember(
             Query(&self.compiler.program.graph),
             self.function,
             &mut self.host_values,
             statement,
         )?;
-        let fields = self.query().fields("Let", statement)?;
-        let pattern = self.query().vector(fields[1])?;
-        let expression = fields[3];
-        let (kind, arguments) = self.query().application(
-            expression,
-            &[
-                "Use",
-                "Product",
-                "Project",
-                "Length",
-                "Index",
-                "PrimOp",
-                "IndexOp",
-                "Assert",
-                "Call",
-                "If",
-                "Loop",
-                "Parallel",
-                "WithAcc",
-                "BucketScatter",
-                "View",
-                "GenerateArray",
-                "Copy",
-                "Scratch",
-                "Update",
-                "Accumulate",
-                "Reserve",
-            ],
-        )?;
-        if kind == "Parallel"
-            && self.query().enode("DeviceKernel", arguments[0])?.is_some()
+        let query = self.query();
+        let pattern = query.sequence("Output", statement)?;
+        let operands = query.sequence("Input", statement)?;
+        let inputs = operands.iter().map(|&name| query.name(name)).collect::<Result<Vec<_>, _>>()?;
+        let code = ir::code(query.0, query.required("OperationPayload", statement)?);
+        if matches!(code, Code::Parallel)
+            && query.enode("DeviceKernel", query.required("OperationExecution", statement)?)?.is_some()
             && self.active_dispatch != Some(statement)
         {
             return Err(error("device parallel region requires a dispatch entry"));
         }
-        let values = match kind {
-            "Use" => self.operand(arguments[0])?.into_iter().collect(),
-            "Product" => {
-                let values = self
-                    .query()
-                    .vector(arguments[0])?
-                    .into_iter()
-                    .map(|atom| self.atom(atom))
-                    .collect::<Result<Vec<_>, _>>()?;
+        let values = match code {
+            Code::Constant { ty, bits } => vec![if ty == types::unit() {
+                self.op(OpTag::Unit, vec![], ty)?
+            } else {
+                self.literal(bits, &ty)?
+            }],
+            Code::Use => self.operand(operands[0])?.into_iter().collect(),
+            Code::Product => {
+                let values = inputs.iter().map(|&name| self.named(name)).collect::<Result<Vec<_>, _>>()?;
                 vec![self.tuple(values)?]
             }
-            "Project" => {
-                let value = self.atom(arguments[0])?;
-                let index = usize::try_from(self.query().0.value_to_base::<i64>(arguments[1]))
-                    .map_err(|_| error("negative product field"))?;
+            Code::Project { index } => {
+                let value = self.named(inputs[0])?;
                 vec![self.field(value, index)?]
             }
-            "IndexOp" => vec![self.index_expression(arguments[0])?],
-            "Copy" if self.values.get(&arguments[0]).is_some_and(|value| value.ty.is_array()) => {
-                let source = self.named(arguments[0])?;
+            Code::IndexValue => {
+                vec![self.index_expression(self.query().required("OperationIndex", (statement, 0_i64))?)?]
+            }
+            Code::Copy => {
+                let source = self.named(inputs[0])?;
                 if source.ty.array_variant().is_some_and(types::is_array_variant_composite) {
                     if let [binding] = pattern.as_slice() {
                         if let Some((output, _)) = runtime_binding(self.query(), *binding)? {
@@ -305,8 +277,8 @@ impl Body<'_, '_, '_> {
                 };
                 let known_count = self
                     .query()
-                    .lookup("LogicalOuterCount", (self.function, arguments[0]))?
-                    .map(|count| self.query().lookup("StaticIndex", (self.function, count)))
+                    .lookup("LogicalOuterCount", inputs[0])?
+                    .map(|count| self.query().lookup("StaticIndex", count))
                     .transpose()?
                     .flatten();
                 let count = if let Some(count) = known_count {
@@ -327,7 +299,7 @@ impl Body<'_, '_, '_> {
                     let bytes =
                         Expr::Multiply(Box::new(length.clone()), Box::new(Expr::Integer(stride.into())));
                     let (_, destination) = self.device_buffer(&element, bytes, count.clone())?;
-                    self.host_lengths.insert(destination.value.clone(), length);
+                    self.host_shapes.insert(destination.value.clone(), vec![length]);
                     destination
                 } else {
                     let capacity = self
@@ -337,12 +309,9 @@ impl Body<'_, '_, '_> {
                             Some(Type::Constructed(TypeName::Size(size), _)) => Some(*size),
                             _ => None,
                         });
-                    let capacity = capacity.or(self
-                        .query()
-                        .lookup("OuterCapacity", (self.function, arguments[0]))?
-                        .and_then(|value| {
-                            usize::try_from(self.query().0.value_to_base::<i64>(value)).ok()
-                        }));
+                    let capacity = capacity.or(self.query().lookup("OuterCapacity", inputs[0])?.and_then(
+                        |value| usize::try_from(self.query().0.value_to_base::<i64>(value)).ok(),
+                    ));
                     let Some(capacity) = capacity else {
                         return Err(error("local copy needs a capacity bound"));
                     };
@@ -361,8 +330,8 @@ impl Body<'_, '_, '_> {
                 )?;
                 vec![destination]
             }
-            "Scratch" => {
-                let source = self.named(arguments[0])?;
+            Code::Scratch => {
+                let source = self.named(inputs[0])?;
                 let count = self.array_length(source.clone())?;
                 let length = if self.active_dispatch.is_none() {
                     Some(self.host_array_length(&source)?)
@@ -372,9 +341,8 @@ impl Body<'_, '_, '_> {
                 let block = self.current()?;
                 vec![self.collection_storage(&source.ty, count, length.as_ref(), None, block)?]
             }
-            "GenerateArray" if self.query().enode("UninitializedShape", arguments[0])?.is_some() => {
-                let fields = self.query().fields("UninitializedShape", arguments[0])?;
-                let shape = self.query().vector(fields[0])?;
+            Code::Uninitialized => {
+                let shape = self.query().vector(self.query().required("OperationShape", statement)?)?;
                 let [extent] = shape.as_slice() else {
                     return Err(error("scratch allocation requires one outer extent"));
                 };
@@ -396,9 +364,8 @@ impl Body<'_, '_, '_> {
                 let block = self.current()?;
                 vec![self.collection_storage(&ty, count, length.as_ref(), None, block)?]
             }
-            "Length" => {
-                let array = self.named(arguments[0])?;
-                let axis = self.query().0.value_to_base::<i64>(arguments[1]);
+            Code::Length { axis } => {
+                let array = self.named(inputs[0])?;
                 if axis != 0 {
                     return Err(error("logical length requires an outer array axis"));
                 }
@@ -414,19 +381,19 @@ impl Body<'_, '_, '_> {
                 }
                 vec![self.array_length(array)?]
             }
-            "Index" => {
-                let mut array = self.named(arguments[0])?;
-                for atom in self.query().vector(arguments[1])? {
-                    let index = self.atom(atom)?;
+            Code::Index => {
+                let mut array = self.named(inputs[0])?;
+                for &name in &inputs[1..] {
+                    let index = self.named(name)?;
                     array = self.index(array, index)?;
                 }
                 vec![array]
             }
-            "GenerateArray" if self.query().enode("RangeValues", arguments[0])?.is_some() => {
-                let fields = self.query().fields("RangeValues", arguments[0])?;
-                let start = self.atom(fields[0])?;
-                let step = self.atom(fields[2])?;
-                let length = self.index_expression(fields[1])?;
+            Code::Range => {
+                let extent = self.query().required("OperationIndex", (statement, 0_i64))?;
+                let start = self.atom(inputs[0])?;
+                let step = self.atom(inputs[1])?;
+                let length = self.index_expression(extent)?;
                 let length = if let Some(count) = self.integer_literal(&length) {
                     self.literal(count.max(0), &length.ty)?
                 } else {
@@ -442,22 +409,20 @@ impl Body<'_, '_, '_> {
                     types::no_buffer(),
                 );
                 let value = self.op(OpTag::Tuple, vec![start, step, length], ty)?;
-                if let Some(length) = host::scalar_index(self.query(), &self.host_values, fields[1])? {
-                    self.host_lengths.insert(
+                if let Some(length) = host::scalar_index(self.query(), &self.host_values, extent)? {
+                    self.host_shapes.insert(
                         value.value,
-                        Expr::Max(Box::new(Expr::Scalar(length)), Box::new(Expr::Integer(0))),
+                        vec![Expr::Max(
+                            Box::new(Expr::Scalar(length)),
+                            Box::new(Expr::Integer(0)),
+                        )],
                     );
                 }
                 vec![value]
             }
-            "GenerateArray" if self.query().enode("ArrayLiteral", arguments[0])?.is_some() => {
-                let literal = self.query().fields("ArrayLiteral", arguments[0])?;
-                let mut elements = self
-                    .query()
-                    .vector(literal[0])?
-                    .into_iter()
-                    .map(|atom| self.atom(atom))
-                    .collect::<Result<Vec<_>, _>>()?;
+            Code::ArrayLiteral => {
+                let mut elements =
+                    inputs.iter().copied().map(|atom| self.atom(atom)).collect::<Result<Vec<_>, _>>()?;
                 let [binding] = pattern.as_slice() else {
                     return Err(error("array literal must bind one value"));
                 };
@@ -479,56 +444,52 @@ impl Body<'_, '_, '_> {
                 let ty = types::sized_array(elements.len(), element);
                 vec![self.op(OpTag::ArrayLit, elements, ty)?]
             }
-            "PrimOp" => {
-                let opcode = self.compiler.program.graph.value_to_base::<S>(arguments[0]).to_string();
-                let args = self
-                    .query()
-                    .vector(arguments[1])?
-                    .into_iter()
-                    .map(|atom| self.atom(atom))
-                    .collect::<Result<Vec<_>, _>>()?;
+            Code::Scalar(payload) => {
+                let args = inputs.iter().map(|&name| self.named(name)).collect::<Result<Vec<_>, _>>()?;
                 let [binding] = pattern.as_slice() else {
                     return Err(error("scalar instruction must bind one result"));
                 };
                 let Some((_, ty)) = runtime_binding(self.query(), *binding)? else {
-                    return Err(error("scalar result is not a value"));
+                    return Err(error("scalar result is a capability"));
                 };
-                vec![self.primitive(&opcode, args, ty)?]
+                vec![self.primitive(payload, args, ty)?]
             }
-            "If" => {
-                let condition = self.atom(arguments[0])?;
-                let types: Vec<_> = pattern
+            Code::Branch => {
+                let condition = self.named(inputs[0])?;
+                let yes = self.query().required("ControlRegion", (statement, 0_i64))?;
+                let no = self.query().required("ControlRegion", (statement, 1_i64))?;
+                let types = pattern
                     .iter()
-                    .map(|&binding| runtime_binding(self.query(), binding))
+                    .map(|&name| runtime_binding(self.query(), name))
                     .collect::<Result<Vec<_>, _>>()?
                     .into_iter()
                     .flatten()
                     .map(|(_, ty)| ty)
-                    .collect();
+                    .collect::<Vec<_>>();
                 let mut speculate = types.iter().all(select::supported_type);
-                for &branch in &arguments[2..4] {
-                    let effects = self.query().required("EffectsBody", (self.function, branch))?;
-                    let Some(effects) = self.query().0.value_to_container::<SetContainer>(effects) else {
-                        return Err(error("invalid branch effects"));
-                    };
-                    speculate &= effects.data.is_empty();
-                    speculate &=
-                        self.query().lookup("BodyWork", (self.function, branch))?.is_some_and(|work| {
-                            u64::try_from(&*self.query().0.value_to_base::<Z>(work))
-                                .is_ok_and(|work| work <= 4)
-                        });
+                for region in [yes, no] {
+                    let query = self.query();
+                    for table in ["RegionRead", "RegionWrite", "RegionTrap"] {
+                        query.for_each(table, |row| {
+                            speculate &= row[0] != region;
+                            Ok(())
+                        })?;
+                    }
+                    speculate &= query.lookup("RegionWork", region)?.is_some_and(|work| {
+                        u64::try_from(&*query.0.value_to_base::<Z>(work)).is_ok_and(|work| work <= 4)
+                    });
                 }
                 if speculate {
-                    let yes = self.block(arguments[2])?;
-                    let no = self.block(arguments[3])?;
-                    if yes.len() != types.len() || no.len() != types.len() {
+                    let a = self.block(yes)?;
+                    let b = self.block(no)?;
+                    if a.len() != types.len() || b.len() != types.len() {
                         return Err(error("selected branch result arity mismatch"));
                     }
                     let mut values = Vec::new();
-                    for ((yes, no), ty) in yes.into_iter().zip(no).zip(&types) {
-                        let yes = self.canonical_value(yes, ty)?;
-                        let no = self.canonical_value(no, ty)?;
-                        values.push(self.select(condition.clone(), yes, no)?);
+                    for ((a, b), ty) in a.into_iter().zip(b).zip(&types) {
+                        let a = self.canonical_value(a, ty)?;
+                        let b = self.canonical_value(b, ty)?;
+                        values.push(self.select(condition.clone(), a, b)?);
                     }
                     return self.bind(&pattern, values);
                 }
@@ -536,59 +497,47 @@ impl Body<'_, '_, '_> {
                 let result = self.branch(
                     condition,
                     |body| {
-                        let values = body.block(arguments[2])?;
+                        let values = body.block(yes)?;
                         let value = body.tuple(values)?;
                         body.canonical_value(value, &ty)
                     },
                     |body| {
-                        let values = body.block(arguments[3])?;
+                        let values = body.block(no)?;
                         let value = body.tuple(values)?;
                         body.canonical_value(value, &ty)
                     },
                 )?;
                 self.unpack(result)?
             }
-            "Loop" => {
+            Code::CountedLoop | Code::WhileLoop => {
+                let region = self.query().required("ControlRegion", (statement, 0_i64))?;
                 let mut params = Vec::new();
                 let mut initial = Vec::new();
-                for (slot, merge) in self.query().vector(arguments[0])?.into_iter().enumerate() {
-                    let fields = self.query().fields("Carry", merge)?;
-                    let param = self.query().fields("Parameter", fields[0])?;
-                    if let Some((name, ty)) = runtime_binding(self.query(), param[0])? {
-                        let Some(value) = self.operand(fields[1])? else {
+                for slot in 0..crate::egglog::analysis::count(self.query(), "OutputCount", statement)? {
+                    let parameter = self.query().required("RegionParameter", (region, slot))?;
+                    if let Some((name, ty)) = runtime_binding(self.query(), parameter)? {
+                        let argument = self.query().required("EdgeArgument", (statement, 0_i64, slot))?;
+                        let Some(value) = self.operand(argument)? else {
                             return Err(error("loop carry has no runtime value"));
                         };
-                        params.push(name);
                         let mut value = self.canonical_value(value, &ty)?;
                         let mut components = 0;
                         let mut preserved = true;
                         self.query().for_each("LoopArrayComponent", |row| {
-                            if row[0] == self.function
-                                && row[1] == expression
-                                && self.query().0.value_to_base::<i64>(row[2]) == slot as i64
-                            {
+                            if row[0] == statement && self.query().0.value_to_base::<i64>(row[1]) == slot {
                                 components += 1;
-                                preserved &= self.query().contains(
-                                    "LoopPreservesComponentLength",
-                                    (row[0], row[1], row[2], row[3]),
-                                )?;
+                                preserved &= self
+                                    .query()
+                                    .contains("LoopPreservesComponentLength", (row[0], row[1], row[2]))?;
                             }
                             Ok(())
                         })?;
-                        if self.query().contains(
-                            "LoopPreservesOuterLength",
-                            (self.function, expression, slot as i64),
-                        )? || (components > 0 && preserved)
+                        if self.query().contains("LoopPreservesOuterLength", (statement, slot))?
+                            || (components > 0 && preserved)
                         {
-                            let initial_name = self
-                                .query()
-                                .enode("ValueOperand", fields[1])?
-                                .map(|operand| self.query().enode("Var", operand[0]))
-                                .transpose()?
-                                .flatten()
-                                .map(|atom| atom[0]);
-                            value = self.fixed_loop_state(value, initial_name)?;
+                            value = self.fixed_loop_state(value, self.query().value_name(argument)?)?;
                         }
+                        params.push(name);
                         initial.push(value);
                     }
                 }
@@ -597,10 +546,11 @@ impl Body<'_, '_, '_> {
                         body.values.insert(name, value.clone());
                     }
                 };
-                if let Some(form) = self.query().enode("Counted", arguments[1])? {
-                    let start = self.index_expression(form[1])?;
-                    let count = self.index_expression(form[2])?;
-                    let step = self.index_expression(form[3])?;
+                if matches!(code, Code::CountedLoop) {
+                    let index = self.query().required("LoopIndex", statement)?;
+                    let start = self.index_expression(self.query().required("LoopStart", statement)?)?;
+                    let count = self.index_expression(self.query().required("LoopCount", statement)?)?;
+                    let step = self.index_expression(self.query().required("LoopStep", statement)?)?;
                     self.counted(
                         Self::number(0),
                         count,
@@ -610,35 +560,35 @@ impl Body<'_, '_, '_> {
                             install(body, &state);
                             let ordinal = body.cast(ordinal, &start.ty)?;
                             let offset = body.binary(BinaryOperator::Multiply, ordinal, step)?;
-                            let index = body.binary(BinaryOperator::Add, start, offset)?;
-                            body.values.insert(form[0], index);
-                            body.block(arguments[3])
+                            let value = body.binary(BinaryOperator::Add, start, offset)?;
+                            body.values.insert(index, value);
+                            body.block(region)
                         },
                     )?
                 } else {
-                    let form = self.query().fields("While", arguments[1])?;
+                    let condition = self.query().required("LoopCondition", statement)?;
                     self.while_loop(
                         initial,
                         |body, state| {
                             install(body, state);
-                            body.named(form[0])
+                            body.named(condition)
                         },
                         |body, state| {
                             install(body, &state);
-                            body.block(arguments[3])
+                            body.block(region)
                         },
                     )?
                 }
             }
-            "Call" => {
+            Code::Call => {
                 let mut args = Vec::new();
-                for arg in self.query().vector(arguments[1])? {
-                    let arg = self.query().fields("Pass", arg)?;
-                    if let Some(value) = self.operand(arg[0])? {
+                for &name in &operands {
+                    if let Some(value) = self.operand(name)? {
                         args.push(value);
                     }
                 }
-                let (id, ty) = self.compiler.function(arguments[0])?;
+                let target = self.query().required("CallTarget", statement)?;
+                let (id, ty) = self.compiler.function(target)?;
                 let result = self.op(OpTag::Call(id), args, ty)?;
                 if pattern.len() == 1 {
                     vec![result]
@@ -646,29 +596,32 @@ impl Body<'_, '_, '_> {
                     self.unpack(result)?
                 }
             }
-            "WithAcc" => {
-                let lambda = self.query().fields("FunctionBody", arguments[1])?;
-                let block = self.query().fields("Block", lambda[2])?;
-                self.statements(block[0])?;
+            Code::WithAcc => {
+                let region = self.query().required("ControlRegion", (statement, 0_i64))?;
+                self.statements(&self.query().operations(region)?)?;
                 let mut values = Vec::new();
-                for input in self.query().vector(arguments[0])? {
-                    let input = self.query().fields("AccumulatorInput", input)?;
-                    for name in self.query().vector(input[0])? {
-                        let value = self.named(name)?;
-                        values.push(value);
+                for group in
+                    0..crate::egglog::analysis::count(self.query(), "AccumulatorGroupCount", statement)?
+                {
+                    let count = crate::egglog::analysis::count(
+                        self.query(),
+                        "AccumulatorArrayCount",
+                        (statement, group),
+                    )?;
+                    for slot in 0..count {
+                        let name = self.query().required("AccumulatorArray", (statement, group, slot))?;
+                        values.push(self.named(name)?);
                     }
                 }
-                values.extend(self.results(block[1])?);
-                if pattern.len() == 1 && values.len() > 1 {
-                    vec![self.tuple(values)?]
-                } else {
-                    values
-                }
+                values.extend(self.results(region)?);
+                self.scope_outputs(&pattern, values)?
             }
-            "BucketScatter" => vec![self.bucket_scatter(&arguments)?],
-            "View" => {
-                let mut array = self.named(arguments[0])?;
-                for slice in self.query().vector(arguments[1])? {
+            Code::BucketScatter { coordinates, depth } => {
+                vec![self.bucket_scatter(statement, &coordinates, depth)?]
+            }
+            Code::View => {
+                let mut array = self.named(inputs[0])?;
+                for slice in self.query().vector(self.query().required("OperationSlices", statement)?)? {
                     if let Some(at) = self.query().enode("At", slice)? {
                         let index = self.index_expression(at[0])?;
                         array = self.index(array, index)?;
@@ -677,26 +630,27 @@ impl Body<'_, '_, '_> {
                         let start = self.index_expression(fields[0])?;
                         let count = self.index_expression(fields[1])?;
                         let stride = self.index_expression(fields[2])?;
-                        let mut shape = self.host_shapes.get(&array.value).cloned();
+                        let mut shape = self.host_shapes.get(&array.value).cloned().unwrap_or_default();
                         array = self.slice_array(array, start, count, stride)?;
                         if let Some(length) =
                             host::scalar_index(self.query(), &self.host_values, fields[1])?
                         {
                             let length = Expr::Scalar(length);
-                            self.host_lengths.insert(array.value, length.clone());
-                            if let Some(shape) = shape.as_mut() {
+                            if shape.is_empty() {
+                                shape.push(length);
+                            } else {
                                 shape[0] = length;
-                                self.host_shapes.insert(array.value, shape.clone());
                             }
+                            self.host_shapes.insert(array.value, shape);
                         }
                     }
                 }
                 vec![array]
             }
-            "Update" => {
-                let slices = self.query().vector(arguments[2])?;
-                let value = self.atom(arguments[3])?;
-                let source = self.named(arguments[1])?;
+            Code::Update { bounds } => {
+                let slices = self.query().vector(self.query().required("OperationSlices", statement)?)?;
+                let value = self.atom(inputs[1])?;
+                let source = self.named(inputs[0])?;
                 if source.ty.array_variant().is_some_and(types::is_array_variant_composite) {
                     if let [slice] = slices.as_slice() {
                         if let Some(at) = self.query().enode("At", *slice)? {
@@ -725,79 +679,76 @@ impl Body<'_, '_, '_> {
                         }
                     }
                 }
-                self.update_slices(
-                    arguments[1],
-                    &slices,
-                    vec![],
-                    value,
-                    self.query().enode("ProvenInBounds", arguments[0])?.is_some(),
-                )?;
-                let value = self.named(arguments[1])?;
+                self.update_slices(inputs[0], &slices, vec![], value, bounds == Bounds::Proven)?;
+                let value = self.named(inputs[0])?;
                 vec![self.snapshot(value)?]
             }
-            "Assert" => {
-                let condition = self.atom(arguments[0])?;
-                self.require_condition(condition)?;
-                Vec::new()
-            }
-            "Accumulate" | "Reserve" => self.accumulate(kind, &arguments)?,
-            "Parallel" => self.parallel(&arguments, &[], &pattern)?,
-            _ => return Err(error(format!("unimplemented logical operation {kind}"))),
+            Code::Accumulate { .. } => self.accumulate(statement)?,
+            Code::Parallel => self.parallel(statement, &pattern)?,
         };
         self.bind(&pattern, values)
     }
 
-    fn primitive(&mut self, opcode: &str, arguments: Vec<Typed>, ty: Type) -> Result<Typed, OptimizeError> {
-        if opcode == "vector-index" {
-            let [vector, index]: [Typed; 2] =
-                arguments.try_into().map_err(|_| error("vector indexing arity"))?;
-            return self.op(OpTag::Index, vec![vector, index], ty);
+    pub(in crate::egglog::to_ssa) fn scope_outputs(
+        &mut self,
+        pattern: &[Value],
+        values: Vec<Typed>,
+    ) -> Result<Vec<Typed>, OptimizeError> {
+        let mut values = values.into_iter().peekable();
+        let mut outputs = Vec::new();
+        for &binding in pattern {
+            if let Some((_, ty)) = runtime_binding(self.query(), binding)? {
+                outputs.push(self.scope_value(&ty, &mut values)?);
+            }
         }
-        if opcode == "index-cast" {
+        if values.next().is_some() {
+            return Err(error("accumulator scope returned too many values"));
+        }
+        Ok(outputs)
+    }
+
+    fn scope_value(
+        &mut self,
+        ty: &Type,
+        values: &mut std::iter::Peekable<std::vec::IntoIter<Typed>>,
+    ) -> Result<Typed, OptimizeError> {
+        if values.peek().is_some_and(|value| same_value_structure(&value.ty, ty)) {
+            let Some(value) = values.next() else {
+                return Err(error("accumulator result disappeared"));
+            };
+            return Ok(value);
+        }
+        if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = ty {
+            let values = fields
+                .iter()
+                .map(|field| self.scope_value(field, values))
+                .collect::<Result<Vec<_>, _>>()?;
+            return self.tuple(values);
+        }
+        let Some(value) = values.next() else {
+            return Err(error("accumulator scope returned too few values"));
+        };
+        self.canonical_value(value, ty)
+    }
+
+    fn primitive(
+        &mut self,
+        payload: Payload,
+        arguments: Vec<Typed>,
+        ty: Type,
+    ) -> Result<Typed, OptimizeError> {
+        if payload == Payload::IndexCast {
             let [value]: [Typed; 1] = arguments.try_into().map_err(|_| error("index conversion arity"))?;
             return self.cast(value, &ty);
         }
-        if opcode == "select" {
+        if payload == Payload::Select {
             let [no, yes, condition] = arguments.as_slice() else {
                 return Err(error("select requires a condition and two values"));
             };
             return self.select(condition.clone(), yes.clone(), no.clone());
         }
-        let tag = match opcode {
-            "unit" => OpTag::Unit,
-            "vector" => OpTag::Vector,
-            "tuple" => OpTag::Tuple,
-            _ if opcode.starts_with("project:") => OpTag::Project {
-                index: opcode[8..].parse().map_err(|_| error("invalid vector projection"))?,
-            },
-            _ => {
-                if let Some((name, overload)) =
-                    opcode.strip_prefix("builtin:").and_then(|name| name.rsplit_once(':'))
-                {
-                    let Some(builtin) = catalog().lookup_by_any_name(name) else {
-                        return Err(error(format!("unknown primitive {opcode}")));
-                    };
-                    OpTag::Intrinsic {
-                        id: builtin.id,
-                        overload_idx: overload.parse().map_err(|_| error("invalid builtin overload"))?,
-                    }
-                } else if let Some(builtin) = catalog().lookup_by_any_name(opcode) {
-                    OpTag::Intrinsic {
-                        id: builtin.id,
-                        overload_idx: 0,
-                    }
-                } else if arguments.len() == 1 {
-                    OpTag::UnaryOp(
-                        UnaryOperator::try_from(opcode)
-                            .map_err(|_| error(format!("unknown unary primitive {opcode}")))?,
-                    )
-                } else {
-                    OpTag::BinOp(
-                        BinaryOperator::try_from(opcode)
-                            .map_err(|_| error(format!("unknown binary primitive {opcode}")))?,
-                    )
-                }
-            }
+        let Some(tag) = payload.instruction() else {
+            return Err(error("scalar payload has no ordinary instruction"));
         };
         if matches!(tag, OpTag::Intrinsic { id, .. } if id == catalog().known().record_with) {
             let [base, index, update]: [Typed; 3] =
@@ -860,7 +811,7 @@ impl Body<'_, '_, '_> {
             } else {
                 let capacity = self
                     .query()
-                    .lookup("OuterCapacity", (self.function, name))?
+                    .lookup("OuterCapacity", name)?
                     .map(|value| self.query().0.value_to_base::<i64>(value));
                 if let Some(shape) = shape {
                     self.ranked_collection_storage(&ty, &shape, block)?
@@ -895,8 +846,8 @@ impl Body<'_, '_, '_> {
     ) -> Result<Option<Typed>, OptimizeError> {
         let mut candidates = Vec::new();
         self.query().for_each("CanReuse", |row| {
-            if row[0] == self.function && row[1] == output {
-                candidates.push(row[2]);
+            if row[0] == output {
+                candidates.push(row[1]);
             }
             Ok(())
         })?;
@@ -917,41 +868,35 @@ impl Body<'_, '_, '_> {
     }
 
     fn value_updates_only(&self, name: Value) -> Result<bool, OptimizeError> {
-        let root = self
-            .query()
-            .constructor("FunctionRoot", (self.function,))?
-            .ok_or_else(|| error("function root missing for value update"))?;
-        let reference = self
-            .query()
-            .constructor("ValueNameRef", (name,))?
-            .ok_or_else(|| error("array name missing for value update"))?;
+        let query = self.query();
+        let Some(reference) = query.constructor("ValueNameRef", name)? else {
+            return Err(error("array name missing for value update"));
+        };
         let mut updates = false;
         let mut safe = true;
-        self.query().for_each("ContainsExp", |row| {
-            if row[0] != root {
+        query.for_each("OperationUse", |row| {
+            if row[1] != reference || !query.contains("LiveOperation", row[0])? {
                 return Ok(());
             }
-            let names = self.query().required("DirectNamesExp", (row[1],))?;
-            let Some(names) = self.query().0.value_to_container::<egglog_engine::sort::SetContainer>(names)
-            else {
-                return Err(error("invalid direct name set"));
-            };
-            if !names.data.contains(&reference) {
-                return Ok(());
-            }
-            if let Some(update) = self.query().enode("Update", row[1])? {
-                let slices = self.query().vector(update[2])?;
-                let simple = update[1] == name
+            let code = ir::code(query.0, query.required("OperationPayload", row[0])?);
+            if matches!(code, Code::Update { .. }) {
+                let slices = query.vector(query.required("OperationSlices", row[0])?)?;
+                let simple = query.required("Input", (row[0], 0_i64))? == reference
                     && slices.len() == 1
-                    && self.query().enode("At", slices[0])?.is_some();
+                    && query.enode("At", slices[0])?.is_some();
                 updates |= simple;
                 safe &= simple;
             } else {
-                safe &= self.query().enode("Index", row[1])?.is_some()
-                    || self.query().enode("Length", row[1])?.is_some();
+                safe &= matches!(code, Code::Index | Code::Length { .. });
             }
             Ok(())
         })?;
+        for table in ["RegionYield", "ResultValue", "ResultNeutral"] {
+            query.for_function(table, |_, value| {
+                safe &= value != reference;
+                Ok(())
+            })?;
+        }
         Ok(safe && updates)
     }
 
@@ -1201,28 +1146,19 @@ impl Body<'_, '_, '_> {
         Ok(coordinates)
     }
 
-    pub(in crate::egglog::to_ssa) fn write_atom(
-        &mut self,
-        destination: Value,
-        prefix: &[Typed],
-        atom: Value,
-    ) -> Result<(), OptimizeError> {
-        let value = self.atom(atom)?;
-        self.write_array(destination, prefix, value)
-    }
-
-    fn accumulate(&mut self, kind: &str, arguments: &[Value]) -> Result<Vec<Typed>, OptimizeError> {
-        let capability = self.query().required(
-            "TokenCapability",
-            (self.function, arguments[usize::from(kind != "Reserve")]),
-        )?;
-        let capability = self.query().fields("AccumulatorInput", capability)?;
-        let arrays = self.query().vector(capability[0])?;
-        let policy = capability[1];
-        let token = usize::from(kind != "Reserve");
-        let indices = self
-            .query()
-            .vector(arguments[token + 1])?
+    fn accumulate(&mut self, operation: Value) -> Result<Vec<Typed>, OptimizeError> {
+        let query = self.query();
+        let operands = query.sequence("Input", operation)?;
+        let token = query.fields("AccNameRef", operands[0])?[0];
+        let capability = query.fields("TokenBindingAt", query.required("TokenCapability", token)?)?;
+        let owner = capability[0];
+        let group = query.0.value_to_base::<i64>(capability[1]);
+        let count = crate::egglog::analysis::count(query, "AccumulatorArrayCount", (owner, group))?;
+        let arrays = query.indexed("AccumulatorArray", &[owner, capability[1]], count)?;
+        let policy = query.required("AccumulatorPolicy", (owner, group))?;
+        let combine = query.lookup("AccumulatorCombiner", (owner, group))?;
+        let indices = query
+            .vector(query.required("OperationShape", operation)?)?
             .into_iter()
             .map(|index| self.index_expression(index))
             .collect::<Result<Vec<_>, _>>()?;
@@ -1232,28 +1168,8 @@ impl Body<'_, '_, '_> {
         if self.values.get(&first).is_some_and(|value| value.ty.is_array()) {
             let array = self.named(first)?;
             let valid = self.valid_indices(array, &indices)?;
-            if kind == "Reserve" {
-                let delta = self.atom(arguments[2])?;
-                let ty = delta.ty.clone();
-                let value = self.branch(
-                    valid,
-                    |body| {
-                        let previous = body.read_array(first, &indices)?;
-                        let next = body.binary(BinaryOperator::Add, previous.clone(), delta)?;
-                        body.write_array(first, &indices, next)?;
-                        Ok(previous)
-                    },
-                    |body| body.literal(0, &ty),
-                )?;
-                return Ok(vec![value]);
-            }
-            let values = self
-                .query()
-                .vector(arguments[3])?
-                .into_iter()
-                .map(|atom| self.atom(atom))
-                .collect::<Result<Vec<_>, _>>()?;
-            if let Some(update) = self.atomic_policy(&arrays, policy)? {
+            let values = self.yield_values(&operands[1..])?;
+            if let Some(update) = self.atomic_policy(&arrays, policy, combine)? {
                 let [value] = values.as_slice() else {
                     return Err(error("atomic accumulator must receive one scalar"));
                 };
@@ -1263,13 +1179,13 @@ impl Body<'_, '_, '_> {
                 return Ok(vec![]);
             }
             self.when(valid, |body| {
-                let values = if let Some(combine) = body.query().enode("CombineWrites", policy)? {
+                let values = if let Some(combine) = combine {
                     let mut operands = arrays
                         .iter()
                         .map(|&array| body.read_array(array, &indices))
                         .collect::<Result<Vec<_>, _>>()?;
                     operands.extend(values);
-                    body.lambda(combine[0], operands)?
+                    body.lambda(combine, operands)?
                 } else {
                     values
                 };

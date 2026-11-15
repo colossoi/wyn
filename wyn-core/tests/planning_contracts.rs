@@ -272,7 +272,7 @@ fn fused_scan_and_filter_count_have_distinct_accumulator_storage() {
     assert_eq!(
         partials.len(),
         3,
-        "all three accumulators need independent partial state"
+        "all three accumulators need independent partial state; stages: {stages:?}"
     );
     assert!(stages[1].writes.contains(&artifact.result(1)));
     assert!(stages[1].writes.contains(&artifact.result(2)));
@@ -419,6 +419,19 @@ fn outputs_that_capture_a_total_wait_for_the_collective_barrier() {
 fn depends_on(graph: &host::FrameGraph, consumer: usize, producer: usize) -> bool {
     consumer == producer
         || graph.passes[consumer].depends_on.iter().any(|&parent| depends_on(graph, parent, producer))
+}
+
+#[test]
+fn scalar_epilogues_share_the_completed_collective_dispatch() {
+    for (source, stages) in [
+        ("entry main(xs:[]i32) i32=reduce((+),0,xs)+1", 2),
+        (
+            "entry main(xs:[]i32) ([]i32,i32)=let ys=filter(|x|x>0,xs) in (ys,length(ys)*2)",
+            1,
+        ),
+    ] {
+        compile(source).stages(stages);
+    }
 }
 
 #[test]

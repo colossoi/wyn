@@ -1,14 +1,13 @@
 //! Typed scalar primitives. Egglog owns matching, propagation, and saturation.
-use crate::builtins::catalog;
-use crate::builtins::lowering::{BuiltinLowering, PrimOp};
+use crate::builtins::by_id;
 use crate::constant_eval::{self, Constant};
-use crate::op::{BinaryOperator, UnaryOperator};
+use crate::egglog::payload::{Payload, PayloadSort};
 use crate::scalar_eval::{binary, unary, wrap_int, Scalar};
 use crate::types::{Type, TypeName};
 use egglog_engine::ast::Span;
 use egglog_engine::constraint::{SimpleTypeConstraint, TypeConstraint};
 use egglog_engine::prelude::BaseSort;
-use egglog_engine::sort::{I64Sort, StringSort, S};
+use egglog_engine::sort::{Boxed, I64Sort, StringSort, S};
 use egglog_engine::{Core, EGraph, Primitive, PurePrim, PureState, Value};
 
 pub(super) fn register(graph: &mut EGraph) {
@@ -35,6 +34,7 @@ impl Primitive for ScalarPrimitive {
             Self::Unary => 4,
         };
         let mut sorts = vec![StringSort.to_arcsort(); arity];
+        sorts[0] = PayloadSort.to_arcsort();
         sorts.push(StringSort.to_arcsort());
         sorts[3..].fill(I64Sort.to_arcsort());
         SimpleTypeConstraint::new(self.name(), sorts, span.clone()).into_box()
@@ -45,10 +45,13 @@ impl PurePrim for ScalarPrimitive {
         let string = |v| state.base_values().unwrap::<S>(v);
         let result = match (self, args) {
             (Self::Binary, &[op, input, output, a, b]) => {
+                let Payload::Binary(op) = state.value_to_base::<Boxed<Payload>>(op).0 else {
+                    return None;
+                };
                 let input = scalar_type(string(input).as_str())?;
                 let output = scalar_type(string(output).as_str())?;
                 let value = binary(
-                    BinaryOperator::try_from(string(op).as_str()).ok()?,
+                    op,
                     decode(&input, state.base_values().unwrap::<i64>(a))?,
                     decode(&input, state.base_values().unwrap::<i64>(b))?,
                     &input,
@@ -56,7 +59,7 @@ impl PurePrim for ScalarPrimitive {
                 encode(&output, value)?
             }
             (Self::Unary, &[op, input, output, a]) => evaluate_unary(
-                string(op).as_str(),
+                state.value_to_base::<Boxed<Payload>>(op).0,
                 string(input).as_str(),
                 string(output).as_str(),
                 state.base_values().unwrap::<i64>(a),
@@ -67,7 +70,7 @@ impl PurePrim for ScalarPrimitive {
     }
 }
 
-fn scalar_type(name: &str) -> Option<Type> {
+pub(super) fn scalar_type(name: &str) -> Option<Type> {
     let kind = if name == "bool" {
         TypeName::Bool
     } else if name == "f32" {
@@ -102,57 +105,24 @@ fn encode(ty: &Type, value: Scalar) -> Option<i64> {
     })
 }
 
-fn evaluate_unary(op: &str, input: &str, output: &str, bits: i64) -> Option<i64> {
+fn evaluate_unary(payload: Payload, input: &str, output: &str, bits: i64) -> Option<i64> {
     let input = scalar_type(input)?;
     let output = scalar_type(output)?;
-    if op == "bitcast" {
-        if !matches!(
-            input,
-            Type::Constructed(TypeName::Float(32) | TypeName::UInt(32) | TypeName::Int(32), _)
-        ) {
-            return None;
-        }
-        return Some(match output {
-            Type::Constructed(TypeName::Float(32) | TypeName::UInt(32), _) => bits as u32 as i64,
-            Type::Constructed(TypeName::Int(32), _) => bits as i32 as i64,
-            _ => return None,
-        });
-    }
     let value = decode(&input, bits)?;
-    if let Ok(op) = UnaryOperator::try_from(op) {
-        return encode(&output, unary(op, value, &input)?);
-    }
-    if let Some(builtin) = op.strip_prefix("builtin:") {
-        let (name, overload) = builtin.rsplit_once(':')?;
-        let overload =
-            catalog().lookup_by_any_name(name)?.overloads().get(overload.parse::<usize>().ok()?)?;
-        let result = constant_eval::builtin(
-            &overload.lowering,
-            &[(Constant::from_scalar(value), input)],
-            &output,
-        )?;
-        return encode(&output, result.as_scalar()?);
-    }
-    encode(&output, conversion(op, &input, &output, value)?)
-}
-fn conversion(op: &str, input: &Type, result: &Type, value: Scalar) -> Option<Scalar> {
-    let prim = match op {
-        "floor" => PrimOp::GlslExt(8),
-        "ceil" => PrimOp::GlslExt(9),
-        "fptosi" => PrimOp::FPToSI,
-        "fptoui" => PrimOp::FPToUI,
-        "sitofp" => PrimOp::SIToFP,
-        "uitofp" => PrimOp::UIToFP,
-        "int-convert" => PrimOp::SConvert,
-        "float-convert" => PrimOp::FPConvert,
+    let result = match payload {
+        Payload::Unary(op) => unary(op, value, &input)?,
+        Payload::Intrinsic { id, overload } => {
+            let overload = by_id(id).overloads().get(overload)?;
+            constant_eval::builtin(
+                &overload.lowering,
+                &[(Constant::from_scalar(value), input)],
+                &output,
+            )?
+            .as_scalar()?
+        }
         _ => return None,
     };
-    constant_eval::builtin(
-        &BuiltinLowering::PrimOp(prim),
-        &[(Constant::from_scalar(value), input.clone())],
-        result,
-    )?
-    .as_scalar()
+    encode(&output, result)
 }
 
 #[cfg(test)]

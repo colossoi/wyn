@@ -882,3 +882,116 @@ fn source_ssa(source: &str) -> wyn_core::error::Result<wyn_core::ssa::stage::Ela
         wyn_core::PipelineTopologyPolicy::AllowGenerated,
     ))
 }
+
+#[test]
+fn authored_outputs_consume_selected_capacities() {
+    for (source, input_sizes, scalar_count, expected) in [
+        (
+            include_str!("../../tests/compiler/library/direct_capacity_0.wyn"),
+            vec![80],
+            None,
+            80,
+        ),
+        (
+            include_str!("../../tests/compiler/library/direct_capacity_1.wyn"),
+            vec![68],
+            None,
+            68,
+        ),
+        (
+            include_str!("../../tests/compiler/library/direct_capacity_1.wyn"),
+            vec![0],
+            None,
+            0,
+        ),
+        (
+            include_str!("../../tests/compiler/library/direct_capacity_2.wyn"),
+            vec![160, 68],
+            None,
+            68,
+        ),
+        (
+            include_str!("../../tests/compiler/library/direct_capacity_3.wyn"),
+            vec![],
+            Some(17i32),
+            68,
+        ),
+        (
+            include_str!("../../tests/compiler/library/direct_capacity_3.wyn"),
+            vec![],
+            Some(0i32),
+            0,
+        ),
+    ] {
+        let source = pipeline::source(source);
+        let ssa = pipeline::lower_with_options(
+            &source,
+            CodegenTarget::Wgsl,
+            wyn_core::egglog::ScalarOptimization::Basic,
+            wyn_core::PipelineTopologyPolicy::AuthoredOnly,
+        );
+        let output = lower_ssa_to_wgsl_with_program(ssa).unwrap();
+        let shader = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&shader)
+        .unwrap();
+        let program =
+            Program::parse(&output.program.to_whl("capacity", ShaderFormat::Wgsl).unwrap()).unwrap();
+        let mut backend = Trace::default();
+        let inputs: Vec<_> = program
+            .entry("main")
+            .unwrap()
+            .parameters
+            .iter()
+            .map(|parameter| {
+                let bytes = match parameter.source_name() {
+                    "xs" => vec![0; input_sizes[0]],
+                    "ys" => vec![0; input_sizes[1]],
+                    _ => scalar_count
+                        .map(|count| count.to_le_bytes().to_vec())
+                        .unwrap_or_else(|| vec![0; input_sizes[0]]),
+                };
+                backend.input(bytes)
+            })
+            .collect();
+        let result = program.run("main", &inputs, &mut backend).unwrap();
+        assert_eq!(backend.buffers[&result.handle().unwrap()].len(), expected);
+    }
+}
+
+#[test]
+fn dynamic_domains_launch_from_the_source_extent() {
+    let source = pipeline::source(
+        "entry buffer_domain(xs:[]i32) []i32=map(|x|x+1,xs)
+        entry scalar_domain(n:i32) []i32=map(|i|i+1,iota(n))",
+    );
+    let output = lower_ssa_to_wgsl_with_program(pipeline::lower(&source, CodegenTarget::Wgsl)).unwrap();
+    let program = Program::parse(&output.program.to_whl("domains", ShaderFormat::Wgsl).unwrap()).unwrap();
+    for entry in &output.program.entries {
+        let Operation::Dispatch { pipeline, stage, .. } =
+            entry.operations.iter().find(|op| matches!(op, Operation::Dispatch { .. })).unwrap()
+        else {
+            unreachable!()
+        };
+        let wyn_host::Pipeline::Compute(compute) = &output.program.interface.pipelines[*pipeline] else {
+            unreachable!()
+        };
+        let width = compute.stages[*stage].workgroup_size.0;
+        for n in [0u32, 1, width, width + 1, width * 3 + 1] {
+            let mut backend = Trace::default();
+            let bytes = if entry.name == "scalar_domain" {
+                (n as i32).to_le_bytes().to_vec()
+            } else {
+                vec![0; n as usize * 4]
+            };
+            let input = backend.input(bytes);
+            let result = program.run(&entry.name, &[input], &mut backend).unwrap();
+            assert_eq!(backend.buffers[&result.handle().unwrap()].len(), n as usize * 4);
+            assert_eq!(backend.dispatches.len(), 1);
+            assert_eq!(backend.dispatches[0].1, [n.div_ceil(width), 1, 1]);
+        }
+    }
+}

@@ -1,15 +1,14 @@
 use super::import;
 use crate::compile_thru_tlc;
+use crate::egglog::dataflow::ir::{self, Code};
 use crate::egglog::query::Query;
 use crate::tlc::{self, DefMeta, TermKind};
 use egglog_engine::{EGraph, Value};
 
 fn function_body(graph: &EGraph) -> Vec<Value> {
     let query = Query(graph);
-    let root = query.row("CurrentProgram", |_| true).unwrap().unwrap()[0];
-    let program = query.fields("MemoryProgram", root).unwrap();
-    let function = query.vector(program[0]).unwrap()[0];
-    query.fields("Block", query.fields("DefineFunction", function).unwrap()[3]).unwrap()
+    let entry = query.first("EntryOrder").unwrap().unwrap()[0];
+    query.operations(query.required("FunctionRoot", entry).unwrap()).unwrap()
 }
 
 #[test]
@@ -35,18 +34,18 @@ fn evaluation_edges_stay_direct_and_borrowed_values_do_not_repeat_effects() {
         let (mut graph, _) = import(&program).unwrap();
         crate::egglog::analysis::run(&mut graph).unwrap();
         let body = function_body(&graph);
-        let statements = Query(&graph).vector(body[0]).unwrap();
+        let statements = body;
         assert!(
             statements.len() <= 3,
             "{depth} coercions must not repeat scalar evaluation"
         );
         let mut additions = 0;
         for statement in statements {
-            let fields = Query(&graph).fields("Let", statement).unwrap();
-            if let Some(op) = Query(&graph).enode("PrimOp", fields[3]).unwrap() {
-                if graph.value_to_base::<egglog_engine::sort::S>(op[0]).as_str() == "+" {
-                    additions += 1;
-                }
+            if let Code::Scalar(payload) = ir::code(
+                &graph,
+                Query(&graph).required("OperationPayload", statement).unwrap(),
+            ) {
+                additions += usize::from(payload.spelling() == "+");
             }
         }
         assert_eq!(additions, 1);
@@ -63,11 +62,8 @@ fn indexed_write_effects_distinguish_owned_arrays_from_views() {
         let query = Query(&graph);
         let body = function_body(&graph);
         let mut copies = 0;
-        for statement in query.vector(body[0]).unwrap() {
-            let statement = query.fields("Let", statement).unwrap();
-            if query.enode("Copy", statement[3]).unwrap().is_some() {
-                copies += 1;
-            }
+        for statement in body {
+            copies += usize::from(query.contains("MaterializedCopyOperation", statement).unwrap());
         }
         assert_eq!(
             copies > 0,
@@ -108,29 +104,22 @@ fn repeated_free_references_keep_dependencies_in_sibling_and_nested_regions() {
         crate::egglog::analysis::run(&mut graph).unwrap();
         let query = Query(&graph);
         let body = function_body(&graph);
-        let statements = query.vector(body[0]).unwrap();
-        let producer = statements
+        let statements = body;
+        let producer = *statements
             .iter()
-            .find_map(|&statement| {
-                let statement = query.fields("Let", statement).unwrap();
-                query.enode("Parallel", statement[3]).unwrap().map(|_| statement[1])
-            })
+            .find(|&&operation| query.contains("ParallelOperation", operation).unwrap())
             .expect("outer producer");
-        let bindings = query.required("BindersPattern", (producer,)).unwrap();
-        let names = graph.value_to_container::<egglog_engine::sort::SetContainer>(bindings).unwrap();
-        assert!(
-            !names.data.is_empty(),
-            "{kind} producer has explicit result bindings"
-        );
+        let names = query.sequence("Output", producer).unwrap();
+        assert!(!names.is_empty(), "{kind} producer has explicit result bindings");
         let mut captures = 0;
         query
-            .for_each("CheckStatement", |row| {
-                if query.enode("If", row[3])?.is_some() || query.enode("Loop", row[3])?.is_some() {
-                    let uses = query.required("NamesExp", (row[3],))?;
-                    let uses = graph.value_to_container::<egglog_engine::sort::SetContainer>(uses).unwrap();
-                    if names.data.iter().any(|name| uses.data.contains(name)) {
-                        captures += 1;
-                    }
+            .for_each("LiveOperation", |row| {
+                if query.contains("BranchOperation", row[0])?
+                    || query.contains("CountedLoopOperation", row[0])?
+                {
+                    captures += usize::from(
+                        names.iter().any(|&name| query.contains("OperationUse", (row[0], name)).unwrap()),
+                    );
                 }
                 Ok(())
             })
@@ -151,13 +140,11 @@ fn scatter_reads_include_branch_dependencies_without_turning_them_into_operand_u
     let query = Query(&graph);
     let body = function_body(&graph);
     let mut branch_reads = 0;
-    for statement in query.vector(body[0]).unwrap() {
-        let statement = query.fields("Let", statement).unwrap();
-        if let Some(branch) = query.enode("If", statement[3]).unwrap() {
-            for arm in [branch[2], branch[3]] {
-                let names = query.required("NamesBody", (arm,)).unwrap();
-                let names = graph.value_to_container::<egglog_engine::sort::SetContainer>(names).unwrap();
-                assert!(!names.data.is_empty());
+    for statement in body {
+        if query.contains("BranchOperation", statement).unwrap() {
+            for edge in 0_i64..2 {
+                let arm = query.required("ControlRegion", (statement, edge)).unwrap();
+                assert!(query.any("RegionCapture", |row| row[0] == arm).unwrap());
                 branch_reads += 1;
             }
         }
@@ -179,9 +166,9 @@ fn runtime_maps_preserve_collection_until_shape_analysis() {
         let query = Query(&graph);
         let mut loops = 0;
         let mut maps = 0;
-        query.for_each("CheckStatement", |row| {
-            loops += usize::from(query.enode("Loop", row[3])?.is_some());
-            maps += usize::from(query.enode("Parallel", row[3])?.is_some());
+        query.for_each("LiveOperation", |row| {
+            loops += usize::from(query.contains("CountedLoopOperation", row[0])? || query.contains("WhileLoopOperation",row[0])?);
+            maps += usize::from(query.contains("ParallelOperation", row[0])?);
             Ok(())
         }).unwrap();
         assert_eq!(loops, 0, "uniform shape must not require a growable loop: {source}");

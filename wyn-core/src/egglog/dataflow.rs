@@ -1,4 +1,6 @@
 //! Shared structural flow analysis; arithmetic remains in TLC.
+pub(super) mod edit;
+pub(super) mod ir;
 use super::query::Query;
 use super::OptimizeError;
 use crate::tlc::{

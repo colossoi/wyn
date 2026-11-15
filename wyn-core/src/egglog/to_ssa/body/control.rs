@@ -3,6 +3,53 @@ use crate::flow::ControlHeader;
 use crate::op::{BinaryOperator, OpTag};
 use crate::ssa::layout::storage_value_type;
 use crate::ssa::types::{ConstantValue, InstKind, Terminator, ValueRef};
+use crate::types::{self, Type, TypeExt, TypeName};
+
+fn joined_type(left: &Type, right: &Type) -> Result<Type, OptimizeError> {
+    if storage_value_type(left) == storage_value_type(right) {
+        return Ok(left.clone());
+    }
+    if let (
+        Type::Constructed(name @ (TypeName::Tuple(_) | TypeName::Record(_)), left),
+        Type::Constructed(other, right),
+    ) = (left, right)
+    {
+        if name == other && left.len() == right.len() {
+            return Ok(Type::Constructed(
+                name.clone(),
+                left.iter().zip(right).map(|(a, b)| joined_type(a, b)).collect::<Result<_, _>>()?,
+            ));
+        }
+    }
+    let local = |ty: &Type| {
+        ty.array_variant().is_some_and(|variant| {
+            types::is_array_variant_composite(variant) || types::is_array_variant_bounded(variant)
+        })
+    };
+    if local(left) && local(right) && left.array_rank() == Some(1) && right.array_rank() == Some(1) {
+        if let (
+            Some(Type::Constructed(TypeName::Size(a), _)),
+            Some(Type::Constructed(TypeName::Size(b), _)),
+            Some(left),
+            Some(right),
+        ) = (
+            left.array_size(),
+            right.array_size(),
+            left.elem_type(),
+            right.elem_type(),
+        ) {
+            return Ok(types::make_array1(
+                joined_type(left, right)?,
+                types::array_variant_bounded(),
+                Type::Constructed(TypeName::Size((*a).max(*b)), vec![]),
+                types::no_buffer(),
+            ));
+        }
+    }
+    Err(error(format!(
+        "branch arms have incompatible representations: {left:?} vs {right:?}"
+    )))
+}
 
 impl Body<'_, '_, '_> {
     pub(in crate::egglog::to_ssa) fn branch(
@@ -31,15 +78,11 @@ impl Body<'_, '_, '_> {
         self.values.restore(outer_values);
         self.builder.switch_to_block_unchecked(no);
         let b = no_value(self)?;
-        if storage_value_type(&a.ty) != storage_value_type(&b.ty) {
-            return Err(error(format!(
-                "branch arms do not match their selected representation: {:?} vs {:?}",
-                a.ty, b.ty
-            )));
-        }
-        let b = self.cast(b, &a.ty)?;
+        let ty = joined_type(&a.ty, &b.ty)?;
+        let b = self.cast(b, &ty)?;
         let no_end = self.current()?;
         self.builder.switch_to_block_unchecked(yes_end);
+        let a = self.cast(a, &ty)?;
         self.terminate(Terminator::Branch {
             target: end,
             args: vec![a.value],
@@ -51,12 +94,12 @@ impl Body<'_, '_, '_> {
             args: vec![b.value],
         })
         .map_err(builder_error)?;
-        let result = self.builder.add_block_param(end, a.ty.clone());
+        let result = self.builder.add_block_param(end, ty.clone());
         self.values.restore(outer_values);
         self.builder.switch_to_block_unchecked(end);
         Ok(Typed {
             value: result.into(),
-            ty: a.ty,
+            ty,
         })
     }
 }
@@ -314,3 +357,7 @@ impl Body<'_, '_, '_> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "control_tests.rs"]
+mod tests;

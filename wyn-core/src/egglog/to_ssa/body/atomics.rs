@@ -1,9 +1,10 @@
 use super::{builder_error, error, Body, OptimizeError, Typed};
+use crate::egglog::payload::{read, Payload};
 use crate::op::BinaryOperator;
 use crate::ssa::types::{AtomicOp, InstKind, PlaceId};
 use crate::types::{self, Type, TypeExt, TypeName};
 use crate::ResourceAccess;
-use egglog_engine::{sort::S, Value};
+use egglog_engine::Value;
 
 pub(in crate::egglog::to_ssa) enum AtomicUpdate {
     Native(AtomicOp),
@@ -15,11 +16,12 @@ impl Body<'_, '_, '_> {
         &self,
         arrays: &[Value],
         policy: Value,
+        combine: Option<Value>,
     ) -> Result<Option<AtomicUpdate>, OptimizeError> {
         let [name] = arrays else {
             return Ok(None);
         };
-        if !self.query().contains("FreshArray", (self.function, *name))? {
+        if !self.query().contains("FreshArray", *name)? {
             return Ok(None);
         }
         let array = self.named(*name)?;
@@ -31,25 +33,32 @@ impl Body<'_, '_, '_> {
         {
             return Ok(None);
         }
-        let Some(combine) = self.query().enode("CombineWrites", policy)? else {
+        let Some(combine) = combine else {
             return Ok(self
                 .query()
                 .enode("IdenticalWrites", policy)?
                 .map(|_| AtomicUpdate::Native(AtomicOp::Exchange)));
         };
-        let effects = self.query().required("EffectsLambda", (self.function, combine[0]))?;
-        if !self.query().contains("ReadOnlyEffects", (effects,))? {
+        if self.query().contains("RegionTrap", combine)? {
             return Ok(None);
         }
-        let Some(opcode) = self.query().lookup("NativeBinaryReducer", (combine[0],))? else {
-            return Ok(Some(AtomicUpdate::CompareExchange(combine[0])));
+        let mut writes = false;
+        self.query().for_each("RegionWrite", |row| {
+            writes |= row[0] == combine;
+            Ok(())
+        })?;
+        if writes {
+            return Ok(None);
+        }
+        let Some(opcode) = self.query().lookup("NativeBinaryReducer", combine)? else {
+            return Ok(Some(AtomicUpdate::CompareExchange(combine)));
         };
-        let opcode = self.query().0.value_to_base::<S>(opcode);
-        let op = match opcode.as_str() {
-            "+" => AtomicOp::Add,
-            "&" => AtomicOp::And,
-            "|" => AtomicOp::Or,
-            "^" => AtomicOp::Xor,
+        let opcode = read(self.query().0, opcode);
+        let op = match opcode {
+            Payload::Binary(BinaryOperator::Add) => AtomicOp::Add,
+            Payload::Binary(BinaryOperator::BitwiseAnd) => AtomicOp::And,
+            Payload::Binary(BinaryOperator::BitwiseOr) => AtomicOp::Or,
+            Payload::Binary(BinaryOperator::BitwiseXor) => AtomicOp::Xor,
             _ => return Err(error("unknown native integer reducer")),
         };
         Ok(Some(AtomicUpdate::Native(op)))
@@ -57,16 +66,27 @@ impl Body<'_, '_, '_> {
 
     pub(in crate::egglog::to_ssa) fn atomic_contributions(
         &self,
-        results: Value,
+        operation: Value,
     ) -> Result<bool, OptimizeError> {
-        for result in self.query().vector(results)? {
-            let Some(tokens) = self.query().enode("Contribute", result)? else {
+        let query = self.query();
+        for clause in 0..crate::egglog::analysis::count(query, "ResultCount", operation)? {
+            let kind = query.required("ResultKindOf", (operation, clause))?;
+            if query.enode("Contributed", kind)?.is_none() {
                 return Ok(false);
-            };
-            for token in self.query().vector(tokens[0])? {
-                let input = self.query().required("TokenCapability", (self.function, token))?;
-                let input = self.query().fields("AccumulatorInput", input)?;
-                if self.atomic_policy(&self.query().vector(input[0])?, input[1])?.is_none() {
+            }
+            for field in 0..crate::egglog::analysis::count(query, "ResultValueCount", (operation, clause))?
+            {
+                let name = query.required("ResultValue", (operation, clause, field))?;
+                let token = query.fields("AccNameRef", name)?[0];
+                let capability =
+                    query.fields("TokenBindingAt", query.required("TokenCapability", token)?)?;
+                let owner = capability[0];
+                let group = query.0.value_to_base::<i64>(capability[1]);
+                let count = crate::egglog::analysis::count(query, "AccumulatorArrayCount", (owner, group))?;
+                let arrays = query.indexed("AccumulatorArray", &[owner, capability[1]], count)?;
+                let policy = query.required("AccumulatorPolicy", (owner, group))?;
+                let combine = query.lookup("AccumulatorCombiner", (owner, group))?;
+                if self.atomic_policy(&arrays, policy, combine)?.is_none() {
                     return Ok(false);
                 }
             }
