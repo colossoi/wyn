@@ -178,7 +178,7 @@ pub(super) fn analyze(graph: &mut EGraph) -> Result<(), OptimizeError> {
     })?;
     graph.parse_and_run_program(
         None,
-        "(run-schedule (saturate scalar-analysis graph-sizes graph-work) (saturate graph-placement))",
+        "(run-schedule (saturate scalar-analysis graph-sizes graph-work))",
     )?;
     Ok(())
 }
@@ -224,7 +224,7 @@ pub(super) fn place(
     }
     graph.parse_and_run_program(
         None,
-        "(run-schedule (saturate graph-loop-select) (saturate graph-host))",
+        "(run-schedule (saturate graph-placement) (saturate graph-loop-select) (saturate graph-host))",
     )?;
     Ok(())
 }

@@ -30,7 +30,6 @@ pub(super) fn invalidate(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "RecursiveFunction",
         "NameOrdinal",
         "NameLiveAfter",
-        "ResourceLiveAfter",
         "FlowNext",
         "FlowLive",
         "FlowLiveOut",
@@ -159,14 +158,12 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
           (saturate flow-forward dataflow-dependencies dataflow-scopes)
           (saturate flow-projections source-summary))",
     )?;
-    live::publish(graph)?;
     graph.parse_and_run_program(
         None,
         "(run-schedule
-        (saturate flow-live dataflow-live)
         (saturate dataflow-resources)
         (saturate dataflow-total)
-        (saturate dataflow-effects dataflow-live)
+        (saturate dataflow-effects)
         (saturate dataflow-motion dataflow-purity))",
     )?;
     let mut edges = Vec::new();
@@ -183,6 +180,17 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
         Ok(())
     })?;
     validate(graph)
+}
+
+/// Compute live-after values for final execution preparation.
+pub(super) fn liveness(graph: &mut EGraph) -> Result<(), OptimizeError> {
+    let _timing = timing::span("egglog execution liveness");
+    live::publish(graph)?;
+    graph.parse_and_run_program(
+        None,
+        "(run-schedule (saturate flow-live dataflow-live) (saturate dataflow-resources))",
+    )?;
+    Ok(())
 }
 
 /// Check the selected graph, including captures and simultaneous loop edges.

@@ -64,7 +64,6 @@
 
 (relation NextOperation (OperationKey OperationKey))
 
-(relation ResourceLiveAfter (OperationKey Resource))
 
 (relation ConsumedToken (OperationKey AccName))
 (relation TokenUnavailableAt (OperationKey AccName))

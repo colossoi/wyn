@@ -117,8 +117,6 @@
       ((ResourceDemand (ValueNameRef name))) :ruleset dataflow-resources)
 (rule ((= revision (AnalysisRevision)) (NameLiveAfter operation (AccNameRef token)))
       ((ResourceDemand (AccNameRef token))) :ruleset dataflow-resources)
-(rule ((= revision (AnalysisRevision)) (NameLiveAfter operation name) (ResourceRoot name root))
-      ((ResourceLiveAfter operation root)) :ruleset dataflow-live)
 ; Collections allocate their own result storage; prefix and compact roles are explicit.
 (rule ((= revision (AnalysisRevision)) (ParallelOperation operation)
        (= (Output operation slot) (ValueNameRef name)) (= (OutputRole operation slot) (CollectedOutput)))

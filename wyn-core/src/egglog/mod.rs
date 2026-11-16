@@ -174,7 +174,7 @@ pub fn optimize_with_policy(
 /// Finish graph analysis and freeze physical execution and storage choices.
 pub fn prepare_host(mut program: Program<'_, Optimized>) -> Result<HostPrepared<'_>, OptimizeError> {
     let _timing = timing::span("egglog host preparation");
-    analysis::run(&mut program.graph)?;
+    analysis::liveness(&mut program.graph)?;
     planning::epilogues(&mut program.graph)?;
     let execution = execution::Execution::prepare(&mut program)?;
     Ok(HostPrepared { program, execution })

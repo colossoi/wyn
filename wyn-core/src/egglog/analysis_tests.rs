@@ -1,9 +1,34 @@
-use super::run;
+use super::{liveness, run};
+use crate::egglog::cost::CostModel;
 use crate::egglog::dataflow::ir::{operation, outputs, parameters, region, yields, Code, Name, Parameter};
 use crate::egglog::fusion;
-use crate::egglog::{planning, OptimizeError};
+use crate::egglog::query::Query;
+use crate::egglog::{planning, test_graph, OptimizeError};
 use crate::types;
 use egglog_engine::{RawValues, Write};
+
+#[test]
+fn rewriting_defers_live_after_and_host_classification() -> Result<(), OptimizeError> {
+    let mut graph = test_graph::import("entry main(x:i32) i32=(x+1)*x")?;
+    run(&mut graph)?;
+    planning::analyze(&mut graph)?;
+    for table in ["FlowLive", "NameLiveAfter", "LaneDependentFunction", "HostRegion"] {
+        assert!(
+            Query(&graph).first(table)?.is_none(),
+            "{table} was calculated before its consumer"
+        );
+    }
+    liveness(&mut graph)?;
+    assert!(Query(&graph).first("NameLiveAfter")?.is_some());
+    planning::place(
+        &mut graph,
+        crate::PipelineTopologyPolicy::AuthoredOnly,
+        CostModel::default(),
+    )?;
+    assert!(Query(&graph).first("LaneDependentFunction")?.is_some());
+    assert!(Query(&graph).first("HostRegion")?.is_some());
+    Ok(())
+}
 
 #[test]
 fn constant_index_arithmetic_does_not_prove_wrapping_counts() {
