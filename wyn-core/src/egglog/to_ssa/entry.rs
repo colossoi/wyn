@@ -890,6 +890,8 @@ impl EntryEmission<'_, '_, '_> {
     ) -> Result<(Vec<Typed>, Vec<Option<ResultShape>>), OptimizeError> {
         let reads_results = values.iter().any(|value| {
             types::as_soa_tuple(&value.ty).is_some()
+                || (types::array_view_buffer(&value.ty).is_some()
+                    && result_buffer(&self.body, value).is_none())
                 || (output_shape(&self.body, value).is_err()
                     && (value.ty.array_rank().is_some_and(|rank| rank > 1)
                         || value.ty.elem_type().is_some_and(TypeExt::is_array)))
@@ -2598,10 +2600,15 @@ fn output_capacities(
                 let Some(stride) = storage_elem_stride(&storage_value_type(element)) else {
                     return Err(error("output array element has no storage stride"));
                 };
-                let bytes = Expr::Multiply(
-                    Box::new(body.host_array_length(value)?),
-                    Box::new(Expr::Integer(stride.into())),
-                );
+                let Some(rank) = value.ty.array_rank() else {
+                    return Err(error("output array rank missing"));
+                };
+                let bytes = output_shape(body, value)?
+                    .into_iter()
+                    .take(rank)
+                    .fold(Expr::Integer(stride.into()), |bytes, extent| {
+                        Expr::Multiply(Box::new(bytes), Box::new(extent))
+                    });
                 buffer_capacity(bytes)
             } else {
                 let Some(bytes) = type_byte_size(&storage_value_type(&value.ty)) else {

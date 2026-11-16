@@ -9,5 +9,27 @@
 --! inputs = {xs=[10,20,30],n=[4]}
 --! result_bytes = 40
 --! no_device_reads = true
+--! [[host]]
+--! entry = "runtime_rows"
+--! inputs = {xs=[10],n=[4]}
+--! result_bytes = 0
+--! no_device_reads = true
+--! [[host]]
+--! entry = "runtime_rows"
+--! inputs = {xs=[10,20,30],n=[-1]}
+--! result_bytes = 0
+--! no_device_reads = true
+--! [[host]]
+--! entry = "runtime_cubes"
+--! inputs = {xs=[10,20,30],n=[5],m=[2]}
+--! result_bytes = 80
+--! no_device_reads = true
+--! [[host]]
+--! entry = "fixed_rows"
+--! inputs = {xs=[10,20,30]}
+--! result_bytes = 40
+--! no_device_reads = true
 
 entry runtime_rows(xs:[]i32,n:i32) [][]i32=let ys=map(|x|map(|y|x+y,iota(n+1)),xs) in ys[1..length(ys)]
+entry runtime_cubes(xs:[]i32,n:i32,m:i32) [][][]i32=let ys=map(|x|map(|y|map(|z|x+y+z,iota(m)),iota(n)),xs) in ys[1..length(ys)]
+entry fixed_rows(xs:[]i32) [][5]i32=let ys=map(|x|[x,x+1,x+2,x+3,x+4],xs) in ys[1..length(ys)]

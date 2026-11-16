@@ -597,6 +597,19 @@ fn storage_root(
 }
 
 #[test]
+fn sliced_results_wait_for_their_producer_dispatch() {
+    let artifact = compile(
+        "entry main(xs:[]i32,n:i32) [][]i32=let ys=map(|x|map(|y|x+y,iota(n)),xs) in ys[1..length(ys)]",
+    );
+    let [producer, copy] = artifact.compute().stages.as_slice() else {
+        panic!("separate producer and output-copy dispatches");
+    };
+    assert!(copy.writes.contains(&artifact.result(0)));
+    assert!(producer.writes.iter().any(|binding| copy.reads.contains(binding)));
+    assert!(depends_on(&artifact.interface.frame_graph, 1, 0));
+}
+
+#[test]
 fn fixed_length_row_selection_keeps_both_producer_backings() {
     let artifact = compile("entry main(xs:[137]i32,i:i32) i32=[map(|x|x+1,xs),map(|x|x+2,xs)][i][0]");
     let stages = &artifact.compute().stages;
