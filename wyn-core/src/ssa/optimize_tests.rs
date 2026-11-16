@@ -13,6 +13,63 @@ fn binary(op: BinaryOperator, a: ValueRef, b: ValueRef) -> InstKind {
 }
 
 #[test]
+fn scalar_projection_forwarding_preserves_snapshots_across_writes() {
+    for overwritten in [false, true] {
+        let array = sized_array(4, i32());
+        let mut builder = FuncBuilder::new(vec![array.clone(), i32()], i32());
+        let initial = builder.get_param(0);
+        let index = builder.get_param(1);
+        let place = builder.new_place(array.clone());
+        builder.push_void_inst(InstKind::Alloca { result: place }).unwrap();
+        builder
+            .push_void_inst(InstKind::Store {
+                place,
+                value: initial.into(),
+            })
+            .unwrap();
+        let snapshot = builder.push_inst(InstKind::Load { place }, array).unwrap();
+        if overwritten {
+            let element = builder.new_place(i32());
+            builder
+                .push_void_inst(InstKind::PlaceIndex {
+                    place,
+                    index: index.into(),
+                    result: element,
+                })
+                .unwrap();
+            builder
+                .push_void_inst(InstKind::Store {
+                    place: element,
+                    value: ValueRef::Const(ConstantValue::I32(9)),
+                })
+                .unwrap();
+        }
+        let result = builder
+            .push_inst(
+                InstKind::Op {
+                    tag: OpTag::Index,
+                    operands: vec![snapshot.into(), index.into()],
+                },
+                i32(),
+            )
+            .unwrap();
+        builder.terminate(Terminator::Return(Some(result.into()))).unwrap();
+        let mut body = builder.finish().unwrap();
+        forward_aggregate_reads(&mut body);
+        let instruction = body.inner.inst_of_value(result).unwrap();
+        assert_eq!(
+            matches!(body.inner.insts[instruction].data, InstKind::Load { .. }),
+            !overwritten
+        );
+        assert_eq!(
+            body.inner.values.contains_key(snapshot),
+            overwritten,
+            "a later write must not change the value captured by the earlier load"
+        );
+    }
+}
+
+#[test]
 fn representation_lowering_makes_view_updates_explicit_without_selecting_local_reuse() {
     let composite = sized_array(4, i32());
     let view = crate::types::view_array_with_size(
@@ -57,7 +114,7 @@ fn representation_lowering_makes_view_updates_explicit_without_selecting_local_r
 fn division_and_remainder_used_by_a_condition_are_reused_in_both_arms() {
     assert_case_operations(&[
         "entry main(i:i32,width:i32) i32=let q=i/width let r=i%width in if q<r then q-r else q+r",
-        "entry main(i:i32,width:i32) i32=loop total=0 for j<3 do let q=(i+j)/width let r=(i+j)%width in total+(if q<r then q-r else q+r)",
+        "entry main(xs:[]i32,width:i32) []i32=map(|i|loop total=0 for j<3 do let q=(i+j)/width let r=(i+j)%width in total+(if q<r then q-r else q+r),xs)",
     ], &[OpTag::BinOp(BinaryOperator::Divide), OpTag::BinOp(BinaryOperator::Remainder)], 1);
 }
 
@@ -66,18 +123,18 @@ fn division_and_remainder_are_reused_from_enclosing_loop_scopes() {
     let placed = live_instructions(
         crate::compile_thru_ssa(
             r#"
-entry case_0(i:i32,width:i32) i32 =
+entry case_0(xs:[]i32,width:i32) []i32 = map(|i|
     let pixel = @[i % width, i / width] in
-    loop total = pixel.x + pixel.y for k < 2 do total + pixel.x + pixel.y
-entry case_1(i:i32,width:i32) i32 =
+    loop total = pixel.x + pixel.y for k < 2 do total + pixel.x + pixel.y,xs)
+entry case_1(xs:[]i32,width:i32) []i32 = map(|i|
     let pixel = @[i % width, i / width] in
     loop total = pixel.x + pixel.y for j < 2 do
-      loop inner = total for k < 2 do inner + pixel.x + pixel.y
-entry case_2(i:i32,width:i32) i32 =
+      loop inner = total for k < 2 do inner + pixel.x + pixel.y,xs)
+entry case_2(xs:[]i32,width:i32) []i32 = map(|i|
     loop total = 0 for j < 2 do
       let pixel = @[(i + j) % width, (i + j) / width] in
       loop inner = total + pixel.x + pixel.y for k < 2 do
-        inner + pixel.x + pixel.y
+        inner + pixel.x + pixel.y,xs)
 "#,
         )
         .unwrap(),
@@ -96,10 +153,10 @@ fn division_reuse_respects_loop_dominance_and_carried_values() {
     let placed = live_instructions(
         crate::compile_thru_ssa(
             r#"
-entry header(i:i32,width:i32) i32 =
-  let total = loop total=0 while total<i/width+i%width do total+1 in total+i/width+i%width
-entry body(i:i32,width:i32) i32 = loop total=0 for k<i do total+i/width+i%width
-entry carried(i:i32,width:i32) i32 = loop total=i/width+i%width for k<2 do total/width+total%width
+entry header(xs:[]i32,width:i32) []i32 = map(|i|
+  let total = loop total=0 while total<i/width+i%width do total+1 in total+i/width+i%width,xs)
+entry body(xs:[]i32,width:i32) []i32 = map(|i|loop total=0 for k<i do total+i/width+i%width,xs)
+entry carried(xs:[]i32,width:i32) []i32 = map(|i|loop total=i/width+i%width for k<2 do total/width+total%width,xs)
 "#,
         )
         .unwrap(),
