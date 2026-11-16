@@ -1,12 +1,8 @@
 //! Lower public declarations and bind their values to the final memory signature.
 use super::{builder_error, error, host, Body, Compiler, OptimizeError, Typed};
-use crate::binding_layout::{
-    extract_io_decoration, extract_sampler_binding, extract_storage_binding, extract_storage_image_binding,
-    extract_storage_image_resource, extract_texture_backing, extract_texture_binding,
-    extract_texture_resource, extract_uniform_binding,
-};
 use crate::builtins::catalog;
-use crate::egglog::dataflow::ir::{self, Code};
+use crate::egglog::allocation::{ArrayOutput, Output, Transfer};
+use crate::egglog::execution::{Grouping, StepKind};
 use crate::egglog::query::Query;
 use crate::flow::ExecutionModel;
 use crate::host::{
@@ -20,29 +16,22 @@ use crate::host::{
 };
 use crate::interface::lowering::build_entry_outputs;
 use crate::interface::publish::{
-    reconcile_storage_binding_access, EntryInput, EntryOutput, EntryPoint, InputHost,
-    ModuleInterfacePublish, StorageBindingDecl, StorageHost,
+    reconcile_storage_binding_access, EntryInput, EntryOutput, EntryPoint, ModuleInterfacePublish,
+    StorageBindingDecl, StorageHost,
 };
-use crate::interface::results::{output_type, result_layout_with_storage};
+use crate::interface::results::result_layout_with_storage;
 use crate::interface::DrawBufferOperand;
-use crate::interface::{
-    Attribute, BindingExposure, EntryInputKind, EntryKind, EntryParamBindingKind, PushConstantSlot,
-    StorageAccess, StorageLayout, StorageRole,
-};
+use crate::interface::{Attribute, EntryInputKind, EntryKind, StorageLayout, StorageRole};
 use crate::op::{BinaryOperator, OpTag, PureViewSource};
 use crate::ssa::context::BackendGlobal;
-use crate::ssa::layout::{
-    block_layout, std430_type_layout, storage_elem_stride, storage_value_type, type_byte_size,
-};
+use crate::ssa::layout::{block_layout, storage_elem_stride, storage_value_type, type_byte_size};
 use crate::ssa::stage::Elaborated;
 use crate::ssa::types::{InstKind, ValueRef};
 use crate::tlc::{extract_lambda_params_ref, DefMeta};
-use crate::types::{
-    self, buffer_tag, canonical_storage_buffer_ty, strip_existentials, Type, TypeExt, TypeName,
-};
+use crate::types::{self, buffer_tag, strip_existentials, Type, TypeExt, TypeName};
 use crate::LookupSet;
 use crate::{BindingRef, CodegenTarget, LookupMap, ResourceAccess, StableMap};
-use egglog_engine::{RawValues, Value};
+use egglog_engine::Value;
 use wyn_base::IdSource;
 
 mod collectives;
@@ -73,101 +62,17 @@ pub(super) fn lower(
             return Err(error("entry declaration missing"));
         };
         let declaration = &metadata.declaration;
-        let (source_body, parameters) = extract_lambda_params_ref(&source.body);
+        let (source_body, _) = extract_lambda_params_ref(&source.body);
         let function = root;
         let Some(&region) = compiler.definitions.get(&function) else {
             return Err(error("entry graph function missing"));
         };
         let params = query.sequence("RegionParameter", region)?;
-        let mut pc_offset = 0u32;
-        let mut parameter_inputs = Vec::new();
-        let mut templates = Vec::new();
-        for (index, (_, ty)) in parameters.iter().enumerate() {
-            let Some(declared) = declaration.params.get(index) else {
-                return Err(error("entry parameter declaration missing"));
-            };
-            let binding = metadata.data.param_bindings.get(index).and_then(Option::as_ref);
-            let first = templates.len();
-            if let Some(EntryParamBindingKind::TupleOfViews(layout)) = binding.map(|binding| &binding.kind)
-            {
-                let Type::Constructed(TypeName::Tuple(_), fields) = strip_existentials(ty) else {
-                    return Err(error("split parameter is not a tuple"));
-                };
-                if fields.len() != layout.len() {
-                    return Err(error("split parameter arity mismatch"));
-                }
-                for (i, (ty, field)) in fields.iter().zip(layout).enumerate() {
-                    let input = EntryInput {
-                        name: format!("{}_{}", declared.name, i),
-                        ty: canonical_storage_buffer_ty(ty),
-                        host: InputHost::default(),
-                        kind: EntryInputKind::Storage {
-                            exposure: BindingExposure::Host(field.binding),
-                            access: StorageAccess::ReadWrite,
-                        },
-                    };
-                    templates.push((input, ty.clone()));
-                }
-            } else {
-                let mut host = InputHost::default();
-                let kind = if let Some(binding) = binding
-                    .map(|binding| binding.first_buffer().0)
-                    .or_else(|| extract_storage_binding(declared))
-                {
-                    host.length = type_byte_size(&storage_value_type(ty))
-                        .map(|bytes| BufferLen::Fixed { bytes: bytes.into() });
-                    EntryInputKind::Storage {
-                        exposure: BindingExposure::Host(binding),
-                        access: StorageAccess::ReadWrite,
-                    }
-                } else if let Some(binding) = extract_uniform_binding(declared) {
-                    EntryInputKind::Uniform { binding }
-                } else if let Some(binding) = extract_texture_binding(declared) {
-                    host.backing = extract_texture_backing(declared);
-                    host.resource = extract_texture_resource(declared);
-                    EntryInputKind::Texture { binding }
-                } else if let Some(binding) = extract_sampler_binding(declared) {
-                    EntryInputKind::Sampler { binding }
-                } else if let Some((binding, format, access, size)) =
-                    extract_storage_image_binding(declared)
-                {
-                    host.image_size = size;
-                    host.resource = extract_storage_image_resource(declared);
-                    EntryInputKind::StorageImage {
-                        binding,
-                        format,
-                        access,
-                    }
-                } else if declaration.entry_kind != EntryKind::Compute
-                    || extract_io_decoration(declared).is_some()
-                {
-                    EntryInputKind::Value {
-                        decoration: extract_io_decoration(declared),
-                    }
-                } else {
-                    let Some((size, align)) = std430_type_layout(&storage_value_type(ty)) else {
-                        return Err(error("push constant has no static size"));
-                    };
-                    pc_offset = pc_offset.div_ceil(align) * align;
-                    let slot = PushConstantSlot {
-                        offset: pc_offset,
-                        size,
-                    };
-                    pc_offset += size;
-                    EntryInputKind::PushConstant { slot }
-                };
-                templates.push((
-                    EntryInput {
-                        name: declared.name.clone(),
-                        ty: canonical_storage_buffer_ty(ty),
-                        kind,
-                        host,
-                    },
-                    ty.clone(),
-                ));
-            }
-            parameter_inputs.push((first..templates.len()).collect());
-        }
+        let Some(inputs) = compiler.execution.storage.parameters.get(&function).cloned() else {
+            return Err(error("entry has no parameter layout"));
+        };
+        let templates = inputs.templates;
+        let parameter_inputs = inputs.components;
 
         let next = templates
             .iter()
@@ -239,8 +144,6 @@ pub(super) fn lower(
             pipeline: pipeline.pipelines.len(),
             invocation,
             pending: false,
-            pending_ordered: false,
-            pending_host_ordered: Vec::new(),
             pending_observable: false,
             restore_names: None,
             dispatch_override: None,
@@ -251,43 +154,22 @@ pub(super) fn lower(
         emission.restart()?;
         let live = live_names(emission.body.query(), &[], region)?;
         emission
-            .statements(region, &live, true)
+            .statements(region, &live)
             .map_err(|failure| error(format!("entry {}: {failure}", declaration.name)))?;
-        let output_arity = crate::interface::lowering::entry_output_arity(declaration, &source_body.ty);
-        let whole_result = declaration.buffer_demand
-            || (output_arity == 1
-                && (declaration.source_entry.is_some()
-                    || declaration.outputs.first().is_some_and(|output| output.ty.is_array())));
-        let mut output_values = emission.body.results(region)?;
-        if !whole_result
-            && matches!(
-                strip_existentials(&source_body.ty),
-                Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), _)
-            )
-            && output_values.len() == 1
-        {
-            output_values = emission.body.unpack(output_values.remove(0))?;
-        }
-        let lowered_types = match strip_existentials(&source_body.ty) {
-            ty if whole_result => std::slice::from_ref(ty),
-            Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) => fields.as_slice(),
-            ty => std::slice::from_ref(ty),
+        let Some(results) = emission.body.compiler.execution.storage.results.get(&function).cloned() else {
+            return Err(error("entry has no physical result plan"));
         };
-        let output_types = lowered_types
-            .iter()
-            .enumerate()
-            .map(|(index, ty)| {
-                let declared = declaration.outputs.get(index).map_or(ty, |output| &output.ty);
-                let Some(ty) = output_type(declared, ty) else {
-                    return Err(error(
-                        "output representation differs from its declared array nesting",
-                    ));
-                };
-                Ok(ty)
-            })
-            .collect::<Result<Vec<_>, OptimizeError>>()?;
+        let output_arity = results.arity;
+        let whole_result = results.whole;
+        let output_types = results.types;
+        let mut output_values = emission.body.results(region)?;
+        if results.unpack {
+            let [value]: [Typed; 1] =
+                output_values.try_into().map_err(|_| error("entry result arity mismatch"))?;
+            output_values = emission.body.unpack(value)?;
+        }
         let (output_values, output_shapes) =
-            emission.prepare_array_outputs(region, output_values, &output_types)?;
+            emission.prepare_array_outputs(region, output_values, &results.layouts)?;
         let Some(generated) = emission.body.generated.as_ref() else {
             return Err(error("entry buffers missing"));
         };
@@ -341,7 +223,7 @@ pub(super) fn lower(
         let capacities = if output_arity == 0 {
             vec![]
         } else {
-            output_capacities(&emission.body, &output_values, &destinations)?
+            output_capacities(&emission.body, &output_values, &destinations, &results.layouts)?
         };
         let mut outputs = build_entry_outputs(
             declaration,
@@ -864,8 +746,6 @@ struct EntryEmission<'a, 'p, 'source> {
     pipeline: usize,
     invocation: ((u32, u32, u32), DispatchSize),
     pending: bool,
-    pending_ordered: bool,
-    pending_host_ordered: Vec<ScalarExpr>,
     pending_observable: bool,
     restore_names: Option<LookupSet<Value>>,
     dispatch_override: Option<((u32, u32, u32), DispatchSize)>,
@@ -890,13 +770,19 @@ impl EntryEmission<'_, '_, '_> {
         &mut self,
         results: Value,
         mut values: Vec<Typed>,
-        types: &[Type],
+        plans: &[Output],
     ) -> Result<(Vec<Typed>, Vec<Option<ResultShape>>), OptimizeError> {
-        let reads_results = values.iter().any(|value| {
-            types::as_soa_tuple(&value.ty).is_some()
-                || (output_shape(&self.body, value).is_err()
-                    && (value.ty.array_rank().is_some_and(|rank| rank > 1)
-                        || value.ty.elem_type().is_some_and(TypeExt::is_array)))
+        if plans.len() != values.len() {
+            return Err(error("output plan arity mismatch"));
+        }
+        let reads_results = plans.iter().any(|plan| {
+            matches!(
+                plan,
+                Output::Array {
+                    mode: ArrayOutput::Pack,
+                    ..
+                }
+            )
         });
         if reads_results && self.body.active_dispatch.is_some() {
             let live = live_names(self.body.query(), &[], results)?;
@@ -906,20 +792,15 @@ impl EntryEmission<'_, '_, '_> {
         let mut counts = Vec::new();
         let mut shapes = vec![None; values.len()];
         for (index, value) in values.iter().enumerate() {
-            if !types[index].is_array() || (value.ty.is_array() && output_shape(&self.body, value).is_ok())
-            {
+            let Output::Array { rank, leaf, mode, .. } = &plans[index] else {
+                counts.push(None);
+                continue;
+            };
+            if *mode == ArrayOutput::Direct {
                 counts.push(None);
                 continue;
             }
-            let mut rank = 0;
-            let mut leaf = &types[index];
-            while leaf.is_array() {
-                rank += leaf.array_rank().ok_or_else(|| error("output array rank missing"))?;
-                let Some(element) = leaf.elem_type() else {
-                    return Err(error("output array element missing"));
-                };
-                leaf = element;
-            }
+            let rank = *rank;
             let rank_u32 = u32::try_from(rank).map_err(|_| error("output rank exceeds u32"))?;
             let (binding, storage) = self.body.device_buffer(
                 &types::i32(),
@@ -941,7 +822,7 @@ impl EntryEmission<'_, '_, '_> {
             }
             self.pending = true;
             self.pending_observable = true;
-            if rank == 1 && array_offset(&self.body, value) == Some(0) {
+            if *mode == ArrayOutput::Count {
                 let length = Expr::Scalar(ScalarExpr::Read {
                     source: scalar_source(binding),
                     offset: 0,
@@ -988,11 +869,6 @@ impl EntryEmission<'_, '_, '_> {
                     })
                 })
                 .collect::<Vec<_>>();
-            if rank == 1 && array_offset(&self.body, &values[i]) == Some(0) {
-                self.body.set_shape(&values[i], lengths.clone())?;
-                shapes[i] = Some(ResultShape::Rectangular(lengths));
-                continue;
-            }
             materialized = true;
             let mut offsets = Vec::new();
             let mut offset_sources = Vec::new();
@@ -1115,26 +991,15 @@ impl EntryEmission<'_, '_, '_> {
                 DispatchSize::Computed { elements, groups }
             } else {
                 let query = self.body.query();
-                let domain = query.required("OperationDomain", statement)?;
-                let mut axes = super::domain_axes(query, domain)?;
-                let mut collective = false;
-                let mut compact = false;
-                let atomic_updates = self.body.atomic_contributions(statement)?;
-                for clause in 0..crate::egglog::analysis::count(query, "ResultCount", statement)? {
-                    let kind = query.required("ResultKindOf", (statement, clause))?;
-                    collective |= query.enode("Folded", kind)?.is_some();
-                    compact |= query.enode("Compacted", kind)?.is_some()
-                        || (query.enode("Contributed", kind)?.is_some() && !atomic_updates);
-                }
-                if collective {
-                    axes.pop();
-                }
+                let Some(launch) = self.body.compiler.execution.launches.get(&statement) else {
+                    return Err(error("dispatch has no physical launch plan"));
+                };
                 let mut elements = Expr::Integer(1);
-                for axis in axes {
+                for &extent in &launch.extents {
                     let length = host::guarded_index(
                         query,
                         &self.body.host_values,
-                        axis.extent,
+                        extent,
                         self.body.guard.as_ref(),
                     )?;
                     elements = Expr::Multiply(
@@ -1142,19 +1007,16 @@ impl EntryEmission<'_, '_, '_> {
                         Box::new(Expr::Max(Box::new(length), Box::new(Expr::Integer(0)))),
                     );
                 }
-                let groups = if compact {
-                    Expr::Integer(1)
-                } else if collective {
-                    elements.clone()
-                } else {
-                    Expr::Ceiling(
+                let groups = match launch.grouping {
+                    Grouping::Single => Expr::Integer(1),
+                    Grouping::PerElement => elements.clone(),
+                    Grouping::PerWorkgroup => Expr::Ceiling(
                         Box::new(elements.clone()),
                         Box::new(Expr::Integer(i64::from(dispatch.width.get()))),
-                    )
+                    ),
                 };
-                // Intermediate stages still publish descriptor witnesses for an empty domain.
                 let groups = Expr::Max(
-                    Box::new(Expr::Integer(i64::from(outputs.is_empty() || compact))),
+                    Box::new(Expr::Integer(launch.minimum)),
                     Box::new(Expr::Min(Box::new(groups), Box::new(Expr::Integer(65_535)))),
                 );
                 DispatchSize::Computed {
@@ -1265,180 +1127,93 @@ impl EntryEmission<'_, '_, '_> {
             span: self.span,
         });
         self.pending = false;
-        self.pending_ordered = false;
-        self.pending_host_ordered.clear();
         self.pending_observable = false;
         self.restart()
     }
 
-    fn statements(
-        &mut self,
-        region: Value,
-        after: &LookupSet<Value>,
-        terminal: bool,
-    ) -> Result<(), OptimizeError> {
-        let statements = self.body.query().operations(region)?;
-        let generated = self.body.query().required("GeneratedDispatches", RawValues(Vec::new()))?;
-        let generated =
-            self.body.query().0.value_to_base::<bool>(generated) && self.kind == EntryKind::Compute;
-        let mut grouped = None;
-        for (i, &statement) in statements.iter().enumerate() {
-            if grouped.is_some_and(|end| i <= end) {
-                continue;
-            }
-            let mut live = statement_names(self.body.query(), &statements[i + 1..])?;
+    fn statements(&mut self, region: Value, after: &LookupSet<Value>) -> Result<(), OptimizeError> {
+        let Some(steps) = self.body.compiler.execution.regions.get(&region) else {
+            return Err(error("host region has no physical schedule"));
+        };
+        let steps = steps.clone();
+        for step in &steps {
+            let statement = step.operation;
+            let mut live = step.live.clone();
             live.extend(after.iter().copied());
-            let code = ir::code(
-                self.body.query().0,
-                self.body.query().required("OperationPayload", statement)?,
-            );
             let pattern = self.body.query().sequence("Output", statement)?;
-            let dispatch = self.body.compiler.execution.dispatch(statement).is_ok();
-            if self.body.query().contains("RequiresSnapshot", statement)? {
+            if step.boundary {
                 let mut before = statement_names(self.body.query(), &[statement])?;
                 before.extend(live.iter().copied());
                 self.flush(&before, vec![], false)?;
             }
-            if matches!(code, Code::Copy) {
-                if let [binding] = pattern.as_slice() {
-                    if let Some((output, ty)) = super::runtime_binding(self.body.query(), *binding)? {
-                        if let Some(storage) = self.body.reuse_storage(output, &ty)? {
-                            self.body.bind(&pattern, vec![storage])?;
-                            continue;
-                        }
-                    }
-                }
-            }
-            if dispatch {
-                let mut before = statement_names(self.body.query(), &[statement])?;
-                before.extend(live.iter().copied());
-                if self.pending_ordered || !self.launch_evaluates_prefix(statement)? {
-                    self.flush(&before, vec![], false)?;
-                }
-                let lane = self.body.query().required("ControlRegion", (statement, 0_i64))?;
-                let mut captures = names_in(self.body.query(), "RegionCapture", lane)?;
-                let mut epilogue_index = None;
-                if generated && self.body.compiler.execution.dispatch(statement)?.groups.is_none() {
-                    for (next_index, &next) in statements.iter().enumerate().skip(i + 1) {
-                        if self.body.query().contains("ScanEpilogue", (statement, next))? {
-                            epilogue_index = Some(next_index);
-                            break;
-                        }
-                    }
-                }
-                let epilogue = epilogue_index.map(|index| statements[index]);
-                if let Some(next) = epilogue {
-                    let lane = self.body.query().required("ControlRegion", (next, 0_i64))?;
-                    captures.extend(names_in(self.body.query(), "RegionCapture", lane)?);
-                }
-                self.materialize_cpu_captures(&captures)?;
-                self.body.active_dispatch = Some(statement);
-                // Total, memory-free epilogues can use the completed values in
-                // this dispatch; memory readers still need a dispatch barrier.
-                let last =
-                    terminal
-                        && statements[epilogue_index.map_or(i + 1, |index| index + 1)..].iter().try_fold(
-                            true,
-                            |safe, &next| -> Result<_, OptimizeError> {
-                                Ok(safe
-                                    && self.body.query().lookup("PureOperation", next)?.is_some_and(
-                                        |value| self.body.query().0.value_to_base::<bool>(value),
-                                    )
-                                    && self.body.compiler.execution.dispatch(next).is_err())
-                            },
+            match &step.kind {
+                StepKind::Dispatch { terminal, epilogue } => {
+                    self.materialize_cpu_captures(&step.cpu_captures)?;
+                    self.body.active_dispatch = Some(statement);
+                    if let Some(plan) = self.body.compiler.execution.collectives.get(&statement).cloned() {
+                        self.emit_collective(
+                            statement,
+                            &plan,
+                            &live,
+                            *terminal,
+                            epilogue.as_ref().map(|epilogue| epilogue.operation),
+                            epilogue.as_ref().map_or(&[], |epilogue| epilogue.preparation.as_slice()),
                         )?;
-                grouped = epilogue_index;
-                let preparation = &statements[i + 1..epilogue_index.unwrap_or(i + 1)];
-                if self.chunked_collective(statement, &live, last, epilogue, preparation)? {
-                    continue;
-                }
-                self.body.statement(statement)?;
-                if let Some(next) = epilogue {
-                    self.body.statements(preparation)?;
-                    let domain = self.body.query().required("OperationDomain", next)?;
-                    let extent = self.body.query().required("DomainExtent", (domain, 0_i64))?;
-                    let count = self.body.index_expression(extent)?;
-                    let mut packed = false;
-                    self.body.query().for_function("ResultPredicate", |keys, _| {
-                        packed |= keys[0] == statement;
-                        Ok(())
-                    })?;
-                    let source_domain = self.body.query().required("OperationDomain", statement)?;
-                    let capacity = self.body.query().required("DomainExtent", (source_domain, 0_i64))?;
-                    self.scan_epilogue(next, (Body::number(0), count), !packed, capacity)?;
-                }
-                self.pending = true;
-                if !last {
-                    self.flush(&live, vec![], true)?;
-                }
-            } else if matches!(code, Code::Branch) {
-                let mut buffer_result = false;
-                if generated {
-                    for &binding in &pattern {
-                        if let Some((_, ty)) = super::runtime_binding(self.body.query(), binding)? {
-                            buffer_result |= contains_array_descriptor(&ty);
+                    } else {
+                        self.body.statement(statement)?;
+                        if let Some(epilogue) = epilogue {
+                            self.body.statements(&epilogue.preparation)?;
+                            let domain =
+                                self.body.query().required("OperationDomain", epilogue.operation)?;
+                            let extent = self.body.query().required("DomainExtent", (domain, 0_i64))?;
+                            let count = self.body.index_expression(extent)?;
+                            self.scan_epilogue(
+                                epilogue.operation,
+                                (Body::number(0), count),
+                                epilogue.cooperative,
+                            )?;
+                        }
+                        self.pending = true;
+                        if !terminal {
+                            self.flush(&live, vec![], true)?;
                         }
                     }
                 }
-                let yes = self.body.query().required("ControlRegion", (statement, 0_i64))?;
-                let no = self.body.query().required("ControlRegion", (statement, 1_i64))?;
-                if buffer_result || self.has_host_effect(yes)? || self.has_host_effect(no)? {
-                    self.branch(statement, &live)?;
-                } else {
-                    self.statement_effects(statement)?;
-                    self.body.statement(statement)?;
-                    self.pending = true;
-                }
-            } else if matches!(code, Code::CountedLoop | Code::WhileLoop) {
-                if generated && self.cpu_loop(statement)? {
-                    continue;
-                }
-                let lane = self.body.query().required("ControlRegion", (statement, 0_i64))?;
-                let mut buffer_carry = false;
-                if generated {
-                    for parameter in self.body.query().sequence("RegionParameter", lane)? {
-                        if let Some((_, ty)) = super::runtime_binding(self.body.query(), parameter)? {
-                            buffer_carry |= contains_array_descriptor(&ty);
-                        }
-                    }
-                }
-                if buffer_carry || self.has_host_effect(lane)? {
-                    self.loop_body(statement, &live)?;
-                } else {
-                    self.statement_effects(statement)?;
-                    self.body.statement(statement)?;
-                    self.pending = true;
-                }
-            } else if matches!(code, Code::WithAcc) {
-                let lane = self.body.query().required("ControlRegion", (statement, 0_i64))?;
-                let mut needed = live_names(self.body.query(), &[], lane)?;
-                needed.extend(names_in(self.body.query(), "OperationUse", statement)?);
-                needed.extend(live.iter().copied());
-                self.statements(lane, &needed, terminal && i + 1 == statements.len())?;
-                let mut values = Vec::new();
-                for group in 0..crate::egglog::analysis::count(
-                    self.body.query(),
-                    "AccumulatorGroupCount",
-                    statement,
-                )? {
-                    for slot in 0..crate::egglog::analysis::count(
+                StepKind::Branch => self.branch(statement, &live)?,
+                StepKind::Loop => self.loop_body(statement, &live)?,
+                StepKind::ScalarLoop => self.cpu_loop(statement)?,
+                StepKind::Accumulator => {
+                    let lane = self.body.query().required("ControlRegion", (statement, 0_i64))?;
+                    let mut needed = live_names(self.body.query(), &[], lane)?;
+                    needed.extend(names_in(self.body.query(), "OperationUse", statement)?);
+                    needed.extend(live.iter().copied());
+                    self.statements(lane, &needed)?;
+                    let mut values = Vec::new();
+                    for group in 0..crate::egglog::analysis::count(
                         self.body.query(),
-                        "AccumulatorArrayCount",
-                        (statement, group),
+                        "AccumulatorGroupCount",
+                        statement,
                     )? {
-                        let name =
-                            self.body.query().required("AccumulatorArray", (statement, group, slot))?;
-                        values.push(self.body.named(name)?);
+                        for slot in 0..crate::egglog::analysis::count(
+                            self.body.query(),
+                            "AccumulatorArrayCount",
+                            (statement, group),
+                        )? {
+                            let name =
+                                self.body.query().required("AccumulatorArray", (statement, group, slot))?;
+                            values.push(self.body.named(name)?);
+                        }
                     }
+                    values.extend(self.body.results(lane)?);
+                    let values = self.body.scope_outputs(&pattern, values)?;
+                    self.body.bind(&pattern, values)?;
+                    self.pending = true;
                 }
-                values.extend(self.body.results(lane)?);
-                let values = self.body.scope_outputs(&pattern, values)?;
-                self.body.bind(&pattern, values)?;
-                self.pending = true;
-            } else {
-                self.statement_effects(statement)?;
-                self.body.statement(statement)?;
-                self.pending = true;
+                StepKind::Shader => {
+                    self.statement_effects(statement)?;
+                    self.body.statement(statement)?;
+                    self.pending = true;
+                }
             }
         }
         Ok(())
@@ -1461,91 +1236,23 @@ impl EntryEmission<'_, '_, '_> {
         }
         let trap = query.contains("OperationTrap", statement)?;
         self.pending_observable |= memory || trap;
-        if (memory || trap) && !query.contains("IndexOperation", statement)? {
-            let pattern = query.sequence("Output", statement)?;
-            let value = if let [binding] = pattern.as_slice() {
-                super::runtime_binding(query, *binding)?
-                    .and_then(|(name, _)| self.body.host_values.get(&name).cloned())
-                    .filter(host::cpu_available)
-            } else {
-                None
-            };
-            if trap && !memory {
-                if let Some(value) = value {
-                    self.pending_host_ordered.push(value);
-                } else {
-                    self.pending_ordered = true;
-                }
-            } else {
-                self.pending_ordered = true;
-            }
-        }
         Ok(())
     }
 
-    fn has_host_effect(&self, region: Value) -> Result<bool, OptimizeError> {
-        let query = self.body.query();
-        for operation in query.operations(region)? {
-            if self.body.compiler.execution.dispatch(operation).is_ok() {
-                return Ok(true);
-            }
-            let mut children = Vec::new();
-            query.for_function("ControlRegion", |keys, child| {
-                if keys[0] == operation {
-                    children.push(child);
-                }
-                Ok(())
-            })?;
-            for child in children {
-                if self.has_host_effect(child)? {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
-    }
-
-    fn launch_evaluates_prefix(&self, statement: Value) -> Result<bool, OptimizeError> {
-        if self.pending_host_ordered.is_empty() {
-            return Ok(true);
-        }
-        let dispatch = self.body.compiler.execution.dispatch(statement)?;
-        if dispatch.grid.is_some() || dispatch.groups.is_some() {
-            return Ok(false);
-        }
-        let query = self.body.query();
-        for clause in 0..crate::egglog::analysis::count(query, "ResultCount", statement)? {
-            if query.enode("Collected", query.required("ResultKindOf", (statement, clause))?)?.is_none() {
-                return Ok(false);
-            }
-        }
-        let domain = query.required("OperationDomain", statement)?;
-        let mut sizes = Vec::new();
-        for axis in super::domain_axes(query, domain)? {
-            if let Some(size) = host::scalar_index(query, &self.body.host_values, axis.extent)? {
-                sizes.push(size);
-            }
-        }
-        Ok(self
-            .pending_host_ordered
-            .iter()
-            .all(|value| sizes.iter().any(|size| host::evaluates(size, value))))
-    }
-
-    fn cpu_loop(&mut self, loop_: Value) -> Result<bool, OptimizeError> {
+    fn cpu_loop(&mut self, loop_: Value) -> Result<(), OptimizeError> {
         let pattern = self.body.query().sequence("Output", loop_)?;
         let mut outputs = Vec::new();
         for &binding in &pattern {
             let Some((name, ty)) = super::runtime_binding(self.body.query(), binding)? else {
-                return Ok(false);
+                return Err(error("planned host loop has no scalar representation"));
             };
             let Some(scalar) = host::scalar_type(&ty) else {
-                return Ok(false);
+                return Err(error("planned host loop has no scalar representation"));
             };
             outputs.push((name, ty, scalar));
         }
         if outputs.is_empty() {
-            return Ok(false);
+            return Err(error("planned host loop has no scalar representation"));
         }
         let Some(value) = host::cpu_loop(
             self.body.query(),
@@ -1554,7 +1261,7 @@ impl EntryEmission<'_, '_, '_> {
             loop_,
         )?
         else {
-            return Ok(false);
+            return Err(error("planned host loop has no scalar representation"));
         };
         for (i, (name, ty, scalar)) in outputs.into_iter().enumerate() {
             let expression = ScalarExpr::Field {
@@ -1563,7 +1270,7 @@ impl EntryEmission<'_, '_, '_> {
             };
             self.publish_cpu_value(name, ty, scalar, expression)?;
         }
-        Ok(true)
+        Ok(())
     }
 
     fn publish_cpu_value(
@@ -1601,39 +1308,25 @@ impl EntryEmission<'_, '_, '_> {
         Ok(slot)
     }
 
-    fn materialize_cpu_captures(&mut self, names: &LookupSet<Value>) -> Result<(), OptimizeError> {
-        let captures = self
-            .body
-            .values
-            .iter()
-            .filter(|(name, value)| {
-                names.contains(name)
-                    && !self.parameters.contains(name)
-                    && self.body.literal_bits(value).is_none()
-            })
-            .filter_map(|(&name, value)| {
-                host::scalar_type(&value.ty).map(|ty| (name, value.ty.clone(), ty))
-            })
-            .collect::<Vec<_>>();
-        for (name, ty, scalar) in captures {
-            let Some(value) =
-                self.body.host_values.get(&name).filter(|value| host::cpu_available(value)).cloned()
-            else {
-                continue;
-            };
-            if !matches!(&value, ScalarExpr::Apply { op, .. } if !op.starts_with("to-")) {
-                continue;
-            }
+    fn materialize_cpu_captures(&mut self, names: &[Value]) -> Result<(), OptimizeError> {
+        for &name in names {
             if matches!(self.saved.get(&name), Some(Location::Buffer(..))) {
                 continue;
             }
-            self.publish_cpu_value(name, ty, scalar, value)?;
+            let value = self.body.named(name)?;
+            let Some(scalar) = host::scalar_type(&value.ty) else {
+                return Err(error("planned CPU capture is not scalar"));
+            };
+            let Some(expression) = self.body.host_values.get(&name).cloned() else {
+                return Err(error("planned CPU capture has no host expression"));
+            };
+            self.publish_cpu_value(name, value.ty, scalar, expression)?;
         }
         Ok(())
     }
 
-    fn capture(&mut self, value: Typed) -> Result<Location, OptimizeError> {
-        let saved = save_component(&mut self.body, value, true)?;
+    fn capture(&mut self, name: Value, value: Typed) -> Result<Location, OptimizeError> {
+        let saved = save_named(&mut self.body, name, value, true)?;
         self.pending = true;
         self.pending_observable = true;
         Ok(saved)
@@ -1679,7 +1372,7 @@ impl EntryEmission<'_, '_, '_> {
                 } else {
                     None
                 };
-                let initial = self.capture(value)?;
+                let initial = self.capture(self.body.query().name(argument)?, value)?;
                 let slots = saved_slots(&initial)?;
                 let mut replacements = LookupMap::default();
                 for (binding, element) in &slots {
@@ -1797,14 +1490,17 @@ impl EntryEmission<'_, '_, '_> {
         }
         let mut live = live_names(self.body.query(), &[], region)?;
         live.extend(after.iter().copied());
-        self.statements(region, &live, false)?;
+        self.statements(region, &live)?;
         let values = self.body.results(region)?;
         if values.len() != carried_values.len() {
             return Err(error("loop carry arity mismatch"));
         }
         let mut carried = Vec::new();
-        for ((_, _, _, current, initial_slots), value) in carried_values.iter().zip(values) {
-            let next = self.capture(value)?;
+        let results = self.body.query().sequence("RegionYield", region)?;
+        for (((_, _, _, current, initial_slots), value), result) in
+            carried_values.iter().zip(values).zip(results)
+        {
+            let next = self.capture(self.body.query().name(result)?, value)?;
             let current_slots = saved_slots(current)?;
             let next_slots = saved_slots(&next)?;
             if next_slots.len() != current_slots.len() {
@@ -1911,10 +1607,13 @@ impl EntryEmission<'_, '_, '_> {
             });
             let mut live = live_names(self.body.query(), &[], block)?;
             live.extend(after.iter().copied());
-            self.statements(block, &live, false)?;
+            self.statements(block, &live)?;
             let values = self.body.results(block)?;
-            let saved =
-                values.into_iter().map(|value| self.capture(value)).collect::<Result<Vec<_>, _>>()?;
+            let saved = values
+                .into_iter()
+                .zip(self.body.query().sequence("RegionYield", block)?)
+                .map(|(value, name)| self.capture(self.body.query().name(name)?, value))
+                .collect::<Result<Vec<_>, _>>()?;
             self.flush(after, vec![], true)?;
             arms.push(saved);
         }
@@ -1928,8 +1627,12 @@ impl EntryEmission<'_, '_, '_> {
         }
         let mut selected = Vec::new();
         let test = self.body.atom(condition_name)?;
-        for (yes, no) in yes.iter().zip(&no) {
-            selected.push(self.merge_saved(&condition, test.clone(), yes, no)?);
+        for ((yes, no), &binding) in yes.iter().zip(&no).zip(&pattern) {
+            let name = self.body.query().name(binding)?;
+            let Some(plan) = self.body.compiler.execution.storage.transfers.get(&name).cloned() else {
+                return Err(error("branch result has no storage plan"));
+            };
+            selected.push(self.merge_saved(&condition, test.clone(), yes, no, &plan)?);
         }
         self.body.bind(&pattern, selected)?;
         self.pending = true;
@@ -1943,18 +1646,22 @@ impl EntryEmission<'_, '_, '_> {
         test: Typed,
         yes: &Location,
         no: &Location,
+        plan: &Transfer,
     ) -> Result<Typed, OptimizeError> {
-        if let (Location::Product(yes), Location::Product(no)) = (yes, no) {
-            if yes.len() != no.len() {
+        if let Transfer::Product(plans) = plan {
+            let (Location::Product(yes), Location::Product(no)) = (yes, no) else {
+                return Err(error("branch product does not match its storage plan"));
+            };
+            if yes.len() != no.len() || yes.len() != plans.len() {
                 return Err(error("branch product arity mismatch"));
             }
             let mut fields = Vec::new();
-            for (yes, no) in yes.iter().zip(no) {
-                fields.push(self.merge_saved(condition, test.clone(), yes, no)?);
+            for ((yes, no), plan) in yes.iter().zip(no).zip(plans) {
+                fields.push(self.merge_saved(condition, test.clone(), yes, no, plan)?);
             }
             return self.body.tuple(fields);
         }
-        if matches!((yes, no), (Location::Array(_), Location::Array(_))) {
+        if matches!(plan, Transfer::Array { .. } | Transfer::Virtual) {
             let left = saved_slots(yes)?;
             let right = saved_slots(no)?;
             if left.len() != right.len() {
@@ -2063,13 +1770,6 @@ fn statement_names(query: Query<'_>, statements: &[Value]) -> Result<LookupSet<V
         names.extend(names_in(query, "OperationUse", statement)?);
     }
     Ok(names)
-}
-
-fn contains_array_descriptor(ty: &Type) -> bool {
-    (ty.is_array()
-        && !(ty.array_variant().is_some_and(types::is_array_variant_composite)
-            && matches!(ty.array_size(), Some(Type::Constructed(TypeName::Size(_), _)))))
-        || matches!(ty, Type::Constructed(_, fields) if fields.iter().any(contains_array_descriptor))
 }
 
 fn names_in(query: Query<'_>, table: &str, value: Value) -> Result<LookupSet<Value>, OptimizeError> {
@@ -2524,9 +2224,22 @@ fn restore_value(body: &mut Body<'_, '_, '_>, saved: &Location) -> Result<Typed,
     Ok(value)
 }
 
+fn save_named(
+    body: &mut Body<'_, '_, '_>,
+    name: Value,
+    value: Typed,
+    materialize: bool,
+) -> Result<Location, OptimizeError> {
+    let Some(plan) = body.compiler.execution.storage.transfers.get(&name).cloned() else {
+        return Err(error("cross-dispatch value has no transport plan"));
+    };
+    save_component(body, value, &plan, materialize)
+}
+
 fn save_component(
     body: &mut Body<'_, '_, '_>,
     mut value: Typed,
+    plan: &Transfer,
     materialize: bool,
 ) -> Result<Location, OptimizeError> {
     if !materialize {
@@ -2535,11 +2248,11 @@ fn save_component(
         }
     }
     let original = value.value;
-    if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = &value.ty {
+    if let Transfer::Product(fields) = plan {
         let mut saved = Vec::new();
-        for i in 0..fields.len() {
+        for (i, field_plan) in fields.iter().enumerate() {
             let field = body.field(value.clone(), i)?;
-            saved.push(save_component(body, field, materialize)?);
+            saved.push(save_component(body, field, field_plan, materialize)?);
         }
         let location = Location::Product(saved);
         body.locations.insert(original, location.clone());
@@ -2550,9 +2263,9 @@ fn save_component(
             return Ok(Location::Constant(n, value.ty));
         }
     }
-    if value.ty.is_array()
-        && types::array_view_buffer(&value.ty).is_none()
-        && (materialize || !value.ty.array_variant().is_some_and(types::is_array_variant_virtual))
+    // A previous boundary may already have realized this value's storage plan.
+    if (matches!(plan, Transfer::Array { copy: true }) && types::array_view_buffer(&value.ty).is_none())
+        || (materialize && matches!(plan, Transfer::Virtual))
     {
         let Some(element) = value.ty.elem_type().cloned() else {
             return Err(error("saved array element missing"));
@@ -2579,7 +2292,9 @@ fn save_component(
         }
         value = destination;
     }
-    let location = if types::array_view_buffer(&value.ty).is_some() {
+    let location = if matches!(plan, Transfer::Array { .. })
+        || (materialize && matches!(plan, Transfer::Virtual))
+    {
         let mut location = body.array_location(&value)?;
         let extents = std::iter::once(&mut location.offset)
             .chain(location.dimensions.iter_mut().map(|(_, extent)| extent))
@@ -2707,7 +2422,7 @@ fn save(
             if value.ty == types::unit() {
                 continue;
             }
-            let location = save_component(body, value, false)?;
+            let location = save_named(body, name, value, false)?;
             if !body.host_values.contains_key(&name) {
                 if let Location::Buffer(binding, ty) = &location {
                     if let Some(ty) = host::scalar_type(ty) {
@@ -2768,6 +2483,7 @@ fn output_capacities(
     body: &Body<'_, '_, '_>,
     values: &[Typed],
     destinations: &[Option<BindingRef>],
+    plans: &[Output],
 ) -> Result<Vec<BufferLen>, OptimizeError> {
     values
         .iter()
@@ -2785,7 +2501,13 @@ fn output_capacities(
                     return Err(error("output array element has no storage stride"));
                 };
                 let bytes = Expr::Multiply(
-                    Box::new(body.host_array_length(value)?),
+                    Box::new(match &plans[index] {
+                        Output::Array {
+                            capacity: Some(capacity),
+                            ..
+                        } => Expr::Integer(*capacity),
+                        _ => body.host_array_length(value)?,
+                    }),
                     Box::new(Expr::Integer(stride.into())),
                 );
                 buffer_capacity(bytes)

@@ -1,8 +1,7 @@
 use super::{builder_error, error, Body, OptimizeError, Typed};
-use crate::host::Expr;
 use crate::op::BinaryOperator;
 use crate::ssa::types::InstKind;
-use crate::types::{self, Type, TypeExt, TypeName};
+use crate::types::{self, TypeExt};
 use egglog_engine::Value;
 
 impl Body<'_, '_, '_> {
@@ -36,19 +35,12 @@ impl Body<'_, '_, '_> {
             self.values.insert(destination_name, destination.clone());
         }
         let buckets = self.array_length(destination.clone())?;
-        let uint = Type::Constructed(TypeName::UInt(32), vec![]);
-        let counts = if self.active_dispatch.is_none() {
-            let length = self.host_array_length(&destination)?;
-            let bytes = Expr::Multiply(Box::new(length.clone()), Box::new(Expr::Integer(4)));
-            let (_, counts) = self.device_buffer(&uint, bytes, buckets.clone())?;
-            self.set_shape(&counts, vec![length])?;
-            counts
-        } else {
-            let Some(Type::Constructed(TypeName::Size(capacity), _)) = destination.ty.array_size() else {
-                return Err(error("local bucket counters require a capacity bound"));
-            };
-            self.local_array(types::sized_array(*capacity, uint))?
+        let Some(plan) = self.compiler.execution.storage.scratch.get(&operation).cloned() else {
+            return Err(error("bucket counters have no physical allocation"));
         };
+        let length =
+            if plan.allocation.device() { Some(self.host_array_length(&destination)?) } else { None };
+        let counts = self.allocate_array(&plan, buckets.clone(), length)?;
         self.counted(
             Self::number(0),
             buckets.clone(),

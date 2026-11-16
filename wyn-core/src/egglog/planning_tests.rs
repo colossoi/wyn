@@ -1,6 +1,6 @@
 use super::super::query::Query;
 use super::super::{finish_for_test, from_tlc, fuse, place, schedule, schedule_with_subgroups};
-use crate::egglog::dataflow::ir::{self, Code};
+use crate::egglog::dataflow::ir::{self, Bounds, Code};
 use crate::egglog::payload::read;
 use crate::egglog::{analysis, test_graph};
 use crate::{compile_thru_tlc, CodegenTarget, PipelineTopologyPolicy};
@@ -1456,4 +1456,142 @@ fn indexed_literal_bounds_require_every_element() {
             .unwrap();
         assert_eq!(indexed, 1);
     }
+}
+
+#[test]
+fn collection_shape_proofs_distinguish_extents_from_capacity() {
+    let mut graph = test_graph::fixture(
+        &[(0, Code::Parallel), (1, Code::Uninitialized)],
+        r#"
+        (set (OperationShape (OperationId 1)) (vec-of (IndexConstant 2)))
+        (set (Output (OperationId 1) 0) (ValueNameRef (ValueId 30)))
+        (LiveOperation (OperationId 0))
+        (set (OperationDomain (OperationId 0)) (DomainId 0))
+        (set (DomainRank (DomainId 0)) 2)
+        (set (DomainExtent (DomainId 0) 0) (IndexConstant 8))
+        (set (DomainExtent (DomainId 0) 1) (IndexConstant 4))
+        (set (Output (OperationId 0) 0) (ValueNameRef (ValueId 0)))
+        (set (OutputRole (OperationId 0) 0) (CollectedOutput))
+        (set (OutputClause (OperationId 0) 0) 0)
+        (set (OutputField (OperationId 0) 0) 0)
+        (set (ResultKindOf (OperationId 0) 0) (Collected))
+        (set (ResultValue (OperationId 0) 0 0) (ValueNameRef (ValueId 10)))
+        (set (Output (OperationId 0) 1) (ValueNameRef (ValueId 1)))
+        (set (OutputRole (OperationId 0) 1) (CompactedOutput))
+        (set (Output (OperationId 0) 2) (ValueNameRef (ValueId 2)))
+        (set (OutputRole (OperationId 0) 2) (TotalOutput))
+        (set (OutputClause (OperationId 0) 2) 2)
+        (set (OutputField (OperationId 0) 2) 0)
+        (set (ResultReducer (OperationId 0) 2) (RegionId 2))
+        (ReducerPreservesOuterLength (RegionId 2) 0)
+        (set (ResultNeutral (OperationId 0) 2 0) (ValueNameRef (ValueId 20)))
+        (set (Output (OperationId 0) 3) (ValueNameRef (ValueId 3)))
+        (set (OutputRole (OperationId 0) 3) (UpdatedOutput))
+        (run-schedule (saturate graph-sizes))
+        (check (= (CollectionRank (ValueId 0)) 2))
+        (check (= (CollectionExtent (ValueId 0) 1) (IndexConstant 4)))
+        (check (= (CollectionElement (ValueId 0)) (ValueId 10)))
+        (check (= (CollectionRank (ValueId 1)) 2))
+        (check (= (CollectionRank (ValueId 2)) 1))
+        (check (= (CollectionElement (ValueId 2)) (ValueId 20)))
+    "#,
+    )
+    .unwrap();
+    let query = Query(&graph);
+    let scratch = query.constructor("ValueId", 30_i64).unwrap().unwrap();
+    let extent = query.required("LogicalOuterCount", scratch).unwrap();
+    assert_eq!(
+        graph.value_to_base::<i64>(query.required("StaticIndex", extent).unwrap()),
+        2
+    );
+
+    let compact = query.constructor("ValueId", 1_i64).unwrap().unwrap();
+    let updated = query.constructor("ValueId", 3_i64).unwrap().unwrap();
+    assert!(query.lookup("LogicalOuterCount", compact).unwrap().is_none());
+    assert!(query.lookup("CollectionRank", updated).unwrap().is_none());
+    graph.clear_function("LiveOperation").unwrap();
+    super::analyze(&mut graph).unwrap();
+    assert!(
+        Query(&graph).lookup("CollectionRank", compact).unwrap().is_none(),
+        "invalidated proofs must not survive a dead producer"
+    );
+}
+
+#[test]
+fn collected_shape_does_not_require_unrelated_result_constructors() {
+    test_graph::fixture(
+        &[(0, Code::Parallel)],
+        r#"
+        (LiveOperation (OperationId 0))
+        (set (OperationDomain (OperationId 0)) (DomainId 0))
+        (set (DomainRank (DomainId 0)) 2)
+        (set (DomainExtent (DomainId 0) 1) (IndexConstant 3))
+        (set (Output (OperationId 0) 0) (ValueNameRef (ValueId 0)))
+        (set (OutputRole (OperationId 0) 0) (CollectedOutput))
+        (run-schedule (saturate graph-sizes))
+        (check (= (CollectionRank (ValueId 0)) 2))
+        (check (= (CollectionExtent (ValueId 0) 1) (IndexConstant 3)))
+    "#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn element_update_snapshots_require_no_escaping_copy() {
+    for (escape, safe) in [
+        ("", true),
+        (
+            "(set (RegionYield (RegionId 0) 0) (ValueNameRef (ValueId 1)))",
+            false,
+        ),
+        (
+            "(LiveOperation (OperationId 3)) (OperationUse (OperationId 3) (ValueNameRef (ValueId 1)))",
+            false,
+        ),
+    ] {
+        let facts = format!(
+            r#"
+            (LiveOperation (OperationId 0)) (LiveOperation (OperationId 1)) (LiveOperation (OperationId 2))
+            (set (Output (OperationId 0) 0) (ValueNameRef (ValueId 1)))
+            (set (Input (OperationId 1) 0) (ValueNameRef (ValueId 1)))
+            (set (OperationSlices (OperationId 1)) (vec-of (At (IndexConstant 0))))
+            (OperationUse (OperationId 1) (ValueNameRef (ValueId 1)))
+            (OperationUse (OperationId 2) (ValueNameRef (ValueId 1)))
+            {escape}
+            (run-schedule (saturate reuse-reads) (saturate reuse-legality) (saturate reuse-select))
+        "#
+        );
+        let graph = test_graph::fixture(
+            &[
+                (0, Code::Copy),
+                (
+                    1,
+                    Code::Update {
+                        bounds: Bounds::Proven,
+                    },
+                ),
+                (2, Code::Index),
+                (3, Code::Use),
+            ],
+            &facts,
+        )
+        .unwrap();
+        let query = Query(&graph);
+        let value = query.constructor("ValueId", 1_i64).unwrap().unwrap();
+        assert_eq!(query.contains("CanSnapshotCopy", value).unwrap(), safe);
+    }
+}
+
+#[test]
+fn slice_lengths_do_not_require_a_source_capacity_bound() {
+    let graph = test_graph::fixture(&[(0, Code::View)], r#"
+        (set (Input (OperationId 0) 0) (ValueNameRef (ValueId 0)))
+        (set (Output (OperationId 0) 0) (ValueNameRef (ValueId 1)))
+        (set (OperationSlices (OperationId 0)) (vec-of (Slice (IndexConstant 2) (IndexConstant 5) (IndexConstant 1))))
+        (run-schedule (saturate graph-sizes))
+        (check (= (LogicalOuterCount (ValueId 1)) (IndexConstant 5)))
+    "#).unwrap();
+    let query = Query(&graph);
+    let source = query.constructor("ValueId", 0_i64).unwrap().unwrap();
+    assert!(query.lookup("OuterCapacity", source).unwrap().is_none());
 }

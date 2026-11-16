@@ -1,17 +1,18 @@
 //! Parallel results share one domain traversal and one reducer calling convention.
-use super::body::{Collection, CollectionShape};
+use super::body::CollectionShape;
 use super::{domain_axes, error, Axis, Body, OptimizeError, Typed};
 use crate::builtins::catalog;
+use crate::egglog::allocation::{Allocation, Capacity, Collection};
+use crate::egglog::execution::Algorithm;
 use crate::egglog::to_ssa::host;
 use crate::egglog::to_ssa::runtime_binding;
 use crate::host::Expr;
 use crate::op::{BinaryOperator, OpTag, PureViewSource};
-use crate::ssa::layout::{storage_elem_stride, storage_value_type};
 use crate::ssa::types::{BlockId, InstKind};
-use crate::types::{self, Type, TypeExt, TypeName};
+use crate::types::{self, Type, TypeName};
 use crate::BindingRef;
 use crate::LookupSet;
-use egglog_engine::{RawValues, Value};
+use egglog_engine::Value;
 
 enum FoldMode {
     Total,
@@ -35,7 +36,6 @@ pub(super) enum CollectivePhase<'a> {
     Epilogue {
         range: (Typed, Typed),
         cooperative: bool,
-        capacity: Value,
     },
     Chunks {
         range: (Typed, Typed),
@@ -55,32 +55,6 @@ pub(super) enum CollectivePhase<'a> {
     },
 }
 
-fn collection_shape(ty: &Type, dimensions: &[Option<usize>]) -> Result<Type, OptimizeError> {
-    let Some((size, rest)) = dimensions.split_first() else {
-        return Ok(ty.clone());
-    };
-    if let Type::Constructed(name @ (TypeName::Tuple(_) | TypeName::Record(_)), fields) = ty {
-        return Ok(Type::Constructed(
-            name.clone(),
-            fields.iter().map(|field| collection_shape(field, dimensions)).collect::<Result<_, _>>()?,
-        ));
-    }
-    let Some(element) = ty.elem_type() else {
-        return Err(error("collection shape exceeds array rank"));
-    };
-    let element = collection_shape(element, rest)?;
-    Ok(if let Some(size) = size {
-        types::sized_array(*size, element)
-    } else {
-        types::make_array1(
-            element,
-            types::array_variant_composite(),
-            ty.array_size().cloned().ok_or_else(|| error("collection dimension missing"))?,
-            types::no_buffer(),
-        )
-    })
-}
-
 impl Body<'_, '_, '_> {
     pub(super) fn parallel(
         &mut self,
@@ -96,8 +70,7 @@ impl Body<'_, '_, '_> {
         pattern: &[Value],
         phase: Option<CollectivePhase<'_>>,
     ) -> Result<Vec<Typed>, OptimizeError> {
-        let execution = self.query().required("OperationExecution", operation)?;
-        let dispatch = if self.query().enode("DeviceKernel", execution)?.is_some() {
+        let dispatch = if self.compiler.execution.dispatch(operation).is_ok() {
             let Some(statement) = self.active_dispatch else {
                 return Err(error("device parallel region requires a dispatch entry"));
             };
@@ -111,7 +84,6 @@ impl Body<'_, '_, '_> {
         let region = self.query().required("ControlRegion", (operation, 0_i64))?;
         let mut collects = Vec::new();
         let mut compacts = Vec::new();
-        let mut contributes = false;
         let mut folds = Vec::new();
         let mut fold_data = Vec::new();
         for clause in 0..crate::egglog::analysis::count(self.query(), "ResultCount", operation)? {
@@ -187,6 +159,7 @@ impl Body<'_, '_, '_> {
                     Some(index)
                 };
                 fold_data.push((
+                    clause,
                     compact,
                     mode,
                     reducer,
@@ -196,45 +169,21 @@ impl Body<'_, '_, '_> {
                     output_names("TotalOutput")?,
                 ));
             } else if self.query().enode("Contributed", kind)?.is_some() {
-                contributes = true;
+                // Accumulator writes are emitted by the common lane body.
             } else {
                 return Err(error("unknown collective result role"));
             }
         }
-        for (compact, mode, reducer, atoms, values, prefixes, totals) in fold_data {
-            let parameters = self.query().sequence("RegionParameter", reducer)?;
+        for (clause, compact, mode, reducer, atoms, values, prefixes, totals) in fold_data {
             let mut neutral = Vec::new();
             for (i, atom) in atoms.into_iter().enumerate() {
-                let Some(parameter) = parameters.get(i) else {
-                    return Err(error("reducer has no state parameter"));
+                let Some(ty) = self.compiler.execution.reducer_states.get(&(operation, clause, i)).cloned()
+                else {
+                    return Err(error("collective has no physical state layout"));
                 };
-                let Some((_, mut ty)) = runtime_binding(self.query(), *parameter)? else {
-                    return Err(error("reducer state has no runtime value"));
-                };
-                ty = super::reducer_state_type(self.query(), self.function, reducer, i, atom, ty)?;
                 let Some(value) = self.operand(atom)? else {
                     return Err(error("collective neutral is a capability"));
                 };
-                if ty.is_array()
-                    && !matches!(ty.array_size(), Some(Type::Constructed(TypeName::Size(_), _)))
-                {
-                    let count = match value.ty.array_size() {
-                        Some(Type::Constructed(TypeName::Size(size), _)) => Some(*size),
-                        _ => None,
-                    };
-                    if !self.query().contains("ReducerPreservesOuterLength", (reducer, i as i64))? {
-                        return Err(error(
-                            "array-valued collective has no proven fixed reducer state shape",
-                        ));
-                    }
-                    let Some(count) = count else {
-                        return Err(error("array-valued collective has no proven fixed neutral shape"));
-                    };
-                    let Some(element) = ty.elem_type() else {
-                        return Err(error("array reducer element type missing"));
-                    };
-                    ty = types::sized_array(count, element.clone());
-                }
                 neutral.push(self.canonical_value(value, &ty)?);
             }
             folds.push(Fold {
@@ -290,64 +239,17 @@ impl Body<'_, '_, '_> {
             }
         }
         for &binding in pattern {
-            if let Some((name, ty)) = runtime_binding(self.query(), binding)? {
-                if !collected.contains(&name) {
-                    continue;
+            if let Some((name, _)) = runtime_binding(self.query(), binding)? {
+                if collected.contains(&name) {
+                    let storage = self.allocate_collection(name)?;
+                    self.values.insert(name, storage);
                 }
-                let rank = if folds.iter().any(|fold| fold.totals.contains(&name)) {
-                    axes.len() - 1
-                } else {
-                    axes.len()
-                };
-                let dimensions = axes[..rank]
-                    .iter()
-                    .map(|&axis| {
-                        self.query()
-                            .lookup("StaticIndex", axis.extent)?
-                            .map(|size| {
-                                usize::try_from(self.query().0.value_to_base::<i64>(size).max(0))
-                                    .map_err(|_| error("collection dimension exceeds usize"))
-                            })
-                            .transpose()
-                    })
-                    .collect::<Result<Vec<_>, OptimizeError>>()?;
-                let ty = collection_shape(&ty, &dimensions)?;
-                let Some(axis) = axes.first() else {
-                    return Err(error("collection requires an axis"));
-                };
-                if let Some(storage) = self.reuse_storage(name, &ty)? {
-                    self.collections.insert(name, Collection::Allocated(storage));
-                    continue;
-                }
-                let shape = if dispatch.is_some() {
-                    let rank = if rank > 1 && dimensions[1..].contains(&None) { rank } else { 1 };
-                    let mut shape = Vec::new();
-                    for &axis in &axes[..rank] {
-                        let count = self.index_expression(axis.extent)?;
-                        let length = host::guarded_index(
-                            self.query(),
-                            &self.host_values,
-                            match &phase {
-                                Some(CollectivePhase::Epilogue { capacity, .. }) => *capacity,
-                                _ => axis.extent,
-                            },
-                            self.guard.as_ref(),
-                        )?;
-                        shape.push((count, Expr::Max(Box::new(length), Box::new(Expr::Integer(0)))));
-                    }
-                    CollectionShape::Device(shape)
-                } else {
-                    CollectionShape::Local(self.index_expression(axis.extent)?)
-                };
-                let block = self.current()?;
-                self.collections.insert(name, Collection::Pending { ty, shape, block });
             }
         }
-        let atomic_updates = contributes
-            && compacts.is_empty()
-            && folds.is_empty()
-            && self.atomic_contributions(operation)?;
-        if !compacts.is_empty() || (contributes && !atomic_updates) {
+        let Some(algorithm) = self.compiler.execution.algorithms.get(&operation).copied() else {
+            return Err(error("parallel operation has no physical algorithm"));
+        };
+        if matches!(algorithm, Algorithm::Ordered | Algorithm::Compaction) {
             let mut initial = vec![Self::number(0); compacts.len()];
             initial.extend(folds.iter().flat_map(|fold| fold.neutral.clone()));
             let statements = region;
@@ -446,7 +348,7 @@ impl Body<'_, '_, '_> {
             let counts = if let Some(dispatch) = dispatch {
                 let (group, _) = self.workgroups(dispatch.grid)?;
                 let first_group = self.binary(BinaryOperator::Equal, group, Self::number(0))?;
-                if !compacts.is_empty() && folds.is_empty() && !contributes && axes.len() == 1 {
+                if matches!(algorithm, Algorithm::Compaction) {
                     self.branch(
                         first_group,
                         |body| {
@@ -509,29 +411,7 @@ impl Body<'_, '_, '_> {
             return Ok(values);
         }
         if let Some(dispatch) = dispatch {
-            let enabled = self
-                .query()
-                .lookup("SubgroupsEnabled", RawValues(Vec::new()))?
-                .is_some_and(|value| self.query().0.value_to_base::<bool>(value));
-            let native = enabled
-                && !folds.is_empty()
-                && folds.iter().try_fold(true, |native, fold| {
-                    let addition = self.query().contains("NativeAddition", fold.reducer)?;
-                    Ok::<_, OptimizeError>(
-                        native
-                            && addition
-                            && fold.neutral.iter().all(|value| {
-                                self.integer_literal(value) == Some(0)
-                                    || matches!(
-                                        value.value,
-                                        crate::ssa::types::ValueRef::Const(
-                                            crate::ssa::types::ConstantValue::F32(0)
-                                        )
-                                    )
-                            }),
-                    )
-                })?;
-            if enabled && native {
+            if self.compiler.execution.subgroups.contains(&operation) {
                 self.prepare_subgroups(dispatch.width.get())?;
             }
         }
@@ -712,14 +592,65 @@ impl Body<'_, '_, '_> {
         Ok(values)
     }
 
+    pub(super) fn planned_allocation(&self, name: Value) -> Result<Collection, OptimizeError> {
+        let Some(plan) = self.compiler.execution.storage.collections.get(&name) else {
+            return Err(error("array has no physical allocation"));
+        };
+        Ok(plan.clone())
+    }
+
+    pub(super) fn allocate_array(
+        &mut self,
+        plan: &Collection,
+        count: Typed,
+        length: Option<Expr>,
+    ) -> Result<Typed, OptimizeError> {
+        let shape = if plan.allocation.device() {
+            let Some(length) = length else {
+                return Err(error("device allocation size is not host available"));
+            };
+            CollectionShape::Device(vec![(count, length)])
+        } else {
+            CollectionShape::Local(count)
+        };
+        let block = self.current()?;
+        self.collection_storage(&plan.allocation, &shape, plan.capacity, block)
+    }
+
+    pub(super) fn allocate_collection(&mut self, name: Value) -> Result<Typed, OptimizeError> {
+        let Some(plan) = self.compiler.execution.storage.collections.get(&name).cloned() else {
+            return Err(error("collection has no physical allocation"));
+        };
+        if let Some(&input) = self.compiler.execution.storage.reuse.get(&name) {
+            return self.named(input);
+        }
+        let shape = if !plan.allocation.device() {
+            let Some(&(extent, _)) = plan.dimensions.first() else {
+                return Err(error("local allocation extent missing"));
+            };
+            CollectionShape::Local(self.index_expression(extent)?)
+        } else {
+            let mut dimensions = Vec::new();
+            for (extent, capacity) in plan.dimensions {
+                let count = self.index_expression(extent)?;
+                let length =
+                    host::guarded_index(self.query(), &self.host_values, capacity, self.guard.as_ref())?;
+                dimensions.push((count, Expr::Max(Box::new(length), Box::new(Expr::Integer(0)))));
+            }
+            CollectionShape::Device(dimensions)
+        };
+        let block = self.current()?;
+        self.collection_storage(&plan.allocation, &shape, plan.capacity, block)
+    }
+
     pub(super) fn collection_storage(
         &mut self,
-        ty: &Type,
+        allocation: &Allocation,
         shape: &CollectionShape,
         capacity: Option<i64>,
         block: BlockId,
     ) -> Result<Typed, OptimizeError> {
-        if let Type::Constructed(name @ (TypeName::Tuple(_) | TypeName::Record(_)), fields) = ty {
+        if let Allocation::Product(name, fields) = allocation {
             let values = fields
                 .iter()
                 .map(|field| self.collection_storage(field, shape, capacity, block))
@@ -741,37 +672,42 @@ impl Body<'_, '_, '_> {
                 ty,
             });
         }
-        let shape = match shape {
-            CollectionShape::Local(count) => {
-                let Some(element) = ty.elem_type().cloned() else {
-                    return Err(error("collection binding must be an array or product of arrays"));
-                };
-                let capacity = self.integer_literal(count).or(capacity).or_else(|| match ty.array_size() {
-                    Some(Type::Constructed(TypeName::Size(size), _)) => i64::try_from(*size).ok(),
-                    _ => None,
-                });
-                let Some(capacity) = capacity else {
-                    return Err(error("local collection requires a capacity bound"));
-                };
-                let capacity = usize::try_from(capacity.max(0))
-                    .map_err(|_| error("collection capacity exceeds usize"))?;
-                return self.local_array_with_length(types::sized_array(capacity, element), count.clone());
-            }
-            CollectionShape::Device(shape) => shape,
+        if let Allocation::Local { element, capacity } = allocation {
+            let CollectionShape::Local(count) = shape else {
+                return Err(error("local allocation has device dimensions"));
+            };
+            let capacity = match capacity {
+                Capacity::Fixed(capacity) => *capacity,
+                Capacity::Extent => {
+                    let Some(capacity) =
+                        self.integer_literal(count).and_then(|n| usize::try_from(n.max(0)).ok())
+                    else {
+                        return Err(error(
+                            "local collection specialization requires a constant extent",
+                        ));
+                    };
+                    capacity
+                }
+            };
+            return self
+                .local_array_with_length(types::sized_array(capacity, element.clone()), count.clone());
+        }
+        let Allocation::Device {
+            element,
+            stride,
+            rank,
+        } = allocation
+        else {
+            return Err(error("device allocation layout missing"));
         };
+        let CollectionShape::Device(shape) = shape else {
+            return Err(error("device allocation has local dimensions"));
+        };
+        if shape.len() != *rank {
+            return Err(error("physical collection rank mismatch"));
+        }
         let Some((first, rest)) = shape.split_first() else {
             return Err(error("device collection requires a dimension"));
-        };
-        let mut element = ty;
-        for _ in shape {
-            let Some(child) = element.elem_type() else {
-                return Err(error("collection shape exceeds array rank"));
-            };
-            element = child;
-        }
-        let element = storage_value_type(element);
-        let Some(stride) = storage_elem_stride(&element) else {
-            return Err(error("collection element requires representation lowering"));
         };
         let mut count = first.0.clone();
         let mut length = first.1.clone();
@@ -793,10 +729,10 @@ impl Body<'_, '_, '_> {
             };
             length = Expr::Multiply(Box::new(length), Box::new(extent.clone()));
         }
-        let bytes = Expr::Multiply(Box::new(length), Box::new(Expr::Integer(stride.into())));
+        let bytes = Expr::Multiply(Box::new(length), Box::new(Expr::Integer((*stride).into())));
         let (binding, mut value) = self.device_buffer_at(&element, bytes, count, block)?;
         if !rest.is_empty() {
-            let mut fields = vec![element, types::array_variant_view()];
+            let mut fields = vec![element.clone(), types::array_variant_view()];
             fields.extend(shape.iter().map(|_| Type::Constructed(TypeName::SizePlaceholder, vec![])));
             fields.push(types::buffer_tag(binding));
             let ty = Type::Constructed(TypeName::Array, fields);

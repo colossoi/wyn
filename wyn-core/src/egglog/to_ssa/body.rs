@@ -9,7 +9,7 @@ use crate::op::OpTag;
 use crate::ssa::builder::{BuilderError, FuncBuilder};
 use crate::ssa::types::{BlockId, FuncBody, InstKind, PlaceId, Terminator, ValueRef};
 use crate::types::{self, Type};
-use crate::{BindingRef, FunctionId, LookupMap, LookupSet};
+use crate::{BindingRef, FunctionId, LookupMap};
 use egglog_engine::Value;
 
 mod atomics;
@@ -22,33 +22,6 @@ mod values;
 pub(super) enum CollectionShape {
     Local(Typed),
     Device(Vec<(Typed, Expr)>),
-}
-
-impl CollectionShape {
-    pub fn outer(count: Typed, length: Option<Expr>) -> Self {
-        match length {
-            Some(length) => Self::Device(vec![(count, length)]),
-            None => Self::Local(count),
-        }
-    }
-}
-
-pub(super) enum Collection {
-    Pending {
-        ty: Type,
-        shape: CollectionShape,
-        block: BlockId,
-    },
-    Allocated(Typed),
-}
-
-impl Collection {
-    fn value(&self) -> Option<&Typed> {
-        match self {
-            Self::Allocated(value) => Some(value),
-            Self::Pending { .. } => None,
-        }
-    }
 }
 
 pub(super) struct Body<'a, 'p, 'source> {
@@ -64,8 +37,6 @@ pub(super) struct Body<'a, 'p, 'source> {
     pub storage_accesses: LookupMap<BindingRef, crate::ResourceAccess>,
     pub active_dispatch: Option<Value>,
     pub host_values: Bindings<Value, ScalarExpr>,
-    pub collections: LookupMap<Value, Collection>,
-    pub reused_buffers: LookupSet<BindingRef>,
     pub guard: Option<ScalarExpr>,
     pub generated: Option<GeneratedBuffers>,
 }
@@ -101,8 +72,6 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
             storage_accesses: LookupMap::default(),
             active_dispatch: None,
             host_values: Bindings::default(),
-            collections: LookupMap::default(),
-            reused_buffers: LookupSet::default(),
             guard: None,
             generated: None,
         }
@@ -127,8 +96,6 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         self.values = Bindings::default();
         self.local_arrays.clear();
         self.locations.clear();
-        self.collections.clear();
-        self.reused_buffers.clear();
         self.storage_accesses.clear();
         self.next_workgroup_array = 0;
         self.active_dispatch = None;

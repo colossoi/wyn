@@ -8,60 +8,18 @@ use crate::ssa::types::ConstantValue;
 use crate::ssa::types::ValueRef;
 use crate::ssa::types::{InstKind, PlaceId};
 use crate::types::{self, bool_type, strip_existentials, Type, TypeExt, TypeName};
-use egglog_engine::{RawValues, Value};
+use egglog_engine::Value;
 
 impl Body<'_, '_, '_> {
     pub(in crate::egglog::to_ssa) fn fixed_loop_state(
         &mut self,
         value: Typed,
-        initial: Option<Value>,
+        operation: Value,
+        slot: i64,
     ) -> Result<Typed, OptimizeError> {
-        if let Type::Constructed(name @ (TypeName::Tuple(_) | TypeName::Record(_)), fields) = &value.ty {
-            let name = name.clone();
-            let mut values = Vec::new();
-            for i in 0..fields.len() {
-                let field = self.field(value.clone(), i)?;
-                let root = self
-                    .query()
-                    .constructor("RootPath", RawValues(vec![]))?
-                    .ok_or_else(|| error("logical root path missing"))?;
-                let path = self.query().constructor("FieldPath", (root, i as i64))?;
-                let component = if let (Some(initial), Some(path)) = (initial, path) {
-                    self.query()
-                        .row("ProductComponent", |row| row[0] == initial && row[1] == path)?
-                        .map(|row| row[2])
-                } else {
-                    None
-                };
-                values.push(self.fixed_loop_state(field, component)?);
-            }
-            let ty = Type::Constructed(name, values.iter().map(|value| value.ty.clone()).collect());
-            return self.op(OpTag::Tuple, values, ty);
-        }
-        if value.ty.array_variant().is_some_and(types::is_array_variant_view) {
-            let exact = if let Some(initial) = initial {
-                self.query()
-                    .lookup("LogicalOuterCount", initial)?
-                    .map(|count| self.query().lookup("StaticIndex", count))
-                    .transpose()?
-                    .flatten()
-                    .and_then(|size| usize::try_from(self.query().0.value_to_base::<i64>(size)).ok())
-            } else {
-                None
-            };
-            let size = exact.or_else(|| match value.ty.array_size() {
-                Some(Type::Constructed(TypeName::Size(size), _)) => Some(*size),
-                _ => match self.host_array_length(&value) {
-                    Ok(Expr::Integer(size)) => usize::try_from(size).ok(),
-                    _ => None,
-                },
-            });
-            if let Some(size) = size {
-                let element =
-                    value.ty.elem_type().cloned().ok_or_else(|| error("loop array element missing"))?;
-                let ty = types::sized_array(size, element);
-                return self.cast(value, &ty);
-            }
+        if let Some(ty) = self.compiler.execution.storage.fixed_states.get(&(operation, slot)).cloned() {
+            let ty = loop_state_type(&value.ty, &ty)?;
+            return self.canonical_value(value, &ty);
         }
         Ok(value)
     }
@@ -200,7 +158,12 @@ impl Body<'_, '_, '_> {
             let storage = self.field(array.clone(), 0)?;
             let storage = self.snapshot(storage)?;
             let count = self.field(array.clone(), 1)?;
-            return self.op(OpTag::Tuple, vec![storage, count], array.ty);
+            let shape = self.host_shape(&array);
+            let value = self.op(OpTag::Tuple, vec![storage, count], array.ty)?;
+            if let Some(shape) = shape {
+                self.set_shape(&value, shape)?;
+            }
+            return Ok(value);
         }
         if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = &array.ty {
             let mut values = Vec::new();
@@ -854,4 +817,31 @@ impl Body<'_, '_, '_> {
     pub fn workgroup_barrier(&mut self) -> Result<(), OptimizeError> {
         self.builder.push_void_inst(InstKind::ControlBarrier).map(|_| ()).map_err(builder_error)
     }
+}
+
+// Instantiate proven fixed extents without replacing nested buffers or descriptors.
+fn loop_state_type(actual: &Type, planned: &Type) -> Result<Type, OptimizeError> {
+    if let (
+        Type::Constructed(name @ (TypeName::Tuple(_) | TypeName::Record(_)), actual),
+        Type::Constructed(_, planned),
+    ) = (actual, planned)
+    {
+        if actual.len() != planned.len() {
+            return Err(error("loop state layout arity mismatch"));
+        }
+        return Ok(Type::Constructed(
+            name.clone(),
+            actual.iter().zip(planned).map(|(a, p)| loop_state_type(a, p)).collect::<Result<_, _>>()?,
+        ));
+    }
+    if actual.array_variant().is_some_and(types::is_array_variant_view)
+        && planned.array_variant().is_some_and(types::is_array_variant_composite)
+    {
+        if let (Some(Type::Constructed(TypeName::Size(size), _)), Some(element)) =
+            (planned.array_size(), actual.elem_type())
+        {
+            return Ok(types::sized_array(*size, element.clone()));
+        }
+    }
+    Ok(actual.clone())
 }

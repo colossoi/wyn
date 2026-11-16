@@ -1,64 +1,21 @@
 //! Emit statements in lexical order; descriptor arithmetic comes from bindings.
-use super::{builder_error, error, Body, Collection, CollectionShape, OptimizeError, Typed, Value};
+use super::{builder_error, error, Body, OptimizeError, Typed, Value};
 use crate::ast::Span;
-use crate::builtins::{catalog, select};
+use crate::builtins::catalog;
 use crate::egglog::dataflow::ir::{self, Bounds, Code};
 use crate::egglog::payload::Payload;
 use crate::egglog::query::Query;
 use crate::egglog::to_ssa::{host, runtime_binding, same_value_structure};
 use crate::host::Expr;
 use crate::op::{BinaryOperator, OpTag, PureViewSource};
-use crate::ssa::layout::{storage_elem_stride, storage_value_type};
 use crate::ssa::types::InstKind;
 use crate::types::{self, Type, TypeExt, TypeName};
 use crate::ResourceAccess;
-use egglog_engine::sort::{Boxed, Z};
-
-fn collection_type(declared: &Type, element: &Type, axes: usize) -> Result<Type, OptimizeError> {
-    if axes == 0 {
-        if let (Some(Type::Constructed(TypeName::Size(size), _)), Some(declared_item), Some(actual_item)) =
-            (declared.array_size(), declared.elem_type(), element.elem_type())
-        {
-            return Ok(types::sized_array(
-                *size,
-                collection_type(declared_item, actual_item, 0)?,
-            ));
-        }
-        return Ok(element.clone());
-    }
-    if let (Type::Constructed(TypeName::Tuple(_), fields), Type::Constructed(TypeName::Tuple(_), values)) =
-        (declared, element)
-    {
-        if fields.len() != values.len() {
-            return Err(error("collection product arity mismatch"));
-        }
-        return Ok(types::tuple(
-            fields
-                .iter()
-                .zip(values)
-                .map(|(field, value)| collection_type(field, value, axes))
-                .collect::<Result<Vec<_>, _>>()?,
-        ));
-    }
-    let Some(child) = declared.elem_type() else {
-        return Err(error("collection rank exceeds declared array rank"));
-    };
-    let Some(size) = declared.array_size() else {
-        return Err(error("collection extent missing"));
-    };
-    Ok(types::make_array1(
-        collection_type(child, element, axes - 1)?,
-        types::array_variant_composite(),
-        size.clone(),
-        types::no_buffer(),
-    ))
-}
+use egglog_engine::sort::Boxed;
 
 impl Body<'_, '_, '_> {
     pub fn named(&self, name: Value) -> Result<Typed, OptimizeError> {
-        let Some(value) =
-            self.values.get(&name).or_else(|| self.collections.get(&name).and_then(Collection::value))
-        else {
+        let Some(value) = self.values.get(&name) else {
             return Err(error(format!("unbound emitted value {name:?}")));
         };
         Ok(value.clone())
@@ -160,6 +117,13 @@ impl Body<'_, '_, '_> {
                 };
                 let value =
                     if same_value_structure(&value.ty, &ty) { value } else { self.cast(value, &ty)? };
+                if value.ty.array_rank() == Some(1) && self.compiler.execution.host_shapes.contains(&name) {
+                    if let Some(count) = self.query().lookup("LogicalOuterCount", name)? {
+                        if let Some(length) = host::scalar_index(self.query(), &self.host_values, count)? {
+                            self.set_shape(&value, vec![Expr::Scalar(length)])?;
+                        }
+                    }
+                }
                 self.values.insert(name, value);
             }
         }
@@ -232,7 +196,7 @@ impl Body<'_, '_, '_> {
         let inputs = operands.iter().map(|&name| query.name(name)).collect::<Result<Vec<_>, _>>()?;
         let code = ir::code(query.0, query.required("OperationPayload", statement)?);
         if matches!(code, Code::Parallel)
-            && query.enode("DeviceKernel", query.required("OperationExecution", statement)?)?.is_some()
+            && self.compiler.execution.dispatch(statement).is_ok()
             && self.active_dispatch != Some(statement)
         {
             return Err(error("device parallel region requires a dispatch entry"));
@@ -257,26 +221,18 @@ impl Body<'_, '_, '_> {
             }
             Code::Copy => {
                 let source = self.named(inputs[0])?;
-                if source.ty.array_variant().is_some_and(types::is_array_variant_composite) {
-                    if let [binding] = pattern.as_slice() {
-                        if let Some((output, _)) = runtime_binding(self.query(), *binding)? {
-                            if self.value_updates_only(output)? {
-                                let value = self.snapshot(source)?;
-                                return self.bind(&pattern, vec![value]);
-                            }
-                        }
-                    }
-                }
                 if let [binding] = pattern.as_slice() {
-                    if let Some((output, ty)) = runtime_binding(self.query(), *binding)? {
-                        if let Some(storage) = self.reuse_storage(output, &ty)? {
+                    if let Some((output, _)) = runtime_binding(self.query(), *binding)? {
+                        if let Some(storage) = self.reuse_storage(output)? {
                             return self.bind(&pattern, vec![storage]);
                         }
                     }
                 }
-                let Some(element) = source.ty.elem_type().cloned() else {
-                    return Err(error("copy source has no element"));
-                };
+                let output = self.query().name(pattern[0])?;
+                if self.compiler.execution.storage.snapshots.contains(&output) {
+                    let value = self.snapshot(source)?;
+                    return self.bind(&pattern, vec![value]);
+                }
                 let known_count = self
                     .query()
                     .lookup("LogicalOuterCount", inputs[0])?
@@ -288,37 +244,11 @@ impl Body<'_, '_, '_> {
                 } else {
                     self.array_length(source.clone())?
                 };
-                let inline = source.ty.array_variant().is_some_and(types::is_array_variant_composite)
-                    && matches!(
-                        source.ty.array_size(),
-                        Some(Type::Constructed(TypeName::Size(_), _))
-                    );
-                let destination = if self.active_dispatch.is_none() && !inline {
-                    let length = self.host_array_length(&source)?;
-                    let Some(stride) = storage_elem_stride(&storage_value_type(&element)) else {
-                        return Err(error("copy element has no stride"));
-                    };
-                    let bytes =
-                        Expr::Multiply(Box::new(length.clone()), Box::new(Expr::Integer(stride.into())));
-                    let (_, destination) = self.device_buffer(&element, bytes, count.clone())?;
-                    self.set_shape(&destination, vec![length])?;
-                    destination
-                } else {
-                    let capacity = self
-                        .integer_literal(&count)
-                        .and_then(|n| usize::try_from(n).ok())
-                        .or_else(|| match source.ty.array_size() {
-                            Some(Type::Constructed(TypeName::Size(size), _)) => Some(*size),
-                            _ => None,
-                        });
-                    let capacity = capacity.or(self.query().lookup("OuterCapacity", inputs[0])?.and_then(
-                        |value| usize::try_from(self.query().0.value_to_base::<i64>(value)).ok(),
-                    ));
-                    let Some(capacity) = capacity else {
-                        return Err(error("local copy needs a capacity bound"));
-                    };
-                    self.local_array_with_length(types::sized_array(capacity, element), count.clone())?
-                };
+                let name = self.query().name(pattern[0])?;
+                let plan = self.planned_allocation(name)?;
+                let length =
+                    if plan.allocation.device() { Some(self.host_array_length(&source)?) } else { None };
+                let destination = self.allocate_array(&plan, count.clone(), length)?;
                 self.counted(
                     Self::number(0),
                     count,
@@ -335,41 +265,34 @@ impl Body<'_, '_, '_> {
             Code::Scratch => {
                 let source = self.named(inputs[0])?;
                 let count = self.array_length(source.clone())?;
-                let length = if self.active_dispatch.is_none() {
-                    Some(self.host_array_length(&source)?)
-                } else {
-                    None
-                };
-                let block = self.current()?;
-                vec![self.collection_storage(
-                    &source.ty,
-                    &CollectionShape::outer(count, length),
-                    None,
-                    block,
-                )?]
+                let name = self.query().name(pattern[0])?;
+                let plan = self.planned_allocation(name)?;
+                let length =
+                    if plan.allocation.device() { Some(self.host_array_length(&source)?) } else { None };
+                vec![self.allocate_array(&plan, count, length)?]
             }
             Code::Uninitialized => {
                 let shape = self.query().vector(self.query().required("OperationShape", statement)?)?;
                 let [extent] = shape.as_slice() else {
-                    return Err(error("scratch allocation requires one outer extent"));
-                };
-                let [binding] = pattern.as_slice() else {
-                    return Err(error("scratch allocation must bind one array"));
-                };
-                let Some((_, ty)) = runtime_binding(self.query(), *binding)? else {
-                    return Err(error("scratch allocation has no value binding"));
+                    return Err(error("uninitialized array requires one dimension"));
                 };
                 let count = self.index_expression(*extent)?;
                 let nonnegative =
                     self.binary(BinaryOperator::GreaterEqual, count.clone(), Self::number(0))?;
                 self.require_condition(nonnegative)?;
-                let length = if self.active_dispatch.is_none() {
-                    host::scalar_index(self.query(), &self.host_values, *extent)?.map(Expr::Scalar)
+                let name = self.query().name(pattern[0])?;
+                let plan = self.planned_allocation(name)?;
+                let length = if plan.allocation.device() {
+                    Some(host::guarded_index(
+                        self.query(),
+                        &self.host_values,
+                        *extent,
+                        self.guard.as_ref(),
+                    )?)
                 } else {
                     None
                 };
-                let block = self.current()?;
-                vec![self.collection_storage(&ty, &CollectionShape::outer(count, length), None, block)?]
+                vec![self.allocate_array(&plan, count, length)?]
             }
             Code::Length { axis } => {
                 let array = self.named(inputs[0])?;
@@ -436,10 +359,8 @@ impl Body<'_, '_, '_> {
                 let Some((_, declared)) = runtime_binding(self.query(), *binding)? else {
                     return Err(error("array literal has no value binding"));
                 };
-                if let Some(first) = elements.first() {
-                    if first.ty.is_array() && elements.iter().any(|value| value.ty != first.ty) {
-                        elements = self.coalesce_arrays(elements)?;
-                    }
+                if self.compiler.execution.storage.coalesce.contains(&statement) {
+                    elements = self.coalesce_arrays(elements)?;
                 }
                 let element = elements
                     .first()
@@ -473,20 +394,7 @@ impl Body<'_, '_, '_> {
                     .flatten()
                     .map(|(_, ty)| ty)
                     .collect::<Vec<_>>();
-                let mut speculate = types.iter().all(select::supported_type);
-                for region in [yes, no] {
-                    let query = self.query();
-                    for table in ["RegionRead", "RegionWrite", "RegionTrap"] {
-                        query.for_each(table, |row| {
-                            speculate &= row[0] != region;
-                            Ok(())
-                        })?;
-                    }
-                    speculate &= query.lookup("RegionWork", region)?.is_some_and(|work| {
-                        u64::try_from(&*query.0.value_to_base::<Z>(work)).is_ok_and(|work| work <= 4)
-                    });
-                }
-                if speculate {
+                if self.compiler.execution.speculated.contains(&statement) {
                     let a = self.block(yes)?;
                     let b = self.block(no)?;
                     if a.len() != types.len() || b.len() != types.len() {
@@ -527,23 +435,8 @@ impl Body<'_, '_, '_> {
                         let Some(value) = self.operand(argument)? else {
                             return Err(error("loop carry has no runtime value"));
                         };
-                        let mut value = self.canonical_value(value, &ty)?;
-                        let mut components = 0;
-                        let mut preserved = true;
-                        self.query().for_each("LoopArrayComponent", |row| {
-                            if row[0] == statement && self.query().0.value_to_base::<i64>(row[1]) == slot {
-                                components += 1;
-                                preserved &= self
-                                    .query()
-                                    .contains("LoopPreservesComponentLength", (row[0], row[1], row[2]))?;
-                            }
-                            Ok(())
-                        })?;
-                        if self.query().contains("LoopPreservesOuterLength", (statement, slot))?
-                            || (components > 0 && preserved)
-                        {
-                            value = self.fixed_loop_state(value, self.query().value_name(argument)?)?;
-                        }
+                        let value = self.canonical_value(value, &ty)?;
+                        let value = self.fixed_loop_state(value, statement, slot)?;
                         params.push(name);
                         initial.push(value);
                     }
@@ -811,26 +704,9 @@ impl Body<'_, '_, '_> {
         indices: &[Typed],
         value: Typed,
     ) -> Result<(), OptimizeError> {
-        if matches!(self.collections.get(&name), Some(Collection::Pending { .. })) {
-            let Some(Collection::Pending { ty, shape, block }) = self.collections.remove(&name) else {
-                return Err(error("pending collection missing"));
-            };
-            let ty = collection_type(&ty, &value.ty, indices.len())?;
-            let storage = if let Some(storage) = self.reuse_storage(name, &ty)? {
-                storage
-            } else {
-                let capacity = self
-                    .query()
-                    .lookup("OuterCapacity", name)?
-                    .map(|value| self.query().0.value_to_base::<i64>(value));
-                self.collection_storage(&ty, &shape, capacity, block)?
-            };
-            self.collections.insert(name, Collection::Allocated(storage));
-        }
         if let Some(array) = self
             .values
             .get(&name)
-            .or_else(|| self.collections.get(&name).and_then(Collection::value))
             .filter(|value| {
                 value.ty.is_array()
                     || matches!(
@@ -846,64 +722,10 @@ impl Body<'_, '_, '_> {
     }
 
     pub(in crate::egglog::to_ssa) fn reuse_storage(
-        &mut self,
+        &self,
         output: Value,
-        ty: &Type,
     ) -> Result<Option<Typed>, OptimizeError> {
-        let mut candidates = Vec::new();
-        self.query().for_each("CanReuse", |row| {
-            if row[0] == output {
-                candidates.push(row[1]);
-            }
-            Ok(())
-        })?;
-        for input in candidates {
-            let Some(array) = self.values.get(&input).cloned() else {
-                continue;
-            };
-            let Some(binding) = types::array_view_buffer(&array.ty) else {
-                continue;
-            };
-            if array.ty.elem_type().map(storage_value_type) == ty.elem_type().map(storage_value_type)
-                && self.reused_buffers.insert(binding)
-            {
-                return Ok(Some(array));
-            }
-        }
-        Ok(None)
-    }
-
-    fn value_updates_only(&self, name: Value) -> Result<bool, OptimizeError> {
-        let query = self.query();
-        let Some(reference) = query.constructor("ValueNameRef", name)? else {
-            return Err(error("array name missing for value update"));
-        };
-        let mut updates = false;
-        let mut safe = true;
-        query.for_each("OperationUse", |row| {
-            if row[1] != reference || !query.contains("LiveOperation", row[0])? {
-                return Ok(());
-            }
-            let code = ir::code(query.0, query.required("OperationPayload", row[0])?);
-            if matches!(code, Code::Update { .. }) {
-                let slices = query.vector(query.required("OperationSlices", row[0])?)?;
-                let simple = query.required("Input", (row[0], 0_i64))? == reference
-                    && slices.len() == 1
-                    && query.enode("At", slices[0])?.is_some();
-                updates |= simple;
-                safe &= simple;
-            } else {
-                safe &= matches!(code, Code::Index | Code::Length { .. });
-            }
-            Ok(())
-        })?;
-        for table in ["RegionYield", "ResultValue", "ResultNeutral"] {
-            query.for_function(table, |_, value| {
-                safe &= value != reference;
-                Ok(())
-            })?;
-        }
-        Ok(safe && updates)
+        self.compiler.execution.storage.reuse.get(&output).map(|&input| self.named(input)).transpose()
     }
 
     fn write_array_value(
@@ -1161,7 +983,6 @@ impl Body<'_, '_, '_> {
         let group = query.0.value_to_base::<i64>(capability[1]);
         let count = crate::egglog::analysis::count(query, "AccumulatorArrayCount", (owner, group))?;
         let arrays = query.indexed("AccumulatorArray", &[owner, capability[1]], count)?;
-        let policy = query.required("AccumulatorPolicy", (owner, group))?;
         let combine = query.lookup("AccumulatorCombiner", (owner, group))?;
         let indices = query
             .vector(query.required("OperationShape", operation)?)?
@@ -1175,7 +996,7 @@ impl Body<'_, '_, '_> {
             let array = self.named(first)?;
             let valid = self.valid_indices(array, &indices)?;
             let values = self.yield_values(&operands[1..])?;
-            if let Some(update) = self.atomic_policy(&arrays, policy, combine)? {
+            if let Some(update) = self.compiler.execution.atomics.get(&(owner, group)).cloned() {
                 let [value] = values.as_slice() else {
                     return Err(error("atomic accumulator must receive one scalar"));
                 };

@@ -1,7 +1,7 @@
 //! Plan execution using the shared graph and the existing portable cost policies.
 use super::cost::{self, CostModel};
 use super::query::Query;
-use super::{analysis, execution, output_error, OptimizeError};
+use super::{analysis, output_error, OptimizeError};
 use crate::PipelineTopologyPolicy;
 use egglog_engine::{EGraph, RawValues, Write};
 
@@ -35,6 +35,9 @@ pub(super) fn analyze(graph: &mut EGraph) -> Result<(), OptimizeError> {
     let _timing = super::timing::span("egglog graph metadata");
     for table in [
         "StaticIndex",
+        "CollectionRank",
+        "CollectionExtent",
+        "CollectionElement",
         "CompactPath",
         "CompactPair",
         "CompactSafe",
@@ -58,6 +61,11 @@ pub(super) fn analyze(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "IntegerUpper",
         "ConsumedScalarArray",
         "ReuseCandidate",
+        "SnapshotCopy",
+        "SnapshotUpdate",
+        "SnapshotUseSafe",
+        "SnapshotCopySafe",
+        "CanSnapshotCopy",
         "ReuseClauses",
         "ReuseReadSafe",
         "ReuseLegal",
@@ -218,15 +226,14 @@ pub(super) fn schedule(graph: &mut EGraph) -> Result<(), OptimizeError> {
     query.for_each("LiveOperation", |row| {
         if query.contains("ParallelOperation", row[0])? {
             let execution = query.required("SelectedExecution", row[0])?;
-            choices.push((row[0], execution, execution::width(query, row[0], execution)?));
+            choices.push((row[0], execution));
         }
         Ok(())
     })?;
     graph.update(|mut sink| {
-        for (operation, execution, width) in choices {
+        for (operation, execution) in choices {
             sink.remove("OperationExecution", operation)?;
             sink.set("OperationExecution", operation, execution)?;
-            sink.set("OperationWidth", operation, i64::from(width))?;
         }
         Ok(())
     })?;

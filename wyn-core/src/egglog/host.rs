@@ -1,5 +1,5 @@
 //! Final host expressions for sizes and scalar arguments; never reinserted into egglog.
-use super::{error, OptimizeError};
+use super::{output_error as error, representation, OptimizeError};
 use crate::builtins::catalog;
 use crate::egglog::bindings::Bindings;
 use crate::egglog::dataflow::ir::{self, Code};
@@ -99,7 +99,19 @@ pub(super) fn scalar_index(
         return Ok(i32::try_from(n).ok().map(ScalarExpr::I32));
     }
     if kind == "IndexValue" {
-        return Ok(values.get(&args[0]).cloned());
+        let Some(value) = values.get(&args[0]).cloned() else {
+            return Ok(None);
+        };
+        let ty = representation::value_type(query, query.required("ValueType", args[0])?)?;
+        return Ok(Some(if scalar_type(&ty) == Some(ScalarType::U32) {
+            ScalarExpr::Apply {
+                op: "to-i32".into(),
+                ty: ScalarType::U32,
+                args: vec![value],
+            }
+        } else {
+            value
+        }));
     }
     let (Some(a), Some(b)) = (
         scalar_index(query, values, args[0])?,
@@ -304,7 +316,7 @@ pub(super) fn remember(
             } else {
                 return Ok(());
             };
-            let target = super::primitive_type(query, element[0])?;
+            let target = super::representation::primitive_type(query, element[0])?;
             let source = atoms.first().map(|&atom| atom_type(query, function, atom)).transpose()?.flatten();
             let conversion = match (&target, &source, builtin) {
                 (Type::Constructed(target, _), Some(Type::Constructed(source, _)), Some(builtin)) => {
@@ -379,7 +391,7 @@ pub(super) fn remember(
 }
 
 fn atom_type(query: Query<'_>, _function: Value, name: Value) -> Result<Option<Type>, OptimizeError> {
-    super::value_type(query, query.required("ValueType", name)?).map(Some)
+    super::representation::value_type(query, query.required("ValueType", name)?).map(Some)
 }
 
 fn results(

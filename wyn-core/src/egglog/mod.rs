@@ -2,6 +2,11 @@
 //! Pass order is enforced by typestate:
 //! [`from_tlc`] → [`fuse`] → [`place`] → [`schedule`] → [`prepare_interfaces`]
 //! → [`optimize`] → [`prepare_host`] → [`to_ssa`].
+//!
+//! Egglog owns logical shapes, effects, aliasing, and transformation legality.
+//! Host preparation reads those proofs to freeze storage and dispatch recipes.
+//! SSA emission instantiates the recipes with concrete bindings and operands;
+//! neither physical planning nor emission writes decisions back into egglog.
 use self::dataflow::edit;
 use crate::ssa::stage::Elaborated;
 use crate::tlc::stage::OwnershipApplied;
@@ -10,6 +15,7 @@ use egglog_engine::EGraph;
 use egglog_engine::Error;
 use wyn_base::Interner;
 
+mod allocation;
 mod analysis;
 mod bindings;
 pub mod cost;
@@ -17,10 +23,12 @@ pub(crate) mod dataflow;
 mod execution;
 mod from_tlc;
 mod fusion;
+mod host;
 mod memory;
 mod payload;
 mod planning;
 mod query;
+mod representation;
 mod scalar;
 #[cfg(test)]
 mod test_graph;
@@ -90,7 +98,7 @@ pub fn place_with_cost_model(
     Ok(program.advance(Placed))
 }
 
-/// Select logical execution strategies. SSA emission completes physical scheduling.
+/// Select logical execution strategies; host preparation completes physical planning.
 pub fn schedule(program: Program<'_, Placed>) -> Result<Program<'_, Scheduled>, OptimizeError> {
     schedule_with_subgroups(program, false)
 }
@@ -154,22 +162,23 @@ pub fn optimize_with_policy(
     Ok(program.advance(Optimized))
 }
 
-/// Validate the program before host and shader emission.
+/// Finish graph analysis and freeze physical execution and storage choices.
 pub fn prepare_host(mut program: Program<'_, Optimized>) -> Result<HostPrepared<'_>, OptimizeError> {
     let _timing = timing::span("egglog host preparation");
     analysis::run(&mut program.graph)?;
     planning::epilogues(&mut program.graph)?;
-    Ok(HostPrepared { program })
+    let execution = execution::Execution::prepare(&program)?;
+    Ok(HostPrepared { program, execution })
 }
 
-/// Plan evaluation and lower shader SSA together with its host interfaces.
+/// Emit shader SSA and host interfaces from the prepared physical plan.
 pub fn to_ssa(program: HostPrepared<'_>, target: CodegenTarget) -> Result<Elaborated, OptimizeError> {
     let _timing = timing::span("SSA emission");
-    to_ssa::lower(&program.program, target)
+    to_ssa::lower(&program.program, &program.execution, target)
 }
 
 /// TLC retains source and public-interface metadata. The graph owns the logical
-/// program and execution choices until direct SSA emission.
+/// program and logical execution choices. Host preparation freezes the physical plan.
 pub struct Program<'source, Stage> {
     source: &'source OwnershipApplied,
     graph: EGraph,
@@ -194,7 +203,7 @@ pub struct Imported;
 pub struct Fused;
 pub struct Placed;
 
-/// Logical execution strategies are selected; storage is determined during SSA emission.
+/// Logical execution strategies are selected; physical planning follows scalar optimization.
 pub struct Scheduled;
 
 pub struct InterfacesPrepared;
@@ -203,6 +212,7 @@ pub struct Optimized;
 
 pub struct HostPrepared<'source> {
     program: Program<'source, Optimized>,
+    execution: execution::Execution,
 }
 
 #[cfg(test)]
