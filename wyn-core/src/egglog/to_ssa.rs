@@ -65,12 +65,12 @@ pub(super) struct Compiler<'a, 'source> {
     externals: LookupMap<Value, Value>,
     pub functions: Vec<Function>,
     pub execution: &'a Execution,
-    callable_ids: LookupMap<Value, (FunctionId, Type)>,
+    callable_ids: LookupMap<Value, (FunctionId, Vec<Type>, Type)>,
     function_ids: IdSource<FunctionId>,
 }
 
 impl Compiler<'_, '_> {
-    fn function(&mut self, name: Value) -> Result<(FunctionId, Type), OptimizeError> {
+    fn function(&mut self, name: Value) -> Result<(FunctionId, Vec<Type>, Type), OptimizeError> {
         if let Some(selected) = self.callable_ids.get(&name) {
             return Ok(selected.clone());
         }
@@ -118,7 +118,12 @@ impl Compiler<'_, '_> {
         let result_type =
             if let [ty] = result_types.as_slice() { ty.clone() } else { types::tuple(result_types) };
         let id = self.function_ids.next_id();
-        self.callable_ids.insert(name, (id, result_type.clone()));
+        let signature = (
+            id,
+            params.iter().map(|(_, ty)| ty.clone()).collect(),
+            result_type.clone(),
+        );
+        self.callable_ids.insert(name, signature.clone());
         let mut body = Body::new(self, name, params, result_type.clone());
         let body = if external {
             body.builder.terminate(crate::ssa::types::Terminator::Unreachable).map_err(builder_error)?;
@@ -142,7 +147,7 @@ impl Compiler<'_, '_> {
             span: Span::generated(),
             linkage_name: external.then_some(text),
         });
-        Ok((id, result_type))
+        Ok(signature)
     }
 }
 

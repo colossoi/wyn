@@ -571,7 +571,15 @@ impl Body<'_, '_, '_> {
                     }
                 }
                 let target = self.query().required("CallTarget", statement)?;
-                let (id, ty) = self.compiler.function(target)?;
+                let (id, parameters, ty) = self.compiler.function(target)?;
+                if args.len() != parameters.len() {
+                    return Err(error("shader call arity differs from its declared signature"));
+                }
+                let args = args
+                    .into_iter()
+                    .zip(parameters)
+                    .map(|(argument, parameter)| self.cast(argument, &parameter))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let result = self.op(OpTag::Call(id), args, ty)?;
                 if pattern.len() == 1 {
                     vec![result]
