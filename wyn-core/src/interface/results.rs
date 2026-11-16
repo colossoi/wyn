@@ -4,6 +4,10 @@ use crate::ssa::layout::{std430_matrix_stride, std430_struct_layout, storage_ele
 use crate::types::{self, strip_existentials, Type, TypeExt, TypeName};
 
 #[cfg(test)]
+#[path = "results_tests.rs"]
+mod results_tests;
+
+#[cfg(test)]
 use crate::ssa::layout::storage_value_type;
 
 #[cfg(test)]
@@ -30,6 +34,7 @@ pub(crate) fn array_element(ty: &Type) -> Option<(Type, Type)> {
 /// Restore authored array nesting over the lowered component types and extents.
 pub(crate) fn output_type(declared: &Type, lowered: &Type) -> Option<Type> {
     let declared = strip_existentials(declared);
+    let lowered = strip_existentials(lowered);
     if let (
         Type::Constructed(name @ (TypeName::Tuple(_) | TypeName::Record(_)), fields),
         Type::Constructed(_, components),

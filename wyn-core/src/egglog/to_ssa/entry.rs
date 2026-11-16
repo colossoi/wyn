@@ -277,9 +277,10 @@ pub(super) fn lower(
             .map(|(index, ty)| {
                 let declared = declaration.outputs.get(index).map_or(ty, |output| &output.ty);
                 let Some(ty) = output_type(declared, ty) else {
-                    return Err(error(
-                        "output representation differs from its declared array nesting",
-                    ));
+                    return Err(error(format!(
+                        "entry {}: output representation differs from its declared array nesting",
+                        declaration.name,
+                    )));
                 };
                 Ok(ty)
             })
