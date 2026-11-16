@@ -24,6 +24,7 @@ pub struct Expectation {
     host_inputs: Option<bool>,
     result_ownership: Option<Vec<String>>,
     result_names: Option<Vec<String>>,
+    result_aliases: Option<Vec<String>>,
     captured_results: Option<Vec<bool>>,
     #[serde(default)]
     texture_draw_chain: bool,
@@ -305,6 +306,7 @@ pub fn check(source: &str, expectations: &[Expectation]) {
         if expected.captured_results.is_none()
             && !expected.texture_draw_chain
             && expected.allocations.is_none()
+            && expected.result_aliases.is_none()
             && expected.draws.is_empty()
             && expected.result_bytes.is_none()
             && expected.result_at_least_bytes.is_none()
@@ -331,7 +333,7 @@ pub fn check(source: &str, expectations: &[Expectation]) {
                 } else {
                     let mut bytes = vec![
                         0;
-                        p.host_bytes().unwrap().or(p.minimum_bytes().unwrap()).unwrap_or(0)
+                        p.host_bytes().unwrap().max(p.minimum_bytes().unwrap()).unwrap_or(0)
                             as usize
                     ];
                     for (field, offset, size) in p.fields().unwrap() {
@@ -351,10 +353,32 @@ pub fn check(source: &str, expectations: &[Expectation]) {
                 value
             })
             .collect();
-        assert!(scalars.next().is_none(), "unused scalar host arguments");
+        assert!(
+            scalars.next().is_none(),
+            "{}: unused scalar host arguments",
+            expected.entry
+        );
         let result = program
             .run(&expected.entry, &arguments, &mut trace)
             .unwrap_or_else(|e| panic!("{}: {e}", expected.entry));
+        if let Some(aliases) = &expected.result_aliases {
+            let values = if let Value::List(values) = &result {
+                values.as_slice()
+            } else {
+                std::slice::from_ref(&result)
+            };
+            let mut actual = values
+                .iter()
+                .map(|value| {
+                    let origin = trace.origin(value.handle().expect("buffer result"));
+                    trace.names[&origin].clone()
+                })
+                .collect::<Vec<_>>();
+            let mut wanted = aliases.clone();
+            actual.sort();
+            wanted.sort();
+            assert_eq!(actual, wanted, "{} result backing resources", expected.entry);
+        }
         if let Some(captured) = &expected.captured_results {
             let results = result.list().expect("tuple results");
             assert_eq!(results.len(), captured.len());

@@ -17,6 +17,8 @@ pub struct Expectation {
     #[serde(default)]
     binary: BTreeMap<String, usize>,
     #[serde(default)]
+    self_binary: BTreeMap<String, usize>,
+    #[serde(default)]
     math: BTreeMap<String, usize>,
     #[serde(default)]
     parameter_loads: BTreeMap<String, usize>,
@@ -66,6 +68,7 @@ fn statements(
 }
 
 pub fn check(bytes: &[u8], target: &str, expectations: &[Expectation], host: &str) {
+    let host_source = host;
     let host = wyn_host_interp::Program::parse(host).expect("valid shader host ABI");
     let module = match target {
         "spirv" => naga::front::spv::parse_u8_slice(bytes, &Default::default()).expect("SPIR-V module"),
@@ -78,23 +81,36 @@ pub fn check(bytes: &[u8], target: &str, expectations: &[Expectation], host: &st
             "unknown shader-check target"
         );
         if expected.targets.is_empty() || expected.targets.iter().any(|t| t == target) {
-            check_module(&module, expected, Some(&host));
+            let aliases = super::support::source_shaders(host_source, &expected.entry);
+            check_entries(&module, expected, Some(&host), &aliases);
         }
     }
 }
 
 fn check_module(module: &Module, expected: &Expectation, host: Option<&wyn_host_interp::Program>) {
+    check_entries(module, expected, host, &BTreeSet::new());
+}
+
+fn check_entries(
+    module: &Module,
+    expected: &Expectation,
+    host: Option<&wyn_host_interp::Program>,
+    aliases: &BTreeSet<String>,
+) {
     let entries: Vec<_> = module
         .entry_points
         .iter()
         .filter(|entry| {
-            (entry.name == expected.entry || entry.name.starts_with(&format!("{}_", expected.entry)))
-                && expected.stage.as_deref().is_none_or(|stage| match stage {
-                    "compute" => entry.stage == ShaderStage::Compute,
-                    "fragment" => entry.stage == ShaderStage::Fragment,
-                    "vertex" => entry.stage == ShaderStage::Vertex,
-                    _ => panic!("unknown shader stage {stage}"),
-                })
+            (if aliases.is_empty() {
+                entry.name == expected.entry || entry.name.starts_with(&format!("{}_", expected.entry))
+            } else {
+                aliases.contains(&entry.name)
+            }) && expected.stage.as_deref().is_none_or(|stage| match stage {
+                "compute" => entry.stage == ShaderStage::Compute,
+                "fragment" => entry.stage == ShaderStage::Fragment,
+                "vertex" => entry.stage == ShaderStage::Vertex,
+                _ => panic!("unknown shader stage {stage}"),
+            })
         })
         .collect();
     assert!(!entries.is_empty(), "missing shader entry {}", expected.entry);
@@ -159,6 +175,7 @@ fn check_module(module: &Module, expected: &Expectation, host: Option<&wyn_host_
         assert_eq!(found, wanted, "{} subgroup inclusive add", expected.entry);
     }
     let mut binary = BTreeMap::<String, usize>::new();
+    let mut self_binary = BTreeMap::<String, usize>::new();
     let mut math = BTreeMap::<String, usize>::new();
     let mut loads = BTreeMap::<u32, usize>::new();
     let mut traffic = [0usize; 3];
@@ -190,7 +207,12 @@ fn check_module(module: &Module, expected: &Expectation, host: Option<&wyn_host_
         let whole_array = |pointer| matches!(function.expressions[pointer], Expression::LocalVariable(id) if arrays.contains(&id));
         for (_, expression) in function.expressions.iter() {
             match expression {
-                Expression::Binary { op, .. } => *binary.entry(format!("{op:?}")).or_default() += 1,
+                Expression::Binary { op, left, right } => {
+                    *binary.entry(format!("{op:?}")).or_default() += 1;
+                    if left == right {
+                        *self_binary.entry(format!("{op:?}")).or_default() += 1;
+                    }
+                }
                 Expression::Math { fun, .. } => *math.entry(format!("{fun:?}")).or_default() += 1,
                 Expression::Select { .. } => selects += 1,
                 Expression::GlobalVariable(id)
@@ -236,6 +258,14 @@ fn check_module(module: &Module, expected: &Expectation, host: Option<&wyn_host_
             binary.get(op).copied().unwrap_or(0),
             *count,
             "{} {op}",
+            expected.entry
+        );
+    }
+    for (op, count) in &expected.self_binary {
+        assert_eq!(
+            self_binary.get(op).copied().unwrap_or(0),
+            *count,
+            "{} {op} with equal operands",
             expected.entry
         );
     }

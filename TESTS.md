@@ -38,10 +38,34 @@ provide a suitable dedicated integration harness. Do not hide expensive work by
 ignoring the test or splitting one slow operation into superficial assertions.
 
 The three-second rule is the placement policy, not an automatically enforced
-Cargo timeout. Existing slow unit tests need follow-up; the current suite is not
-yet compliant. Resource caps for a whole test executable are a separate safeguard.
+Cargo timeout. Run `python scripts/test_units.py` for the enforced workspace unit
+gate, also run by CI. It uses 16 MiB stacks, eight test threads matching the baseline,
+and libtest elapsed times; compilation is excluded. Functional failures also fail
+the gate. Integration tests and doctests are separate.
+Unlisted tests over three seconds are rerun individually to confirm the limit
+without parallel contention. Reruns cannot clear a functional failure.
+
+Existing slow units are explicitly listed in `tests/unit-time-exceptions.txt`.
+Adding or broadening exceptions requires explicit user approval. Renaming and
+removing existing entries is allowed. When changing or renaming an excepted test,
+consider reducing it below three seconds. The runner never updates this list.
+Existing exceptions still need follow-up; the current suite is not yet compliant.
 
 ## Test locations
+
+Run `python scripts/test_integrations.py` for the workspace integration gate.
+It gives each Rust integration test and each source fixture a hard five-minute
+execution deadline, with 16 MiB stacks and four workers. A fixture's deadline
+covers all its shader targets. Compilation of the Rust harnesses is excluded.
+On a timeout or failure, the gate stops immediately and terminates active test
+process trees, including compiler children. Timeouts are failures, never retries
+or allowed timing exceptions. `--filter TEXT` selects case labels for debugging.
+
+Each case runs in its own process so even a stuck in-process compiler can be
+terminated. Prelude reuse within a test's source-example loop is preserved;
+process-local caches do not carry between separate test cases. The CLI fixtures
+share one compiler snapshot per gate run. Direct `cargo test` remains useful for
+debugging but does not enforce this deadline.
 
 | Kind | Location and runner | What belongs here |
 | --- | --- | --- |

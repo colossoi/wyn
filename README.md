@@ -437,6 +437,10 @@ cargo build --workspace --all-targets
 cargo test --workspace
 ```
 
+For workspace unit tests with the enforced three-second limit, run
+`python scripts/test_units.py`. Integration tests run separately; see
+[test placement and timing exceptions](TESTS.md).
+
 The standalone crates under `extra/` are excluded from the root workspace.
 Build and test each with `--manifest-path`, including `extra/viz`, `extra/tephra`,
 `extra/spirv-validator`, `extra/wyn-doc`, `extra/mdbook-wyn-highlight`,

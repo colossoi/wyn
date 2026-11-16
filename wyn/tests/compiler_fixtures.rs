@@ -94,7 +94,7 @@ fn assert_diagnostics(stderr: &str, kind: &str, expected: &[String]) {
     }
 }
 
-fn run_fixture(path: &Path) {
+fn run_fixture(path: &Path, compiler: &Path) {
     let source = fs::read_to_string(path).expect("read fixture");
     let header = source
         .lines()
@@ -182,7 +182,7 @@ fn run_fixture(path: &Path) {
     for target in targets {
         let directory = OutputDirectory(directory.0.join(if target.is_empty() { "check" } else { target }));
         fs::create_dir(&directory.0).expect("create target output directory");
-        let mut command = Command::new(env!("CARGO_BIN_EXE_wyn"));
+        let mut command = Command::new(compiler);
         command.arg(match expected.command {
             Action::Check => "check",
             Action::Build => "build",
@@ -257,6 +257,7 @@ fn run_fixture(path: &Path) {
                     &fs::read(&artifact).unwrap(),
                     &expected.spirv,
                     expected.spirv_helpers,
+                    Some(&fs::read_to_string(artifact.with_extension("wynhost")).expect("shader host ABI")),
                 );
             }
             if expected.spirv_round_trip {
@@ -309,7 +310,7 @@ fn run_fixture(path: &Path) {
             );
             let other = path.parent().unwrap().join(other).canonicalize().expect("comparison source");
             let original = fs::read(directory.0.join("output.wynhost")).expect("read reference WHL");
-            let mut comparison = Command::new(env!("CARGO_BIN_EXE_wyn"));
+            let mut comparison = Command::new(compiler);
             comparison.current_dir(&directory.0).args(command.get_args().map(|arg| {
                 if arg == path.as_os_str() {
                     other.as_os_str()
@@ -390,20 +391,35 @@ fn run_fixture(path: &Path) {
 
 #[test]
 fn compiler_fixtures() {
+    // A running Windows executable cannot be rebuilt; keep this run's compiler snapshot.
+    let compiler =
+        OutputDirectory(std::env::temp_dir().join(format!("wyn_fixture_compiler_{}", std::process::id())));
+    fs::create_dir(&compiler.0).expect("create compiler snapshot directory");
+    let compiler = compiler.0.join("wyn.exe");
+    let compiler = if let Some(snapshot) = std::env::var_os("WYN_TEST_COMPILER") {
+        PathBuf::from(snapshot)
+    } else {
+        fs::copy(env!("CARGO_BIN_EXE_wyn"), &compiler).expect("snapshot fixture compiler");
+        compiler
+    };
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     // Package fixtures stay inside their package so imports obey the normal root boundary.
-    let mut paths: Vec<_> = ["tests/compiler/cases", "pkg/sort/test/compiler"]
-        .into_iter()
-        .flat_map(|directory| fs::read_dir(root.join(directory)).unwrap())
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "wyn"))
-        .collect();
+    let mut paths: Vec<_> = if let Some(file) = std::env::var_os("WYN_TEST_FILE") {
+        vec![fs::canonicalize(file).expect("resolve selected fixture")]
+    } else {
+        ["tests/compiler/cases", "pkg/sort/test/compiler"]
+            .into_iter()
+            .flat_map(|directory| fs::read_dir(root.join(directory)).unwrap())
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "wyn"))
+            .collect()
+    };
     let filter = std::env::var("WYN_TEST_FILTER").unwrap_or_default();
     paths.retain(|path| path.file_stem().unwrap().to_string_lossy().contains(&filter));
     paths.sort();
     assert!(!paths.is_empty(), "no compiler fixtures discovered");
     // Bound concurrency: each fixture starts a compiler process.
-    let worker_count = std::thread::available_parallelism().map_or(1, usize::from).min(24).min(paths.len());
+    let worker_count = std::thread::available_parallelism().map_or(1, usize::from).min(4).min(paths.len());
     let pending = std::sync::Mutex::new(paths.iter());
     let failures = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..worker_count)
@@ -413,7 +429,7 @@ fn compiler_fixtures() {
                     loop {
                         let path = pending.lock().unwrap().next();
                         let Some(path) = path else { break };
-                        if std::panic::catch_unwind(|| run_fixture(path)).is_err() {
+                        if std::panic::catch_unwind(|| run_fixture(path, &compiler)).is_err() {
                             failures.push(path.display().to_string());
                         }
                     }

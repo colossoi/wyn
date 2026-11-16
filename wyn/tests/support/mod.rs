@@ -3,6 +3,70 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::process::Command;
 
+/// Resolve authored entries through WHL instead of depending on generated shader names.
+pub fn source_shaders(source: &str, entry: &str) -> std::collections::BTreeSet<String> {
+    use wyn_host_interp::{Form, Program};
+    let program = Program::parse(source).expect("valid host ABI");
+    let forms = wyn_host_interp::read(source).unwrap();
+    let mut shaders = std::collections::BTreeSet::new();
+    let Ok(entry) = program.entry(entry) else {
+        return shaders;
+    };
+    let mut pending = vec![entry.function.clone()];
+    let mut seen = std::collections::BTreeSet::new();
+    fn visit(
+        form: &Form,
+        program: &Program,
+        shaders: &mut std::collections::BTreeSet<String>,
+        pending: &mut Vec<String>,
+    ) {
+        let Form::List(values) = form else {
+            return;
+        };
+        if let Some(Form::Symbol(op)) = values.first() {
+            if op == "quote" {
+                return;
+            }
+            pending.push(op.clone());
+            if matches!(op.as_str(), "gpu-draw" | "gpu-dispatch") {
+                if let Some(Form::List(quoted)) = values.get(1) {
+                    if let [Form::Symbol(quote), Form::Symbol(name)] = quoted.as_slice() {
+                        assert_eq!(quote, "quote");
+                        if let Some(kernel) = program.kernels.get(name) {
+                            shaders.insert(kernel.options.text(":entry").unwrap().into());
+                        }
+                        if let Some(graphics) = program.graphics.get(name) {
+                            for stage in [":vertex", ":fragment"] {
+                                if let Some(value) = graphics
+                                    .options
+                                    .optional(stage)
+                                    .and_then(|value| value.list().ok())
+                                    .and_then(|values| values.get(1))
+                                {
+                                    shaders.insert(value.text().unwrap().into());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for value in values {
+            visit(value, program, shaders, pending);
+        }
+    }
+    while let Some(function) = pending.pop() {
+        if !seen.insert(function.clone()) {
+            continue;
+        }
+        if let Some(form) = forms.iter().find(|form| matches!(form, Form::List(values)
+            if matches!(values.as_slice(), [Form::Symbol(kind), Form::Symbol(name), ..] if kind == "defun" && name == &function))) {
+            visit(form, &program, &mut shaders, &mut pending);
+        }
+    }
+    shaders
+}
+
 /// Validate the explicit target, since CLI tests also use neutral file extensions.
 pub fn validate_shader(path: &Path, target: &str) {
     validate_shader_with(path, target, Path::new("spirv-val"))
