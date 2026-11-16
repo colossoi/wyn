@@ -424,7 +424,7 @@ fn dependent_or_partial_regions_stay_inside_parallel_callbacks() {
 #[test]
 fn exported_views_have_their_own_logical_domain() {
     planned_cases(
-        &["entry main() [][]i32=let rows=map(|n|map(|i|i+n,iota(n)),[0,1,3,7]) in rows[1..3]"],
+        &["entry main() [][]i32=let rows=map(|n|map(|i|i+n,iota(3)),[0,1,3,7]) in rows[1..3]"],
         |_, graph, function| {
             let query = Query(graph);
             let views = top_level(graph, function, "View");
@@ -1096,7 +1096,6 @@ fn rectangular_runtime_dimensions_must_be_uniform_across_outer_coordinates() {
         "entry main(xs:[]i32,n:i32) [][]i32=map(|x|map(|y|x+y,iota(n)),xs)",
         "entry main(xs:[]i32,ys:[]i32) [][]i32=map(|x|map(|y|x+y,ys),xs)",
         "entry main(xs:[]i32,n:i32,m:i32) [][][]i32=map(|x|map(|y|map(|z|x+y+z,iota(m)),iota(n)),xs)",
-        "entry main(xs:[]i32) [][]i32=map(|x|map(|y|x+y,iota(x)),xs)",
         "entry main(xs:[]i32,n:i32) [][]i32=map(|x|map(|y|x+y,iota(n+1)),xs)",
     ];
     planned_cases(&sources, |index, graph, function| {
@@ -1110,7 +1109,7 @@ fn rectangular_runtime_dimensions_must_be_uniform_across_outer_coordinates() {
             .collect::<Vec<_>>();
         assert_eq!(
             ranks,
-            [[2].as_slice(), &[2], &[3], &[1], &[2]][index],
+            [[2].as_slice(), &[2], &[3], &[2]][index],
             "{}",
             sources[index]
         );

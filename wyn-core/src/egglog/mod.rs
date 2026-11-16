@@ -64,6 +64,17 @@ pub fn from_tlc(source: &OwnershipApplied) -> Result<Program<'_, Imported>, Opti
 pub fn fuse(mut program: Program<'_, Imported>) -> Result<Program<'_, Fused>, OptimizeError> {
     timing::time("egglog structural analysis", || analysis::run(&mut program.graph))?;
     memory::inline(&mut program.graph)?;
+    memory::simplify(&mut program.graph, false)?;
+    planning::analyze(&mut program.graph)?;
+    program.graph.parse_and_run_program(
+        None,
+        "(run-schedule (saturate regularity-index) (saturate regularity))",
+    )?;
+    if query::Query(&program.graph).first("IrregularResult")?.is_some() {
+        return Err(output_error(
+            "map callback results must have the same array shape for every input element",
+        ));
+    }
     // Fuse adjacent producers before hoisting invariant work between them.
     loop {
         let revision = edit::revision(&program.graph)?;

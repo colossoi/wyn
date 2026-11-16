@@ -597,26 +597,3 @@ fn collective_phase_accesses_exclude_unused_inputs_and_producer_captures() {
         "the combiner must not evaluate producer captures"
     );
 }
-
-#[test]
-fn varying_collection_emits_shaders_and_host_loop() {
-    let source = "entry main(xs:[]i32) [][]i32=map(|x|map(|y|x+y,iota(x)),xs)";
-    let module = lowered_with_policy(source, crate::egglog::ScalarOptimization::Basic);
-    let wgsl = crate::lower_ssa_to_wgsl_with_program(module).unwrap();
-    let shader = naga::front::wgsl::parse_str(&wgsl.wgsl).unwrap();
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(&shader)
-    .unwrap();
-    assert_eq!(wgsl.program.interface.dispatch_loops.len(), 1);
-    let host = wgsl.program.to_whl("main", crate::host::ShaderFormat::Wgsl).unwrap();
-    wyn_host_interp::Program::parse(&host).unwrap();
-    let module = lowered_for_target(
-        source,
-        crate::egglog::ScalarOptimization::Basic,
-        CodegenTarget::Spirv,
-    );
-    assert!(!crate::lower_ssa_to_spirv(module).unwrap().spirv.is_empty());
-}

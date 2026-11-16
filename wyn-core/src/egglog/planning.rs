@@ -26,7 +26,9 @@ pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
             "\n",
             include_str!("planning/compaction.egg"),
             "\n",
-            include_str!("planning/legality.egg")
+            include_str!("planning/legality.egg"),
+            "\n",
+            include_str!("analysis/regularity.egg")
         ),
     )?;
     Ok(())
