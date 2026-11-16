@@ -248,7 +248,7 @@ fn execution_planning_preserves_logical_array_types() -> Result<(), OptimizeErro
         super::validate(&mut graph)?;
         super::super::fusion::run(&mut graph)?;
         crate::egglog::planning::place(&mut graph, crate::PipelineTopologyPolicy::AllowGenerated, crate::egglog::cost::CostModel::default())?;
-        crate::egglog::planning::schedule(&mut graph, crate::egglog::cost::CostModel::default())?;
+        crate::egglog::planning::schedule(&mut graph)?;
         assert!(Query(&graph).any("ValueType",|row| Query(&graph).enode("LogicalValue",*row.last().unwrap()).unwrap().is_some())?);
     }
     Ok(())

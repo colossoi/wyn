@@ -238,7 +238,7 @@ fn distributed_cases(sources: &[impl AsRef<str>], check: impl Fn(usize, &EGraph,
             PipelineTopologyPolicy::AllowGenerated,
         )
         .unwrap();
-        super::schedule(&mut program.graph, super::CostModel::default()).unwrap();
+        super::schedule(&mut program.graph).unwrap();
         check_entries(&program, 1, |_, graph, function| check(index, graph, function));
     }
 }
@@ -914,7 +914,7 @@ fn rectangular_planning_and_emission_use_fused_structure() {
         PipelineTopologyPolicy::AllowGenerated,
     )
     .unwrap();
-    super::schedule(&mut program.graph, super::CostModel::default()).unwrap();
+    super::schedule(&mut program.graph).unwrap();
     let query = Query(&program.graph);
     let function = test_graph::entry(&program.graph);
     let ranks = top_level(&program.graph, function, "Parallel")

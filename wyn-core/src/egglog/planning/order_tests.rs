@@ -18,7 +18,7 @@ fn placement_preserves_scopes_and_allocation_follows_scheduling() {
     )
     .unwrap();
     assert_eq!(test_graph::root(&graph), root);
-    schedule(&mut graph, CostModel::default()).unwrap();
+    schedule(&mut graph).unwrap();
     let query = Query(&graph);
     let mut device = false;
     let mut local = false;
@@ -45,7 +45,7 @@ fn authored_only_keeps_parallel_work_inside_its_invocation() {
         CostModel::default(),
     )
     .unwrap();
-    schedule(&mut graph, CostModel::default()).unwrap();
+    schedule(&mut graph).unwrap();
     let query = Query(&graph);
     let mut count = 0;
     query

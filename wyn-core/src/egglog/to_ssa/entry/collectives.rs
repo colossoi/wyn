@@ -1,5 +1,7 @@
 use super::*;
+use crate::egglog::cost::CollectiveWork;
 use crate::egglog::to_ssa::kernels::CollectivePhase;
+use egglog_engine::sort::Z;
 
 impl EntryEmission<'_, '_, '_> {
     pub(super) fn chunked_collective(
@@ -25,7 +27,10 @@ impl EntryEmission<'_, '_, '_> {
         }
         let mut types = Vec::new();
         let mut reducer_names = LookupSet::default();
-        let mut prefixes = false;
+        let mut work = CollectiveWork {
+            map_ops: region_work(query, query.required("ControlRegion", (statement, 0_i64))?)?,
+            ..Default::default()
+        };
         for clause in 0..crate::egglog::analysis::count(query, "ResultCount", statement)? {
             let kind = query.required("ResultKindOf", (statement, clause))?;
             let Some(fold) = query.enode("Folded", kind)? else {
@@ -34,8 +39,9 @@ impl EntryEmission<'_, '_, '_> {
                 }
                 return Ok(false);
             };
-            prefixes |= query.enode("Total", fold[0])?.is_none();
+            work.scan |= query.enode("Total", fold[0])?.is_none();
             let reducer = query.required("ResultReducer", (statement, clause))?;
+            work.combine_ops = work.combine_ops.saturating_add(region_work(query, reducer)?);
             if query.contains("RegionTrap", reducer)? {
                 return Ok(false);
             }
@@ -65,15 +71,26 @@ impl EntryEmission<'_, '_, '_> {
                 let ty =
                     super::super::reducer_state_type(query, self.body.function, reducer, i, neutral, ty)?;
                 let ty = storage_value_type(&ty);
-                if storage_elem_stride(&ty).is_none() {
+                let Some(bytes) = storage_elem_stride(&ty) else {
                     return Ok(false);
-                }
+                };
+                work.state_bytes = work.state_bytes.saturating_add(u64::from(bytes));
                 types.push(ty);
             }
         }
         if types.is_empty() {
             return Ok(false);
         }
+        // Estimate contribution traffic at the reducer-state stride. Unknown
+        // extents use the residency cap, clamped by the actual host extent.
+        work.input_bytes = work.state_bytes;
+        work.output_bytes = if work.scan { work.state_bytes } else { 0 };
+        let selected_groups = if let Some(count) = query.lookup("StaticIndex", axis.extent)? {
+            work.elements = query.0.value_to_base::<i64>(count).max(0) as u64;
+            Some(self.body.compiler.program.costs.select(work, dispatch.width.get(), 256).map_err(error)?)
+        } else {
+            None
+        };
         let pattern = query.sequence("Output", statement)?;
         let mut output_names = LookupSet::default();
         for &binding in &pattern {
@@ -95,20 +112,17 @@ impl EntryEmission<'_, '_, '_> {
         let groups = Expr::Max(
             Box::new(Expr::Integer(1)),
             Box::new(Expr::Min(
-                Box::new(Expr::Integer(256)),
+                Box::new(Expr::Integer(i64::from(selected_groups.unwrap_or(
+                    self.body.compiler.program.costs.resident_workgroups.min(256),
+                )))),
                 Box::new(Expr::Ceiling(
                     Box::new(count.clone()),
                     Box::new(Expr::Integer(i64::from(dispatch.width.get()))),
                 )),
             )),
         );
-        let carry_width = query
-            .lookup("StaticIndex", axis.extent)?
-            .map(|count| {
-                let count = query.0.value_to_base::<i64>(count).max(0) as u64;
-                let groups = count.div_ceil(u64::from(dispatch.width.get())).clamp(1, 256) as u32;
-                groups.next_power_of_two().max(32).min(dispatch.width.get())
-            })
+        let carry_width = selected_groups
+            .map(|groups| groups.next_power_of_two().max(32).min(dispatch.width.get()))
             .unwrap_or(dispatch.width.get());
         let (group, group_count, range) = self.chunk_range(axis.extent)?;
         let mut partials = Vec::new();
@@ -120,7 +134,7 @@ impl EntryEmission<'_, '_, '_> {
             let bytes = Expr::Multiply(Box::new(groups.clone()), Box::new(Expr::Integer(stride.into())));
             let (partial, _) = self.body.device_buffer(&ty, bytes.clone(), group_count.clone())?;
             partials.push((partial, ty.clone()));
-            if prefixes {
+            if work.scan {
                 let (carry, _) = self.body.device_buffer(&ty, bytes, group_count.clone())?;
                 carries.push((carry, ty));
             }
@@ -171,12 +185,12 @@ impl EntryEmission<'_, '_, '_> {
                 explicit: true,
             },
         ));
-        if !prefixes && terminal {
+        if !work.scan && terminal {
             return Ok(true);
         }
         self.flush(&inside, vec![], true)?;
 
-        if prefixes {
+        if work.scan {
             self.body.active_dispatch = Some(statement);
             let (group, _, range) = self.chunk_range(axis.extent)?;
             self.body.parallel_phase(
@@ -248,4 +262,11 @@ impl EntryEmission<'_, '_, '_> {
         let end = self.body.binary(BinaryOperator::Add, start.clone(), length)?;
         Ok((group, groups, (start, end)))
     }
+}
+
+fn region_work(query: Query<'_>, region: Value) -> Result<u64, OptimizeError> {
+    Ok(query
+        .lookup("RegionWork", region)?
+        .and_then(|work| u64::try_from(&*query.0.value_to_base::<Z>(work)).ok())
+        .unwrap_or(65))
 }

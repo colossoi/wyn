@@ -48,6 +48,7 @@ pub fn from_tlc(source: &OwnershipApplied) -> Result<Program<'_, Imported>, Opti
         source,
         graph,
         symbols,
+        costs: cost::CostModel::default(),
         _stage: Imported,
     })
 }
@@ -115,7 +116,8 @@ pub fn schedule_with_cost_model(
         &format!("(set (SubgroupsEnabled) {enabled})"),
     )?;
     let _timing = timing::span("egglog scheduling");
-    planning::schedule(&mut program.graph, costs)?;
+    planning::schedule(&mut program.graph)?;
+    program.costs = costs;
     Ok(program.advance(Scheduled))
 }
 
@@ -172,6 +174,7 @@ pub struct Program<'source, Stage> {
     source: &'source OwnershipApplied,
     graph: EGraph,
     symbols: Interner<i64, SymbolId>,
+    costs: cost::CostModel,
     _stage: Stage,
 }
 
@@ -181,6 +184,7 @@ impl<'source, Stage> Program<'source, Stage> {
             source: self.source,
             graph: self.graph,
             symbols: self.symbols,
+            costs: self.costs,
             _stage: stage,
         }
     }

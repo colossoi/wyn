@@ -208,7 +208,7 @@ pub(super) fn place(
     Ok(())
 }
 
-pub(super) fn schedule(graph: &mut EGraph, _costs: CostModel) -> Result<(), OptimizeError> {
+pub(super) fn schedule(graph: &mut EGraph) -> Result<(), OptimizeError> {
     // Host-region reachability is complete before false facts select local execution.
     graph.parse_and_run_program(None, "(run-schedule (saturate graph-placement-select))")?;
     let query = Query(graph);

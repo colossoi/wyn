@@ -4,7 +4,57 @@ mod pipeline;
 
 use std::collections::BTreeSet;
 use wyn_core::host::{self, Binding, BufferLen, BufferUsage, DispatchSize, Expr, Pipeline};
-use wyn_core::{lower_ssa_to_wgsl_with_program, CodegenTarget};
+use wyn_core::{egglog, lower_ssa_to_wgsl_with_program, CodegenTarget, PipelineTopologyPolicy};
+
+#[test]
+fn scheduling_costs_control_collective_launches_after_placement() {
+    for source in [
+        "entry main(xs:[8192]i32) i32=reduce((+),0,xs)",
+        "entry main(xs:[8192]i32) [8192]i32=scan((+),0,xs)",
+    ] {
+        let source = pipeline::source(source);
+        let mut launches = Vec::new();
+        for resident_workgroups in [1, 256] {
+            let program = egglog::fuse(egglog::from_tlc(&source).unwrap()).unwrap();
+            // Placement is identical; only the scheduling model changes.
+            let program = egglog::place(program, PipelineTopologyPolicy::AllowGenerated).unwrap();
+            let program = egglog::schedule_with_cost_model(
+                program,
+                false,
+                egglog::cost::CostModel {
+                    resident_workgroups,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let program = egglog::prepare_interfaces(program).unwrap();
+            let program = egglog::optimize_with_policy(program, egglog::ScalarOptimization::Basic).unwrap();
+            let module =
+                egglog::to_ssa(egglog::prepare_host(program).unwrap(), CodegenTarget::Portable).unwrap();
+            wyn_core::lower_ssa_to_spirv(module.clone()).unwrap();
+            let output = lower_ssa_to_wgsl_with_program(module).unwrap();
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&naga::front::wgsl::parse_str(&output.wgsl).unwrap())
+            .unwrap();
+            let [Pipeline::Compute(compute)] = output.program.interface.pipelines.as_slice() else {
+                panic!("one compute pipeline");
+            };
+            let DispatchSize::Computed { groups, .. } = &compute.stages[0].dispatch_size else {
+                panic!("collective chunk launch");
+            };
+            launches.push(constant(&groups[0]).unwrap());
+            assert!(depends_on(&output.program.interface.frame_graph, 1, 0));
+        }
+        assert_eq!(launches[0], 1);
+        assert!(
+            launches[1] > launches[0],
+            "schedule calibration must affect launches: {launches:?}"
+        );
+    }
+}
 
 #[test]
 fn parameter_blocks_preserve_aggregate_padding_and_member_alignment() {
