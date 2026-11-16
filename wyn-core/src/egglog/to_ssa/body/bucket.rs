@@ -41,7 +41,7 @@ impl Body<'_, '_, '_> {
             let length = self.host_array_length(&destination)?;
             let bytes = Expr::Multiply(Box::new(length.clone()), Box::new(Expr::Integer(4)));
             let (_, counts) = self.device_buffer(&uint, bytes, buckets.clone())?;
-            self.host_shapes.insert(counts.value, vec![length]);
+            self.set_shape(&counts, vec![length])?;
             counts
         } else {
             let Some(Type::Constructed(TypeName::Size(capacity), _)) = destination.ty.array_size() else {

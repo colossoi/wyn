@@ -1,4 +1,5 @@
 //! Parallel results share one domain traversal and one reducer calling convention.
+use super::body::{Collection, CollectionShape};
 use super::{domain_axes, error, Axis, Body, OptimizeError, Typed};
 use crate::builtins::catalog;
 use crate::egglog::to_ssa::host;
@@ -293,22 +294,11 @@ impl Body<'_, '_, '_> {
                     })
                     .collect::<Result<Vec<_>, OptimizeError>>()?;
                 let ty = collection_shape(&ty, &dimensions)?;
-                let Some(&axis) = axes.first() else {
+                let Some(axis) = axes.first() else {
                     return Err(error("collection requires an axis"));
                 };
-                let count = self.index_expression(axis.extent)?;
-                let length = if dispatch.is_some() {
-                    let length = host::guarded_index(
-                        self.query(),
-                        &self.host_values,
-                        axis.extent,
-                        self.guard.as_ref(),
-                    )?;
-                    Some(Expr::Max(Box::new(length), Box::new(Expr::Integer(0))))
-                } else {
-                    None
-                };
-                let shape = if dispatch.is_some() && rank > 1 && dimensions[1..].contains(&None) {
+                let shape = if dispatch.is_some() {
+                    let rank = if rank > 1 && dimensions[1..].contains(&None) { rank } else { 1 };
                     let mut shape = Vec::new();
                     for &axis in &axes[..rank] {
                         let count = self.index_expression(axis.extent)?;
@@ -320,12 +310,12 @@ impl Body<'_, '_, '_> {
                         )?;
                         shape.push((count, Expr::Max(Box::new(length), Box::new(Expr::Integer(0)))));
                     }
-                    Some(shape)
+                    CollectionShape::Device(shape)
                 } else {
-                    None
+                    CollectionShape::Local(self.index_expression(axis.extent)?)
                 };
                 let block = self.current()?;
-                self.collection_requests.insert(name, (ty, count, length, shape, block));
+                self.collections.insert(name, Collection::Pending { ty, shape, block });
             }
         }
         let atomic_updates = contributes
@@ -652,65 +642,14 @@ impl Body<'_, '_, '_> {
     pub(super) fn collection_storage(
         &mut self,
         ty: &Type,
-        count: Typed,
-        length: Option<&Expr>,
+        shape: &CollectionShape,
         capacity: Option<i64>,
-        block: BlockId,
-    ) -> Result<Typed, OptimizeError> {
-        if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = ty {
-            let mut storage = Vec::new();
-            for field in fields {
-                storage.push(self.collection_storage(field, count.clone(), length, capacity, block)?);
-            }
-            let ty = types::tuple(storage.iter().map(|value| value.ty.clone()).collect());
-            let value = self.builder.func_mut().append_inst(
-                block,
-                InstKind::Op {
-                    tag: OpTag::Tuple,
-                    operands: storage.into_iter().map(|value| value.value).collect(),
-                },
-                ty.clone(),
-            );
-            return Ok(Typed {
-                value: value.into(),
-                ty,
-            });
-        }
-        let Some(element) = ty.elem_type().cloned() else {
-            return Err(error("collection binding must be an array or product of arrays"));
-        };
-        if let Some(length) = length {
-            let Some(stride) = storage_elem_stride(&storage_value_type(&element)) else {
-                return Err(error("collection element requires representation lowering"));
-            };
-            let capacity = capacity.map(Expr::Integer).unwrap_or_else(|| length.clone());
-            let bytes = Expr::Multiply(Box::new(capacity), Box::new(Expr::Integer(stride.into())));
-            let (_, storage) = self.device_buffer_at(&element, bytes, count, block)?;
-            self.host_shapes.insert(storage.value.clone(), vec![length.clone()]);
-            return Ok(storage);
-        }
-        let capacity = self.integer_literal(&count).or(capacity).or_else(|| match ty.array_size() {
-            Some(Type::Constructed(TypeName::Size(size), _)) => i64::try_from(*size).ok(),
-            _ => None,
-        });
-        let Some(capacity) = capacity else {
-            return Err(error("local collection requires a capacity bound"));
-        };
-        let capacity =
-            usize::try_from(capacity.max(0)).map_err(|_| error("collection capacity exceeds usize"))?;
-        self.local_array_with_length(types::sized_array(capacity, element), count)
-    }
-
-    pub(super) fn ranked_collection_storage(
-        &mut self,
-        ty: &Type,
-        shape: &[(Typed, Expr)],
         block: BlockId,
     ) -> Result<Typed, OptimizeError> {
         if let Type::Constructed(name @ (TypeName::Tuple(_) | TypeName::Record(_)), fields) = ty {
             let values = fields
                 .iter()
-                .map(|field| self.ranked_collection_storage(field, shape, block))
+                .map(|field| self.collection_storage(field, shape, capacity, block))
                 .collect::<Result<Vec<_>, _>>()?;
             let ty = Type::Constructed(
                 name.clone(),
@@ -729,27 +668,43 @@ impl Body<'_, '_, '_> {
                 ty,
             });
         }
+        let shape = match shape {
+            CollectionShape::Local(count) => {
+                let Some(element) = ty.elem_type().cloned() else {
+                    return Err(error("collection binding must be an array or product of arrays"));
+                };
+                let capacity = self.integer_literal(count).or(capacity).or_else(|| match ty.array_size() {
+                    Some(Type::Constructed(TypeName::Size(size), _)) => i64::try_from(*size).ok(),
+                    _ => None,
+                });
+                let Some(capacity) = capacity else {
+                    return Err(error("local collection requires a capacity bound"));
+                };
+                let capacity = usize::try_from(capacity.max(0))
+                    .map_err(|_| error("collection capacity exceeds usize"))?;
+                return self.local_array_with_length(types::sized_array(capacity, element), count.clone());
+            }
+            CollectionShape::Device(shape) => shape,
+        };
+        let Some((first, rest)) = shape.split_first() else {
+            return Err(error("device collection requires a dimension"));
+        };
         let mut element = ty;
         for _ in shape {
-            element = element.elem_type().ok_or_else(|| error("collection shape exceeds array rank"))?;
+            let Some(child) = element.elem_type() else {
+                return Err(error("collection shape exceeds array rank"));
+            };
+            element = child;
         }
-        self.ranked_buffer(element.clone(), shape, block)
-    }
-
-    pub(super) fn ranked_buffer(
-        &mut self,
-        element: Type,
-        shape: &[(Typed, Expr)],
-        block: BlockId,
-    ) -> Result<Typed, OptimizeError> {
-        let element = storage_value_type(&element);
-        let stride =
-            storage_elem_stride(&element).ok_or_else(|| error("collection leaf has no storage stride"))?;
-        let Some((first, rest)) = shape.split_first() else {
-            return Err(error("ranked buffer requires a dimension"));
+        let element = storage_value_type(element);
+        let Some(stride) = storage_elem_stride(&element) else {
+            return Err(error("collection element requires representation lowering"));
         };
         let mut count = first.0.clone();
         let mut length = first.1.clone();
+        if rest.is_empty() {
+            length = capacity.map(Expr::Integer).unwrap_or(length);
+        }
         for (dimension, extent) in rest {
             let value = self.builder.func_mut().append_inst(
                 block,
@@ -766,29 +721,33 @@ impl Body<'_, '_, '_> {
             length = Expr::Multiply(Box::new(length), Box::new(extent.clone()));
         }
         let bytes = Expr::Multiply(Box::new(length), Box::new(Expr::Integer(stride.into())));
-        let (binding, _) = self.device_buffer_at(&element, bytes, count, block)?;
-        let mut fields = vec![element, types::array_variant_view()];
-        fields.extend(shape.iter().map(|_| Type::Constructed(TypeName::SizePlaceholder, vec![])));
-        fields.push(types::buffer_tag(binding));
-        let ty = Type::Constructed(TypeName::Array, fields);
-        let mut operands = vec![Self::number(0).value];
-        operands.extend(shape.iter().map(|(dimension, _)| dimension.value));
-        let value = self.builder.func_mut().append_inst(
-            block,
-            InstKind::Op {
-                tag: OpTag::StorageView(PureViewSource::Storage(binding)),
-                operands,
-            },
-            ty.clone(),
-        );
-        let value = Typed {
-            value: value.into(),
-            ty,
-        };
-        self.host_shapes.insert(
-            value.value,
-            shape.iter().map(|(_, extent)| extent.clone()).collect(),
-        );
+        let (binding, mut value) = self.device_buffer_at(&element, bytes, count, block)?;
+        if !rest.is_empty() {
+            let mut fields = vec![element, types::array_variant_view()];
+            fields.extend(shape.iter().map(|_| Type::Constructed(TypeName::SizePlaceholder, vec![])));
+            fields.push(types::buffer_tag(binding));
+            let ty = Type::Constructed(TypeName::Array, fields);
+            let mut operands = vec![Self::number(0).value];
+            operands.extend(shape.iter().map(|(dimension, _)| dimension.value));
+            let descriptor = self.builder.func_mut().append_inst(
+                block,
+                InstKind::Op {
+                    tag: OpTag::StorageView(PureViewSource::Storage(binding)),
+                    operands,
+                },
+                ty.clone(),
+            );
+            value = Typed {
+                value: descriptor.into(),
+                ty,
+            };
+            self.register_array(
+                &value,
+                Self::number(0),
+                shape.iter().map(|(dimension, _)| dimension.clone()).collect(),
+            )?;
+        }
+        self.set_shape(&value, shape.iter().map(|(_, extent)| extent.clone()).collect())?;
         Ok(value)
     }
 

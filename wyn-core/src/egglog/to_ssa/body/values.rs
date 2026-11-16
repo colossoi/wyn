@@ -114,7 +114,7 @@ impl Body<'_, '_, '_> {
             Box::new(Expr::Integer(stride.into())),
         );
         let (_, payload) = self.device_buffer(&element, bytes, total)?;
-        self.host_shapes.insert(payload.value, vec![host_total]);
+        self.set_shape(&payload, vec![host_total])?;
         let mut offset = self.literal(0, &types::i32())?;
         let mut views = Vec::new();
         for (array, length) in arrays.into_iter().zip(lengths) {
@@ -262,25 +262,8 @@ impl Body<'_, '_, '_> {
             }
         }
         if array.ty.array_variant().is_some_and(types::is_array_variant_view) {
-            if let ValueRef::Ssa(id) = array.value {
-                let function = self.builder.func();
-                if let ValueDef::Inst { inst } = function.values[id].def {
-                    if let InstKind::Op {
-                        tag: OpTag::StorageView(_),
-                        operands,
-                    } = &function.insts[inst].data
-                    {
-                        let value = operands[1];
-                        let ty = match value {
-                            ValueRef::Ssa(id) => function.values[id].ty.clone(),
-                            ValueRef::Const(ConstantValue::I32(_)) => types::i32(),
-                            ValueRef::Const(ConstantValue::U32(_)) => Self::number(0).ty,
-                            _ => return Err(error("view length must be an integer")),
-                        };
-                        return self.cast(Typed { value, ty }, &types::i32());
-                    }
-                }
-            }
+            let length = self.field(array, 1)?;
+            return self.cast(length, &types::i32());
         }
         self.op(
             OpTag::Intrinsic {
@@ -296,7 +279,7 @@ impl Body<'_, '_, '_> {
         &self,
         array: &Typed,
     ) -> Result<Expr, OptimizeError> {
-        if let Some(length) = self.host_shapes.get(&array.value).and_then(|shape| shape.first()) {
+        if let Some(length) = self.located_length(array) {
             return Ok(length.clone());
         }
         if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = &array.ty {
@@ -391,21 +374,27 @@ impl Body<'_, '_, '_> {
         }) else {
             return Err(error(format!("invalid projection {index} of {:?}", value.ty)));
         };
-        // Keep physical resource identity when projecting an emitted aggregate.
-        // A shared descriptor's storage is not encoded in its source-level type.
+        // Preserve resource identity in aggregates and fold descriptor dimensions.
+        // Inherited views still need projection to compute their absolute offset.
         if let ValueRef::Ssa(id) = value.value {
             let function = self.builder.func();
-            if let ValueDef::Inst { inst } = function.values[id].def {
-                if let InstKind::Op {
-                    tag: OpTag::Tuple,
-                    operands,
-                } = &function.insts[inst].data
-                {
-                    if let Some(value) = operands.get(index) {
-                        return Ok(Typed {
-                            value: value.clone(),
-                            ty,
-                        });
+            if let Some(inst) = function.inst_of_value(id) {
+                if let InstKind::Op { tag, operands } = &function.insts[inst].data {
+                    if matches!(tag, OpTag::Tuple) {
+                        if let Some(&value) = operands.get(index) {
+                            return Ok(Typed { value, ty });
+                        }
+                    } else if matches!(tag, OpTag::StorageView(_)) && index > 0 {
+                        let Some(&value) = operands.get(index) else {
+                            return Err(error("view descriptor dimension missing"));
+                        };
+                        let source = match value {
+                            ValueRef::Ssa(id) => function.value_type(id).clone(),
+                            ValueRef::Const(ConstantValue::I32(_)) => types::i32(),
+                            ValueRef::Const(ConstantValue::U32(_)) => Self::number(0).ty,
+                            _ => return Err(error("view dimension is not an integer")),
+                        };
+                        return self.cast(Typed { value, ty: source }, &ty);
                     }
                 }
             }
@@ -750,11 +739,8 @@ impl Body<'_, '_, '_> {
             };
             fields.remove(2);
             let ty = Type::Constructed(TypeName::Array, fields);
-            let host_shape = self
-                .host_shapes
-                .get(&array.value)
-                .filter(|shape| shape.len() > 1)
-                .map(|shape| shape[1..].to_vec());
+            let host_shape =
+                self.host_shape(&array).filter(|shape| shape.len() > 1).map(|shape| shape[1..].to_vec());
             let mut operands = vec![offset];
             operands.extend_from_slice(&shape[1..]);
             operands.push(array);
@@ -764,7 +750,7 @@ impl Body<'_, '_, '_> {
                 ty,
             )?;
             if let Some(shape) = host_shape {
-                self.host_shapes.insert(row.value, shape);
+                self.set_shape(&row, shape)?;
             }
             return Ok(row);
         }
@@ -809,36 +795,10 @@ impl Body<'_, '_, '_> {
         &mut self,
         array: Typed,
     ) -> Result<Vec<Typed>, OptimizeError> {
-        let rank = array.ty.array_rank().ok_or_else(|| error("view rank missing"))?;
-        if let ValueRef::Ssa(value) = array.value {
-            let function = self.builder.func();
-            if let Some(inst) = function.inst_of_value(value) {
-                if let InstKind::Op {
-                    tag: OpTag::StorageView(_),
-                    operands,
-                } = &function.insts[inst].data
-                {
-                    let dimensions = operands
-                        .get(1..=rank)
-                        .ok_or_else(|| error("view descriptor dimensions missing"))?
-                        .iter()
-                        .map(|value| {
-                            let ty = match value {
-                                ValueRef::Ssa(value) => function.value_type(*value).clone(),
-                                ValueRef::Const(ConstantValue::I32(_)) => types::i32(),
-                                ValueRef::Const(ConstantValue::U32(_)) => Self::number(0).ty,
-                                _ => return Err(error("view dimension is not an integer")),
-                            };
-                            Ok(Typed { value: *value, ty })
-                        })
-                        .collect::<Result<Vec<_>, OptimizeError>>()?;
-                    return dimensions
-                        .into_iter()
-                        .map(|dimension| self.cast(dimension, &types::i32()))
-                        .collect();
-                }
-            }
+        if let Some(dimensions) = self.located_dimensions(&array)? {
+            return Ok(dimensions);
         }
+        let rank = array.ty.array_rank().ok_or_else(|| error("view rank missing"))?;
         (0..rank)
             .map(|axis| {
                 let value = self.field(array.clone(), axis + 1)?;

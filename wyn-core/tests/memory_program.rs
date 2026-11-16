@@ -65,6 +65,7 @@ fn local_control_and_folds_preserve_memory_results() {
         "entry count(n:i32) i32=loop acc=0 for i<n do acc+i",
         "entry total(xs:[4]i32) i32=reduce((+),0,xs)",
         "entry prefix(xs:[4]i32) [4]i32=scan((+),0,xs)",
+        "entry pairs(xs:[4]i32) [4](i32,i32)=map(|x|(x,x+1),xs)",
     ] {
         eprintln!("checking {source}");
         let owned = pipeline::source(source);
@@ -93,6 +94,7 @@ fn generated_dispatches_use_common_memory_bindings() {
         "entry mapped(xs:[]i32) []i32=map(|x|x+1,xs)",
         "entry total(xs:[]i32) i32=reduce((+),0,xs)",
         "entry prefix(xs:[]i32) []i32=scan((+),0,xs)",
+        "entry matrix(xs:[]i32,n:i32) [][](i32,i32)=map(|x|map(|i|(x,i),iota(n)),xs)",
         "entry packed(xs:[](i32,f32)) [](i32,f32)=map(|(i,f)|(i+1,f+2.0),xs)",
         "entry twice(xs:[]i32) []i32=let n=reduce((+),0,xs) in map(|x|x+n,xs)",
     ] {
@@ -180,6 +182,7 @@ fn typed_views_preserve_rectangular_and_product_storage() {
         "entry rows(xs:[][3]i32) []i32=map(|row|reduce((+),0,row),xs)",
         "entry rows(xs:[][3]i32) [][3]i32=xs",
         "entry nested(xs:[]((i32,f32),i32)) []((i32,f32),i32)=xs",
+        "entry matrix(xs:[]i32,n:i32) [][]i32=map(|x|map(|i|x+i,iota(n)),xs)",
     ] {
         eprintln!("checking {source}");
         let owned = pipeline::source(source);

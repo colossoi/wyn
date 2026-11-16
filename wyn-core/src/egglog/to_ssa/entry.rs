@@ -217,9 +217,7 @@ pub(super) fn lower(
         body.generated = Some(GeneratedBuffers {
             owner: declaration.name.clone(),
             next,
-            inputs: vec![],
             declarations: vec![],
-            scalar_slots: LookupMap::default(),
             scalar_tasks: vec![],
         });
         let mut emission = EntryEmission {
@@ -851,7 +849,7 @@ struct EntryEmission<'a, 'p, 'source> {
     parameter_inputs: Vec<Vec<usize>>,
     inputs: Vec<EntryInput>,
     parameters: LookupSet<Value>,
-    saved: StableMap<Value, SavedValue>,
+    saved: StableMap<Value, Location>,
     name: String,
     owner: String,
     kind: EntryKind,
@@ -942,7 +940,7 @@ impl EntryEmission<'_, '_, '_> {
                     offset: 0,
                     ty: ScalarType::I32,
                 });
-                self.body.host_shapes.insert(value.value, vec![length.clone()]);
+                self.body.set_shape(&value, vec![length.clone()])?;
                 shapes[index] = Some(ResultShape::Rectangular(vec![length]));
                 counts.push(None);
                 continue;
@@ -966,7 +964,7 @@ impl EntryEmission<'_, '_, '_> {
         for (i, plan) in counts.into_iter().enumerate() {
             let Some((binding, rank, leaf, known_shape)) = plan else {
                 if let Some(ResultShape::Rectangular(shape)) = &shapes[i] {
-                    self.body.host_shapes.insert(values[i].value, shape.clone());
+                    self.body.set_shape(&values[i], shape.clone())?;
                 }
                 continue;
             };
@@ -984,7 +982,7 @@ impl EntryEmission<'_, '_, '_> {
                 })
                 .collect::<Vec<_>>();
             if rank == 1 && array_offset(&self.body, &values[i]) == Some(0) {
-                self.body.host_shapes.insert(values[i].value, lengths.clone());
+                self.body.set_shape(&values[i], lengths.clone())?;
                 shapes[i] = Some(ResultShape::Rectangular(lengths));
                 continue;
             }
@@ -1015,7 +1013,7 @@ impl EntryEmission<'_, '_, '_> {
                 Box::new(Expr::Integer(stride.into())),
             );
             let (_, payload) = self.body.device_buffer(&leaf, bytes, length)?;
-            self.body.host_shapes.insert(payload.value, vec![lengths[rank - 1].clone()]);
+            self.body.set_shape(&payload, vec![lengths[rank - 1].clone()])?;
             let zero = self.body.literal(0, &types::i32())?;
             self.body.flatten_array(values[i].clone(), &payload, &offsets, 0, vec![zero; rank])?;
             values[i] = payload;
@@ -1064,12 +1062,6 @@ impl EntryEmission<'_, '_, '_> {
             }
         }
         self.parameters = self.body.values.keys().copied().collect();
-        let Some(generated) = self.body.generated.as_ref() else {
-            return Err(error("entry buffers missing"));
-        };
-        for input in &generated.inputs {
-            self.body.builder.func_mut().add_function_param(input.ty.clone());
-        }
         restore(&mut self.body, &self.saved, self.restore_names.take().as_ref())
     }
 
@@ -1190,8 +1182,7 @@ impl EntryEmission<'_, '_, '_> {
         let Some(generated) = self.body.generated.as_ref() else {
             return Err(error("entry buffers missing"));
         };
-        let mut inputs = self.inputs.clone();
-        inputs.extend(generated.inputs.iter().cloned());
+        let inputs = self.inputs.clone();
         let storage_bindings = generated.declarations.clone();
         let mut accesses = std::mem::take(&mut self.body.storage_accesses);
         for input in &inputs {
@@ -1554,37 +1545,43 @@ impl EntryEmission<'_, '_, '_> {
                 tuple: Box::new(value.clone()),
                 index: i,
             };
-            let slot = self.scalar_slot(name, &ty)?;
-            let storage = storage_view(&mut self.body, slot, storage_value_type(&ty), Body::number(1))?;
-            let loaded = self.body.index(storage, Body::number(0))?;
-            let loaded = self.body.cast(loaded, &ty)?;
-            self.body.values.insert(name, loaded);
-            self.saved.insert(name, SavedValue::Buffer(slot, ty));
-            self.body.host_values.insert(name, expression.clone());
-            let Some(generated) = self.body.generated.as_mut() else {
-                return Err(error("CPU loop has no entry buffers"));
-            };
-            generated.scalar_tasks.push(ScalarTask {
-                stage: String::new(),
-                destination: scalar_source(slot),
-                offset: 0,
-                ty: scalar,
-                value: expression,
-                replaces_dispatch: false,
-            });
+            self.publish_cpu_value(name, ty, scalar, expression)?;
         }
         Ok(true)
     }
 
-    fn scalar_slot(&mut self, name: Value, ty: &Type) -> Result<BindingRef, OptimizeError> {
+    fn publish_cpu_value(
+        &mut self,
+        name: Value,
+        ty: Type,
+        scalar: ScalarType,
+        value: ScalarExpr,
+    ) -> Result<(), OptimizeError> {
+        let slot = self.scalar_slot(&ty)?;
+        let location = Location::Buffer(slot, ty);
+        let loaded = restore_value(&mut self.body, &location)?;
+        self.body.values.insert(name, loaded);
+        self.saved.insert(name, location);
+        self.body.host_values.insert(name, value.clone());
+        let Some(generated) = self.body.generated.as_mut() else {
+            return Err(error("CPU value has no entry buffers"));
+        };
+        generated.scalar_tasks.push(ScalarTask {
+            stage: String::new(),
+            destination: scalar_source(slot),
+            offset: 0,
+            ty: scalar,
+            value,
+            replaces_dispatch: false,
+        });
+        Ok(())
+    }
+
+    fn scalar_slot(&mut self, ty: &Type) -> Result<BindingRef, OptimizeError> {
         let Some(bytes) = storage_elem_stride(&storage_value_type(ty)) else {
             return Err(error("dispatch witness has no storage size"));
         };
         let (slot, _) = self.body.device_buffer(ty, Expr::Integer(bytes.into()), Body::number(1))?;
-        let Some(generated) = self.body.generated.as_mut() else {
-            return Err(error("entry buffers missing"));
-        };
-        generated.scalar_slots.insert(name, (slot, ty.clone()));
         Ok(slot)
     }
 
@@ -1611,74 +1608,19 @@ impl EntryEmission<'_, '_, '_> {
             if !matches!(&value, ScalarExpr::Apply { op, .. } if !op.starts_with("to-")) {
                 continue;
             }
-            let Some(generated) = self.body.generated.as_ref() else {
-                return Err(error("CPU capture has no entry buffers"));
-            };
-            if generated.scalar_slots.contains_key(&name) {
+            if matches!(self.saved.get(&name), Some(Location::Buffer(..))) {
                 continue;
             }
-            let slot = self.scalar_slot(name, &ty)?;
-            let storage = storage_view(&mut self.body, slot, storage_value_type(&ty), Body::number(1))?;
-            let loaded = self.body.index(storage, Body::number(0))?;
-            let loaded = self.body.cast(loaded, &ty)?;
-            self.body.values.insert(name, loaded);
-            self.saved.insert(name, SavedValue::Buffer(slot, ty));
-            let Some(generated) = self.body.generated.as_mut() else {
-                return Err(error("CPU capture has no entry buffers"));
-            };
-            generated.scalar_tasks.push(ScalarTask {
-                stage: String::new(),
-                destination: scalar_source(slot),
-                offset: 0,
-                ty: scalar,
-                value,
-                replaces_dispatch: false,
-            });
+            self.publish_cpu_value(name, ty, scalar, value)?;
         }
         Ok(())
     }
 
-    fn read_slot(&mut self, name: Value, slot: BindingRef, ty: &Type) {
-        self.saved.insert(name, SavedValue::Buffer(slot, ty.clone()));
-        if let Some(ty) = host::scalar_type(ty) {
-            self.body.host_values.insert(
-                name,
-                ScalarExpr::Read {
-                    source: scalar_source(slot),
-                    offset: 0,
-                    ty,
-                },
-            );
-        }
-    }
-
-    fn capture(&mut self, value: Typed, materialize_arrays: bool) -> Result<SavedValue, OptimizeError> {
-        let saved = save_component(&mut self.body, value, None, materialize_arrays)?;
+    fn capture(&mut self, value: Typed) -> Result<Location, OptimizeError> {
+        let saved = save_component(&mut self.body, value, true)?;
         self.pending = true;
         self.pending_observable = true;
-        self.materialize_constants(saved)
-    }
-
-    fn materialize_constants(&mut self, saved: SavedValue) -> Result<SavedValue, OptimizeError> {
-        match saved {
-            SavedValue::Constant(n, ty) => {
-                let value = self.body.literal(n, &ty)?;
-                let Some(bytes) = storage_elem_stride(&storage_value_type(&ty)) else {
-                    return Err(error("carried scalar has no storage size"));
-                };
-                let (slot, storage) =
-                    self.body.device_buffer(&ty, Expr::Integer(bytes.into()), Body::number(1))?;
-                self.body.store(storage, Body::number(0), value)?;
-                Ok(SavedValue::Buffer(slot, ty))
-            }
-            SavedValue::Product(fields) => Ok(SavedValue::Product(
-                fields
-                    .into_iter()
-                    .map(|field| self.materialize_constants(field))
-                    .collect::<Result<Vec<_>, _>>()?,
-            )),
-            saved => Ok(saved),
-        }
+        Ok(saved)
     }
 
     fn loop_body(&mut self, expression: Value, after: &LookupSet<Value>) -> Result<(), OptimizeError> {
@@ -1721,8 +1663,8 @@ impl EntryEmission<'_, '_, '_> {
                 } else {
                     None
                 };
-                let initial = self.capture(value, true)?;
-                let slots = saved_slots(&self.body, &initial)?;
+                let initial = self.capture(value)?;
+                let slots = saved_slots(&initial)?;
                 let mut replacements = LookupMap::default();
                 for (binding, element) in &slots {
                     let bytes = Expr::BufferLength {
@@ -1734,8 +1676,10 @@ impl EntryEmission<'_, '_, '_> {
                 }
                 let mut current = remap_saved(&initial, &replacements);
                 retain_fixed_shape(&mut current, &ty)?;
-                if let (Some(length), SavedValue::Array { host_length, .. }) = (host_length, &mut current) {
-                    *host_length = Some(length);
+                if let (Some(length), Location::Array(array)) = (host_length, &mut current) {
+                    if let Some((_, extent)) = array.dimensions.first_mut() {
+                        extent.host = Some(length);
+                    }
                 }
                 carried_values.push((name, output, initial, current, slots));
             }
@@ -1749,10 +1693,7 @@ impl EntryEmission<'_, '_, '_> {
             else {
                 return Err(error("loop count has no host value"));
             };
-            let slot = self.scalar_slot(
-                self.body.query().required("LoopIndex", expression)?,
-                &types::i32(),
-            )?;
+            let slot = self.scalar_slot(&types::i32())?;
             let zero = self.body.literal(0, &types::i32())?;
             self.body.values.insert(self.body.query().required("LoopIndex", expression)?, zero);
             before.insert(self.body.query().required("LoopIndex", expression)?);
@@ -1762,7 +1703,7 @@ impl EntryEmission<'_, '_, '_> {
             }
         } else {
             let condition = self.body.query().required("LoopCondition", expression)?;
-            let Some((_, _, _, SavedValue::Buffer(slot, _), _)) =
+            let Some((_, _, _, Location::Buffer(slot, _), _)) =
                 carried_values.iter().find(|(name, ..)| *name == condition)
             else {
                 return Err(error("loop predicate is not a scalar carry"));
@@ -1788,10 +1729,9 @@ impl EntryEmission<'_, '_, '_> {
             else {
                 return Err(error("loop ordinal binding missing"));
             };
-            self.read_slot(
+            self.install_saved(
                 self.body.query().required("LoopIndex", expression)?,
-                BindingRef::new(*set, *binding),
-                &types::i32(),
+                Location::Buffer(BindingRef::new(*set, *binding), types::i32()),
             );
         }
         self.restart()?;
@@ -1848,9 +1788,9 @@ impl EntryEmission<'_, '_, '_> {
         }
         let mut carried = Vec::new();
         for ((_, _, _, current, initial_slots), value) in carried_values.iter().zip(values) {
-            let next = self.capture(value, true)?;
-            let current_slots = saved_slots(&self.body, current)?;
-            let next_slots = saved_slots(&self.body, &next)?;
+            let next = self.capture(value)?;
+            let current_slots = saved_slots(current)?;
+            let next_slots = saved_slots(&next)?;
             if next_slots.len() != current_slots.len() {
                 return Err(error("loop value changed its storage structure"));
             }
@@ -1888,8 +1828,8 @@ impl EntryEmission<'_, '_, '_> {
         Ok(())
     }
 
-    fn install_saved(&mut self, name: Value, saved: SavedValue) {
-        if let SavedValue::Buffer(binding, ty) = &saved {
+    fn install_saved(&mut self, name: Value, saved: Location) {
+        if let Location::Buffer(binding, ty) = &saved {
             if let Some(ty) = host::scalar_type(ty) {
                 self.body.host_values.insert(
                     name,
@@ -1958,7 +1898,7 @@ impl EntryEmission<'_, '_, '_> {
             self.statements(block, &live, false)?;
             let values = self.body.results(block)?;
             let saved =
-                values.into_iter().map(|value| self.capture(value, true)).collect::<Result<Vec<_>, _>>()?;
+                values.into_iter().map(|value| self.capture(value)).collect::<Result<Vec<_>, _>>()?;
             self.flush(after, vec![], true)?;
             arms.push(saved);
         }
@@ -1966,7 +1906,7 @@ impl EntryEmission<'_, '_, '_> {
         self.saved = incoming;
         self.body.host_values = incoming_host.into();
         self.restart()?;
-        let [yes, no]: [Vec<SavedValue>; 2] = arms.try_into().map_err(|_| error("branch arms missing"))?;
+        let [yes, no]: [Vec<Location>; 2] = arms.try_into().map_err(|_| error("branch arms missing"))?;
         if yes.len() != no.len() {
             return Err(error("branch arity mismatch"));
         }
@@ -1985,10 +1925,10 @@ impl EntryEmission<'_, '_, '_> {
         &mut self,
         condition: &ScalarExpr,
         test: Typed,
-        yes: &SavedValue,
-        no: &SavedValue,
+        yes: &Location,
+        no: &Location,
     ) -> Result<Typed, OptimizeError> {
-        if let (SavedValue::Product(yes), SavedValue::Product(no)) = (yes, no) {
+        if let (Location::Product(yes), Location::Product(no)) = (yes, no) {
             if yes.len() != no.len() {
                 return Err(error("branch product arity mismatch"));
             }
@@ -1998,9 +1938,9 @@ impl EntryEmission<'_, '_, '_> {
             }
             return self.body.tuple(fields);
         }
-        if matches!((yes, no), (SavedValue::Array { .. }, SavedValue::Array { .. })) {
-            let left = saved_slots(&self.body, yes)?;
-            let right = saved_slots(&self.body, no)?;
+        if matches!((yes, no), (Location::Array(_), Location::Array(_))) {
+            let left = saved_slots(yes)?;
+            let right = saved_slots(no)?;
             if left.len() != right.len() {
                 return Err(error("branch arrays have different storage structures"));
             }
@@ -2034,59 +1974,34 @@ impl EntryEmission<'_, '_, '_> {
                 no_bindings.insert(b, binding);
             }
             let mut result = remap_saved(yes, &yes_bindings);
-            if let (
-                SavedValue::Array {
-                    element: a,
-                    tail: a_tail,
-                    ..
-                },
-                SavedValue::Array {
-                    element: b,
-                    tail: b_tail,
-                    ..
-                },
-            ) = (&result, remap_saved(no, &no_bindings))
-            {
-                if *a != b || a_tail.iter().map(|(ty, _)| ty).ne(b_tail.iter().map(|(ty, _)| ty)) {
+            if let (Location::Array(a), Location::Array(b)) = (&result, remap_saved(no, &no_bindings)) {
+                if a.element != b.element
+                    || a.dimensions.iter().map(|(ty, _)| ty).ne(b.dimensions.iter().map(|(ty, _)| ty))
+                {
                     return Err(error("branch arrays have incompatible nested alias structures"));
                 }
             }
-            if let (
-                SavedValue::Array {
-                    host_length, tail, ..
-                },
-                SavedValue::Array {
-                    host_length: a,
-                    length: a_length,
-                    tail: a_tail,
-                    ..
-                },
-                SavedValue::Array {
-                    host_length: b,
-                    length: b_length,
-                    tail: b_tail,
-                    ..
-                },
-            ) = (&mut result, yes, no)
+            if let (Location::Array(result), Location::Array(a), Location::Array(b)) =
+                (&mut result, yes, no)
             {
-                let choose = |a: Option<Expr>, b: Option<Expr>| {
-                    let (a, b) = (a?, b?);
-                    Some(if a == b {
-                        a
-                    } else {
-                        Expr::Scalar(ScalarExpr::If {
+                for ((_, extent), ((_, a), (_, b))) in
+                    result.dimensions.iter_mut().zip(a.dimensions.iter().zip(&b.dimensions))
+                {
+                    extent.host = match (a.host(), b.host()) {
+                        (Some(a), Some(b)) if a == b => Some(a),
+                        (Some(a), Some(b)) => Some(Expr::Scalar(ScalarExpr::If {
                             condition: Box::new(condition.clone()),
-                            yes: Box::new(host::scalar_extent(&a)?),
-                            no: Box::new(host::scalar_extent(&b)?),
-                        })
-                    })
-                };
-                *host_length = choose(
-                    a.clone().or(a_length.map(Expr::Integer)),
-                    b.clone().or(b_length.map(Expr::Integer)),
-                );
-                for ((_, extent), ((_, a), (_, b))) in tail.iter_mut().zip(a_tail.iter().zip(b_tail)) {
-                    *extent = choose(a.clone(), b.clone());
+                            yes: Box::new(
+                                host::scalar_extent(&a)
+                                    .ok_or_else(|| error("branch extent is not scalar"))?,
+                            ),
+                            no: Box::new(
+                                host::scalar_extent(&b)
+                                    .ok_or_else(|| error("branch extent is not scalar"))?,
+                            ),
+                        })),
+                        _ => None,
+                    };
                 }
             }
             // Descriptors keep their offsets: copy their entire backing buffers,
@@ -2170,9 +2085,7 @@ fn domain_names(query: Query<'_>, domain: Value) -> Result<LookupSet<Value>, Opt
 pub(super) struct GeneratedBuffers {
     owner: String,
     next: u32,
-    inputs: Vec<EntryInput>,
     declarations: Vec<StorageBindingDecl>,
-    scalar_slots: LookupMap<Value, (BindingRef, Type)>,
     scalar_tasks: Vec<ScalarTask>,
 }
 
@@ -2212,28 +2125,10 @@ impl Body<'_, '_, '_> {
             role: StorageRole::Intermediate,
             elem_ty: element.clone(),
             host: StorageHost {
-                logical_resource: name.clone(),
-                length: length.clone(),
+                logical_resource: name,
+                length,
             },
         });
-        let input = EntryInput {
-            name,
-            ty: types::view_array_with_size(
-                &element,
-                Type::Constructed(TypeName::SizePlaceholder, vec![]),
-                buffer_tag(binding),
-            ),
-            kind: EntryInputKind::Storage {
-                exposure: BindingExposure::Host(binding),
-                access: StorageAccess::ReadWrite,
-            },
-            host: InputHost {
-                length: Some(length),
-                ..InputHost::default()
-            },
-        };
-        self.builder.func_mut().add_function_param(input.ty.clone());
-        generated.inputs.push(input);
         let ty = types::view_array_with_size(
             &element,
             Type::Constructed(TypeName::SizePlaceholder, vec![]),
@@ -2247,32 +2142,459 @@ impl Body<'_, '_, '_> {
             },
             ty.clone(),
         );
-        Ok((
-            binding,
-            Typed {
-                value: value.into(),
-                ty,
-            },
-        ))
+        let value = Typed {
+            value: value.into(),
+            ty,
+        };
+        self.register_array(&value, Body::number(0), vec![count])?;
+        Ok((binding, value))
     }
 }
 
-// These slots are final cross-dispatch ABI transport, not a second memory layout.
+// Locations survive dispatch boundaries; SSA operands are only cached evaluations.
 #[derive(Clone)]
-enum SavedValue {
-    Product(Vec<SavedValue>),
+pub(super) enum Location {
+    Product(Vec<Location>),
     Parameter(Value),
     Constant(i64, Type),
     Buffer(BindingRef, Type),
-    Array {
-        binding: BindingRef,
-        element: Type,
-        descriptor: Option<BindingRef>,
-        length: Option<i64>,
-        offset: Option<i64>,
-        host_length: Option<Expr>,
-        tail: Vec<(Type, Option<Expr>)>,
-    },
+    Array(ArrayLocation),
+}
+
+impl Location {
+    fn persistent(&self) -> bool {
+        match self {
+            Self::Product(fields) => fields.iter().all(Self::persistent),
+            Self::Array(array) => {
+                array.binding.is_some()
+                    && std::iter::once(&array.offset)
+                        .chain(array.dimensions.iter().map(|(_, extent)| extent))
+                        .all(|extent| !matches!(extent.value, ExtentValue::Local(_)))
+            }
+            Self::Parameter(_) | Self::Constant(..) | Self::Buffer(..) => true,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct ArrayLocation {
+    binding: Option<BindingRef>,
+    element: Type,
+    offset: Extent,
+    dimensions: Vec<(Type, Extent)>,
+}
+
+#[derive(Clone)]
+struct Extent {
+    value: ExtentValue,
+    host: Option<Expr>,
+}
+
+#[derive(Clone)]
+enum ExtentValue {
+    Constant(i64),
+    Local(Typed),
+    Stored(BindingRef, u32),
+}
+
+impl Extent {
+    fn local(body: &Body<'_, '_, '_>, value: Typed) -> Self {
+        Self {
+            value: body.integer_literal(&value).map_or(ExtentValue::Local(value), ExtentValue::Constant),
+            host: None,
+        }
+    }
+
+    fn host(&self) -> Option<Expr> {
+        self.host.clone().or_else(|| match self.value {
+            ExtentValue::Constant(n) => Some(Expr::Integer(n)),
+            ExtentValue::Stored(binding, index) => Some(Expr::Scalar(ScalarExpr::Read {
+                source: scalar_source(binding),
+                offset: index * 4,
+                ty: ScalarType::I32,
+            })),
+            ExtentValue::Local(_) => None,
+        })
+    }
+
+    fn emit(&self, body: &mut Body<'_, '_, '_>) -> Result<Typed, OptimizeError> {
+        match &self.value {
+            ExtentValue::Constant(n) => body.literal(*n, &types::i32()),
+            ExtentValue::Local(value) => Ok(value.clone()),
+            ExtentValue::Stored(binding, index) => {
+                let storage = storage_view(body, *binding, Body::number(0).ty, Body::number(index + 1))?;
+                let value = body.index(storage, Body::number(*index))?;
+                body.cast(value, &types::i32())
+            }
+        }
+    }
+
+    fn remap(&mut self, bindings: &LookupMap<BindingRef, BindingRef>) {
+        if let ExtentValue::Stored(binding, _) = &mut self.value {
+            if let Some(next) = bindings.get(binding) {
+                *binding = *next;
+                self.host = None;
+            }
+        }
+    }
+}
+
+impl Body<'_, '_, '_> {
+    fn array_location(&mut self, value: &Typed) -> Result<ArrayLocation, OptimizeError> {
+        if let Some(Location::Array(location)) = self.locations.get(&value.value) {
+            return Ok(location.clone());
+        }
+        let binding = types::array_view_buffer(&value.ty);
+        let (offset, dimensions) = if binding.is_some() {
+            let offset = if let Some(n) = array_offset(self, value) {
+                self.literal(n, &types::i32())?
+            } else {
+                self.op(
+                    OpTag::Project { index: 0 },
+                    vec![value.clone()],
+                    Body::number(0).ty,
+                )?
+            };
+            (offset, self.view_dimensions(value.clone())?)
+        } else {
+            (Body::number(0), vec![self.array_length(value.clone())?])
+        };
+        self.describe_array(value, offset, dimensions)
+    }
+
+    fn describe_array(
+        &self,
+        value: &Typed,
+        offset: Typed,
+        dimensions: Vec<Typed>,
+    ) -> Result<ArrayLocation, OptimizeError> {
+        let Some(element) = value.ty.elem_type().cloned() else {
+            return Err(error("array location has no element type"));
+        };
+        let binding = types::array_view_buffer(&value.ty);
+        let Some(dimension_types) = value.ty.array_dims() else {
+            return Err(error("array dimensions missing"));
+        };
+        if dimensions.len() != dimension_types.len() {
+            return Err(error("array location rank does not match its dimensions"));
+        }
+        let dimensions = dimension_types
+            .iter()
+            .cloned()
+            .zip(dimensions.into_iter().map(|dimension| Extent::local(self, dimension)))
+            .collect();
+        Ok(ArrayLocation {
+            binding,
+            element,
+            offset: Extent::local(self, offset),
+            dimensions,
+        })
+    }
+
+    pub(super) fn register_array(
+        &mut self,
+        value: &Typed,
+        offset: Typed,
+        dimensions: Vec<Typed>,
+    ) -> Result<(), OptimizeError> {
+        let location = self.describe_array(value, offset, dimensions)?;
+        self.locations.insert(value.value, Location::Array(location));
+        Ok(())
+    }
+
+    pub(super) fn set_shape(&mut self, value: &Typed, shape: Vec<Expr>) -> Result<(), OptimizeError> {
+        let mut location = self.array_location(value)?;
+        if shape.len() > location.dimensions.len() {
+            return Err(error("host shape exceeds the array location rank"));
+        }
+        for ((_, dimension), extent) in location.dimensions.iter_mut().zip(shape) {
+            dimension.host = Some(extent);
+        }
+        self.locations.insert(value.value, Location::Array(location));
+        Ok(())
+    }
+
+    pub(super) fn host_shape(&self, value: &Typed) -> Option<Vec<Expr>> {
+        match self.locations.get(&value.value)? {
+            Location::Array(location) => {
+                location.dimensions.iter().map(|(_, extent)| extent.host()).collect()
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn located_dimensions(
+        &mut self,
+        value: &Typed,
+    ) -> Result<Option<Vec<Typed>>, OptimizeError> {
+        let Some(Location::Array(location)) = self.locations.get(&value.value).cloned() else {
+            return Ok(None);
+        };
+        location
+            .dimensions
+            .iter()
+            .map(|(_, extent)| extent.emit(self))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
+    }
+
+    pub(super) fn located_length(&self, value: &Typed) -> Option<Expr> {
+        match self.locations.get(&value.value)? {
+            Location::Array(location) => location.dimensions.first()?.1.host(),
+            Location::Buffer(binding, ty)
+                if ty.array_variant().is_some_and(types::is_array_variant_virtual) =>
+            {
+                Some(Expr::Scalar(ScalarExpr::Read {
+                    source: scalar_source(*binding),
+                    offset: 8,
+                    ty: ScalarType::I32,
+                }))
+            }
+            _ => None,
+        }
+    }
+}
+
+fn remap_saved(saved: &Location, bindings: &LookupMap<BindingRef, BindingRef>) -> Location {
+    let get = |binding: &BindingRef| bindings.get(binding).copied().unwrap_or(*binding);
+    match saved {
+        Location::Product(fields) => {
+            Location::Product(fields.iter().map(|field| remap_saved(field, bindings)).collect())
+        }
+        Location::Parameter(name) => Location::Parameter(*name),
+        Location::Constant(n, ty) => Location::Constant(*n, remap_type(ty, bindings)),
+        Location::Buffer(binding, ty) => Location::Buffer(get(binding), remap_type(ty, bindings)),
+        Location::Array(location) => {
+            let mut location = location.clone();
+            location.binding = location.binding.as_ref().map(get);
+            location.element = remap_type(&location.element, bindings);
+            location.offset.remap(bindings);
+            for (_, extent) in &mut location.dimensions {
+                extent.remap(bindings);
+            }
+            Location::Array(location)
+        }
+    }
+}
+
+fn retain_fixed_shape(saved: &mut Location, logical: &Type) -> Result<(), OptimizeError> {
+    match (saved, strip_existentials(logical)) {
+        (
+            Location::Product(values),
+            Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields),
+        ) => {
+            if values.len() != fields.len() {
+                return Err(error("loop shape product arity mismatch"));
+            }
+            for (value, field) in values.iter_mut().zip(fields) {
+                retain_fixed_shape(value, field)?;
+            }
+        }
+        (Location::Array(location), ty) => {
+            if let Some(Type::Constructed(TypeName::Size(n), _)) = ty.array_size() {
+                let n = i64::try_from(*n).map_err(|_| error("loop extent exceeds i64"))?;
+                if let Some((_, extent)) = location.dimensions.first_mut() {
+                    *extent = Extent {
+                        value: ExtentValue::Constant(n),
+                        host: None,
+                    };
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn saved_slots(saved: &Location) -> Result<Vec<(BindingRef, Type)>, OptimizeError> {
+    fn add(slots: &mut Vec<(BindingRef, Type)>, binding: BindingRef, ty: Type) {
+        if !slots.iter().any(|(existing, _)| *existing == binding) {
+            slots.push((binding, ty));
+        }
+    }
+    fn nested(slots: &mut Vec<(BindingRef, Type)>, ty: &Type) -> Result<(), OptimizeError> {
+        if let Some(binding) = types::array_view_buffer(ty) {
+            let Some(element) = ty.elem_type() else {
+                return Err(error("carried view element missing"));
+            };
+            add(slots, binding, element.clone());
+        }
+        if let Type::Constructed(_, fields) = ty {
+            for field in fields {
+                nested(slots, field)?;
+            }
+        }
+        Ok(())
+    }
+    fn visit(slots: &mut Vec<(BindingRef, Type)>, saved: &Location) -> Result<(), OptimizeError> {
+        match saved {
+            Location::Product(fields) => {
+                for field in fields {
+                    visit(slots, field)?;
+                }
+            }
+            Location::Constant(..) | Location::Parameter(..) => {
+                return Err(error("carried value has not been materialized"))
+            }
+            Location::Buffer(binding, ty) => {
+                add(slots, *binding, storage_value_type(ty));
+                nested(slots, ty)?;
+            }
+            Location::Array(location) => {
+                let Some(binding) = location.binding else {
+                    return Err(error("carried array has no storage"));
+                };
+                add(slots, binding, location.element.clone());
+                for extent in std::iter::once(&location.offset)
+                    .chain(location.dimensions.iter().map(|(_, extent)| extent))
+                {
+                    match extent.value {
+                        ExtentValue::Stored(binding, _) => add(slots, binding, Body::number(0).ty),
+                        ExtentValue::Local(_) => {
+                            return Err(error("carried extent has not been materialized"))
+                        }
+                        ExtentValue::Constant(_) => {}
+                    }
+                }
+                nested(slots, &location.element)?;
+            }
+        }
+        Ok(())
+    }
+    let mut slots = Vec::new();
+    visit(&mut slots, saved)?;
+    Ok(slots)
+}
+
+fn restore_value(body: &mut Body<'_, '_, '_>, saved: &Location) -> Result<Typed, OptimizeError> {
+    let value = match saved {
+        Location::Parameter(name) => body.named(*name)?,
+        Location::Product(fields) => {
+            let values =
+                fields.iter().map(|field| restore_value(body, field)).collect::<Result<Vec<_>, _>>()?;
+            body.tuple(values)?
+        }
+        Location::Array(location) => {
+            let Some(binding) = location.binding else {
+                return Err(error("restored array has no storage"));
+            };
+            let mut fields = vec![location.element.clone(), types::array_variant_view()];
+            fields.extend(location.dimensions.iter().enumerate().map(|(axis, (ty, _))| {
+                if axis == 0 {
+                    Type::Constructed(TypeName::SizePlaceholder, vec![])
+                } else {
+                    ty.clone()
+                }
+            }));
+            fields.push(buffer_tag(binding));
+            let mut operands = vec![location.offset.emit(body)?];
+            for (_, extent) in &location.dimensions {
+                operands.push(extent.emit(body)?);
+            }
+            body.op(
+                OpTag::StorageView(PureViewSource::Storage(binding)),
+                operands,
+                Type::Constructed(TypeName::Array, fields),
+            )?
+        }
+        Location::Constant(n, ty) => body.literal(*n, ty)?,
+        Location::Buffer(binding, ty) => {
+            let storage = storage_view(body, *binding, storage_value_type(ty), Body::number(1))?;
+            let value = body.index(storage, Body::number(0))?;
+            body.cast(value, ty)?
+        }
+    };
+    body.locations.insert(value.value, saved.clone());
+    Ok(value)
+}
+
+fn save_component(
+    body: &mut Body<'_, '_, '_>,
+    mut value: Typed,
+    materialize: bool,
+) -> Result<Location, OptimizeError> {
+    if !materialize {
+        if let Some(location) = body.locations.get(&value.value).filter(|location| location.persistent()) {
+            return Ok(location.clone());
+        }
+    }
+    let original = value.value;
+    if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = &value.ty {
+        let mut saved = Vec::new();
+        for i in 0..fields.len() {
+            let field = body.field(value.clone(), i)?;
+            saved.push(save_component(body, field, materialize)?);
+        }
+        let location = Location::Product(saved);
+        body.locations.insert(original, location.clone());
+        return Ok(location);
+    }
+    if !materialize {
+        if let Some(n) = body.literal_bits(&value) {
+            return Ok(Location::Constant(n, value.ty));
+        }
+    }
+    if value.ty.is_array()
+        && types::array_view_buffer(&value.ty).is_none()
+        && (materialize || !value.ty.array_variant().is_some_and(types::is_array_variant_virtual))
+    {
+        let Some(element) = value.ty.elem_type().cloned() else {
+            return Err(error("saved array element missing"));
+        };
+        let Some(stride) = storage_elem_stride(&storage_value_type(&element)) else {
+            return Err(error("saved array element has no stride"));
+        };
+        let length = match body.host_array_length(&value) {
+            Ok(length) => length,
+            Err(failure) => {
+                let Some(Type::Constructed(TypeName::Size(capacity), _)) = value.ty.array_size() else {
+                    return Err(failure);
+                };
+                Expr::Integer(i64::try_from(*capacity).map_err(|_| error("array capacity exceeds i64"))?)
+            }
+        };
+        let shape = body.host_shape(&value);
+        let count = body.array_length(value.clone())?;
+        let bytes = Expr::Multiply(Box::new(length.clone()), Box::new(Expr::Integer(stride.into())));
+        let (_, destination) = body.device_buffer(&element, bytes, count.clone())?;
+        body.copy_elements(value, destination.clone(), count)?;
+        if let Some(shape) = shape {
+            body.set_shape(&destination, shape)?;
+        }
+        value = destination;
+    }
+    let location = if types::array_view_buffer(&value.ty).is_some() {
+        let mut location = body.array_location(&value)?;
+        let extents = std::iter::once(&mut location.offset)
+            .chain(location.dimensions.iter_mut().map(|(_, extent)| extent))
+            .filter(|extent| materialize || matches!(extent.value, ExtentValue::Local(_)))
+            .collect::<Vec<_>>();
+        if !extents.is_empty() {
+            let count = u32::try_from(extents.len()).map_err(|_| error("descriptor rank exceeds u32"))?;
+            let (binding, storage) = body.device_buffer(
+                &Body::number(0).ty,
+                Expr::Integer(i64::from(count) * 4),
+                Body::number(count),
+            )?;
+            for (index, extent) in extents.into_iter().enumerate() {
+                let value = extent.emit(body)?;
+                let value = body.cast(value, &Body::number(0).ty)?;
+                body.store(storage.clone(), Body::number(index as u32), value)?;
+                extent.value = ExtentValue::Stored(binding, index as u32);
+            }
+        }
+        Location::Array(location)
+    } else {
+        let Some(bytes) = storage_elem_stride(&storage_value_type(&value.ty)) else {
+            return Err(error("cross-dispatch value has no storage size"));
+        };
+        let (binding, slot) =
+            body.device_buffer(&value.ty, Expr::Integer(bytes.into()), Body::number(1))?;
+        body.store(slot, Body::number(0), value.clone())?;
+        Location::Buffer(binding, value.ty)
+    };
+    body.locations.insert(original, location.clone());
+    Ok(location)
 }
 
 fn remap_type(ty: &Type, bindings: &LookupMap<BindingRef, BindingRef>) -> Type {
@@ -2298,145 +2620,6 @@ fn erase_buffers(ty: &Type) -> Type {
     }
 }
 
-fn remap_saved(saved: &SavedValue, bindings: &LookupMap<BindingRef, BindingRef>) -> SavedValue {
-    let get = |binding: &BindingRef| bindings.get(binding).copied().unwrap_or(*binding);
-    match saved {
-        SavedValue::Product(fields) => {
-            SavedValue::Product(fields.iter().map(|field| remap_saved(field, bindings)).collect())
-        }
-        SavedValue::Parameter(name) => SavedValue::Parameter(*name),
-        SavedValue::Constant(n, ty) => SavedValue::Constant(*n, remap_type(ty, bindings)),
-        SavedValue::Buffer(binding, ty) => SavedValue::Buffer(get(binding), remap_type(ty, bindings)),
-        SavedValue::Array {
-            binding,
-            element,
-            descriptor,
-            length,
-            offset,
-            host_length,
-            tail,
-        } => SavedValue::Array {
-            binding: get(binding),
-            element: remap_type(element, bindings),
-            descriptor: descriptor.as_ref().map(get),
-            // A source loop may change the extent on its next iteration.
-            length: descriptor.is_none().then_some(*length).flatten(),
-            offset: descriptor.is_none().then_some(*offset).flatten(),
-            host_length: if descriptor.is_none() { host_length.clone() } else { None },
-            tail: tail
-                .iter()
-                .map(|(ty, extent)| {
-                    (
-                        remap_type(ty, bindings),
-                        if descriptor.is_none() { extent.clone() } else { None },
-                    )
-                })
-                .collect(),
-        },
-    }
-}
-
-fn retain_fixed_shape(saved: &mut SavedValue, logical: &Type) -> Result<(), OptimizeError> {
-    match (saved, strip_existentials(logical)) {
-        (
-            SavedValue::Product(values),
-            Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields),
-        ) => {
-            if values.len() != fields.len() {
-                return Err(error("loop shape product arity mismatch"));
-            }
-            for (value, field) in values.iter_mut().zip(fields) {
-                retain_fixed_shape(value, field)?;
-            }
-        }
-        (
-            SavedValue::Array {
-                length, host_length, ..
-            },
-            ty,
-        ) => {
-            if let Some(Type::Constructed(TypeName::Size(n), _)) = ty.array_size() {
-                let n = i64::try_from(*n).map_err(|_| error("loop extent exceeds i64"))?;
-                *length = Some(n);
-                *host_length = Some(Expr::Integer(n));
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn saved_slots(
-    body: &Body<'_, '_, '_>,
-    saved: &SavedValue,
-) -> Result<Vec<(BindingRef, Type)>, OptimizeError> {
-    fn add(slots: &mut Vec<(BindingRef, Type)>, binding: BindingRef, ty: Type) {
-        if !slots.iter().any(|(existing, _)| *existing == binding) {
-            slots.push((binding, ty));
-        }
-    }
-    fn nested(
-        body: &Body<'_, '_, '_>,
-        slots: &mut Vec<(BindingRef, Type)>,
-        ty: &Type,
-    ) -> Result<(), OptimizeError> {
-        if let Some(binding) = types::array_view_buffer(ty) {
-            let Some(element) = ty.elem_type() else {
-                return Err(error("carried view element missing"));
-            };
-            add(slots, binding, element.clone());
-        }
-        if let Type::Constructed(_, fields) = ty {
-            for field in fields {
-                nested(body, slots, field)?;
-            }
-        }
-        Ok(())
-    }
-    fn visit(
-        body: &Body<'_, '_, '_>,
-        slots: &mut Vec<(BindingRef, Type)>,
-        saved: &SavedValue,
-    ) -> Result<(), OptimizeError> {
-        match saved {
-            SavedValue::Product(fields) => {
-                for field in fields {
-                    visit(body, slots, field)?;
-                }
-            }
-            SavedValue::Constant(..) | SavedValue::Parameter(..) => {
-                return Err(error("carried value has not been materialized"));
-            }
-            SavedValue::Buffer(binding, ty) => {
-                add(slots, *binding, storage_value_type(ty));
-                nested(body, slots, ty)?;
-            }
-            SavedValue::Array {
-                binding,
-                element,
-                descriptor,
-                tail,
-                ..
-            } => {
-                let Some(descriptor) = descriptor else {
-                    return Err(error("carried array descriptor has not been materialized"));
-                };
-                add(slots, *binding, element.clone());
-                add(
-                    slots,
-                    *descriptor,
-                    types::tuple(vec![Body::number(0).ty; 2 + tail.len()]),
-                );
-                nested(body, slots, element)?;
-            }
-        }
-        Ok(())
-    }
-    let mut slots = Vec::new();
-    visit(body, &mut slots, saved)?;
-    Ok(slots)
-}
-
 fn live_names(
     query: Query<'_>,
     statements: &[Value],
@@ -2453,7 +2636,7 @@ fn live_names(
 
 fn restore(
     body: &mut Body<'_, '_, '_>,
-    saved: &StableMap<Value, SavedValue>,
+    saved: &StableMap<Value, Location>,
     names: Option<&LookupSet<Value>>,
 ) -> Result<(), OptimizeError> {
     for (&name, saved) in saved {
@@ -2461,131 +2644,9 @@ fn restore(
             continue;
         }
         let value = restore_value(body, saved)?;
-        body.transported_values.insert(name, value.value);
         body.values.insert(name, value);
     }
     Ok(())
-}
-
-fn restore_value(body: &mut Body<'_, '_, '_>, saved: &SavedValue) -> Result<Typed, OptimizeError> {
-    match saved {
-        SavedValue::Parameter(name) => body.named(*name),
-        SavedValue::Product(fields) => {
-            let values =
-                fields.iter().map(|field| restore_value(body, field)).collect::<Result<Vec<_>, _>>()?;
-            body.tuple(values)
-        }
-        SavedValue::Array {
-            binding,
-            element,
-            descriptor,
-            length,
-            offset: known_offset,
-            host_length,
-            tail,
-        } => {
-            let uint = Body::number(0).ty;
-            let metadata = if let Some(descriptor) = descriptor {
-                let slot = storage_view(
-                    body,
-                    *descriptor,
-                    types::tuple(vec![uint; 2 + tail.len()]),
-                    Body::number(1),
-                )?;
-                Some(body.index(slot, Body::number(0))?)
-            } else {
-                None
-            };
-            let offset = if let Some(offset) = known_offset {
-                body.literal(*offset, &Body::number(0).ty)?
-            } else {
-                body.field(
-                    metadata.clone().ok_or_else(|| error("saved array offset missing"))?,
-                    0,
-                )?
-            };
-            let count = if let Some(length) = length {
-                body.literal(*length, &types::i32())?
-            } else {
-                body.field(
-                    metadata.clone().ok_or_else(|| error("saved array length missing"))?,
-                    1,
-                )?
-            };
-            let mut fields = vec![
-                element.clone(),
-                types::array_variant_view(),
-                Type::Constructed(TypeName::SizePlaceholder, vec![]),
-            ];
-            fields.extend(tail.iter().map(|(ty, _)| ty.clone()));
-            fields.push(buffer_tag(*binding));
-            let ty = Type::Constructed(TypeName::Array, fields);
-            let mut operands = vec![offset, count];
-            for axis in 0..tail.len() {
-                operands.push(body.field(
-                    metadata.clone().ok_or_else(|| error("saved array shape missing"))?,
-                    axis + 2,
-                )?);
-            }
-            let array = body.op(
-                OpTag::StorageView(PureViewSource::Storage(*binding)),
-                operands,
-                ty,
-            )?;
-            let host_length = if let Some(length) = host_length {
-                length.clone()
-            } else if let Some(length) = length {
-                Expr::Integer(*length)
-            } else {
-                let descriptor = descriptor.ok_or_else(|| error("saved host length missing"))?;
-                Expr::Scalar(ScalarExpr::Read {
-                    source: scalar_source(descriptor),
-                    offset: 4,
-                    ty: ScalarType::I32,
-                })
-            };
-            let mut shape = vec![host_length];
-            if !tail.is_empty() {
-                let descriptor = descriptor.ok_or_else(|| error("saved shape descriptor missing"))?;
-                shape.extend(tail.iter().enumerate().map(|(axis, (_, extent))| {
-                    extent.clone().unwrap_or_else(|| {
-                        Expr::Scalar(ScalarExpr::Read {
-                            source: scalar_source(descriptor),
-                            offset: (axis as u32 + 2) * 4,
-                            ty: ScalarType::I32,
-                        })
-                    })
-                }));
-            }
-            body.host_shapes.insert(array.value, shape);
-            Ok(array)
-        }
-        SavedValue::Constant(n, ty) => body.literal(*n, ty),
-        SavedValue::Buffer(binding, ty) => {
-            let storage = storage_view(body, *binding, storage_value_type(ty), Body::number(1))?;
-            let value = body.index(storage, Body::number(0))?;
-            let value = body.cast(value, ty)?;
-            if ty.array_variant().is_some_and(types::is_array_variant_virtual) {
-                let scalar = match ty.elem_type() {
-                    Some(Type::Constructed(TypeName::Int(32) | TypeName::UInt(32), _)) => {
-                        Some(ScalarType::I32)
-                    }
-                    _ => None,
-                };
-                if let Some(ty) = scalar {
-                    body.host_shapes.insert(
-                        value.value,
-                        vec![Expr::Scalar(ScalarExpr::Read {
-                            source: scalar_source(*binding),
-                            offset: 8,
-                            ty,
-                        })],
-                    );
-                }
-            }
-            Ok(value)
-        }
-    }
 }
 
 fn publication_leader(body: &mut Body<'_, '_, '_>) -> Result<Option<Typed>, OptimizeError> {
@@ -2605,7 +2666,7 @@ fn save(
     body: &mut Body<'_, '_, '_>,
     live: &LookupSet<Value>,
     parameters: &LookupSet<Value>,
-    saved: &mut StableMap<Value, SavedValue>,
+    saved: &mut StableMap<Value, Location>,
 ) -> Result<(), OptimizeError> {
     saved.retain(|name, _| live.contains(name));
     let values = body
@@ -2615,225 +2676,49 @@ fn save(
         .map(|(&name, value)| (name, value.clone()))
         .collect::<Vec<_>>();
     let leader = publication_leader(body)?;
-    for (name, value) in values {
-        if saved.contains_key(&name) && body.transported_values.get(&name) == Some(&value.value) {
-            continue;
-        }
-        if value.ty.is_array() && types::array_view_buffer(&value.ty).is_some() {
-            if let Some(&parameter) = parameters.iter().find(|parameter| {
-                body.values
-                    .get(*parameter)
-                    .is_some_and(|input| input.value == value.value && input.ty == value.ty)
-            }) {
-                saved.insert(name, SavedValue::Parameter(parameter));
+    let publish = |body: &mut Body<'_, '_, '_>| {
+        for (name, value) in values {
+            if value.ty.is_array() && types::array_view_buffer(&value.ty).is_some() {
+                if let Some(&parameter) = parameters.iter().find(|parameter| {
+                    body.values
+                        .get(*parameter)
+                        .is_some_and(|input| input.value == value.value && input.ty == value.ty)
+                }) {
+                    saved.insert(name, Location::Parameter(parameter));
+                    continue;
+                }
+            }
+            if value.ty == types::unit() {
                 continue;
             }
-        }
-        if value.ty.is_array()
-            || matches!(
-                value.ty,
-                Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), _)
-            )
-        {
-            saved.insert(name, save_component(body, value, leader.as_ref(), false)?);
-            continue;
-        }
-        let Some(generated) = body.generated.as_ref() else {
-            return Err(error("dispatch buffers missing"));
-        };
-        let slot = generated.scalar_slots.get(&name).cloned();
-        if slot.is_none() {
-            if let Some(n) = body.literal_bits(&value) {
-                saved.insert(name, SavedValue::Constant(n, value.ty));
-                continue;
+            let location = save_component(body, value, false)?;
+            if !body.host_values.contains_key(&name) {
+                if let Location::Buffer(binding, ty) = &location {
+                    if let Some(ty) = host::scalar_type(ty) {
+                        body.host_values.insert(
+                            name,
+                            ScalarExpr::Read {
+                                source: scalar_source(*binding),
+                                offset: 0,
+                                ty,
+                            },
+                        );
+                    }
+                }
             }
+            saved.insert(name, location);
         }
-        if value.ty == types::unit() {
-            continue;
-        }
-        let (binding, storage) = if let Some((binding, ty)) = slot {
-            (
-                binding,
-                storage_view(body, binding, storage_value_type(&ty), Body::number(1))?,
-            )
-        } else {
-            let Some(bytes) = storage_elem_stride(&storage_value_type(&value.ty)) else {
-                return Err(error("cross-dispatch value has no storage size"));
-            };
-            body.device_buffer(&value.ty, Expr::Integer(bytes.into()), Body::number(1))?
-        };
-        if let Some(leader) = &leader {
-            body.when(leader.clone(), |body| {
-                body.store(storage, Body::number(0), value.clone())
-            })?;
-        } else {
-            body.store(storage, Body::number(0), value.clone())?;
-        }
-        if !body.host_values.contains_key(&name) {
-            if let Some(ty) = host::scalar_type(&value.ty) {
-                body.host_values.insert(
-                    name,
-                    ScalarExpr::Read {
-                        source: ScalarSource::Binding {
-                            set: binding.set,
-                            binding: binding.binding,
-                        },
-                        offset: 0,
-                        ty,
-                    },
-                );
-            }
-        }
-        let Some(generated) = body.generated.as_mut() else {
-            return Err(error("dispatch buffers missing"));
-        };
-        generated.scalar_slots.insert(name, (binding, value.ty.clone()));
-        saved.insert(
-            name,
-            match body.literal_bits(&value) {
-                Some(n) => SavedValue::Constant(n, value.ty),
-                None => SavedValue::Buffer(binding, value.ty),
-            },
-        );
-    }
-    Ok(())
-}
-
-fn save_component(
-    body: &mut Body<'_, '_, '_>,
-    mut value: Typed,
-    leader: Option<&Typed>,
-    materialize_arrays: bool,
-) -> Result<SavedValue, OptimizeError> {
-    if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = &value.ty {
-        let mut saved = Vec::new();
-        for i in 0..fields.len() {
-            let field = body.field(value.clone(), i)?;
-            saved.push(save_component(body, field, leader, materialize_arrays)?);
-        }
-        return Ok(SavedValue::Product(saved));
-    }
-    if let Some(n) = body.literal_bits(&value) {
-        return Ok(SavedValue::Constant(n, value.ty));
-    }
-    if value.ty.is_array()
-        && types::array_view_buffer(&value.ty).is_none()
-        && (materialize_arrays || !value.ty.array_variant().is_some_and(types::is_array_variant_virtual))
-    {
-        let Some(element) = value.ty.elem_type().cloned() else {
-            return Err(error("saved array element missing"));
-        };
-        let Some(stride) = storage_elem_stride(&storage_value_type(&element)) else {
-            return Err(error("saved array element has no stride"));
-        };
-        let length = match body.host_array_length(&value) {
-            Ok(length) => length,
-            Err(failure) => {
-                let Some(Type::Constructed(TypeName::Size(capacity), _)) = value.ty.array_size() else {
-                    return Err(failure);
-                };
-                Expr::Integer(i64::try_from(*capacity).map_err(|_| error("array capacity exceeds i64"))?)
-            }
-        };
-        let count = body.array_length(value.clone())?;
-        let bytes = Expr::Multiply(Box::new(length.clone()), Box::new(Expr::Integer(stride.into())));
-        let (_, destination) = body.device_buffer(&element, bytes, count.clone())?;
-        let copy = |body: &mut Body<'_, '_, '_>| {
-            body.counted(
-                Body::number(0),
-                count,
-                Body::number(1),
-                vec![],
-                |body, index, _| {
-                    let item = body.index(value.clone(), index.clone())?;
-                    body.store(destination.clone(), index, item)?;
-                    Ok(vec![])
-                },
-            )?;
-            Ok(())
-        };
-        if let Some(leader) = leader {
-            body.when(leader.clone(), copy)?;
-        } else {
-            copy(body)?;
-        }
-        value = destination;
-    }
-    let (stored, ty, bytes, result) = if let Some(binding) = types::array_view_buffer(&value.ty) {
-        let Some(element) = value.ty.elem_type().cloned() else {
-            return Err(error("saved array has no element"));
-        };
-        let uint = Body::number(0).ty;
-        let offset = body.op(OpTag::Project { index: 0 }, vec![value.clone()], uint.clone())?;
-        let known_offset = array_offset(body, &value);
-        // Host-known lengths survive dispatches; carried descriptors are refreshed at backedges.
-        let host_length = body.host_array_length(&value).ok();
-        let host_shape = body.host_shapes.get(&value.value);
-        let tail = value.ty.array_dims().ok_or_else(|| error("saved array dimensions missing"))?[1..]
-            .iter()
-            .enumerate()
-            .map(|(axis, ty)| {
-                (
-                    ty.clone(),
-                    host_shape.and_then(|shape| shape.get(axis + 1)).cloned(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let dimensions = body.view_dimensions(value.clone())?;
-        let count = body.array_length(value)?;
-        let length = body.integer_literal(&count);
-        if !materialize_arrays && tail.is_empty() && length.is_some() && known_offset.is_some() {
-            return Ok(SavedValue::Array {
-                binding,
-                element,
-                descriptor: None,
-                length,
-                offset: known_offset,
-                host_length,
-                tail,
-            });
-        }
-        let mut fields = vec![offset];
-        for dimension in dimensions {
-            fields.push(body.cast(dimension, &uint)?);
-        }
-        let bytes = u32::try_from(fields.len()).map_err(|_| error("descriptor rank exceeds u32"))? * 4;
-        let stored = body.tuple(fields)?;
-        let ty = stored.ty.clone();
-        (
-            stored,
-            ty,
-            bytes,
-            Some((binding, element, length, known_offset, host_length, tail)),
-        )
-    } else {
-        let Some(bytes) = storage_elem_stride(&storage_value_type(&value.ty)) else {
-            return Err(error("cross-dispatch value has no storage size"));
-        };
-        (value.clone(), value.ty, bytes, None)
+        Ok(())
     };
-    let (binding, slot) = body.device_buffer(&ty, Expr::Integer(bytes.into()), Body::number(1))?;
     if let Some(leader) = leader {
-        body.when(leader.clone(), |body| body.store(slot, Body::number(0), stored))?;
+        body.when(leader, publish)
     } else {
-        body.store(slot, Body::number(0), stored)?;
+        publish(body)
     }
-    Ok(match result {
-        Some((storage, element, length, offset, host_length, tail)) => SavedValue::Array {
-            binding: storage,
-            element,
-            descriptor: Some(binding),
-            length,
-            offset,
-            host_length,
-            tail,
-        },
-        None => SavedValue::Buffer(binding, ty),
-    })
 }
 
 fn output_shape(body: &Body<'_, '_, '_>, value: &Typed) -> Result<Vec<Expr>, OptimizeError> {
-    let mut shape = if let Some(shape) = body.host_shapes.get(&value.value) {
+    let mut shape = if let Some(shape) = body.host_shape(value) {
         shape.clone()
     } else {
         vec![body.host_array_length(value)?]
@@ -2899,6 +2784,12 @@ fn output_capacities(
 }
 
 fn array_offset(body: &Body<'_, '_, '_>, value: &Typed) -> Option<i64> {
+    if let Some(Location::Array(location)) = body.locations.get(&value.value) {
+        return match location.offset.value {
+            ExtentValue::Constant(n) => Some(n),
+            _ => None,
+        };
+    }
     let ValueRef::Ssa(id) = value.value else {
         return None;
     };
@@ -2941,11 +2832,10 @@ fn result_buffer(body: &Body<'_, '_, '_>, value: &Typed) -> Option<BindingRef> {
     if body.literal_bits(value).is_some() {
         return None;
     }
-    let generated = body.generated.as_ref()?;
-    body.transported_values.iter().find_map(|(name, operand)| {
-        let (binding, ty) = generated.scalar_slots.get(name)?;
-        (*operand == value.value && *ty == value.ty).then_some(*binding)
-    })
+    match body.locations.get(&value.value)? {
+        Location::Buffer(binding, ty) if *ty == value.ty => Some(*binding),
+        _ => None,
+    }
 }
 
 fn write_results(
@@ -2992,31 +2882,11 @@ fn write_results(
             }
             writes = true;
             let count = body.array_length(value.clone())?;
-            let Some(element) = value.ty.elem_type() else {
-                return Err(error("array output has no element"));
-            };
-            let destination = if value.ty.array_rank().is_some_and(|rank| rank > 1) {
-                let dimensions = body.view_dimensions(value.clone())?;
-                let mut fields = vec![storage_value_type(element), types::array_variant_view()];
-                fields.extend(
-                    value
-                        .ty
-                        .array_dims()
-                        .ok_or_else(|| error("output dimensions missing"))?
-                        .iter()
-                        .cloned(),
-                );
-                fields.push(buffer_tag(binding));
-                let mut operands = vec![Body::number(0)];
-                operands.extend(dimensions);
-                body.op(
-                    OpTag::StorageView(PureViewSource::Storage(binding)),
-                    operands,
-                    Type::Constructed(TypeName::Array, fields),
-                )?
-            } else {
-                storage_view(body, binding, storage_value_type(element), count.clone())?
-            };
+            let mut destination = body.array_location(value)?;
+            destination.binding = Some(binding);
+            destination.element = storage_value_type(&destination.element);
+            destination.offset = Extent::local(body, Body::number(0));
+            let destination = restore_value(body, &Location::Array(destination))?;
             body.counted(
                 partition.as_ref().map_or_else(|| Body::number(0), |(start, ..)| start.clone()),
                 count,
@@ -3073,11 +2943,13 @@ pub(super) fn storage_view(
         .map(|count| Type::Constructed(TypeName::Size(count), vec![]))
         .unwrap_or_else(|| Type::Constructed(TypeName::SizePlaceholder, vec![]));
     let ty = types::view_array_with_size(&element, size, buffer_tag(binding));
-    body.op(
+    let value = body.op(
         OpTag::StorageView(PureViewSource::Storage(binding)),
-        vec![zero, count],
+        vec![zero.clone(), count.clone()],
         ty,
-    )
+    )?;
+    body.register_array(&value, zero, vec![count])?;
+    Ok(value)
 }
 
 fn bind_input(
@@ -3154,7 +3026,7 @@ fn bind_input(
                     .ok_or_else(|| error("input element stride missing"))?,
                 })
             };
-            body.host_shapes.insert(value.value, vec![host_length]);
+            body.set_shape(&value, vec![host_length])?;
             inputs.push(input);
             return Ok((value, None));
         }
@@ -3224,3 +3096,7 @@ fn input_host_value(
     };
     Ok(Some(ScalarExpr::Parameter { source, offset, ty }))
 }
+
+#[cfg(test)]
+#[path = "entry_tests.rs"]
+mod tests;

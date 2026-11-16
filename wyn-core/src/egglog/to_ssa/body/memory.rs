@@ -1,5 +1,5 @@
 //! Emit statements in lexical order; descriptor arithmetic comes from bindings.
-use super::{builder_error, error, Body, OptimizeError, Typed, Value};
+use super::{builder_error, error, Body, Collection, CollectionShape, OptimizeError, Typed, Value};
 use crate::ast::Span;
 use crate::builtins::{catalog, select};
 use crate::egglog::dataflow::ir::{self, Bounds, Code};
@@ -56,7 +56,9 @@ fn collection_type(declared: &Type, element: &Type, axes: usize) -> Result<Type,
 
 impl Body<'_, '_, '_> {
     pub fn named(&self, name: Value) -> Result<Typed, OptimizeError> {
-        let Some(value) = self.values.get(&name).or_else(|| self.collection_values.get(&name)) else {
+        let Some(value) =
+            self.values.get(&name).or_else(|| self.collections.get(&name).and_then(Collection::value))
+        else {
             return Err(error(format!("unbound emitted value {name:?}")));
         };
         Ok(value.clone())
@@ -299,7 +301,7 @@ impl Body<'_, '_, '_> {
                     let bytes =
                         Expr::Multiply(Box::new(length.clone()), Box::new(Expr::Integer(stride.into())));
                     let (_, destination) = self.device_buffer(&element, bytes, count.clone())?;
-                    self.host_shapes.insert(destination.value.clone(), vec![length]);
+                    self.set_shape(&destination, vec![length])?;
                     destination
                 } else {
                     let capacity = self
@@ -339,7 +341,12 @@ impl Body<'_, '_, '_> {
                     None
                 };
                 let block = self.current()?;
-                vec![self.collection_storage(&source.ty, count, length.as_ref(), None, block)?]
+                vec![self.collection_storage(
+                    &source.ty,
+                    &CollectionShape::outer(count, length),
+                    None,
+                    block,
+                )?]
             }
             Code::Uninitialized => {
                 let shape = self.query().vector(self.query().required("OperationShape", statement)?)?;
@@ -362,7 +369,7 @@ impl Body<'_, '_, '_> {
                     None
                 };
                 let block = self.current()?;
-                vec![self.collection_storage(&ty, count, length.as_ref(), None, block)?]
+                vec![self.collection_storage(&ty, &CollectionShape::outer(count, length), None, block)?]
             }
             Code::Length { axis } => {
                 let array = self.named(inputs[0])?;
@@ -410,13 +417,13 @@ impl Body<'_, '_, '_> {
                 );
                 let value = self.op(OpTag::Tuple, vec![start, step, length], ty)?;
                 if let Some(length) = host::scalar_index(self.query(), &self.host_values, extent)? {
-                    self.host_shapes.insert(
-                        value.value,
+                    self.set_shape(
+                        &value,
                         vec![Expr::Max(
                             Box::new(Expr::Scalar(length)),
                             Box::new(Expr::Integer(0)),
                         )],
-                    );
+                    )?;
                 }
                 vec![value]
             }
@@ -630,7 +637,7 @@ impl Body<'_, '_, '_> {
                         let start = self.index_expression(fields[0])?;
                         let count = self.index_expression(fields[1])?;
                         let stride = self.index_expression(fields[2])?;
-                        let mut shape = self.host_shapes.get(&array.value).cloned().unwrap_or_default();
+                        let mut shape = self.host_shape(&array).unwrap_or_default();
                         array = self.slice_array(array, start, count, stride)?;
                         if let Some(length) =
                             host::scalar_index(self.query(), &self.host_values, fields[1])?
@@ -641,7 +648,7 @@ impl Body<'_, '_, '_> {
                             } else {
                                 shape[0] = length;
                             }
-                            self.host_shapes.insert(array.value, shape);
+                            self.set_shape(&array, shape)?;
                         }
                     }
                 }
@@ -804,7 +811,10 @@ impl Body<'_, '_, '_> {
         indices: &[Typed],
         value: Typed,
     ) -> Result<(), OptimizeError> {
-        if let Some((ty, count, length, shape, block)) = self.collection_requests.remove(&name) {
+        if matches!(self.collections.get(&name), Some(Collection::Pending { .. })) {
+            let Some(Collection::Pending { ty, shape, block }) = self.collections.remove(&name) else {
+                return Err(error("pending collection missing"));
+            };
             let ty = collection_type(&ty, &value.ty, indices.len())?;
             let storage = if let Some(storage) = self.reuse_storage(name, &ty)? {
                 storage
@@ -813,18 +823,14 @@ impl Body<'_, '_, '_> {
                     .query()
                     .lookup("OuterCapacity", name)?
                     .map(|value| self.query().0.value_to_base::<i64>(value));
-                if let Some(shape) = shape {
-                    self.ranked_collection_storage(&ty, &shape, block)?
-                } else {
-                    self.collection_storage(&ty, count, length.as_ref(), capacity, block)?
-                }
+                self.collection_storage(&ty, &shape, capacity, block)?
             };
-            self.collection_values.insert(name, storage);
+            self.collections.insert(name, Collection::Allocated(storage));
         }
         if let Some(array) = self
             .values
             .get(&name)
-            .or_else(|| self.collection_values.get(&name))
+            .or_else(|| self.collections.get(&name).and_then(Collection::value))
             .filter(|value| {
                 value.ty.is_array()
                     || matches!(
