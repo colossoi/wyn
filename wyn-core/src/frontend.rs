@@ -1,4 +1,4 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::ast::{NodeCounter, SourceImport};
 use crate::error::{CompilationFailure, CompilerError, LoadModulesError, Result};
@@ -15,6 +15,7 @@ use wyn_module_graph::{
 };
 
 static COMPILER_PRELUDE_CACHE: OnceLock<(PreElaboratedPrelude, NodeCounter)> = OnceLock::new();
+static PRELUDE_INITIALIZATION: Mutex<()> = Mutex::new(());
 
 /// Parsed source modules together with the compiler state that produced them.
 ///
@@ -91,6 +92,13 @@ fn cached_compiler_prelude() -> Result<&'static (PreElaboratedPrelude, NodeCount
         return Ok(cached);
     }
 
+    // Serialize fallible initialization, including concurrent first compilations.
+    let _initialization = PRELUDE_INITIALIZATION
+        .lock()
+        .map_err(|_| CompilerError::Internal("compiler prelude initialization lock poisoned".into()))?;
+    if let Some(cached) = COMPILER_PRELUDE_CACHE.get() {
+        return Ok(cached);
+    }
     let mut node_ids = NodeCounter::new();
     let prelude = SemanticModules::create_prelude(&mut node_ids)?;
     Ok(COMPILER_PRELUDE_CACHE.get_or_init(|| (prelude, node_ids)))
