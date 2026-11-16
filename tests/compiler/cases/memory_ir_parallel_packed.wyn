@@ -1,0 +1,8 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"packed\""]
+
+entry packed(xs:[17]i32) []i32=map(|x|100/x,filter(|x|x!=0,xs))

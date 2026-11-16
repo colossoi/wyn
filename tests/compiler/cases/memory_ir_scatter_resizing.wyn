@@ -1,0 +1,11 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! warnings = []
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"resized_rows\""]
+
+-- Replacing a nested row must update payload and offsets together.
+entry resized_rows(n:i32) [][]i32 =
+  scatter([iota(0),iota(2),iota(1)],[1],[iota(n)])

@@ -1,0 +1,11 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"allocated_loop_4_main\""]
+
+entry allocated_loop_4_main(allocated_loop_4_n:i32) ([]i32,[]i32) =
+         let initial=replicate(allocated_loop_4_n,0i32)
+         let output=loop out=initial for i<allocated_loop_4_n do out with [i]=i+1
+         in (initial,output)

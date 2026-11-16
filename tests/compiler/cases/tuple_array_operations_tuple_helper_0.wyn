@@ -1,0 +1,9 @@
+--! command = "build"
+--! exit = 0
+--! args = ["--graphics"]
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"tuple_helper_0_main\""]
+
+entry tuple_helper_0_main(tuple_helper_0_xs:[]i32,tuple_helper_0_ys:[]i32) ([]i32,[]i32)=unzip(zip(tuple_helper_0_xs,tuple_helper_0_ys))

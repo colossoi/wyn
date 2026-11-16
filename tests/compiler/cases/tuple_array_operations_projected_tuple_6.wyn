@@ -1,0 +1,9 @@
+--! command = "build"
+--! exit = 0
+--! args = ["--graphics"]
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"projected_tuple_6_kept\""]
+
+entry projected_tuple_6_kept() ([1]i32,[3]i32)=([1],[2,3,4])

@@ -1,0 +1,22 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = []
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"local_14_0_main\""]
+--! [[spirv]]
+--! entry = "local_14_0_main"
+--! array_phis = 0
+
+def local_14_0_walk(seed:i32,steps:i32) i32 =
+        loop total=0 for outer<3 do
+            let initial=replicate(8,seed+outer) in
+            let queue=loop queue=initial for k<steps do
+                queue with [(k+1)%8]=queue[k%8]+1 in total+queue[steps%8]
+
+entry local_14_0_main(steps:i32) []i32=map(|i|local_14_0_walk(i,steps),0i32..<4)
+
+-- Expected 27*seed+111 (300 for seed=7). Each map creates a fresh temporary;
+-- after reduction it is dead before the next iteration allocates another.
+-- Generated code should index its allocation without whole-array snapshots.

@@ -1,0 +1,9 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"bucket_edges\""]
+
+entry bucket_edges() ([2][2]i32,[2]u32,u32) =
+  bucket_scatter_1d([[0i32,0i32],[0i32,0i32]],[(-1,9),(0,10),(0,11),(0,12),(1,20),(2,99)])

@@ -1,0 +1,22 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"dead_elements\"", ":source-name \"live_elements\""]
+--! [[shader]]
+--! entry = "dead_elements"
+--! targets = ["wgsl"]
+--! self_binary = { "Multiply" = 0 }
+--! [[shader]]
+--! entry = "live_elements"
+--! targets = ["wgsl"]
+--! self_binary = { "Multiply" = 1 }
+
+-- Scratch consumes only the shape of the first map.
+entry dead_elements(xs:[8]i32) [8]i32 =
+  let dead=map(|x|x*x,xs) in let live=map(|x|x+17,xs) in
+  scatter((#[scratch] dead),iota(8),live)
+
+-- The same arithmetic must survive when its values are returned.
+entry live_elements(xs:[8]i32) [8]i32 = map(|x|x*x,xs)

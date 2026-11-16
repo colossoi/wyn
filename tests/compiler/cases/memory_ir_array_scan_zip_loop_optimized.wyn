@@ -1,0 +1,20 @@
+--! command = "build"
+--! exit = 0
+--! args = ["-O"]
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"prefix_rows\""]
+--! [[shader]]
+--! entry = "prefix_rows"
+--! targets = ["wgsl"]
+--! parallel = true
+--! barrier = true
+--! workgroup_storage = true
+--! [[host]]
+--! entry = "prefix_rows"
+--! inputs = {xs = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]}
+--! result_bytes = 64
+--! no_device_reads = true
+
+entry prefix_rows(xs:[][16]i32) [][16]i32=loop ys=xs for i<2 do scan(|a,b|map(|(x,y)|x+y,zip(a,b)),replicate(16,0i32),ys)

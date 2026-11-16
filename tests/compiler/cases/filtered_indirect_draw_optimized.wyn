@@ -8,7 +8,7 @@
 --! [[host]]
 --! entry = "filtered_indirect_0_reproduce"
 --! parameters = 2
---! calls = { "gpu-alloc" = 4 }
+--! calls = { "gpu-alloc" = 3 }
 
 
 

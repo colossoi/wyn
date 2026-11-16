@@ -1,0 +1,15 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = ["-O"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"local_25_0_map_loop\""]
+--! [[spirv]]
+--! entry = "local_25_0_map_loop"
+--! maximum = { CompositeExtract = 99 }
+
+entry local_25_0_map_loop(seed: i32) i32 =
+  let (values,_j) = loop (values,j) = (replicate(4097,seed),0i32) while j<2 do
+    (map(|v| v+1,values),j+1) in
+  values[4096]

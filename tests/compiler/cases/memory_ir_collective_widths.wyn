@@ -1,0 +1,23 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"eight\"", ":source-name \"nine\"", ":source-name \"thirty_two\"", ":source-name \"sixty_five\""]
+--! [[shader]]
+--! entry = "eight"
+--! workgroup_size = [256, 1, 1]
+--! [[shader]]
+--! entry = "nine"
+--! workgroup_size = [128, 1, 1]
+--! [[shader]]
+--! entry = "thirty_two"
+--! workgroup_size = [64, 1, 1]
+--! [[shader]]
+--! entry = "sixty_five"
+--! workgroup_size = [32, 1, 1]
+
+entry eight(xs:[][8]i32) [][8]i32 = scan(|a,b|map2((+),a,b),replicate(8,0i32),xs)
+entry nine(xs:[][9]i32) [][9]i32 = scan(|a,b|map2((+),a,b),replicate(9,0i32),xs)
+entry thirty_two(xs:[][32]i32) [][32]i32 = scan(|a,b|map2((+),a,b),replicate(32,0i32),xs)
+entry sixty_five(xs:[][65]i32) [][65]i32 = scan(|a,b|map2((+),a,b),replicate(65,0i32),xs)

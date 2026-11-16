@@ -1,0 +1,10 @@
+--! command = "build"
+--! exit = 0
+--! args = ["--graphics"]
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"tuple_helper_3_main\""]
+
+def tuple_helper_3_firsts<[tuple_helper_3_n], A, B>(tuple_helper_3_xs:[tuple_helper_3_n](A,B)) [tuple_helper_3_n]A=map(|(a,b)|a,tuple_helper_3_xs)
+entry tuple_helper_3_main(tuple_helper_3_xs:[]i32,tuple_helper_3_ys:[]i32) []i32=tuple_helper_3_firsts(zip(tuple_helper_3_xs,tuple_helper_3_ys))

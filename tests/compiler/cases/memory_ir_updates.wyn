@@ -1,0 +1,10 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"updated_scalar\""]
+
+entry updated_scalar(xs:[]i32,i:i32,v:i32) []i32 = xs with [i]=v
+entry updated_row(xs:[][2]i32,i:i32) [][2]i32 = xs with [i]=[7i32,9i32]
+entry updated_slice(xs:[]i32,i:i32) []i32 = xs[1..length(xs)] with [i]=42i32

@@ -1,0 +1,10 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"nested_branch\""]
+
+entry nested_branch(xs:[]i32) []i32 =
+         if length(xs)>10 then replicate(0,0i32)
+         else if length(xs)>5 then replicate(2,7i32) else xs

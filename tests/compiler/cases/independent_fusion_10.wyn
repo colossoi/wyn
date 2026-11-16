@@ -1,0 +1,10 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"buckets\"", ":source-name \"chain\"", ":source-name \"observed\""]
+
+entry buckets() ([2]u32,u32)=let dest=[[-1,-1],[-1,-1]] in let (ys,counts,overflow)=bucket_scatter_2d(dest,[[(-1,9),(0,10),(0,11)],[(0,12),(1,20),(2,9)]]) in (counts,overflow)
+entry chain() []i32=filter(|x|x<50,map(|x|100/x,filter(|x|x!=0,[0,1,2,4,-2,5,0,10])))
+entry observed() (i32,i32)=let a=filter(|x|x>0,[-1,0,1,2,18,19,20]) let b=filter(|x|x<20,map(|x|x+1,a)) in (length(a),length(b))

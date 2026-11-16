@@ -1,0 +1,19 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = []
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"local_21_0_main\""]
+
+def local_21_0_observe(xs:[8]i32,i:i32) i32=xs[i%8]
+
+def local_21_0_walk(seed:i32,steps:i32) i32 =
+            let a=replicate(8,seed) in
+            let (b,k)=loop (b,k)=(a,0i32) while k<steps do
+                let next=b with [k%8]=k in (next,k+1+local_21_0_observe(b,next[k%8])) in b[seed%8]
+
+entry local_21_0_main(steps:i32) []i32=map(|i|local_21_0_walk(i,steps),0i32..<4)
+
+-- Expected seed+2. The generated shader must not carry a whole array through
+-- an OpPhi: map-produced loop state should use liveness-proven local storage.

@@ -1,0 +1,15 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"row_scan_0_main\""]
+
+entry row_scan_0_main() [16]i32 =
+      let rows=map(|i| map(|j| if i == j then 1i32 else 0i32,iota(16)),iota(4)) in
+        let ranks=scan(|a,b| map(|(x,y)| x+y,zip(a,b)),replicate(16,0i32),rows) in
+        ranks[3]
+
+
+-- scan_outputs_can_use_completed_totals
+-- Output callbacks need the completed reduction, not the running total.

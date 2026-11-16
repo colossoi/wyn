@@ -1,0 +1,17 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"local_capacity_0_check\"", ":source-name \"local_capacity_1_check\""]
+
+entry local_capacity_0_check(xs: []f32) []f32 =
+  map(|x: f32|
+    let values = map(|i: i32| x + f32.i32(i), iota(3)) in
+    values[0], xs)
+
+
+entry local_capacity_1_check(xs: []f32) [3]f32 =
+         reduce(|a: [3]f32, b: [3]f32| map(|(x,y)| x+y, zip(a,b)),
+                [0.0,0.0,0.0], map(|x| [x,x+1.0,x+2.0], xs))
+

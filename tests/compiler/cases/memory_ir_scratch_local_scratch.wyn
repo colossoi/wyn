@@ -1,0 +1,8 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"local_scratch\""]
+
+entry local_scratch(xs:[]i32) []i32 = map(|x| let a = scratch(2) with [0]=x in let b=a with [1]=x+1 in b[0]+b[1],xs)

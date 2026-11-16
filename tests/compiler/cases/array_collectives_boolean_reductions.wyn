@@ -1,0 +1,18 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"boolean_reduce_0_repro\"", ":source-name \"boolean_reduce_1_repro\"", ":source-name \"boolean_reduce_2_repro\"", ":source-name \"boolean_reduce_3_repro\""]
+
+entry boolean_reduce_0_repro(boolean_reduce_0_xs: []i32) []i32 = let any = reduce(|a,b| a || b,false,map(|x| x != 0,boolean_reduce_0_xs)) in [if boolean_reduce_0_xs[0] > 0 || any then 1i32 else 0i32]
+
+
+entry boolean_reduce_1_repro(boolean_reduce_1_xs: []i32) []i32 = let any = reduce(|a,b| a || b,false,map(|x| x != 0,boolean_reduce_1_xs)) in [if any || boolean_reduce_1_xs[0] > 0 then 1i32 else 0i32]
+
+
+entry boolean_reduce_2_repro(boolean_reduce_2_xs: []i32) []i32 = let any = reduce(|a,b| a || b,false,map(|x| x != 0,boolean_reduce_2_xs)) in [if any then 1i32 else 0i32]
+
+
+entry boolean_reduce_3_repro(boolean_reduce_3_xs: []i32) []i32 = let any = reduce(|a,b| a || b,false,map(|x| x != 0,boolean_reduce_3_xs)) in [if !any then 1i32 else 0i32]
+

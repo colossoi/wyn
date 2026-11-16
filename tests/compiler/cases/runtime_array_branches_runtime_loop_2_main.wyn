@@ -1,0 +1,9 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"runtime_loop_2_main\""]
+
+entry runtime_loop_2_main(runtime_loop_2_xs:[]i32) []i32 =
+         loop out=runtime_loop_2_xs while length(out)>0 && out[0]<4 do out with [0]=out[0]+1

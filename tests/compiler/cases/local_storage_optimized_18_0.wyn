@@ -1,0 +1,23 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = ["-O"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"local_18_0_temporary_lifetime\""]
+--! [[spirv]]
+--! entry = "local_18_0_temporary_lifetime"
+--! minimum_array_allocations = 1
+--! array_loads = 0
+
+def local_18_0_walk(seed: i32) i32 =
+  let (total,_k) = loop (total,k) = (0i32,0i32) while k<3 do
+    let values=map(|i| seed+i+k,iota(8)) in
+    (total+reduce((+),0i32,values)+values[0],k+1) in
+  total
+
+-- Keep the temporary inside a GPU invocation: host loops now dispatch their
+-- array operations, while this fixture specifically checks local storage.
+
+entry local_18_0_temporary_lifetime(seed: i32) [1]i32 =
+  map(local_18_0_walk, [seed])

@@ -1,0 +1,14 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"zipped_runtime_loop_retains_its_domain_0_main\""]
+
+entry zipped_runtime_loop_retains_its_domain_0_main(xs:[]i32) []i32 =
+      let pairs=zip(xs,iota(length(xs))) in
+      let count=if length(xs)==0 then 0 else 3 in
+      let ys=loop ys=pairs for i<count do map(|(x,j)| (x+j,j),ys) in
+      map(|(x,j)| x,ys)
+
+-- compiler_repro_array_loop

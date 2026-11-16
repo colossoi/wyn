@@ -1,0 +1,10 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"total_updates\"", ":source-name \"independent_indexed\"", ":source-name \"independent_buckets\""]
+
+entry total_updates() (i32,[3]i32)=let xs=[1,2,3,4] let da=[1,1,1] let a=reduce_by_index(da,(+),0,map(|x|x%3,xs),xs) in (reduce((+),0,xs),a)
+entry independent_indexed() ([3]i32,[5]i32)=let xs=[2,3,4,5] let da=[0,0,0] let db=[1,1,1,1,1] let a=reduce_by_index(da,(+),0,map(|x|x%3,xs),xs) let b=reduce_by_index(db,|a,b|a+b+1,0,map(|x|x%5,xs),xs) in (a,b)
+entry independent_buckets() ([2]u32,u32,[2]u32,u32)=let da=[[-1,-1],[-1,-1]] let db=[[-2],[-2]] let (a,ac,ao)=bucket_scatter_2d(da,[[(0,10),(0,11),(1,20)]]) let (b,bc,bo)=bucket_scatter_2d(db,[[(0,30),(0,31),(1,40)]]) in (ac,ao,bc,bo)

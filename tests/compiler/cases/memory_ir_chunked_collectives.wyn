@@ -1,0 +1,29 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"prefixes\"", ":source-name \"reduced\"", ":source-name \"composed\""]
+--! [[host]]
+--! entry = "prefixes"
+--! dispatches = 3
+--! inputs = { xs = [1, 2, 3, 4, 5] }
+--! [[host]]
+--! entry = "reduced"
+--! minimum_calls = { "gpu-dispatch" = 2 }
+--! [[shader]]
+--! entry = "reduced"
+--! barrier = true
+--! [[host]]
+--! entry = "composed"
+--! minimum_calls = { "gpu-dispatch" = 3 }
+--! [[shader]]
+--! entry = "composed"
+--! barrier = true
+
+entry prefixes(xs:[]i32) []i32 = scan((+),0i32,xs)
+entry reduced(xs:[]i32,unused:[]i32,bias:i32) i32 =
+  reduce((+),0i32,map(|x|x+bias*bias,xs))
+entry composed() [](i32,i32) =
+  scan(|a,b|(a.0*b.0,a.1*b.0+b.1),(1,0),
+    map(|i|(if i%5==0 then 0 else 1,i),iota(1025)))

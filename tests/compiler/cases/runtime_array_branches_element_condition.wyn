@@ -1,0 +1,8 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"element_condition\""]
+
+entry element_condition(xs:[]i32) []i32 = if xs[0]>0 then replicate(2,7i32) else xs

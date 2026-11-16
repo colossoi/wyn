@@ -1,0 +1,10 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"nested_loop\""]
+
+-- Vary row extents without merging two branch backing representations.
+entry nested_loop(n:i32) [][]i32 =
+  loop rows=[iota(0),iota(1)] for i<n do [iota(i),iota(i+1)]

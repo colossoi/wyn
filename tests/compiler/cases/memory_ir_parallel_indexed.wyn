@@ -1,0 +1,8 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"indexed\""]
+
+entry indexed(dest:*[3]i32,xs:[5]i32,k:i32) [3]i32=reduce_by_index(dest,|a,b|a+b+k,0,map(|x|x%3,xs),xs)

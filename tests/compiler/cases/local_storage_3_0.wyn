@@ -1,0 +1,17 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! args = []
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"local_3_0_reproduce\""]
+--! [[spirv]]
+--! entry = "local_3_0_reproduce"
+--! array_traffic = [1, 0, 0]
+
+def local_3_0_walk(seed:i32, steps:i32) i32 =
+            let initial=replicate(4,0i32) in
+            let (queue,k)=loop (queue,k)=(initial,0i32) while k<steps do
+                (queue with [(k+1)%4]=queue[k%4]+1i32,k+1) in queue[k%4]
+
+entry local_3_0_reproduce(steps:i32) []i32=map(|i|local_3_0_walk(i,steps),0i32..<4)

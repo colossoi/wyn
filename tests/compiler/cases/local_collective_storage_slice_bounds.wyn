@@ -1,0 +1,12 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"fused_local_slice_reductions_do_not_allocate_unused_producer_arrays_0_bounds\""]
+
+entry fused_local_slice_reductions_do_not_allocate_unused_producer_arrays_0_bounds(xs:[][8]f32) []f32 = map(|row|
+      let values=map(|x|x+1.0,row[1..i32(row[0])]) in
+      reduce(|a,b|min(a,b),f32.highest,values)+reduce(|a,b|max(a,b),f32.lowest,values),xs)
+
+-- local_scatter_keeps_updates_inside_each_invocation

@@ -1,0 +1,15 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! warnings = []
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"product_collection\"", ":source-name \"product_outputs\""]
+
+-- Both array components must survive the dispatch before the row is read.
+entry product_collection(xs:[]i32) (i32,bool) =
+  let pairs = map(|x|(x+1,x>0),xs) in
+  if length(xs)>0 then pairs[0] else (0,false)
+
+entry product_outputs(xs:[]i32) ([]i32,[]bool) =
+  (map(|x|x+1,xs),map(|x|x>0,xs))

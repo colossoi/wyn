@@ -1,0 +1,14 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"runtime_rows\""]
+--! [[host]]
+--! entry = "runtime_rows"
+--! inputs = {xs=[10,20,30],ys=[1,2]}
+--! result_bytes = 36
+--! no_device_reads = true
+
+def row_input(ys:[]i32,x:i32) []i32=map(|y|x+y,iota(length(ys)+1))
+entry runtime_rows(xs:[]i32,ys:[]i32) [][]i32=map(|x|row_input(ys,x),xs)
