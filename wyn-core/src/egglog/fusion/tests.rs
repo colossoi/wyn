@@ -1,8 +1,156 @@
 use crate::compile_thru_tlc;
-use crate::egglog::dataflow::ir::{self, Code};
+use crate::egglog::dataflow::{
+    edit,
+    ir::{self, Code},
+};
 use crate::egglog::payload::Payload;
 use crate::egglog::{analysis, from_tlc, fuse, query::Query, test_graph};
 use crate::op::BinaryOperator;
+
+#[test]
+fn placement_uses_complete_demand_and_effect_proofs() {
+    let facts = r#"
+        (LiveOperation (OperationId 1)) (LiveOperation (OperationId 2))
+        (LiveOperation (OperationId 3)) (LiveOperation (OperationId 4))
+        (LiveRegion (RegionId 0)) (LiveRegion (RegionId 20)) (LiveRegion (RegionId 21))
+        (set (ControlRegion (OperationId 1) 0) (RegionId 10))
+        (set (ControlRegion (OperationId 2) 0) (RegionId 20))
+        (set (ControlRegion (OperationId 2) 1) (RegionId 21))
+        (set (OperationRegion (OperationId 1)) (RegionId 0))
+        (set (OperationOrder (OperationId 1)) 0)
+        (set (OperationRegion (OperationId 2)) (RegionId 0))
+        (set (OperationOrder (OperationId 2)) 2)
+        (set (OperationRegion (OperationId 3)) (RegionId 21))
+        (set (OperationOrder (OperationId 3)) 0)
+        (set (OperationRegion (OperationId 4)) (RegionId 0))
+        (set (OperationOrder (OperationId 4)) 1)
+        (set (Output (OperationId 1) 0) (ValueNameRef (ValueId 1)))
+        (DirectOperationUse (OperationId 3) (ValueNameRef (ValueId 1)))
+        (set (PureOperation (OperationId 3)) true)
+        (NextOperation (OperationId 1) (OperationId 4))
+        (NextOperation (OperationId 4) (OperationId 2))
+        (FlowScopeAncestor (RegionId 20) (RegionId 20))
+        (FlowScopeAncestor (RegionId 21) (RegionId 21))
+    "#;
+    let template = test_graph::fixture(
+        &[
+            (1, Code::CountedLoop),
+            (2, Code::Branch),
+            (3, Code::Use),
+            (4, Code::Use),
+        ],
+        facts,
+    )
+    .unwrap();
+    for (extra, sinks) in [
+        ("", true),
+        ("(OperationUse (OperationId 2) (ValueNameRef (ValueId 1)))", true),
+        ("(DirectOperationUse (OperationId 99) (ValueNameRef (ValueId 1))) (set (OperationRegion (OperationId 99)) (RegionId 99))", true),
+        ("(OperationWrite (OperationId 1) (ExternalMemory))", false),
+        ("(OperationWrite (OperationId 4) (ExternalMemory))", false),
+        ("(ConsumedToken (OperationId 1) (AccumulatorId 1))", false),
+        ("(InvocationDependent (OperationId 1))", false),
+        ("(EndDemand (RegionId 0) (ValueNameRef (ValueId 1)))", false),
+        ("(EndDemand (RegionId 20) (ValueNameRef (ValueId 1)))", false),
+        ("(DirectOperationUse (OperationId 2) (ValueNameRef (ValueId 1)))", false),
+        ("(OperationUse (OperationId 1) (ValueNameRef (ValueId 9)))", false),
+        ("(OperationUse (OperationId 1) (ValueNameRef (ValueId 9))) (AvailableAt (OperationId 2) (ValueNameRef (ValueId 9)))", true),
+    ] {
+        let mut graph = template.clone();
+        graph.parse_and_run_program(None, extra).unwrap();
+        graph.parse_and_run_program(None, "(run-schedule (saturate placement-index) (saturate placement-demand dataflow-scopes) (saturate placement-legality) (saturate placement-select))").unwrap();
+        assert_eq!(Query(&graph).first("SinkProducer").unwrap().is_some(), sinks, "{extra}");
+    }
+}
+
+#[test]
+fn moving_into_empty_regions_preserves_operation_order() {
+    let mut graph = test_graph::fixture(
+        &[(1, Code::Use), (2, Code::Use)],
+        r#"
+        (set (OperationRegion (OperationId 1)) (RegionId 0))
+        (set (OperationOrder (OperationId 1)) 0)
+        (set (OperationRegion (OperationId 2)) (RegionId 0))
+        (set (OperationOrder (OperationId 2)) 1)
+        (Region (RegionId 1))
+    "#,
+    )
+    .unwrap();
+    let query = Query(&graph);
+    let first = query.constructor("OperationId", 1_i64).unwrap().unwrap();
+    let second = query.constructor("OperationId", 2_i64).unwrap().unwrap();
+    let destination = query.constructor("RegionId", 1_i64).unwrap().unwrap();
+    let source = query.constructor("RegionId", 0_i64).unwrap().unwrap();
+    edit::move_into(&mut graph, first, destination, None).unwrap();
+    edit::move_into(&mut graph, second, destination, None).unwrap();
+    assert_eq!(Query(&graph).operations(destination).unwrap(), [first, second]);
+    assert!(Query(&graph).operations(source).unwrap().is_empty());
+    edit::move_before(&mut graph, second, first).unwrap();
+    assert_eq!(Query(&graph).operations(destination).unwrap(), [second, first]);
+}
+
+#[test]
+fn merging_matching_branches_preserves_certificates_and_path_order() {
+    let mut graph = test_graph::fixture(
+        &[
+            (1, Code::Branch),
+            (2, Code::Branch),
+            (3, Code::Use),
+            (4, Code::Use),
+            (5, Code::Use),
+            (6, Code::Use),
+        ],
+        r#"
+        (set (ControlRegion (OperationId 1) 0) (RegionId 10))
+        (set (ControlRegion (OperationId 1) 1) (RegionId 11))
+        (set (ControlRegion (OperationId 2) 0) (RegionId 20))
+        (set (ControlRegion (OperationId 2) 1) (RegionId 21))
+        (set (OutputCount (OperationId 1)) 1) (set (OutputCount (OperationId 2)) 1)
+        (set (Output (OperationId 1) 0) (ValueNameRef (ValueId 1)))
+        (set (Output (OperationId 2) 0) (ValueNameRef (ValueId 2)))
+        (set (RegionYieldCount (RegionId 10)) 1) (set (RegionYieldCount (RegionId 11)) 1)
+        (set (RegionYieldCount (RegionId 20)) 1) (set (RegionYieldCount (RegionId 21)) 1)
+        (set (RegionYield (RegionId 10) 0) (ValueNameRef (ValueId 3)))
+        (set (RegionYield (RegionId 11) 0) (ValueNameRef (ValueId 4)))
+        (set (RegionYield (RegionId 20) 0) (ValueNameRef (ValueId 5)))
+        (set (RegionYield (RegionId 21) 0) (ValueNameRef (ValueId 6)))
+        (set (RegionReturnType (RegionId 20) 0) (ReturnScalar (ScalarElement (I32))))
+        (set (RegionReturnType (RegionId 21) 0) (ReturnScalar (ScalarElement (I32))))
+        (set (OperationRegion (OperationId 3)) (RegionId 10)) (set (OperationOrder (OperationId 3)) 4)
+        (set (OperationRegion (OperationId 4)) (RegionId 11)) (set (OperationOrder (OperationId 4)) 9)
+        (set (OperationRegion (OperationId 5)) (RegionId 20)) (set (OperationOrder (OperationId 5)) 0)
+        (set (OperationRegion (OperationId 6)) (RegionId 21)) (set (OperationOrder (OperationId 6)) 0)
+        (YieldCertificate (RegionId 20) 0 (ValueId 8))
+        (YieldCertificate (RegionId 21) 0 (ValueId 9))
+        (OperationCertificate (OperationId 2) (ValueId 7))
+        (BranchPair (OperationId 1) (OperationId 2))
+        (set (FusionOutputBase (OperationId 1) (OperationId 2)) 1)
+    "#,
+    )
+    .unwrap();
+    graph
+        .parse_and_run_program(
+            None,
+            r#"
+        (run-schedule (saturate graph-fusion))
+        (BranchFuseSelected (OperationId 1) (OperationId 2))
+        (run-schedule (run graph-fusion-apply))
+        (check (= (OutputCount (OperationId 1)) 2))
+        (check (= (Output (OperationId 1) 1) (ValueNameRef (ValueId 2))))
+        (check (= (RegionYieldCount (RegionId 10)) 2) (= (RegionYieldCount (RegionId 11)) 2))
+        (check (= (RegionYield (RegionId 10) 1) (ValueNameRef (ValueId 5))))
+        (check (= (RegionYield (RegionId 11) 1) (ValueNameRef (ValueId 6))))
+        (check (= (RegionReturnType (RegionId 10) 1) (ReturnScalar (ScalarElement (I32)))))
+        (check (= (RegionReturnType (RegionId 11) 1) (ReturnScalar (ScalarElement (I32)))))
+        (check (YieldCertificate (RegionId 10) 1 (ValueId 8)))
+        (check (YieldCertificate (RegionId 11) 1 (ValueId 9)))
+        (check (OperationCertificate (OperationId 1) (ValueId 7)))
+        (check (= (OperationRegion (OperationId 5)) (RegionId 10)) (= (OperationOrder (OperationId 5)) 5))
+        (check (= (OperationRegion (OperationId 6)) (RegionId 11)) (= (OperationOrder (OperationId 6)) 10))
+    "#,
+        )
+        .unwrap();
+}
 
 #[test]
 fn compact_length_uses_a_count_without_a_collection() {

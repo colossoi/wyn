@@ -243,12 +243,26 @@ pub(in crate::egglog) fn move_before(
     operation: Value,
     before: Value,
 ) -> Result<(), OptimizeError> {
-    let query = Query(graph);
-    let destination = query.required("OperationRegion", before)?;
-    let mut order = query.operations(destination)?;
+    let destination = Query(graph).required("OperationRegion", before)?;
+    move_into(graph, operation, destination, Some(before))
+}
+
+/// Move into a region, appending when no anchor is supplied.
+pub(in crate::egglog) fn move_into(
+    graph: &mut EGraph,
+    operation: Value,
+    destination: Value,
+    before: Option<Value>,
+) -> Result<(), OptimizeError> {
+    let mut order = Query(graph).operations(destination)?;
     order.retain(|&item| item != operation);
-    let Some(position) = order.iter().position(|&item| item == before) else {
-        return Err(output_error("motion destination is outside its execution region"));
+    let position = if let Some(before) = before {
+        let Some(position) = order.iter().position(|&item| item == before) else {
+            return Err(output_error("motion destination is outside its execution region"));
+        };
+        position
+    } else {
+        order.len()
     };
     order.insert(position, operation);
     analysis::invalidate(graph)?;

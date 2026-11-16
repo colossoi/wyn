@@ -46,7 +46,23 @@ fn clear(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "FusionHasForwardedLoad",
         "FusionPrivateWrites",
         "SinkProducer",
-        "SinkPath",
+        "PlacementReadOnly",
+        "PlacementMember",
+        "PlacementValue",
+        "PlacementInput",
+        "PlacementPath",
+        "PlacementDemand",
+        "PlacementHasDemand",
+        "PlacementDead",
+        "PlacementSite",
+        "PlacementUnder",
+        "PlacementGuarded",
+        "PlacementAvailable",
+        "PlacementUnsafe",
+        "BranchPair",
+        "BranchUnsafe",
+        "BranchFuseSelected",
+        "BranchOperationBase",
         "AccumulatorPair",
         "AccumulatorFuseSelected",
         "FusionGroupBase",
@@ -63,7 +79,7 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
         clear(graph)?;
         analysis::run(graph)?;
         crate::egglog::planning::analyze(graph)?;
-        graph.parse_and_run_program(None, "(run-schedule (saturate graph-fusion dataflow-scopes) (saturate dataflow-effects) (saturate graph-fusion-legality) (saturate graph-fusion-select))")?;
+        graph.parse_and_run_program(None, "(run-schedule (saturate placement-index) (saturate placement-demand dataflow-scopes) (saturate placement-legality) (saturate placement-select) (saturate graph-fusion dataflow-scopes) (saturate dataflow-effects) (saturate graph-fusion-legality) (saturate graph-fusion-select))")?;
         let query = Query(graph);
         let mut selected = None;
         query.for_each("FuseCandidate", |row| {
@@ -90,6 +106,13 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
                 Ok(())
             })?;
             let Some((first, second)) = selected else {
+                if let Some(pair) = query.first("BranchPair")? {
+                    graph.update(|mut sink| sink.add("BranchFuseSelected", (pair[0], pair[1])))?;
+                    graph.parse_and_run_program(None, "(run-schedule (run graph-fusion-apply))")?;
+                    edit::remove(graph, &[pair[1]])?;
+                    memory::simplify(graph, false)?;
+                    continue;
+                }
                 if compaction::run(graph)? {
                     memory::simplify(graph, false)?;
                     continue;
@@ -112,78 +135,51 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
 
 fn sink_producer(graph: &mut EGraph) -> Result<bool, OptimizeError> {
     let query = Query(graph);
-    let mut selected = None;
-    query.for_each("SinkProducer", |row| {
-        if selected.is_some() {
-            return Ok(());
-        }
-        let producer = row[0];
-        let scope = row[1];
-        let body = row[2];
-        let mut outputs = query.sequence("Output", producer)?.into_iter().collect::<LookupSet<_>>();
-        let mut moved = vec![producer];
-        let parent = query.required("OperationRegion", producer)?;
-        for operation in query.operations(parent)? {
-            if operation == scope {
-                break;
-            }
-            if operation == producer {
-                continue;
-            }
-            let mut used = false;
-            query.for_each("DirectOperationUse", |row| {
-                used |= row[0] == operation && outputs.contains(&row[1]);
-                Ok(())
-            })?;
-            if used
-                && query
-                    .lookup("PureOperation", operation)?
-                    .is_some_and(|pure| query.0.value_to_base::<bool>(pure))
-                && query.contains("DiscardableOperation", operation)?
-                && query.contains("RepeatableOperation", operation)?
-            {
-                moved.push(operation);
-                outputs.extend(query.sequence("Output", operation)?);
-            }
-        }
-        let mut safe = true;
-        query.for_each("OperationWrite", |write| {
-            safe &= write[0] != producer;
-            Ok(())
-        })?;
-        query.for_each("OperationUse", |use_| {
-            if outputs.contains(&use_[1]) && use_[0] != scope && !moved.contains(&use_[0]) {
-                let region = query.required("OperationRegion", use_[0])?;
-                safe &= query.contains("FlowScopeAncestor", (body, region))?;
-            }
-            Ok(())
-        })?;
-        query.for_each("EndDemand", |use_| {
-            if outputs.contains(&use_[1]) && query.contains("LiveRegion", use_[0])? {
-                safe &= query.contains("FlowScopeAncestor", (body, use_[0]))?;
-            }
-            Ok(())
-        })?;
-        query.for_function("AccumulatorArray", |keys, value| {
-            if keys[0] == scope {
-                if let Some(name) = query.constructor("ValueNameRef", value)? {
-                    safe &= !outputs.contains(&name);
-                }
-            }
-            Ok(())
-        })?;
-        if safe {
-            if let Some(&first) = query.operations(body)?.first() {
-                selected = Some((moved, first));
-            }
-        }
+    let mut dead = Vec::new();
+    query.for_each("PlacementDead", |row| {
+        dead.push(row[0]);
         Ok(())
     })?;
-    let Some((moved, first)) = selected else {
+    if !dead.is_empty() {
+        edit::remove(graph, &dead)?;
+        return Ok(true);
+    }
+    let Some(site) = query.first("SinkProducer")? else {
         return Ok(false);
     };
-    for operation in moved {
-        edit::move_before(graph, operation, first)?;
+    let (producer, scope, body) = (site[0], site[1], site[2]);
+    let first = query.operations(body)?.first().copied();
+    let mut moved = Vec::new();
+    let parent = query.required("OperationRegion", producer)?;
+    for operation in query.operations(parent)? {
+        if query
+            .lookup("PlacementMember", (producer, operation))?
+            .is_some_and(|v| graph.value_to_base::<bool>(v))
+        {
+            moved.push((operation, query.required("OperationOrder", operation)?));
+        }
+    }
+    let copy = query.contains("BranchOperation", scope)?;
+    let edge = i64::from(copy && query.required("ControlRegion", (scope, 1_i64))? == body);
+    for &(operation, _) in &moved {
+        edit::move_into(graph, operation, body, first)?;
+    }
+    if copy {
+        graph.parse_and_run_program(None, "(run-schedule (saturate dataflow-scopes flow-scopes))")?;
+        let cloned = edit::clone_region(graph, scope, body, &[])?;
+        graph.update(|mut sink| {
+            sink.remove("ControlRegion", (scope, edge))?;
+            sink.set("ControlRegion", (scope, edge), cloned)?;
+            for (operation, order) in moved {
+                sink.remove("OperationRegion", operation)?;
+                sink.set("OperationRegion", operation, parent)?;
+                sink.remove("OperationOrder", operation)?;
+                sink.set("OperationOrder", operation, order)?;
+            }
+            Ok(())
+        })?;
+        analysis::invalidate(graph)?;
+        edit::changed(graph)?;
     }
     Ok(true)
 }
