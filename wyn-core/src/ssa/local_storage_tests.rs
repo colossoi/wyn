@@ -7,6 +7,22 @@ use crate::types::{i32, sized_array};
 use egglog_engine::EGraph;
 
 #[test]
+fn unused_array_snapshots_do_not_keep_their_allocation() {
+    let mut body = FuncBuilder::new(vec![], i32()).finish_unchecked();
+    let entry = body.inner.entry;
+    let ty = sized_array(1, i32());
+    let place = body.places.insert(PlaceInfo {
+        elem_ty: ty.clone(),
+        origin: PlaceOrigin::Instruction,
+    });
+    body.inner.append_void_inst(entry, InstKind::Alloca { result: place });
+    body.inner.append_inst(entry, InstKind::Load { place }, ty);
+    remove_unused_loads(&mut body);
+    assert!(body.inner.insts.is_empty());
+    assert!(body.inner.blocks[entry].insts.is_empty());
+}
+
+#[test]
 fn storage_validation_requires_initialization_on_every_incoming_path() {
     for omit_initializer in [false, true] {
         let mut graph = EGraph::default();

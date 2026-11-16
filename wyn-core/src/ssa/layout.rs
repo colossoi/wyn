@@ -2,7 +2,7 @@
 
 use crate::ast::{Type, TypeName};
 use crate::interface::StorageLayout;
-use crate::types::TypeExt;
+use crate::types::{self, TypeExt};
 use wyn_host::VertexFormat;
 
 #[cfg(test)]
@@ -14,9 +14,45 @@ pub(crate) fn storage_value_type(ty: &Type) -> Type {
     match ty {
         Type::Constructed(TypeName::Bool, _) => Type::Constructed(TypeName::UInt(32), vec![]),
         Type::Constructed(name, fields) => {
-            Type::Constructed(name.clone(), fields.iter().map(storage_value_type).collect())
+            let mut fields = fields.iter().map(storage_value_type).collect::<Vec<_>>();
+            if *name == TypeName::Array
+                && matches!(ty.array_variant(), Some(Type::Variable(_)))
+                && ty.array_dims().is_some_and(|dims| {
+                    dims.iter().all(|size| matches!(size, Type::Constructed(TypeName::Size(_), _)))
+                })
+            {
+                fields[1] = types::array_variant_composite();
+                if let Some(region) = fields.last_mut() {
+                    *region = types::no_buffer();
+                }
+            }
+            Type::Constructed(name.clone(), fields)
         }
         _ => ty.clone(),
+    }
+}
+
+/// Runtime array values store descriptors; only composite arrays store inline elements.
+pub(crate) fn array_descriptor_fields(ty: &Type) -> Option<Vec<Type>> {
+    let storage = ty.array_storage()?;
+    match storage.variant {
+        Type::Constructed(TypeName::ArrayVariantView, _) => {
+            Some(vec![
+                Type::Constructed(TypeName::UInt(32), vec![]);
+                ty.array_rank()? + 1
+            ])
+        }
+        Type::Constructed(TypeName::ArrayVariantVirtual, _) => Some(vec![ty.elem_type()?.clone(); 3]),
+        Type::Constructed(TypeName::ArrayVariantBounded, _) => Some(vec![
+            types::make_array1(
+                ty.elem_type()?.clone(),
+                types::array_variant_composite(),
+                ty.array_size()?.clone(),
+                types::no_buffer(),
+            ),
+            types::i32(),
+        ]),
+        _ => None,
     }
 }
 
@@ -115,6 +151,9 @@ pub fn type_byte_size(ty: &Type) -> Option<u32> {
 /// Calculate std430 alignment for a type.
 /// Returns None for types that don't have a fixed alignment.
 pub fn std430_alignment(ty: &Type) -> Option<u32> {
+    if let Some(fields) = array_descriptor_fields(ty) {
+        return std430_alignment(&types::tuple(fields));
+    }
     match ty {
         Type::Constructed(TypeName::Int(bits), _) => Some((*bits / 8) as u32),
         Type::Constructed(TypeName::UInt(bits), _) => Some((*bits / 8) as u32),
@@ -268,6 +307,9 @@ pub(crate) fn std430_struct_layout(fields: &[&Type]) -> Option<BlockLayout> {
 }
 
 pub(crate) fn std430_type_layout(ty: &Type) -> Option<(u32, u32)> {
+    if let Some(fields) = array_descriptor_fields(ty) {
+        return std430_type_layout(&types::tuple(fields));
+    }
     match ty {
         Type::Constructed(TypeName::Int(_), _)
         | Type::Constructed(TypeName::UInt(_), _)
@@ -285,7 +327,7 @@ pub(crate) fn std430_type_layout(ty: &Type) -> Option<(u32, u32)> {
             };
             let (element_size, element_align) = std430_type_layout(ty.elem_type()?)?;
             let stride = element_size.div_ceil(element_align) * element_align;
-            Some((count * stride, element_align))
+            Some((count.max(1) * stride, element_align))
         }
         Type::Constructed(TypeName::Tuple(_), members)
         | Type::Constructed(TypeName::Record(_), members) => {
@@ -309,6 +351,12 @@ pub(crate) fn std430_type_layout(ty: &Type) -> Option<(u32, u32)> {
 pub fn block_layout(ty: &Type, rules: StorageLayout) -> Option<BlockLayout> {
     // (size, alignment) of one supported member.
     fn member(ty: &Type, rules: StorageLayout) -> Option<(u32, u32)> {
+        if rules == StorageLayout::Std430 {
+            if let Some(fields) = array_descriptor_fields(ty) {
+                let layout = block_layout(&types::tuple(fields), rules)?;
+                return Some((layout.size, layout.align));
+            }
+        }
         match ty {
             Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), _)
                 if rules == StorageLayout::Std430 =>
@@ -339,7 +387,7 @@ pub fn block_layout(ty: &Type, rules: StorageLayout) -> Option<BlockLayout> {
                     _ => return None,
                 };
                 let elem_stride = elem_size.div_ceil(elem_align) * elem_align;
-                Some((n * elem_stride, elem_align))
+                Some((n.max(1) * elem_stride, elem_align))
             }
             _ => None,
         }
@@ -381,6 +429,9 @@ pub fn block_layout(ty: &Type, rules: StorageLayout) -> Option<BlockLayout> {
 /// the shader backend emits. Every element uses its aligned std430 size;
 /// notably, a three-component 32-bit vector occupies a 16-byte array slot.
 pub fn storage_elem_stride(ty: &Type) -> Option<u32> {
+    if let Some(fields) = array_descriptor_fields(ty) {
+        return storage_elem_stride(&types::tuple(fields));
+    }
     match ty {
         Type::Constructed(TypeName::Tuple(_), _) | Type::Constructed(TypeName::Record(_), _) => {
             block_layout(ty, StorageLayout::Std430).map(|l| l.size)
@@ -391,7 +442,8 @@ pub fn storage_elem_stride(ty: &Type) -> Option<u32> {
                 Type::Constructed(TypeName::Size(count), _) => *count as u32,
                 _ => return None,
             };
-            Some(count * storage_elem_stride(ty.elem_type()?)?)
+            // Shader value types reserve one physical slot for an empty array.
+            Some(count.max(1) * storage_elem_stride(ty.elem_type()?)?)
         }
         _ => {
             let size = type_byte_size(ty)?;

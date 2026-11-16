@@ -247,7 +247,8 @@ impl Constructor {
             };
             let size = u32::try_from(*size)
                 .map_err(|_| err_spirv!("tensor dimension exceeds SPIR-V limits: {:?}", dim))?;
-            let size_const = self.const_u32(size);
+            // Empty logical values still need a legal physical SPIR-V type.
+            let size_const = self.const_u32(size.max(1));
             let array_type = *self.builder.type_array(builder::TypeId::new(result), size_const);
             self.builder
                 .register_array_element(builder::TypeId::new(array_type), builder::TypeId::new(result));

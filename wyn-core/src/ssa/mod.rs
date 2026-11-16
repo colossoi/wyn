@@ -29,7 +29,7 @@ mod optimize;
 mod ownership;
 pub mod print;
 pub mod reachability;
-mod storage;
+pub(crate) mod storage;
 pub(crate) mod storage_function_variants;
 mod texture_sampling;
 pub mod types;

@@ -595,11 +595,11 @@ impl TypeEmitter {
                                 ));
                             }
                         };
-                        return Ok(self.bounded_struct(&elem, n));
+                        return Ok(self.bounded_struct(&elem, n.max(1)));
                     }
                     match ty.array_size() {
                         Some(PolyType::Constructed(TypeName::Size(n), _)) => {
-                            Ok(format!("array<{}, {}>", elem, n))
+                            Ok(format!("array<{}, {}>", elem, (*n).max(1)))
                         }
                         // Runtime-sized `array<T>`. Legal in WGSL only at
                         // storage-binding sites; naga will reject it
@@ -666,8 +666,8 @@ fn is_view_array_ty(ty: &polytype::Type<TypeName>) -> bool {
     ty.array_variant().is_some_and(types::is_array_variant_view)
 }
 
-fn atomic_storage_bindings(program: &ssa::stage::WgslReady) -> LookupSet<BindingRef> {
-    fn collect(body: &FuncBody, bindings: &mut LookupSet<BindingRef>) {
+fn atomic_storage_bindings(program: &ssa::stage::WgslReady) -> LookupSet<(BindingRef, types::Type)> {
+    fn collect(body: &FuncBody, bindings: &mut LookupSet<(BindingRef, types::Type)>) {
         for (_, atomic) in body.inner.insts.iter() {
             let InstKind::Atomic { place, .. } = &atomic.data else {
                 continue;
@@ -676,9 +676,11 @@ fn atomic_storage_bindings(program: &ssa::stage::WgslReady) -> LookupSet<Binding
                 InstKind::ViewIndex { view, result, .. } if result == place => view.as_ssa(),
                 _ => None,
             });
-            if let Some(binding) = view.and_then(|view| types::array_view_buffer(body.get_value_type(view)))
-            {
-                bindings.insert(binding);
+            if let Some(view) = view {
+                let ty = body.get_value_type(view);
+                if let (Some(binding), Some(element)) = (types::array_view_buffer(ty), ty.elem_type()) {
+                    bindings.insert((binding, element.clone()));
+                }
             }
         }
     }
@@ -700,7 +702,7 @@ struct LowerCtx<'a> {
     storage_access_variants: LookupMap<BindingRef, (bool, bool)>,
     current_entry: Option<EntryId>,
     storage_names: LookupMap<(Option<EntryId>, BindingRef, bool), String>,
-    atomic_bindings: LookupSet<BindingRef>,
+    atomic_bindings: LookupSet<(BindingRef, types::Type)>,
     type_emitter: TypeEmitter,
     lowered: LookupSet<String>,
     indent: usize,
@@ -1093,7 +1095,7 @@ impl<'a> LowerCtx<'a> {
     /// may reuse a descriptor slot with different types; their bodies and helper
     /// variants select the declaration belonging to their entry context.
     fn storage_buffer_declarations(&mut self) -> Result<String> {
-        let mut synth: LookupMap<(BindingRef, bool, String), Vec<EntryId>> = LookupMap::new();
+        let mut synth: LookupMap<(BindingRef, bool, String, bool), Vec<EntryId>> = LookupMap::new();
         for entry in &self.program.entry_points {
             let accesses = entry.shader_storage_accesses();
             // Explicit compiler-inserted bindings (e.g. parallelize's
@@ -1101,7 +1103,13 @@ impl<'a> LowerCtx<'a> {
             for sb in &entry.storage_bindings {
                 let ty_str = self.type_emitter.type_to_wgsl(&sb.elem_ty)?;
                 synth
-                    .entry((sb.binding, accesses[&sb.binding].writes(), ty_str))
+                    .entry((
+                        sb.binding,
+                        accesses[&sb.binding].writes(),
+                        ty_str,
+                        accesses[&sb.binding].writes()
+                            && self.atomic_bindings.contains(&(sb.binding, sb.elem_ty.clone())),
+                    ))
                     .or_default()
                     .push(entry.id);
             }
@@ -1119,7 +1127,8 @@ impl<'a> LowerCtx<'a> {
                         })?
                         .clone();
                     let ty_str = self.type_emitter.type_to_wgsl(&elem_ty)?;
-                    synth.entry((br, accesses[&br].writes(), ty_str)).or_default().push(entry.id);
+                    let atomic = accesses[&br].writes() && self.atomic_bindings.contains(&(br, elem_ty));
+                    synth.entry((br, accesses[&br].writes(), ty_str, atomic)).or_default().push(entry.id);
                 }
             }
             // Entry outputs likewise. For scalar-valued compute outputs
@@ -1138,7 +1147,8 @@ impl<'a> LowerCtx<'a> {
                         None => out.ty.clone(),
                     };
                     let ty_str = self.type_emitter.type_to_wgsl(&elem_ty)?;
-                    synth.entry((br, accesses[&br].writes(), ty_str)).or_default().push(entry.id);
+                    let atomic = accesses[&br].writes() && self.atomic_bindings.contains(&(br, elem_ty));
+                    synth.entry((br, accesses[&br].writes(), ty_str, atomic)).or_default().push(entry.id);
                 }
             }
         }
@@ -1146,16 +1156,15 @@ impl<'a> LowerCtx<'a> {
         let mut synth_sorted: Vec<_> = synth.into_iter().collect();
         synth_sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
         let mut type_counts = LookupMap::new();
-        for ((br, writable, _), _) in &synth_sorted {
+        for ((br, writable, _, _), _) in &synth_sorted {
             *type_counts.entry((*br, *writable)).or_insert(0) += 1;
         }
         let mut type_indices = LookupMap::new();
         let mut output = String::new();
-        for ((br, writable, elem_ty), entries) in synth_sorted {
+        for ((br, writable, elem_ty, atomic), entries) in synth_sorted {
             let (set, binding) = (br.set, br.binding);
             let access = if writable { "read_write" } else { "read" };
-            let elem_ty =
-                if self.atomic_bindings.contains(&br) { format!("atomic<{}>", elem_ty) } else { elem_ty };
+            let elem_ty = if atomic { format!("atomic<{}>", elem_ty) } else { elem_ty };
             let mixed = self
                 .storage_access_variants
                 .get(&br)
@@ -1764,6 +1773,7 @@ impl<'a> LowerCtx<'a> {
                 if let Some((value_id, _)) = body.param(field.input_index) {
                     let expr = format!("{}.{}", pc.var_name, field.wgsl_name);
                     body_ctx.addressable.insert(expr.clone());
+                    body_ctx.immutable_addresses.insert(expr.clone());
                     body_ctx.value_map.insert(value_id, ValueBinding::Alias(expr));
                 }
             }
@@ -1886,6 +1896,7 @@ struct BodyLowerCtx<'a, 'b> {
     /// Names that can be used as addressable storage. Ordinary SSA
     /// results are immutable `let` bindings and deliberately absent.
     addressable: LookupSet<String>,
+    immutable_addresses: LookupSet<String>,
     /// Addressable names that can also appear on the left-hand side of
     /// an assignment. Function parameters are addressable but immutable.
     writable: LookupSet<String>,
@@ -1941,6 +1952,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             inline_values: LookupSet::new(),
             next_copy: 0,
             addressable: LookupSet::new(),
+            immutable_addresses: LookupSet::new(),
             writable: LookupSet::new(),
             needs_mutable_binding,
             workgroup_view_name: LookupMap::new(),
@@ -1954,10 +1966,18 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 
     fn is_atomic_place(&self, place: ssa::types::PlaceId) -> bool {
         self.body.inner.insts.iter().any(|(_, inst)| match &inst.data {
-            InstKind::ViewIndex { view, result, .. } if *result == place => view
-                .as_ssa()
-                .and_then(|view| types::array_view_buffer(self.body.get_value_type(view)))
-                .is_some_and(|binding| self.ctx.atomic_bindings.contains(&binding)),
+            InstKind::ViewIndex { view, result, .. } if *result == place => {
+                view.as_ssa().is_some_and(|view| {
+                    let ty = self.body.get_value_type(view);
+                    types::array_view_buffer(ty).zip(ty.elem_type()).is_some_and(|(binding, element)| {
+                        self.ctx
+                            .current_storage_accesses
+                            .get(&binding)
+                            .is_some_and(|access| access.writes())
+                            && self.ctx.atomic_bindings.contains(&(binding, element.clone()))
+                    })
+                })
+            }
             _ => false,
         })
     }
@@ -2276,6 +2296,20 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         // Structured walk via the shared structurize pass.
         let mut tree = structured::structurize(self.body);
         self.inline_values = super::bindings::place_bindings(self.body, &mut tree);
+        // Places have function scope even when their allocation lifetime starts
+        // in a branch. A later guarded read may be outside that lexical branch.
+        for block in self.body.inner.blocks.values() {
+            for &inst in &block.insts {
+                if let InstKind::Alloca { result } = self.body.get_inst(inst).data {
+                    let ty = self.ctx.type_emitter.type_to_wgsl(self.body.place_elem_ty(result))?;
+                    let var = wgsl_place(result);
+                    writeln!(output, "{}var {}: {};", self.ctx.indent_str(), var, ty)?;
+                    self.addressable.insert(var.clone());
+                    self.writable.insert(var.clone());
+                    self.place_targets.insert(result, var);
+                }
+            }
+        }
         self.emit_scope(&tree.root, output)
     }
 
@@ -2307,16 +2341,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     match &inst.data {
                         // Alloca: `var<function> x: T;` — register the
                         // local var's name as the place expression.
-                        InstKind::Alloca { result } => {
-                            let ty =
-                                self.ctx.type_emitter.type_to_wgsl(self.body.place_elem_ty(*result))?;
-                            let var = wgsl_place(*result);
-                            writeln!(output, "{}var {}: {};", self.ctx.indent_str(), var, ty)?;
-                            self.addressable.insert(var.clone());
-                            self.writable.insert(var.clone());
-                            self.place_targets.insert(*result, var);
-                            continue;
-                        }
+                        InstKind::Alloca { .. } => continue,
 
                         // OutputSlot: bind the place to the entry's
                         // output variable name (`_out0` or struct-field
@@ -2755,6 +2780,30 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                     // Subscripts and fields of an addressable array remain
                                     // addressable when retained as lexical aliases.
                                     self.addressable.insert(expr.clone());
+                                    if self.immutable_addresses.contains(&base) {
+                                        self.immutable_addresses.insert(expr.clone());
+                                    }
+                                    if self.immutable_addresses.contains(&expr)
+                                        && !self.inline_values.contains(&result)
+                                        && !matches!(
+                                            self.value_map.get(&result),
+                                            Some(ValueBinding::Variable(_))
+                                        )
+                                    {
+                                        // Retain the address across nested scopes without copying
+                                        // an immutable row. The pointer freezes its index here.
+                                        let pointer = wgsl_var(result);
+                                        writeln!(
+                                            output,
+                                            "{}let {pointer} = &{expr};",
+                                            self.ctx.indent_str()
+                                        )?;
+                                        let alias = format!("(*{pointer})");
+                                        self.addressable.insert(alias.clone());
+                                        self.immutable_addresses.insert(alias.clone());
+                                        self.value_map.insert(result, ValueBinding::Alias(alias));
+                                        continue;
+                                    }
                                 }
                             }
                             self.emit_alias_or_binding(output, result, expr)?;
@@ -3491,6 +3540,11 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         .map(|&value| self.get_value(value).map(|v| format!("u32({v})")))
                         .collect::<Result<Vec<_>>>()?;
                     if inherited {
+                        if let Some(parent) = operands[count].as_ssa() {
+                            if let Some(name) = self.workgroup_view_name.get(&parent).cloned() {
+                                self.workgroup_view_name.insert(result_id, name);
+                            }
+                        }
                         let parent = self.get_value(operands[count])?;
                         fields[0] = format!("({parent}[0] + {})", fields[0]);
                     }
