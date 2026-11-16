@@ -1,11 +1,9 @@
 # Tinyporto startup and generated-code investigation
 
-These investigation notes were supplied on September 27, 2026. The measurements
-describe the 30,128-instruction Tinyporto snapshot, not the unfinished expression-DAG
-implementation in this branch. The targeted cleanup described here was an
+These historical investigation notes were supplied on September 27, 2026. The
+measurements describe the 30,128-instruction Tinyporto snapshot. The targeted cleanup was an
 experiment on generated SPIR-V; it did not change production compiler or app code.
-See [the scalar-port checkpoint](spirv-reuse-wip-20260926.md) for the separate
-implementation status and the reproducible source comparison.
+See the [current compiler pipeline](../README.md#egglog-passes) for its implementation.
 
 ## Startup
 
