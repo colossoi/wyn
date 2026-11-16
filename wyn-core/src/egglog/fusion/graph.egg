@@ -256,6 +256,9 @@
 (rule ((PlacementSite producer scope body) (PlacementSite producer other target) (!= scope other) (BranchOperation scope) (BranchOperation other)
        (= condition (Input scope 0)) (= condition (Input other 0))) ((set (PlacementUnsafe producer scope body) true)) :ruleset placement-legality)
 ; Copy only conditional demands; a value needed in both arms stays shared.
+; Keep cheap work where the hoister would put it instead of repeatedly cloning it.
+(rule ((PlacementSite producer scope body) (BranchOperation scope) (= work (OperationWork producer)) (<= work (bigint 4)))
+      ((set (PlacementUnsafe producer scope body) true)) :ruleset placement-legality)
 (rule ((PlacementSite producer scope body) (BranchOperation scope) (PlacementDemand producer region) (= (PlacementGuarded producer region) false))
       ((set (PlacementUnsafe producer scope body) true)) :ruleset placement-legality)
 (rule ((PlacementSite producer scope body) (BranchOperation scope) (= other (ControlRegion scope edge)) (!= body other)

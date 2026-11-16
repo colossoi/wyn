@@ -44,6 +44,8 @@ fn placement_uses_complete_demand_and_effect_proofs() {
     .unwrap();
     for (extra, sinks) in [
         ("", true),
+        ("(set (OperationWork (OperationId 1)) (bigint 4))", false),
+        ("(set (OperationWork (OperationId 1)) (bigint 5))", true),
         ("(OperationUse (OperationId 2) (ValueNameRef (ValueId 1)))", true),
         ("(DirectOperationUse (OperationId 99) (ValueNameRef (ValueId 1))) (set (OperationRegion (OperationId 99)) (RegionId 99))", true),
         ("(OperationWrite (OperationId 1) (ExternalMemory))", false),

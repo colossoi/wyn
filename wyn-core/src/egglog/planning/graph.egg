@@ -16,7 +16,6 @@
 (relation FreshArray (ValueName))
 (function LocalLoop (OperationKey) bool :merge (or old new))
 (function LoopStateBytes (OperationKey i64) BigInt :no-merge)
-(function OperationWork (OperationKey) BigInt :no-merge)
 (function RegionWorkPrefix (RegionKey OperationKey) BigInt :no-merge)
 (function RegionWork (RegionKey) BigInt :no-merge)
 (function DomainWork (Domain i64) BigInt :no-merge)

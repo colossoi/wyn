@@ -79,6 +79,7 @@
 (relation Operation (OperationKey))
 (relation Region (RegionKey))
 (function InstructionWork (OperationKey) i64 :no-merge)
+(function OperationWork (OperationKey) BigInt :no-merge)
 (function OperationSpan (OperationKey) SourceSpan :no-merge)
 (function OperationPayload (OperationKey) OperationCode :no-merge)
 (function OperationRegion (OperationKey) RegionKey :no-merge)
