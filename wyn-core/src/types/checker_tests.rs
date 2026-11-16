@@ -3044,8 +3044,7 @@ def test: i32 = add_first([1, 2, 3], [4, 5])
 // Abstract-variant array must typecheck cleanly (length, index, slice,
 // passing to a size-poly helper). The previous Composite pinning froze
 // the consumer signature against Composite before the producer's
-// representation existed — see issues/slice-view-provenance.md and
-// `ssa::backend_validation`.
+// representation existed; `ssa::backend_validation` checks the lowered form.
 
 #[test]
 fn filter_result_typechecks_in_let_binding() {
