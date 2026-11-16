@@ -3,8 +3,9 @@
       ((StorageValue value) (ArrayValue value)) :ruleset dataflow-resources)
 (rule ((= revision (AnalysisRevision)) (= (ValueType value) (LogicalValue (ArrayType (ValueArray) extents element))))
       ((ArrayValue value)) :ruleset dataflow-resources)
-(rule ((= revision (AnalysisRevision)) (= name (RegionParameter region slot)))
-      ((ResourceAnchor name)) :ruleset dataflow-resources)
+; Accumulator capabilities inherit their arrays' roots; they are not external inputs.
+(rule ((= revision (AnalysisRevision)) (= (ValueNameRef value) (RegionParameter region slot)))
+      ((ResourceAnchor (ValueNameRef value))) :ruleset dataflow-resources)
 (rule ((= revision (AnalysisRevision)) (CallOperation operation) (= name (Output operation slot)))
       ((ResourceAnchor name)) :ruleset dataflow-resources)
 (rule ((= revision (AnalysisRevision)) (ResourceDemand name) (ResourceAnchor name))

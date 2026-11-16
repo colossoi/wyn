@@ -358,8 +358,7 @@ fn observing_an_intermediate_filter_length_preserves_its_cardinality() {
 
 #[test]
 fn guarded_streams_feed_updates_and_prefixes_without_a_compaction_buffer() {
-    // One workgroup isolates stream fusion from multi-dispatch scheduling.
-    // Runtime-size counterparts are memory_ir_parallel_{guarded_write,packed_prefix}.wyn.
+    // Both fixed and runtime domains preserve the callback guard without packing an intermediate.
     for (source, stages) in [
         (
             "entry main(xs:[17]i32) [3]i32=let ys=filter(|x|x!=0,xs) let dest=[-1,-1,-1]
@@ -370,8 +369,15 @@ fn guarded_streams_feed_updates_and_prefixes_without_a_compaction_buffer() {
             "entry main(xs:[17]i32) []i32=map(|x|x*2,scan((+),0,map(|x|100/x,filter(|x|x!=0,xs))))",
             1,
         ),
-    ] {
-        let artifact = compile(source);
+    ]
+    .into_iter()
+    .flat_map(|(source, stages)| {
+        [
+            (source.to_owned(), stages),
+            (source.replace("[17]", "[]"), stages),
+        ]
+    }) {
+        let artifact = compile(&source);
         artifact.stages(stages);
         let output = artifact.result(0);
         let payload_buffers: Vec<_> = artifact
@@ -710,6 +716,31 @@ fn pointwise_scan_consumers_share_the_final_prefix_dispatch() {
                     "both prefixes and mapped values complete in the last dispatch"
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn packed_prefix_epilogues_preserve_retained_inputs_and_changed_elements() {
+    for source in [
+        "entry main(xs:[17]i32) ([]i32,[]i32)=let p=scan((+),0,filter(|x|x!=0,xs)) in (p,map(|x|x*2,p))",
+        "entry main(xs:[]i32) ([]i32,[]i32)=let p=scan((+),0,filter(|x|x!=0,xs)) in (p,map(|x|x*2,p))",
+        "entry main(xs:[]i32) []bool=map(|x|x>0,scan((+),0,filter(|x|x!=0,xs)))",
+    ] {
+        let artifact = compile(source);
+        artifact.stages(1);
+        if artifact.interface.source_results.len() == 2 {
+            assert_ne!(
+                artifact.result(0),
+                artifact.result(1),
+                "retained prefixes cannot be overwritten"
+            );
+        }
+        for result in &artifact.interface.source_results {
+            assert!(
+                result.shape.expressions().iter().all(|extent| constant(extent).is_none()),
+                "packed result lengths are runtime values, not capacities"
+            );
         }
     }
 }

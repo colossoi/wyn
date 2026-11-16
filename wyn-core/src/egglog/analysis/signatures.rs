@@ -116,8 +116,11 @@ pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), Optimi
         }
         for clause in 0..clauses {
             let kind = query.required("ResultKindOf", (operation, clause))?;
-            if query.enode("Compacted", kind)?.is_some() {
-                let predicate = query.required("ResultPredicate", (operation, clause))?;
+            let predicate = query.lookup("ResultPredicate", (operation, clause))?;
+            if query.enode("Compacted", kind)?.is_some() && predicate.is_none() {
+                return Err(output_error("compacted result has no predicate"));
+            }
+            if let Some(predicate) = predicate {
                 let Some(predicate) = query.constructor("ValueNameRef", predicate)? else {
                     return Err(output_error("compact predicate has no value identity"));
                 };

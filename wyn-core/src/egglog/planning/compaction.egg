@@ -66,8 +66,13 @@
       ((CompactCandidate first second clause)) :ruleset compact-select)
 (rule ((= revision (AnalysisRevision)) (CompactPair first second clause) (= (CompactSafe first second) true)
        (= (PointwiseLegal first second) true) (PointwiseLoad first second load)
-       (= (ResultKindOf second 0) (Folded (Total))) (= count (ResultNeutralCount second 0))
+       (= (ResultKindOf second 0) (Folded kind)) (= count (ResultNeutralCount second 0))
        (= count (ResultValueCount second 0)) (CompactMaskPrefix first second count))
+      ((CompactCandidate first second clause)) :ruleset compact-select)
+
+(rule ((= revision (AnalysisRevision)) (CompactPair first second clause) (= (CompactSafe first second) true)
+       (= (PointwiseLegal first second) true) (PointwiseLoad first second load)
+       (= (ResultKindOf second 0) (Contributed)))
       ((CompactCandidate first second clause)) :ruleset compact-select)
 
 ; A compact clause used only for its outer length becomes a count reduction.

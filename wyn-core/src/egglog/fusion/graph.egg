@@ -194,8 +194,13 @@
 (rule ((= revision (AnalysisRevision)) (AccumulatorFuseSelected first second) (OperationCertificate second name))
       ((OperationCertificate first name)) :ruleset graph-fusion-apply)
 
+(relation SinkPath (OperationKey OperationKey))
 (relation SinkProducer (OperationKey OperationKey RegionKey))
-(rule ((= revision (AnalysisRevision)) (NextOperation producer scope) (ParallelOperation producer)
+(rule ((= revision (AnalysisRevision)) (NextOperation first next) (ParallelOperation first))
+      ((SinkPath first next)) :ruleset graph-fusion)
+(rule ((= revision (AnalysisRevision)) (SinkPath first middle) (= (PureOperation middle) true) (NextOperation middle next))
+      ((SinkPath first next)) :ruleset graph-fusion)
+(rule ((= revision (AnalysisRevision)) (SinkPath producer scope) (ParallelOperation producer)
        (AccumulatorOperation scope) (= body (ControlRegion scope 0)))
       ((SinkProducer producer scope body)) :ruleset graph-fusion)
 (rule ((= revision (AnalysisRevision)) (NextOperation anchor operation) (ParallelOperation anchor)
@@ -222,3 +227,16 @@
       ((set (FusionUnsafe first second) true)) :ruleset graph-fusion-legality)
 (rule ((= revision (AnalysisRevision)) (FusionChildRegion first second region) (EndDemand region name) (= name (Output first slot)))
       ((set (FusionUnsafe first second) true)) :ruleset graph-fusion-legality)
+
+; A read-only producer may stream into fresh accumulator storage: no write becomes
+; observable before the enclosing accumulator scope returns.
+(function FusionPrivateWrites (OperationKey OperationKey) bool :merge (and old new))
+(rule ((= revision (AnalysisRevision)) (ParallelPair first second) (FusionForwardLoad first second load value)
+       (= (ResultCount second) 1) (= (ResultKindOf second 0) (Contributed)))
+      ((set (FusionPrivateWrites first second) true)) :ruleset graph-fusion)
+(rule ((= revision (AnalysisRevision)) (= flag (FusionPrivateWrites first second)) (OperationWrite first resource))
+      ((set (FusionPrivateWrites first second) false)) :ruleset graph-fusion-legality)
+(rule ((= revision (AnalysisRevision)) (= flag (FusionPrivateWrites first second)) (OperationWrite second (ExternalMemory)))
+      ((set (FusionPrivateWrites first second) false)) :ruleset graph-fusion-legality)
+(rule ((= revision (AnalysisRevision)) (= flag (FusionPrivateWrites first second)) (OperationRead first resource) (OperationWrite second resource))
+      ((set (FusionPrivateWrites first second) false)) :ruleset graph-fusion-legality)

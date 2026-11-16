@@ -58,20 +58,30 @@ fn consumer(graph: &mut EGraph, first: Value, second: Value, clause: i64) -> Res
     })?;
     let collected = query.enode("Collected", query.required("ResultKindOf", (second, 0_i64))?)?.is_some();
     let outputs = analysis::count(query, "OutputCount", second)?;
-    if collected {
+    let mut prefixes = Vec::new();
+    for slot in 0..outputs {
+        if query.enode("PrefixOutput", query.required("OutputRole", (second, slot))?)?.is_some() {
+            prefixes.push(slot);
+        }
+    }
+    let packed = if collected { (0..outputs).collect() } else { prefixes };
+    if !packed.is_empty() {
         graph.update(|mut sink| {
-            let kind = sink.add("Compacted", RawValues(Vec::new()))?;
-            sink.remove("ResultKindOf", (second, 0_i64))?;
-            sink.set("ResultKindOf", (second, 0_i64), kind)?;
+            if collected {
+                let kind = sink.add("Compacted", RawValues(Vec::new()))?;
+                sink.remove("ResultKindOf", (second, 0_i64))?;
+                sink.set("ResultKindOf", (second, 0_i64), kind)?;
+            }
             sink.set("ResultPredicate", (second, 0_i64), predicate)?;
             let role = sink.add("CompactedOutput", RawValues(Vec::new()))?;
-            for slot in 0..outputs {
+            for slot in packed {
                 sink.remove("OutputRole", (second, slot))?;
                 sink.set("OutputRole", (second, slot), role)?;
             }
             Ok(())
         })?;
-    } else {
+    }
+    if !collected {
         mask(graph, second, predicate)?;
     }
     graph.update(|mut sink| {
@@ -100,13 +110,39 @@ fn mask(graph: &mut EGraph, operation: Value, predicate: Value) -> Result<(), Op
     let mut neutral = Vec::new();
     let mut types = Vec::new();
     for slot in 0..count {
-        let value = query.name(query.required("ResultValue", (operation, 0_i64, slot))?)?;
-        contributions.push(Name::Value(value));
-        neutral.push(Name::Value(
-            query.name(query.required("ResultNeutral", (operation, 0_i64, slot))?)?,
-        ));
-        let info = query.required("ValueType", value)?;
-        types.push((info, query.fields("ScalarInfo", info)?[0]));
+        let result = query.required("ResultValue", (operation, 0_i64, slot))?;
+        if let Some(fields) = query.enode("AccNameRef", result)? {
+            let token = fields[0];
+            let capability = query.required("TokenCapability", token)?;
+            let mut incoming = None;
+            query.for_each("RegionCapture", |row| {
+                if row[0] == yes {
+                    if let Some(fields) = query.enode("AccNameRef", row[1])? {
+                        if query.required("TokenCapability", fields[0])? == capability {
+                            incoming = Some(fields[0]);
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+            let Some(incoming) = incoming else {
+                return Err(OptimizeError::Output(
+                    "guarded contribution has no incoming capability".into(),
+                ));
+            };
+            contributions.push(Name::Accumulator(token));
+            neutral.push(Name::Accumulator(incoming));
+            let info = query.required("AccumulatorType", token)?;
+            types.push((Name::Accumulator(token), info, info));
+        } else {
+            let value = query.name(result)?;
+            contributions.push(Name::Value(value));
+            neutral.push(Name::Value(
+                query.name(query.required("ResultNeutral", (operation, 0_i64, slot))?)?,
+            ));
+            let info = query.required("ValueType", value)?;
+            types.push((Name::Value(value), info, query.fields("ScalarInfo", info)?[0]));
+        }
     }
     graph.update(|mut sink| {
         Ok((|| -> Result<(), OptimizeError> {
@@ -143,15 +179,24 @@ fn mask(graph: &mut EGraph, operation: Value, predicate: Value) -> Result<(), Op
                 sink.set("ControlRole", (id, slot), role)?;
             }
             let mut outputs = Vec::new();
-            for (slot, (info, element)) in types.into_iter().enumerate() {
-                let value = sink.add("DerivedValue", (operation, 91_i64, slot as i64))?;
-                sink.set("ValueType", value, info)?;
-                outputs.push(Name::Value(value));
-                let returns = sink.add("ReturnScalar", element)?;
+            for (slot, (original, info, returns)) in types.into_iter().enumerate() {
+                let (name, returns) = match original {
+                    Name::Value(_) => {
+                        let value = sink.add("DerivedValue", (operation, 91_i64, slot as i64))?;
+                        sink.set("ValueType", value, info)?;
+                        (Name::Value(value), sink.add("ReturnScalar", returns)?)
+                    }
+                    Name::Accumulator(token) => {
+                        let value = sink.add("ClonedAccumulator", (id, token))?;
+                        sink.set("AccumulatorType", value, info)?;
+                        (Name::Accumulator(value), sink.add("ReturnAccumulator", returns)?)
+                    }
+                };
+                outputs.push(name);
                 for region in [yes, no] {
                     sink.set("RegionReturnType", (region, slot as i64), returns)?;
                 }
-                let name = Name::Value(value).fact(&mut sink)?;
+                let name = name.fact(&mut sink)?;
                 sink.remove("ResultValue", (operation, 0_i64, slot as i64))?;
                 sink.set("ResultValue", (operation, 0_i64, slot as i64), name)?;
             }
@@ -177,6 +222,28 @@ fn count(graph: &mut EGraph, operation: Value, clause: i64, output_slot: i64) ->
         }
         Ok(())
     })?;
+    let mut packed = None;
+    query.for_function("OutputRole", |keys, role| {
+        if keys[0] == operation && query.enode("CompactedOutput", role)?.is_some() {
+            let other = query.required("OutputClause", (operation, keys[1]))?;
+            if query.enode("Folded", query.required("ResultKindOf", (operation, other))?)?.is_some()
+                && query.lookup("ResultPredicate", (operation, other))? == Some(predicate)
+            {
+                packed = Some(query.required("Output", (operation, keys[1]))?);
+            }
+        }
+        Ok(())
+    })?;
+    if let Some(packed) = packed {
+        graph.update(|mut sink| {
+            for &(length, _) in &lengths {
+                sink.remove("Input", (length, 0_i64))?;
+                sink.set("Input", (length, 0_i64), packed)?;
+            }
+            Ok(())
+        })?;
+        return Ok(());
+    }
     lengths.sort_by_key(|&(operation, _)| operation);
     let Some(&(_, output)) = lengths.first() else {
         return Ok(());

@@ -120,6 +120,7 @@
 (function ResultCount (OperationKey) i64 :no-merge)
 (function ResultValueCount (OperationKey i64) i64 :no-merge)
 (function ResultValue (OperationKey i64 i64) Name :no-merge)
+; Compacted values and packed scan prefixes share the lane predicate.
 (function ResultPredicate (OperationKey i64) ValueName :no-merge)
 (function ResultReducer (OperationKey i64) RegionKey :no-merge)
 (function ResultNeutral (OperationKey i64 i64) Name :no-merge)

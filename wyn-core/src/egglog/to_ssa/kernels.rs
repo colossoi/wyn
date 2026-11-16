@@ -27,12 +27,15 @@ struct Fold {
     neutral: Vec<Typed>,
     prefixes: Vec<Value>,
     totals: Vec<Value>,
+    compact: Option<usize>,
 }
 
 // Physical SSA operands only; callback bodies remain in the common IR.
 pub(super) enum CollectivePhase<'a> {
     Epilogue {
         range: (Typed, Typed),
+        cooperative: bool,
+        capacity: Value,
     },
     Chunks {
         range: (Typed, Typed),
@@ -170,12 +173,26 @@ impl Body<'_, '_, '_> {
                     &[operation, self.query().0.base_to_value(clause)],
                     count,
                 )?;
+                let mut prefixes = output_names("PrefixOutput")?;
+                let packed = output_names("CompactedOutput")?;
+                let compact = if packed.is_empty() {
+                    None
+                } else {
+                    prefixes.extend(packed);
+                    let index = compacts.len();
+                    compacts.push((
+                        self.query().required("ResultPredicate", (operation, clause))?,
+                        vec![],
+                    ));
+                    Some(index)
+                };
                 fold_data.push((
+                    compact,
                     mode,
                     reducer,
                     neutral,
                     values,
-                    output_names("PrefixOutput")?,
+                    prefixes,
                     output_names("TotalOutput")?,
                 ));
             } else if self.query().enode("Contributed", kind)?.is_some() {
@@ -184,7 +201,7 @@ impl Body<'_, '_, '_> {
                 return Err(error("unknown collective result role"));
             }
         }
-        for (mode, reducer, atoms, values, prefixes, totals) in fold_data {
+        for (compact, mode, reducer, atoms, values, prefixes, totals) in fold_data {
             let parameters = self.query().sequence("RegionParameter", reducer)?;
             let mut neutral = Vec::new();
             for (i, atom) in atoms.into_iter().enumerate() {
@@ -221,6 +238,7 @@ impl Body<'_, '_, '_> {
                 neutral.push(self.canonical_value(value, &ty)?);
             }
             folds.push(Fold {
+                compact,
                 mode,
                 reducer,
                 values,
@@ -297,6 +315,10 @@ impl Body<'_, '_, '_> {
                 let Some(axis) = axes.first() else {
                     return Err(error("collection requires an axis"));
                 };
+                if let Some(storage) = self.reuse_storage(name, &ty)? {
+                    self.collections.insert(name, Collection::Allocated(storage));
+                    continue;
+                }
                 let shape = if dispatch.is_some() {
                     let rank = if rank > 1 && dimensions[1..].contains(&None) { rank } else { 1 };
                     let mut shape = Vec::new();
@@ -305,7 +327,10 @@ impl Body<'_, '_, '_> {
                         let length = host::guarded_index(
                             self.query(),
                             &self.host_values,
-                            axis.extent,
+                            match &phase {
+                                Some(CollectivePhase::Epilogue { capacity, .. }) => *capacity,
+                                _ => axis.extent,
+                            },
                             self.guard.as_ref(),
                         )?;
                         shape.push((count, Expr::Max(Box::new(length), Box::new(Expr::Integer(0)))));
@@ -358,7 +383,9 @@ impl Body<'_, '_, '_> {
                                     state[compacts.len()..].to_vec(),
                                 )?;
                                 let mut next = Vec::new();
-                                for ((predicate, outputs), count) in compacts.iter().zip(&state) {
+                                for (compact, ((predicate, outputs), count)) in
+                                    compacts.iter().zip(&state).enumerate()
+                                {
                                     let keep = body.atom(*predicate)?;
                                     let count = body.branch(
                                         keep,
@@ -370,6 +397,27 @@ impl Body<'_, '_, '_> {
                                                     ));
                                                 };
                                                 body.write_array(name, &[count.clone()], value)?;
+                                            }
+                                            let mut offset = 0;
+                                            for fold in &folds {
+                                                if fold.compact == Some(compact) {
+                                                    let prefix = if matches!(
+                                                        fold.mode,
+                                                        FoldMode::Scan { exclusive: true }
+                                                    ) {
+                                                        &state[compacts.len()..]
+                                                    } else {
+                                                        &folded
+                                                    };
+                                                    for (i, &name) in fold.prefixes.iter().enumerate() {
+                                                        body.write_array(
+                                                            name,
+                                                            &[count.clone()],
+                                                            prefix[offset + i].clone(),
+                                                        )?;
+                                                    }
+                                                }
+                                                offset += fold.neutral.len();
                                             }
                                             body.binary(BinaryOperator::Add, count.clone(), Self::number(1))
                                         },
@@ -432,6 +480,18 @@ impl Body<'_, '_, '_> {
             }
             let mut offset = compacts.len();
             for fold in &folds {
+                if let Some(compact) = fold.compact {
+                    for &name in &fold.prefixes {
+                        let array = self.named(name)?;
+                        let view = self.slice_array(
+                            array,
+                            Self::number(0),
+                            counts[compact].clone(),
+                            Self::number(1),
+                        )?;
+                        self.values.insert(name, view);
+                    }
+                }
                 for (i, &name) in fold.totals.iter().enumerate() {
                     if !collected.contains(&name) {
                         let value = counts[offset + i].clone();
@@ -510,17 +570,21 @@ impl Body<'_, '_, '_> {
         }
         // The same lane owns each prefix and its pointwise consumer, so no
         // cross-workgroup visibility or additional barrier is required.
-        let scalar_results = if let Some(CollectivePhase::Epilogue { range }) = &phase {
+        let scalar_results = if let Some(CollectivePhase::Epilogue {
+            range, cooperative, ..
+        }) = &phase
+        {
             let Some(dispatch) = dispatch else {
                 return Err(error("scan epilogue dispatch missing"));
             };
             let axis = axes[0];
-            let lane = self.local_id()?;
+            let lane = if *cooperative { self.local_id()? } else { Self::number(0) };
+            let step = if *cooperative { dispatch.width.get() } else { 1 };
             let start = self.binary(BinaryOperator::Add, range.0.clone(), lane)?;
             self.counted(
                 start,
                 range.1.clone(),
-                Self::number(dispatch.width.get()),
+                Self::number(step),
                 vec![],
                 |body_lower, index, _| {
                     body_lower.values.insert(axis.name, index.clone());
@@ -623,7 +687,16 @@ impl Body<'_, '_, '_> {
         for &binding in pattern {
             if let Some((name, _)) = runtime_binding(self.query(), binding)? {
                 if collected.contains(&name) {
-                    let array = self.named(name)?;
+                    let mut array = self.named(name)?;
+                    if let Some(CollectivePhase::Epilogue {
+                        range,
+                        cooperative: false,
+                        ..
+                    }) = &phase
+                    {
+                        array =
+                            self.slice_array(array, Self::number(0), range.1.clone(), Self::number(1))?;
+                    }
                     values.push(self.snapshot(array)?);
                 } else {
                     let Some(value) = scalars.next() else {
@@ -882,8 +955,10 @@ impl Body<'_, '_, '_> {
             } else {
                 &combined
             };
-            for (&output, value) in fold.prefixes.iter().zip(prefix) {
-                self.write_array(output, &coordinates, value.clone())?;
+            if fold.compact.is_none() {
+                for (&output, value) in fold.prefixes.iter().zip(prefix) {
+                    self.write_array(output, &coordinates, value.clone())?;
+                }
             }
             next.extend(combined);
         }

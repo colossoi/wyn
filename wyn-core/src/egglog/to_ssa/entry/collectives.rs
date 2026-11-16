@@ -10,6 +10,7 @@ impl EntryEmission<'_, '_, '_> {
         after: &LookupSet<Value>,
         terminal: bool,
         epilogue: Option<Value>,
+        preparation: &[Value],
     ) -> Result<bool, OptimizeError> {
         let query = self.body.query();
         let domain = query.required("OperationDomain", statement)?;
@@ -39,6 +40,9 @@ impl EntryEmission<'_, '_, '_> {
                 }
                 return Ok(false);
             };
+            if query.lookup("ResultPredicate", (statement, clause))?.is_some() {
+                return Ok(false);
+            }
             work.scan |= query.enode("Total", fold[0])?.is_none();
             let reducer = query.required("ResultReducer", (statement, clause))?;
             work.combine_ops = work.combine_ops.saturating_add(region_work(query, reducer)?);
@@ -203,7 +207,8 @@ impl EntryEmission<'_, '_, '_> {
                 }),
             )?;
             if let Some(epilogue) = epilogue {
-                self.scan_epilogue(epilogue, range)?;
+                self.body.statements(preparation)?;
+                self.scan_epilogue(epilogue, range, true, axis.extent)?;
             }
             self.pending = true;
             self.dispatch_override = Some((
@@ -226,10 +231,19 @@ impl EntryEmission<'_, '_, '_> {
         &mut self,
         statement: Value,
         range: (Typed, Typed),
+        cooperative: bool,
+        capacity: Value,
     ) -> Result<(), OptimizeError> {
         let pattern = self.body.query().sequence("Output", statement)?;
-        let values =
-            self.body.parallel_phase(statement, &pattern, Some(CollectivePhase::Epilogue { range }))?;
+        let values = self.body.parallel_phase(
+            statement,
+            &pattern,
+            Some(CollectivePhase::Epilogue {
+                range,
+                cooperative,
+                capacity,
+            }),
+        )?;
         self.body.bind(&pattern, values)
     }
 

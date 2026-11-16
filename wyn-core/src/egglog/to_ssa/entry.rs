@@ -1283,7 +1283,7 @@ impl EntryEmission<'_, '_, '_> {
             self.body.query().0.value_to_base::<bool>(generated) && self.kind == EntryKind::Compute;
         let mut grouped = None;
         for (i, &statement) in statements.iter().enumerate() {
-            if grouped == Some(statement) {
+            if grouped.is_some_and(|end| i <= end) {
                 continue;
             }
             let mut live = statement_names(self.body.query(), &statements[i + 1..])?;
@@ -1317,16 +1317,16 @@ impl EntryEmission<'_, '_, '_> {
                 }
                 let lane = self.body.query().required("ControlRegion", (statement, 0_i64))?;
                 let mut captures = names_in(self.body.query(), "RegionCapture", lane)?;
-                let epilogue =
-                    if generated && self.body.compiler.execution.dispatch(statement)?.groups.is_none() {
-                        if let Some(&next) = statements.get(i + 1) {
-                            self.body.query().contains("ScanEpilogue", (statement, next))?.then_some(next)
-                        } else {
-                            None
+                let mut epilogue_index = None;
+                if generated && self.body.compiler.execution.dispatch(statement)?.groups.is_none() {
+                    for (next_index, &next) in statements.iter().enumerate().skip(i + 1) {
+                        if self.body.query().contains("ScanEpilogue", (statement, next))? {
+                            epilogue_index = Some(next_index);
+                            break;
                         }
-                    } else {
-                        None
-                    };
+                    }
+                }
+                let epilogue = epilogue_index.map(|index| statements[index]);
                 if let Some(next) = epilogue {
                     let lane = self.body.query().required("ControlRegion", (next, 0_i64))?;
                     captures.extend(names_in(self.body.query(), "RegionCapture", lane)?);
@@ -1337,7 +1337,7 @@ impl EntryEmission<'_, '_, '_> {
                 // this dispatch; memory readers still need a dispatch barrier.
                 let last =
                     terminal
-                        && statements[i + 1 + usize::from(epilogue.is_some())..].iter().try_fold(
+                        && statements[epilogue_index.map_or(i + 1, |index| index + 1)..].iter().try_fold(
                             true,
                             |safe, &next| -> Result<_, OptimizeError> {
                                 Ok(safe
@@ -1347,16 +1347,25 @@ impl EntryEmission<'_, '_, '_> {
                                     && self.body.compiler.execution.dispatch(next).is_err())
                             },
                         )?;
-                grouped = epilogue;
-                if self.chunked_collective(statement, &live, last, epilogue)? {
+                grouped = epilogue_index;
+                let preparation = &statements[i + 1..epilogue_index.unwrap_or(i + 1)];
+                if self.chunked_collective(statement, &live, last, epilogue, preparation)? {
                     continue;
                 }
                 self.body.statement(statement)?;
                 if let Some(next) = epilogue {
-                    let domain = self.body.query().required("OperationDomain", statement)?;
+                    self.body.statements(preparation)?;
+                    let domain = self.body.query().required("OperationDomain", next)?;
                     let extent = self.body.query().required("DomainExtent", (domain, 0_i64))?;
                     let count = self.body.index_expression(extent)?;
-                    self.scan_epilogue(next, (Body::number(0), count))?;
+                    let mut packed = false;
+                    self.body.query().for_function("ResultPredicate", |keys, _| {
+                        packed |= keys[0] == statement;
+                        Ok(())
+                    })?;
+                    let source_domain = self.body.query().required("OperationDomain", statement)?;
+                    let capacity = self.body.query().required("DomainExtent", (source_domain, 0_i64))?;
+                    self.scan_epilogue(next, (Body::number(0), count), !packed, capacity)?;
                 }
                 self.pending = true;
                 if !last {

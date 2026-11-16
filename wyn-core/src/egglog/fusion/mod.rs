@@ -44,7 +44,9 @@ fn clear(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "FusionNested",
         "FusionCollective",
         "FusionHasForwardedLoad",
+        "FusionPrivateWrites",
         "SinkProducer",
+        "SinkPath",
         "AccumulatorPair",
         "AccumulatorFuseSelected",
         "FusionGroupBase",
@@ -65,7 +67,12 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
         let query = Query(graph);
         let mut selected = None;
         query.for_each("FuseCandidate", |row| {
-            if selected.is_none() && !query.contains("OperationsConflict", (row[0], row[1]))? {
+            if selected.is_none()
+                && (!query.contains("OperationsConflict", (row[0], row[1]))?
+                    || query
+                        .lookup("FusionPrivateWrites", (row[0], row[1]))?
+                        .is_some_and(|safe| query.0.value_to_base::<bool>(safe)))
+            {
                 selected = Some((row[0], row[1]));
             }
             Ok(())
@@ -113,14 +120,39 @@ fn sink_producer(graph: &mut EGraph) -> Result<bool, OptimizeError> {
         let producer = row[0];
         let scope = row[1];
         let body = row[2];
-        let outputs = query.sequence("Output", producer)?.into_iter().collect::<LookupSet<_>>();
+        let mut outputs = query.sequence("Output", producer)?.into_iter().collect::<LookupSet<_>>();
+        let mut moved = vec![producer];
+        let parent = query.required("OperationRegion", producer)?;
+        for operation in query.operations(parent)? {
+            if operation == scope {
+                break;
+            }
+            if operation == producer {
+                continue;
+            }
+            let mut used = false;
+            query.for_each("DirectOperationUse", |row| {
+                used |= row[0] == operation && outputs.contains(&row[1]);
+                Ok(())
+            })?;
+            if used
+                && query
+                    .lookup("PureOperation", operation)?
+                    .is_some_and(|pure| query.0.value_to_base::<bool>(pure))
+                && query.contains("DiscardableOperation", operation)?
+                && query.contains("RepeatableOperation", operation)?
+            {
+                moved.push(operation);
+                outputs.extend(query.sequence("Output", operation)?);
+            }
+        }
         let mut safe = true;
         query.for_each("OperationWrite", |write| {
             safe &= write[0] != producer;
             Ok(())
         })?;
         query.for_each("OperationUse", |use_| {
-            if outputs.contains(&use_[1]) && use_[0] != scope {
+            if outputs.contains(&use_[1]) && use_[0] != scope && !moved.contains(&use_[0]) {
                 let region = query.required("OperationRegion", use_[0])?;
                 safe &= query.contains("FlowScopeAncestor", (body, region))?;
             }
@@ -142,15 +174,17 @@ fn sink_producer(graph: &mut EGraph) -> Result<bool, OptimizeError> {
         })?;
         if safe {
             if let Some(&first) = query.operations(body)?.first() {
-                selected = Some((producer, first));
+                selected = Some((moved, first));
             }
         }
         Ok(())
     })?;
-    let Some((producer, first)) = selected else {
+    let Some((moved, first)) = selected else {
         return Ok(false);
     };
-    edit::move_before(graph, producer, first)?;
+    for operation in moved {
+        edit::move_before(graph, operation, first)?;
+    }
     Ok(true)
 }
 

@@ -63,6 +63,8 @@ pub(super) fn analyze(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "ReuseLegal",
         "ReuseSnapshot",
         "EpiloguePair",
+        "EpiloguePath",
+        "EpilogueReuse",
         "PointwisePair",
         "PointwiseSource",
         "EpilogueDomainPrefix",
