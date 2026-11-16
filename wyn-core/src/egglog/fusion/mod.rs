@@ -165,7 +165,6 @@ fn sink_producer(graph: &mut EGraph) -> Result<bool, OptimizeError> {
         edit::move_into(graph, operation, body, first)?;
     }
     if copy {
-        graph.parse_and_run_program(None, "(run-schedule (saturate dataflow-scopes flow-scopes))")?;
         let cloned = edit::clone_region(graph, scope, body, &[])?;
         graph.update(|mut sink| {
             sink.remove("ControlRegion", (scope, edge))?;

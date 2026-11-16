@@ -1,8 +1,8 @@
 //! Scoped wall-clock timings for egglog passes and their sub-passes.
 use egglog_engine::{CommandOutput, EGraph};
 use std::time::Instant;
+pub(super) use wyn_base::timing::span;
 use wyn_base::timing::Span;
-pub(super) use wyn_base::timing::{span, time};
 
 /// Snapshot every registered table, including empty ones, without running rules.
 pub(super) fn tables(graph: &EGraph, phase: &str) {

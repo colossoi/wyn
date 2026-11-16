@@ -259,3 +259,34 @@ live in `tests/compiler/library/` or reuse existing testfiles. Backend variants
 share source preparation and SSA; multiple input values reuse one emitted program.
 It does not execute GPU shaders. `host_stage_contracts.wyn` groups ten related
 storage and dispatch cases under the existing emitted-artifact harness.
+
+## Timing helper inlining
+
+`cases/tinyporto_compile.wyn` is a bounded workload derived from the standalone
+TinyPorto camera example. Twelve camera draws share record-taking helpers,
+exercising repeated helper inlining and graph analysis. Its fixture checks all
+24 shader entry points and all twelve generated Rust host functions.
+
+Build the release compiler first, then time only the compile (PowerShell, from
+the repository root):
+
+```powershell
+cargo build --release -p wyn --bin wyn
+New-Item -ItemType Directory -Force tmp/tinyporto-compile | Out-Null
+Measure-Command {
+  & target/release/wyn.exe build tests/compiler/cases/tinyporto_compile.wyn `
+    --graphics -O --target spirv --target-double rust-wgpu -v `
+    -o tmp/tinyporto-compile/main.spv
+}
+```
+
+At compiler revision `6fc999f6`, this took about 8.6 seconds on the development
+machine, including about 5.5 seconds in the two helper-inlining invocations.
+After separating structural edits and inline eligibility from whole-program
+analysis and scalar candidate discovery, the same fixture took about 4.1 seconds
+in a direct invocation (3.0 seconds reported inside the compiler), including
+0.26 seconds in helper inlining. The inliner ran no full analyses, compared with
+62 before the change. Full analysis first runs
+when the following simplifier needs dependency, liveness, and effect proofs.
+These are reference measurements, not timing assertions. Logs and generated
+artifacts belong under ignored `tmp/` directories.

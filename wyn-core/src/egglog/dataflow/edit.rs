@@ -184,7 +184,7 @@ pub(in crate::egglog) fn replace(
     })?;
     graph.parse_and_run_program(
         None,
-        "(run-schedule (saturate graph-candidates) (saturate graph-needed) (saturate graph-apply))",
+        "(run-schedule (saturate graph-indices graph-substitution-index) (saturate graph-substitution) (saturate graph-apply))",
     )?;
     changed(graph)?;
     Ok(())
@@ -358,9 +358,11 @@ pub(in crate::egglog) fn clone_region(
         "CloneIndexDemand",
         "CloneIndex",
         "CloneShapeDemand",
+        "CloneShapeSlot",
         "CloneShapePrefix",
         "CloneShape",
         "CloneSliceDemand",
+        "CloneSliceSlot",
         "CloneSlicePrefix",
         "CloneSlices",
         "CloneDimDemand",

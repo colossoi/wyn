@@ -62,7 +62,6 @@ pub fn from_tlc(source: &OwnershipApplied) -> Result<Program<'_, Imported>, Opti
 
 /// Simplify regions and fuse parallel statements in the common IR.
 pub fn fuse(mut program: Program<'_, Imported>) -> Result<Program<'_, Fused>, OptimizeError> {
-    timing::time("egglog structural analysis", || analysis::run(&mut program.graph))?;
     memory::inline(&mut program.graph)?;
     memory::simplify(&mut program.graph, false)?;
     planning::analyze(&mut program.graph)?;
@@ -141,11 +140,11 @@ pub fn schedule_with_cost_model(
 
 /// Validate memory bindings before final scalar simplification.
 pub fn prepare_interfaces(
-    mut program: Program<'_, Scheduled>,
+    program: Program<'_, Scheduled>,
 ) -> Result<Program<'_, InterfacesPrepared>, OptimizeError> {
     let _timing = timing::span("egglog interface preparation");
-    memory::validate(&mut program.graph)?;
-    analysis::run(&mut program.graph)?;
+    // Scheduling only changes execution annotations; placement's dataflow proofs remain valid.
+    analysis::validate(&program.graph)?;
     Ok(program.advance(InterfacesPrepared))
 }
 

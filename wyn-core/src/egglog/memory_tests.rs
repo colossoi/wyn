@@ -6,6 +6,115 @@ use crate::types;
 use egglog_engine::{EGraph, RawValues, Write};
 
 #[test]
+fn inlining_does_not_run_scalar_candidate_discovery() -> Result<(), OptimizeError> {
+    let mut graph = test_graph::import("entry main(x:i32) i32=x+x")?;
+    assert!(Query(&graph).first("ScalarPayload")?.is_some());
+    super::inline(&mut graph)?;
+    assert!(Query(&graph).first("CseOperation")?.is_none());
+    Ok(())
+}
+
+#[test]
+fn inlining_preserves_dependent_calls_and_shape_arguments() -> Result<(), OptimizeError> {
+    for reverse in [false, true] {
+        let mut calls = vec![(1, Code::Call), (2, Code::Call), (3, Code::Call)];
+        if reverse {
+            calls.reverse();
+        }
+        calls.push((4, Code::Range));
+        calls.push((5, Code::Uninitialized));
+        let mut graph = test_graph::fixture(&calls, include_str!("tests/inline_arguments.egg"))?;
+        super::inline(&mut graph)?;
+        assert!(
+            Query(&graph).first("FlowLive")?.is_none(),
+            "inlining must not run liveness"
+        );
+        analysis::run(&mut graph)?;
+        analysis::validate(&graph)?;
+        graph.parse_and_run_program(
+            None,
+            r#"
+            (fail (check (LiveOperation call) (CallOperation call)))
+            (check (= (OperationIndex (OperationId 4) 0) (IndexValue (ValueId 0))))
+            (check (= (OperationShape (OperationId 5)) (vec-of (IndexValue (ValueId 0)))))
+            (check (= (RegionYield (RegionId 0) 0) (ValueNameRef (ValueId 3))))
+            (check (= (ValueType (ValueId 0)) (ScalarInfo (ScalarElement (I32)))))
+        "#,
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn structural_cloning_renames_storage_shapes_without_analysis() -> Result<(), OptimizeError> {
+    let mut graph = test_graph::fixture(
+        &[
+            (1, Code::Call),
+            (2, Code::Call),
+            (3, Code::Call),
+            (4, Code::Range),
+            (5, Code::Uninitialized),
+        ],
+        include_str!("tests/inline_arguments.egg"),
+    )?;
+    let query = Query(&graph);
+    assert!(query.first("FlowScopeAncestor")?.is_none());
+    let root = query.constructor("RegionId", 0_i64)?.unwrap();
+    let context = query.constructor("OperationId", 1_i64)?.unwrap();
+    let storage = query.constructor("OperationId", 5_i64)?.unwrap();
+    let arguments = query.sequence("RegionParameter", root)?;
+    edit::clone_region(&mut graph, context, root, &arguments)?;
+    let query = Query(&graph);
+    let cloned = query.constructor("ClonedOperation", (context, storage))?.unwrap();
+    let shape = query.vector(query.required("OperationShape", cloned)?)?;
+    let index = query.fields("IndexValue", shape[0])?[0];
+    let expected = query
+        .constructor(
+            "ClonedValue",
+            (context, query.constructor("ValueId", 2_i64)?.unwrap()),
+        )?
+        .unwrap();
+    assert_eq!(index, expected);
+    assert!(query.first("FlowLive")?.is_none());
+    Ok(())
+}
+
+#[test]
+fn structural_cloning_follows_nested_regions_without_analysis() -> Result<(), OptimizeError> {
+    let mut graph = test_graph::import(
+        "entry main(xs:[]i32,n:i32,m:i32,b:bool) i32=if b then reduce((+),0,xs[0..n]) else m",
+    )?;
+    let query = Query(&graph);
+    assert!(query.first("FlowScopeAncestor")?.is_none());
+    let root = test_graph::root(&graph);
+    let branch = query.first("BranchOperation")?.unwrap()[0];
+    let view = query.first("ViewOperation")?.unwrap()[0];
+    let slices = query.required("OperationSlices", view)?;
+    let returns = query.sequence("RegionYield", root)?;
+    let mut arguments = query.sequence("RegionParameter", root)?;
+    arguments[1] = arguments[2];
+    let cloned_root = edit::clone_region(&mut graph, branch, root, &arguments)?;
+    let query = Query(&graph);
+    let copied_branch = query.constructor("ClonedOperation", (branch, branch))?.unwrap();
+    let original_arm = query.required("ControlRegion", (branch, 0_i64))?;
+    let copied_arm = query.required("ControlRegion", (copied_branch, 0_i64))?;
+    assert_eq!(
+        copied_arm,
+        query.constructor("ClonedRegion", (branch, original_arm))?.unwrap()
+    );
+    let copied_view = query.constructor("ClonedOperation", (branch, view))?.unwrap();
+    assert_eq!(query.required("OperationRegion", copied_view)?, copied_arm);
+    assert_ne!(query.required("OperationSlices", copied_view)?, slices);
+    assert!(query.first("FlowLive")?.is_none());
+    let results = query.sequence("RegionYield", cloned_root)?;
+    let operations = query.operations(cloned_root)?;
+    edit::replace(&mut graph, &returns.into_iter().zip(results).collect::<Vec<_>>())?;
+    edit::splice(&mut graph, branch, &operations)?;
+    analysis::run(&mut graph)?;
+    Ok(())
+}
+
+#[test]
 fn keyed_positions_keep_multi_result_occurrences_distinct() -> Result<(), OptimizeError> {
     let graph = test_graph::fixture(
         &[
@@ -73,6 +182,43 @@ fn unused_values_follow_complete_uses_and_the_current_program() -> Result<(), Op
     })?;
     super::simplify(&mut graph, false)?;
     assert!(Query(&graph).operations(root)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn substitution_renames_accumulator_shapes_without_analysis() -> Result<(), OptimizeError> {
+    let mut graph = test_graph::fixture(
+        &[],
+        r#"
+        (let original (ValueNameRef (ValueId 0)))
+        (let replacement (ValueNameRef (ValueId 1)))
+        (let info (AccumulatorInfo (vec-of (IndexValue (ValueId 0))) (vec-of (ScalarElement (I32)))))
+        (set (AccumulatorType (AccumulatorId 0)) info)
+        (set (RegionReturnType (RegionId 0) 0) (ReturnAccumulator info))
+        (set (FunctionResultType (FunctionId 0 "main") 0) (ReturnAccumulator info))
+        (set (CallReturnType (OperationId 0) 0) (ReturnAccumulator info))
+        "#,
+    )?;
+    let query = Query(&graph);
+    let old = query.constructor("ValueNameRef", query.constructor("ValueId", 0_i64)?.unwrap())?.unwrap();
+    let new = Query(&graph)
+        .constructor(
+            "ValueNameRef",
+            Query(&graph).constructor("ValueId", 1_i64)?.unwrap(),
+        )?
+        .unwrap();
+    edit::replace(&mut graph, &[(old, new)])?;
+    graph.parse_and_run_program(
+        None,
+        r#"
+        (let expected (AccumulatorInfo (vec-of (IndexValue (ValueId 1))) (vec-of (ScalarElement (I32)))))
+        (check (= (AccumulatorType (AccumulatorId 0)) expected))
+        (check (= (RegionReturnType (RegionId 0) 0) (ReturnAccumulator expected)))
+        (check (= (FunctionResultType (FunctionId 0 "main") 0) (ReturnAccumulator expected)))
+        (check (= (CallReturnType (OperationId 0) 0) (ReturnAccumulator expected)))
+        "#,
+    )?;
+    assert!(Query(&graph).first("FlowLive")?.is_none());
     Ok(())
 }
 

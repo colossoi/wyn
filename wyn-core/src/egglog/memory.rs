@@ -4,7 +4,7 @@ use super::dataflow::{
     ir::{self, Code},
 };
 use super::query::Query;
-use super::{analysis, scalar, OptimizeError};
+use super::{analysis, scalar, timing, OptimizeError};
 use crate::LookupMap;
 use egglog_engine::sort::VecContainer;
 use egglog_engine::{Core, EGraph, Write};
@@ -16,33 +16,40 @@ pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
 }
 
 pub(super) fn inline(graph: &mut EGraph) -> Result<(), OptimizeError> {
-    let _timing = super::timing::span("egglog helper inlining");
+    let _timing = timing::span("egglog helper inlining");
     loop {
+        let selection = timing::span("egglog inline selection");
         edit::clear(graph)?;
-        analysis::run(graph)?;
+        analysis::structure(graph)?;
         graph.parse_and_run_program(
             None,
-            "(run-schedule (saturate graph-candidates) (saturate graph-inline))",
+            "(run-schedule (saturate graph-inline-required) (saturate graph-inline))",
         )?;
         let Some(candidate) = Query(graph).first("InlineCandidate")? else {
             return Ok(());
         };
+        drop(selection);
+        let cloning = timing::span("egglog inline cloning");
         let call = candidate[0];
         let arguments = Query(graph).sequence("Input", call)?;
         let outputs = Query(graph).sequence("Output", call)?;
         let region = edit::clone_region(graph, call, candidate[1], &arguments)?;
+        drop(cloning);
+        let substitution = timing::span("egglog inline substitution");
         let results = Query(graph).sequence("RegionYield", region)?;
         if outputs.len() != results.len() {
             return Err(super::output_error("inlined result signature differs from call"));
         }
         edit::replace(graph, &outputs.into_iter().zip(results).collect::<Vec<_>>())?;
+        drop(substitution);
+        let _splicing = timing::span("egglog inline splicing");
         let operations = Query(graph).operations(region)?;
         edit::splice(graph, call, &operations)?;
     }
 }
 
 pub(super) fn simplify(graph: &mut EGraph, hoist: bool) -> Result<(), OptimizeError> {
-    let _timing = super::timing::span(if hoist {
+    let _timing = timing::span(if hoist {
         "egglog hoisting simplification"
     } else {
         "egglog reducing simplification"

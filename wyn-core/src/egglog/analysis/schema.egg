@@ -1,5 +1,7 @@
 (function AnalysisRevision () i64 :no-merge)
 (set (AnalysisRevision) 0)
+(ruleset graph-structure)
+(ruleset graph-indices)
 (ruleset dataflow-scopes)
 (ruleset dataflow-dependencies)
 (ruleset dataflow-resources)

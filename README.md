@@ -198,10 +198,10 @@ The public pass order is enforced by typed checkpoints in
 | Pass | Responsibility |
 | --- | --- |
 | `egglog::from_tlc` | Import typed values, operation inputs and outputs, callable/control regions, logical shapes, and memory capabilities. |
-| `egglog::fuse` | Analyze dependencies and effects; inline required helpers; compose compatible traversals and accumulator scopes; simplify and hoist until graph edits reach a fixed point; validate memory bindings. |
+| `egglog::fuse` | Inline required helpers using structural facts, then analyze dependencies and effects; compose compatible traversals and accumulator scopes; simplify and hoist until graph edits reach a fixed point; validate memory bindings. |
 | `egglog::place` / `place_with_cost_model` | Apply the topology policy and portable cost model, canonicalize and distribute eligible nested traversals, and derive host regions and loop execution choices. |
 | `egglog::schedule` / `schedule_with_cost_model` | Commit logical execution choices for surviving parallel operations. The cost-model variant also accepts native subgroup support; default scheduling uses portable collectives. |
-| `egglog::prepare_interfaces` | Validate memory capabilities and bindings, then refresh graph analysis before final scalar optimization. |
+| `egglog::prepare_interfaces` | Validate memory capabilities and bindings using placement's dataflow proofs, which scheduling preserves. Final scalar simplification refreshes analysis after inlining. |
 | `egglog::optimize_with_policy` / `optimize` | Simplify authoritative statements: fold constants, forward values, share common expressions, remove dead work, and perform legal code motion. `Full` additionally inlines nonrecursive helpers; `optimize` selects `Full`. |
 | `egglog::prepare_host` | Recompute final proofs, select reuse and scan epilogues, and prepare dispatch boundaries, collective metadata, host captures, and region schedules. Populate physical kernel and launch policies in egglog. |
 | `egglog::to_ssa` | Instantiate the prepared execution with concrete buffer identities, allocations, copies, and SSA control flow; publish host operations, dispatch dependencies, and source result layouts. |
@@ -236,7 +236,7 @@ replace correctness gates for other language features and targets.
 
 | Optimization | Behavior |
 | --- | --- |
-| Helper expansion | Inline required array/control helpers during structural simplification; `-O` additionally inlines nonrecursive helpers to expose scalar work. |
+| Helper expansion | Inline required array/control helpers during structural simplification; `-O` additionally inlines nonrecursive helpers to expose scalar work. Expansion uses isolated inline eligibility, lexical structure, and call-graph facts. Cloning and substitution read structural metadata directly; whole-program dataflow, liveness, effects, and scalar candidate discovery run afterward, when simplification needs them. |
 | Constant folding and simplification | Fold supported scalar constants, integer identities, constant/equal-arm choices, lengths, and aggregate projections. General reassociation and expansion are not performed. |
 | Common-subexpression sharing | Forward equivalent repeatable operations to an available definition in a compatible scope, preserving operands and evaluation order. |
 | Loop-invariant code motion and branch factoring | Move eligible work when operands are available and scope, effect, and termination proofs permit it. Sharing must preserve dependencies and dominating definitions. |

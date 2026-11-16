@@ -1,7 +1,7 @@
 //! Derived facts are disposable; executable edges remain in the flat graph.
 use super::dataflow::ir;
 use super::query::Query;
-use super::{output_error, OptimizeError};
+use super::{output_error, timing, OptimizeError};
 use egglog_engine::sort::S;
 use egglog_engine::{EGraph, IntoValues, RawValues, Value, Write};
 
@@ -140,14 +140,22 @@ pub(super) fn advance(graph: &mut EGraph) -> Result<(), OptimizeError> {
     Ok(())
 }
 
-pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
-    let _timing = super::timing::span("egglog graph analysis");
+/// Refresh lexical ownership, reachable calls, and recursion without solving dataflow.
+pub(super) fn structure(graph: &mut EGraph) -> Result<(), OptimizeError> {
+    let _timing = timing::span("egglog graph structure");
     invalidate(graph)?;
+    graph.parse_and_run_program(None, "(run-schedule (saturate graph-structure flow-scopes))")?;
+    Ok(())
+}
+
+pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
+    let _timing = timing::span("egglog graph analysis");
+    structure(graph)?;
     graph.parse_and_run_program(
         None,
         "(run-schedule
-          (saturate dataflow-scopes flow-scopes)
-          (saturate dataflow-dependencies dataflow-scopes flow-scopes)
+          (saturate graph-indices dataflow-scopes flow-scopes)
+          (saturate graph-indices dataflow-dependencies dataflow-scopes flow-scopes)
           (saturate flow-forward dataflow-dependencies dataflow-scopes)
           (saturate flow-projections source-summary))",
     )?;
