@@ -44,31 +44,27 @@ The [fusion driver](https://github.com/diku-dk/futhark/blob/f547a39abb1f3773f7cd
 
 The [graph representation and feasibility checks](https://github.com/diku-dk/futhark/blob/f547a39abb1f3773f7cdb324ec8ea7cb8cf13ea0/src/Futhark/Optimise/Fusion/GraphRep.hs) distinguish dependencies and node kinds. Candidate legality uses graph reachability. Vertical fusion checks for interfering dependencies/alternate paths; horizontal fusion requires independence. Successful fusion contracts and updates the graph.
 
-This is materially different from Wyn's current `GroupBefore` transitive closure followed by `GroupBetween(p,c)` membership for every intermediate `m`. On a chain, the number of ordered `(p,m,c)` combinations grows cubically even though the original graph has only a linear number of adjacent edges. Native insertion reduces loading overhead but does not remove this derived-relation explosion.
+This differs from Wyn's former `GroupBefore` transitive closure followed by `GroupBetween(p,c)` membership for every intermediate `m`. On a chain, the number of ordered `(p,m,c)` combinations grows cubically even though the original graph has only a linear number of adjacent edges. Native insertion reduces loading overhead but does not remove this derived-relation explosion.
 
 Futhark does not precompute our all-triples “between” relation. That does **not** make its optimizer linear-time: horizontal candidate enumeration considers pairs, graph queries cost work, and fusion iterates. Its representation nevertheless avoids this particular persistent combinatorial fact set. This is the most directly applicable implementation difference.
 
-Measurements
-------------
+Reproducible structural comparison
+---------------------------------
 
 The six fixtures implement the same stable binary radix pass over unsigned integers: classify bits, scan, obtain the total, compute destinations, scatter. They sort the low 30 bits. They are deliberately small diagnostic programs, not ports of fluid-simulation or copies of Futhark's production sorting library.
 
-Each compiler process ran with a **3 GiB address-space cap**, a 2 GiB GHC heap cap, one GHC capability, and a 120-second timeout. These are single observations, not statistical benchmarks. Times include compiler startup; fusion times come from verbose pass logs. GPU measurements stop at optimized GPU IR: they do not include downstream C compilation, driver shader compilation, or GPU execution.
-
-| Fixture | Scan bodies before fusion | Fusion time | Time through GPU IR | Peak RSS through GPU IR |
-|---|---:|---:|---:|---:|
-| 30 calls, top level | 1 | 0.005 s | 0.35 s | 66.8 MiB |
-| 30 calls, inside map | 30 | 0.445 s | 3.03 s | 73.2 MiB |
-| Loop, top level | 1 | 0.006 s | 0.32 s | 64.6 MiB |
-| Loop, inside map | 1 | 0.010 s | 0.43 s | 76.8 MiB |
-| 30 calls, top level, forced inline | 30 | 0.309 s | 1.55 s | 67.5 MiB |
-| 30 calls, inside map, forced noinline | 1 | 0.007 s | 0.40 s | 71.9 MiB |
+| Fixture | Scan bodies before fusion |
+|---|---:|
+| 30 calls, top level | 1 |
+| 30 calls, inside map | 30 |
+| Loop, top level | 1 |
+| Loop, inside map | 1 |
+| 30 calls, top level, forced inline | 30 |
+| 30 calls, inside map, forced noinline | 1 |
 
 All 18 compilation runs succeeded. The normally inlined nested version contains 121 printed SOAC nodes before fusion and 61 afterwards; it still has 30 scans. The normal top-level version retains 30 calls to one pass definition. Counts describe static IR occurrences, not runtime iterations, kernel launches, or input array elements.
 
-These results demonstrate that Futhark can analyze this expanded example without Wyn's memory explosion. They do not establish how it would perform on the complete Wyn program, or prove arbitrary scaling bounds.
-
-[Fixtures and runner](futhark-research/), [machine-readable measurements](futhark-research/results.json), and [verbose logs](futhark-research/logs/) are retained. Reproduce on Linux with the official 0.27.1 binary, Python 3, GNU time, `prlimit`, and `timeout`:
+The distinction worth preserving is which parallel bodies become visible to fusion, rather than historical compile-time measurements. The [fixtures and runner](futhark-research/) reproduce that comparison; generated logs and result captures are not tracked. Run on Linux with the official 0.27.1 binary, Python 3, GNU time, `prlimit`, and `timeout`:
 
 ```sh
 python3 docs/futhark-research/run_experiments.py /path/to/futhark /tmp/futhark-results
@@ -83,7 +79,7 @@ Futhark's [sorting library](https://github.com/diku-dk/sorts/blob/master/lib/git
 
 A loop describes one body executed repeatedly. Inlining its helper exposes that one body; it does not require unrolling every iteration. Our loop-inside-map experiment retains one scan body while still exposing nested parallel computation to the compiler. This directly answers the repeated-stage problem without inventing a fusion-plan cache.
 
-That source rewrite is not immediately sufficient in Wyn: our earlier attempted loop reached an unsupported host-stage publication path. Supporting repeated dispatches in the shader/runtime interface is a separate prerequisite. It would be misleading to prescribe a loop as a working one-line fix today.
+The original Wyn investigation also encountered an unsupported host-stage publication path. Wyn now publishes host dispatch loops; the general lesson remains that compact source iteration requires matching shader/runtime support, independently of fusion.
 
 Also, 30 passes are not necessarily 30 stages that can legally collapse into one kernel. Each pass depends on global information and the previous permutation. In our fixture, extracting the last scan result creates a real dependency. The recent [scan/scatter fusion discussion](https://futhark-lang.org/blog/2026-03-24-scan-scatter-fusion.html) illustrates why intermediate uses and representation affect fusion. It does not imply that all consecutive radix scans can fuse together.
 
@@ -98,16 +94,16 @@ The 2026 full-flattening thesis documents the lifting design and limitations. So
 
 This could be a long-term architecture for reusable parallel functions in Wyn. It is substantially more work than moving an inlining pass, and it does not preserve all optimization opportunities of expanded code.
 
-Recommendation for Wyn
-----------------------
+Guidance for future Wyn development
+-----------------------------------
 
-First address the analysis pathology. Keep the native fact insertion, stage-producer sharing fixes, redundant specialization fixes, and detailed timing/debug dumps. Replace broad eager “between” materialization with candidate-specific legality checks over a compact dependency graph. A practical design to investigate is computing candidate reachability/alternate-path answers in Rust and feeding only needed legality results to the fusion machinery. That is a proposal, not a verified drop-in replacement: results must be updated after contractions, and effects, ownership, aliases, and alternate paths must remain sound.
+Keep candidate legality tied to the current graph after contractions. Reachability, alternate paths, effects, ownership, aliases, and observable outputs must remain sound without eagerly materializing all intermediate triples. Wyn has already replaced the broad closure described above.
 
-Then restore the inlining visibility required for SOAC-containing helpers, especially within SOAC bodies, and measure the expanded case again under the watchdog. The recent policy of fusing every helper independently and expanding it only afterwards should not be treated as the general solution for nested fusion. Context-sensitive retention of large top-level helpers remains useful where the backend supports calls or their eventual expansion.
+Preserve visibility of parallel computation inside SOAC-containing helpers. Optimizing each helper independently and expanding it only after fusion can lose caller-dependent opportunities. Context-sensitive retention of large top-level helpers remains useful where the backend supports calls or their eventual expansion.
 
-Separately, add the host-loop/dispatch support needed to express radix iteration as one loop body. This removes avoidable source-level duplication independently of how fusion legality is implemented.
+Keep repeated radix passes as one source loop body with explicit host dispatch-loop support. This avoids source-level unrolling independently of fusion policy.
 
-Only introduce structural fusion-plan caching if measurements still justify it. A cache would need a definition of equivalent shapes, captures, ownership, observable outputs, and surrounding uses. Reusing an internal plan while allowing caller fusion may be possible, but “identical call syntax always fuses identically” deliberately excludes context-dependent opportunities. Futhark does not provide evidence that such a cache is necessary to solve our immediate failure.
+Structural fusion-plan caching would need equivalent shapes, captures, ownership, observable outputs, and surrounding uses. Identical call syntax alone does not establish equivalent fusion opportunities. Function lifting is a separate possible architecture for retaining parallel calls, with the implementation and optimization tradeoffs described above.
 
 Papers saved in docs/
 --------------------

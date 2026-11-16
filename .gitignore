@@ -6,6 +6,11 @@ node_modules/
 __pycache__/
 *.pyc
 *.pyo
+# Generated research captures; retain reproducible source inputs.
+/docs/profiles/
+/docs/futhark-research/logs/
+/docs/futhark-research/results.json
+/fluid-simulation/profiles/
 dist/
 !/pkg/dist/
 !/pkg/dist/**

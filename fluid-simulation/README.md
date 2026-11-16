@@ -100,12 +100,7 @@ python3 fluid-simulation/test/check_build.py
 
 Builds both shader targets and compares a headless GPU step with a Python
 reference, including interacting particles and collisions at both bounds.
-On the RX 580, the complete 640×480 simulation runs at about 20 ms per frame
-for 4,320 particles and 184–196 ms for 100,000 particles across SPIR-V/WGSL.
-Both targets passed particle-count, finite-value, bounds and overflow checks
-through the full scaling ladder. See the
-[implementation and measured results](../docs/fluid-performance-implementation.md)
-for the sampling method, remaining costs and validation-layer limitation.
+The checks cover particle count, finite values, bounds, and overflow.
 
 GPU tests need access to the host GPU. Check the selected adapter before
 interpreting performance results.
