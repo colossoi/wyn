@@ -7,5 +7,5 @@
 --! contains = [":source-name \"nested_products\""]
 
 -- Public results must pack product elements inside nested array layouts.
-entry nested_products(xs:[]i32) [][](i32,bool) =
-  map(|x|map(|i|(x+i,i%2==0),iota(x)),xs)
+entry nested_products(xs:[]i32,n:i32) [][](i32,bool) =
+  map(|x|map(|i|(x+i,i%2==0),iota(n)),xs)

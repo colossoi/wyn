@@ -1,10 +1,9 @@
 --! command = "build"
---! exit = 0
+--! exit = 1
 --! targets = ["spirv", "wgsl"]
 --! warnings = []
---! [[artifacts]]
---! path = "output.wynhost"
---! contains = [":source-name \"filtered_nested\""]
+--! errors = ["egglog output: map callback results must have the same array shape"]
+--! contains = ["map callback results must have the same array shape"]
 
--- A single compaction path must handle variable-width and empty rows.
+-- Filtering the result cannot make a varying-row map valid.
 entry filtered_nested(xs:[]i32) [][]i32 = filter(|row|length(row)>0,map(|x|iota(x),xs))

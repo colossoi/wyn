@@ -1,12 +1,11 @@
 --! command = "build"
---! exit = 0
+--! exit = 1
 --! targets = ["spirv", "wgsl"]
 --! warnings = []
---! [[artifacts]]
---! path = "output.wynhost"
---! contains = [":source-name \"growing_rows\""]
+--! errors = ["egglog output: map callback results must have the same array shape"]
+--! contains = ["map callback results must have the same array shape"]
 
--- Concatenation is associative, but its scan accumulator changes shape.
+-- Scanning the result cannot make a varying-row map valid.
 def join_rows(a:[]i32,b:[]i32) []i32 =
   map(|i|if i<length(a) then a[i] else b[i-length(a)],iota(length(a)+length(b)))
 entry growing_rows(xs:[]i32) [][]i32 =
