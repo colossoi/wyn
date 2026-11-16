@@ -7,7 +7,7 @@ use crate::interface::{
     Attribute, BindingExposure, EntryDecl, EntryOutputDestination, EntryOutputKind, IoDecoration,
     ResolvedAttribute,
 };
-use crate::types::{canonical_storage_buffer_ty, strip_existentials};
+use crate::types::{canonical_storage_buffer_ty, strip_existentials, TypeExt};
 use crate::BindingRef;
 use polytype::Type;
 use wyn_base::IdSource;
@@ -56,6 +56,9 @@ pub(crate) fn is_storage_image_ty(ty: &Type<TypeName>) -> bool {
 pub(crate) fn entry_output_arity(entry: &EntryDecl, ret_type: &Type<TypeName>) -> usize {
     match strip_existentials(ret_type) {
         Type::Constructed(TypeName::Unit | TypeName::SideEffect | TypeName::StorageTexture, _) => 0,
+        _ if entry.buffer_demand => 1,
+        _ if entry.source_entry.is_some() => entry.outputs.len(),
+        _ if entry.outputs.len() == 1 && entry.outputs[0].ty.is_array() => 1,
         Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) => fields.len(),
         _ => usize::from(!entry.outputs.is_empty()),
     }
@@ -65,6 +68,7 @@ pub(crate) fn build_entry_outputs(
     entry: &EntryDecl,
     ret_type: &Type<TypeName>,
     capacities: &[BufferLen],
+    destinations: &[Option<BindingRef>],
     is_compute: bool,
     binding_ids: &mut IdSource<u32>,
 ) -> Result<Vec<EntryOutput>, InterfaceError> {
@@ -79,14 +83,27 @@ pub(crate) fn build_entry_outputs(
         };
         Ok(Some(capacity.clone()))
     };
-    // TODO: Consider moving generated output binding assignment into Egglog
-    // alongside the selected output capacities and PhysicalBinding facts.
-    let mut storage_binding_for = |ty: &Type<TypeName>,
+    let mut storage_binding_for = |slot: usize,
+                                   ty: &Type<TypeName>,
                                    is_compute: bool,
                                    attribute: Option<&ResolvedAttribute>|
      -> Option<BindingRef> {
         if is_compute && !matches!(ty, Type::Constructed(TypeName::Unit, _)) {
-            storage_output_binding(attribute)
+            let selected = if entry.source_entry.is_some()
+                && matches!(
+                    attribute,
+                    Some(Attribute::Storage {
+                        set: AUTO_STORAGE_SET,
+                        ..
+                    })
+                ) {
+                destinations.get(slot).copied().flatten()
+            } else {
+                None
+            };
+            selected
+                .or_else(|| storage_output_binding(attribute))
+                .or_else(|| destinations.get(slot).copied().flatten())
                 .or_else(|| Some(BindingRef::new(AUTO_STORAGE_SET, binding_ids.next_id())))
         } else {
             None
@@ -112,16 +129,24 @@ pub(crate) fn build_entry_outputs(
         return Ok(vec![]);
     }
 
-    if entry.outputs.iter().all(|o| o.attribute.is_none()) && output_arity == 1 {
+    if (entry.buffer_demand
+        || entry.source_entry.is_some()
+        || entry.outputs.iter().all(|o| o.attribute.is_none()))
+        && output_arity == 1
+    {
         if !matches!(ret_type, Type::Constructed(TypeName::Unit, _)) {
             let ty = canonical_storage_buffer_ty(ret_type);
             let attribute = entry.outputs.first().and_then(|output| output.attribute.as_ref());
-            let storage_binding = storage_binding_for(&ty, is_compute, attribute);
+            let storage_binding = storage_binding_for(0, &ty, is_compute, attribute);
             let length = length_for(0, storage_binding)?;
             Ok(vec![EntryOutput {
                 ty,
                 kind: entry_output_kind(storage_binding, None, false, 0),
-                host: OutputHost { length, target: None },
+                host: OutputHost {
+                    length,
+                    target: None,
+                    elements: None,
+                },
             }])
         } else {
             Ok(vec![])
@@ -135,7 +160,7 @@ pub(crate) fn build_entry_outputs(
             .map(|(slot, ty)| {
                 let ty = canonical_storage_buffer_ty(ty);
                 let attribute = entry.outputs.get(slot).and_then(|output| output.attribute.as_ref());
-                let storage_binding = storage_binding_for(&ty, is_compute, attribute);
+                let storage_binding = storage_binding_for(slot, &ty, is_compute, attribute);
                 let length = length_for(slot, storage_binding)?;
                 Ok(EntryOutput {
                     ty,
@@ -148,6 +173,7 @@ pub(crate) fn build_entry_outputs(
                     host: OutputHost {
                         length,
                         target: target_of(attribute).map(str::to_owned),
+                        elements: None,
                     },
                 })
             })
@@ -155,7 +181,7 @@ pub(crate) fn build_entry_outputs(
     } else {
         let ty = canonical_storage_buffer_ty(ret_type);
         let first_attr = entry.outputs.first().and_then(|o| o.attribute.as_ref());
-        let storage_binding = storage_binding_for(&ty, is_compute, first_attr);
+        let storage_binding = storage_binding_for(0, &ty, is_compute, first_attr);
         let length = length_for(0, storage_binding)?;
         Ok(vec![EntryOutput {
             ty,
@@ -168,6 +194,7 @@ pub(crate) fn build_entry_outputs(
             host: OutputHost {
                 length,
                 target: target_of(first_attr).map(str::to_owned),
+                elements: None,
             },
         }])
     }

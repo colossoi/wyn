@@ -2,26 +2,35 @@
 //! Pass order is enforced by typestate:
 //! [`from_tlc`] → [`fuse`] → [`place`] → [`schedule`] → [`prepare_interfaces`]
 //! → [`optimize`] → [`prepare_host`] → [`to_ssa`].
-use crate::host::ScalarExpr;
+//!
+//! Egglog owns logical shapes, effects, aliasing, and transformation legality.
+//! Host preparation reads those proofs to freeze dispatch recipes and storage requirements.
+//! SSA emission instantiates the recipes with concrete bindings and operands;
+//! physical eligibility and kernel policies remain queryable in egglog.
+use self::dataflow::edit;
 use crate::ssa::stage::Elaborated;
 use crate::tlc::stage::OwnershipApplied;
-use crate::{CodegenTarget, LookupMap, PipelineTopologyPolicy};
-use egglog_engine::ast::{Command, Parser};
+use crate::{CodegenTarget, PipelineTopologyPolicy, SymbolId};
+use egglog_engine::EGraph;
 use egglog_engine::Error;
-use egglog_engine::{EGraph, Value};
+use wyn_base::Interner;
 
-mod abi;
 mod analysis;
 mod bindings;
 pub mod cost;
 pub(crate) mod dataflow;
-mod facts;
+mod execution;
+mod from_tlc;
 mod fusion;
 mod host;
+mod memory;
+mod payload;
 mod planning;
 mod query;
+mod representation;
 mod scalar;
-mod source;
+#[cfg(test)]
+mod test_graph;
 mod timing;
 mod to_ssa;
 
@@ -37,23 +46,34 @@ pub enum OptimizeError {
     Output(String),
 }
 
-/// Summarize semantic values, operations, and execution scopes from typed TLC.
-/// Resolve lexical bindings directly; scalar bodies remain source references.
+/// Internalize typed TLC, preserving logical products and array nesting.
 pub fn from_tlc(source: &OwnershipApplied) -> Result<Program<'_, Imported>, OptimizeError> {
     let _timing = timing::span("egglog import");
-    let (graph, identities) = source::import(source)?;
+    let (graph, symbols) = from_tlc::import(source)?;
+    timing::tables(&graph, "after-import");
     Ok(Program {
         source,
         graph,
-        identities,
-        stage: Imported,
+        symbols,
+        costs: cost::CostModel::default(),
+        _stage: Imported,
     })
 }
 
-/// Apply the retained fusion rules and record callback composition in egglog.
+/// Simplify regions and fuse parallel statements in the common IR.
 pub fn fuse(mut program: Program<'_, Imported>) -> Result<Program<'_, Fused>, OptimizeError> {
     timing::time("egglog structural analysis", || analysis::run(&mut program.graph))?;
-    fusion::run(&mut program.graph)?;
+    memory::inline(&mut program.graph)?;
+    // Fuse adjacent producers before hoisting invariant work between them.
+    loop {
+        let revision = edit::revision(&program.graph)?;
+        fusion::run(&mut program.graph)?;
+        memory::simplify(&mut program.graph, true)?;
+        if edit::revision(&program.graph)? == revision {
+            break;
+        }
+    }
+    memory::validate(&mut program.graph)?;
     Ok(program.advance(Fused))
 }
 
@@ -77,7 +97,7 @@ pub fn place_with_cost_model(
     Ok(program.advance(Placed))
 }
 
-/// Select dispatch recipes, resource requirements, and ordering constraints.
+/// Select logical execution strategies; host preparation completes physical planning.
 pub fn schedule(program: Program<'_, Placed>) -> Result<Program<'_, Scheduled>, OptimizeError> {
     schedule_with_subgroups(program, false)
 }
@@ -97,30 +117,34 @@ pub fn schedule_with_cost_model(
     costs: cost::CostModel,
 ) -> Result<Program<'_, Scheduled>, OptimizeError> {
     let costs = costs.validate().map_err(output_error)?;
-    program.graph.parse_and_run_program(None, &format!("(set (SubgroupsEnabled) {enabled})"))?;
+    timing::evaluate(
+        &mut program.graph,
+        None,
+        &format!("(set (SubgroupsEnabled) {enabled})"),
+    )?;
     let _timing = timing::span("egglog scheduling");
-    planning::schedule(&mut program.graph, costs)?;
+    planning::schedule(&mut program.graph)?;
+    program.costs = costs;
     Ok(program.advance(Scheduled))
 }
 
-/// Resolve demanded scalar inputs and the physical ABI before scalar optimization.
+/// Validate memory bindings before final scalar simplification.
 pub fn prepare_interfaces(
     mut program: Program<'_, Scheduled>,
 ) -> Result<Program<'_, InterfacesPrepared>, OptimizeError> {
     let _timing = timing::span("egglog interface preparation");
-    scalar::admit(&mut program.graph)?;
-    // Physical ABI and publication rules consume the scalar demand facts.
-    abi::prepare(&mut program.graph)?;
+    memory::validate(&mut program.graph)?;
+    analysis::run(&mut program.graph)?;
     Ok(program.advance(InterfacesPrepared))
 }
 
-/// Optimize and extract demanded scalar regions.
+/// Simplify the authoritative statement bodies.
 pub fn optimize(program: Program<'_, InterfacesPrepared>) -> Result<Program<'_, Optimized>, OptimizeError> {
     optimize_with_policy(program, ScalarOptimization::Full)
 }
 
-/// Basic retains reducing rewrites and safety analysis; Full additionally searches
-/// helper expansions and compares compact and inlining-preferred extractions.
+/// Basic retains reducing rewrites and safety analysis; Full additionally
+/// inlines nonrecursive helpers with fresh graph identities.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScalarOptimization {
     Basic,
@@ -131,34 +155,35 @@ pub fn optimize_with_policy(
     mut program: Program<'_, InterfacesPrepared>,
     policy: ScalarOptimization,
 ) -> Result<Program<'_, Optimized>, OptimizeError> {
-    let selected = scalar::run(&mut program.graph, &program.identities, policy)?;
-    Ok(program.advance(Optimized {
-        selected,
-        host: LookupMap::default(),
-        captures: LookupMap::default(),
-    }))
+    scalar::run(&mut program.graph, policy)?;
+    analysis::run(&mut program.graph)?;
+    timing::tables(&program.graph, "after-optimization");
+    Ok(program.advance(Optimized))
 }
 
-/// Lower supported host scalar expressions and captures from the selected DAG.
+/// Finish graph analysis and freeze physical execution and storage choices.
 pub fn prepare_host(mut program: Program<'_, Optimized>) -> Result<HostPrepared<'_>, OptimizeError> {
     let _timing = timing::span("egglog host preparation");
-    facts::prepare(&mut program)?;
-    host::prepare(&mut program)?;
-    Ok(HostPrepared { program })
+    analysis::run(&mut program.graph)?;
+    planning::epilogues(&mut program.graph)?;
+    let execution = execution::Execution::prepare(&mut program)?;
+    Ok(HostPrepared { program, execution })
 }
 
-/// Plan evaluation and lower shader SSA together with its host interfaces.
+/// Emit shader SSA and host interfaces from the prepared physical plan.
 pub fn to_ssa(program: HostPrepared<'_>, target: CodegenTarget) -> Result<Elaborated, OptimizeError> {
-    to_ssa::lower(&program.program, target)
+    let _timing = timing::span("SSA emission");
+    to_ssa::lower(&program.program, &program.execution, target)
 }
 
-/// Original TLC supplies untouched bodies and source metadata. The graph owns
-/// structural transformations and planning facts; Rust does not mirror its terms.
+/// TLC retains source and public-interface metadata. The graph owns the logical
+/// program and logical execution choices. Host preparation freezes the physical plan.
 pub struct Program<'source, Stage> {
     source: &'source OwnershipApplied,
     graph: EGraph,
-    identities: source::Identities<'source>,
-    stage: Stage,
+    symbols: Interner<i64, SymbolId>,
+    costs: cost::CostModel,
+    _stage: Stage,
 }
 
 impl<'source, Stage> Program<'source, Stage> {
@@ -166,8 +191,9 @@ impl<'source, Stage> Program<'source, Stage> {
         Program {
             source: self.source,
             graph: self.graph,
-            identities: self.identities,
-            stage,
+            symbols: self.symbols,
+            costs: self.costs,
+            _stage: stage,
         }
     }
 }
@@ -176,26 +202,20 @@ pub struct Imported;
 pub struct Fused;
 pub struct Placed;
 
-/// Dispatch recipes, execution domains, storage, and effect order are fixed.
+/// Logical execution strategies are selected; physical planning follows scalar optimization.
 pub struct Scheduled;
 
 pub struct InterfacesPrepared;
 
-pub struct Optimized {
-    captures: LookupMap<egglog_engine::TermId, host::Capture>,
-    host: LookupMap<(Value, Value), ScalarExpr>,
-    selected: scalar::Selected,
-}
+pub struct Optimized;
 
 pub struct HostPrepared<'source> {
     program: Program<'source, Optimized>,
+    execution: execution::Execution,
 }
 
 #[cfg(test)]
 mod pipeline_tests;
-
-#[cfg(test)]
-mod descriptor_tests;
 
 #[cfg(test)]
 fn optimize_for_test(program: Program<'_, Scheduled>) -> Result<Program<'_, Optimized>, OptimizeError> {
@@ -209,12 +229,6 @@ fn finish_for_test(
 ) -> Result<Elaborated, OptimizeError> {
     let program = prepare_host(program)?;
     to_ssa(program, target)
-}
-
-fn parse_program(filename: &str, source: &str) -> Result<Vec<Command>, OptimizeError> {
-    Parser::default()
-        .get_program_from_string(Some(filename.into()), source)
-        .map_err(|error| OptimizeError::Output(error.to_string()))
 }
 
 pub(super) fn output_error(message: impl Into<String>) -> OptimizeError {

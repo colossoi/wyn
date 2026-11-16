@@ -31,7 +31,7 @@ pub enum DefunctionalizedTag {}
 pub type Defunctionalized =
     super::Program<DefunctionalizedTag, ClosureConverted, super::context::PostClosureGlobal>;
 
-pub fn defunctionalize(program: super::stage::RuntimeIndexProducersFloated) -> Defunctionalized {
+pub fn defunctionalize(program: super::stage::SoacsAnfNormalized) -> Defunctionalized {
     let mut program = closure_convert::convert_closures(program);
     hof_specialize::specialize_higher_order_functions(&mut program);
     lower_calls::lower_closure_calls(&mut program);

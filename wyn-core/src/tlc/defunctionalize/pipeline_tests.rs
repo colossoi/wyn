@@ -48,7 +48,7 @@ fn assert_callable_program_normalizes(source: &str) {
 
 /// End-to-end runner for the three internal defunctionalization algorithms. Mirrors what
 /// `tlc::defunctionalize` does in production.
-fn defunctionalize(program: tlc::stage::RuntimeIndexProducersFloated) -> tlc::stage::Defunctionalized {
+fn defunctionalize(program: tlc::stage::SoacsAnfNormalized) -> tlc::stage::Defunctionalized {
     super::defunctionalize(program)
 }
 
@@ -764,7 +764,7 @@ fn specialized_hof_preserves_diet_order_and_return_with_captures() {
          entry main(xs:*[4]i32,ys:[4]i32,bias:i32) [4]i32 =
          apply(ys,|x|x+bias,xs)",
     );
-    let program = defunctionalize(tlc::float_runtime_index_nested_producers(program));
+    let program = defunctionalize(program);
     let specialized = program
         .defs
         .iter()

@@ -12,7 +12,7 @@
 //! reason is enough to point at the offending construct. The `ArrayExpr` type
 //! makes inline producers unrepresentable in SOAC-*input* positions; this
 //! checker guards the `Term`-typed positions the type cannot reach (`Index`
-//! operand, `App` argument), where `runtime_index_producers` / `normalize` do
+//! operand, `App` argument), where `normalize` do
 //! the floating.
 
 use super::{Family, Payload, Program, Term, TermKind};
@@ -72,7 +72,7 @@ fn walk<C: Payload, S: Payload>(term: &Term<C, S>) -> Result<(), &'static str> {
 }
 
 /// A `Term` in an `Index`/`App` operand position that is a bare inline *array*
-/// producer (which `runtime_index_producers` / `normalize` float into a `let`).
+/// producer (which `normalize` float into a `let`).
 /// A SOAC *input* is an atom by type, so only these `Term`-typed positions —
 /// which the `ArrayExpr` type cannot constrain — need a runtime guard.
 ///

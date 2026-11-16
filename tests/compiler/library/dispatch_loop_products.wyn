@@ -42,3 +42,31 @@ entry projected(limit: i32) ([4097]i32, i32, bool) =
       let next = scan((+), 0, ys) in
       let active = iteration%2 == 0 in
       (if active then next else ys, iteration+(if active then 1 else 2), active)
+
+entry shrinking(n:i32, iterations:i32) []i32 =
+  loop ys=iota(n) for i<iterations do map(|x|x+1,ys[1..length(ys)])
+
+entry growing(n:i32, iterations:i32) []i32 =
+  loop ys=iota(n) for i<iterations do
+    map(|j|if j<length(ys) then ys[j]+1 else i,iota(length(ys)+1))
+
+entry growing_while(n:i32, limit:i32) []i32 =
+  let (ys,i)=loop (ys,i)=(map(|x|x,iota(n)),0) while i<limit do
+    (map(|j|if j<length(ys) then ys[j]+1 else i,iota(length(ys)+1)),i+1)
+  in ys
+
+entry growing_rows(n:i32, limit:i32) [][]i32 =
+  let rows=loop rows=map(|k|map(|x|x,iota(k)),iota(n)) for i<limit do
+    map(|row|map(|j|if j<length(row) then row[j]+1 else i,iota(length(row)+1)),rows)
+  in map(|row|map(|x|x+10,row),rows)
+
+entry nested_rows(n:i32, limit:i32) [][][]i32 =
+  loop rows=map(|k|map(|j|map(|x|x,iota(j)),iota(k)),iota(n)) for i<limit do
+    map(|plane|map(|row|map(|x|x+1,row),plane),rows)
+
+entry uniform_rows(n:i32, limit:i32) [][]i32 =
+  loop rows=map(|k|map(|x|x,iota(n)),iota(n)) for i<limit do
+    map(|row|map(|j|if j<length(row) then row[j]+1 else i,iota(length(row)+1)),rows)
+
+entry indexed_extent(n:i32, limit:i32) []i32 =
+  loop ys=map(|x|x,iota(n)) for i<limit do map(|j|j+i,iota(i))

@@ -1,0 +1,13 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! warnings = []
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"growing_rows\""]
+
+-- Concatenation is associative, but its scan accumulator changes shape.
+def join_rows(a:[]i32,b:[]i32) []i32 =
+  map(|i|if i<length(a) then a[i] else b[i-length(a)],iota(length(a)+length(b)))
+entry growing_rows(xs:[]i32) [][]i32 =
+  scan(join_rows,replicate(0,0i32),map(|x|map(|i|i,iota(x)),xs))

@@ -65,6 +65,21 @@ fn dispatch_loops_share_product_carries_and_control_across_backends() {
             loops[*region].control,
             DispatchLoopControl::Counted { .. }
         ));
+        for entry in program.entries.iter().filter(|entry| entry.name.starts_with("growing")) {
+            let body = entry
+                .operations
+                .iter()
+                .find_map(|operation| match operation {
+                    Operation::Loop { body, .. } => Some(body),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(
+                body.iter().any(|op| matches!(op, Operation::Allocate(_))),
+                "{}",
+                entry.name
+            );
+        }
         for loop_ in loops {
             if matches!(loop_.control, DispatchLoopControl::While { .. }) {
                 assert!(!loop_.test.is_empty());
@@ -129,7 +144,7 @@ fn tuple_loop_outputs_and_scalar_bounds_reach_host_backends() {
                     assert!(p.bindings.iter().any(|b| matches!(b,
                 Binding::StorageBuffer { set, binding, length: Some(BufferLen::Fixed { bytes }), .. }
                     if (*set, *binding) == (result.set, result.binding) && *bytes == u64::from(*stride) * 2
-            )));
+            )), "{} result {}: {:?}", result.entry, result.result, p.bindings);
                 }
             }
             for entry in &program.entries {

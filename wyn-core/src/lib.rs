@@ -243,11 +243,7 @@ pub use polytype::Context as PolytypeContext;
 //       tlc::extract_stages(...)          -> tlc::stage::StagesExtracted
 //       tlc::pin_entry_buffers(...)       -> tlc::stage::BuffersPinned
 //       tlc::monomorphize(...)           -> tlc::stage::Monomorphized
-//       tlc::canonicalize_conditional_producers(...)
-//                                      -> tlc::stage::ConditionalProducersCanonicalized
 //       tlc::normalize_soacs(...)        -> tlc::stage::SoacsAnfNormalized
-//       tlc::float_runtime_index_nested_producers(...)
-//                                      -> tlc::stage::RuntimeIndexProducersFloated
 //       tlc::defunctionalize(...)        -> tlc::stage::Defunctionalized
 //       tlc::fold_generated_lambdas(...) -> tlc::stage::GeneratedLambdasFolded
 //       tlc::apply_ownership(...)        -> tlc::stage::OwnershipApplied
@@ -287,7 +283,6 @@ pub(crate) fn optimize_tlc_for_test(
     program: tlc::stage::OwnershipValidated,
 ) -> error::Result<tlc::stage::OwnershipApplied> {
     let program = optimize_tlc_for_test_thru_soac_normalization(program)?;
-    let program = tlc::float_runtime_index_nested_producers(program);
     let program = tlc::defunctionalize(program);
     let program = tlc::fold_generated_lambdas(program);
     Ok(tlc::apply_ownership(program))
@@ -303,7 +298,6 @@ pub(crate) fn optimize_tlc_for_test_thru_soac_normalization(
     let program = tlc::extract_stages(program)?;
     let program = tlc::pin_entry_buffers(program)?;
     let program = tlc::monomorphize(program)?;
-    let program = tlc::canonicalize_conditional_producers(program);
     Ok(tlc::normalize_soacs(program))
 }
 

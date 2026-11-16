@@ -665,9 +665,7 @@ fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileRe
         Ok(t) => t,
         Err(e) => return CompileResultWgsl::err(source, e),
     };
-    let program = wyn_core::tlc::canonicalize_conditional_producers(program);
     let program = wyn_core::tlc::normalize_soacs(program);
-    let program = wyn_core::tlc::float_runtime_index_nested_producers(program);
     let program = wyn_core::tlc::defunctionalize(program);
     let program = wyn_core::tlc::fold_generated_lambdas(program);
     let program = wyn_core::tlc::apply_ownership(program);

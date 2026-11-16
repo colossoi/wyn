@@ -1,10 +1,151 @@
 use super::super::query::Query;
 use super::super::{finish_for_test, from_tlc, fuse, place, schedule, schedule_with_subgroups};
+use crate::egglog::dataflow::ir::{self, Bounds, Code};
+use crate::egglog::payload::read;
+use crate::egglog::{analysis, test_graph};
 use crate::{compile_thru_tlc, CodegenTarget, PipelineTopologyPolicy};
-use egglog_engine::{
-    sort::{SetContainer, VecContainer, S},
-    EGraph, Value, Write,
-};
+use egglog_engine::{sort::S, EGraph, Value};
+use egglog_engine::{Core, Write};
+
+#[test]
+fn whole_row_fusion_preserves_conflicting_callback_effects() {
+    for (producer, consumer, fused) in [
+        ("ReadsInput", "ReadsInput", true),
+        ("WritesInput", "ReadsInput", false),
+        ("ReadsInput", "WritesInput", false),
+    ] {
+        let facts = include_str!("tests/array_reduce_effects.egg")
+            .replace("PRODUCER_EFFECTS", &format!("({producer} (OperationId 2) 0)"))
+            .replace("CONSUMER_EFFECTS", &format!("({consumer} (OperationId 4) 0)"));
+        let mut graph = test_graph::fixture(
+            &[
+                (
+                    90,
+                    Code::Constant {
+                        ty: crate::types::i32(),
+                        bits: 0,
+                    },
+                ),
+                (0, Code::ArrayLiteral),
+                (1, Code::Parallel),
+                (2, Code::Scalar(crate::egglog::payload::Payload::Unit)),
+                (3, Code::Parallel),
+                (4, Code::Scalar(crate::egglog::payload::Payload::Vector)),
+                (5, Code::Index),
+            ],
+            &facts,
+        )
+        .unwrap();
+        super::super::memory::validate(&mut graph).unwrap();
+        super::super::fusion::run(&mut graph).unwrap();
+        super::super::memory::validate(&mut graph).unwrap();
+        assert_eq!(
+            top_level(&graph, test_graph::entry(&graph), "Parallel").len(),
+            if fused { 1 } else { 2 }
+        );
+    }
+}
+
+#[test]
+fn every_collective_callback_must_be_available_before_distribution() {
+    use crate::egglog::payload::Payload;
+    use crate::op::BinaryOperator;
+    for blocked in [None, Some(20), Some(30)] {
+        let mut facts = include_str!("tests/collective_distribution.egg").to_owned();
+        for (prefix, base) in [("FIRST", 20), ("SECOND", 30)] {
+            let capture = if blocked == Some(base) {
+                format!("(set (InputCount (OperationId {})) 2) (set (Input (OperationId {}) 0) (ValueNameRef (ValueId {}))) (set (Input (OperationId {}) 1) (ValueNameRef (ValueId 10))) (set (OutputCount (OperationId {})) 1) (set (Output (OperationId {}) 0) (ValueNameRef (ValueId {}))) (set (ValueType (ValueId {})) scalar) (set (OperationRegion (OperationId {})) (RegionId {})) (set (OperationOrder (OperationId {})) 1) (DiscardableOperation (OperationId {})) (RepeatableOperation (OperationId {}))",base+1,base+1,base+2,base+1,base+1,base+1,base+3,base+3,base+1,base,base+1,base+1,base+1)
+            } else {
+                String::new()
+            };
+            let result = base + if blocked == Some(base) { 3 } else { 2 };
+            facts = facts.replace(&format!("{prefix}_CAPTURE"), &capture).replace(
+                &format!("{prefix}_RESULT"),
+                &format!("(ValueNameRef (ValueId {result}))"),
+            );
+        }
+        let mut codes = vec![
+            (0, Code::Parallel),
+            (1, Code::Parallel),
+            (
+                90,
+                Code::Constant {
+                    ty: crate::types::i32(),
+                    bits: 0,
+                },
+            ),
+        ];
+        for id in [20, 21, 30, 31] {
+            codes.push((id, Code::Scalar(Payload::Binary(BinaryOperator::Add))));
+        }
+        let mut graph = test_graph::fixture(&codes, &facts).unwrap();
+        analysis::run(&mut graph).unwrap();
+        super::super::fusion::run(&mut graph).unwrap();
+        super::place(
+            &mut graph,
+            PipelineTopologyPolicy::AllowGenerated,
+            super::CostModel::default(),
+        )
+        .unwrap();
+        let query = Query(&graph);
+        let outer = top_level(&graph, test_graph::entry(&graph), "Parallel");
+        assert_eq!(outer.len(), 1);
+        assert_eq!(rank(query, outer[0]), if blocked.is_some() { 1 } else { 2 });
+        assert_eq!(
+            analysis::count(query, "OutputCount", outer[0]).unwrap(),
+            2,
+            "both source results must survive the legality decision"
+        );
+    }
+}
+
+#[test]
+fn product_loops_track_array_component_length_proofs() {
+    for (source, capacity) in [
+        ("entry main(steps:i32) []i32=let (ys,k)=loop (ys,k)=([0,0,0,0],0) while k<steps do (ys with [k%4]=k,k+1) in ys", Some(4)),
+        ("entry main(steps:i32) []i32=let (ys,k)=loop (ys,k)=(replicate(4,0i32),0) while k<steps do (map(|i|if i<length(ys) then ys[i] else k,iota(length(ys)+1)),k+1) in ys", None),
+    ] {
+        let source = compile_thru_tlc(source).unwrap();
+        let mut program = from_tlc(&source).unwrap();
+        super::super::analysis::run(&mut program.graph).unwrap();
+        super::analyze(&mut program.graph).unwrap();let query=Query(&program.graph);let mut components=0;
+        query.for_each("LoopArrayComponent",|row| {
+            let bound=query.lookup("OuterCapacity",row[3])?.map(|value|program.graph.value_to_base::<i64>(value));
+            assert_eq!(bound,capacity);assert_eq!(query.contains("LoopPreservesComponentLength",(row[0],row[1],row[2]))?,capacity.is_some());components+=1;Ok(())
+        }).unwrap();
+        assert!(components > 0, "exercise a projected array in a product carry");
+    }
+}
+
+#[test]
+fn sliced_local_collections_retain_their_source_capacity() {
+    let source = compile_thru_tlc("entry main(xs:[][8]f32) []f32 = map(|row| let values=map(|x|x+1.0,row[1..i32(row[0])]) in reduce(|a,b|min(a,b),f32.highest,values)+reduce(|a,b|max(a,b),f32.lowest,values),xs)").unwrap();
+    let mut program = selected(&source);
+    super::super::analysis::run(&mut program.graph).unwrap();
+    let query = Query(&program.graph);
+    let mut collections = 0;
+    query
+        .for_each("LiveOperation", |row| {
+            if query.contains("ParallelOperation", row[0])?
+                && query.enode("InvocationLocal", query.required("OperationExecution", row[0])?)?.is_some()
+            {
+                for name in query.sequence("Output", row[0])? {
+                    let name = query.name(name)?;
+                    let info = query.required("ValueType", name)?;
+                    if array_extents(query, info).is_some() {
+                        assert_eq!(
+                            program.graph.value_to_base::<i64>(query.required("OuterCapacity", name)?),
+                            8
+                        );
+                        collections += 1;
+                    }
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert!(collections > 0, "exercise a sliced local collection");
+}
 
 fn selected(
     source: &crate::tlc::stage::OwnershipApplied,
@@ -45,14 +186,17 @@ fn check_entries<Stage>(
     count: usize,
     check: impl Fn(usize, &EGraph, Value),
 ) {
+    let query = Query(&program.graph);
     let mut seen = vec![false; count];
-    Query(&program.graph)
-        .for_each("SourceOriginalEntry", |row| {
-            let symbol = program.identities.symbols.resolve(program.graph.value_to_base::<i64>(row[0]));
-            let name = program.source.symbols.get(*symbol).unwrap();
-            let index: usize = name.strip_prefix("case_").unwrap().parse().unwrap();
-            seen[index] = true;
-            check(index, &program.graph, row[1]);
+    query
+        .for_function("EntryOrder", |keys, _| {
+            let fields = query.fields("FunctionId", keys[0])?;
+            let name = program.graph.value_to_base::<S>(fields[1]);
+            if let Some(index) = name.as_str().strip_prefix("case_") {
+                let index: usize = index.parse().unwrap();
+                seen[index] = true;
+                check(index, &program.graph, keys[0]);
+            }
             Ok(())
         })
         .unwrap();
@@ -60,109 +204,246 @@ fn check_entries<Stage>(
 }
 
 fn planned_cases(sources: &[impl AsRef<str>], check: impl Fn(usize, &EGraph, Value)) {
-    let tlc = compile_thru_tlc(&cases_source(sources)).unwrap();
-    let program = schedule(
-        place(
+    for (index, source) in sources.iter().enumerate() {
+        let tlc = compile_thru_tlc(&cases_source(std::slice::from_ref(source))).unwrap();
+        let program = schedule(
+            place(
+                fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                PipelineTopologyPolicy::AllowGenerated,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        check_entries(&program, 1, |_, graph, function| check(index, graph, function));
+    }
+}
+
+fn placed_cases(sources: &[impl AsRef<str>], check: impl Fn(usize, &EGraph, Value)) {
+    for (index, source) in sources.iter().enumerate() {
+        let tlc = compile_thru_tlc(&cases_source(std::slice::from_ref(source))).unwrap();
+        let program = place(
             fuse(from_tlc(&tlc).unwrap()).unwrap(),
             PipelineTopologyPolicy::AllowGenerated,
         )
-        .unwrap(),
-    )
-    .unwrap();
+        .unwrap();
+        check_entries(&program, 1, |_, graph, function| check(index, graph, function));
+    }
+}
+
+fn distributed_cases(sources: &[impl AsRef<str>], check: impl Fn(usize, &EGraph, Value)) {
+    for (index, source) in sources.iter().enumerate() {
+        let tlc = compile_thru_tlc(&cases_source(std::slice::from_ref(source))).unwrap();
+        let mut program = place(
+            fuse(from_tlc(&tlc).unwrap()).unwrap(),
+            PipelineTopologyPolicy::AllowGenerated,
+        )
+        .unwrap();
+        super::schedule(&mut program.graph).unwrap();
+        check_entries(&program, 1, |_, graph, function| check(index, graph, function));
+    }
+}
+
+fn fused_cases(sources: &[impl AsRef<str>], check: impl Fn(usize, &EGraph, Value)) {
+    let tlc = compile_thru_tlc(&cases_source(sources)).unwrap();
+    let program = fuse(from_tlc(&tlc).unwrap()).unwrap();
     check_entries(&program, sources.len(), check);
 }
 
-fn operations(graph: &EGraph, kind: &str) -> Vec<Value> {
-    let mut operations = Vec::new();
-    Query(graph)
-        .for_function("SourceOperation", |row, info| {
-            let fields = Query(graph).enode("OperationInfo", info)?.unwrap();
-            if graph.value_to_base::<S>(fields[1]).as_str() == kind {
-                operations.push(row[0]);
-            }
-            Ok(())
-        })
-        .unwrap();
-    operations
-}
-
-fn operations_in(graph: &EGraph, kind: &str, region: Value) -> Vec<Value> {
-    operations(graph, kind)
+fn top_level(graph: &EGraph, function: Value, constructor: &str) -> Vec<Value> {
+    let query = Query(graph);
+    let root = query.required("FunctionRoot", function).unwrap();
+    query
+        .operations(root)
+        .unwrap()
         .into_iter()
-        .filter(|&op| {
-            Query(graph).record("SourceOperation", "OperationInfo", (op,)).unwrap().unwrap()[0] == region
-        })
+        .filter(|&operation| code_is(query, operation, constructor))
         .collect()
 }
 
-#[test]
-fn scan_output_can_capture_a_fused_total() {
-    planned(
-        "entry main(xs: [257]i32) [257]i32 =
-         let prefix = scan((+), 0, xs) in
-         let total = reduce((+), 0, xs) in
-         map(|x| x + total, prefix)",
-        |graph| {
-            let query = Query(graph);
-            let scan = operations(graph, "scan")[0];
-            let reduce = operations(graph, "reduce")[0];
-            let plan = query.required("SelectedPlan", (scan,)).unwrap();
-            assert_eq!(plan, query.required("SelectedPlan", (reduce,)).unwrap());
-            let owner = query.required("Owner", (plan,)).unwrap();
-            let total = query.constructor("Result", (owner, 0i64)).unwrap().unwrap();
-            for phase in ["chunks", "combine", "offsets"] {
-                let stage = query.constructor("Stage", (owner, phase)).unwrap().unwrap();
-                assert_eq!(
-                    query.contains("Needs", (stage, total)).unwrap(),
-                    phase == "offsets"
-                );
-                assert_eq!(
-                    query.contains("Produces", (stage, total)).unwrap(),
-                    phase == "combine"
-                );
+fn dispatches(graph: &EGraph, function: Value) -> Vec<super::super::execution::Dispatch> {
+    let query = Query(graph);
+    let execution = super::super::execution::Execution::select(graph).unwrap();
+    fn collect(
+        query: Query<'_>,
+        execution: &super::super::execution::Execution,
+        region: Value,
+        stages: &mut Vec<super::super::execution::Dispatch>,
+    ) {
+        for operation in query.operations(region).unwrap() {
+            if let Ok(dispatch) = execution.dispatch(operation) {
+                stages.push(*dispatch);
+            } else {
+                for child in super::super::execution::control_regions(query, operation).unwrap() {
+                    collect(query, execution, child, stages);
+                }
             }
-            let mut phases = 0;
-            query
-                .for_each("Phase", |_| {
-                    phases += 1;
-                    Ok(())
+        }
+    }
+    let mut stages = Vec::new();
+    collect(
+        query,
+        &execution,
+        query.required("FunctionRoot", function).unwrap(),
+        &mut stages,
+    );
+    stages
+}
+
+fn array_extents(query: Query<'_>, info: Value) -> Option<Vec<Option<i64>>> {
+    let info = query.enode("LogicalValue", info).unwrap()?;
+    fn dimensions(query: Query<'_>, ty: Value) -> Option<Vec<Option<i64>>> {
+        if let Some(array) = query.enode("ArrayType", ty).unwrap() {
+            let mut extents = query
+                .vector(array[1])
+                .unwrap()
+                .into_iter()
+                .map(|extent| {
+                    query
+                        .enode("FixedExtent", extent)
+                        .unwrap()
+                        .map(|fixed| query.0.value_to_base::<i64>(fixed[0]))
                 })
-                .unwrap();
-            assert_eq!(phases, 3);
+                .collect::<Vec<_>>();
+            extents.extend(dimensions(query, array[2]).unwrap_or_default());
+            return Some(extents);
+        }
+        let product = query.enode("ProductType", ty).unwrap()?;
+        let mut shapes =
+            query.vector(product[0]).unwrap().into_iter().filter_map(|field| dimensions(query, field));
+        let shape = shapes.next()?;
+        assert!(
+            shapes.all(|other| other == shape),
+            "a coordinate-mapped product requires aligned array fields"
+        );
+        Some(shape)
+    }
+    dimensions(query, info[0])
+}
+
+#[test]
+fn invariant_array_regions_are_evaluated_outside_parallel_callbacks() {
+    fused_cases(&["def producer(n:i32) []f32=map(|i|f32.i32(i),0i32..<n) entry main(n:i32,j:i32) [4]f32=map(|p|producer(n)[j],iota(4))"], |_, graph, function| {
+        assert_eq!(top_level(graph, function, "Parallel").len(), 2,
+            "the producer and its consumer must be separate enclosing statements");
+    });
+}
+
+#[test]
+fn invariant_reductions_and_scans_move_with_their_memory_results() {
+    fused_cases(
+        &[
+            "entry main(xs:[]i32) [4]i32=map(|p|reduce((+),0i32,xs),iota(4))",
+            "entry main(xs:[]i32,j:i32) [4]i32=map(|p|scan((+),0i32,xs)[j],iota(4))",
+        ],
+        |_, graph, function| {
+            let query = Query(graph);
+            let collectives = top_level(graph, function, "Parallel")
+                .into_iter()
+                .filter(|&operation| !folds(query, operation).is_empty())
+                .count();
+            assert_eq!(collectives, 1, "the invariant collective must leave the callback");
         },
     );
 }
 
 #[test]
-fn radix_step_has_three_phases() {
-    let source = format!(
-        "{}\n entry main(xs: []i32) []i32 = radix_sort_step(xs, |i:i32,x:i32| (x >> i) & 1, 0)",
-        include_str!("../../../pkg/sort/src/radix_sort.wyn")
+fn invariant_memory_computations_move_out_of_loops_and_stay_guarded_by_branches() {
+    fused_cases(
+        &[
+            "entry main(xs:[]i32,b:bool) i32=if b then reduce((+),0i32,xs) else 0i32",
+            "entry main(xs:[]i32,n:i32) i32=loop x=0i32 for i<n do x+reduce((+),0i32,xs)",
+        ],
+        |index, graph, function| {
+            assert_eq!(
+                top_level(graph, function, "Parallel").len(),
+                usize::from(index == 1),
+                "a closed reduction may leave a loop without speculating expensive branch work"
+            );
+            if index == 0 {
+                assert_eq!(top_level(graph, function, "Branch").len(), 1);
+            }
+        },
     );
-    planned(&source, |graph| {
-        let query = Query(graph);
-        let mut phases = Vec::new();
-        query
-            .for_each("Phase", |row| {
-                let stage = query.enode("Stage", row[0])?.unwrap();
-                let info = query.record("SourceOperation", "OperationInfo", (stage[0],))?.unwrap();
-                phases.push((
-                    graph.value_to_base::<S>(stage[1]).to_string(),
-                    graph.value_to_base::<S>(info[1]).to_string(),
-                ));
-                Ok(())
-            })
-            .unwrap();
-        phases.sort();
-        assert_eq!(
-            phases,
-            vec![
-                ("chunks".into(), "scatter".into()),
-                ("combine".into(), "scatter".into()),
-                ("offsets".into(), "scatter".into())
-            ]
-        );
-    });
+}
+
+#[test]
+fn invariant_fusion_moves_all_members_together() {
+    fused_cases(&["entry main() [4]i32=map(|p|let a=map(|i|i+2,iota(8)) in let b=map(|i|i+1,iota(8)) in a[0]+b[0],iota(4))"], |_, graph, function| {
+            let query=Query(graph);
+            assert!(top_level(graph,function,"Parallel").into_iter().any(|operation| infos(query,operation).into_iter().filter(|&info|array_extents(query,info).is_some()).count()==2),"the complete fused computation must leave the callback");
+        });
+}
+
+#[test]
+fn retained_fusion_outputs_block_motion_when_any_member_depends_on_the_iteration() {
+    fused_cases(&["entry main() [4]i32=map(|p|let a=map(|i|i+p,iota(8)) in let b=map(|i|i+1,iota(8)) in a[0]+b[0],iota(4))"], |_, graph, function| {
+            let query=Query(graph);let top=top_level(graph,function,"Parallel");
+            let dependent=within(graph,function).into_iter().filter(|&operation|code_is(query,operation,"Parallel")&&!top.contains(&operation)&&sizes(query,operation)==[8]).count();
+            assert_eq!(dependent,1,"the iteration-dependent row must stay in the callback; its independent sibling may move out");
+        });
+}
+
+#[test]
+fn dependent_or_partial_regions_stay_inside_parallel_callbacks() {
+    fused_cases(
+        &[
+            "entry main(j:i32) [4]i32=map(|p|map(|i|i+p,iota(8))[j],iota(4))",
+            "entry main(j:i32) [4]i32=map(|p|map(|i|i/j,iota(8))[0],iota(4))",
+            "entry main(j:i32) [4]i32=map(|p|map(|i|loop x=i while x<j do x+1,iota(8))[0],iota(4))",
+        ],
+        |index, graph, function| {
+            let query = Query(graph);
+            let root = query.required("FunctionRoot", function).unwrap();
+            let result = query.required("RegionYield", (root, 0_i64)).unwrap();
+            let mut checked = false;
+            for outer in top_level(graph, function, "Parallel") {
+                if !query.sequence("Output", outer).unwrap().contains(&result) {
+                    assert!(
+                        !query.contains("OperationTrap", outer).unwrap(),
+                        "case {index}: only total independent producers may leave the callback"
+                    );
+                    continue;
+                }
+                let body = query.required("ControlRegion", (outer, 0_i64)).unwrap();
+                assert!(
+                    within(graph, function).into_iter().any(|operation| code_is(
+                        query, operation, "Parallel"
+                    ) && query
+                        .required("OperationRegion", operation)
+                        .unwrap()
+                        == body),
+                    "case {index}: the dependent or partial computation stays nested"
+                );
+                checked = true;
+            }
+            assert!(checked, "case {index}: result-producing callback missing");
+        },
+    );
+}
+
+#[test]
+fn exported_views_have_their_own_logical_domain() {
+    planned_cases(
+        &["entry main() [][]i32=let rows=map(|n|map(|i|i+n,iota(n)),[0,1,3,7]) in rows[1..3]"],
+        |_, graph, function| {
+            let query = Query(graph);
+            let views = top_level(graph, function, "View");
+            assert_eq!(views.len(), 1);
+            let operation = views[0];
+            let slices = query.vector(query.required("OperationSlices", operation).unwrap()).unwrap();
+            let slice = query.fields("Slice", slices[0]).unwrap();
+            assert_eq!(
+                graph.value_to_base::<i64>(query.required("StaticIndex", slice[1]).unwrap()),
+                2
+            );
+            let source = query.name(query.required("Input", (operation, 0_i64)).unwrap()).unwrap();
+            let count = query.required("LogicalOuterCount", source).unwrap();
+            assert_eq!(
+                graph.value_to_base::<i64>(query.required("StaticIndex", count).unwrap()),
+                4
+            );
+        },
+    );
 }
 
 #[test]
@@ -174,71 +455,38 @@ fn collective_width_tracks_materialized_accumulator_size() {
          scan(|a,b|map2((+),a,b),replicate({columns},0i32),xs)"
         )
     });
-    planned_cases(&sources, |index, graph, region| {
-        let query = Query(graph);
-        let scans = operations_in(graph, "scan", region);
-        assert_eq!(scans.len(), 1);
-        let plan = query.required("SelectedPlan", (scans[0],)).unwrap();
-        let owner = query.required("Owner", (plan,)).unwrap();
-        let width = query.required("CollectiveChunkWidth", (owner,)).unwrap();
-        assert_eq!(graph.value_to_base::<i64>(width), cases[index].1, "case {index}");
-    });
-}
-
-#[test]
-fn four_bit_radix_step_has_three_phases() {
-    let source = format!(
-        "{}\n entry main(xs: []vec2u32) []vec2u32 = radix_sort_step(xs, |i,p| u32.get_bit(i,p.x), 0)",
-        include_str!("../../../pkg/sort/src/four_bit.wyn")
-    );
-    planned(&source, |graph| {
-        let query = Query(graph);
-        let scan = operations(graph, "scan")[0];
-        let plan = query.required("SelectedPlan", (scan,)).unwrap();
-        let owner = query.required("Owner", (plan,)).unwrap();
-        let width = query.required("CollectiveChunkWidth", (owner,)).unwrap();
-        assert_eq!(graph.value_to_base::<i64>(width), 64);
-        let mut phases = Vec::new();
-        query
-            .for_each("Phase", |row| {
-                let stage = query.enode("Stage", row[0])?.unwrap();
-                let info = query.record("SourceOperation", "OperationInfo", (stage[0],))?.unwrap();
-                phases.push((
-                    graph.value_to_base::<S>(stage[1]).to_string(),
-                    graph.value_to_base::<S>(info[1]).to_string(),
-                ));
-                Ok(())
-            })
-            .unwrap();
-        phases.sort();
-        assert_eq!(
-            phases,
-            vec![
-                ("chunks".into(), "scatter".into()),
-                ("combine".into(), "scatter".into()),
-                ("offsets".into(), "scatter".into())
-            ]
-        );
+    planned_cases(&sources, |index, graph, function| {
+        let stages = dispatches(graph, function);
+        assert!(!stages.is_empty(), "case {index}: missing scan dispatch");
+        assert_eq!(stages[0].width.get(), cases[index].1, "case {index}");
     });
 }
 
 #[test]
 fn scan_input_cannot_capture_a_fused_total() {
-    planned_cases(
+    fused_cases(
         &[
             "entry main(xs:[]i32) []i32 = let t=reduce((+),0,xs) in scan((+),0,map(|x|x+t,xs))",
             "entry main(xs:[]i32) []i32 = let t=reduce((+),0,xs) in scan((+),t,xs)",
             "entry main(xs:[]i32) []i32 = let t=reduce((+),0,xs) in scan(|a,b|a+b+t,0,xs)",
         ],
-        |index, graph, region| {
+        |index, graph, function| {
             let query = Query(graph);
-            let scans = operations_in(graph, "scan", region);
-            let reductions = operations_in(graph, "reduce", region);
-            assert_eq!((scans.len(), reductions.len()), (1, 1));
+            let mut scans = Vec::new();
+            let mut totals = Vec::new();
+            for operation in top_level(graph, function, "Parallel") {
+                for kind in folds(query, operation) {
+                    if query.enode("Total", kind).unwrap().is_some() {
+                        totals.push(operation);
+                    } else {
+                        scans.push(operation);
+                    }
+                }
+            }
+            assert_eq!((scans.len(), totals.len()), (1, 1), "case {index}");
             assert_ne!(
-                query.required("SelectedPlan", (scans[0],)).unwrap(),
-                query.required("SelectedPlan", (reductions[0],)).unwrap(),
-                "case {index}"
+                scans[0], totals[0],
+                "case {index}: scan inputs depend on a completed total"
             );
         },
     );
@@ -252,10 +500,19 @@ fn updated_slice_preserves_its_descriptor() {
             let query = Query(graph);
             let mut updates = 0;
             query
-                .for_each("SourceResultOperand", |row| {
-                    let view = query.required("ArrayView", (row[0],))?;
-                    assert_eq!(view, query.required("ArrayView", (row[2],))?);
-                    updates += 1;
+                .for_each("LiveOperation", |row| {
+                    if let Code::Update { .. } =
+                        ir::code(graph, query.required("OperationPayload", row[0])?)
+                    {
+                        let output = query.name(query.required("Output", (row[0], 0_i64))?)?;
+                        let source = query.name(query.required("Input", (row[0], 0_i64))?)?;
+                        assert_eq!(
+                            query.required("ValueType", output)?,
+                            query.required("ValueType", source)?,
+                            "an update preserves the complete typed memory view"
+                        );
+                        updates += 1;
+                    }
                     Ok(())
                 })
                 .unwrap();
@@ -265,75 +522,20 @@ fn updated_slice_preserves_its_descriptor() {
 }
 
 #[test]
-fn returned_array_lengths_share_storage() {
-    planned(
-        include_str!("../../../testfiles/regressions/runtime_array_three_outputs.wyn"),
-        |graph| {
-            let query = Query(graph);
-            let mut slots = Vec::new();
-            query
-                .for_function("MetadataIndex", |keys, _| {
-                    slots.push(query.required("Backing", (keys[0],))?);
-                    Ok(())
-                })
-                .unwrap();
-            assert!(!slots.is_empty());
-            assert!(slots.iter().all(|slot| *slot == slots[0]));
-            query
-                .for_function("InputShapeBuffer", |_, storage| {
-                    assert_eq!(storage, slots[0]);
-                    Ok(())
-                })
-                .unwrap();
-        },
-    );
-}
-
-#[test]
-fn copied_runtime_slices_do_not_overwrite_other_outputs() {
-    planned(
-        include_str!("../../../testfiles/regressions/triangulation_runtime_array_return_alias.wyn"),
-        |graph| {
-            let query = Query(graph);
-            let mut backings = Vec::new();
-            query
-                .for_each("ReturnArray", |row| {
-                    let backing = query.required("OutputBacking", (row[0],))?;
-                    let view = query.record("ArrayView", "ViewInfo", (row[1],))?.unwrap();
-                    let source = query.required("Backing", (view[0],))?;
-                    if query.lookup("SourceSlice", (row[1],))?.is_some() {
-                        assert_ne!(backing, source, "copying a slice must not overwrite its source");
-                    }
-                    assert!(
-                        !backings.contains(&backing),
-                        "returned arrays need separate destinations"
-                    );
-                    backings.push(backing);
-                    Ok(())
-                })
-                .unwrap();
-            assert_eq!(backings.len(), 2);
-        },
-    );
-}
-
-#[test]
 fn shrinking_loop_does_not_inherit_its_initial_extent() {
-    planned(
-        "entry main(xs:[]i32) []i32 =
-         loop out=xs for i<2 do out[0..length(out)-1]",
-        |graph| {
+    planned_cases(
+        &["entry main(xs:[]i32) []i32=loop out=xs for i<2 do out[0..length(out)-1]"],
+        |_, graph, function| {
             let query = Query(graph);
-            let mut loops = 0;
-            query
-                .for_function("SourceLoop", |row, _| {
-                    let shape = query.record("LogicalExtent", "Scalar", (row[0],))?.unwrap();
-                    assert_eq!(query.enode("SourceShape", shape[0])?, Some(vec![row[0]]));
-                    loops += 1;
-                    Ok(())
-                })
-                .unwrap();
-            assert_eq!(loops, 1);
+            let loops = top_level(graph, function, "Loop");
+            assert_eq!(loops.len(), 1);
+            let operation = loops[0];
+            assert!(!query.contains("LoopPreservesOuterLength", (operation, 0_i64)).unwrap());
+            let initial =
+                query.name(query.required("EdgeArgument", (operation, 0_i64, 0_i64)).unwrap()).unwrap();
+            let output = query.name(query.required("Output", (operation, 0_i64)).unwrap()).unwrap();
+            assert!(array_extents(query, query.required("ValueType", output).unwrap()).is_some());
+            assert!(!query.contains("OuterShapeSource", (output, initial)).unwrap());
         },
     );
 }
@@ -343,39 +545,41 @@ fn loop_capacity_obligations_use_the_length_preservation_proof() {
     planned_cases(
         &[
             include_str!("../../../testfiles/regressions/triangulation_allocated_array_loop.wyn"),
-            "entry main(n:i32) []i32 = loop out=iota(n) for i<2 do out[1..length(out)]",
+            "entry main(n:i32) []i32=loop out=iota(n) for i<2 do out[1..length(out)]",
         ],
-        |index, graph, scope| {
-            let preserves = index == 0;
+        |index, graph, function| {
             let query = Query(graph);
-            let mut loops = 0;
-            query
-                .for_function("SourceLoop", |row, info| {
-                    let value = row[0];
-                    if query.required("SourceResult", (scope,))? != value {
-                        return Ok(());
-                    }
-                    assert_eq!(query.flag("LoopPreservesLength", (value,))?, preserves);
-                    let regions = query.enode("LoopInfo", info)?.unwrap();
-                    let initial =
-                        query.record("SourceLoopInitial", "LoopInitialInfo", (regions[0],))?.unwrap();
-                    let next = query.required("SourceResult", (regions[1],))?;
-                    let storage = query.constructor("LoopStorage", (value,))?.unwrap();
-                    let bounds = graph
-                        .value_to_container::<SetContainer>(query.required("AllocationBounds", (storage,))?)
-                        .unwrap();
-                    assert!(bounds.data.contains(&query.constructor("Length", (initial[1],))?.unwrap()));
-                    assert_eq!(
-                        bounds.data.contains(&query.constructor("Length", (next,))?.unwrap()),
-                        !preserves
-                    );
-                    loops += 1;
-                    Ok(())
-                })
-                .unwrap();
-            assert_eq!(loops, 1);
+            let loops = top_level(graph, function, "Loop");
+            assert_eq!(loops.len(), 1);
+            assert_eq!(
+                query.contains("LoopPreservesOuterLength", (loops[0], 0_i64)).unwrap(),
+                index == 0
+            );
         },
     );
+}
+
+fn local_capacities(graph: &EGraph) -> Vec<i64> {
+    let mut graph = graph.clone();
+    super::analyze(&mut graph).unwrap();
+    let query = Query(&graph);
+    let mut capacities = Vec::new();
+    query
+        .for_each("LiveOperation", |row| {
+            if query.contains("ParallelOperation", row[0])?
+                && query.enode("InvocationLocal", query.required("OperationExecution", row[0])?)?.is_some()
+            {
+                for name in query.sequence("Output", row[0])? {
+                    let name = query.name(name)?;
+                    if let Some(capacity) = query.lookup("OuterCapacity", name)? {
+                        capacities.push(graph.value_to_base::<i64>(capacity));
+                    }
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    capacities
 }
 
 #[test]
@@ -383,17 +587,12 @@ fn compiler_repro_local_capacity_plan() {
     planned(
         include_str!("../../../testfiles/regressions/local_array_capacity.wyn"),
         |graph| {
-            let query = Query(graph);
-            let mut buffers = 0;
-            query
-                .for_each("LocalBuffer", |row| {
-                    let capacity = query.required("PhysicalLocalCapacity", (row[4],))?;
-                    assert_eq!(graph.value_to_base::<i64>(capacity), 3);
-                    buffers += 1;
-                    Ok(())
-                })
-                .unwrap();
-            assert!(buffers > 0);
+            let capacities = local_capacities(graph);
+            assert!(!capacities.is_empty());
+            assert!(
+                capacities.iter().all(|&elements| elements == 3),
+                "three local elements: {capacities:?}"
+            );
         },
     );
 }
@@ -403,72 +602,19 @@ fn compiler_repro_nested_capacity_plan() {
     let source =
         "entry main(xs:[]i32) []i32=map(|x| let a=loop a=[x,x+1,x+2] for k<2 do map(|y|y+1,a) in a[0],xs)";
     planned(source, |graph| {
-        let query = Query(graph);
-        let mut capacities = Vec::new();
-        query
-            .for_each("LocalBuffer", |row| {
-                let capacity = query.required("PhysicalLocalCapacity", (row[4],))?;
-                capacities.push(graph.value_to_base::<i64>(capacity));
-                let slot = query.required("BufferSlot", (row[0], row[1], row[2]))?;
-                query.required("LocalElementLayout", (slot,))?;
-                Ok(())
-            })
-            .unwrap();
+        let capacities = local_capacities(graph);
         assert!(capacities.contains(&3));
-        assert!(capacities.iter().all(|&capacity| capacity == 1 || capacity == 3));
+        assert!(
+            capacities.iter().all(|&elements| elements == 1 || elements == 3),
+            "{capacities:?}"
+        );
     });
 }
 
 #[test]
-fn compiler_repro_array_reduce_preserves_effect_barrier() {
-    for source in ["entry main(xs:[][2]i32) [2]i32 =
-        reduce(|a,b|map(|i|a[i]+b[i],iota(2)),[0,0],map(|row|map(|x|x+1,row),xs))"]
-    {
-        let tlc = compile_thru_tlc(source).unwrap();
-        let mut imported = from_tlc(&tlc).unwrap();
-        imported
-            .graph
-            .parse_and_run_program(
-                None,
-                "(run-schedule (saturate source-summary) (saturate source-dependencies))",
-            )
-            .unwrap();
-        for writer in [None, Some("producer"), Some("consumer")] {
-            let mut graph = imported.graph.clone();
-            let query = Query(&graph);
-            let reducer = operations(&graph, "reduce")[0];
-            let producer = query
-                .row("SourceDepends", |row| {
-                    row[0] == reducer && query.enode("Input", row[2]).unwrap().is_some()
-                })
-                .unwrap()
-                .unwrap()[1];
-            let value = query.required("SourceOperationValue", (reducer,)).unwrap();
-            if let Some(writer) = writer {
-                let operation = if writer == "producer" { producer } else { reducer };
-                let written = query.required("SourceOperationValue", (operation,)).unwrap();
-                graph
-                    .update(|mut sink| {
-                        sink.set("SourceReadOnly", (written,), false)?;
-                        sink.set("SourceSpeculatable", (written,), false)
-                    })
-                    .unwrap();
-            }
-            super::super::analysis::run(&mut graph).unwrap();
-            super::super::fusion::run(&mut graph).unwrap();
-            let query = Query(&graph);
-            assert!(!query.flag("SourceSpeculatable", (value,)).unwrap());
-            assert_eq!(
-                query.required("SelectedPlan", (producer,)).unwrap()
-                    == query.required("SelectedPlan", (reducer,)).unwrap(),
-                writer.is_none()
-            );
-        }
-    }
-}
-
-#[test]
 fn result_tree_counts_are_available_to_fusion_choices() {
+    // Scan consumers share a final dispatch rather than a pre-reduction body;
+    // planning_contracts covers the resulting public execution plan.
     let cases = [
         (
             "entry main(xs:[]i32) ([]i32,[]i32)=(map(|x|x+1,xs),map(|x|x*2,xs))",
@@ -495,8 +641,8 @@ fn result_tree_counts_are_available_to_fusion_choices() {
             vec![(0, false, true)],
         ),
         (
-            "entry main(xs:[]i32) []i32=map(|x|x+1,scan((+),0,xs))",
-            vec![(1, true, false)],
+            "entry main(xs:[]i32) (i32,i32)=let a=filter(|x|x>0,xs) let b=filter(|x|x<20,map(|x|x+1,a)) in (length(a),length(b))",
+            vec![(0, false, true)],
         ),
         (
             "entry main(xs:[]i32) ([]i32,i32)=(scan((+),0,xs),reduce((+),0,xs))",
@@ -509,67 +655,24 @@ fn result_tree_counts_are_available_to_fusion_choices() {
     check_entries(&program, cases.len(), |index, graph, region| {
         let query = Query(graph);
         let mut counts = Vec::new();
-        query
-            .for_each("Current", |row| {
-                let mut belongs = false;
-                query.for_each("Member", |member| {
-                    if member[0] == row[0] {
-                        belongs |= query.record("SourceOperation", "OperationInfo", (member[1],))?.unwrap()
-                            [0]
-                            == region;
-                    }
-                    Ok(())
-                })?;
-                if !belongs {
-                    return Ok(());
-                }
-                let plan = row[1];
-                if query.contains("ScremaPlan", (plan,))? || query.contains("FilterPlan", (plan,))? {
-                    counts.push((
-                        graph.value_to_base::<i64>(query.required("ArrayOutputs", (plan,))?),
-                        graph.value_to_base::<bool>(query.required("HasScans", (plan,))?),
-                        graph.value_to_base::<bool>(query.required("HasReductions", (plan,))?),
-                    ));
-                }
-                Ok(())
-            })
-            .unwrap();
+        for operation in top_level(graph, region, "Parallel") {
+            let arrays = infos(query, operation)
+                .into_iter()
+                .filter(|&info| array_extents(query, info).is_some())
+                .count() as i64;
+            let mut scans = false;
+            let mut totals = false;
+            for kind in folds(query, operation) {
+                scans |= query.enode("Total", kind).unwrap().is_none();
+                totals |= query.enode("Total", kind).unwrap().is_some()
+                    || query.enode("InclusiveScanAndTotal", kind).unwrap().is_some()
+                    || query.enode("ExclusiveScanAndTotal", kind).unwrap().is_some();
+            }
+            counts.push((arrays, scans, totals));
+        }
         counts.sort();
         assert_eq!(counts, cases[index].1, "case {index}");
     });
-}
-
-#[test]
-fn indexed_phase_domains_preserve_validation() {
-    let tlc = compile_thru_tlc("entry main(xs:[]i32) []i32=map(|x|x+1,xs)").unwrap();
-    let program = selected(&tlc);
-    let mut prepared = super::super::prepare_host(program).unwrap();
-    let baseline = prepared.program.graph.clone();
-    for (mode, expected) in [
-        ("missing", "stage domain missing"),
-        ("ambiguous", "ambiguous PhaseDomain"),
-        ("zero-width", "stage width must be positive"),
-    ] {
-        prepared.program.graph = baseline.clone();
-        let program = &mut prepared.program;
-        let domain = Query(&program.graph).row("PhaseDomain", |_| true).unwrap().unwrap();
-        if mode != "ambiguous" {
-            program.graph.clear_function("PhaseDomain").unwrap();
-        }
-        if mode != "missing" {
-            program
-                .graph
-                .update(|mut sink| {
-                    sink.add("PhaseDomain", (domain[0], domain[1], 0i64))?;
-                    Ok(())
-                })
-                .unwrap();
-        }
-        let Err(error) = super::super::to_ssa::lower(program, CodegenTarget::Wgsl) else {
-            panic!("invalid {mode} phase domain was accepted");
-        };
-        assert!(error.to_string().contains(expected), "{mode}: {error}");
-    }
 }
 
 #[test]
@@ -584,28 +687,41 @@ fn accumulator_state_order_is_read_from_the_plan() {
         PipelineTopologyPolicy::AllowGenerated,
     )
     .unwrap();
+    // Reorder complete clauses and their bindings, instead of mutating a
+    // separate accumulator table. Different element types expose slot mistakes.
+    let query = Query(&program.graph);
+    let operation = top_level(&program.graph, test_graph::entry(&program.graph), "Parallel")
+        .into_iter()
+        .find(|&operation| folds(query, operation).len() == 2)
+        .expect("two independent accumulator clauses");
     let mut rows = Vec::new();
-    Query(&program.graph)
-        .for_each("Accumulator", |row| {
-            rows.push(row.to_vec());
-            Ok(())
-        })
-        .unwrap();
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0][0], rows[1][0], "the scan and reduction must be fused");
-    assert_ne!(
-        rows[0][2], rows[1][2],
-        "different types expose incorrect slot ordering"
-    );
-    let slot = rows[0][1];
-    rows[0][1] = rows[1][1];
-    rows[1][1] = slot;
-    program.graph.clear_function("Accumulator").unwrap();
+    for &table in super::super::dataflow::edit::OPERATION_CELLS {
+        if (table.starts_with("Result") && table != "ResultCount")
+            || ["Output", "OutputRole", "OutputClause", "OutputField"].contains(&table)
+        {
+            query
+                .for_function(table, |keys, value| {
+                    if keys[0] == operation {
+                        rows.push((table, keys.to_vec(), value));
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        }
+    }
     program
         .graph
         .update(|mut sink| {
-            for row in rows {
-                sink.add("Accumulator", egglog_engine::RawValues(row))?;
+            for (table, keys, _) in &rows {
+                sink.remove(table, egglog_engine::RawValues(keys.clone()))?;
+            }
+            for (table, mut keys, mut value) in rows {
+                let slot = sink.value_to_base::<i64>(keys[1]);
+                keys[1] = sink.base_to_value(1_i64 - slot);
+                if table == "OutputClause" {
+                    value = sink.base_to_value(1_i64 - sink.value_to_base::<i64>(value));
+                }
+                sink.set(table, egglog_engine::RawValues(keys), value)?;
             }
             Ok(())
         })
@@ -628,40 +744,6 @@ fn accumulator_state_order_is_read_from_the_plan() {
     )
     .validate(&module)
     .unwrap();
-}
-
-#[test]
-fn fused_scan_and_filter_count_have_distinct_accumulator_slots() {
-    planned(
-        "entry main(xs:[]i32) ([]i32,i32,i32)=let ys=filter(|x|x>0,xs) in
-         (scan((+),0,xs),length(ys),reduce((+),0,ys))",
-        |graph| {
-            let query = Query(graph);
-            let mut rows = Vec::new();
-            query
-                .for_each("Accumulator", |row| {
-                    rows.push(row.to_vec());
-                    Ok(())
-                })
-                .unwrap();
-            assert_eq!(rows.len(), 3);
-            assert!(
-                rows.iter().all(|row| row[0] == rows[0][0]),
-                "all components must be fused"
-            );
-            let mut slots: Vec<_> = rows.iter().map(|row| graph.value_to_base::<i64>(row[1])).collect();
-            slots.sort();
-            assert_eq!(slots, [0, 1, 2]);
-            for row in rows {
-                let slot = graph.value_to_base::<i64>(row[1]);
-                let partial = query.constructor("Temporary", (row[0], "partial", slot)).unwrap().unwrap();
-                assert!(query.contains("ElementType", (partial, row[2])).unwrap());
-                if graph.value_to_base::<S>(row[3]).as_str() == "count" {
-                    assert_eq!(slot, graph.value_to_base::<i64>(row[4]) + 1);
-                }
-            }
-        },
-    );
 }
 
 #[test]
@@ -688,110 +770,107 @@ fn flat_and_ranked_collectives_share_dimension_metadata() {
         ),
     ];
     let sources = cases.iter().map(|case| case.0).collect::<Vec<_>>();
-    planned_cases(&sources, |index, graph, scope| {
-        let (_source, kind, rank, count) = cases[index];
+    distributed_cases(&sources, |index, graph, function| {
+        let (_source, kind, expected_rank, count) = cases[index];
         let query = Query(graph);
-        let matching = operations(graph, kind)
-            .into_iter()
-            .filter(|&operation| query.required("OperationRegion", (operation,)).unwrap() == scope)
-            .collect::<Vec<_>>();
-        let [operation] = matching[..] else {
-            panic!("one {kind}")
-        };
-        assert_eq!(
-            graph.value_to_base::<i64>(query.required("SourceDomainRank", (operation,)).unwrap()),
-            rank
-        );
-        let extent = query.required("SourceDomainExtent", (operation,)).unwrap();
-        assert_eq!(
-            graph.value_to_base::<i64>(query.required("StaticCapacityBound", (extent,)).unwrap()),
-            count
-        );
-        for axis in 0..rank {
-            query.required("SourceDomainAxis", (operation, axis)).unwrap();
-        }
-        query
-            .for_function("SourceInputRank", |keys, value| {
-                if keys[0] == operation {
-                    for dimension in 0..graph.value_to_base::<i64>(value) {
-                        let axis = graph.value_to_base::<i64>(
-                            query.required("SourceInputDimension", (operation, keys[1], dimension))?,
-                        );
-                        assert!((0..rank).contains(&axis));
+        let mut matching = 0;
+        for operation in within(graph, function) {
+            let code = ir::code(graph, query.required("OperationPayload", operation).unwrap());
+            if kind == "bucket-scatter" {
+                if let Code::BucketScatter { coordinates, depth } = code {
+                    assert_eq!(depth, expected_rank as usize);
+                    let inputs = query.sequence("Input", operation).unwrap();
+                    let mut dimensions = vec![None; expected_rank as usize];
+                    for (input, mapping) in inputs.into_iter().skip(1).zip(coordinates) {
+                        let name = query.name(input).unwrap();
+                        let extents = array_extents(query, query.required("ValueType", name).unwrap())
+                            .expect("bucket input array");
+                        assert_eq!(extents.len(), mapping.len());
+                        for (extent, axis) in extents.into_iter().zip(mapping) {
+                            let axis = axis as usize;
+                            let extent = extent.expect("fixed input extent");
+                            if let Some(previous) = dimensions[axis] {
+                                assert_eq!(previous, extent);
+                            }
+                            dimensions[axis] = Some(extent);
+                        }
                     }
+                    assert_eq!(
+                        dimensions
+                            .into_iter()
+                            .map(|extent| extent.expect("covered domain axis"))
+                            .product::<i64>(),
+                        count
+                    );
+                    matching += 1;
                 }
-                Ok(())
-            })
-            .unwrap();
+                continue;
+            }
+            if !matches!(code, Code::Parallel) {
+                continue;
+            }
+            let matches = (0..analysis::count(query, "ResultCount", operation).unwrap()).any(|clause| {
+                let value = query.required("ResultKindOf", (operation, clause)).unwrap();
+                query
+                    .enode(
+                        match kind {
+                            "map" => "Collected",
+                            "filter" => "Compacted",
+                            _ => "Folded",
+                        },
+                        value,
+                    )
+                    .unwrap()
+                    .is_some()
+            });
+            if !matches {
+                continue;
+            }
+            assert_eq!(rank(query, operation), expected_rank as usize, "case {index}");
+            assert_eq!(
+                sizes(query, operation).into_iter().product::<i64>(),
+                count,
+                "case {index}"
+            );
+            matching += 1;
+        }
+        assert!(matching > 0, "case {index}: no {kind} traversal");
     });
 }
 
 #[test]
-fn fused_filter_postmap_retains_the_traversed_input_domain() {
-    planned(
-        "entry main(xs:[]i32) []i32=map(|x|x+3,filter(|x|x>0,xs))",
-        |graph| {
-            let query = Query(graph);
-            let [filter] = operations(graph, "filter")[..] else {
-                panic!("one filter")
-            };
-            let [map] = operations(graph, "map")[..] else {
-                panic!("one map")
-            };
-            let mut plans = Vec::new();
-            query
-                .for_each("Current", |row| {
-                    if query.contains("PlanMember", (row[1], filter))? {
-                        plans.push(row[1]);
-                    }
-                    Ok(())
-                })
-                .unwrap();
-            let [plan] = plans[..] else {
-                panic!("one selected filter plan")
-            };
-            assert!(query.contains("PlanMember", (plan, map)).unwrap());
-            assert_eq!(query.required("PlanDomain", (plan,)).unwrap(), filter);
-            let input = query.required("SourceInput", (filter, 0i64)).unwrap();
-            let extent = query.required("SourceExtent", (input,)).unwrap();
-            let owner = query.required("Owner", (plan,)).unwrap();
-            assert_eq!(query.required("InputDomain", (owner,)).unwrap(), extent);
-        },
-    );
-}
-
-#[test]
 fn nested_domains_retain_distinct_axes_and_capture_origins() {
-    planned(
-        "entry main(xs:[4]i32) [4][4]i32=map(|x|map(|y|x+y,xs),xs)",
-        |graph| {
+    fused_cases(
+        &["entry main(xs:[4]i32) [4][4]i32=map(|x|map(|y|x+y,xs),xs)"],
+        |_, graph, function| {
             let query = Query(graph);
-            let maps = operations(graph, "map");
-            assert_eq!(maps.len(), 2);
-            let mut bodies = Vec::new();
-            for operation in maps {
-                let body = query.required("SourceOperatorBody", (operation,)).unwrap();
-                query.required("SourceParameter", (body, 0i64)).unwrap();
-                query.required("SourceDomainAxis", (operation, 0i64)).unwrap();
-                bodies.push(body);
-            }
-            assert_ne!(bodies[0], bodies[1]);
-            let mut capture_origins = Vec::new();
+            let [outer] = top_level(graph, function, "Parallel")[..] else {
+                panic!("one outer map");
+            };
+            let domain = query.required("OperationDomain", outer).unwrap();
+            let outer_index = query.required("DomainAxis", (domain, 0_i64)).unwrap();
+            let body = query.required("ControlRegion", (outer, 0_i64)).unwrap();
+            let inner = query
+                .operations(body)
+                .unwrap()
+                .into_iter()
+                .find(|&operation| code_is(query, operation, "Parallel"))
+                .expect("the inner map retains its captured outer value");
+            let domain = query.required("OperationDomain", inner).unwrap();
+            let inner_index = query.required("DomainAxis", (domain, 0_i64)).unwrap();
+            assert_ne!(outer_index, inner_index, "nested axes need distinct binders");
+            let lane = query.required("ControlRegion", (inner, 0_i64)).unwrap();
+            let mut captures = false;
             query
-                .for_function("SourceCapture", |row, actual| {
-                    if bodies.contains(&row[0]) {
-                        if let Some(origin) = query.enode("SourceFormal", actual)? {
-                            capture_origins.push((row[0], origin[0]));
-                        }
-                    }
+                .for_each("RegionCapture", |row| {
+                    captures |= row[0] == lane && query.contains("DefinitionRegion", (row[1], body))?;
                     Ok(())
                 })
                 .unwrap();
             assert!(
-                !capture_origins.is_empty(),
-                "inner map must retain its outer element capture"
+                captures,
+                "the inner body must capture a value bound by the outer body"
             );
-            assert!(capture_origins.iter().all(|(capture, origin)| capture != origin));
         },
     );
 }
@@ -804,85 +883,44 @@ fn ranked_inputs_keep_their_independent_coordinate_mappings() {
          bucket_scatter_2d(dest,items)",
         |graph| {
             let query = Query(graph);
-            let [operation] = operations(graph, "bucket-scatter")[..] else {
-                panic!("one bucket scatter")
+            let function = test_graph::entry(graph);
+            let [operation] = top_level(graph, function, "BucketScatter")[..] else {
+                panic!("one bucket scatter");
             };
-            for input in 0..2i64 {
-                let rank = query.required("SourceInputRank", (operation, input)).unwrap();
-                assert_eq!(graph.value_to_base::<i64>(rank), 1);
-                let axis = query.required("SourceInputDimension", (operation, input, 0i64)).unwrap();
-                assert_eq!(graph.value_to_base::<i64>(axis), input);
-            }
-            let extent = query.required("SourceDomainExtent", (operation,)).unwrap();
-            let product = query.enode("Product", extent).unwrap().unwrap();
-            for (axis, factor) in product.into_iter().enumerate() {
-                let input = query.required("SourceInput", (operation, axis as i64)).unwrap();
-                assert_eq!(factor, query.required("SourceExtent", (input,)).unwrap());
-            }
+            let Code::BucketScatter { coordinates, depth } =
+                ir::code(graph, query.required("OperationPayload", operation).unwrap())
+            else {
+                panic!("bucket payload");
+            };
+            assert_eq!(coordinates[0], [0, 1]);
+            assert_eq!(depth, 2);
+            let input = query.required("Input", (operation, 1_i64)).unwrap();
+            let producer = top_level(graph, function, "Parallel")
+                .into_iter()
+                .find(|&operation| query.sequence("Output", operation).unwrap().contains(&input))
+                .expect("bucket input producer");
+            assert_eq!(sizes(query, producer), [4, 6]);
         },
     );
 }
 
 #[test]
-fn map_and_bucket_emission_require_selected_axes_not_source_domains() {
-    let tlc = compile_thru_tlc(
-        r#"
-entry case_0(xs:[2]i32) [2][3]i32=map(|x|map(|y|x+y,iota(3)),xs)
-entry case_1(dest:*[2][2]i32) ([2][2]i32,[2]u32,u32)=
-         bucket_scatter_2d(dest,[[(0,1),(0,2)],[(1,3),(1,4)]])
-"#,
-    )
-    .unwrap();
-    let program = selected(&tlc);
-    let mut prepared = super::super::prepare_host(program).unwrap();
-    for table in ["SourceDomainAxis", "SourceDomainRank", "PlanDomain"] {
-        prepared.program.graph.clear_function(table).unwrap();
-    }
-    super::super::to_ssa::lower(&prepared.program, CodegenTarget::Wgsl).unwrap();
-    let mut owners = Vec::new();
-    Query(&prepared.program.graph)
-        .for_function("IterationRank", |keys, _| {
-            owners.push(keys[0]);
-            Ok(())
-        })
-        .unwrap();
-    assert!(owners.len() >= 2);
-    prepared.program.graph.clear_function("IterationAxis").unwrap();
-    let facts = super::super::facts::Facts {
-        program: &prepared.program,
-    };
-    for owner in owners {
-        let error = facts.iteration_dimensions(owner).unwrap_err();
-        assert!(error.to_string().contains("domain axis has no planned extent"));
-    }
-}
-
-#[test]
 fn rectangular_maps_expand_launch_without_expanding_row_capacity() {
     let source = "entry main(xs:[4]i32) [4][3]i32=map(|x|map(|y|x+y,iota(3)),xs)";
-    planned(source, |graph| {
+    distributed_cases(&[source], |_, graph, function| {
         let query = Query(graph);
-        let mut flattened = 0;
-        query
-            .for_function("IterationRank", |keys, rank| {
-                if graph.value_to_base::<i64>(rank) == 2 {
-                    flattened += 1;
-                    let launch = query.required("IterationExtent", (keys[0],))?;
-                    assert_eq!(
-                        graph.value_to_base::<i64>(query.required("StaticCapacityBound", (launch,))?),
-                        12
-                    );
-                    let outer = query.required("IterationAxis", (keys[0], 0i64))?;
-                    assert_eq!(query.required("InputDomain", (keys[0],))?, outer);
-                    assert_eq!(
-                        graph.value_to_base::<i64>(query.required("StaticCapacityBound", (outer,))?),
-                        4
-                    );
-                }
-                Ok(())
-            })
-            .unwrap();
-        assert_eq!(flattened, 1);
+        let parallel = top_level(graph, function, "Parallel");
+        assert_eq!(parallel.len(), 1);
+        assert_eq!(
+            sizes(query, parallel[0]),
+            [4, 3],
+            "flattening must keep the logical row and column extents"
+        );
+        assert_eq!(
+            array_extents(query, infos(query, parallel[0])[0]).unwrap(),
+            [Some(4), Some(3)],
+            "the output retains its logical row capacity"
+        );
     });
 }
 
@@ -898,63 +936,81 @@ fn rectangular_planning_and_emission_use_fused_structure() {
         PipelineTopologyPolicy::AllowGenerated,
     )
     .unwrap();
-    // Remove source operation classification; immutable inputs and callbacks remain
-    // shared by source analysis and the fused plan.
-    program.graph.clear_function("SourceOperation").unwrap();
+    super::schedule(&mut program.graph).unwrap();
+    let query = Query(&program.graph);
+    let function = test_graph::entry(&program.graph);
+    let ranks = top_level(&program.graph, function, "Parallel")
+        .into_iter()
+        .map(|operation| rank(query, operation))
+        .collect::<Vec<_>>();
+    assert_eq!(ranks, [2]);
     let program = schedule(program).unwrap();
-    let graph = &program.graph;
-    let query = Query(graph);
-    let mut ranks = Vec::new();
-    query
-        .for_function("IterationRank", |_, rank| {
-            ranks.push(graph.value_to_base::<i64>(rank));
-            Ok(())
-        })
-        .unwrap();
-    assert!(ranks.contains(&2));
-
-    let mut program = super::super::optimize_with_policy(
+    let program = super::super::optimize_with_policy(
         super::super::prepare_interfaces(program).unwrap(),
         super::super::ScalarOptimization::Basic,
     )
     .unwrap();
-    program.graph.clear_function("SourceOperation").unwrap();
     finish_for_test(program, CodegenTarget::Wgsl).unwrap();
 }
 
 #[test]
-fn rectangular_maps_ignore_scalar_recomputation_cost() {
-    let mut expression = String::from("x");
-    for i in 1..=40 {
-        expression = format!("({expression} * x + {i})");
+fn rectangular_candidates_retain_expensive_but_legal_recomputation() {
+    use crate::egglog::payload::Payload;
+    use crate::op::BinaryOperator;
+    let mut prefix = String::new();
+    let mut codes = vec![
+        (400, Code::Parallel),
+        (200, Code::Parallel),
+        (201, Code::Scalar(Payload::Binary(BinaryOperator::Add))),
+        (
+            900,
+            Code::Constant {
+                ty: crate::types::i32(),
+                bits: 2,
+            },
+        ),
+    ];
+    for i in 1_i64..=80 {
+        codes.push((i, Code::Scalar(Payload::Binary(BinaryOperator::Multiply))));
+        prefix.push_str(&format!("(set (InputCount (OperationId {i})) 2) (set (Input (OperationId {i}) 0) (ValueNameRef (ValueId {}))) (set (Input (OperationId {i}) 1) (ValueNameRef (ValueId 1000))) (set (OutputCount (OperationId {i})) 1) (set (Output (OperationId {i}) 0) (ValueNameRef (ValueId {i}))) (set (ValueType (ValueId {i})) scalar) (set (OperationRegion (OperationId {i})) (RegionId 1)) (set (OperationOrder (OperationId {i})) {}) (RepeatableOperation (OperationId {i})) (DiscardableOperation (OperationId {i}))",i-1,i-1));
     }
-    let source = format!(
-        "def costly(x:i32) i32={expression}
-         entry main(xs:[4]i32) [4][3]i32=
-         map(|x|let t=costly(x) in map(|y|t+y,iota(3)),xs)"
+    let mut graph = test_graph::fixture(
+        &codes,
+        &include_str!("tests/distribution_cost.egg").replace("PREFIX", &prefix),
+    )
+    .unwrap();
+    analysis::run(&mut graph).unwrap();
+    super::super::fusion::run(&mut graph).unwrap();
+    super::place(
+        &mut graph,
+        PipelineTopologyPolicy::AllowGenerated,
+        super::CostModel::default(),
+    )
+    .unwrap();
+    let query = Query(&graph);
+    let mut legal = 0;
+    query
+        .for_each("DistributionPair", |row| {
+            assert!(query.flag("DistributionSafe", (row[0], row[1]))?);
+            let body = query.required("ControlRegion", (row[0], 0_i64))?;
+            assert_eq!(
+                analysis::count(query, "RegionOperationCount", body)? - 1,
+                80,
+                "expensive repeated prefix"
+            );
+            assert!(!query.contains("DistributeNest", (row[0], row[1]))?);
+            legal += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert!(legal > 0, "cost must not remove a legal distribution candidate");
+    let statements = top_level(&graph, test_graph::entry(&graph), "Parallel");
+    assert_eq!(statements.len(), 1);
+    assert_eq!(
+        rank(query, statements[0]),
+        1,
+        "ample outer parallelism should avoid repeating the expensive prefix"
     );
-    planned(&source, |graph| {
-        let query = Query(graph);
-        let mut expensive = false;
-        query
-            .for_function("WorkInlineCost", |_, cost| {
-                expensive |= graph.value_to_base::<i64>(cost) >= 65;
-                Ok(())
-            })
-            .unwrap();
-        assert!(expensive, "fixture must exceed the old repetition budget");
-        let mut flattened = false;
-        query
-            .for_function("IterationRank", |_, rank| {
-                flattened |= graph.value_to_base::<i64>(rank) == 2;
-                Ok(())
-            })
-            .unwrap();
-        assert!(
-            flattened,
-            "legal scalar recomputation must not block nested parallelism"
-        );
-    });
 }
 
 #[test]
@@ -967,290 +1023,129 @@ fn rectangular_maps_select_arbitrary_rank_and_preserve_sequential_prefixes() {
         ("entry main(xs:[][3]i32) [][3]i32=map(|row|map(|x|x+1,row),xs)", 2),
         ("entry main(xs:[2]i32) [2][3][4]i32=map(|x|map(|y|map(|z|x+y+z,iota(4)),iota(3)),xs)", 3),
         ("entry main(xs:[2]i32) [2][3][4][5]i32=map(|x|map(|y|map(|z|map(|w|x+y+z+w,iota(5)),iota(4)),iota(3)),xs)", 4),
-        ("entry main(xs:[]i32) [][3]i32=map(|x|map(|y|reduce(|a,b|a+b,0,[x,y]),iota(3)),xs)", 2),
         ("entry main(xs:[2]i32) [2][0]i32=map(|x|map(|y|x+y,iota(0)),xs)", 2),
         ("entry main(xs:[]i32) [][3]i32=map(|x|let t=loop a=x for i<16 do a+i in map(|y|t+y,iota(3)),xs)", 1),
         ("entry main(xs:[]i32) [][3]i32=map(|x|let t=reduce(|a,b|a+b,0,[x,x,x]) in map(|y|t+y,iota(3)),xs)", 1),
     ];
+    check_ranks(&cases);
+}
+
+#[test]
+fn nested_collectives_are_costed_as_part_of_the_lane_body() {
+    check_ranks(&[(
+        "entry main(xs:[]i32) [][3]i32=map(|x|map(|y|reduce(|a,b|a+b,0,[x,y]),iota(3)),xs)",
+        2,
+    )]);
+}
+
+#[test]
+fn conditional_distribution_preserves_empty_and_partial_evaluation() {
+    let cases = [
+        ("entry main(xs:[3]i32) [3][4]i32=map(|x|if x>0 then map(|y|100/(x+y),iota(4)) else map(|y|x+y,iota(4)),xs)", 2),
+        ("entry main(xs:[3]i32) [3][4]i32=map(|x|if 1/x>0 then map(|y|x+y,iota(4)) else map(|y|x-y,iota(4)),xs)", 1),
+        ("entry main(xs:[3]i32) [3][0]i32=map(|x|if x>0 then map(|y|1/x+y,iota(0)) else map(|y|x-y,iota(0)),xs)", 2),
+        ("entry main(xs:[3]i32) [3][0]i32=map(|x|let offset=1/x in map(|y|offset+y,iota(0)),xs)", 1),
+    ];
+    check_ranks(&cases);
+}
+
+fn check_ranks(cases: &[(&str, usize)]) {
     let sources = cases.iter().map(|case| case.0).collect::<Vec<_>>();
-    planned_cases(&sources, |index, graph, scope| {
+    distributed_cases(&sources, |index, graph, function| {
         let (source, expected_rank) = cases[index];
         let query = Query(graph);
-        let mut ranks = Vec::new();
-        query
-            .for_function("IterationRank", |keys, rank| {
-                let region = query.required("OperationRegion", (keys[0],))?;
-                let host = query.contains("HostRegion", (region,))?;
-                if host && region == scope {
-                    ranks.push(graph.value_to_base::<i64>(rank));
-                }
-                Ok(())
-            })
-            .unwrap();
-        assert_eq!(ranks, vec![expected_rank], "{source}");
+        let ranks = top_level(graph, function, "Parallel")
+            .into_iter()
+            .map(|operation| rank(query, operation))
+            .collect::<Vec<_>>();
+        assert_eq!(ranks, [expected_rank], "{source}");
     });
 }
 
 #[test]
-fn fused_outputs_only_share_a_rectangular_launch_when_inner_shapes_agree() {
+fn fused_outputs_traverse_independent_rectangular_domains() {
     let sources = [3, 5].map(|inner| {
         format!(
             "entry main(xs:[4]i32) ([4][3]i32,[4][{inner}]i32)=
         (map(|x|map(|y|x+y,iota(3)),xs), map(|x|map(|y|x*y,iota({inner})),xs))"
         )
     });
-    planned_cases(&sources, |index, graph, region| {
-        let expected_rank = [2, 1][index];
+    fused_cases(&sources, |index, graph, function| {
         let query = Query(graph);
-        let mut fused = 0;
-        query
-            .for_each("MapPlan", |row| {
-                if query.required("OperationRegion", (row[1],))? != region
-                    || !query.flag("MapHost", (row[0],))?
-                {
-                    return Ok(());
-                }
-                let mut outputs = 0;
-                query.for_each("PlanResult", |result| {
-                    outputs += usize::from(result[0] == row[0]);
-                    Ok(())
-                })?;
-                if outputs == 2 {
-                    fused += 1;
-                    let rank = query.required("IterationRank", (row[1],))?;
-                    assert_eq!(graph.value_to_base::<i64>(rank), expected_rank);
-                }
-                Ok(())
-            })
-            .unwrap();
-        assert_eq!(fused, 1, "case {index}");
+        let parallels = top_level(graph, function, "Parallel");
+        assert_eq!(
+            parallels.len(),
+            1,
+            "case {index}: both outputs share their outer traversal"
+        );
+        let mut shapes = infos(query, parallels[0])
+            .into_iter()
+            .filter_map(|info| array_extents(query, info))
+            .collect::<Vec<_>>();
+        shapes.sort();
+        assert_eq!(
+            shapes,
+            [vec![Some(4), Some(3)], vec![Some(4), Some([3, 5][index])]]
+        );
     });
 }
 
 #[test]
 fn rectangular_runtime_dimensions_must_be_uniform_across_outer_coordinates() {
-    planned_cases(
-        &[
-            "entry main(xs:[]i32,n:i32) [][]i32=map(|x|map(|y|x+y,iota(n)),xs)",
-            "entry main(xs:[]i32,ys:[]i32) [][]i32=map(|x|map(|y|x+y,ys),xs)",
-            "entry main(xs:[]i32,n:i32,m:i32) [][][]i32=map(|x|map(|y|map(|z|x+y+z,iota(m)),iota(n)),xs)",
-            "entry main(xs:[]i32) [][]i32=map(|x|map(|y|x+y,iota(x)),xs)",
-        ],
-        |index, graph, region| {
-            let query = Query(graph);
-            let mut ranks = Vec::new();
-            query
-                .for_each("MapPlan", |row| {
-                    let info = query.required("SourceOperation", (row[1],))?;
-                    let owner = query.enode("OperationInfo", info)?.unwrap()[0];
-                    if owner == region && query.flag("MapHost", (row[0],))? {
-                        ranks.push(graph.value_to_base::<i64>(query.required("IterationRank", (row[1],))?));
-                    }
-                    Ok(())
-                })
-                .unwrap();
-            assert_eq!(ranks, vec![[2, 2, 3, 1][index]], "case {index}");
-        },
-    );
-}
-
-#[test]
-fn segment_callback_blockers_cover_every_output_of_a_fused_plan() {
-    let tlc =
-        compile_thru_tlc("entry main(xs:[17]i32) (i32,i32)=(reduce((+),0,xs),reduce((*),1,xs))").unwrap();
-    let program = place(
-        fuse(from_tlc(&tlc).unwrap()).unwrap(),
-        PipelineTopologyPolicy::AllowGenerated,
-    )
-    .unwrap();
-    for blocked in [false, true] {
-        let mut graph = program.graph.clone();
-        let reducers = operations(&graph, "reduce");
-        assert_eq!(reducers.len(), 2);
-        let query = Query(&graph);
-        let plan = query.required("SelectedPlan", (reducers[0],)).unwrap();
-        assert_eq!(plan, query.required("SelectedPlan", (reducers[1],)).unwrap());
-        let callback = query.required("SourceOperatorBody", (reducers[0],)).unwrap();
-        let values: Vec<_> = reducers
-            .iter()
-            .map(|&reducer| query.required("SourceOperationValue", (reducer,)).unwrap())
-            .collect();
-        graph
-            .update(|mut sink| {
-                // Request both results independently, as outer map traversal would.
-                for &value in &values {
-                    sink.add("RectangularDemand", (value,))?;
-                    sink.add("SegmentDemand", (value, 0i64))?;
-                }
-                if blocked {
-                    let region = sink.add("FlowRegion", callback)?;
-                    sink.set("SourceDuplicable", region, false)?;
-                }
-                Ok(())
-            })
-            .unwrap();
-        super::schedule(&mut graph, super::super::cost::CostModel::default()).unwrap();
-        let query = Query(&graph);
-        assert_eq!(query.flag("SegmentPlanBlocked", (plan,)).unwrap(), blocked);
-        for value in values {
-            assert_eq!(query.required("SegmentCandidatePlan", (value,)).unwrap(), plan);
-            assert_eq!(
-                query.lookup("SegmentTerminal", (value, 0i64)).unwrap().is_some(),
-                !blocked
-            );
-        }
-    }
+    let sources = [
+        "entry main(xs:[]i32,n:i32) [][]i32=map(|x|map(|y|x+y,iota(n)),xs)",
+        "entry main(xs:[]i32,ys:[]i32) [][]i32=map(|x|map(|y|x+y,ys),xs)",
+        "entry main(xs:[]i32,n:i32,m:i32) [][][]i32=map(|x|map(|y|map(|z|x+y+z,iota(m)),iota(n)),xs)",
+        "entry main(xs:[]i32) [][]i32=map(|x|map(|y|x+y,iota(x)),xs)",
+        "entry main(xs:[]i32,n:i32) [][]i32=map(|x|map(|y|x+y,iota(n+1)),xs)",
+    ];
+    planned_cases(&sources, |index, graph, function| {
+        let query = Query(graph);
+        let root = query.required("FunctionRoot", function).unwrap();
+        let output = query.required("RegionYield", (root, 0_i64)).unwrap();
+        let ranks = top_level(graph, function, "Parallel")
+            .into_iter()
+            .filter(|&operation| query.sequence("Output", operation).unwrap().contains(&output))
+            .map(|operation| rank(query, operation))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ranks,
+            [[2].as_slice(), &[2], &[3], &[1], &[2]][index],
+            "{}",
+            sources[index]
+        );
+        assert!(
+            top_level(graph, function, "Loop").is_empty(),
+            "planning must not manufacture a source loop to select array storage"
+        );
+    });
 }
 
 #[test]
 fn segmented_collectives_select_workgroups_for_each_outer_coordinate() {
     planned_cases(
         &[
-            "entry main(xs:[][513]i32) []i32=map(|row|reduce((+),0,row),xs)",
-            "entry main(xs:[][513]i32) [][513]i32=map(|row|scan((+),0,row),xs)",
-            "entry main(xs:[][3][17]i32) [][3]i32=map(|rows|map(|row|reduce((+),0,row),rows),xs)",
+            "entry main(xs:[4][513]i32) []i32=map(|row|reduce((+),0,row),xs)",
+            "entry main(xs:[4][513]i32) [][513]i32=map(|row|scan((+),0,row),xs)",
+            "entry main(xs:[4][3][17]i32) [][3]i32=map(|rows|map(|row|reduce((+),0,row),rows),xs)",
         ],
-        |index, graph, region| {
+        |index, graph, function| {
             let query = Query(graph);
-            let maps = operations_in(graph, "map", region);
-            let mut groups = 0;
-            query
-                .for_function("MapSegmented", |keys, enabled| {
-                    groups += usize::from(maps.contains(&keys[0]) && graph.value_to_base::<bool>(enabled));
-                    Ok(())
-                })
+            let kernels = top_level(graph, function, "Parallel");
+            assert_eq!(kernels.len(), 1, "case {index}: one segmented kernel");
+            let operation = kernels[0];
+            assert_eq!(rank(query, operation), [2, 2, 3][index]);
+            assert!(!folds(query, operation).is_empty());
+            let execution = query
+                .fields(
+                    "DeviceKernel",
+                    query.required("OperationExecution", operation).unwrap(),
+                )
                 .unwrap();
-            assert_eq!(groups, 1, "case {index}");
-        },
-    );
-}
-
-#[test]
-fn segmented_collectives_do_not_cross_callback_control_flow() {
-    let sources = [
-        "entry main(xs:[][17]i32) []i32=map(|row|if row[0]>0 then reduce((+),0,row) else 0,xs)",
-        "entry main(xs:[][17]i32) []i32=map(|row|loop a=0 for i<2 do a+reduce((+),0,row),xs)",
-        "entry main(xs:[]i32) []i32=map(|n|reduce((+),0,iota(n)),xs)",
-    ];
-    planned(&cases_source(&sources), |graph| {
-        Query(graph)
-            .for_function("MapSegmented", |_, enabled| {
-                assert!(
-                    !graph.value_to_base::<bool>(enabled),
-                    "all three control-flow cases"
-                );
-                Ok(())
-            })
-            .unwrap();
-    });
-}
-
-#[test]
-fn selected_map_bindings_replace_callback_discovery() {
-    let source = r#"
-def row(x:i32) [3]i32=map(|y|x+y,iota(3))
-          entry case_0(xs:[]i32) [][3]i32=map(row,xs)
-entry case_1(xs:[][3][17]i32) [][3]i32=
-          map(|rows|map(|row|reduce((+),0,map(|x|x+row[0],row)),rows),xs)
-entry case_2(xs:[][3][17]i32) [][3][17]i32=
-          map(|rows|map(|row|map(|x|x*2,scan((+),0,map(|x|x+1,row))),rows),xs)
-"#;
-    let tlc = compile_thru_tlc(source).unwrap();
-    let mut program = selected(&tlc);
-    let query = Query(&program.graph);
-    let mut expected = crate::LookupMap::default();
-    query
-        .for_each("SourceOriginalEntry", |row| {
-            let symbol = program.identities.symbols.resolve(program.graph.value_to_base::<i64>(row[0]));
-            let name = program.source.symbols.get(*symbol).unwrap();
-            let index: usize = name.strip_prefix("case_").unwrap().parse().unwrap();
-            expected.insert(row[1], [(2, 2), (2, 2), (2, 3)][index]);
-            Ok(())
-        })
-        .unwrap();
-    let mut outputs = 0;
-    query
-        .for_each("MapPlan", |row| {
-            if !query.flag("MapHost", (row[0],))? {
-                return Ok(());
-            }
-            let info = query.required("SourceOperation", (row[1],))?;
-            let region = query.enode("OperationInfo", info)?.unwrap()[0];
-            let (rank, output_rank) = expected[&region];
-            let mut bindings = query.required("MapOutputBindings", (row[1], 0i64))?;
-            let mut axes = Vec::new();
-            loop {
-                if let Some(fields) = query.enode("MapIndexBinding", bindings)? {
-                    axes.push(program.graph.value_to_base::<i64>(fields[4]));
-                    bindings = fields[5];
-                } else if let Some(fields) = query.enode("MapCallBinding", bindings)? {
-                    bindings = fields[3];
-                } else {
-                    assert!(query.enode("MapValueBinding", bindings)?.is_some());
-                    break;
-                }
-            }
-            assert_eq!(axes, (0..rank).collect::<Vec<_>>(), "{source}");
-            let axes = query.required("MapOutputAxes", (row[1], 0i64))?;
-            let axes = program.graph.value_to_container::<VecContainer>(axes).unwrap();
-            assert_eq!(
-                axes.data.iter().map(|&axis| program.graph.value_to_base::<i64>(axis)).collect::<Vec<_>>(),
-                (0..output_rank).collect::<Vec<_>>(),
-                "{source}"
-            );
-            outputs += 1;
-            Ok(())
-        })
-        .unwrap();
-    assert_eq!(outputs, 3, "{source}");
-    let mut collectives = Vec::new();
-    query
-        .for_function("SourceOperatorBody", |keys, callback| {
-            if !query.flag("PlanMapping", (keys[0],))? {
-                collectives.push((keys[0], callback));
-            }
-            Ok(())
-        })
-        .unwrap();
-    for table in [
-        "SourceOperatorBody",
-        "SourceCallTarget",
-        "SourceCallArgument",
-        "SegmentTerminal",
-    ] {
-        program.graph.clear_function(table).unwrap();
-    }
-    program
-        .graph
-        .update(|mut sink| {
-            for (op, callback) in collectives {
-                sink.set("SourceOperatorBody", (op,), callback)?;
-            }
-            Ok(())
-        })
-        .unwrap();
-    finish_for_test(program, CodegenTarget::Wgsl).unwrap();
-}
-
-#[test]
-fn runtime_segmented_collectives_require_uniform_dimensions() {
-    planned_cases(
-        &[
-            "entry main(xs:[]i32,n:i32) []i32=map(|x|reduce((+),0,map(|y|x+y,iota(n))),xs)",
-            "entry main(xs:[]i32,n:i32) [][]i32=map(|x|scan((+),0,map(|y|x+y,iota(n))),xs)",
-            "entry main(xs:[]i32) []i32=map(|x|reduce((+),0,iota(x)),xs)",
-        ],
-        |index, graph, region| {
-            let query = Query(graph);
-            let maps = operations_in(graph, "map", region);
-            assert_eq!(maps.len(), 1);
-            let plan = query.required("SelectedPlan", (maps[0],)).unwrap();
-            assert!(query.flag("MapHost", (plan,)).unwrap());
-            assert_eq!(
-                query.flag("MapSegmented", (maps[0],)).unwrap(),
-                index < 2,
-                "case {index}"
-            );
+            assert!(query.enode("AutomaticGrid", execution[0]).unwrap().is_some());
+            let stages = dispatches(graph, function);
+            assert_eq!(stages.len(), 1);
+            assert!(stages[0].width.get() > 1);
         },
     );
 }
@@ -1273,13 +1168,25 @@ fn indexed_reducers_share_native_recognition_and_keep_cas_fallback() {
         let source = format!("def combine(a:i32,b:i32) i32 = a+b\nentry main(dest:*[3]i32,xs:[5]i32,k:i32) [3]i32 = reduce_by_index(dest,{reducer},0,map(|x:i32|x%3,xs),xs)");
         planned(&source, |graph| {
             let query = Query(graph);
-            let row = query.row("IndexedReducer", |_| true).unwrap().unwrap();
-            assert!(
-                query.enode(expected, row[2]).unwrap().is_some(),
-                "{reducer}: {expected}"
-            );
-            let recipe = query.record("Plan", "Atomic", (row[0],)).unwrap().unwrap();
-            assert_eq!(recipe[0], row[2], "{reducer}");
+            let mut checked = 0;
+            query
+                .for_function("AccumulatorCombiner", |_, combine| {
+                    let native = query
+                        .lookup("NativeBinaryReducer", combine)?
+                        .map(|value| read(graph, value).spelling().into_owned());
+                    let opcode = match expected {
+                        "AtomicAdd" => Some("+"),
+                        "AtomicAnd" => Some("&"),
+                        "AtomicOr" => Some("|"),
+                        "AtomicXor" => Some("^"),
+                        _ => None,
+                    };
+                    assert_eq!(native.as_deref(), opcode, "{reducer}");
+                    checked += 1;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(checked, 1, "one logical indexed combiner: {reducer}");
         });
     }
 }
@@ -1288,162 +1195,40 @@ fn indexed_reducers_share_native_recognition_and_keep_cas_fallback() {
 fn subgroup_addition_is_opt_in_and_uses_small_segments() {
     let tlc =
         compile_thru_tlc("entry main(xs:[4][32]u32) [4][32]u32 = map(|row|scan((+),0u32,row),xs)").unwrap();
-    let mut placed = place(
-        fuse(from_tlc(&tlc).unwrap()).unwrap(),
-        PipelineTopologyPolicy::AllowGenerated,
-    )
-    .unwrap();
-    let baseline = placed.graph.clone();
     for enabled in [false, true] {
-        placed.graph = baseline.clone();
-        let program = schedule_with_subgroups(placed, enabled).unwrap();
-        let query = Query(&program.graph);
-        let scan = operations(&program.graph, "scan")[0];
-        assert_eq!(query.contains("SubgroupAddition", (scan,)).unwrap(), enabled);
-        let mut segments = 0;
-        query
-            .for_each("MapPlan", |row| {
-                if query.flag("MapHost", (row[0],))? && query.flag("MapSegmented", (row[1],))? {
-                    let width = query.required("SegmentWidth", (row[1],))?;
-                    assert_eq!(
-                        program.graph.value_to_base::<i64>(width),
-                        if enabled { 32 } else { 256 }
-                    );
-                    segments += 1;
-                }
-                Ok(())
-            })
-            .unwrap();
-        assert_eq!(segments, 1);
-        placed = program.advance(super::super::Placed);
-    }
-}
-
-#[test]
-fn tiled_outputs_require_complete_tiles_and_preserve_other_consumers() {
-    for (count, fused) in [(8, true), (7, false)] {
-        for reduced in [false, true] {
-            for retained in [false, true] {
-                let metadata =
-                    if reduced { "reduce((+),0,map(|r|r[2],rows))" } else { "map(|r|r[2],rows)" };
-                let metadata_type = if reduced { "i32".to_string() } else { format!("[{count}]i32") };
-                let row_type = if retained { format!(",[{count}][3]i32") } else { String::new() };
-                let row_result = if retained { ",rows" } else { "" };
-                let source = format!("def row(i:i32) [3]i32 = [i,i+1,i+2]
-                entry main() ([16]i32,{metadata_type}{row_type}) =
-                let rows = map(row,iota({count})) in
-                (map(|a|let i=(a/8)*4+a%4 in if i<length(rows) then rows[i][(a%8)/4] else -1,iota(16)), {metadata}{row_result})");
-                planned(&source, |graph| {
-                    let query = Query(graph);
-                    let mut destinations = 0;
-                    query
-                        .for_function("TiledOutputs", |_, _| {
-                            destinations += 1;
-                            Ok(())
-                        })
-                        .unwrap();
-                    assert_eq!(destinations, usize::from(fused), "{source}");
-                    query
-                        .for_each("TiledOutput", |row| {
-                            let producer = row[0];
-                            let slot = row[1];
-                            let gather = row[2];
-                            query.for_each("KernelPhase", |phase| {
-                                assert_ne!(phase[0], gather, "tiled gather must not launch: {source}");
-                                Ok(())
-                            })?;
-                            let result = query.constructor("Result", (producer, slot))?.unwrap();
-                            let mut allocated = false;
-                            query.for_each("Allocation", |allocation| {
-                                allocated |= allocation[0] == result;
-                                Ok(())
-                            })?;
-                            assert_eq!(allocated, retained, "only observed rows allocate: {source}");
-                            Ok(())
-                        })
-                        .unwrap();
-                });
-            }
-        }
-    }
-}
-#[test]
-fn primitive_dispatch_recipes_publish_their_phase_widths_and_order() {
-    let source = compile_thru_tlc("").unwrap();
-    let mut program = place(
-        fuse(from_tlc(&source).unwrap()).unwrap(),
-        PipelineTopologyPolicy::AllowGenerated,
-    )
-    .unwrap();
-    program
-        .graph
-        .parse_and_run_program(
-            None,
-            r#"
-        (set (Plan (OperationId 0)) (Elements))
-        (set (ElideElements (OperationId 0)) false)
-        (set (MapSegmented (OperationId 0)) false)
-        (set (MapExecution (OperationId 0)) (InvocationScope))
-        (set (IterationExtent (OperationId 0)) (Fixed 1024))
-        (set (OperationGrid (OperationId 0)) (AutomaticGrid))
-        (set (Plan (OperationId 1)) (Totals))
-        (set (Plan (OperationId 2)) (Prefixes))
-        (set (SelectedCollectiveGroups (OperationId 1)) 256)
-        (set (CollectiveCombineWidth (OperationId 1)) 256)
-        (set (SelectedCollectiveGroups (OperationId 2)) 256)
-        (set (CollectiveCombineWidth (OperationId 2)) 256)
-        (set (CollectiveChunkWidth (OperationId 1)) 256)
-        (set (CollectiveChunkWidth (OperationId 2)) 256)
-        (set (OperationGrid (OperationId 1)) (AutomaticGrid))
-        (set (OperationGrid (OperationId 2)) (AutomaticGrid))
-        (set (InputDomain (OperationId 2)) (Fixed 1024))
-        (FilterShape (OperationId 3))
-        (set (ParallelBodySafe (OperationId 3)) true)
-        (set (OperationGrid (OperationId 3)) (FixedGrid 2 3 4))
-        (IndexedReducer (OperationId 4) true (AtomicAdd))
-        (set (ParallelBodySafe (OperationId 4)) true)
-        (set (InputDomain (OperationId 4)) (Fixed 5))
-        (set (OperationGrid (OperationId 4)) (AutomaticGrid))
-        (IndexedReducer (OperationId 5) false (AtomicAdd))
-        (run-schedule (saturate schedule))
-        (check (KernelPhase (OperationId 0) "elements" (Fixed 1024) 64 (AutomaticGrid)))
-        (check (KernelPhase (OperationId 1) "chunks" (Fixed 65536) 256 (FixedGrid 256 1 1)))
-        (check (KernelPhase (OperationId 1) "combine" (Fixed 256) 256 (FixedGrid 1 1 1)))
-        (check (PhaseLink (OperationId 1) "chunks" "combine"))
-        (check (KernelPhase (OperationId 2) "offsets" (Fixed 1024) 64 (AutomaticGrid)))
-        (check (PhaseLink (OperationId 2) "combine" "offsets"))
-        (check (= (Plan (OperationId 3)) (Compact)))
-        (check (KernelPhase (OperationId 3) "compact" (Fixed 64) 64 (FixedGrid 1 1 1)))
-        (check (= (Plan (OperationId 4)) (Atomic (AtomicAdd))))
-        (check (KernelPhase (OperationId 4) "atomic" (Fixed 5) 64 (AutomaticGrid)))
-        (check (= (Plan (OperationId 5)) (Serial)))
-        (check (KernelPhase (OperationId 5) "ordered" (Fixed 1) 1 (FixedGrid 1 1 1)))
-    "#,
+        let placed = place(
+            fuse(from_tlc(&tlc).unwrap()).unwrap(),
+            PipelineTopologyPolicy::AllowGenerated,
         )
         .unwrap();
+        let program = schedule_with_subgroups(placed, enabled).unwrap();
+        let function = test_graph::entry(&program.graph);
+        let stages = dispatches(&program.graph, function);
+        assert_eq!(stages.len(), 1);
+        assert_eq!(stages[0].width.get(), 32);
+        let program = super::super::optimize_for_test(program).unwrap();
+        let ssa = finish_for_test(program, CodegenTarget::Wgsl).unwrap();
+        let wgsl = crate::lower_ssa_to_wgsl(ssa).unwrap();
+        assert_eq!(wgsl.contains("subgroupInclusiveAdd("), enabled);
+    }
 }
 
 #[test]
 fn loop_placement_accounts_for_iteration_work_before_storage() {
-    for (source, dispatched) in [
-        ("entry main(xs:[4]i32) [4]i32=loop ys=xs for i<128 do map(|x|x+1,ys)", false),
-        ("entry main(xs:[4]i32) ([4]i32,i32)=loop (ys,i)=(xs,0) while i<128 do (map(|x|x+1,ys),i+1)", false),
-        ("entry main(xs:[16]i32) ([16]i32,i32)=loop (ys,i)=(xs,0) while i<128 do (scan((+),0,ys),i+1)", false),
-        ("entry main(xs:[4097]i32) ([4097]i32,i32)=loop (ys,i)=(xs,0) while i<128 do (map(|x|x+1,ys),i+1)", true),
-        ("entry main(xs:[]i32) ([]i32,i32)=loop (ys,i)=(map(|x|x,xs),0) while i<128 do (map(|x|x+1,ys),i+1)", true),
-        ("entry main(xs:[4]i32,big:[65536]i32) ([4]i32,i32)=loop (ys,i)=(xs,0) while i<128 do (map(|x|x+reduce((+),0,big),ys),i+1)", true),
+    for (source, dispatched, hoisted_reductions) in [
+        ("entry main(xs:[4]i32) [4]i32=loop ys=xs for i<128 do map(|x|x+1,ys)", false, 0),
+        ("entry main(xs:[4]i32) ([4]i32,i32)=loop (ys,i)=(xs,0) while i<128 do (map(|x|x+1,ys),i+1)", false, 0),
+        ("entry main(xs:[16]i32) ([16]i32,i32)=loop (ys,i)=(xs,0) while i<128 do (scan((+),0,ys),i+1)", false, 0),
+        ("entry main(xs:[4097]i32) ([4097]i32,i32)=loop (ys,i)=(xs,0) while i<128 do (map(|x|x+1,ys),i+1)", true, 0),
+        ("entry main(xs:[]i32) ([]i32,i32)=loop (ys,i)=(map(|x|x,xs),0) while i<128 do (map(|x|x+1,ys),i+1)", true, 0),
+        ("entry main(xs:[4]i32,big:[65536]i32) ([4]i32,i32)=loop (ys,i)=(xs,0) while i<128 do (map(|x|x+reduce((+),0,big),ys),i+1)", false, 1),
     ] {
-        planned(source, |graph| {
-            let query = Query(graph);
-            let mut count = 0;
-            query.for_each("SourceDispatchLoop", |row| {
-                let op = query.required("SourceValueOperation", (row[0],))?;
-                assert_eq!(query.flag("DispatchLoopSelected", (op,))?, dispatched, "{source}");
-                assert_eq!(query.flag("InvocationBoundary", (op,))?, !dispatched, "{source}");
-                count += 1;
-                Ok(())
-            }).unwrap();
-            assert_eq!(count, 1, "{source}");
+        placed_cases(&[source], |_, graph, function| {
+            let query=Query(graph);let loops=within(graph,function).into_iter().filter(|&operation|code_is(query,operation,"Loop")).collect::<Vec<_>>();
+            assert_eq!(loops.len(),1,"{source}");let operation=loops[0];let body=query.required("ControlRegion",(operation,0_i64)).unwrap();
+            assert_eq!(query.flag("HostRegion",body).unwrap(),dispatched,"{source}");assert_eq!(query.flag("LocalLoop",operation).unwrap(),!dispatched,"{source}");
+            let reductions=top_level(graph,function,"Parallel").into_iter().map(|operation|folds(query,operation).len()).sum::<usize>();
+            assert_eq!(reductions,hoisted_reductions,"the invariant reduction must execute once before the local loop: {source}");
         });
     }
 }
@@ -1456,21 +1241,15 @@ fn nested_loop_work_uses_constant_trip_counts() {
              loop (ys,i)=(xs,0) while i<128 do
                let next=loop zs=ys for j<{bound} do map(|x|x+1,zs) in (next,i+1)"
         );
-        planned(&source, |graph| {
+        placed_cases(&[&source], |_, graph, function| {
             let query = Query(graph);
-            let mut checked = 0;
-            query
-                .for_each("SourceDispatchLoop", |row| {
-                    let form = query.required("SourceLoopForm", (row[0],))?;
-                    if query.enode("WhileCondition", form)?.is_some() {
-                        let op = query.required("SourceValueOperation", (row[0],))?;
-                        assert_eq!(query.flag("DispatchLoopSelected", (op,))?, dispatched, "{source}");
-                        checked += 1;
-                    }
-                    Ok(())
-                })
-                .unwrap();
-            assert_eq!(checked, 1);
+            let loops = within(graph, function)
+                .into_iter()
+                .filter(|&operation| query.contains("WhileLoopOperation", operation).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(loops.len(), 1);
+            let body = query.required("ControlRegion", (loops[0], 0_i64)).unwrap();
+            assert_eq!(query.flag("HostRegion", body).unwrap(), dispatched, "{source}");
         });
     }
 }
@@ -1478,63 +1257,617 @@ fn nested_loop_work_uses_constant_trip_counts() {
 // Compile related cases once; keep every assertion tied to its source entry.
 
 #[test]
-fn fixed_collective_launches_share_geometry_and_storage() {
-    for (size, groups, combine) in [
-        (0, 1, 32),
-        (1, 1, 32),
-        (257, 2, 32),
-        (8193, 33, 64),
-        (65537, 256, 256),
-    ] {
-        planned(
-            &format!("entry main(xs:[{size}]i32) [{size}]i32=scan((+),0,xs)"),
-            |graph| {
-                let query = Query(graph);
-                let scan = operations(graph, "scan")[0];
-                let plan = query.required("SelectedPlan", (scan,)).unwrap();
-                let owner = query.required("Owner", (plan,)).unwrap();
-                assert_eq!(
-                    graph.value_to_base::<i64>(query.required("CollectiveGroups", (owner,)).unwrap()),
-                    groups
-                );
-                assert_eq!(
-                    graph.value_to_base::<i64>(query.required("CollectiveCombineWidth", (owner,)).unwrap()),
-                    combine
-                );
-                let stage = query.constructor("Stage", (owner, "chunks")).unwrap().unwrap();
-                let grid = query.record("LaunchGrid", "FixedGrid", (stage,)).unwrap().unwrap();
-                assert_eq!(graph.value_to_base::<i64>(grid[0]), groups);
-                for role in ["partial", "offset"] {
-                    let temporary = query.constructor("Temporary", (owner, role, 0i64)).unwrap().unwrap();
-                    let extent = query.record("CapacityExtent", "Fixed", (temporary,)).unwrap().unwrap();
-                    assert_eq!(graph.value_to_base::<i64>(extent[0]), groups, "{role}");
+fn fusion_compares_logical_shapes_of_independent_inputs() {
+    let sources = [17, 19].map(|size| {
+        format!("entry main(xs:[17]i32,ys:[{size}]i32) (i32,i32)=(reduce((+),0,xs),reduce((+),0,ys))")
+    });
+    fused_cases(&sources, |index, graph, function| {
+        let query = Query(graph);
+        let parallels = top_level(graph, function, "Parallel");
+        assert_eq!(parallels.len(), if index == 0 { 1 } else { 2 });
+        let count = parallels.into_iter().map(|operation| folds(query, operation).len()).sum::<usize>();
+        assert_eq!(count, 2, "fusion must retain both reductions");
+    });
+}
+
+#[test]
+fn update_handles_and_reservation_results_cannot_escape_their_scope() {
+    let tlc = compile_thru_tlc("entry main(dest:*[2]i32) [2]i32=scatter(dest,[0,1],[7,9])").unwrap();
+    let program = fuse(from_tlc(&tlc).unwrap()).unwrap();
+    for slot in [0_i64, 1] {
+        let mut graph = program.graph.clone();
+        let query = Query(&graph);
+        let mut operation = None;
+        query
+            .for_each("LiveOperation", |row| {
+                if matches!(
+                    ir::code(&graph, query.required("OperationPayload", row[0])?),
+                    Code::Accumulate { .. }
+                ) {
+                    operation = Some(row[0]);
                 }
-            },
+                Ok(())
+            })
+            .unwrap();
+        let operation = operation.expect("indexed update occurrence");
+        graph
+            .update(|mut sink| {
+                let missing = sink.add(if slot == 0 { "AccumulatorId" } else { "ValueId" }, 999999_i64)?;
+                let name = sink.add(if slot == 0 { "AccNameRef" } else { "ValueNameRef" }, missing)?;
+                sink.remove("Input", (operation, slot))?;
+                sink.set("Input", (operation, slot), name)
+            })
+            .unwrap();
+        let error = super::super::memory::validate(&mut graph).unwrap_err();
+        assert!(error.to_string().contains("outside its scope"), "{error}");
+    }
+}
+
+#[test]
+fn calibrated_costs_select_among_the_same_legal_map_executions() {
+    let tlc = compile_thru_tlc("entry main(xs:[4][513]i32) [4]i32=map(|row|reduce((+),0,row),xs)").unwrap();
+    for (barrier_ns, expected_rank) in [(0.0, 2), (1e9, 1)] {
+        let costs = super::super::cost::CostModel {
+            barrier_ns,
+            ..Default::default()
+        };
+        let placed = super::super::place_with_cost_model(
+            fuse(from_tlc(&tlc).unwrap()).unwrap(),
+            PipelineTopologyPolicy::AllowGenerated,
+            costs,
+        )
+        .unwrap();
+        let program = super::super::schedule_with_cost_model(placed, false, costs).unwrap();
+        let query = Query(&program.graph);
+        let function = test_graph::entry(&program.graph);
+        let [kernel] = top_level(&program.graph, function, "Parallel")[..] else {
+            panic!("one map kernel");
+        };
+        assert_eq!(rank(query, kernel), expected_rank, "barrier_ns={barrier_ns}");
+        let program = super::super::prepare_interfaces(program).unwrap();
+        let program =
+            super::super::optimize_with_policy(program, super::super::ScalarOptimization::Basic).unwrap();
+        finish_for_test(program, CodegenTarget::Wgsl).unwrap();
+    }
+}
+
+#[test]
+fn scan_epilogues_require_pointwise_reads_and_completed_captures() {
+    use crate::egglog::payload::Payload;
+    use crate::op::BinaryOperator;
+    for (index, bias, opcode, expected) in [
+        (11, 1001, BinaryOperator::Add, true),
+        (1000, 1001, BinaryOperator::Add, false),
+        (11, 3, BinaryOperator::Add, false),
+        (11, 1000, BinaryOperator::Divide, false),
+    ] {
+        let facts = include_str!("tests/scan_epilogue.egg")
+            .replace("INDEX", &format!("(ValueNameRef (ValueId {index}))"))
+            .replace("BIAS", &format!("(ValueNameRef (ValueId {bias}))"))
+            .replace(
+                "OPCODE_EFFECTS",
+                if opcode == BinaryOperator::Divide {
+                    "(OrderedOperation (OperationId 5))"
+                } else {
+                    "(DiscardableOperation (OperationId 5)) (RepeatableOperation (OperationId 5))"
+                },
+            );
+        let mut graph = test_graph::fixture(
+            &[
+                (
+                    90,
+                    Code::Constant {
+                        ty: crate::types::i32(),
+                        bits: 0,
+                    },
+                ),
+                (
+                    91,
+                    Code::Constant {
+                        ty: crate::types::i32(),
+                        bits: 1,
+                    },
+                ),
+                (0, Code::Parallel),
+                (1, Code::Index),
+                (3, Code::Parallel),
+                (4, Code::Index),
+                (5, Code::Scalar(Payload::Binary(opcode))),
+                (20, Code::Scalar(Payload::Binary(BinaryOperator::Add))),
+            ],
+            &facts,
+        )
+        .unwrap();
+        analysis::run(&mut graph).unwrap();
+        super::epilogues(&mut graph).unwrap();
+        assert_eq!(Query(&graph).first("ScanEpilogue").unwrap().is_some(), expected);
+    }
+}
+
+fn code_is(query: Query<'_>, operation: Value, kind: &str) -> bool {
+    let code = ir::code(query.0, query.required("OperationPayload", operation).unwrap());
+    matches!(
+        (kind, code),
+        ("Parallel", Code::Parallel)
+            | ("Branch", Code::Branch)
+            | ("Loop", Code::CountedLoop | Code::WhileLoop)
+            | ("View", Code::View)
+            | ("BucketScatter", Code::BucketScatter { .. })
+    )
+}
+fn rank(query: Query<'_>, operation: Value) -> usize {
+    analysis::count(
+        query,
+        "DomainRank",
+        query.required("OperationDomain", operation).unwrap(),
+    )
+    .unwrap() as usize
+}
+fn sizes(query: Query<'_>, operation: Value) -> Vec<i64> {
+    let domain = query.required("OperationDomain", operation).unwrap();
+    (0..rank(query, operation) as i64)
+        .map(|slot| {
+            query.0.value_to_base::<i64>(
+                query
+                    .required(
+                        "StaticIndex",
+                        query.required("DomainExtent", (domain, slot)).unwrap(),
+                    )
+                    .unwrap(),
+            )
+        })
+        .collect()
+}
+fn infos(query: Query<'_>, operation: Value) -> Vec<Value> {
+    query
+        .sequence("Output", operation)
+        .unwrap()
+        .into_iter()
+        .map(|name| query.required("ValueType", query.name(name).unwrap()).unwrap())
+        .collect()
+}
+fn folds(query: Query<'_>, operation: Value) -> Vec<Value> {
+    (0..analysis::count(query, "ResultCount", operation).unwrap())
+        .filter_map(|slot| {
+            query
+                .enode(
+                    "Folded",
+                    query.required("ResultKindOf", (operation, slot)).unwrap(),
+                )
+                .unwrap()
+                .map(|fields| fields[0])
+        })
+        .collect()
+}
+fn within(graph: &EGraph, function: Value) -> Vec<Value> {
+    let query = Query(graph);
+    let root = query.required("FunctionRoot", function).unwrap();
+    let mut operations = Vec::new();
+    query
+        .for_each("LiveOperation", |row| {
+            if query.contains(
+                "FlowScopeAncestor",
+                (root, query.required("OperationRegion", row[0])?),
+            )? {
+                operations.push(row[0]);
+            }
+            Ok(())
+        })
+        .unwrap();
+    operations
+}
+
+#[test]
+fn indexed_literal_bounds_require_every_element() {
+    for (elements, expected) in [("[-3,7,0]", Some((-3, 7))), ("[-3,n,7]", None)] {
+        let source = compile_thru_tlc(&format!("entry main(i:i32,n:i32) i32={elements}[i]")).unwrap();
+        let mut program = from_tlc(&source).unwrap();
+        analysis::run(&mut program.graph).unwrap();
+        super::analyze(&mut program.graph).unwrap();
+        let query = Query(&program.graph);
+        let mut indexed = 0;
+        query
+            .for_each("IndexOperation", |row| {
+                let value = query.required("Output", (row[0], 0_i64))?;
+                let low = query.lookup("IntegerLower", value)?.map(|v| query.0.value_to_base::<i64>(v));
+                let high = query.lookup("IntegerUpper", value)?.map(|v| query.0.value_to_base::<i64>(v));
+                assert_eq!(low.zip(high), expected);
+                indexed += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(indexed, 1);
+    }
+}
+
+#[test]
+fn collection_shape_proofs_distinguish_extents_from_capacity() {
+    let mut graph = test_graph::fixture(
+        &[(0, Code::Parallel), (1, Code::Uninitialized)],
+        r#"
+        (set (OperationShape (OperationId 1)) (vec-of (IndexConstant 2)))
+        (set (Output (OperationId 1) 0) (ValueNameRef (ValueId 30)))
+        (LiveOperation (OperationId 0))
+        (set (OperationDomain (OperationId 0)) (DomainId 0))
+        (set (DomainRank (DomainId 0)) 2)
+        (set (DomainExtent (DomainId 0) 0) (IndexConstant 8))
+        (set (DomainExtent (DomainId 0) 1) (IndexConstant 4))
+        (set (Output (OperationId 0) 0) (ValueNameRef (ValueId 0)))
+        (set (OutputRole (OperationId 0) 0) (CollectedOutput))
+        (set (OutputClause (OperationId 0) 0) 0)
+        (set (OutputField (OperationId 0) 0) 0)
+        (set (ResultKindOf (OperationId 0) 0) (Collected))
+        (set (ResultValue (OperationId 0) 0 0) (ValueNameRef (ValueId 10)))
+        (set (Output (OperationId 0) 1) (ValueNameRef (ValueId 1)))
+        (set (OutputRole (OperationId 0) 1) (CompactedOutput))
+        (set (Output (OperationId 0) 2) (ValueNameRef (ValueId 2)))
+        (set (OutputRole (OperationId 0) 2) (TotalOutput))
+        (set (OutputClause (OperationId 0) 2) 2)
+        (set (OutputField (OperationId 0) 2) 0)
+        (set (ResultReducer (OperationId 0) 2) (RegionId 2))
+        (ReducerPreservesOuterLength (RegionId 2) 0)
+        (set (ResultNeutral (OperationId 0) 2 0) (ValueNameRef (ValueId 20)))
+        (set (Output (OperationId 0) 3) (ValueNameRef (ValueId 3)))
+        (set (OutputRole (OperationId 0) 3) (UpdatedOutput))
+        (run-schedule (saturate graph-sizes))
+        (check (= (CollectionRank (ValueId 0)) 2))
+        (check (= (CollectionExtent (ValueId 0) 1) (IndexConstant 4)))
+        (check (= (CollectionElement (ValueId 0)) (ValueId 10)))
+        (check (= (CollectionRank (ValueId 1)) 2))
+        (check (= (CollectionRank (ValueId 2)) 1))
+        (check (= (CollectionElement (ValueId 2)) (ValueId 20)))
+    "#,
+    )
+    .unwrap();
+    let query = Query(&graph);
+    let scratch = query.constructor("ValueId", 30_i64).unwrap().unwrap();
+    let extent = query.required("LogicalOuterCount", scratch).unwrap();
+    assert_eq!(
+        graph.value_to_base::<i64>(query.required("StaticIndex", extent).unwrap()),
+        2
+    );
+
+    let compact = query.constructor("ValueId", 1_i64).unwrap().unwrap();
+    let updated = query.constructor("ValueId", 3_i64).unwrap().unwrap();
+    assert!(query.lookup("LogicalOuterCount", compact).unwrap().is_none());
+    assert!(query.lookup("CollectionRank", updated).unwrap().is_none());
+    graph.clear_function("LiveOperation").unwrap();
+    super::analyze(&mut graph).unwrap();
+    assert!(
+        Query(&graph).lookup("CollectionRank", compact).unwrap().is_none(),
+        "invalidated proofs must not survive a dead producer"
+    );
+}
+
+#[test]
+fn collected_shape_does_not_require_unrelated_result_constructors() {
+    test_graph::fixture(
+        &[(0, Code::Parallel)],
+        r#"
+        (LiveOperation (OperationId 0))
+        (set (OperationDomain (OperationId 0)) (DomainId 0))
+        (set (DomainRank (DomainId 0)) 2)
+        (set (DomainExtent (DomainId 0) 1) (IndexConstant 3))
+        (set (Output (OperationId 0) 0) (ValueNameRef (ValueId 0)))
+        (set (OutputRole (OperationId 0) 0) (CollectedOutput))
+        (run-schedule (saturate graph-sizes))
+        (check (= (CollectionRank (ValueId 0)) 2))
+        (check (= (CollectionExtent (ValueId 0) 1) (IndexConstant 3)))
+    "#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn element_update_snapshots_require_no_escaping_copy() {
+    for (escape, safe) in [
+        ("", true),
+        (
+            "(set (RegionYield (RegionId 0) 0) (ValueNameRef (ValueId 1)))",
+            false,
+        ),
+        (
+            "(LiveOperation (OperationId 3)) (OperationUse (OperationId 3) (ValueNameRef (ValueId 1)))",
+            false,
+        ),
+    ] {
+        let facts = format!(
+            r#"
+            (LiveOperation (OperationId 0)) (LiveOperation (OperationId 1)) (LiveOperation (OperationId 2))
+            (set (Output (OperationId 0) 0) (ValueNameRef (ValueId 1)))
+            (set (Input (OperationId 1) 0) (ValueNameRef (ValueId 1)))
+            (set (OperationSlices (OperationId 1)) (vec-of (At (IndexConstant 0))))
+            (OperationUse (OperationId 1) (ValueNameRef (ValueId 1)))
+            (OperationUse (OperationId 2) (ValueNameRef (ValueId 1)))
+            {escape}
+            (run-schedule (saturate reuse-reads) (saturate reuse-legality) (saturate reuse-select))
+        "#
+        );
+        let graph = test_graph::fixture(
+            &[
+                (0, Code::Copy),
+                (
+                    1,
+                    Code::Update {
+                        bounds: Bounds::Proven,
+                    },
+                ),
+                (2, Code::Index),
+                (3, Code::Use),
+            ],
+            &facts,
+        )
+        .unwrap();
+        let query = Query(&graph);
+        let value = query.constructor("ValueId", 1_i64).unwrap().unwrap();
+        assert_eq!(query.contains("CanSnapshotCopy", value).unwrap(), safe);
+    }
+}
+
+#[test]
+fn slice_lengths_do_not_require_a_source_capacity_bound() {
+    let graph = test_graph::fixture(&[(0, Code::View)], r#"
+        (set (Input (OperationId 0) 0) (ValueNameRef (ValueId 0)))
+        (set (Output (OperationId 0) 0) (ValueNameRef (ValueId 1)))
+        (set (OperationSlices (OperationId 0)) (vec-of (Slice (IndexConstant 2) (IndexConstant 5) (IndexConstant 1))))
+        (run-schedule (saturate graph-sizes))
+        (check (= (LogicalOuterCount (ValueId 1)) (IndexConstant 5)))
+    "#).unwrap();
+    let query = Query(&graph);
+    let source = query.constructor("ValueId", 0_i64).unwrap().unwrap();
+    assert!(query.lookup("OuterCapacity", source).unwrap().is_none());
+}
+
+#[test]
+fn speculation_requires_native_outputs_purity_and_bounded_work() {
+    for (element, pure, work, expected) in [
+        ("(ScalarElement (I32))", true, 4, true),
+        ("(VectorElement (F16) 4)", true, 4, true),
+        ("(ScalarElement (I64))", true, 1, false),
+        ("(VectorElement (F32) 8)", true, 1, false),
+        ("(ScalarElement (I32))", false, 1, false),
+        ("(ScalarElement (I32))", true, 5, false),
+    ] {
+        let graph = test_graph::fixture(
+            &[(0, Code::Branch)],
+            &format!(
+                r#"
+            (LiveOperation (OperationId 0))
+            (set (PureOperation (OperationId 0)) {pure})
+            (set (OutputCount (OperationId 0)) 1)
+            (set (Output (OperationId 0) 0) (ValueNameRef (ValueId 0)))
+            (set (ValueType (ValueId 0)) (ScalarInfo {element}))
+            (set (ControlRegion (OperationId 0) 0) (RegionId 0))
+            (set (ControlRegion (OperationId 0) 1) (RegionId 1))
+            (set (RegionWork (RegionId 0)) (bigint {work}))
+            (set (RegionWork (RegionId 1)) (bigint 0))
+            (run-schedule (saturate physical-legality))
+        "#
+            ),
+        )
+        .unwrap();
+        let query = Query(&graph);
+        let operation = query.constructor("OperationId", 0_i64).unwrap().unwrap();
+        assert_eq!(
+            query.contains("CanSpeculate", operation).unwrap(),
+            expected,
+            "{element}, pure={pure}, work={work}"
         );
     }
 }
 
 #[test]
-fn fluid_radix_scan_avoids_empty_groups_and_oversized_carries() {
-    let source = format!(
-        "{}\nentry main(xs:[4320]vec2u32) [4320]vec2u32 = radix_sort_step(xs,|i,p|u32.get_bit(i,p.x),0)",
-        include_str!("../../../pkg/sort/src/four_bit.wyn")
+fn retry_safety_allows_reads_but_rejects_writes_and_traps() {
+    let mut graph = test_graph::fixture(
+        &[],
+        r#"
+        (LiveRegion (RegionId 0)) (LiveRegion (RegionId 1)) (LiveRegion (RegionId 2))
+        (RegionRead (RegionId 0) (ExternalMemory))
+        (RegionWrite (RegionId 1) (ExternalMemory))
+        (RegionTrap (RegionId 2))
+        (run-schedule (saturate physical-legality))
+        (check (= (RetrySafe (RegionId 0)) true))
+        (check (= (RetrySafe (RegionId 1)) false))
+        (check (= (RetrySafe (RegionId 2)) false))
+    "#,
+    )
+    .unwrap();
+    graph.clear_function("LiveRegion").unwrap();
+    super::analyze(&mut graph).unwrap();
+    let query = Query(&graph);
+    let region = query.constructor("RegionId", 0_i64).unwrap().unwrap();
+    assert!(
+        query.lookup("RetrySafe", region).unwrap().is_none(),
+        "invalidated eligibility cannot survive analysis refresh"
     );
-    planned(&source, |graph| {
-        let query = Query(graph);
-        let scan = operations(graph, "scan")[0];
-        let plan = query.required("SelectedPlan", (scan,)).unwrap();
-        let owner = query.required("Owner", (plan,)).unwrap();
-        for (fact, expected) in [
-            ("CollectiveChunkWidth", 64),
-            ("CollectiveGroups", 68),
-            ("CollectiveCombineWidth", 128),
-        ] {
+}
+
+#[test]
+fn atomic_candidates_require_one_fresh_32_bit_scalar_array() {
+    for (element, count, fresh, expected) in [
+        ("(ScalarElement (I32))", 1, true, true),
+        ("(ScalarElement (U32))", 1, true, true),
+        ("(ScalarElement (F32))", 1, true, false),
+        ("(ScalarElement (I64))", 1, true, false),
+        ("(ScalarElement (I32))", 2, true, false),
+        ("(ScalarElement (I32))", 1, false, false),
+    ] {
+        let fact = if fresh { "(FreshArray (ValueId 0))" } else { "" };
+        let graph = test_graph::fixture(&[], &format!(r#"
+            (set (AccumulatorArrayCount (OperationId 0) 0) {count})
+            (set (AccumulatorArray (OperationId 0) 0 0) (ValueId 0))
+            (set (ValueType (ValueId 0)) (LogicalValue (ArrayType (ValueArray) (vec-of (FixedExtent 4)) (ElementValue {element}))))
+            {fact}
+            (run-schedule (saturate physical-legality))
+        "#)).unwrap();
+        assert_eq!(
+            Query(&graph).first("AtomicAccumulatorArray").unwrap().is_some(),
+            expected,
+            "{element}, count={count}, fresh={fresh}"
+        );
+    }
+}
+
+#[test]
+fn kernel_policies_distinguish_compaction_atomics_and_native_scans() {
+    for (kind, device, rank, atomic, predicated, algorithm, grouping, native) in [
+        (
+            "(Collected)",
+            true,
+            1,
+            false,
+            false,
+            "ParallelKernel",
+            "WorkgroupGroups",
+            false,
+        ),
+        (
+            "(Compacted)",
+            true,
+            1,
+            false,
+            false,
+            "CompactionKernel",
+            "SingleGroup",
+            false,
+        ),
+        ("(Compacted)", false, 1, false, false, "OrderedKernel", "", false),
+        (
+            "(Compacted)",
+            true,
+            2,
+            false,
+            false,
+            "OrderedKernel",
+            "SingleGroup",
+            false,
+        ),
+        (
+            "(Contributed)",
+            true,
+            1,
+            false,
+            false,
+            "OrderedKernel",
+            "SingleGroup",
+            false,
+        ),
+        (
+            "(Contributed)",
+            true,
+            1,
+            true,
+            false,
+            "ParallelKernel",
+            "WorkgroupGroups",
+            false,
+        ),
+        (
+            "(Folded (InclusiveScan))",
+            true,
+            1,
+            false,
+            false,
+            "ParallelKernel",
+            "ElementGroups",
+            true,
+        ),
+        (
+            "(Folded (InclusiveScan))",
+            true,
+            1,
+            false,
+            true,
+            "OrderedKernel",
+            "ElementGroups",
+            true,
+        ),
+    ] {
+        let mut graph = test_graph::fixture(
+            &[(0, Code::Parallel)],
+            &format!(
+                r#"
+            (LiveOperation (OperationId 0))
+            (set (OperationDomain (OperationId 0)) (DomainId 0)) (set (DomainRank (DomainId 0)) {rank})
+            (set (ResultCount (OperationId 0)) 1) (set (ResultKindOf (OperationId 0) 0) {kind})
+            (set (ResultValueCount (OperationId 0) 0) 1)
+            (set (ResultValue (OperationId 0) 0 0) (AccNameRef (AccumulatorId 0)))
+            (set (TokenCapability (AccumulatorId 0)) (TokenBindingAt (OperationId 1) 0))
+            (set (ResultReducer (OperationId 0) 0) (RegionId 1)) (LiveRegion (RegionId 1))
+            (set (ResultNeutralCount (OperationId 0) 0) 1)
+            (set (ResultNeutral (OperationId 0) 0 0) (ValueNameRef (ValueId 10)))
+            (set (ConstantValue (ValueNameRef (ValueId 10))) 0) (NativeAddition (RegionId 1))
+            (set (SubgroupsEnabled) true)
+        "#
+            ),
+        )
+        .unwrap();
+        super::load_execution(&mut graph).unwrap();
+        let facts = format!(
+            "{} {} {}",
+            if device { "(EmittedDispatch (OperationId 0))" } else { "" },
+            "",
+            if predicated { "(set (ResultPredicate (OperationId 0) 0) (ValueId 99))" } else { "" }
+        );
+        graph
+            .parse_and_run_program(
+                None,
+                &format!(
+                    r#"{facts}
+            (run-schedule (saturate physical-legality) (saturate execution-features)
+                (saturate execution-atomics) (saturate execution-policy) (saturate execution-select))"#
+                ),
+            )
+            .unwrap();
+        let query = Query(&graph);
+        let operation = query.constructor("OperationId", 0_i64).unwrap().unwrap();
+        let selected = query.required("SelectedKernelAlgorithm", (operation, atomic)).unwrap();
+        assert!(
+            query.enode(algorithm, selected).unwrap().is_some(),
+            "{kind}, device={device}, rank={rank}, atomic={atomic}, predicated={predicated}"
+        );
+        assert_eq!(query.contains("UseNativeSubgroups", operation).unwrap(), native);
+        assert_eq!(
+            query.contains("CanChunkCollective", operation).unwrap(),
+            kind == "(Collected)" || (kind.starts_with("(Folded") && !predicated)
+        );
+        if device {
+            let selected = query.required("SelectedLaunchGrouping", (operation, atomic)).unwrap();
+            assert!(query.enode(grouping, selected).unwrap().is_some());
             assert_eq!(
-                graph.value_to_base::<i64>(query.required(fact, (owner,)).unwrap()),
-                expected,
-                "{fact}"
+                graph.value_to_base::<i64>(query.required("LaunchRank", operation).unwrap()),
+                rank - i64::from(native)
             );
         }
-    });
+    }
+}
+
+#[test]
+fn fixed_loop_states_require_every_array_component_to_preserve_length() {
+    for preserved in [false, true] {
+        let second = if preserved {
+            "(LoopPreservesComponentLength (OperationId 0) 0 (FieldPath (RootPath) 1))"
+        } else {
+            ""
+        };
+        let mut graph = test_graph::fixture(&[], &format!(r#"
+            (LoopValueCarry (OperationId 0) 0 (ValueId 10) (ValueId 20) (ValueId 30))
+            (LoopArrayComponent (OperationId 0) 0 (FieldPath (RootPath) 0) (ValueId 11) (ValueId 21) (ValueId 31))
+            (LoopArrayComponent (OperationId 0) 0 (FieldPath (RootPath) 1) (ValueId 12) (ValueId 22) (ValueId 32))
+            (LoopPreservesComponentLength (OperationId 0) 0 (FieldPath (RootPath) 0))
+            {second}
+            (run-schedule (saturate physical-legality))
+        "#)).unwrap();
+        super::load_execution(&mut graph).unwrap();
+        graph
+            .parse_and_run_program(
+                None,
+                "(run-schedule (saturate execution-features) (saturate execution-atomics))",
+            )
+            .unwrap();
+        assert_eq!(
+            Query(&graph).first("FixedLoopState").unwrap().is_some(),
+            preserved
+        );
+    }
 }

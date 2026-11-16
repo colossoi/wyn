@@ -256,25 +256,25 @@ fn substitute_in_soac(
             body(pred, old_symbol, replacement, term_ids);
             substitute_in_array(input, old_symbol, replacement, term_ids);
         }
-        SoacOp::Scatter { lam, inputs, .. } => {
-            body(lam, old_symbol, replacement, term_ids);
-            for input in inputs {
-                substitute_in_array(input, old_symbol, replacement, term_ids);
-            }
-        }
-        SoacOp::BucketScatter { lam, inputs, .. } => {
+        SoacOp::Scatter { dest, lam, inputs }
+        | SoacOp::BucketScatter {
+            dest, lam, inputs, ..
+        } => {
+            substitute_in_place(dest, old_symbol, replacement, term_ids);
             body(lam, old_symbol, replacement, term_ids);
             for input in inputs {
                 substitute_in_array(input, old_symbol, replacement, term_ids);
             }
         }
         SoacOp::ReduceByIndex {
+            dest,
             op,
             ne,
             indices,
             values,
             ..
         } => {
+            substitute_in_place(dest, old_symbol, replacement, term_ids);
             body(op, old_symbol, replacement, term_ids);
             substitute_in_place(ne, old_symbol, replacement, term_ids);
             substitute_in_array(indices, old_symbol, replacement, term_ids);

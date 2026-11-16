@@ -71,6 +71,32 @@ impl CostModel {
         local < dispatch
     }
 
+    /// Estimate a map coordinate's repeated prefix and its remaining parallel leaf.
+    pub(super) fn mapping(
+        self,
+        coordinates: f64,
+        serial: f64,
+        parallel: f64,
+        elements: f64,
+        width: u32,
+    ) -> f64 {
+        let lanes = f64::from(self.resident_workgroups) * 32.0;
+        let active = f64::from(width).min(elements.max(1.0));
+        let occupancy = (coordinates * active / lanes).clamp(1.0 / lanes, 1.0);
+        let compute =
+            coordinates * (serial * f64::from(width) + parallel) / (self.compute_ops_per_ns * occupancy);
+        let memory = coordinates * elements * 4.0 / (self.memory_bytes_per_ns * occupancy);
+        let barriers = if width == 1 {
+            0.0
+        } else {
+            (coordinates / f64::from(self.resident_workgroups)).ceil()
+                * f64::from(width.ilog2())
+                * 2.0
+                * self.barrier_ns
+        };
+        compute.max(memory) + barriers + self.launch_ns
+    }
+
     pub fn estimate(self, work: CollectiveWork, chunk_width: u32, groups: u32) -> f64 {
         let carry_width = groups.next_power_of_two().max(32);
         let groups = u64::from(groups.max(1));
@@ -123,6 +149,87 @@ impl CostModel {
                     .then_with(|| b.cmp(a))
             })
             .ok_or("no legal collective launch")
+    }
+}
+
+pub(super) fn register_width(graph: &mut EGraph, costs: CostModel) {
+    graph.add_pure_primitive(Width(costs), None);
+    graph.add_pure_primitive(Distribute(costs), None);
+}
+
+#[derive(Clone)]
+struct Width(CostModel);
+impl Primitive for Width {
+    fn name(&self) -> &str {
+        "wyn-workgroup-width"
+    }
+    fn get_type_constraints(&self, span: &Span) -> Box<dyn TypeConstraint> {
+        SimpleTypeConstraint::new(
+            self.name(),
+            vec![
+                BigIntSort.to_arcsort(),
+                BigIntSort.to_arcsort(),
+                I64Sort.to_arcsort(),
+            ],
+            span.clone(),
+        )
+        .into_box()
+    }
+}
+impl PurePrim for Width {
+    fn apply<'a, 'db>(&self, state: PureState<'a, 'db>, args: &[Value]) -> Option<Value> {
+        let &[elements, work] = args else {
+            unreachable!("invalid workgroup cost arity");
+        };
+        let elements = u64::try_from(&*state.value_to_base::<Z>(elements)).ok()? as f64;
+        let work = u64::try_from(&*state.value_to_base::<Z>(work)).ok()? as f64;
+        let width = [32, 64, 128].into_iter().min_by(|&a, &b| {
+            self.0
+                .mapping(1.0, 0.0, work, elements, a)
+                .total_cmp(&self.0.mapping(1.0, 0.0, work, elements, b))
+                .then_with(|| a.cmp(&b))
+        })?;
+        Some(state.base_to_value(i64::from(width)))
+    }
+}
+
+#[derive(Clone)]
+struct Distribute(CostModel);
+impl Primitive for Distribute {
+    fn name(&self) -> &str {
+        "wyn-distribute"
+    }
+    fn get_type_constraints(&self, span: &Span) -> Box<dyn TypeConstraint> {
+        let mut sorts = vec![BigIntSort.to_arcsort(); 4];
+        sorts.extend([BoolSort.to_arcsort(), BoolSort.to_arcsort()]);
+        SimpleTypeConstraint::new(self.name(), sorts, span.clone()).into_box()
+    }
+}
+impl PurePrim for Distribute {
+    fn apply<'a, 'db>(&self, state: PureState<'a, 'db>, args: &[Value]) -> Option<Value> {
+        let &[coordinates, serial, parallel, elements, fold] = args else {
+            unreachable!("invalid distribution cost arity");
+        };
+        let number = |value| u64::try_from(&*state.value_to_base::<Z>(value)).ok();
+        let coordinates = number(coordinates)? as f64;
+        let serial = number(serial)? as f64;
+        let parallel = number(parallel)? as f64;
+        let elements = number(elements)? as f64;
+        let lanes = f64::from(self.0.resident_workgroups) * 32.0;
+        let cost = |width: f64| {
+            let occupancy = (coordinates * width / lanes).clamp(1.0 / lanes, 1.0);
+            (coordinates * (serial * width + parallel * elements) / (self.0.compute_ops_per_ns * occupancy))
+                .max(coordinates * elements * 4.0 / (self.0.memory_bytes_per_ns * occupancy))
+        };
+        let barriers = if state.value_to_base::<bool>(fold) {
+            elements.clamp(1.0, 128.0).log2()
+                * 2.0
+                * self.0.barrier_ns
+                * (coordinates / f64::from(self.0.resident_workgroups)).ceil()
+        } else {
+            0.0
+        };
+        Some(state.base_to_value(cost(elements.max(1.0)) + barriers <= cost(1.0)))
     }
 }
 

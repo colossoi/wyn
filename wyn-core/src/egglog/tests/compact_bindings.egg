@@ -1,0 +1,13 @@
+; Mixed collected/compacted slots, retained outputs, and a wide compact clause.
+(LiveOperation (OperationId 0)) (LiveOperation (OperationId 1)) (LiveOperation (OperationId 2))
+(set (ResultCount (OperationId 0)) 2) (set (ResultCount (OperationId 1)) 1) (set (ResultCount (OperationId 2)) 1)
+(set (ResultKindOf (OperationId 0) 0) (Collected)) (set (ResultKindOf (OperationId 0) 1) (Compacted))
+(set (ResultKindOf (OperationId 1) 0) (Compacted)) (set (ResultKindOf (OperationId 2) 0) (Compacted))
+(set (ResultValueCount (OperationId 0) 0) 1) (set (ResultValueCount (OperationId 0) 1) 1)
+(set (ResultValueCount (OperationId 1) 0) 1) (set (ResultValueCount (OperationId 2) 0) 2)
+(set (Output (OperationId 0) 0) (ValueNameRef (ValueId 2))) (set (OutputClause (OperationId 0) 0) 0)
+(set (Output (OperationId 0) 1) (ValueNameRef (ValueId 3))) (set (OutputClause (OperationId 0) 1) 1)
+(set (Output (OperationId 1) 0) (ValueNameRef (ValueId 4))) (set (OutputClause (OperationId 1) 0) 0)
+(set (Output (OperationId 2) 0) (ValueNameRef (ValueId 5))) (set (OutputClause (OperationId 2) 0) 0)
+(set (Output (OperationId 2) 1) (ValueNameRef (ValueId 6))) (set (OutputClause (OperationId 2) 1) 0)
+(NeededName (ValueNameRef (ValueId 2))) (NeededName (ValueNameRef (ValueId 4)))

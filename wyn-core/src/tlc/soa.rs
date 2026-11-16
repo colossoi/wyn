@@ -14,7 +14,7 @@
 
 use super::bindings::flatten_nested_let;
 use super::data::Empty;
-use super::if_over_producer::ConditionalProducersCanonicalized;
+use super::stage::Monomorphized;
 use super::{
     clone_term_with_fresh_ids, ArrayExpr, Bindings, RewriteDecision, Term, TermId, TermIdSource, TermKind,
     TermRewriter, VarRef,
@@ -394,7 +394,7 @@ impl TermRewriter<Empty, Empty> for SoaTransformer<'_, '_> {
 ///    that touch array-of-tuple types.
 /// 2. Converts standalone Zip to tuple construction.
 /// 3. Names SOAC application arguments and flattens nested let RHSs.
-pub fn normalize_soacs(mut program: ConditionalProducersCanonicalized) -> SoacsAnfNormalized {
+pub fn normalize_soacs(mut program: Monomorphized) -> SoacsAnfNormalized {
     let mut transformer = SoaTransformer {
         term_ids: &mut program.term_ids,
         symbols: &mut program.symbols,

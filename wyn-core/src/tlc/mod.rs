@@ -9,7 +9,6 @@ pub mod data;
 mod dce;
 pub mod defunctionalize;
 mod from_ast;
-pub mod if_over_producer;
 pub mod inline;
 pub mod monomorphize;
 pub mod ownership;
@@ -20,7 +19,6 @@ pub mod pin_entry_buffers;
 #[path = "rep_specialize_tests.rs"]
 mod rep_specialize_tests;
 pub mod run;
-pub mod runtime_index_producers;
 pub mod soa;
 mod specialize;
 mod stage_extract;
@@ -38,7 +36,7 @@ use polytype::Type;
 use std::num::NonZeroU32;
 use wyn_module_graph::PackageId;
 
-pub(crate) use bindings::{wrap_let_bindings, Bindings, LetBinding};
+pub(crate) use bindings::{Bindings, LetBinding};
 pub(crate) use from_ast::{PendingBinding, Transformer};
 
 // =============================================================================
@@ -307,14 +305,12 @@ pub mod family {
 /// Stable names for checkpoints defined by their producing passes.
 pub mod stage {
     pub use super::defunctionalize::Defunctionalized;
-    pub use super::if_over_producer::ConditionalProducersCanonicalized;
     pub use super::inline::{GeneratedLambdasFolded, UnifiedHelpersInlined};
     pub use super::monomorphize::{Monomorphized, TypesSpecialized};
     pub use super::ownership::{OwnershipApplied, OwnershipValidated};
     pub use super::partial_eval::PartialEvaled;
     pub use super::pin_entry_buffers::BuffersPinned;
     pub use super::run::Transformed;
-    pub use super::runtime_index_producers::RuntimeIndexProducersFloated;
     pub use super::soa::SoacsAnfNormalized;
     pub use super::stage_extract::StagesExtracted;
 }
@@ -322,14 +318,12 @@ pub mod stage {
 // Named consuming TLC transitions. The stage types remain visible through
 // `tlc::stage`, while callers compose the pipeline as ordinary functions.
 pub use defunctionalize::defunctionalize;
-pub use if_over_producer::canonicalize_conditional_producers;
 pub use inline::{fold_generated_lambdas, inline_unified_helpers};
 pub use monomorphize::{monomorphize, specialize_types};
 pub use ownership::{apply_ownership, validate_ownership};
 pub use partial_eval::partial_eval;
 pub use pin_entry_buffers::pin_entry_buffers;
 pub use run::lower_from_ast;
-pub use runtime_index_producers::float_runtime_index_nested_producers;
 pub use soa::normalize_soacs;
 pub use stage_extract::extract_stages;
 
@@ -951,14 +945,14 @@ pub enum SoacOp<C: Payload = data::Empty, S: Payload = data::Empty> {
     /// `lam = λ(i, v) → (i, v)` with `inputs = [is, vs]`. egglog receives that
     /// callable ABI and owns any later producer composition.
     Scatter {
-        dest: Place,
+        dest: Box<Term<C, S>>,
         lam: SoacBody<C, S>,
         inputs: Vec<ArrayExpr<C, S>>,
     },
     /// Capacity-bounded insertion into a `[bucket_count][capacity]a`
     /// destination. Every ranked item leaf is `(bucket_key, value)`.
     BucketScatter {
-        dest: Place,
+        dest: Box<Term<C, S>>,
         /// Identity at the surface, then available for ordinary producer
         /// composition just like Scatter's envelope.
         lam: SoacBody<C, S>,
@@ -971,19 +965,12 @@ pub enum SoacOp<C: Payload = data::Empty, S: Payload = data::Empty> {
     /// General histogram update. egglog retains the reducer and neutral value;
     /// physical expansion currently emits a serial read-combine-write loop.
     ReduceByIndex {
-        dest: Place,
+        dest: Box<Term<C, S>>,
         op: SoacBody<C, S>,
         ne: Box<Term<C, S>>,
         indices: ArrayExpr<C, S>,
         values: ArrayExpr<C, S>,
     },
-}
-
-/// Destination-passing for scatter / reduce_by_index.
-#[derive(Debug, Clone)]
-pub struct Place {
-    pub id: SymbolId,
-    pub elem_ty: Type<TypeName>,
 }
 
 // =============================================================================

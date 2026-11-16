@@ -3,7 +3,6 @@
 use crate::ast::TypeName;
 use crate::host;
 use crate::host::UniformMember;
-use crate::interface::results::result_layout;
 use crate::interface::StorageLayout;
 use crate::ssa::layout::{block_layout, type_byte_size, vertex_format};
 use crate::EntryId;
@@ -12,9 +11,8 @@ use polytype::Type;
 
 use crate::flow::ExecutionModel;
 use crate::host::{
-    Access, BackingRef, Binding, BufferUsage, FragmentOutput, ModuleInterface, Pipeline, ResultKind,
-    SamplerBindingType, SourceResultBinding, StageBindingUses, TextureSampleType, TextureViewDimension,
-    VertexAttribute,
+    Access, BackingRef, Binding, BufferUsage, FragmentOutput, ModuleInterface, Pipeline,
+    SamplerBindingType, StageBindingUses, TextureSampleType, TextureViewDimension, VertexAttribute,
 };
 use crate::interface::{IoDecoration, StorageAccess};
 pub(crate) type EntryPoint = crate::ssa::types::EntryPoint<InputHost, OutputHost, StorageHost>;
@@ -34,6 +32,7 @@ pub(crate) struct InputHost {
 pub(crate) struct OutputHost {
     pub length: Option<crate::host::BufferLen>,
     pub target: Option<String>,
+    pub elements: Option<(usize, host::Expr)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -340,26 +339,6 @@ impl ModuleInterfacePublish for ModuleInterface {
                 let Some(br) = output.storage_binding() else {
                     continue;
                 };
-                let source_result = SourceResultBinding {
-                    entry: entry.name.clone(),
-                    kind: if entry.outputs.len() == 1 { ResultKind::Value } else { ResultKind::TupleField },
-                    name: output.host.target.clone().unwrap_or_else(|| {
-                        if entry.outputs.len() == 1 {
-                            entry.name.clone()
-                        } else {
-                            format!("result_{i}")
-                        }
-                    }),
-                    layout: result_layout(&output.ty),
-                    shape: host::ResultShape::default(),
-                    result: i,
-                    pipeline_index,
-                    set: br.set,
-                    binding: br.binding,
-                };
-                if !self.source_results.contains(&source_result) {
-                    self.source_results.push(source_result);
-                }
                 // This name is the buffer's frame-graph identity — a reader
                 // binding the same name reads the same resource — and is what
                 // `viz --output <name>` takes on the command line.

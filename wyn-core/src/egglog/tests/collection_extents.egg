@@ -1,0 +1,12 @@
+; A total cannot acquire a collected result's outer length.
+(ParallelOperation (OperationId 0)) (ParallelOperation (OperationId 1)) (ParallelOperation (OperationId 2))
+(set (OperationDomain (OperationId 0)) (DomainId 0)) (set (DomainRank (DomainId 0)) 2)
+(set (DomainExtent (DomainId 0) 0) (IndexConstant 5)) (set (DomainExtent (DomainId 0) 1) (IndexConstant 9))
+(set (OperationDomain (OperationId 1)) (DomainId 1)) (set (DomainRank (DomainId 1)) 1)
+(set (DomainExtent (DomainId 1) 0) (IndexConstant 7))
+(set (OperationDomain (OperationId 2)) (DomainId 2)) (set (DomainRank (DomainId 2)) 0)
+(set (Output (OperationId 0) 0) (ValueNameRef (ValueId 10))) (set (OutputRole (OperationId 0) 0) (TotalOutput))
+(set (Output (OperationId 0) 1) (ValueNameRef (ValueId 11))) (set (OutputRole (OperationId 0) 1) (CollectedOutput))
+(set (Output (OperationId 0) 2) (ValueNameRef (ValueId 12))) (set (OutputRole (OperationId 0) 2) (CollectedOutput))
+(set (Output (OperationId 1) 0) (ValueNameRef (ValueId 13))) (set (OutputRole (OperationId 1) 0) (CollectedOutput))
+(set (Output (OperationId 2) 0) (ValueNameRef (ValueId 14))) (set (OutputRole (OperationId 2) 0) (CollectedOutput))

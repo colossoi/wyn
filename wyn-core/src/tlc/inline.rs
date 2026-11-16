@@ -499,7 +499,7 @@ pub(crate) fn build_inline_lets<C: Payload, S: Payload>(
     result
 }
 
-/// `substitute_sym` variant that *also* overrides the substituted
+/// Rename free symbols and override the substituted
 /// `Var(old)`'s carried type with `new_ty`. Used by `build_inline_lets`
 /// for the bare-Var-arg fast path: when we forward a call-site
 /// concrete-region arg through a polymorphic param, the substituted

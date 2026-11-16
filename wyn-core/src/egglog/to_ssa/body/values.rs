@@ -1,31 +1,351 @@
 use super::{builder_error, error, Body, OptimizeError, Typed};
 use crate::builtins::{catalog, select};
+use crate::host::{Expr, ScalarExpr, ScalarSource};
 use crate::op::{BinaryOperator, OpTag, PureViewSource};
 use crate::ssa::ir::ValueDef;
+use crate::ssa::layout::{storage_elem_stride, storage_value_type};
 use crate::ssa::types::ConstantValue;
 use crate::ssa::types::ValueRef;
 use crate::ssa::types::{InstKind, PlaceId};
-use crate::types::{
-    self, bool_type, is_array_variant_view, is_array_variant_virtual, strip_existentials, Type, TypeExt,
-    TypeName,
-};
+use crate::types::{self, bool_type, strip_existentials, Type, TypeExt, TypeName};
+use egglog_engine::{RawValues, Value};
 
-// Keep aggregate projections addressable until the final scalar read. Loading
-// between a tuple projection and an index would materialize the entire array.
-enum ReadAddress {
-    Value(Typed),
-    Place(PlaceId, Type),
-}
-
-impl ReadAddress {
-    fn ty(&self) -> &Type {
-        match self {
-            Self::Value(value) => &value.ty,
-            Self::Place(_, ty) => ty,
-        }
-    }
-}
 impl Body<'_, '_, '_> {
+    pub(in crate::egglog::to_ssa) fn fixed_loop_state(
+        &mut self,
+        value: Typed,
+        initial: Option<Value>,
+    ) -> Result<Typed, OptimizeError> {
+        if let Type::Constructed(name @ (TypeName::Tuple(_) | TypeName::Record(_)), fields) = &value.ty {
+            let name = name.clone();
+            let mut values = Vec::new();
+            for i in 0..fields.len() {
+                let field = self.field(value.clone(), i)?;
+                let root = self
+                    .query()
+                    .constructor("RootPath", RawValues(vec![]))?
+                    .ok_or_else(|| error("logical root path missing"))?;
+                let path = self.query().constructor("FieldPath", (root, i as i64))?;
+                let component = if let (Some(initial), Some(path)) = (initial, path) {
+                    self.query()
+                        .row("ProductComponent", |row| row[0] == initial && row[1] == path)?
+                        .map(|row| row[2])
+                } else {
+                    None
+                };
+                values.push(self.fixed_loop_state(field, component)?);
+            }
+            let ty = Type::Constructed(name, values.iter().map(|value| value.ty.clone()).collect());
+            return self.op(OpTag::Tuple, values, ty);
+        }
+        if value.ty.array_variant().is_some_and(types::is_array_variant_view) {
+            let exact = if let Some(initial) = initial {
+                self.query()
+                    .lookup("LogicalOuterCount", initial)?
+                    .map(|count| self.query().lookup("StaticIndex", count))
+                    .transpose()?
+                    .flatten()
+                    .and_then(|size| usize::try_from(self.query().0.value_to_base::<i64>(size)).ok())
+            } else {
+                None
+            };
+            let size = exact.or_else(|| match value.ty.array_size() {
+                Some(Type::Constructed(TypeName::Size(size), _)) => Some(*size),
+                _ => match self.host_array_length(&value) {
+                    Ok(Expr::Integer(size)) => usize::try_from(size).ok(),
+                    _ => None,
+                },
+            });
+            if let Some(size) = size {
+                let element =
+                    value.ty.elem_type().cloned().ok_or_else(|| error("loop array element missing"))?;
+                let ty = types::sized_array(size, element);
+                return self.cast(value, &ty);
+            }
+        }
+        Ok(value)
+    }
+
+    pub(in crate::egglog::to_ssa) fn copy_elements(
+        &mut self,
+        source: Typed,
+        destination: Typed,
+        count: Typed,
+    ) -> Result<Typed, OptimizeError> {
+        self.counted(
+            Self::number(0),
+            count,
+            Self::number(1),
+            vec![],
+            |body, index, _| {
+                let value = body.index(source, index.clone())?;
+                body.store(destination, index, value)?;
+                Ok(vec![])
+            },
+        )?;
+        self.op(OpTag::Unit, vec![], types::unit())
+    }
+    pub(in crate::egglog::to_ssa) fn coalesce_arrays(
+        &mut self,
+        arrays: Vec<Typed>,
+    ) -> Result<Vec<Typed>, OptimizeError> {
+        let Some(element) = arrays.first().and_then(|array| array.ty.elem_type()).cloned() else {
+            return Err(error("array collection has no element type"));
+        };
+        if arrays.iter().any(|array| array.ty.elem_type() != Some(&element)) {
+            return Err(error(
+                "nested collection requires a common payload representation",
+            ));
+        }
+        let Some(stride) = storage_elem_stride(&storage_value_type(&element)) else {
+            return Err(error("array collection element has no storage stride"));
+        };
+        let mut total = self.literal(0, &types::i32())?;
+        let mut host_total = Expr::Integer(0);
+        let mut lengths = Vec::new();
+        for array in &arrays {
+            let length = self.array_length(array.clone())?;
+            total = self.binary(BinaryOperator::Add, total, length.clone())?;
+            host_total = Expr::Add(Box::new(host_total), Box::new(self.host_array_length(array)?));
+            lengths.push(length);
+        }
+        let bytes = Expr::Multiply(
+            Box::new(host_total.clone()),
+            Box::new(Expr::Integer(stride.into())),
+        );
+        let (_, payload) = self.device_buffer(&element, bytes, total)?;
+        self.set_shape(&payload, vec![host_total])?;
+        let mut offset = self.literal(0, &types::i32())?;
+        let mut views = Vec::new();
+        for (array, length) in arrays.into_iter().zip(lengths) {
+            self.counted(
+                Self::number(0),
+                length.clone(),
+                Self::number(1),
+                vec![],
+                |body, index, _| {
+                    let value = body.index(array, index.clone())?;
+                    let destination = body.binary(BinaryOperator::Add, offset.clone(), index)?;
+                    body.store(payload.clone(), destination, value)?;
+                    Ok(vec![])
+                },
+            )?;
+            let view = self.op(
+                OpTag::StorageView(PureViewSource::Inherited),
+                vec![offset.clone(), length.clone(), payload.clone()],
+                payload.ty.clone(),
+            )?;
+            views.push(view);
+            offset = self.binary(BinaryOperator::Add, offset, length)?;
+        }
+        Ok(views)
+    }
+
+    pub(in crate::egglog::to_ssa) fn array_totals(
+        &mut self,
+        array: Typed,
+        depth: usize,
+        mut totals: Vec<Typed>,
+    ) -> Result<Vec<Typed>, OptimizeError> {
+        let length = self.array_length(array.clone())?;
+        totals[depth] = self.binary(BinaryOperator::Add, totals[depth].clone(), length.clone())?;
+        if depth + 1 == totals.len() {
+            return Ok(totals);
+        }
+        self.counted(
+            Self::number(0),
+            length,
+            Self::number(1),
+            totals,
+            |body, index, totals| {
+                let row = body.index(array, index)?;
+                body.array_totals(row, depth + 1, totals)
+            },
+        )
+    }
+
+    pub(in crate::egglog::to_ssa) fn flatten_array(
+        &mut self,
+        array: Typed,
+        payload: &Typed,
+        offsets: &[Typed],
+        depth: usize,
+        positions: Vec<Typed>,
+    ) -> Result<Vec<Typed>, OptimizeError> {
+        let length = self.array_length(array.clone())?;
+        self.counted(
+            Self::number(0),
+            length,
+            Self::number(1),
+            positions,
+            |body, index, mut positions| {
+                let element = body.index(array, index)?;
+                if depth == offsets.len() {
+                    body.store(payload.clone(), positions[depth].clone(), element)?;
+                } else {
+                    positions = body.flatten_array(element, payload, offsets, depth + 1, positions)?;
+                    let next =
+                        body.binary(BinaryOperator::Add, positions[depth].clone(), Self::number(1))?;
+                    body.store(offsets[depth].clone(), next, positions[depth + 1].clone())?;
+                }
+                positions[depth] =
+                    body.binary(BinaryOperator::Add, positions[depth].clone(), Self::number(1))?;
+                Ok(positions)
+            },
+        )
+    }
+
+    pub(in crate::egglog::to_ssa) fn snapshot(&mut self, array: Typed) -> Result<Typed, OptimizeError> {
+        if array.ty.array_variant().is_some_and(types::is_array_variant_bounded) {
+            let storage = self.field(array.clone(), 0)?;
+            let storage = self.snapshot(storage)?;
+            let count = self.field(array.clone(), 1)?;
+            let shape = self.host_shape(&array);
+            let value = self.op(OpTag::Tuple, vec![storage, count], array.ty)?;
+            if let Some(shape) = shape {
+                self.set_shape(&value, shape)?;
+            }
+            return Ok(value);
+        }
+        if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = &array.ty {
+            let mut values = Vec::new();
+            for i in 0..fields.len() {
+                let field = self.field(array.clone(), i)?;
+                values.push(self.snapshot(field)?);
+            }
+            return self.tuple(values);
+        }
+        let Some(&place) = self.local_arrays.get(&array.value) else {
+            return Ok(array);
+        };
+        let value =
+            self.builder.push_inst(InstKind::Load { place }, array.ty.clone()).map_err(builder_error)?;
+        Ok(Typed {
+            value: value.into(),
+            ty: array.ty,
+        })
+    }
+    pub(in crate::egglog::to_ssa) fn array_length(&mut self, array: Typed) -> Result<Typed, OptimizeError> {
+        if array.ty.array_variant().is_some_and(types::is_array_variant_bounded) {
+            return self.field(array, 1);
+        }
+        if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = &array.ty {
+            if fields.is_empty() {
+                return Err(error("empty product has no array length"));
+            }
+            let first = self.field(array, 0)?;
+            return self.array_length(first);
+        }
+        if array.ty.array_variant().is_some_and(types::is_array_variant_composite) {
+            if let Some(Type::Constructed(TypeName::Size(size), _)) = array.ty.array_size() {
+                return self.literal(
+                    i64::try_from(*size).map_err(|_| error("array length exceeds i64"))?,
+                    &types::i32(),
+                );
+            }
+        }
+        if array.ty.array_variant().is_some_and(types::is_array_variant_virtual) {
+            if let ValueRef::Ssa(id) = array.value {
+                let function = self.builder.func();
+                if let ValueDef::Inst { inst } = function.values[id].def {
+                    if let InstKind::Op {
+                        tag: OpTag::Tuple,
+                        operands,
+                    } = &function.insts[inst].data
+                    {
+                        if let (Some(value), Some(ty)) = (operands.get(2), array.ty.elem_type()) {
+                            return self.cast(
+                                Typed {
+                                    value: *value,
+                                    ty: ty.clone(),
+                                },
+                                &types::i32(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if array.ty.array_variant().is_some_and(types::is_array_variant_view) {
+            let length = self.field(array, 1)?;
+            return self.cast(length, &types::i32());
+        }
+        self.op(
+            OpTag::Intrinsic {
+                id: catalog().known().length,
+                overload_idx: 0,
+            },
+            vec![array],
+            types::i32(),
+        )
+    }
+
+    pub(in crate::egglog::to_ssa) fn host_array_length(
+        &self,
+        array: &Typed,
+    ) -> Result<Expr, OptimizeError> {
+        if let Some(length) = self.located_length(array) {
+            return Ok(length.clone());
+        }
+        if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = &array.ty {
+            if let (Some(ty), ValueRef::Ssa(id)) = (fields.first(), array.value) {
+                let function = self.builder.func();
+                if let ValueDef::Inst { inst } = function.values[id].def {
+                    if let InstKind::Op {
+                        tag: OpTag::Tuple,
+                        operands,
+                    } = &function.insts[inst].data
+                    {
+                        if let Some(value) = operands.first() {
+                            return self.host_array_length(&Typed {
+                                value: *value,
+                                ty: ty.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        if array.ty.array_variant().is_some_and(types::is_array_variant_bounded) {
+            return Err(error("bounded array length has no host witness"));
+        }
+        if let Some(Type::Constructed(TypeName::Size(size), _)) = array.ty.array_size() {
+            return Ok(Expr::Integer(
+                i64::try_from(*size).map_err(|_| error("array length exceeds i64"))?,
+            ));
+        }
+        if let ValueRef::Ssa(id) = array.value {
+            let function = self.builder.func();
+            if let ValueDef::Inst { inst } = function.values[id].def {
+                if matches!(
+                    &function.insts[inst].data,
+                    InstKind::Op {
+                        tag: OpTag::StorageView(PureViewSource::Inherited),
+                        ..
+                    }
+                ) {
+                    return Err(error("slice length has no host witness"));
+                }
+            }
+        }
+        if let Some(binding) = types::array_view_buffer(&array.ty) {
+            let Some(element) = array.ty.elem_type() else {
+                return Err(error("array element missing"));
+            };
+            let Some(stride) = crate::ssa::layout::storage_elem_stride(element) else {
+                return Err(error("array element has no stride"));
+            };
+            return Ok(Expr::Scalar(ScalarExpr::BufferLength {
+                source: ScalarSource::Binding {
+                    set: binding.set,
+                    binding: binding.binding,
+                },
+                stride,
+            }));
+        }
+        Err(error("array length has no host witness"))
+    }
+
     pub(in crate::egglog::to_ssa) fn field(
         &mut self,
         value: Typed,
@@ -36,25 +356,50 @@ impl Body<'_, '_, '_> {
                 fields.get(index).cloned()
             }
             Type::Constructed(TypeName::Vec, fields) => fields.first().cloned(),
+            _ if value.ty.array_variant().is_some_and(types::is_array_variant_view)
+                && value.ty.array_rank().is_some_and(|rank| index <= rank) =>
+            {
+                Some(Self::number(0).ty)
+            }
+            _ if value.ty.array_variant().is_some_and(types::is_array_variant_bounded) => match index {
+                0 => Some(types::make_array1(
+                    value.ty.elem_type().cloned().ok_or_else(|| error("bounded array element missing"))?,
+                    types::array_variant_composite(),
+                    value
+                        .ty
+                        .array_size()
+                        .cloned()
+                        .ok_or_else(|| error("bounded array capacity missing"))?,
+                    types::no_buffer(),
+                )),
+                1 => Some(types::i32()),
+                _ => None,
+            },
             _ => None,
         }) else {
             return Err(error(format!("invalid projection {index} of {:?}", value.ty)));
         };
-        // Keep physical resource identity when projecting an emitted aggregate.
-        // A shared descriptor's storage is not encoded in its source-level type.
+        // Preserve resource identity in aggregates and fold descriptor dimensions.
+        // Inherited views still need projection to compute their absolute offset.
         if let ValueRef::Ssa(id) = value.value {
             let function = self.builder.func();
-            if let ValueDef::Inst { inst } = function.values[id].def {
-                if let InstKind::Op {
-                    tag: OpTag::Tuple,
-                    operands,
-                } = &function.insts[inst].data
-                {
-                    if let Some(value) = operands.get(index) {
-                        return Ok(Typed {
-                            value: value.clone(),
-                            ty,
-                        });
+            if let Some(inst) = function.inst_of_value(id) {
+                if let InstKind::Op { tag, operands } = &function.insts[inst].data {
+                    if matches!(tag, OpTag::Tuple) {
+                        if let Some(&value) = operands.get(index) {
+                            return Ok(Typed { value, ty });
+                        }
+                    } else if matches!(tag, OpTag::StorageView(_)) && index > 0 {
+                        let Some(&value) = operands.get(index) else {
+                            return Err(error("view descriptor dimension missing"));
+                        };
+                        let source = match value {
+                            ValueRef::Ssa(id) => function.value_type(id).clone(),
+                            ValueRef::Const(ConstantValue::I32(_)) => types::i32(),
+                            ValueRef::Const(ConstantValue::U32(_)) => Self::number(0).ty,
+                            _ => return Err(error("view dimension is not an integer")),
+                        };
+                        return self.cast(Typed { value, ty: source }, &ty);
                     }
                 }
             }
@@ -89,132 +434,35 @@ impl Body<'_, '_, '_> {
             .map_err(builder_error)?;
         Ok((place, ty))
     }
-    pub(in crate::egglog::to_ssa) fn index(
+    pub(in crate::egglog::to_ssa) fn canonical_value(
         &mut self,
-        array: Typed,
-        index: Typed,
+        value: Typed,
+        logical: &Type,
     ) -> Result<Typed, OptimizeError> {
-        if let Type::Constructed(TypeName::Tuple(_), fields) = &array.ty {
-            let mut values = vec![];
-            for i in 0..fields.len() {
-                let part = self.field(array.clone(), i)?;
-                values.push(self.index(part, index.clone())?);
+        if let Type::Constructed(name @ (TypeName::Tuple(_) | TypeName::Record(_)), fields) = logical {
+            let mut values = Vec::new();
+            for (i, field) in fields.iter().enumerate() {
+                let value = self.field(value.clone(), i)?;
+                values.push(self.canonical_value(value, field)?);
             }
-            return self.tuple(values);
-        }
-        if array.ty.array_variant().is_some_and(is_array_variant_view)
-            && array.ty.array_rank().is_some_and(|rank| rank > 1)
-        {
-            let Type::Constructed(TypeName::Array, mut fields) = array.ty.clone() else {
-                return Err(error("rectangular view has no array type"));
-            };
-            let rank = fields.len() - 3;
-            let mut stride = Self::number(1);
-            let mut dimensions = Vec::new();
-            for axis in 1..rank {
-                let length = self.op(
-                    OpTag::Project {
-                        index: (axis + 1) as u32,
-                    },
-                    vec![array.clone()],
-                    Type::Constructed(TypeName::UInt(32), vec![]),
-                )?;
-                stride = self.binary(BinaryOperator::Multiply, stride, length.clone())?;
-                dimensions.push(length);
-            }
-            let index = self.cast(index, &Type::Constructed(TypeName::UInt(32), vec![]))?;
-            let offset = self.binary(BinaryOperator::Multiply, index, stride)?;
-            let mut operands = vec![offset];
-            operands.extend(dimensions);
-            operands.push(array);
-            fields.remove(2);
-            return self.op(
-                OpTag::StorageView(PureViewSource::Inherited),
-                operands,
-                Type::Constructed(TypeName::Array, fields),
+            let ty = Type::Constructed(
+                name.clone(),
+                values.iter().map(|value| value.ty.clone()).collect(),
             );
+            return self.op(OpTag::Tuple, values, ty);
         }
-        if array.ty.array_variant().is_some_and(is_array_variant_view)
-            || self.local_arrays.contains_key(&array.value)
+        if logical.is_array()
+            && !(logical.array_variant().is_some_and(types::is_array_variant_composite)
+                && matches!(
+                    logical.array_size(),
+                    Some(Type::Constructed(TypeName::Size(_), _))
+                ))
         {
-            let (place, ty) = self.index_place(array, index)?;
-            return self.load_place(place, &ty);
+            return Ok(value);
         }
-        let Some(ty) = array.ty.elem_type().cloned() else {
-            return Err(error(format!("index of non-array {:?}", array.ty)));
-        };
-        let index = if array.ty.array_variant().is_some_and(is_array_variant_virtual) {
-            self.cast(index, &ty)?
-        } else {
-            index
-        };
-        self.op(OpTag::Index, vec![array, index], ty)
+        self.cast(value, logical)
     }
 
-    pub(super) fn index_path(
-        &mut self,
-        array: Typed,
-        steps: &[(Vec<usize>, Typed)],
-    ) -> Result<Typed, OptimizeError> {
-        let mut address = ReadAddress::Value(array);
-        for (fields, index) in steps {
-            let mut fields = fields.iter().copied().peekable();
-            while !address.ty().is_array() && fields.peek().is_some() {
-                address = self.address_field(address, fields.next().unwrap())?;
-            }
-            address = match address {
-                ReadAddress::Place(place, ty)
-                    if ty.array_variant().is_some_and(types::is_array_variant_composite) =>
-                {
-                    let element = ty.elem_type().cloned().ok_or_else(|| error("array element missing"))?;
-                    ReadAddress::Place(self.child_place(place, index.clone(), &element)?, element)
-                }
-                other => {
-                    let value = self.read_address(other)?;
-                    if (value.ty.array_variant().is_some_and(is_array_variant_view)
-                        && value.ty.array_rank() == Some(1))
-                        || self.local_arrays.contains_key(&value.value)
-                    {
-                        let (place, ty) = self.index_place(value, index.clone())?;
-                        ReadAddress::Place(place, ty)
-                    } else {
-                        ReadAddress::Value(self.index(value, index.clone())?)
-                    }
-                }
-            };
-            // Array-valued projections describe a field of each stored element.
-            for field in fields {
-                address = self.address_field(address, field)?;
-            }
-        }
-        self.read_address(address)
-    }
-
-    fn read_address(&mut self, address: ReadAddress) -> Result<Typed, OptimizeError> {
-        match address {
-            ReadAddress::Value(value) => Ok(value),
-            ReadAddress::Place(place, ty) => self.load_place(place, &ty),
-        }
-    }
-
-    fn address_field(&mut self, address: ReadAddress, index: usize) -> Result<ReadAddress, OptimizeError> {
-        match address {
-            ReadAddress::Value(value) => Ok(ReadAddress::Value(self.field(value, index)?)),
-            ReadAddress::Place(place, ty) => {
-                let element = match &ty {
-                    Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) => {
-                        fields.get(index)
-                    }
-                    Type::Constructed(TypeName::Vec, fields) => fields.first(),
-                    _ => None,
-                }
-                .cloned()
-                .ok_or_else(|| error("invalid address projection"))?;
-                let child = self.child_place(place, Self::number(index as u32), &element)?;
-                Ok(ReadAddress::Place(child, element))
-            }
-        }
-    }
     pub(in crate::egglog::to_ssa) fn cast(
         &mut self,
         value: Typed,
@@ -224,28 +472,73 @@ impl Body<'_, '_, '_> {
         if value.ty == *ty {
             return Ok(value);
         }
-        // Source array qualifiers describe shape and ownership, not a physical
-        // conversion. Boundary layouts explicitly request any required copy.
-        if value.ty.is_array() && ty.is_array() {
+        if value.ty.array_variant().is_some_and(types::is_array_variant_composite)
+            && ty.array_variant().is_some_and(types::is_array_variant_composite)
+            && value.ty.elem_type() == ty.elem_type()
+            && value.ty.array_dims() == ty.array_dims()
+        {
             return Ok(value);
         }
-        if let (
-            Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), a),
-            Type::Constructed(name @ (TypeName::Tuple(_) | TypeName::Record(_)), b),
-        ) = (&value.ty, ty)
+        if value.ty.is_array()
+            && ty.array_variant().is_some_and(|variant| {
+                types::is_array_variant_composite(variant) || types::is_array_variant_bounded(variant)
+            })
         {
-            if a.len() == b.len() {
-                let mut fields = vec![];
-                for (i, target) in b.iter().enumerate() {
-                    let field = self.field(value.clone(), i)?;
-                    fields.push(self.cast(field, target)?);
-                }
-                let ty = Type::Constructed(name.clone(), fields.iter().map(|f| f.ty.clone()).collect());
-                return self.op(OpTag::Tuple, fields, ty);
+            if let Some(Type::Constructed(TypeName::Size(capacity), _)) = ty.array_size() {
+                let bounded = ty.array_variant().is_some_and(types::is_array_variant_bounded);
+                let count = if bounded {
+                    if !matches!(value.ty.array_size(), Some(Type::Constructed(TypeName::Size(size), _)) if size <= capacity)
+                    {
+                        return Err(error(
+                            "bounded array conversion cannot narrow or assume a capacity",
+                        ));
+                    }
+                    self.array_length(value.clone())?
+                } else {
+                    Self::number(u32::try_from(*capacity).map_err(|_| error("array capacity exceeds u32"))?)
+                };
+                let Some(element) = ty.elem_type() else {
+                    return Err(error("array conversion element missing"));
+                };
+                let storage =
+                    if bounded { types::sized_array(*capacity, element.clone()) } else { ty.clone() };
+                let destination = self.local_array(storage)?;
+                self.copy_elements(value, destination.clone(), count.clone())?;
+                let array = self.snapshot(destination)?;
+                return if bounded {
+                    let count = self.cast(count, &types::i32())?;
+                    self.op(OpTag::Tuple, vec![array, count], ty.clone())
+                } else {
+                    Ok(array)
+                };
             }
         }
+        if matches!(ty, Type::Constructed(TypeName::Int(_) | TypeName::UInt(_), _)) {
+            if let Some(number) = self.integer_literal(&value) {
+                return self.literal(number, ty);
+            }
+        }
+        if let (
+            Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), targets),
+            Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), sources),
+        ) = (ty, &value.ty)
+        {
+            if targets.len() != sources.len() {
+                return Err(error("physical product conversion arity mismatch"));
+            }
+            let fields = targets
+                .iter()
+                .enumerate()
+                .map(|(i, ty)| {
+                    let field = self.field(value.clone(), i)?;
+                    self.cast(field, ty)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            return self.op(OpTag::Tuple, fields, ty.clone());
+        }
         if *ty == bool_type() {
-            return self.binary(BinaryOperator::NotEqual, value, Self::number(0));
+            let zero = self.literal(0, &value.ty)?;
+            return self.binary(BinaryOperator::NotEqual, value, zero);
         }
         if value.ty == bool_type() {
             let one = self.cast(Self::number(1), ty)?;
@@ -338,6 +631,9 @@ impl Body<'_, '_, '_> {
             Type::Constructed(TypeName::UInt(_), _) => OpTag::Uint((bits as u64).to_string()),
             Type::Constructed(TypeName::Int(_), _) => OpTag::Int(bits.to_string()),
             Type::Constructed(TypeName::Bool, _) => OpTag::Bool(bits != 0),
+            Type::Constructed(TypeName::Float(64), _) => {
+                OpTag::Float(f64::from_bits(bits as u64).to_string())
+            }
             Type::Constructed(TypeName::Float(_), _) => {
                 let bits = u32::try_from(bits).map_err(|_| error("invalid folded float bits"))?;
                 if matches!(ty, Type::Constructed(TypeName::Float(32), _)) {
@@ -352,260 +648,215 @@ impl Body<'_, '_, '_> {
         };
         self.op(tag, vec![], ty.clone())
     }
-    pub(in crate::egglog::to_ssa) fn length(&mut self, array: Typed) -> Result<Typed, OptimizeError> {
-        if array.ty.array_variant().is_some_and(types::is_array_variant_composite) {
-            if let Some(Type::Constructed(TypeName::Size(n), _)) = array.ty.array_size() {
-                return self.literal(*n as i64, &types::i32());
-            }
-        }
-        if matches!(array.ty, Type::Constructed(TypeName::Tuple(_), _)) {
-            let first = self.field(array, 0)?;
-            return self.length(first);
-        }
-        if array.ty.array_variant().is_some_and(is_array_variant_view) {
-            let length = self.op(
-                OpTag::Project { index: 1 },
-                vec![array],
-                Type::Constructed(TypeName::UInt(32), vec![]),
-            )?;
-            return self.cast(length, &types::i32());
-        }
-        self.op(
-            OpTag::Intrinsic {
-                id: catalog().known().length,
-                overload_idx: 0,
-            },
-            vec![array],
-            types::i32(),
-        )
-    }
 }
 
 impl Body<'_, '_, '_> {
-    fn child_place(&mut self, place: PlaceId, index: Typed, ty: &Type) -> Result<PlaceId, OptimizeError> {
-        let result = self.builder.new_place(ty.clone());
-        self.builder
-            .push_void_inst(InstKind::PlaceIndex {
-                place,
-                index: index.value,
-                result,
-            })
-            .map_err(builder_error)?;
-        Ok(result)
+    pub(in crate::egglog::to_ssa) fn local_place(&mut self, ty: Type) -> Result<PlaceId, OptimizeError> {
+        let place = self.builder.new_place(ty);
+        self.builder.push_void_inst(InstKind::Alloca { result: place }).map_err(builder_error)?;
+        Ok(place)
     }
 
-    // Transfer aggregates through element pointers so buffer layout conversion
-    // does not expand fixed arrays into one instruction per element.
-    fn load_place(&mut self, place: PlaceId, ty: &Type) -> Result<Typed, OptimizeError> {
-        if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = ty {
-            let mut values = Vec::new();
-            for (i, field) in fields.iter().enumerate() {
-                let child = self.child_place(place, Self::number(i as u32), field)?;
-                values.push(self.load_place(child, field)?);
-            }
-            return self.op(OpTag::Tuple, values, ty.clone());
-        }
-        if ty.array_variant().is_some_and(types::is_array_variant_composite) {
-            let Some(Type::Constructed(TypeName::Size(n), _)) = ty.array_size() else {
-                return Err(error("aggregate load requires a concrete array dimension"));
-            };
-            let Some(element) = ty.elem_type() else {
-                return Err(error("aggregate load requires an array element type"));
-            };
-            let output = self.builder.new_place(ty.clone());
-            self.builder.push_void_inst(InstKind::Alloca { result: output }).map_err(builder_error)?;
-            let count = self.literal(*n as i64, &types::i32())?;
-            self.counted(
-                Self::number(0),
-                count,
-                Self::number(1),
-                vec![],
-                |body, index, _| {
-                    let source = body.child_place(place, index.clone(), element)?;
-                    let item = body.load_place(source, element)?;
-                    body.store_place(output, ty, &[index], item)?;
-                    Ok(vec![])
-                },
-            )?;
-            let value = self
-                .builder
-                .push_inst(InstKind::Load { place: output }, ty.clone())
-                .map_err(builder_error)?;
-            return Ok(Typed {
-                value: value.into(),
-                ty: ty.clone(),
-            });
-        }
+    pub(in crate::egglog::to_ssa) fn load_place(&mut self, place: PlaceId) -> Result<Typed, OptimizeError> {
+        let ty = self.builder.place_elem_ty(place).clone();
         let value = self.builder.push_inst(InstKind::Load { place }, ty.clone()).map_err(builder_error)?;
         Ok(Typed {
             value: value.into(),
-            ty: ty.clone(),
+            ty,
         })
     }
 
-    pub(in crate::egglog::to_ssa) fn store(
-        &mut self,
-        array: Typed,
-        index: Typed,
-        value: Typed,
-    ) -> Result<(), OptimizeError> {
-        self.store_at(array, &[index], value)
-    }
-
-    pub fn store_at(&mut self, array: Typed, indices: &[Typed], value: Typed) -> Result<(), OptimizeError> {
-        let Some((first, rest)) = indices.split_first() else {
-            let length = self.length(value.clone())?;
-            return self.copy_array(array, value, length, &[]);
-        };
-        if array.ty.array_variant().is_some_and(is_array_variant_view)
-            && array.ty.array_rank().is_some_and(|rank| rank > 1)
-        {
-            let row = self.index(array, first.clone())?;
-            return self.store_at(row, rest, value);
-        }
-        let (place, ty) = self.index_place(array, first.clone())?;
-        self.store_place(place, &ty, rest, value)
-    }
-
-    fn store_place(
+    pub(in crate::egglog::to_ssa) fn store_place(
         &mut self,
         place: PlaceId,
-        ty: &Type,
-        indices: &[Typed],
         value: Typed,
     ) -> Result<(), OptimizeError> {
-        if let Some((index, rest)) = indices.split_first() {
-            if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = ty {
-                for (i, field) in fields.iter().enumerate() {
-                    let next = self.builder.new_place(field.clone());
-                    self.builder
-                        .push_void_inst(InstKind::PlaceIndex {
-                            place,
-                            index: Self::number(i as u32).value,
-                            result: next,
-                        })
-                        .map_err(builder_error)?;
-                    let value = self.field(value.clone(), i)?;
-                    self.store_place(next, field, indices, value)?;
-                }
-                return Ok(());
-            }
-            let Some(element) = ty.elem_type() else {
-                return Err(error("store index exceeds array rank"));
-            };
-            let next = self.builder.new_place(element.clone());
-            self.builder
-                .push_void_inst(InstKind::PlaceIndex {
-                    place,
-                    index: index.value,
-                    result: next,
-                })
-                .map_err(builder_error)?;
-            return self.store_place(next, element, rest, value);
-        }
-        // A view carries a descriptor; an owned destination needs its elements.
-        let copy_array = ty.array_variant().is_some_and(types::is_array_variant_composite);
-        if value.ty.is_array()
-            && (copy_array || matches!(ty, Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), _)))
-        {
-            let n = self.length(value.clone())?;
-            let zero = self.literal(0, &types::i32())?;
-            let one = self.literal(1, &types::i32())?;
-            self.counted(zero, n, one, vec![], |body, index, _| {
-                let item = body.index(value.clone(), index.clone())?;
-                body.store_place(place, ty, &[index], item)?;
-                Ok(vec![])
-            })?;
-            return Ok(());
-        }
-        if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = ty {
-            for (i, field) in fields.iter().enumerate() {
-                let child = self.child_place(place, Self::number(i as u32), field)?;
-                let item = self.field(value.clone(), i)?;
-                self.store_place(child, field, &[], item)?;
-            }
-            return Ok(());
-        }
-        let value = self.cast(value, ty)?;
+        let ty = self.builder.place_elem_ty(place).clone();
+        let value = self.cast(value, &ty)?;
         self.builder
             .push_void_inst(InstKind::Store {
                 place,
                 value: value.value,
             })
-            .map_err(builder_error)?;
-        Ok(())
+            .map(|_| ())
+            .map_err(builder_error)
     }
 
-    pub(in crate::egglog::to_ssa) fn view_type(element: &Type, region: Type) -> Type {
-        types::view_array_with_size(
-            element,
-            Type::Constructed(TypeName::SizePlaceholder, vec![]),
-            region,
-        )
+    /// Allocate mutable local storage; reads used as values are explicit snapshots.
+    pub(in crate::egglog::to_ssa) fn local_array(&mut self, ty: Type) -> Result<Typed, OptimizeError> {
+        // Preserve the allocation's logical lifetime for reuse across loop iterations.
+        let place = self.local_place(ty)?;
+        let array = self.load_place(place)?;
+        self.local_arrays.insert(array.value, place);
+        Ok(array)
+    }
+
+    pub(in crate::egglog::to_ssa) fn local_array_with_length(
+        &mut self,
+        ty: Type,
+        count: Typed,
+    ) -> Result<Typed, OptimizeError> {
+        let array = self.local_array(ty)?;
+        let Some(Type::Constructed(TypeName::Size(capacity), _)) = array.ty.array_size() else {
+            return Err(error("local array capacity missing"));
+        };
+        if self.integer_literal(&count).and_then(|value| usize::try_from(value).ok()) == Some(*capacity) {
+            return Ok(array);
+        }
+        let ty = types::make_array1(
+            array.ty.elem_type().cloned().ok_or_else(|| error("local array element missing"))?,
+            types::array_variant_bounded(),
+            Type::Constructed(TypeName::Size(*capacity), vec![]),
+            types::no_buffer(),
+        );
+        let place = self
+            .local_arrays
+            .get(&array.value)
+            .copied()
+            .ok_or_else(|| error("local array place missing"))?;
+        let count = self.cast(count, &types::i32())?;
+        let value = self.op(OpTag::Tuple, vec![array, count], ty)?;
+        self.local_arrays.insert(value.value, place);
+        Ok(value)
     }
 }
 
 impl Body<'_, '_, '_> {
-    pub fn copy_array(
-        &mut self,
-        destination: Typed,
-        source: Typed,
-        length: Typed,
-        fields: &[usize],
-    ) -> Result<(), OptimizeError> {
-        let zero = self.literal(0, &length.ty)?;
-        let one = self.literal(1, &length.ty)?;
-        self.copy_array_strided((destination, &[]), source, length, fields, zero, one)
+    pub fn index(&mut self, array: Typed, index: Typed) -> Result<Typed, OptimizeError> {
+        if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = &array.ty {
+            let mut elements = Vec::new();
+            for field in 0..fields.len() {
+                let component = self.field(array.clone(), field)?;
+                elements.push(self.index(component, index.clone())?);
+            }
+            return self.tuple(elements);
+        }
+        if array.ty.array_rank().is_some_and(|rank| rank > 1)
+            && array.ty.array_variant().is_some_and(types::is_array_variant_view)
+        {
+            let shape = self.view_dimensions(array.clone())?;
+            let mut offset = self.cast(index, &types::i32())?;
+            for dimension in &shape[1..] {
+                offset = self.binary(BinaryOperator::Multiply, offset, dimension.clone())?;
+            }
+            let Type::Constructed(TypeName::Array, mut fields) = array.ty.clone() else {
+                return Err(error("ranked view type missing"));
+            };
+            fields.remove(2);
+            let ty = Type::Constructed(TypeName::Array, fields);
+            let host_shape =
+                self.host_shape(&array).filter(|shape| shape.len() > 1).map(|shape| shape[1..].to_vec());
+            let mut operands = vec![offset];
+            operands.extend_from_slice(&shape[1..]);
+            operands.push(array);
+            let row = self.op(
+                OpTag::StorageView(crate::op::PureViewSource::Inherited),
+                operands,
+                ty,
+            )?;
+            if let Some(shape) = host_shape {
+                self.set_shape(&row, shape)?;
+            }
+            return Ok(row);
+        }
+        if array.ty.array_variant().is_some_and(|variant| {
+            types::is_array_variant_composite(variant)
+                || types::is_array_variant_virtual(variant)
+                || types::is_array_variant_bounded(variant)
+        }) && !self.local_arrays.contains_key(&array.value)
+        {
+            let Some(element) = array.ty.elem_type().cloned() else {
+                return Err(error("indexed array has no element type"));
+            };
+            let index = if array.ty.array_variant().is_some_and(types::is_array_variant_virtual) {
+                self.cast(index, &element)?
+            } else {
+                index
+            };
+            return self.op(OpTag::Index, vec![array, index], element);
+        }
+        self.storage_access(&array.ty, crate::ResourceAccess::Read);
+        let (place, ty) = self.index_place(array, index)?;
+        let value = self.builder.push_inst(InstKind::Load { place }, ty.clone()).map_err(builder_error)?;
+        Ok(Typed {
+            value: value.into(),
+            ty,
+        })
     }
 
-    pub fn copy_array_strided(
-        &mut self,
-        (destination, indices): (Typed, &[Typed]),
-        source: Typed,
-        length: Typed,
-        fields: &[usize],
-        start: Typed,
-        step: Typed,
-    ) -> Result<(), OptimizeError> {
-        if indices.is_empty()
-            && fields.is_empty()
-            && crate::ssa::array_copy::matching_view_element(&source.ty, &destination.ty).is_some()
-        {
-            let collective = !self.invocation_execution
-                && self
-                    .workgroup_width
-                    .is_some_and(|width| step.value == ValueRef::Const(ConstantValue::U32(width)));
-            let length = self.cast(length, &start.ty)?;
-            let step = self.cast(step, &start.ty)?;
-            self.builder
-                .push_void_inst(InstKind::Copy {
-                    destination: destination.value,
-                    source: source.value,
-                    length: length.value,
-                    start: start.value,
-                    step: step.value,
-                    collective,
-                })
-                .map_err(builder_error)?;
+    pub fn store(&mut self, array: Typed, index: Typed, value: Typed) -> Result<(), OptimizeError> {
+        if array.ty.array_rank().is_some_and(|rank| rank > 1) {
+            let row = self.index(array, index)?;
+            let count = self.array_length(value.clone())?;
+            self.copy_elements(value, row, count)?;
             return Ok(());
         }
-        self.counted(start, length, step, vec![], |body, index, _| {
-            let mut value = body.index(source.clone(), index.clone())?;
-            let mut path = indices.to_vec();
-            path.push(index);
-            if !fields.is_empty() && source.ty.array_rank().is_some_and(|rank| rank > 1) {
-                let length = body.length(value.clone())?;
-                let zero = body.literal(0, &length.ty)?;
-                let one = body.literal(1, &length.ty)?;
-                body.copy_array_strided((destination.clone(), &path), value, length, fields, zero, one)?;
-            } else {
-                for &field in fields {
-                    value = body.field(value, field)?;
-                }
-                body.store_at(destination.clone(), &path, value)?;
-            }
-            Ok(vec![])
-        })?;
-        Ok(())
+        self.storage_access(&array.ty, crate::ResourceAccess::Write);
+        let (place, _) = self.index_place(array, index)?;
+        self.store_place(place, value)
+    }
+
+    pub(in crate::egglog::to_ssa) fn view_dimensions(
+        &mut self,
+        array: Typed,
+    ) -> Result<Vec<Typed>, OptimizeError> {
+        if let Some(dimensions) = self.located_dimensions(&array)? {
+            return Ok(dimensions);
+        }
+        let rank = array.ty.array_rank().ok_or_else(|| error("view rank missing"))?;
+        (0..rank)
+            .map(|axis| {
+                let value = self.field(array.clone(), axis + 1)?;
+                self.cast(value, &types::i32())
+            })
+            .collect()
+    }
+
+    pub(super) fn valid_indices(
+        &mut self,
+        array: Typed,
+        indices: &[Typed],
+    ) -> Result<Typed, OptimizeError> {
+        let Some((index, rest)) = indices.split_first() else {
+            return self.op(OpTag::Bool(true), vec![], types::bool_type());
+        };
+        let length = self.array_length(array.clone())?;
+        let length = self.cast(length, &index.ty)?;
+        let zero = self.literal(0, &index.ty)?;
+        let above = self.binary(BinaryOperator::GreaterEqual, index.clone(), zero)?;
+        let below = self.binary(BinaryOperator::Less, index.clone(), length)?;
+        let valid = self.binary(BinaryOperator::LogicalAnd, above, below)?;
+        if rest.is_empty() {
+            return Ok(valid);
+        }
+        self.branch(
+            valid,
+            |body| {
+                let row = body.index(array, index.clone())?;
+                body.valid_indices(row, rest)
+            },
+            |body| body.op(OpTag::Bool(false), vec![], types::bool_type()),
+        )
+    }
+
+    pub fn workgroup_array(&mut self, count: u32, element: &Type) -> Result<Typed, OptimizeError> {
+        let id = self.next_workgroup_array;
+        self.next_workgroup_array += 1;
+        self.op(
+            OpTag::StorageView(PureViewSource::Workgroup {
+                id,
+                count: count.max(1),
+            }),
+            vec![Self::number(0), Self::number(count)],
+            types::view_array_with_size(
+                &crate::ssa::layout::storage_value_type(element),
+                Type::Constructed(TypeName::Size(count as usize), vec![]),
+                types::no_buffer(),
+            ),
+        )
+    }
+
+    pub fn workgroup_barrier(&mut self) -> Result<(), OptimizeError> {
+        self.builder.push_void_inst(InstKind::ControlBarrier).map(|_| ()).map_err(builder_error)
     }
 }

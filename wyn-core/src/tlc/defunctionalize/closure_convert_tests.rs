@@ -5,7 +5,7 @@ use crate::ast::{Span, TypeName};
 use crate::tlc;
 use crate::tlc::{
     data::{Empty, ExplicitCapturesPayload, ExplicitClosurePayload},
-    Def, DefMeta, Lambda, Payload, Place, Program, SoacBody, SoacOp, Term, TermIdSource, TermKind,
+    Def, DefMeta, Lambda, Payload, Program, SoacBody, SoacOp, Term, TermIdSource, TermKind,
 };
 use crate::types;
 use crate::SymbolId;
@@ -31,7 +31,7 @@ fn unit_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Unit, vec![])
 }
 
-fn empty_program() -> tlc::stage::RuntimeIndexProducersFloated {
+fn empty_program() -> tlc::stage::SoacsAnfNormalized {
     Program::from_parts(
         vec![],
         SymbolTable::new(),
@@ -55,7 +55,7 @@ fn empty_converted_program() -> Defunctionalized {
 }
 
 fn term(
-    program: &mut tlc::stage::RuntimeIndexProducersFloated,
+    program: &mut tlc::stage::SoacsAnfNormalized,
     kind: TermKind<Empty, Empty>,
     ty: Type<TypeName>,
 ) -> Term<Empty, Empty> {
@@ -230,13 +230,11 @@ fn unlifted_scatter_envelope_fails_verifier() {
     let sym = program.symbols.alloc("f".to_string());
     let dest = program.symbols.alloc("dest".to_string());
     let scatter_body = converted_term(&mut program, TermKind::UnitLit, unit_ty());
+    let destination = converted_term(&mut program, TermKind::Var(VarRef::Symbol(dest)), unit_ty());
     let scatter = converted_term(
         &mut program,
         TermKind::Soac(SoacOp::Scatter {
-            dest: Place {
-                id: dest,
-                elem_ty: unit_ty(),
-            },
+            dest: Box::new(destination),
             lam: SoacBody {
                 lam: Lambda {
                     params: vec![],
@@ -276,10 +274,11 @@ fn scatter_envelope_params_count_as_bound_symbols() {
         ty: unit_ty(),
         span: span(),
         kind: TermKind::Soac(SoacOp::Scatter {
-            dest: Place {
-                id: dest,
-                elem_ty: unit_ty(),
-            },
+            dest: Box::new(term_with_ids(
+                &mut ids,
+                TermKind::Var(VarRef::Symbol(dest)),
+                unit_ty(),
+            )),
             lam: SoacBody {
                 lam: Lambda {
                     params: vec![(param, unit_ty())],
@@ -300,6 +299,11 @@ fn scatter_envelope_params_count_as_bound_symbols() {
 
     let (values, _) = Dataflow::build(&scatter);
     let free = values.free_variables::<ExplicitClosurePayload, ExplicitCapturesPayload>(|_| false);
+    assert!(
+        free.iter()
+            .any(|term| matches!(term.kind, TermKind::Var(VarRef::Symbol(symbol)) if symbol == dest)),
+        "destination must be captured"
+    );
     assert!(
         !free
             .iter()

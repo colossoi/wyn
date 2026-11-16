@@ -1,6 +1,7 @@
 //! Regression inputs exercise the public pipeline and backend-visible output.
 use crate::compile_thru_ssa;
-use crate::egglog::prepare_interfaces;
+use crate::egglog::query::Query;
+use crate::egglog::{prepare_interfaces, scalar, ScalarOptimization};
 
 #[test]
 fn size_hint_survives_egglog_optimization() {
@@ -35,72 +36,18 @@ fn size_hint_survives_egglog_optimization() {
     assert!(entries > 0);
 }
 
+// Scratch element liveness is checked in memory_ir_dead_elements.wyn.
 #[test]
-fn dead_fused_outputs_do_not_evaluate_their_elements() {
-    let module = placed_source(
-        "entry main(xs:[8]i32) [8]i32 =
-        let dead=map(|x|x*x,xs) in let live=map(|x|x+17,xs) in
-        scatter((#[scratch] dead),iota(8),live)",
-    );
-    for entry in &module.entry_points {
-        assert!(
-            !entry.body.inner.insts.values().any(|instruction| matches!(&instruction.data,
-                crate::ssa::types::InstKind::Op {tag:crate::op::OpTag::BinOp(crate::op::BinaryOperator::Multiply),operands}
-                    if operands.len()==2 && operands[0]==operands[1])),
-            "unused producer arithmetic in {}",
-            entry.name
-        );
-    }
-}
-
-#[test]
-fn native_admission_and_selected_evaluation_share_the_source_graph() {
-    use super::{from_tlc, fuse, optimize_with_policy, place, schedule, ScalarOptimization};
-    use crate::PipelineTopologyPolicy;
-
+fn host_preparation_preserves_the_authoritative_memory_program() {
     let tlc =
-        crate::compile_thru_tlc("entry main(xs:[]i32,bias:i32) []i32=map(|x:i32|x+bias*bias,xs)").unwrap();
-    {
-        let policy = ScalarOptimization::Full;
-        let program = optimize_with_policy(
-            prepare_interfaces(
-                schedule(
-                    place(
-                        fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                        PipelineTopologyPolicy::AllowGenerated,
-                    )
-                    .unwrap(),
-                )
-                .unwrap(),
-            )
-            .unwrap(),
-            policy,
-        )
-        .unwrap();
-        assert!(
-            program.stage.captures.is_empty(),
-            "scalar optimization must not lower host captures"
-        );
-        let program = super::prepare_host(program).unwrap().program;
-        if policy == ScalarOptimization::Full {
-            assert!(
-                !program.stage.captures.is_empty(),
-                "expanded callback arithmetic must reach host evaluation"
-            );
-        }
-        let mut phase_roots = 0;
-        program
-            .graph
-            .constructor_enodes("HostEvalPhaseRoot", |row| {
-                phase_roots += 1;
-                assert!(program.stage.selected.roots.contains_key(&(row.children[1], row.children[2])));
-            })
-            .unwrap();
-        assert!(phase_roots > 0);
-        let mut requests = 0;
-        program.graph.constructor_enodes("ExprImportRoot", |_| requests += 1).unwrap();
-        assert!(requests > 0);
-    }
+        crate::compile_thru_tlc("entry main(xs:[]i32,bias:i32) []i32=map(|x|x+bias*bias,xs)").unwrap();
+    let program = super::optimize_with_policy(interfaces_for_test(&tlc), ScalarOptimization::Full).unwrap();
+    let before = super::dataflow::edit::revision(&program.graph).unwrap();
+    let program = super::prepare_host(program).unwrap();
+    let after = super::dataflow::edit::revision(&program.program.graph).unwrap();
+    assert_eq!(before, after, "host readout must not rebuild executable bodies");
+    let ssa = super::to_ssa(program, crate::CodegenTarget::Portable).unwrap();
+    assert!(ssa.entry_points.iter().any(|entry| entry.inputs.iter().any(|input| input.name == "bias")));
 }
 
 // Broad policy/backend coverage lives in tests/compiler/cases/scalar_policy_*.wyn.
@@ -111,31 +58,19 @@ fn scalar_policy_controls_optional_templates() {
     let program = interfaces_for_test(&tlc);
     for policy in [super::ScalarOptimization::Basic, super::ScalarOptimization::Full] {
         let mut scalars = program.graph.clone();
-        super::scalar::run(&mut scalars, &program.identities, policy).unwrap();
-        let mut templates = 0;
-        scalars.constructor_enodes("ExprTemplateBody", |_| templates += 1).unwrap();
-        assert_eq!(templates > 0, policy == super::ScalarOptimization::Full);
+        super::scalar::run(&mut scalars, policy).unwrap();
+        let query = Query(&scalars);
+        let mut calls = 0;
+        query
+            .for_each("LiveOperation", |row| {
+                calls += usize::from(query.contains("CallOperation", row[0])?);
+                Ok(())
+            })
+            .unwrap();
+        if policy == super::ScalarOptimization::Full {
+            assert_eq!(calls, 0);
+        }
     }
-}
-
-#[test]
-fn record_update_survives_to_ssa_and_lowers_in_both_backends() {
-    let source = include_str!("../../../testfiles/regressions/record_update.wyn");
-    let program = compile_thru_ssa(source).unwrap();
-    let count = program
-        .functions
-        .iter()
-        .map(|f| &f.body)
-        .chain(program.entry_points.iter().map(|e| &e.body))
-        .flat_map(|body| body.inner.insts.values())
-        .filter(|inst| {
-            matches!(&inst.data,
-            crate::ssa::types::InstKind::Op {
-                tag: crate::op::OpTag::Intrinsic { id, .. }, ..
-            } if *id == crate::builtins::catalog().known().record_with)
-        })
-        .count();
-    assert!(count >= 7, "dependent field updates must survive to SSA");
 }
 
 #[test]
@@ -225,13 +160,7 @@ fn interfaces_for_test(
 
 // Inspect both emitted shader formats under the CLI's default and -O policies.
 
-#[test]
-fn narrowing_loop_capacity_requires_bounded_backedge() {
-    let source = include_str!("../../../testfiles/regressions/narrowing_loop_capacity.wyn")
-        .replace("(mid+1,hi)", "(hi+1,hi)");
-    assert!(compile_thru_ssa(&source).is_err());
-}
-
+// Loop capacity is checked through both backends in memory_ir_loop_capacity.wyn.
 #[test]
 fn helper_substitution_keeps_argument_contexts_and_shared_products() {
     use crate::op::{BinaryOperator, OpTag};
@@ -319,3 +248,30 @@ fn placed_source(source: &str) -> crate::ssa::stage::Reachable {
         crate::ssa::place_floating(crate::ssa::optimize(compile_thru_ssa(source).unwrap())).unwrap(),
     )
 }
+
+#[test]
+fn scalar_admission_uses_ir_literal_edits() {
+    let tlc = crate::compile_thru_tlc("entry main(x:i32) i32=x+1").unwrap();
+    let mut program = interfaces_for_test(&tlc);
+    let operation = Query(&program.graph).first("ScalarPayload").unwrap().unwrap()[0];
+    super::dataflow::edit::set_code(
+        &mut program.graph,
+        operation,
+        super::dataflow::ir::Code::Constant {
+            ty: crate::types::i32(),
+            bits: 7,
+        },
+    )
+    .unwrap();
+    super::dataflow::edit::inputs(&mut program.graph, operation, &[]).unwrap();
+    scalar::run(&mut program.graph, ScalarOptimization::Basic).unwrap();
+    let root = super::test_graph::root(&program.graph);
+    let query = Query(&program.graph);
+    let result = query.required("RegionYield", (root, 0_i64)).unwrap();
+    assert_eq!(
+        program.graph.value_to_base::<i64>(query.required("ConstantValue", result).unwrap()),
+        7
+    );
+}
+
+// Parallel emission contracts live in memory_ir_parallel_*.wyn CLI fixtures.
