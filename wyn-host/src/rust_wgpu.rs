@@ -10,10 +10,10 @@ use syn::{
 use wyn_base::timing;
 
 use crate::{
-    Allocation, Binding, BlendMode, BufferUsage, CullMode, DepthTest, DrawCall, DrawCount, Entry, Expr,
-    FillMode, FrameResourceKind, FrontFace, HostError, IndexFormat, Operation, Pipeline, PrimitiveTopology,
-    Program, ResourceId, ResultKind, Scissor, ShaderFormat, ShaderStage, StorageImageFormat,
-    TextureViewDimension, VertexFormat, Viewport,
+    Allocation, Binding, BlendMode, BufferSource, BufferUsage, CullMode, DepthTest, DrawCall, DrawCount,
+    Entry, Expr, FillMode, FrameResourceKind, FrontFace, HostError, IndexFormat, Operation, Pipeline,
+    PrimitiveTopology, Program, ResourceId, ResultKind, ScalarSource, Scissor, ShaderFormat, ShaderStage,
+    StorageImageFormat, TextureViewDimension, VertexFormat, Viewport,
 };
 
 pub(crate) fn resource(id: ResourceId) -> Ident {
@@ -161,16 +161,7 @@ impl Program {
         names.visit_file(&syntax);
         names.used.extend(["RESOURCE_NAMES".into(), "BUFFER_FIELDS".into()]);
         names.used.extend((0..self.entries.len()).map(|i| format!("ENTRY_{i}")));
-        let pipelines: BTreeSet<_> = entry
-            .operations
-            .iter()
-            .map(|operation| match operation {
-                Operation::Dispatch { pipeline, .. }
-                | Operation::Draw { pipeline }
-                | Operation::Scalar { pipeline, .. }
-                | Operation::Loop { pipeline, .. } => *pipeline,
-            })
-            .collect();
+        let pipelines: BTreeSet<_> = entry.operations.iter().filter_map(Operation::pipeline).collect();
         let mut replacements = BTreeMap::new();
         for &id in &entry.inputs {
             let frame_resource = &self.interface.frame_graph.resources[id.0];
@@ -338,16 +329,7 @@ impl Program {
         let mut params = vec![];
         let mut arguments = vec![];
         let mut input_checks = vec![];
-        let pipelines: BTreeSet<_> = entry
-            .operations
-            .iter()
-            .map(|operation| match operation {
-                Operation::Dispatch { pipeline, .. }
-                | Operation::Draw { pipeline }
-                | Operation::Scalar { pipeline, .. }
-                | Operation::Loop { pipeline, .. } => *pipeline,
-            })
-            .collect();
+        let pipelines: BTreeSet<_> = entry.operations.iter().filter_map(Operation::pipeline).collect();
         for &r in &entry.inputs {
             let id = resource(r);
             let ty = match self.interface.frame_graph.resources[r.0].kind {
@@ -435,73 +417,7 @@ impl Program {
                 }
             });
         }
-        let mut carried = BTreeSet::new();
-        self.loop_resources(&entry.operations, &mut carried)?;
         let mut code = input_checks;
-        let mut scratch = vec![];
-        for a in &entry.allocations {
-            match a {
-                Allocation::Buffer { resource: r, bytes } => {
-                    let id = resource(*r);
-                    let bytes = self.rust_expr(bytes, entry)?;
-                    let length = format_ident!("resource_{}_bytes", r.0);
-                    let label = &self.interface.frame_graph.resources[r.0].name;
-                    // Either carried buffer can become the result after a swap.
-                    // A cached handle must not let a later call overwrite it.
-                    let allocate = if entry.results.contains(r) || carried.contains(r) {
-                        quote!(device.create_buffer(&descriptor))
-                    } else {
-                        context.scratch = true;
-                        let slot = r.0;
-                        scratch.push(quote! {
-                            if let Some(cached_buffer) = context.scratch.get(&#slot) {
-                                encoder.clear_buffer(cached_buffer, 0, None);
-                            }
-                        });
-                        quote!(support::scratch_buffer(device, &mut context.scratch, #slot, &descriptor))
-                    };
-                    let mutable = carried.contains(r).then(|| quote!(mut));
-                    code.push(quote!{
-                        let #length=size(#bytes)?;
-                        if #length>device.limits().max_buffer_size {return Err(HostError::Invalid(format!("buffer {} exceeds device limit",#label)));}
-                        let #mutable #id={ let descriptor=BufferDescriptor{
-                            label:Some(#label),size:#length.max(4),mapped_at_creation:false,
-                            usage:BufferUsages::STORAGE|BufferUsages::COPY_SRC|BufferUsages::COPY_DST|BufferUsages::VERTEX|BufferUsages::INDEX|BufferUsages::INDIRECT,
-                        }; #allocate };
-                    });
-                }
-                Allocation::Texture {
-                    resource: r,
-                    width,
-                    height,
-                } => {
-                    let id = resource(*r);
-                    let width = self.rust_expr(width, entry)?;
-                    let height = self.rust_expr(height, entry)?;
-                    let Some(Binding::StorageTexture { format, .. }) = self.texture_binding(*r) else {
-                        return Err(HostError::Invalid("texture allocation without format".into()));
-                    };
-                    let format = texture_format(*format);
-                    let label = &self.interface.frame_graph.resources[r.0].name;
-                    code.push(quote!{let #id=device.create_texture(&TextureDescriptor{
-                        label:Some(#label),size:Extent3d{width:dimension(#width)?,height:dimension(#height)?,depth_or_array_layers:1},
-                        mip_level_count:1,sample_count:1,dimension:TextureDimension::D2,format:#format,
-                        usage:TextureUsages::STORAGE_BINDING|TextureUsages::TEXTURE_BINDING|TextureUsages::RENDER_ATTACHMENT|TextureUsages::COPY_SRC|TextureUsages::COPY_DST,
-                        view_formats:&[],
-                    });});
-                }
-            }
-        }
-        if !scratch.is_empty() {
-            code.insert(
-                0,
-                quote! {
-                    if !context.scratch.is_empty() {
-                        #(#scratch)*
-                    }
-                },
-            );
-        }
         code.push(self.rust_operations(&entry.operations, entry, format, context)?);
         let results = self.rust_results(entry)?;
         let entry_id = format_ident!("ENTRY_{}", index);
@@ -568,15 +484,115 @@ impl Program {
             } = operation
             {
                 let repeated = &self.interface.dispatch_loops[*region];
-                for (current, next) in &repeated.carried {
-                    resources.insert(self.scalar_resource(*pipeline, current)?);
-                    resources.insert(self.scalar_resource(*pipeline, next)?);
+                for carry in &repeated.carried {
+                    resources.insert(self.scalar_resource(*pipeline, &carry.binding)?);
+                    for binding in carry.initial.bindings().chain(carry.next.bindings()) {
+                        resources.insert(self.scalar_resource(*pipeline, binding)?);
+                    }
                 }
                 self.loop_resources(body, resources)?;
                 self.loop_resources(test, resources)?;
             }
         }
         Ok(())
+    }
+
+    fn rust_allocation(
+        &self,
+        a: &Allocation,
+        entry: &Entry,
+        context: &mut RustContext,
+    ) -> Result<TokenStream, HostError> {
+        let mut carried = BTreeSet::new();
+        self.loop_resources(&entry.operations, &mut carried)?;
+        let mut code = Vec::new();
+        let mut scratch = Vec::new();
+
+        match a {
+            Allocation::Buffer { resource: r, bytes } => {
+                let id = resource(*r);
+                let bytes = self.rust_expr(bytes, entry)?;
+                let length = format_ident!("resource_{}_bytes", r.0);
+                let label = &self.interface.frame_graph.resources[r.0].name;
+                // Any carried buffer can become the result after rebinding.
+                // A cached handle must not let a later call overwrite it.
+                let allocate = if self.result_resource(entry, *r) || carried.contains(r) {
+                    quote!(device.create_buffer(&descriptor))
+                } else {
+                    context.scratch = true;
+                    let slot = r.0;
+                    scratch.push(quote! {
+                        if let Some(cached_buffer) = context.scratch.get(&#slot) {
+                            encoder.clear_buffer(cached_buffer, 0, None);
+                        }
+                    });
+                    quote!(support::scratch_buffer(device, &mut context.scratch, #slot, &descriptor))
+                };
+                let mutable = carried.contains(r).then(|| quote!(mut));
+                code.push(quote!{
+                        let #length=size(#bytes)?;
+                        if #length>device.limits().max_buffer_size {return Err(HostError::Invalid(format!("buffer {} exceeds device limit",#label)));}
+                        let #mutable #id={ let descriptor=BufferDescriptor{
+                            label:Some(#label),size:#length.max(4),mapped_at_creation:false,
+                            usage:BufferUsages::STORAGE|BufferUsages::COPY_SRC|BufferUsages::COPY_DST|BufferUsages::VERTEX|BufferUsages::INDEX|BufferUsages::INDIRECT,
+                        }; #allocate };
+                    });
+            }
+            Allocation::Texture {
+                resource: r,
+                width,
+                height,
+            } => {
+                let id = resource(*r);
+                let width = self.rust_expr(width, entry)?;
+                let height = self.rust_expr(height, entry)?;
+                let Some(Binding::StorageTexture { format, .. }) = self.texture_binding(*r) else {
+                    return Err(HostError::Invalid("texture allocation without format".into()));
+                };
+                let format = texture_format(*format);
+                let label = &self.interface.frame_graph.resources[r.0].name;
+                code.push(quote!{let #id=device.create_texture(&TextureDescriptor{
+                        label:Some(#label),size:Extent3d{width:dimension(#width)?,height:dimension(#height)?,depth_or_array_layers:1},
+                        mip_level_count:1,sample_count:1,dimension:TextureDimension::D2,format:#format,
+                        usage:TextureUsages::STORAGE_BINDING|TextureUsages::TEXTURE_BINDING|TextureUsages::RENDER_ATTACHMENT|TextureUsages::COPY_SRC|TextureUsages::COPY_DST,
+                        view_formats:&[],
+                    });});
+            }
+        }
+        Ok(quote!(#(#scratch)* #(#code)*))
+    }
+
+    fn rust_loop_bindings<'a>(
+        &self,
+        pipeline: usize,
+        bindings: impl Iterator<Item = (&'a ScalarSource, &'a BufferSource)>,
+    ) -> Result<TokenStream, HostError> {
+        let mut selections = Vec::new();
+        let mut assignments = Vec::new();
+        for (i, (current, next)) in bindings.enumerate() {
+            let current = resource(self.scalar_resource(pipeline, current)?);
+            let selected = format_ident!("carried_{i}");
+            let value = match next {
+                BufferSource::Binding(binding) => {
+                    let source = resource(self.scalar_resource(pipeline, binding)?);
+                    quote!(#source.clone())
+                }
+                BufferSource::Select { tag, cases } => {
+                    let tag = self.rust_scalar(pipeline, tag)?;
+                    let cases = cases
+                        .iter()
+                        .map(|(key, source)| {
+                            let source = resource(self.scalar_resource(pipeline, source)?);
+                            Ok(quote!(#key => #source.clone()))
+                        })
+                        .collect::<Result<Vec<_>, HostError>>()?;
+                    quote!(match #tag { #(#cases,)* _ => return Err(HostError::Invalid("invalid loop memory tag".into())) })
+                }
+            };
+            selections.push(quote!(let #selected = #value;));
+            assignments.push(quote!(#current = #selected;));
+        }
+        Ok(quote!({ #(#selections)* #(#assignments)* }))
     }
 
     fn rust_operations(
@@ -589,49 +605,50 @@ impl Program {
         let mut code = vec![];
         for (ordinal, operation) in operations.iter().enumerate() {
             code.push(match operation {
-                Operation::Loop { pipeline, region, setup, test, body } => {
+                Operation::Bind { name, value } => {
+                    let name = format_ident!("{}", name.replace('-', "_"));
+                    let value = crate::scalar_emit::rust_scalar(value, &|source| Ok((source.resource()?, false)))?;
+                    quote!(let #name = #value;)
+                }
+                Operation::Allocate(allocation) => self.rust_allocation(allocation, entry, context)?,
+                Operation::Loop { pipeline, region, test, body } => {
                     let repeated = &self.interface.dispatch_loops[*region];
-                    let setup = self.rust_operations(setup, entry, format, context)?;
                     let test = self.rust_operations(test, entry, format, context)?;
                     let body = self.rust_operations(body, entry, format, context)?;
-                    let swaps = repeated.carried.iter().map(|(current, next)| {
-                        let current = self.scalar_resource(*pipeline, current)?;
-                        let next = self.scalar_resource(*pipeline, next)?;
-                        if current == next { return Ok(quote!()); }
-                        let current = resource(current);
-                        let next = resource(next);
-                        Ok(quote!(std::mem::swap(&mut #current, &mut #next);))
-                    }).collect::<Result<Vec<_>, HostError>>()?;
+                    let initial = self.rust_loop_bindings(*pipeline, repeated.carried.iter().map(|carry| (&carry.binding, &carry.initial)))?;
+                    let next = self.rust_loop_bindings(*pipeline, repeated.carried.iter().map(|carry| (&carry.binding, &carry.next)))?;
                     match &repeated.control {
                         crate::DispatchLoopControl::Counted { count, index } => {
                             let count = self.rust_scalar(*pipeline, count)?;
                             let index = resource(self.scalar_resource(*pipeline, index)?);
                             quote!({
-                                #setup
+                                #initial
                                 let iterations = #count;
                                 for iteration in 0..iterations {
                                     support::write_buffer(device, encoder, &#index, 0, &(iteration as i32).to_le_bytes());
                                     #body
-                                    #(#swaps)*
+                                    #next
                                 }
                             })
                         }
                         crate::DispatchLoopControl::While { condition } => {
                             let condition = self.rust_scalar(*pipeline, condition)?;
                             quote!({
-                                #setup
+                                #initial
                                 loop {
                                     #test
                                     if !(#condition) { break; }
                                     #body
-                                    #(#swaps)*
+                                    #next
                                 }
                             })
                         }
                     }
                 }
-                Operation::Scalar { pipeline, task } => {
-                    self.rust_scalar_task(*pipeline, &self.interface.scalar_tasks[*task])?
+                Operation::Scalar { pipeline, task, value } => {
+                    let mut task = self.interface.scalar_tasks[*task].clone();
+                    task.value = value.clone();
+                    self.rust_scalar_task(*pipeline, &task)?
                 }
                 Operation::Dispatch { pipeline, stage, groups } => {
                     let (create, run) = self.rust_dispatch(*pipeline, *stage, groups, entry, format)?;
@@ -1049,11 +1066,8 @@ impl Program {
     }
 
     fn rust_draw_call(&self, p: usize, draw: &DrawCall, entry: &Entry) -> Result<TokenStream, HostError> {
-        let count = |c: &DrawCount, r: ResourceId| -> Result<TokenStream, HostError> {
-            let expr = match c {
-                DrawCount::Fixed(n) => Expr::Integer((*n).into()),
-                DrawCount::BufferLength => Expr::Input(format!("count-resource-{}", r.0)),
-            };
+        let count = |c: &DrawCount, buffer: &crate::DrawBufferRef| -> Result<TokenStream, HostError> {
+            let expr = self.draw_count(p, c, buffer)?;
             let expr = self.rust_expr(&expr, entry)?;
             Ok(quote!(dimension(#expr)?))
         };
@@ -1080,7 +1094,7 @@ impl Program {
                 first_instance,
             } => {
                 let r = self.draw_resource(p, indices)?;
-                let n = count(index_count, r)?;
+                let n = count(index_count, indices)?;
                 let id = resource(r);
                 let format = index(index_format);
                 quote! {pass.set_index_buffer(#id.slice(..),#format);pass.draw_indexed(#first_index..support::draw_end(#first_index,#n)?,#vertex_offset,#first_instance..support::draw_end(#first_instance,#instance_count)?);}
@@ -1091,7 +1105,7 @@ impl Program {
                 draw_count,
             } => {
                 let r = self.draw_resource(p, commands)?;
-                let n = count(draw_count, r)?;
+                let n = count(draw_count, commands)?;
                 let id = resource(r);
                 quote!(pass.multi_draw_indirect(&#id,#offset,#n);)
             }
@@ -1103,7 +1117,7 @@ impl Program {
                 draw_count,
             } => {
                 let r = self.draw_resource(p, commands)?;
-                let n = count(draw_count, r)?;
+                let n = count(draw_count, commands)?;
                 let id = resource(r);
                 let indices = resource(self.draw_resource(p, indices)?);
                 let format = index(index_format);

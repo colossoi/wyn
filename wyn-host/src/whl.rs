@@ -1,11 +1,11 @@
 use std::fmt::Write;
 
 use crate::{
-    Access, Allocation, Binding, BlendMode, BufferLen, CullMode, DepthTest, DrawCall, DrawCount, Entry,
-    Expr, FillMode, FrameResourceKind, FrontFace, HostError, IndexFormat, Operation, Pipeline,
-    PrimitiveTopology, Program, ResourceId, ResultLayout, ResultScalar, SamplerBindingType, Scissor,
-    ShaderFormat, ShaderStage, StorageImageFormat, TextureSampleType, TextureViewDimension, UniformMember,
-    VertexFormat, Viewport,
+    Access, Allocation, Binding, BlendMode, BufferLen, BufferSource, CullMode, DepthTest, DrawCall,
+    DrawCount, Entry, Expr, FillMode, FrameResourceKind, FrontFace, HostError, IndexFormat, Operation,
+    Pipeline, PrimitiveTopology, Program, ResourceId, ResultLayout, ResultScalar, SamplerBindingType,
+    ScalarSource, Scissor, ShaderFormat, ShaderStage, StorageImageFormat, TextureSampleType,
+    TextureViewDimension, UniformMember, VertexFormat, Viewport,
 };
 
 pub(crate) fn symbol(name: &str) -> String {
@@ -387,12 +387,125 @@ impl Program {
         }
     }
 
+    fn write_allocation(&self, out: &mut String, allocation: &Allocation) -> Result<(), HostError> {
+        let target = resource(allocation.resource());
+        writeln!(out, "    (if {target} (gpu-free {target}))")?;
+        match allocation {
+            Allocation::Buffer { resource: r, bytes } => {
+                writeln!(out, "    (setq {} (gpu-alloc {}))", resource(*r), bytes.to_whl()?)?
+            }
+            Allocation::Texture {
+                resource: r,
+                width,
+                height,
+            } => {
+                let Some(Binding::StorageTexture { format, .. }) = self.texture_binding(*r) else {
+                    return Err(HostError::Invalid("allocated texture has no format".into()));
+                };
+                writeln!(out,"    (setq {} (gpu-alloc-texture :dimension :d2 :size (list {} {} 1) :format :{} :mip-levels 1 :samples 1 :usage '(:storage :sampled :render-target :copy)))",resource(*r),width.to_whl()?,height.to_whl()?,format_name(*format))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn write_views(&self, out: &mut String, p: usize) -> Result<(), HostError> {
+        for (b, binding) in self.bindings(p).iter().enumerate() {
+            let usage = match binding {
+                Binding::Texture { .. } => Some("sampled"),
+                Binding::StorageTexture { .. } => Some("storage"),
+                _ => None,
+            };
+            if let Some(usage) = usage {
+                let id = self.binding_resource(p, b)?;
+                let view_dimension = match binding {
+                    Binding::Texture { view_dimension, .. } => dimension(view_dimension),
+                    _ => ":d2",
+                };
+                let layers = match binding {
+                    Binding::Texture {
+                        view_dimension: TextureViewDimension::D2Array | TextureViewDimension::CubeArray,
+                        ..
+                    } => format!("(gpu-texture-dimension {} 0 'depth-or-layers)", resource(id)),
+                    Binding::Texture {
+                        view_dimension: TextureViewDimension::Cube,
+                        ..
+                    } => "6".into(),
+                    _ => "1".into(),
+                };
+                let mips = if usage == "sampled" {
+                    format!("(gpu-texture-mip-levels {})", resource(id))
+                } else {
+                    "1".into()
+                };
+                writeln!(out,"    (view-{p}-{b} (gpu-texture-view {} :usage :{usage} :dimension {view_dimension} :mip 0 :mip-count {mips} :layer 0 :layer-count {layers}))",resource(id))?;
+            }
+        }
+        if let Pipeline::Graphics(g) = &self.interface.pipelines[p] {
+            if g.invocation.fragment_state.depth_test != DepthTest::Disabled {
+                let id = self.depth_target(p)?;
+                writeln!(out,"    (depth-view-{p} (gpu-texture-view {} :usage :render-target :dimension :d2 :mip 0 :mip-count 1 :layer 0 :layer-count 1))",resource(id))?;
+            }
+            for target in &g.fragment_outputs {
+                let id = self.target_resource(&target.name)?;
+                writeln!(out,"    (target-{p}-{} (gpu-texture-view {} :usage :render-target :dimension :d2 :mip 0 :mip-count 1 :layer 0 :layer-count 1))",target.location,resource(id))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn write_loop_bindings<'a>(
+        &self,
+        out: &mut String,
+        pipeline: usize,
+        bindings: impl Iterator<Item = (&'a ScalarSource, &'a BufferSource)>,
+    ) -> Result<(), HostError> {
+        let mut assignments = Vec::new();
+        writeln!(out, "      (let (")?;
+        for (i, (current, next)) in bindings.enumerate() {
+            let value = match next {
+                BufferSource::Binding(binding) => resource(self.scalar_resource(pipeline, binding)?),
+                BufferSource::Select { tag, cases } => {
+                    let mut value =
+                        format!("(let ((memory-tag {})) (cond", self.whl_scalar(pipeline, tag)?);
+                    for (key, source) in cases {
+                        write!(
+                            value,
+                            " ((= memory-tag (i32 {key})) {})",
+                            resource(self.scalar_resource(pipeline, source)?)
+                        )?;
+                    }
+                    value.push_str(" (t (error \"invalid loop memory tag\"))))");
+                    value
+                }
+            };
+            writeln!(out, "        (carried-{i} {value})")?;
+            assignments.push((i, resource(self.scalar_resource(pipeline, current)?)));
+        }
+        writeln!(out, "      )")?;
+        for (i, current) in assignments {
+            writeln!(out, "        (setq {current} carried-{i})")?;
+        }
+        writeln!(out, "      )")?;
+        Ok(())
+    }
+
     fn write_operations(&self, out: &mut String, operations: &[Operation]) -> Result<(), HostError> {
         for op in operations {
+            let pipeline = match op {
+                Operation::Dispatch { pipeline, .. } | Operation::Draw { pipeline } => Some(*pipeline),
+                _ => None,
+            };
+            if let Some(pipeline) = pipeline {
+                writeln!(out, "    (let* (")?;
+                self.write_views(out, pipeline)?;
+                writeln!(out, "    )")?;
+            }
             match op {
-                Operation::Loop { pipeline, region, setup, test, body } => {
+                Operation::Bind { name, value } => writeln!(out, "    (setq {name} {})", crate::scalar_emit::whl_scalar(value, &ScalarSource::resource)?)?,
+                Operation::Allocate(allocation) => self.write_allocation(out, allocation)?,
+                Operation::Loop { pipeline, region, test, body } => {
                     let repeated = &self.interface.dispatch_loops[*region];
-                    self.write_operations(out, setup)?;
+                    self.write_loop_bindings(out, *pipeline, repeated.carried.iter().map(|carry| (&carry.binding, &carry.initial)))?;
                     match &repeated.control {
                         crate::DispatchLoopControl::Counted { count, index } => {
                             let index = resource(self.scalar_resource(*pipeline, index)?);
@@ -406,17 +519,19 @@ impl Program {
                         }
                     }
                     self.write_operations(out, body)?;
-                    for (current, next) in &repeated.carried {
-                        let current = resource(self.scalar_resource(*pipeline, current)?);
-                        let next = resource(self.scalar_resource(*pipeline, next)?);
-                        if current == next { continue; }
-                        writeln!(out, "      (let ((previous {current})) (setq {current} {next} {next} previous))")?;
-                    }
+                    self.write_loop_bindings(out, *pipeline, repeated.carried.iter().map(|carry| (&carry.binding, &carry.next)))?;
                     writeln!(out, "    )")?;
                 }
-                Operation::Scalar { pipeline, task } => writeln!(out, "    {}", self.whl_scalar_task(*pipeline, &self.interface.scalar_tasks[*task])?)?,
+                Operation::Scalar { pipeline, task, value } => {
+                    let mut task = self.interface.scalar_tasks[*task].clone();
+                    task.value = value.clone();
+                    writeln!(out, "    {}", self.whl_scalar_task(*pipeline, &task)?)?;
+                }
                 Operation::Dispatch { pipeline: p, stage: s, groups } => writeln!(out, "    (gpu-dispatch 'kernel-{p}-{s}\n      :groups (list {} {} {})\n      :args (list {}))", groups[0].to_whl()?, groups[1].to_whl()?, groups[2].to_whl()?, self.arguments(*p, Some(*s))?)?,
                 Operation::Draw { pipeline } => self.write_draw(out, *pipeline)?,
+            }
+            if pipeline.is_some() {
+                writeln!(out, "    )")?;
             }
         }
         Ok(())
@@ -444,8 +559,7 @@ impl Program {
             writeln!(out, "    ({scalar} :u32)")?;
         }
         write!(out, "  )\n  :results '(")?;
-        let mut source_results =
-            self.interface.source_results.iter().filter(|r| r.entry == entry.name).collect::<Vec<_>>();
+        let mut source_results = entry.source_results.iter().collect::<Vec<_>>();
         source_results.sort_by_key(|r| r.result);
         for (i, &id) in entry.results.iter().enumerate() {
             let source_result = source_results.get(i);
@@ -456,19 +570,32 @@ impl Program {
                 out,
                 "\n    ({} {} :source-name {} :ownership {}",
                 symbol(source_name),
-                self.resource_description(
-                    id,
-                    source_result.is_some_and(|r| !r.shape.is_empty()
-                        && matches!(r.layout, ResultLayout::Array { length: None, .. }))
-                ),
+                if source_result.is_some_and(|r| !r.shape.offsets().is_empty()) {
+                    ":segmented-buffer :write".into()
+                } else {
+                    self.resource_description(id, source_result.is_some_and(|r| !r.shape.is_static()))
+                },
                 string(source_name),
                 if entry.inputs.contains(&id) { ":borrowed" } else { ":owned" }
             )?;
             if let Some(result) = source_result {
+                if !result.shape.is_static() {
+                    if let ResultLayout::Array {
+                        length: Some(length),
+                        stride,
+                        ..
+                    } = result.layout
+                    {
+                        write!(out, " :min-bytes {}", u64::from(length) * u64::from(stride))?;
+                    }
+                }
                 write!(out, " :value-layout {}", result.layout.to_whl())?;
+                if !result.shape.offsets().is_empty() {
+                    write!(out, " :segmented-rank {}", result.shape.offsets().len() + 1)?;
+                }
             }
             // A shaped result may create a shorter view with a distinct handle.
-            if entry.inputs.contains(&id) && source_result.is_none_or(|r| r.shape.is_empty()) {
+            if entry.inputs.contains(&id) && source_result.is_none_or(|r| r.shape.is_static()) {
                 write!(out, " :alias {}", resource(id))?;
             }
             write!(out, ")")?;
@@ -485,119 +612,80 @@ impl Program {
                 .join(" ")
         )?;
         writeln!(out, "  (let* (")?;
-        for allocation in &entry.allocations {
-            match allocation {
-                Allocation::Buffer { resource: r, bytes } => {
-                    writeln!(out, "    ({} (gpu-alloc {}))", resource(*r), bytes.to_whl()?)?
-                }
-                Allocation::Texture {
-                    resource: r,
-                    width,
-                    height,
-                } => {
-                    let Some(Binding::StorageTexture { format, .. }) = self.texture_binding(*r) else {
-                        return Err(HostError::Invalid("allocated texture has no format".into()));
-                    };
-                    writeln!(out,"    ({} (gpu-alloc-texture :dimension :d2 :size (list {} {} 1) :format :{} :mip-levels 1 :samples 1 :usage '(:storage :sampled :render-target :copy)))",resource(*r),width.to_whl()?,height.to_whl()?,format_name(*format))?;
-                }
-            }
+        for allocation in entry.allocations() {
+            writeln!(out, "    ({} nil)", resource(allocation.resource()))?;
         }
-        for p in entry
-            .operations
-            .iter()
-            .map(|op| match op {
-                Operation::Dispatch { pipeline, .. }
-                | Operation::Draw { pipeline }
-                | Operation::Scalar { pipeline, .. }
-                | Operation::Loop { pipeline, .. } => *pipeline,
-            })
-            .collect::<std::collections::BTreeSet<_>>()
-        {
-            for (b, binding) in self.bindings(p).iter().enumerate() {
-                let usage = match binding {
-                    Binding::Texture { .. } => Some("sampled"),
-                    Binding::StorageTexture { .. } => Some("storage"),
-                    _ => None,
-                };
-                if let Some(usage) = usage {
-                    let id = self.binding_resource(p, b)?;
-                    let view_dimension = match binding {
-                        Binding::Texture { view_dimension, .. } => dimension(view_dimension),
-                        _ => ":d2",
-                    };
-                    let layers = match binding {
-                        Binding::Texture {
-                            view_dimension: TextureViewDimension::D2Array | TextureViewDimension::CubeArray,
-                            ..
-                        } => format!("(gpu-texture-dimension {} 0 'depth-or-layers)", resource(id)),
-                        Binding::Texture {
-                            view_dimension: TextureViewDimension::Cube,
-                            ..
-                        } => "6".into(),
-                        _ => "1".into(),
-                    };
-                    let mips = if usage == "sampled" {
-                        format!("(gpu-texture-mip-levels {})", resource(id))
-                    } else {
-                        "1".into()
-                    };
-                    writeln!(out,"    (view-{p}-{b} (gpu-texture-view {} :usage :{usage} :dimension {view_dimension} :mip 0 :mip-count {mips} :layer 0 :layer-count {layers}))",resource(id))?;
-                }
-            }
-            if let Pipeline::Graphics(g) = &self.interface.pipelines[p] {
-                if g.invocation.fragment_state.depth_test != DepthTest::Disabled {
-                    let id = self.depth_target(p)?;
-                    writeln!(out,"    (depth-view-{p} (gpu-texture-view {} :usage :render-target :dimension :d2 :mip 0 :mip-count 1 :layer 0 :layer-count 1))",resource(id))?;
-                }
-                for target in &g.fragment_outputs {
-                    let id = self.target_resource(&target.name)?;
-                    writeln!(out,"    (target-{p}-{} (gpu-texture-view {} :usage :render-target :dimension :d2 :mip 0 :mip-count 1 :layer 0 :layer-count 1))",target.location,resource(id))?;
-                }
-            }
+        for name in entry.scalar_bindings() {
+            writeln!(out, "    ({name} nil)")?;
         }
         writeln!(out, "  )")?;
         self.write_operations(out, &entry.operations)?;
         writeln!(out, "    (let* (")?;
         let mut results = Vec::new();
         for (i, &id) in entry.results.iter().enumerate() {
-            let value = if let Some(result) = source_results.get(i).filter(|r| !r.shape.is_empty()) {
+            let value = if let Some(result) = source_results.get(i).filter(|r| !r.shape.is_static()) {
                 let ResultLayout::Array { stride, .. } = &result.layout else {
-                    return Err(HostError::Invalid("shaped result must be an array".into()));
+                    return Err(HostError::Invalid(format!(
+                        "shaped result {}.{} must be an array, got {:?}",
+                        result.entry, result.result, result.layout
+                    )));
                 };
-                let bytes =
-                    result.shape.iter().cloned().fold(Expr::Integer(i64::from(*stride)), Expr::multiply);
+                let bytes = result
+                    .shape
+                    .expressions()
+                    .iter()
+                    .cloned()
+                    .fold(Expr::Integer(i64::from(*stride)), Expr::multiply);
                 writeln!(out, "      (result-bytes-{i} (u64 {}))", bytes.to_whl()?)?;
                 format!("(if (= result-bytes-{i} (gpu-buffer-size {0})) {0} (gpu-buffer-view {0} result-bytes-{i}))", resource(id))
             } else {
                 resource(id)
+            };
+            let value = if let Some(result) = source_results.get(i) {
+                let offsets = result
+                    .shape
+                    .offsets()
+                    .iter()
+                    .map(|s| s.resource().map(resource))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if offsets.is_empty() {
+                    value
+                } else {
+                    format!("(list {} {value})", offsets.join(" "))
+                }
+            } else {
+                value
             };
             let name = format!("result-{i}");
             writeln!(out, "      ({name} {value})")?;
             results.push(name);
         }
         writeln!(out, "    )")?;
-        for a in &entry.allocations {
+        for a in entry.allocations() {
             let id = a.resource();
+            if source_results
+                .iter()
+                .any(|r| r.shape.offsets().iter().any(|s| s.resource().is_ok_and(|r| r == id)))
+            {
+                continue;
+            }
             if !entry.results.iter().enumerate().any(|(i, result)| {
-                *result == id && source_results.get(i).is_none_or(|r| r.shape.is_empty())
+                *result == id && source_results.get(i).is_none_or(|r| r.shape.is_static())
             }) {
-                let views: Vec<_> = entry
+                let mut views: Vec<_> = entry
                     .results
                     .iter()
                     .enumerate()
                     .filter(|(_, result)| **result == id)
                     .map(|(i, _)| format!("(/= result-bytes-{i} (gpu-buffer-size {}))", resource(id)))
                     .collect();
-                if views.is_empty() {
-                    writeln!(out, "    (gpu-free {})", resource(id))?;
-                } else {
-                    writeln!(
-                        out,
-                        "    (if (and {}) (gpu-free {}))",
-                        views.join(" "),
-                        resource(id)
-                    )?;
-                }
+                views.insert(0, resource(id));
+                writeln!(
+                    out,
+                    "    (if (and {}) (gpu-free {}))",
+                    views.join(" "),
+                    resource(id)
+                )?;
             }
         }
         writeln!(
@@ -700,10 +788,7 @@ impl Program {
             IndexFormat::Uint16 => ":u16",
             IndexFormat::Uint32 => ":u32",
         };
-        let count = |c: &DrawCount, id: ResourceId| match c {
-            DrawCount::Fixed(n) => n.to_string(),
-            DrawCount::BufferLength => format!("count-resource-{}", id.0),
-        };
+        let count = |c: &DrawCount, buffer: &crate::DrawBufferRef| self.draw_count(p, c, buffer)?.to_whl();
         match &g.invocation.draw {
             DrawCall::Direct {
                 vertex_count,
@@ -729,7 +814,7 @@ impl Program {
                     ":indexed {} {} {} {instance_count} {first_index} {vertex_offset} {first_instance}",
                     resource(id),
                     index_name(index_format),
-                    count(index_count, id)
+                    count(index_count, indices)?
                 )?;
             }
             DrawCall::Indirect {
@@ -742,7 +827,7 @@ impl Program {
                     out,
                     ":indirect {} {offset} {} 16",
                     resource(id),
-                    count(draw_count, id)
+                    count(draw_count, commands)?
                 )?;
             }
             DrawCall::IndexedIndirect {
@@ -759,7 +844,7 @@ impl Program {
                     resource(self.draw_resource(p, indices)?),
                     index_name(index_format),
                     resource(id),
-                    count(draw_count, id)
+                    count(draw_count, commands)?
                 )?;
             }
         }

@@ -22,6 +22,7 @@ pub(crate) fn builtin(name: &str) -> bool {
                 | "progn"
                 | "if"
                 | "cond"
+                | "error"
                 | "and"
                 | "or"
                 | "dotimes"
@@ -322,6 +323,12 @@ impl<B: Backend> Interpreter<'_, B> {
                         Ok(list.list()?.get(index.u32()? as usize).cloned().unwrap_or(Value::Nil))
                     }
                     "list" => Ok(if values.is_empty() { Value::Nil } else { Value::List(values) }),
+                    "error" => {
+                        let [Value::String(message)] = values.as_slice() else {
+                            return Err(Error::Invalid("error needs one string operand".into()));
+                        };
+                        Err(Error::Invalid(message.clone()))
+                    }
                     "not" => {
                         let [value] = values.as_slice() else {
                             return Err(Error::Invalid("not needs one operand".into()));

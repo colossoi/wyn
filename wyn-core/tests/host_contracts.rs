@@ -182,12 +182,12 @@ fn rust_context_keeps_pipeline_creation_out_of_entry_calls() {
                 );
             }
             let entry = &program.entries[0];
-            let scratch = entry.allocations.iter().filter(|allocation| {
+            let scratch = entry.allocations().filter(|allocation| {
                 matches!(allocation, Allocation::Buffer { resource, .. } if !entry.results.contains(resource))
             }).count();
             assert_eq!(call.matches("support::scratch_buffer(").count(), scratch);
             assert_eq!(call.matches("encoder.clear_buffer(").count(), scratch);
-            let returned_buffers = entry.allocations.iter().filter(|allocation| {
+            let returned_buffers = entry.allocations().filter(|allocation| {
                 matches!(allocation, Allocation::Buffer { resource, .. } if entry.results.contains(resource))
             }).count();
             assert_eq!(call.matches("device.create_buffer(").count(), returned_buffers);

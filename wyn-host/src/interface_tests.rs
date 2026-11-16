@@ -1,7 +1,7 @@
 use super::{
-    Access, BackingRef, Binding, BufferUsage, ComputePipeline, ComputeStage, DispatchLoop,
+    Access, BackingRef, Binding, BufferSource, BufferUsage, ComputePipeline, ComputeStage, DispatchLoop,
     DispatchLoopControl, DispatchSize, FragmentOutput, FrameGraph, FramePass, FramePassKind,
-    FrameResourceExtent, FrameResourceKind, GraphicsInvocation, GraphicsPipeline, GraphicsStage,
+    FrameResourceExtent, FrameResourceKind, GraphicsInvocation, GraphicsPipeline, GraphicsStage, LoopCarry,
     ModuleInterface, Pipeline, ShaderStage, StageBindingUses, StorageImageFormat, StorageTextureSize,
     TextureSampleType, TextureViewDimension,
 };
@@ -36,10 +36,11 @@ fn selected_loops_stay_contiguous_and_wait_for_outer_dependencies() {
             count: ScalarExpr::I32(8),
             index: ScalarSource::Binding { set: 0, binding: 0 },
         },
-        carried: vec![(
-            ScalarSource::Binding { set: 0, binding: 1 },
-            ScalarSource::Binding { set: 0, binding: 2 },
-        )],
+        carried: vec![LoopCarry {
+            binding: ScalarSource::Binding { set: 0, binding: 1 },
+            initial: BufferSource::Binding(ScalarSource::Binding { set: 0, binding: 1 }),
+            next: BufferSource::Binding(ScalarSource::Binding { set: 0, binding: 2 }),
+        }],
     };
     assert_eq!(graph.topological_order().unwrap(), [0, 3, 4, 1, 2, 5]);
     assert_eq!(
@@ -203,7 +204,9 @@ fn frame_graph_aliases_storage_texture_views_and_orders_consumers() {
 
     let program = crate::Program::new(descriptor).unwrap();
     let entry = program.entries.iter().find(|entry| entry.name == "paint").unwrap();
-    let [crate::Operation::Dispatch { groups, .. }] = entry.operations.as_slice() else {
+    let operations: Vec<_> =
+        entry.operations.iter().filter(|op| !matches!(op, crate::Operation::Allocate(_))).collect();
+    let [crate::Operation::Dispatch { groups, .. }] = operations.as_slice() else {
         panic!("one texture dispatch");
     };
     assert_eq!(
@@ -429,7 +432,8 @@ fn dispatch_sized_allocations_keep_the_unrounded_expression() {
     descriptor.frame_graph = descriptor.frame_graph.refresh_resources(&descriptor.pipelines).unwrap();
     let program = crate::Program::new(descriptor).unwrap();
     let entry = program.entries.iter().find(|entry| entry.name == "producer").unwrap();
-    let [crate::Allocation::Buffer { bytes, .. }] = entry.allocations.as_slice() else {
+    let allocations = entry.allocations().collect::<Vec<_>>();
+    let [crate::Allocation::Buffer { bytes, .. }] = allocations.as_slice() else {
         panic!("one output allocation");
     };
     assert_eq!(
@@ -546,4 +550,77 @@ fn selected_frame_graph_does_not_infer_accesses_or_dependencies() {
     let refreshed = explicit.refresh_resources(&descriptor.pipelines).unwrap();
     assert_eq!(refreshed.passes[0].depends_on, vec![1]);
     assert!(refreshed.passes[1].depends_on.is_empty());
+}
+
+fn device_sized_storage_descriptor() -> ModuleInterface {
+    let mut descriptor = producer_consumer_descriptor(true);
+    descriptor.pipelines.truncate(1);
+    let Pipeline::Compute(pipeline) = &mut descriptor.pipelines[0] else {
+        panic!("compute");
+    };
+    let mut data = pipeline.bindings[0].clone();
+    let Binding::StorageBuffer { length, resource, .. } = &mut pipeline.bindings[0] else {
+        panic!("count");
+    };
+    *length = Some(super::BufferLen::Fixed { bytes: 4 });
+    *resource = Some("count".into());
+    let Binding::StorageBuffer {
+        binding,
+        name,
+        resource,
+        length,
+        ..
+    } = &mut data
+    else {
+        panic!("data");
+    };
+    *binding = 1;
+    *name = "data".into();
+    *resource = Some("data".into());
+    *length = Some(super::BufferLen::Computed {
+        bytes: Expr::Scalar(ScalarExpr::Read {
+            source: ScalarSource::Binding { set: 0, binding: 0 },
+            offset: 0,
+            ty: crate::ScalarType::I32,
+        })
+        .multiply(Expr::Integer(4)),
+    });
+    pipeline.bindings.push(data);
+    pipeline.stages[0].uses = StageBindingUses {
+        reads: vec![],
+        writes: vec![0],
+    };
+    let mut elements = pipeline.stages[0].clone();
+    elements.entry_point = "elements".into();
+    elements.uses = StageBindingUses {
+        reads: vec![0],
+        writes: vec![1],
+    };
+    pipeline.stages.push(elements);
+    descriptor.frame_graph =
+        FrameGraph::from_selected_pipelines(&descriptor.pipelines, &[((0, 0), (0, 1))]).unwrap();
+    descriptor
+}
+
+#[test]
+fn device_sized_storage_is_allocated_after_its_count_and_before_its_writer() {
+    let mut descriptor = device_sized_storage_descriptor();
+    let program = crate::Program::new(descriptor.clone()).unwrap();
+    assert!(matches!(
+        program.entries[0].operations.as_slice(),
+        [
+            crate::Operation::Allocate(_),
+            crate::Operation::Dispatch { stage: 0, .. },
+            crate::Operation::Bind { .. },
+            crate::Operation::Allocate(_),
+            crate::Operation::Dispatch { stage: 1, .. },
+        ]
+    ));
+    let Pipeline::Compute(pipeline) = &mut descriptor.pipelines[0] else {
+        panic!("compute");
+    };
+    pipeline.stages[0].uses.writes.clear();
+    descriptor.frame_graph =
+        FrameGraph::from_selected_pipelines(&descriptor.pipelines, &[((0, 0), (0, 1))]).unwrap();
+    assert!(crate::Program::new(descriptor).unwrap_err().to_string().contains("uninitialized size"));
 }

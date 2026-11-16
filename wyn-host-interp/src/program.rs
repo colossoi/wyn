@@ -33,6 +33,7 @@ impl Parameter {
                 | ":f32"
                 | ":f64"
                 | ":buffer"
+                | ":segmented-buffer"
                 | ":host-buffer"
                 | ":texture"
                 | ":texture-view"
@@ -42,7 +43,7 @@ impl Parameter {
         }
         let resource = matches!(
             kind.as_str(),
-            ":buffer" | ":host-buffer" | ":texture" | ":texture-view"
+            ":buffer" | ":segmented-buffer" | ":host-buffer" | ":texture" | ":texture-view"
         );
         let start = if resource { 3 } else { 2 };
         if values.len() < start {
@@ -78,9 +79,13 @@ impl Parameter {
                 ":ownership",
                 ":alias",
                 ":value-layout",
+                ":segmented-rank",
                 ":host-bytes",
             ],
         )?;
+        if kind == ":segmented-buffer" && options.get(":segmented-rank")?.u64()? < 2 {
+            return Err(Error::Invalid("segmented rank must be at least two".into()));
+        }
         if let Some(name) = options.optional(":source-name") {
             if !matches!(name, Value::String(_)) {
                 return Err(Error::Invalid(":source-name must be a string".into()));
@@ -121,6 +126,9 @@ impl Parameter {
             return Ok(Value::Number(number.convert(kind)?));
         }
         match (&*self.kind, &value) {
+            (":segmented-buffer", Value::List(buffers))
+                if buffers.len() as u64 == self.options.get(":segmented-rank")?.u64()?
+                    && buffers.iter().all(|v| matches!(v, Value::Resource(_))) => {}
             (":bool", Value::True | Value::Nil) => {}
             (
                 ":buffer" | ":host-buffer" | ":texture" | ":texture-view" | ":sampler",

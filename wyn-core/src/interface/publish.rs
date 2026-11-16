@@ -351,7 +351,7 @@ impl ModuleInterfacePublish for ModuleInterface {
                         }
                     }),
                     layout: result_layout(&output.ty),
-                    shape: vec![],
+                    shape: host::ResultShape::default(),
                     result: i,
                     pipeline_index,
                     set: br.set,

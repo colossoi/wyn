@@ -1,7 +1,7 @@
 //! Sequential scalar expressions shared by the host backends.
 use crate::{Binding, HostError, Program, ResourceId};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ScalarType {
     Bool,
     I32,

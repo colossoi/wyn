@@ -139,7 +139,7 @@ fn computed_dispatch_extents_preserve_parameters_wrapping_and_grid_limits() {
             ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
         };
         assert!(
-            host.entries[0].allocations.is_empty(),
+            host.entries[0].allocations().next().is_none(),
             "scatter reuses its destination"
         );
         host.to_rust_wgpu("computed_dispatch", format).unwrap();

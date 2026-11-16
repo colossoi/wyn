@@ -9,10 +9,13 @@ use crate::host::ResultKind;
 use crate::host::SourceResultBinding;
 use crate::host::{Binding, BufferUsage, DrawBufferRef, DrawCall, DrawCount, GraphicsInvocation};
 use crate::host::{
+    BufferSource, DispatchLoop, DispatchLoopControl, LoopCarry, ResultShape, ScalarExpr, ScalarSource,
+    ScalarTask, ScalarType,
+};
+use crate::host::{
     ComputePipeline, ComputeStage, DispatchSize, FrameGraph, GraphicsPipeline, GraphicsStage,
     ModuleInterface, Pipeline, ShaderStage,
 };
-use crate::host::{DispatchLoop, DispatchLoopControl, ScalarExpr, ScalarSource, ScalarTask, ScalarType};
 use crate::interface::publish::{reconcile_storage_binding_access, EntryPoint, ModuleInterfacePublish};
 use crate::interface::results::result_layout;
 use crate::interface::{DrawBufferOperand, SourceResult};
@@ -66,6 +69,7 @@ fn resolve_draw_buffer(
         (binding, name)
     };
     Ok(DrawBufferRef {
+        elements: None,
         set: binding.set,
         binding: binding.binding,
         resource: Some(name.clone()),
@@ -406,7 +410,7 @@ fn publish_results(
                     name: result.name,
                     kind: result.kind,
                     layout: layout.clone(),
-                    shape: shape.clone(),
+                    shape: ResultShape::Rectangular(shape.clone()),
                     result: result.index,
                     pipeline_index,
                     set: binding.set,
@@ -663,7 +667,12 @@ fn publish_loops(
                 compiler.facts.value_ref(carry.state).ok_or_else(|| error("loop carry missing"))?;
             let next = crate::egglog::query::Query(&compiler.program.graph)
                 .required("LoopNext", (operation, carry.slot))?;
-            carried.push((slot(current)?, slot(next)?));
+            let binding = slot(current)?;
+            carried.push(LoopCarry {
+                initial: BufferSource::Binding(binding.clone()),
+                binding,
+                next: BufferSource::Binding(slot(next)?),
+            });
         }
         let Some(pipeline) = associations.iter().position(|ids| ids.contains(&entry.id)) else {
             return Err(error("loop pipeline missing"));

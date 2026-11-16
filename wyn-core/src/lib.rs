@@ -509,7 +509,7 @@ fn adapt_host_interface_for_wgsl(
         for result in
             descriptor.source_results.iter_mut().filter(|result| result.pipeline_index == pipeline_index)
         {
-            for dimension in &mut result.shape {
+            for dimension in result.shape.expressions_mut() {
                 dimension.reads_mut(&mut |source, offset| legalize(source, offset, None));
             }
         }

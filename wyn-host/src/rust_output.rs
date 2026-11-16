@@ -22,6 +22,9 @@ pub enum OutputResource {
     Buffer {
         /// Retains the GPU allocation. Reading it requires suitable COPY_SRC usage.
         buffer: Buffer,
+        /// One buffer per variable-length nesting level; empty for rectangular arrays.
+        /// Each contains parent count + 1 monotone u32 offsets.
+        offsets: Vec<Buffer>,
         layout: ResultLayout,
         range: BufferRange,
     },

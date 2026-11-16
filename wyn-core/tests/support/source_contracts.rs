@@ -175,13 +175,15 @@ mod source_pipeline {
         let compiled =
             wyn_core::lower_ssa_to_wgsl_with_program(compile_thru_ssa(&source).unwrap()).unwrap();
         let entry = &compiled.program.entries[0];
-        let arrays = entry.allocations.iter().filter(|allocation| matches!(allocation,
+        let arrays = entry.allocations().filter(|allocation| matches!(allocation,
         wyn_core::host::Allocation::Buffer { bytes, .. } if !matches!(bytes, wyn_core::host::Expr::Integer(_))
     )).count();
         assert_eq!(
-            arrays, 2,
+            arrays,
+            2,
             "only scan prefixes and sorted output scale with input length\n{}\n{:?}",
-            compiled.wgsl, entry.allocations
+            compiled.wgsl,
+            entry.allocations().collect::<Vec<_>>()
         );
     }
     #[test]
@@ -851,7 +853,7 @@ mod source_host_output {
         let [entry] = program.entries.as_slice() else {
             panic!("one host entry");
         };
-        assert!(entry.allocations.iter().any(
+        assert!(entry.allocations().any(
         |a| matches!(a,Allocation::Buffer{bytes,..} if bytes.to_whl().unwrap().contains("host-read-scalar"))
     ));
         let whl = program.to_whl("sizes.wgsl", ShaderFormat::Wgsl).unwrap();
@@ -913,7 +915,7 @@ mod source_host_output {
     );
         let entry = &program.entries[0];
         assert!(program.interface.source_results.is_empty());
-        assert!(entry.allocations.iter().any(|a| matches!(a, Allocation::Buffer { .. })));
+        assert!(entry.allocations().any(|a| matches!(a, Allocation::Buffer { .. })));
         let rust = program.to_rust_wgpu("scratch.wgsl", ShaderFormat::Wgsl).unwrap();
         assert!(rust.contains("count: &ParameterBuffer"));
         assert!(entry.inputs.iter().all(|id| {
@@ -1011,9 +1013,9 @@ mod source_host_output {
             assert_eq!(entry.results.len(), 1, "only the render target is returned");
             assert!(entry.inputs.contains(&entry.results[0]), "borrowed render target");
             // Computed captures allocate element storage and an explicit input length.
-            assert_eq!(entry.allocations.len(), 2 * usize::from(computed));
+            assert_eq!(entry.allocations().count(), 2 * usize::from(computed));
             let captured = if computed {
-                let Allocation::Buffer { resource, .. } = entry.allocations[0] else {
+                let Allocation::Buffer { resource, .. } = *entry.allocations().next().unwrap() else {
                     panic!("computed capture needs one buffer")
                 };
                 assert!(!entry.inputs.contains(&resource));

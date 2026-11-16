@@ -148,7 +148,7 @@ fn graphics_helper_returns_image_with_inline_array_results() {
             assert_eq!(entry.results.len(), 2);
             assert_eq!(entry.results[1], *entry.inputs.first().unwrap());
             assert_ne!(entry.results[0], *entry.inputs.first().unwrap());
-            assert!(entry.allocations.iter().any(|allocation|
+            assert!(entry.allocations().any(|allocation|
                 matches!(allocation, Allocation::Buffer { resource, .. } if *resource == entry.results[0])));
             assert_eq!(
                 entry.operations.iter().filter(|op| matches!(op, Operation::Draw { .. })).count(),
@@ -488,7 +488,7 @@ fn allocated_results_keep_source_fields_and_rust_parameter_contracts() {
     ] {
         let entry = program.entries.iter().find(|entry| entry.name == name).unwrap();
         assert!(entry.results.iter().all(|id| !entry.inputs.contains(id)));
-        assert!(entry.results.iter().all(|id| entry.allocations.iter().any(|a| a.resource() == *id)));
+        assert!(entry.results.iter().all(|id| entry.allocations().any(|a| a.resource() == *id)));
         for field in fields {
             assert!(rust.contains(&format!("name: {field:?}")), "missing {field}");
         }
@@ -600,7 +600,7 @@ fn generated_compute_captures_are_allocated_by_the_authored_host_entry() {
         let inputs: BTreeSet<_> = entry.inputs.iter().map(|id| resources[id.0].name.as_str()).collect();
         assert_eq!(inputs, BTreeSet::from(["xs", "target"]), "{format:?}");
         assert!(!entry.inputs.contains(&entry.results[0]));
-        assert!(entry.allocations.iter().any(|a| a.resource() == entry.results[0]));
+        assert!(entry.allocations().any(|a| a.resource() == entry.results[0]));
         WhlProgram::parse(&program.to_whl("staged", format).unwrap()).unwrap();
     }
 }
@@ -625,7 +625,7 @@ fn resolution_allocation_expressions_keep_cpu_parameters() {
         assert!(!whl.contains("gpu-read-scalar"));
         for id in entry.results.iter().take(3) {
             let Allocation::Buffer { bytes, .. } =
-                entry.allocations.iter().find(|a| a.resource() == *id).unwrap()
+                entry.allocations().find(|a| a.resource() == *id).unwrap()
             else {
                 panic!("computed output allocation");
             };
@@ -731,7 +731,7 @@ fn graphics_compute_helpers_capture_computed_records_and_return_both_arrays() {
                 !entry.inputs.contains(result),
                 "computed result must not alias an input"
             );
-            assert!(entry.allocations.iter().any(
+            assert!(entry.allocations().any(
                 |allocation| matches!(allocation, Allocation::Buffer { resource, .. } if resource == result)
             ));
         }
@@ -751,7 +751,7 @@ fn uniform_sized_maps_launch_from_their_logical_domain() {
         };
         let pixels = entry.results[0];
         assert!(
-            entry.allocations.iter().any(|a| a.resource() == pixels),
+            entry.allocations().any(|a| a.resource() == pixels),
             "host computes and allocates the output capacity"
         );
         let [Operation::Dispatch { groups, .. }, Operation::Draw { .. }] = entry.operations.as_slice()
@@ -816,8 +816,7 @@ fn graphics_root_composes_multiple_computations_and_source_results() {
         for &id in &entry.results[..2] {
             assert!(!entry.inputs.contains(&id));
             assert!(entry
-                .allocations
-                .iter()
+                .allocations()
                 .any(|a| matches!(a, Allocation::Buffer { resource, .. } if *resource == id)));
             assert!(entry.operations.iter().any(|op| {
                 let Operation::Dispatch { pipeline, stage, .. } = op else {
