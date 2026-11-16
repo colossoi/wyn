@@ -4,7 +4,7 @@
 --! warnings = []
 --! [[artifacts]]
 --! path = "output.wynhost"
---! contains = [":source-name \"logical_values\""]
+--! contains = [":source-name \"logical_values\"", ":source-name \"virtual_array_parameter\""]
 
 -- Products remain whole values across branches and loop carries until SSA.
 entry logical_values(x:i32,b:bool) i32 =
@@ -13,3 +13,6 @@ entry logical_values(x:i32,b:bool) i32 =
     let (a,c) = pair in
     (c,a+c)
   in a+c
+
+def third(arr:[]i32) i32=arr[2]
+entry virtual_array_parameter() i32=third(0..<10)

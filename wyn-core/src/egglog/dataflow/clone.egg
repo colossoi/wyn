@@ -52,8 +52,9 @@
 (rule ((= revision (AnalysisRevision)) (CloneNameDemand context (AccNameRef name)) (= (CloneIsLocal context (AccNameRef name)) true)
        (= (CloneIsSubstituted context (AccNameRef name)) false))
       ((set (CloneName context (AccNameRef name)) (AccNameRef (ClonedAccumulator context name)))) :ruleset clone-names)
+; Substituted arguments keep their caller's shape and storage type.
 (rule ((= revision (AnalysisRevision)) (CloneLocal context (ValueNameRef name)) (= (CloneName context (ValueNameRef name)) (ValueNameRef replacement))
-       (= info (ValueType name)))
+       (= (CloneIsSubstituted context (ValueNameRef name)) false) (= info (ValueType name)))
       ((set (ValueType replacement) info)) :ruleset clone-edges)
 (rule ((= revision (AnalysisRevision)) (CloneLocal context (AccNameRef name)) (= info (AccumulatorType name)))
       ((CloneAccInfoDemand context info)) :ruleset clone-index)

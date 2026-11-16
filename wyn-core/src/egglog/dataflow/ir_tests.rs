@@ -7,6 +7,30 @@ use crate::op::BinaryOperator;
 use egglog_engine::{EGraph, RawValues, Write};
 
 #[test]
+fn cloned_parameters_preserve_the_callers_value_type() {
+    let mut graph = EGraph::default();
+    load(&mut graph).unwrap();
+    graph
+        .parse_and_run_program(
+            None,
+            r#"
+        (let context (OperationId 0))
+        (let parameter (ValueId 1)) (let argument (ValueId 2))
+        (let scalar (ElementValue (ScalarElement (I32))))
+        (let declared (LogicalValue (ArrayType (ValueArray) (vec-of (UnspecifiedExtent)) scalar)))
+        (let actual (LogicalValue (ArrayType (ValueArray) (vec-of (FixedExtent 10)) scalar)))
+        (set (ValueType parameter) declared) (set (ValueType argument) actual)
+        (CloneLocal context (ValueNameRef parameter))
+        (CloneNameDemand context (ValueNameRef parameter))
+        (set (CloneSubstitute context (ValueNameRef parameter)) (ValueNameRef argument))
+        (run-schedule (saturate clone-index) (saturate clone-names) (saturate clone-edges))
+        (check (= (ValueType argument) actual))
+    "#,
+        )
+        .unwrap();
+}
+
+#[test]
 fn operations_share_connectivity_without_sharing_occurrences_or_payloads() {
     let mut graph = EGraph::default();
     load(&mut graph).unwrap();
