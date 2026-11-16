@@ -7,7 +7,7 @@ use crate::interface::{
     Attribute, BindingExposure, EntryDecl, EntryOutputDestination, EntryOutputKind, IoDecoration,
     ResolvedAttribute,
 };
-use crate::types::{canonical_storage_buffer_ty, strip_existentials};
+use crate::types::{canonical_storage_buffer_ty, strip_existentials, TypeExt};
 use crate::BindingRef;
 use polytype::Type;
 use wyn_base::IdSource;
@@ -58,6 +58,7 @@ pub(crate) fn entry_output_arity(entry: &EntryDecl, ret_type: &Type<TypeName>) -
         Type::Constructed(TypeName::Unit | TypeName::SideEffect | TypeName::StorageTexture, _) => 0,
         _ if entry.buffer_demand => 1,
         _ if entry.source_entry.is_some() => entry.outputs.len(),
+        _ if entry.outputs.len() == 1 && entry.outputs[0].ty.is_array() => 1,
         Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) => fields.len(),
         _ => usize::from(!entry.outputs.is_empty()),
     }

@@ -1,6 +1,7 @@
 //! End-to-end contracts for the authoritative memory program.
 #[path = "support/pipeline.rs"]
 mod pipeline;
+use wyn_core::host::{ResultKind, ResultLayout, ResultShape};
 use wyn_core::{egglog, CodegenTarget, PipelineTopologyPolicy};
 
 #[test]
@@ -198,4 +199,56 @@ fn typed_views_preserve_rectangular_and_product_storage() {
         .unwrap();
         assert_eq!(wgsl.program.interface.source_results.len(), 1);
     }
+}
+
+#[test]
+fn source_array_products_preserve_result_grouping() {
+    for (depth, source) in [
+        "entry pairs(xs:[]i32) [](i32,i32)=map(|x|(x,x+1),xs)",
+        "entry pairs(xs:[]i32,n:i32) [][](i32,i32)=map(|x|map(|i|(x,i),iota(n)),xs)",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        eprintln!("checking {source}");
+        let owned = pipeline::source(source);
+        let module = pipeline::lower(&owned, CodegenTarget::Portable);
+        wyn_core::lower_ssa_to_spirv(module.clone()).unwrap();
+        let wgsl = wyn_core::lower_ssa_to_wgsl_with_program(module).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&naga::front::wgsl::parse_str(&wgsl.wgsl).unwrap())
+        .unwrap();
+        let [result] = wgsl.program.interface.source_results.as_slice() else {
+            panic!("one authored array result: {source}");
+        };
+        assert_eq!(result.result, 0);
+        assert_eq!(result.kind, ResultKind::Value);
+        let rank = match &result.shape {
+            ResultShape::Rectangular(dimensions) => dimensions.len(),
+            ResultShape::Segmented { offsets, .. } => offsets.len() + 1,
+        };
+        assert_eq!(rank, depth + 1);
+        let ResultLayout::Array { element, stride, .. } = &result.layout else {
+            panic!("array result: {:?}", result.layout);
+        };
+        assert_eq!(*stride, 8);
+        assert!(
+            matches!(element.as_ref(), ResultLayout::Tuple { .. }),
+            "{element:?}"
+        );
+    }
+
+    let owned = pipeline::source("entry pair(xs:[]i32) ([]i32,[]i32)=(xs,map(|x|x+1,xs))");
+    let module = pipeline::lower(&owned, CodegenTarget::Portable);
+    let wgsl = wyn_core::lower_ssa_to_wgsl_with_program(module).unwrap();
+    assert_eq!(wgsl.program.interface.source_results.len(), 2);
+    assert!(wgsl
+        .program
+        .interface
+        .source_results
+        .iter()
+        .all(|result| result.kind == ResultKind::TupleField));
 }

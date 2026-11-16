@@ -1,7 +1,7 @@
 //! Publish source result types using the shader's storage layout rules.
 use crate::host::{ResultField, ResultLayout, ResultScalar};
 use crate::ssa::layout::{std430_matrix_stride, std430_struct_layout, storage_elem_stride, type_byte_size};
-use crate::types::{strip_existentials, Type, TypeExt, TypeName};
+use crate::types::{self, strip_existentials, Type, TypeExt, TypeName};
 
 #[cfg(test)]
 use crate::ssa::layout::storage_value_type;
@@ -25,6 +25,38 @@ pub(crate) fn array_element(ty: &Type) -> Option<(Type, Type)> {
     } else {
         Some((ty.elem_type()?.clone(), ty.array_size()?.clone()))
     }
+}
+
+/// Restore authored array nesting over the lowered component types and extents.
+pub(crate) fn output_type(declared: &Type, lowered: &Type) -> Option<Type> {
+    let declared = strip_existentials(declared);
+    if let (
+        Type::Constructed(name @ (TypeName::Tuple(_) | TypeName::Record(_)), fields),
+        Type::Constructed(_, components),
+    ) = (declared, lowered)
+    {
+        if fields.len() != components.len() {
+            return None;
+        }
+        return Some(Type::Constructed(
+            name.clone(),
+            fields
+                .iter()
+                .zip(components)
+                .map(|(field, component)| output_type(field, component))
+                .collect::<Option<Vec<_>>>()?,
+        ));
+    }
+    if !declared.is_array() {
+        return Some(lowered.clone());
+    }
+    let (element, size) = array_element(lowered)?;
+    Some(types::make_array1(
+        output_type(declared.elem_type()?, &element)?,
+        types::array_variant_composite(),
+        size,
+        types::no_buffer(),
+    ))
 }
 
 /// Logical counts describe values; physical types supply strides and field offsets.

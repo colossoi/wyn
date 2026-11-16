@@ -90,12 +90,17 @@ fn empty_array_results_publish_their_actual_storage_stride() {
         entry rows() [3][0]i32=map(|x|if x>0 then map(|y|1/x+y,iota(0)) else map(|y|x-y,iota(0)),[0,1,-1])
         entry fields() [2]([0]i32,i32)=map(|x|(iota(0),x),[1,2])",
     );
-    assert_eq!(artifact.interface.source_results.len(), 4);
+    assert_eq!(artifact.interface.source_results.len(), 3);
     for result in &artifact.interface.source_results {
         let host::ResultLayout::Array { stride, length, .. } = result.layout else {
             panic!("array result");
         };
-        assert_eq!(stride, 4, "{}: host stride", result.entry);
+        assert_eq!(
+            stride,
+            if result.entry == "fields" { 8 } else { 4 },
+            "{}: host stride",
+            result.entry
+        );
         assert_eq!(
             length,
             Some(match result.entry.as_str() {

@@ -23,7 +23,7 @@ use crate::interface::publish::{
     reconcile_storage_binding_access, EntryInput, EntryOutput, EntryPoint, InputHost,
     ModuleInterfacePublish, StorageBindingDecl, StorageHost,
 };
-use crate::interface::results::result_layout_with_storage;
+use crate::interface::results::{output_type, result_layout_with_storage};
 use crate::interface::DrawBufferOperand;
 use crate::interface::{
     Attribute, BindingExposure, EntryInputKind, EntryKind, EntryParamBindingKind, PushConstantSlot,
@@ -254,8 +254,10 @@ pub(super) fn lower(
             .statements(region, &live, true)
             .map_err(|failure| error(format!("entry {}: {failure}", declaration.name)))?;
         let output_arity = crate::interface::lowering::entry_output_arity(declaration, &source_body.ty);
-        let whole_result =
-            declaration.buffer_demand || (declaration.source_entry.is_some() && output_arity == 1);
+        let whole_result = declaration.buffer_demand
+            || (output_arity == 1
+                && (declaration.source_entry.is_some()
+                    || declaration.outputs.first().is_some_and(|output| output.ty.is_array())));
         let mut output_values = emission.body.results(region)?;
         if !whole_result
             && matches!(
@@ -266,7 +268,26 @@ pub(super) fn lower(
         {
             output_values = emission.body.unpack(output_values.remove(0))?;
         }
-        let (output_values, output_shapes) = emission.prepare_array_outputs(region, output_values)?;
+        let lowered_types = match strip_existentials(&source_body.ty) {
+            ty if whole_result => std::slice::from_ref(ty),
+            Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) => fields.as_slice(),
+            ty => std::slice::from_ref(ty),
+        };
+        let output_types = lowered_types
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| {
+                let declared = declaration.outputs.get(index).map_or(ty, |output| &output.ty);
+                let Some(ty) = output_type(declared, ty) else {
+                    return Err(error(
+                        "output representation differs from its declared array nesting",
+                    ));
+                };
+                Ok(ty)
+            })
+            .collect::<Result<Vec<_>, OptimizeError>>()?;
+        let (output_values, output_shapes) =
+            emission.prepare_array_outputs(region, output_values, &output_types)?;
         let Some(generated) = emission.body.generated.as_ref() else {
             return Err(error("entry buffers missing"));
         };
@@ -417,24 +438,9 @@ pub(super) fn lower(
             }
         }
         if declaration.entry_kind == EntryKind::Compute && !declaration.buffer_demand {
-            let types = match strip_existentials(&source_body.ty) {
-                ty if whole_result => std::slice::from_ref(ty),
-                Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) => fields.as_slice(),
-                ty => std::slice::from_ref(ty),
-            };
-            for (index, ((ty, value), output)) in types.iter().zip(&output_values).zip(&outputs).enumerate()
+            for (index, ((ty, value), output)) in
+                output_types.iter().zip(&output_values).zip(&outputs).enumerate()
             {
-                let array_product = types::as_soa_tuple(ty)
-                    .and_then(|_| crate::interface::results::array_element(ty))
-                    .map(|(element, size)| {
-                        types::make_array1(
-                            element,
-                            types::array_variant_composite(),
-                            size,
-                            types::no_buffer(),
-                        )
-                    });
-                let ty = array_product.as_ref().unwrap_or(ty);
                 let Some(binding) = output.storage_binding() else {
                     return Err(error("source result has no output buffer"));
                 };
@@ -482,6 +488,7 @@ pub(super) fn lower(
                     (ty.clone(), ResultShape::Rectangular(vec![]))
                 };
                 let (name, kind) = match strip_existentials(&source_body.ty) {
+                    _ if whole_result => (declaration.name.clone(), ResultKind::Value),
                     Type::Constructed(TypeName::Record(names), _) => {
                         (names.0[index].clone(), ResultKind::RecordField)
                     }
@@ -883,6 +890,7 @@ impl EntryEmission<'_, '_, '_> {
         &mut self,
         results: Value,
         mut values: Vec<Typed>,
+        types: &[Type],
     ) -> Result<(Vec<Typed>, Vec<Option<ResultShape>>), OptimizeError> {
         let reads_results = values.iter().any(|value| {
             types::as_soa_tuple(&value.ty).is_some()
@@ -898,14 +906,13 @@ impl EntryEmission<'_, '_, '_> {
         let mut counts = Vec::new();
         let mut shapes = vec![None; values.len()];
         for (index, value) in values.iter().enumerate() {
-            let product = types::as_soa_tuple(&value.ty)
-                .and_then(|_| crate::interface::results::array_element(&value.ty));
-            if product.is_none() && (!value.ty.is_array() || output_shape(&self.body, value).is_ok()) {
+            if !types[index].is_array() || (value.ty.is_array() && output_shape(&self.body, value).is_ok())
+            {
                 counts.push(None);
                 continue;
             }
-            let mut rank = usize::from(product.is_some());
-            let mut leaf = product.as_ref().map_or(&value.ty, |(element, _)| element);
+            let mut rank = 0;
+            let mut leaf = &types[index];
             while leaf.is_array() {
                 rank += leaf.array_rank().ok_or_else(|| error("output array rank missing"))?;
                 let Some(element) = leaf.elem_type() else {
