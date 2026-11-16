@@ -81,7 +81,7 @@ analysis.
 | --- | --- |
 | Frontend / AST | Build an abstract syntax tree (AST), resolve source-level meaning, and attach inferred types and symbol identities. |
 | TLC | Use typed lambda calculus to simplify functional code, specialize functions, normalize arrays, and eliminate higher-order values. |
-| Egglog | Use graphs of array operations, scalar expressions, and dependencies to fuse work and plan execution and storage. |
+| Egglog | Rewrite one flat executable dataflow graph, prove transformation legality, and select logical execution and physical kernel policies. |
 | SSA | Express device computation as control-flow blocks with single-assignment values, ready for final cleanup and target preparation. |
 | Backends | Lower the prepared program to SPIR-V or WGSL and emit its companion host program. |
 
@@ -140,12 +140,10 @@ The passes below run in order. SOACs are second-order array combinators, such as
 | `extract_stages` | Extract compute, vertex, and fragment entries and their interfaces from root orchestration, including graphics callbacks and the compute work feeding them. Ordinary roots become compute entries. |
 | `pin_entry_buffers` | Resolve entry binding layouts and substitute each storage parameter's assigned binding into its buffer-region type before buffer-dependent specialization. |
 | `monomorphize` | Finish specialization with concrete buffer regions, instantiating reachable user definitions by type and known array-producer representation, including the bounded capacity of filter results. |
-| `canonicalize_conditional_producers` | Rewrite supported array-valued conditionals into a pointwise map with the branch inside its callback. |
 | `normalize_soacs` | Lower local arrays of tuples and their operations to tuples of arrays; turn standalone `zip` into tuple construction; name SOAC application arguments and flatten let chains. |
-| `float_runtime_index_nested_producers` | Move eligible runtime-indexed producers out of nested callbacks before defunctionalization, exposing the producer and gather separately. |
 | `defunctionalize` | Run closure conversion/lambda lifting, higher-order-function specialization, then closure-call lowering to direct calls. |
 | `fold_generated_lambdas` | Inline applications of compiler-generated lifted lambdas, prune unreachable definitions, and verify that higher-order parameters have been eliminated. |
-| `apply_ownership` | Export ownership permission on values without changing the functional TLC tree. Egglog decides buffer reuse after fusion and dispatch planning; SSA commits local storage and update decisions after placement. |
+| `apply_ownership` | Finish the validated TLC checkpoint while retaining parameter consumption diets. Egglog derives reuse legality from the imported graph; SSA emission and preparation assign concrete storage. |
 
 Stage extraction needs unified helpers exposed before it selects entry interfaces.
 Those interfaces determine buffer bindings, which must be pinned before final
@@ -154,8 +152,7 @@ is exposed once, before extraction; final specialization checks that it remains
 visible. Intrinsic specialization shares the definition-specialization traversal,
 after type substitution, instead of walking the program separately.
 
-Specialization, helper inlining, and conditional-producer rewriting retain the
-source array shapes. SoA lowering then runs once, with concrete element types
+Specialization and helper inlining retain the source array shapes. SoA lowering then runs once, with concrete element types
 and the helper bodies exposed. It constructs operations from lowered operands
 with their target types, including binder and callback annotations; later TLC
 passes preserve that layout. Storage-backed arrays keep their declared layout
@@ -181,147 +178,127 @@ the same point, before the remaining optimization and backend passes.
 
 ### Egglog passes
 
-Egglog combines Datalog's relational reasoning with equivalence graphs (e-graphs).
-Wyn uses structural rules to plan array fusion, execution placement, and dispatches,
-then scalar rules to inline eligible helpers and simplify arithmetic. Egglog derives
-ordering, scope placement, and storage decisions; Rust imports syntax, selects
-scalar alternatives, reads the resulting plans, and emits SSA.
+Egglog combines relational reasoning with equivalence graphs. Wyn's executable
+representation is a flat graph of named values, ordered operation occurrences,
+regions, control edges, iteration domains, and memory capabilities. Scalar
+expressions, array traversals, branches, loops, and accumulator updates all use
+this representation. Rust operation payloads hold attributes such as opcodes and
+types; operands and executable bodies live in graph relations.
 
-A single traversal of TLC resolves lexical bindings and imports semantic identities,
-scopes, operation inputs, effects, and dependency summaries. Fusion, placement,
-and scheduling share this structural graph. They operate on array operations and
-execution regions rather than individual arithmetic expressions. Original TLC
-bodies and opaque identity mappings remain available for source metadata and
-computations outside scalar optimization.
+[from_tlc.rs](wyn-core/src/egglog/from_tlc.rs) imports normalized TLC once. Fusion,
+placement, and scalar simplification edit that same graph. TLC remains available
+for source locations and public interfaces. Derived dependency, availability,
+liveness, alias, shape, and effect facts are invalidated and recomputed after
+edits. Scope and effect proofs determine where computations can be shared,
+inlined, moved, or fused.
 
-After scheduling, native demand rules admit scalar expressions and eligible helper
-templates into the same graph. Structural analysis facts remain available.
-Context keys keep functions,
-fused callbacks, and scalar dispatch groups distinct: batching their rule execution
-does not let expressions in unrelated contexts optimize against one another.
-
-The passes below run in order:
+The public pass order is enforced by typed checkpoints in
+[egglog/mod.rs](wyn-core/src/egglog/mod.rs):
 
 | Pass | Responsibility |
 | --- | --- |
-| `egglog::from_tlc` | Walk normalized TLC once, resolve bindings, and import structural summaries with source identities and scope relationships. |
-| `egglog::fuse` | Run source-summary, dependency, work-cost, and effect-order analyses, then select a deterministic greedy fusion plan and record callback composition, argument routing, and result signatures. |
-| `egglog::place` | Import the fused plan, order its execution graph and reject cycles, then choose execution domains, rematerialization, host regions, and scalar dispatch groups under the selected topology policy. |
-| `egglog::schedule` | Resolve shapes, traversal proofs, execution recipes, representations, storage allocation/reuse, output routes, capacity bounds, and local-storage/boundary facts. |
-| `egglog::prepare_interfaces` | Resolve scalar admission, contexts, demands, and host targets, then derive physical ABI, binding, and publication dependency/order facts. |
-| `egglog::optimize_with_policy` / `optimize` | Optimize and extract demanded scalar DAGs, then project selected occurrences into the shared flow model to derive evaluation placement. |
-| `egglog::prepare_host` | Prepare lowering queries and lower supported host scalar expressions/captures from the selected DAG. |
-| `egglog::to_ssa` | Lower functions, kernels, control flow, and host interfaces using the final evaluation-plan readout. Resolve Egglog facts for sizes, resource accesses, scalar tasks, and dispatch loops during lowering; remove interface-only entries and return shader SSA with its host interface description. |
+| `egglog::from_tlc` | Import typed values, operation inputs and outputs, callable/control regions, logical shapes, and memory capabilities. |
+| `egglog::fuse` | Analyze dependencies and effects; inline required helpers; compose compatible traversals and accumulator scopes; simplify and hoist until graph edits reach a fixed point; validate memory bindings. |
+| `egglog::place` / `place_with_cost_model` | Apply the topology policy and portable cost model, canonicalize and distribute eligible nested traversals, and derive host regions and loop execution choices. |
+| `egglog::schedule` / `schedule_with_cost_model` | Commit logical execution choices for surviving parallel operations. The cost-model variant also accepts native subgroup support; default scheduling uses portable collectives. |
+| `egglog::prepare_interfaces` | Validate memory capabilities and bindings, then refresh graph analysis before final scalar optimization. |
+| `egglog::optimize_with_policy` / `optimize` | Simplify authoritative statements: fold constants, forward values, share common expressions, remove dead work, and perform legal code motion. `Full` additionally inlines nonrecursive helpers; `optimize` selects `Full`. |
+| `egglog::prepare_host` | Recompute final proofs, select reuse and scan epilogues, and prepare dispatch boundaries, collective metadata, host captures, and region schedules. Populate physical kernel and launch policies in egglog. |
+| `egglog::to_ssa` | Instantiate the prepared execution with concrete buffer identities, allocations, copies, and SSA control flow; publish host operations, dispatch dependencies, and source result layouts. |
 
-Egglog infers minimum input-buffer sizes for inputs used only in constant prefix
-slices. Other inputs need sizes from their interface or runtime.
+Egglog rules own transformation and reuse legality, speculation/retry safety,
+atomic and subgroup eligibility, kernel algorithm policies, and launch grouping.
+Rust supplies cost calculations, applies selected graph edits, prepares execution
+metadata, lowers host expressions, and constructs SSA. Concrete allocation and
+coalescing use actual storage types and buffer identities during emission.
 
-The rule files follow compiler responsibilities. [flow.egg](wyn-core/src/egglog/flow.egg)
-owns shared dependency, scope, liveness, and structural-value relations;
-[analysis.egg](wyn-core/src/egglog/analysis.egg) projects source syntax into them.
-The [planner schema](wyn-core/src/egglog/planning/schema.egg) declares the vocabulary
-needed across source import, fusion, and planning. Private helper relations stay
-beside their rules in the responsibility files. Declarations and rules load before
-execution; [place.egg](wyn-core/src/egglog/planning/place.egg),
-[prepare-schedule.egg](wyn-core/src/egglog/planning/prepare-schedule.egg), and
-[run.egg](wyn-core/src/egglog/planning/run.egg) explicitly sequence fixed points
-and selections. Selections that depend on settled minima or blocker flags run
-after those proofs saturate.
+The main implementation boundaries are:
 
-For a quick compile-only check, run `./scripts/smoke_egglog.ps1`. It compiles the
-one-line [smoke program](testfiles/egglog_smoke.wyn), containing two maps, a branch,
-and a reduction, with `-O` to WGSL and checks that a compute entry was emitted.
-It builds the compiler as needed; it does not execute the shader or replace
-coverage of loops, storage reuse, graphics, or other targets.
+| Responsibility | Sources |
+| --- | --- |
+| Executable graph and edits | [memory/schema.egg](wyn-core/src/egglog/memory/schema.egg), [dataflow/ir.rs](wyn-core/src/egglog/dataflow/ir.rs), [dataflow/edits.egg](wyn-core/src/egglog/dataflow/edits.egg), [dataflow/edit.rs](wyn-core/src/egglog/dataflow/edit.rs) |
+| Dependencies, scopes, liveness, and resources | [analysis/dataflow.egg](wyn-core/src/egglog/analysis/dataflow.egg), [analysis/resources.egg](wyn-core/src/egglog/analysis/resources.egg), [flow.egg](wyn-core/src/egglog/flow.egg) |
+| Fusion and scalar simplification | [fusion/graph.egg](wyn-core/src/egglog/fusion/graph.egg), [fusion/mod.rs](wyn-core/src/egglog/fusion/mod.rs), [scalar/simplify.egg](wyn-core/src/egglog/scalar/simplify.egg), [memory.rs](wyn-core/src/egglog/memory.rs) |
+| Shapes, placement, and physical policies | [planning.rs](wyn-core/src/egglog/planning.rs), [planning/graph.egg](wyn-core/src/egglog/planning/graph.egg), [planning/choices.egg](wyn-core/src/egglog/planning/choices.egg), [planning/legality.egg](wyn-core/src/egglog/planning/legality.egg), [planning/execution.egg](wyn-core/src/egglog/planning/execution.egg) |
+| Host preparation and SSA emission | [execution.rs](wyn-core/src/egglog/execution.rs), [host.rs](wyn-core/src/egglog/host.rs), [to_ssa/entry.rs](wyn-core/src/egglog/to_ssa/entry.rs), [to_ssa/kernels.rs](wyn-core/src/egglog/to_ssa/kernels.rs) |
+
+Rule schedules separate candidate discovery, availability/effect proofs, legality,
+and selection. Choices that depend on settled costs or blocker facts run after
+their prerequisites saturate. Physical policies can be parameterized by concrete
+atomic support and output publication; emission reads the applicable choice.
+
+For a quick compile-only check, run `./scripts/smoke_egglog.ps1`. It builds the
+compiler and compiles the [smoke program](testfiles/egglog_smoke.wyn) with `-O` to
+WGSL, checking that a compute entry was emitted. This does not execute shaders or
+replace correctness gates for other language features and targets.
 
 #### Scalar optimization and computation placement
 
 | Optimization | Behavior |
 | --- | --- |
-| Helper expansion | Inline eligible helpers to expose arithmetic simplifications and shared expressions. |
-| Constant folding and simplification | Fold constants and simplify integer identities, constant/equal-arm choices, and aggregate projections. General reassociation and expansion are not performed. |
-| Common-subexpression sharing | Extract required expressions together into a shared graph, comparing alternatives by their combined computation cost. |
-| Loop-invariant code motion (LICM) and branch hoisting | Move computations to the lowest legal loop depth and identify work common to branch arms. Operands must be available, and speculative evaluation must be read-only and guaranteed to terminate without trapping. Reuse requires the computed value to dominate its uses. |
+| Helper expansion | Inline required array/control helpers during structural simplification; `-O` additionally inlines nonrecursive helpers to expose scalar work. |
+| Constant folding and simplification | Fold supported scalar constants, integer identities, constant/equal-arm choices, lengths, and aggregate projections. General reassociation and expansion are not performed. |
+| Common-subexpression sharing | Forward equivalent repeatable operations to an available definition in a compatible scope, preserving operands and evaluation order. |
+| Loop-invariant code motion and branch factoring | Move eligible work when operands are available and scope, effect, and termination proofs permit it. Sharing must preserve dependencies and dominating definitions. |
 
-`-O` enables scalar helper inlining and a broader search for shared computations.
-Constant folding, algebraic simplification, aggregate cleanup, and safety analysis
-run in both modes. Structural fusion and required lowering are always enabled.
+Constant folding, common-expression sharing, reducing rewrites, and safety analysis
+run in both scalar modes. Structural fusion and required lowering are always enabled.
 
 #### Fusion
 
-Fusion is essential to making compositional array programs practical on the GPU.
-Without it, a chain of operators can materialize an array and launch a kernel at
-every step. Combining producers with consumers lets intermediate values stay
-within an invocation and reduces memory traffic, temporary storage, and dispatch
-overhead. The compiler relies on this step to turn high-level array composition
-into efficient executable work.
+Fusion lets intermediate array values stay within an invocation and reduces
+materialized storage and dispatches. The rules in
+[fusion/graph.egg](wyn-core/src/egglog/fusion/graph.egg) reason over executable
+operations, domains, loads, result clauses, uses, regions, and resource effects.
+Rust applies selected edits through the shared graph mutation API, preserving
+operation order and refreshing derived facts.
 
-[fusion.egg](wyn-core/src/egglog/fusion/fusion.egg) plans over structural summaries:
-iteration domains, SOAC layouts, producer/consumer links, uses, scalar dependency
-summaries, and memory/effect constraints. Scalar expression syntax and callback
-bodies remain opaque to the fusion rules. Source facts are analyzed once; the
-planner contracts groups on a persistent graph and records selected composition,
-argument routing, and result signatures in egglog. Executable bodies are emitted
-later during SSA lowering.
-
-Supported cases include vertical producer/consumer fusion, horizontal fusion of
-compatible independent maps/scans/reductions, and retention of shared producer
-outputs. Maps can compose with filters and indexed operations; eligible filtered
-reductions become masked collectives, and indexed demands can compute selected
-map elements without materializing the whole array. Scan dependencies, captures,
-region boundaries, and memory/effect barriers constrain these transformations.
-For example, a scan followed by a map can fuse, while a reduction consuming the
-scan's prefix values still requires a separate operation.
+Compatible maps, scans, and reductions can share a traversal, including independent
+outputs and retained producer results. Filter predicates can feed guarded maps or
+reductions without first materializing a packed array when legality permits;
+[fusion/compaction.rs](wyn-core/src/egglog/fusion/compaction.rs) applies these stream
+rewrites. Accumulator scopes support indexed writes and reductions. Captures,
+scan dependencies, control boundaries, and conflicting reads/writes constrain
+fusion. Conditional factoring and nested traversal distribution use the same
+availability and effect proofs.
 
 #### Scheduling and publication
 
-Execution placement chooses host or device execution and scalar dispatch groups.
-Structural scheduling then selects physical recipes, allocates or reuses storage,
-determines where outputs are written, and orders dispatches. Scalar optimization
-follows these decisions; SSA lowering builds the selected kernels and control flow,
-eliminating SOAC operations from the emitted program.
-
-The [execution recipes](wyn-core/src/egglog/planning/schedule.egg) apply to surviving fused
-operations. Maps absorbed into a reduction share its traversal; a map after a scan
-runs with offset application. An eligible filtered reduction can use a masked
-collective and avoid compaction altogether. Thus a source operator does not imply
-its own kernel, and one fused operation can require several dispatches.
+Logical placement and scheduling precede final scalar simplification. Host
+preparation then selects physical policies and prepares dispatch/region metadata.
+SSA emission constructs the kernels and concrete storage, preserving input aliases,
+snapshots, live ranges, and source result grouping.
 
 | Work | Physical execution |
 | --- | --- |
-| Maps | Parallel elementwise evaluation, including any fused map chain. |
-| Reductions | Workgroup reduction trees within chunks, followed by a workgroup combine pass; fused array outputs can be written during chunk processing. |
-| Scans | Workgroup prefix scans within chunks, a workgroup scan of chunk totals, then parallel offset application and post-map work. This recipe also handles reductions fused with scans. |
-| Filters | When a compacted array is needed, tiled workgroup evaluation computes predicate prefixes, writes survivors in input order, and publishes the result length. |
+| Maps | Parallel elementwise traversal, including fused map chains. |
+| Reductions | Workgroup reduction trees within chunks and a combine pass; fused array outputs can be written during chunk processing. |
+| Scans | Workgroup chunk prefixes, scanned chunk totals, and offset application, including eligible post-map work and retained totals. |
+| Filters | Stable predicate-prefix compaction when a packed result is required; eligible guarded consumers can avoid the intermediate packed array. |
 | Eligible indexed reductions | Parallel atomic updates, including compare/exchange where needed. |
-| Eligible bucket scatter | A count-clearing dispatch followed by parallel slot reservation and writes. |
-| Eligible scatter | Parallel indexed writes, with a separate initialization dispatch when needed. Colliding writes must have identical values; conflicting destination reads or effectful callbacks require serial execution. |
-| Work without a parallel-safe recipe | Ordered single-invocation kernels. |
-| Supported counted array loops | Host-controlled repetition of the scheduled body dispatches, with setup and completion phases for array state. |
-| Nested array work | Local device loops within the enclosing invocation. |
+| Eligible bucket scatter | Count initialization followed by parallel slot reservation and writes. |
+| Eligible scatter | Parallel indexed writes, with separate initialization when needed; effect and destination-access proofs constrain eligibility. |
+| Work without a parallel-safe recipe | Ordered device loops. |
+| Supported counted and while array loops | Host-controlled repetition of body dispatches, carrying buffers and scalar/shape witnesses through setup, test, and completion phases. |
+| Nested array work | Local device loops or distributed ranked traversals, according to legality and cost. |
 
-Parallel recipes require compatible callback effects; otherwise execution falls
-back to ordered device loops. Collective kernels preserve operand order, and empty
-inputs still initialize collective identities and result lengths.
+Collective kernels preserve operand order, and empty inputs still publish identities
+and logical lengths. Host-known scalar expressions and control can run on the CPU;
+GPU-dependent values remain on the device until an orchestration decision requires
+a readback after their writer. Supported branches can select dispatch sequences.
+Direct mode retains authored shader invocations and keeps array work local.
 
-The planner derives CPU availability, bounded rematerialization costs, and scalar
-kernel groups. CPU-available scalar work can run on the host; GPU-dependent work
-stays on the GPU. Cheap immutable expressions can be recomputed at their consumers,
-and compatible consecutive GPU scalar operations can share a kernel, storing only
-results needed outside it. Mutable reads, effects, and unbounded work are excluded
-from rematerialization. Allocation and reuse decisions use post-fusion liveness,
-ownership candidates, and resource accesses.
-
-Supported counted array loops publish repeated dispatches with a CPU-computable
-iteration count. General conditional dispatch orchestration remains unsupported.
-Direct mode retains the authored stages and rejects programs requiring generated
-prepasses or intermediate host storage.
+[Host emission](wyn-core/src/egglog/to_ssa/entry.rs) publishes rectangular dimensions
+or segmented offset buffers alongside the flat payload. Logical lengths remain
+separate from allocation capacities. Shifted result copies run after their producer
+dispatch, and host allocations/readbacks are ordered around the stages supplying
+their sizes. Both WHL and Rust/WGPU hosts consume this published program.
 
 ### SSA passes
 
 Static single assignment (SSA) represents device computation as explicit
 instructions and control-flow blocks. Each value is defined once, and block
-parameters carry values across branches and loops. Array scheduling and scalar
+parameters carry values across branches and loops. Array scheduling and source-level scalar
 computation placement are decided during the Egglog stage. SSA preparation
 simplifies the generated instructions and assigns concrete storage for code
 generation.
@@ -332,6 +309,7 @@ qualified.
 | Orchestration pass | Subpass | Responsibility |
 | --- | --- | --- |
 | `optimize` | `storage::lower_array_update` | Make authored storage-view writes explicit during concrete representation lowering. |
+| `optimize` | `forward_aggregate_reads` | Forward scalar projections from their original place within a block, stopping at possible writes to preserve snapshots. |
 | `optimize` | `materialize_dynamic_index` | Introduce and share addressable storage for dynamic indexing of fixed scalar-array values, preserving existing array views. |
 | `place_floating` | `ir::schedule_floating` | Assign the generated array materializations to concrete control-flow blocks. |
 | `filter_reachable` | Reachability walk | Prune function definitions unreachable from entries, counting calls only in CFG-reachable blocks. |
@@ -421,7 +399,7 @@ cargo run --bin wyn -- check input.wyn
 
 Add `--graphics` to `check` for a rendering program. Use `--output-tlc FILE` and
 `--output-mir FILE` to inspect compiler checkpoints; `--verbose` prints pass timings
-to stderr. Add `-O` to `build` for scalar helper expansion and extraction search;
+to stderr. Add `-O` to `build` for additional nonrecursive scalar helper expansion;
 fusion and basic cleanup also run without it. Both commands accept
 `--max-warnings N` (`0` suppresses warnings). For runnable graphics and compute examples, see
 [testfiles](testfiles/) and the [viz runner](extra/viz/README.md).
@@ -432,14 +410,18 @@ Use Rust and Cargo with a native toolchain for your platform. Run these commands
 from the repository root:
 
 ```bash
-cargo fmt --all
+cargo fmt --all -- --check
 cargo build --workspace --all-targets
-cargo test --workspace
+python scripts/test_units_test.py
+python scripts/test_integrations_test.py
+python scripts/test_units.py
+python scripts/test_integrations.py
+cargo test --workspace --doc
 ```
 
-For workspace unit tests with the enforced three-second limit, run
-`python scripts/test_units.py`. Integration tests run separately; see
-[test placement and timing exceptions](TESTS.md).
+The unit gate enforces the three-second limit and recorded timing exceptions.
+The integration gate gives every case a five-minute process-tree deadline and
+stops on failure. See [test placement and timing exceptions](TESTS.md).
 
 The standalone crates under `extra/` are excluded from the root workspace.
 Build and test each with `--manifest-path`, including `extra/viz`, `extra/tephra`,
