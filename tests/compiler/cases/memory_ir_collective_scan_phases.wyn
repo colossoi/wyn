@@ -1,0 +1,30 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"prefixes\"", ":source-name \"doubled\"", ":source-name \"maxima\""]
+--! [[host]]
+--! entry = "prefixes"
+--! inputs = { xs = [0, 0, 0] }
+--! dispatches = 3
+--! result_bytes = 12
+--! no_device_reads = true
+--! [[host]]
+--! entry = "doubled"
+--! inputs = { xs = [0, 0, 0] }
+--! dispatches = 3
+--! result_bytes = 12
+--! no_device_reads = true
+--! [[host]]
+--! entry = "maxima"
+--! inputs = { xs = [1, 2, 3] }
+--! dispatches = 3
+--! result_bytes = 12
+--! no_device_reads = true
+
+-- Scan-only programs must select all prefix phases without a total-reduction node.
+entry prefixes(xs:[]f32) []f32=scan((+),0.0,xs)
+entry doubled(xs:[]f32) []f32=scan((+),0.0,map(|x|2.0*x,xs))
+def stencil(xs:[]i32) []i32=scan(|a,b|if a>b then a else b,0,xs)
+entry maxima(xs:[]i32) []i32=stencil(xs)
