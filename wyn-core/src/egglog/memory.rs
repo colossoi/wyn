@@ -7,7 +7,8 @@ use super::query::Query;
 use super::{analysis, scalar, timing, OptimizeError};
 use crate::LookupMap;
 use egglog_engine::sort::VecContainer;
-use egglog_engine::{Core, EGraph, Write};
+use egglog_engine::{Core, EGraph, Value, Write};
+use wyn_graph::dag_postorder;
 
 pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
     super::dataflow::ir::load(graph)?;
@@ -17,35 +18,76 @@ pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
 
 pub(super) fn inline(graph: &mut EGraph) -> Result<(), OptimizeError> {
     let _timing = timing::span("egglog helper inlining");
-    loop {
-        let selection = timing::span("egglog inline selection");
-        edit::clear(graph)?;
-        analysis::structure(graph)?;
-        graph.parse_and_run_program(
-            None,
-            "(run-schedule (saturate graph-inline-required) (saturate graph-inline))",
-        )?;
-        let Some(candidate) = Query(graph).first("InlineCandidate")? else {
-            return Ok(());
-        };
-        drop(selection);
-        let cloning = timing::span("egglog inline cloning");
-        let call = candidate[0];
-        let arguments = Query(graph).sequence("Input", call)?;
-        let outputs = Query(graph).sequence("Output", call)?;
-        let region = edit::clone_region(graph, call, candidate[1], &arguments)?;
-        drop(cloning);
-        let substitution = timing::span("egglog inline substitution");
-        let results = Query(graph).sequence("RegionYield", region)?;
-        if outputs.len() != results.len() {
-            return Err(super::output_error("inlined result signature differs from call"));
-        }
-        edit::replace(graph, &outputs.into_iter().zip(results).collect::<Vec<_>>())?;
-        drop(substitution);
-        let _splicing = timing::span("egglog inline splicing");
-        let operations = Query(graph).operations(region)?;
-        edit::splice(graph, call, &operations)?;
+    let selection = timing::span("egglog inline selection");
+    edit::clear(graph)?;
+    analysis::structure(graph)?;
+    graph.parse_and_run_program(
+        None,
+        "(run-schedule (saturate graph-inline-required) (saturate graph-inline))",
+    )?;
+    let mut roots = Vec::new();
+    let mut calls = LookupMap::<Value, Vec<(Value, Value)>>::default();
+    Query(graph).for_each("InlineCandidate", |row| {
+        let [caller, call, callee] = [row[0], row[1], row[2]];
+        calls
+            .entry(caller)
+            .or_insert_with(|| {
+                roots.push(caller);
+                Vec::new()
+            })
+            .push((call, callee));
+        Ok(())
+    })?;
+    for table in [
+        "InlineCall",
+        "InlineParallel",
+        "InlineRequired",
+        "InlineCandidate",
+    ] {
+        graph.clear_function(table)?;
     }
+    if calls.is_empty() {
+        return Ok(());
+    }
+    // Selected targets are nonrecursive. Preparing their bodies first ensures
+    // that copying a callee cannot introduce more selected calls.
+    let order = dag_postorder(
+        roots,
+        |_| false,
+        |region, dependencies| {
+            if let Some(sites) = calls.get(&region) {
+                dependencies.extend(sites.iter().map(|&(_, callee)| callee));
+            }
+        },
+    );
+    analysis::invalidate(graph)?;
+    drop(selection);
+    for caller in order {
+        if let Some(sites) = calls.remove(&caller) {
+            for (call, callee) in sites {
+                inline_call(graph, call, callee)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn inline_call(graph: &mut EGraph, call: Value, callee: Value) -> Result<(), OptimizeError> {
+    let cloning = timing::span("egglog inline cloning");
+    let arguments = Query(graph).sequence("Input", call)?;
+    let outputs = Query(graph).sequence("Output", call)?;
+    let region = edit::clone_region(graph, call, callee, &arguments)?;
+    drop(cloning);
+    let substitution = timing::span("egglog inline substitution");
+    let results = Query(graph).sequence("RegionYield", region)?;
+    if outputs.len() != results.len() {
+        return Err(super::output_error("inlined result signature differs from call"));
+    }
+    edit::replace(graph, &outputs.into_iter().zip(results).collect::<Vec<_>>())?;
+    drop(substitution);
+    let _splicing = timing::span("egglog inline splicing");
+    let operations = Query(graph).operations(region)?;
+    edit::splice_unanalyzed(graph, call, &operations)
 }
 
 pub(super) fn simplify(graph: &mut EGraph, hoist: bool) -> Result<(), OptimizeError> {

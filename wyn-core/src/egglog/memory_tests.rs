@@ -46,6 +46,69 @@ fn inlining_preserves_dependent_calls_and_shape_arguments() -> Result<(), Optimi
 }
 
 #[test]
+fn inlining_exposes_parallel_work_through_scalar_helpers_before_copying_them() -> Result<(), OptimizeError>
+{
+    let mut graph = test_graph::fixture(
+        &[
+            (1, Code::Call),
+            (2, Code::Call),
+            (3, Code::Call),
+            (4, Code::Range),
+            (5, Code::Uninitialized),
+            (6, Code::Parallel),
+        ],
+        include_str!("tests/inline_arguments.egg"),
+    )?;
+    graph.parse_and_run_program(
+        None,
+        r#"
+        (delete (InlineAll)) (set (InlineAll) false)
+        (set (OperationRegion (OperationId 6)) (RegionId 2))
+        (set (OperationOrder (OperationId 6)) 0)
+        (set (InputCount (OperationId 6)) 0)
+        (set (OutputCount (OperationId 6)) 0)
+        "#,
+    )?;
+    super::inline(&mut graph)?;
+    analysis::structure(&mut graph)?;
+    graph.parse_and_run_program(
+        None,
+        r#"
+        (fail (check (LiveOperation call) (CallOperation call)))
+        (let prepared (ClonedOperation (OperationId 3) (OperationId 6)))
+        (check (ParallelOperation (ClonedOperation (OperationId 1) prepared)))
+        (check (ParallelOperation (ClonedOperation (OperationId 2) prepared)))
+        "#,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn inline_all_leaves_recursive_calls_intact() -> Result<(), OptimizeError> {
+    let mut graph = test_graph::fixture(
+        &[
+            (1, Code::Call),
+            (2, Code::Call),
+            (3, Code::Call),
+            (4, Code::Range),
+            (5, Code::Uninitialized),
+        ],
+        include_str!("tests/inline_arguments.egg"),
+    )?;
+    graph.parse_and_run_program(
+        None,
+        r#"
+        (delete (CallTarget (OperationId 3)))
+        (set (CallTarget (OperationId 3)) (FunctionId 1 "forward"))
+        "#,
+    )?;
+    let revision = edit::revision(&graph)?;
+    super::inline(&mut graph)?;
+    assert_eq!(edit::revision(&graph)?, revision);
+    Ok(())
+}
+
+#[test]
 fn structural_cloning_renames_storage_shapes_without_analysis() -> Result<(), OptimizeError> {
     let mut graph = test_graph::fixture(
         &[

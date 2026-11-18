@@ -1,33 +1,27 @@
 # Deferred analysis and callee-first inlining
 
-Status: implementation paused at the user's request; this is a WIP handoff.
+Status: first-use deferrals and callee-first helper inlining implemented.
 Branch: `codex/defer-analysis-callee-first-wip`.
 Starting commit: `040a9f7a26b16e8220e82c3fbb5d3eca2f240031`.
 
 ## Current progress
 
-The first change is partially implemented: backward liveness moves to host
-preparation, host/kernel classification moves to placement, the unused
-`ResourceLiveAfter` table is removed, and the duplicate host-preparation full
-analysis is replaced by the explicit liveness request. Early dependency,
-resource, and effect analysis remains in place.
+The first-use deferrals put backward liveness and reducer metadata at host
+preparation, and host/kernel classification and loop state sizing at placement.
+Host preparation requests liveness explicitly and reuses the valid structural
+analysis from optimization. The unused `ResourceLiveAfter` table is removed.
 
-The unit-test harness compiles with the latest edits. Focused tests have not yet
-been executed successfully for this WIP. Run the deferred-fact, storage-effect,
-and explicit-liveness phase tests, then the affected host/compiler fixtures.
-The production change is currently five net lines.
+The inliner computes recursion, ownership, and eligibility once per invocation.
+Egglog propagates the parallel-work requirement through nonrecursive callees
+and identifies the original call sites. Rust visits the selected dependencies
+callee-first and splices into the edited regions. It clears body-dependent
+analysis before the first splice, then works from the call-site snapshot.
+Focused tests cover first-use metadata, storage effects, dependent shape
+arguments, nested region cloning, shared callees, and recursive calls.
 
-Callee-first inlining and surgical invalidation are not implemented yet.
-The agreed direction is to prepare callees before copying them into callers,
-avoid duplicated expansion, and retain or defer facts according to their
-actual dependencies and consumers. Preserve the 100-net-production-line limit
-for each separately reviewable change; test code is excluded.
-
-The implementation should be split into a late-calculation deferral commit
-and a callee-first/surgical-invalidation commit after focused verification.
-The prior gate failure described below is pre-existing at the starting commit.
-Measurement logs remain local under ignored `tmp/`; the implementation plan is
-included here so this WIP branch carries its intended next steps.
+The simplifier still uses a whole-graph analysis refresh. Finer fact lifetimes
+and invalidation in that pass are follow-up work. The measurements below are
+from before callee-first inlining. Measurement logs remain under ignored `tmp/`.
 
 ## Finding and measurements
 
@@ -166,9 +160,9 @@ mandatory expansion and the separate `-O` behavior.
    what must be recomputed, what can be frozen, the expected production-code
    delta, and any policy change. Review existing implementations/deletion diffs
    before adding a new traversal or cache.
-3. Check the proposed fact lifetimes and owner scopes before implementing their
-   invalidation changes. Implement the agreed callee-first direction with the
-   existing clone/edit helpers; keep broader policy changes separately reviewable.
+3. Check the proposed fact lifetimes and owner scopes before changing
+   invalidation outside inlining. Keep broader policy changes separately
+   reviewable.
 
 Targeted coverage must include recursion, helpers that expose parallel work
 through other helpers, shared callees across entries, nested controls/reducers,

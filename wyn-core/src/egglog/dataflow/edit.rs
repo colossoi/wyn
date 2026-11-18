@@ -116,11 +116,9 @@ pub(in crate::egglog) fn clear(graph: &mut EGraph) -> Result<(), OptimizeError> 
         "NeededName",
         "NeededOperation",
         "ObservableOperation",
-        "InlineRequired",
         "ValuePrimitive",
         "ConstantValue",
         "FoldedConstant",
-        "InlineCandidate",
         "BranchCandidate",
         "RewrittenAccumulatorInfo",
         "RewrittenIndex",
@@ -140,6 +138,11 @@ pub(in crate::egglog) fn clear(graph: &mut EGraph) -> Result<(), OptimizeError> 
 }
 
 pub(in crate::egglog) fn remove(graph: &mut EGraph, operations: &[Value]) -> Result<(), OptimizeError> {
+    analysis::invalidate(graph)?;
+    remove_unanalyzed(graph, operations)
+}
+
+fn remove_unanalyzed(graph: &mut EGraph, operations: &[Value]) -> Result<(), OptimizeError> {
     let operations: LookupSet<_> = operations.iter().copied().collect();
     let query = Query(graph);
     let mut rows = Vec::new();
@@ -159,7 +162,6 @@ pub(in crate::egglog) fn remove(graph: &mut EGraph, operations: &[Value]) -> Res
             Ok(())
         })?;
     }
-    analysis::invalidate(graph)?;
     graph.update(|mut sink| {
         for (table, keys) in rows {
             sink.remove(table, RawValues(keys))?;
@@ -218,6 +220,16 @@ pub(in crate::egglog) fn splice(
     at: Value,
     inserted: &[Value],
 ) -> Result<(), OptimizeError> {
+    analysis::invalidate(graph)?;
+    splice_unanalyzed(graph, at, inserted)
+}
+
+/// Splice operations when body-dependent analyses have already been cleared.
+pub(in crate::egglog) fn splice_unanalyzed(
+    graph: &mut EGraph,
+    at: Value,
+    inserted: &[Value],
+) -> Result<(), OptimizeError> {
     let query = Query(graph);
     let region = query.required("OperationRegion", at)?;
     let mut order = query.operations(region)?;
@@ -225,17 +237,30 @@ pub(in crate::egglog) fn splice(
         return Err(output_error("splice point is outside its region"));
     };
     order.splice(position..=position, inserted.iter().copied());
-    analysis::invalidate(graph)?;
+    let query = Query(graph);
+    let mut edits = Vec::new();
+    for (index, operation) in order.into_iter().enumerate() {
+        let index = index as i64;
+        let move_region = query.required("OperationRegion", operation)? != region;
+        let set_order = query.required("OperationOrder", operation)? != graph.base_to_value(index);
+        if move_region || set_order {
+            edits.push((operation, index, move_region, set_order));
+        }
+    }
     graph.update(|mut sink| {
-        for (index, operation) in order.into_iter().enumerate() {
-            sink.remove("OperationRegion", operation)?;
-            sink.remove("OperationOrder", operation)?;
-            sink.set("OperationRegion", operation, region)?;
-            sink.set("OperationOrder", operation, index as i64)?;
+        for (operation, index, move_region, set_order) in edits {
+            if move_region {
+                sink.remove("OperationRegion", operation)?;
+                sink.set("OperationRegion", operation, region)?;
+            }
+            if set_order {
+                sink.remove("OperationOrder", operation)?;
+                sink.set("OperationOrder", operation, index)?;
+            }
         }
         Ok(())
     })?;
-    remove(graph, &[at])
+    remove_unanalyzed(graph, &[at])
 }
 
 pub(in crate::egglog) fn move_before(
