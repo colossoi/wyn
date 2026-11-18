@@ -31,6 +31,37 @@ fn rewriting_defers_live_after_and_host_classification() -> Result<(), OptimizeE
 }
 
 #[test]
+fn loop_and_reducer_metadata_is_computed_by_its_consumers() -> Result<(), OptimizeError> {
+    let mut graph =
+        test_graph::import("entry main(xs:[]i32,n:i32) i32=loop x=reduce((+),0i32,xs) for i<n do x+i")?;
+    run(&mut graph)?;
+    planning::analyze(&mut graph)?;
+    for table in ["LoopStateBytes", "ReducerState", "NativeAddition"] {
+        assert!(
+            Query(&graph).first(table)?.is_none(),
+            "{table} was computed before use"
+        );
+    }
+    planning::place(
+        &mut graph,
+        crate::PipelineTopologyPolicy::AuthoredOnly,
+        CostModel::default(),
+    )?;
+    assert!(Query(&graph).first("LoopStateBytes")?.is_some());
+    for table in ["ReducerState", "NativeAddition"] {
+        assert!(
+            Query(&graph).first(table)?.is_none(),
+            "{table} was computed during placement"
+        );
+    }
+    planning::schedule(&mut graph)?;
+    planning::epilogues(&mut graph)?;
+    assert!(Query(&graph).first("ReducerState")?.is_some());
+    assert!(Query(&graph).first("NativeAddition")?.is_some());
+    Ok(())
+}
+
+#[test]
 fn constant_index_arithmetic_does_not_prove_wrapping_counts() {
     let mut graph = fusion::new_graph().unwrap();
     graph
