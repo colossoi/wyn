@@ -453,7 +453,7 @@ impl Program {
         Ok(())
     }
 
-    fn write_loop_bindings<'a>(
+    fn write_buffer_bindings<'a>(
         &self,
         out: &mut String,
         entry: &Entry,
@@ -479,7 +479,7 @@ impl Program {
                             resource(self.scalar_resource(pipeline, source)?)
                         )?;
                     }
-                    value.push_str(" (t (error \"invalid loop memory tag\"))))");
+                    value.push_str(" (t (error \"invalid memory tag\"))))");
                     value
                 }
             };
@@ -527,9 +527,12 @@ impl Program {
             match op {
                 Operation::Bind { name, value } => writeln!(out, "    (setq {name} {})", crate::scalar_emit::whl_scalar(value, &ScalarSource::resource)?)?,
                 Operation::Allocate(allocation) => self.write_allocation(out, allocation)?,
+                Operation::JoinBuffer { pipeline, target, source } => {
+                    self.write_buffer_bindings(out, entry, *pipeline, std::iter::once((&ScalarSource::Resource(*target), source)))?;
+                }
                 Operation::Loop { pipeline, region, test, body } => {
                     let repeated = &self.interface.dispatch_loops[*region];
-                    self.write_loop_bindings(out, entry, *pipeline, repeated.carried.iter().map(|carry| (&carry.binding, &carry.initial)))?;
+                    self.write_buffer_bindings(out, entry, *pipeline, repeated.carried.iter().map(|carry| (&carry.binding, &carry.initial)))?;
                     match &repeated.control {
                         crate::DispatchLoopControl::Counted { count, index } => {
                             let index = resource(self.scalar_resource(*pipeline, index)?);
@@ -543,7 +546,7 @@ impl Program {
                         }
                     }
                     self.write_operations(out, entry, body)?;
-                    self.write_loop_bindings(out, entry, *pipeline, repeated.carried.iter().map(|carry| (&carry.binding, &carry.next)))?;
+                    self.write_buffer_bindings(out, entry, *pipeline, repeated.carried.iter().map(|carry| (&carry.binding, &carry.next)))?;
                     writeln!(out, "    )")?;
                 }
                 Operation::Scalar { pipeline, task, value } => {
@@ -636,8 +639,8 @@ impl Program {
                 .join(" ")
         )?;
         writeln!(out, "  (let* (")?;
-        for allocation in entry.allocations() {
-            writeln!(out, "    ({} nil)", resource(allocation.resource()))?;
+        for id in entry.owned_resources() {
+            writeln!(out, "    ({} nil)", resource(id))?;
         }
         for name in entry.scalar_bindings() {
             writeln!(out, "    ({name} nil)")?;
@@ -685,8 +688,7 @@ impl Program {
             results.push(name);
         }
         writeln!(out, "    )")?;
-        for a in entry.allocations() {
-            let id = a.resource();
+        for id in entry.owned_resources() {
             if source_results
                 .iter()
                 .any(|r| r.shape.offsets().iter().any(|s| s.resource().is_ok_and(|r| r == id)))

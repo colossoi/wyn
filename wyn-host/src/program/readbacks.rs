@@ -151,6 +151,13 @@ impl Readbacks {
                     if let Operation::Scalar { value, .. } = &mut operation {
                         self.scalar(value, operations);
                     }
+                    if let Operation::JoinBuffer {
+                        source: crate::BufferSource::Select { tag, .. },
+                        ..
+                    } = &mut operation
+                    {
+                        self.scalar(tag, operations);
+                    }
                     self.values.retain(|(resource, ..), _| !writes.contains(resource));
                 }
             }

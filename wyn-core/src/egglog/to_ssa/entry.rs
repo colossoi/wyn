@@ -10,7 +10,7 @@ use crate::egglog::execution::StepKind;
 use crate::egglog::query::Query;
 use crate::flow::ExecutionModel;
 use crate::host::{
-    BufferLen, BufferSource, ComputePipeline, ComputeStage, DispatchLoop, DispatchLoopControl,
+    BufferJoin, BufferLen, BufferSource, ComputePipeline, ComputeStage, DispatchLoop, DispatchLoopControl,
     DispatchSize, Expr, FrameGraph, LoopCarry, ModuleInterface, Pipeline, ScalarExpr, ScalarSource,
     ScalarTask, ScalarType,
 };
@@ -35,7 +35,7 @@ use crate::ssa::layout::{
     block_layout, std430_type_layout, storage_elem_stride, storage_value_type, type_byte_size,
 };
 use crate::ssa::stage::Elaborated;
-use crate::ssa::types::{InstKind, ValueRef};
+use crate::ssa::types::{InstKind, Terminator, ValueRef};
 use crate::tlc::{extract_lambda_params_ref, DefMeta};
 use crate::types::{
     self, buffer_tag, canonical_storage_buffer_ty, strip_existentials, Type, TypeExt, TypeName,
@@ -214,6 +214,15 @@ pub(super) fn lower(
             )
         };
         let mut body = Body::new(compiler, function, vec![], types::unit());
+        if let [output] = declaration.outputs.as_slice() {
+            if declaration.entry_kind == EntryKind::Compute {
+                if let Some((name, ty)) =
+                    packed_collection_output(body.query(), region, &output.ty, &source_body.ty)?
+                {
+                    body.collection_outputs.insert(name, ty);
+                }
+            }
+        }
         body.generated = Some(GeneratedBuffers {
             owner: declaration.name.clone(),
             next,
@@ -247,6 +256,7 @@ pub(super) fn lower(
             stages: vec![],
             entries: vec![],
             loops: vec![],
+            buffer_joins: vec![],
         };
         emission.prepare_input_lengths()?;
         emission.restart()?;
@@ -679,6 +689,7 @@ pub(super) fn lower(
             entries.push(entry);
         }
         pipeline.dispatch_loops.extend(emission.loops);
+        pipeline.buffer_joins.extend(emission.buffer_joins);
         if let Some(generated) = emission.body.generated.as_mut() {
             next_generated = next_generated.max(generated.next);
             pipeline.scalar_tasks.append(&mut generated.scalar_tasks);
@@ -915,6 +926,39 @@ pub(super) fn lower(
     ))
 }
 
+fn packed_collection_output(
+    query: Query<'_>,
+    region: Value,
+    declared: &Type,
+    lowered: &Type,
+) -> Result<Option<(Value, Type)>, OptimizeError> {
+    let Some(fields) = types::as_soa_tuple(strip_existentials(lowered)) else {
+        return Ok(None);
+    };
+    if strip_existentials(declared).array_rank() != Some(1)
+        || !fields.iter().all(|field| {
+            field
+                .elem_type()
+                .is_some_and(|element| element.is_scalar() || element.is_vec() || element.is_mat())
+        })
+    {
+        return Ok(None);
+    }
+    let Some(ty) = output_type(declared, lowered) else {
+        return Ok(None);
+    };
+    let results = query.sequence("RegionYield", region)?;
+    let [result] = results.as_slice() else {
+        return Ok(None);
+    };
+    let Some(name) = query.value_name(*result)? else {
+        return Ok(None);
+    };
+    let proven =
+        query.lookup("ReturnOnlyCollection", name)?.is_some_and(|flag| query.0.value_to_base::<bool>(flag));
+    Ok(proven.then_some((name, ty)))
+}
+
 struct EntryEmission<'a, 'p, 'source> {
     body: Body<'a, 'p, 'source>,
     templates: Vec<(EntryInput, Type)>,
@@ -937,6 +981,7 @@ struct EntryEmission<'a, 'p, 'source> {
     stages: Vec<ComputeStage>,
     entries: Vec<EntryPoint>,
     loops: Vec<DispatchLoop>,
+    buffer_joins: Vec<BufferJoin>,
 }
 
 impl EntryEmission<'_, '_, '_> {
@@ -1388,6 +1433,21 @@ impl EntryEmission<'_, '_, '_> {
                     block.insts.retain(|id| function.insts.contains_key(*id));
                 }
             }
+        }
+        if self.kind == EntryKind::Compute
+            && !force
+            && outputs.is_empty()
+            && self.body.active_dispatch.is_none()
+            && function_body.inner.insts.is_empty()
+            && function_body.inner.blocks.len() == 1
+            && matches!(
+                function_body.inner.blocks[function_body.inner.entry].term,
+                Terminator::Return(None)
+            )
+        {
+            self.pending = false;
+            self.pending_observable = false;
+            return self.restart();
         }
         let phase = match self.kind {
             EntryKind::Vertex => "vertex",
@@ -1937,6 +1997,9 @@ impl EntryEmission<'_, '_, '_> {
         let Some(condition) = host::atom(self.body.query(), &self.body.host_values, condition_name)? else {
             return Err(error("branch condition has no host value"));
         };
+        let can_select = self.body.query().required("OperationRegion", operation)?
+            == self.body.query().required("FunctionRoot", self.body.function)?;
+        let first_stage = self.stages.len();
         let incoming = self.saved.clone();
         let incoming_host = self
             .body
@@ -1987,6 +2050,15 @@ impl EntryEmission<'_, '_, '_> {
         }
         let mut selected = Vec::new();
         let test = self.body.atom(condition_name)?;
+        if can_select && self.stages.len() > first_stage {
+            if let ([Location::Array(a)], [Location::Array(b)]) = (yes.as_slice(), no.as_slice()) {
+                if let Some(value) = self.select_branch_array(&condition, test.clone(), a, b)? {
+                    self.body.bind(&pattern, vec![value])?;
+                    self.pending = true;
+                    return Ok(());
+                }
+            }
+        }
         for (yes, no) in yes.iter().zip(&no) {
             selected.push(self.merge_saved(&condition, test.clone(), yes, no)?);
         }
@@ -1994,6 +2066,54 @@ impl EntryEmission<'_, '_, '_> {
         self.pending = true;
         self.pending_observable = true;
         Ok(())
+    }
+
+    fn select_branch_array(
+        &mut self,
+        condition: &ScalarExpr,
+        test: Typed,
+        a: &ArrayLocation,
+        b: &ArrayLocation,
+    ) -> Result<Option<Typed>, OptimizeError> {
+        let (Some(left), Some(right), [(_, a_len)], [(_, b_len)]) = (
+            a.binding,
+            b.binding,
+            a.dimensions.as_slice(),
+            b.dimensions.as_slice(),
+        ) else {
+            return Ok(None);
+        };
+        if left == right
+            || a.element != b.element
+            || !(a.element.is_scalar() || a.element.is_vec() || a.element.is_mat())
+            || [a, b].iter().any(|array| {
+                !array.offset.host().is_some_and(|offset| matches!(offset.constant(), Ok(Some(0))))
+            })
+        {
+            return Ok(None);
+        }
+        let Some(length) = joined_extent(condition, a_len, b_len)? else {
+            return Ok(None);
+        };
+        let tag = ScalarExpr::If {
+            condition: Box::new(condition.clone()),
+            yes: Box::new(ScalarExpr::I32(0)),
+            no: Box::new(ScalarExpr::I32(1)),
+        };
+        let count = self.body.branch(test, |body| a_len.emit(body), |body| b_len.emit(body))?;
+        // The host provides backing for this descriptor at the join.
+        let (binding, value) = self.body.device_buffer(&a.element, Expr::Integer(0), count)?;
+        self.body.set_shape(&value, vec![length])?;
+        self.buffer_joins.push(BufferJoin {
+            pipeline: self.pipeline,
+            stage: self.stages.len() - 1,
+            binding: scalar_source(binding),
+            source: BufferSource::Select {
+                tag,
+                cases: vec![(0, scalar_source(left)), (1, scalar_source(right))],
+            },
+        });
+        Ok(Some(value))
     }
 
     fn merge_saved(
@@ -2501,7 +2621,9 @@ fn remap_saved(saved: &Location, bindings: &LookupMap<BindingRef, BindingRef>) -
         }
         Location::Parameter(name) => Location::Parameter(*name),
         Location::Constant(n, ty) => Location::Constant(*n, remap_type(ty, bindings)),
-        Location::ConstantArray(bits, ty) => Location::ConstantArray(bits.clone(), remap_type(ty, bindings)),
+        Location::ConstantArray(bits, ty) => {
+            Location::ConstantArray(bits.clone(), remap_type(ty, bindings))
+        }
         Location::InputLength(binding, word, ty) => Location::InputLength(get(binding), *word, ty.clone()),
         Location::Buffer(binding, ty) => Location::Buffer(get(binding), remap_type(ty, bindings)),
         Location::Array(location) => {
@@ -2675,7 +2797,10 @@ fn restore_slot(
         ty,
     };
     if body.generated.as_ref().and_then(|generated| generated.input_length_buffer) == Some(binding) {
-        body.locations.insert(value.value, Location::InputLength(binding, word, value.ty.clone()));
+        body.locations.insert(
+            value.value,
+            Location::InputLength(binding, word, value.ty.clone()),
+        );
     }
     Ok(value)
 }
@@ -3277,7 +3402,10 @@ fn read_input_length(
     let ty = Body::number(0).ty;
     let view = storage_view(body, metadata, ty.clone(), Body::number(word + 1))?;
     let value = body.op(OpTag::Index, vec![view, Body::number(word)], ty)?;
-    body.locations.insert(value.value, Location::InputLength(metadata, word, value.ty.clone()));
+    body.locations.insert(
+        value.value,
+        Location::InputLength(metadata, word, value.ty.clone()),
+    );
     Ok(value)
 }
 

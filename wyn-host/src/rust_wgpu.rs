@@ -475,6 +475,11 @@ impl Program {
         resources: &mut BTreeSet<ResourceId>,
     ) -> Result<(), HostError> {
         for operation in operations {
+            if let Operation::JoinBuffer { pipeline, source, .. } = operation {
+                for binding in source.bindings() {
+                    resources.insert(self.scalar_resource(*pipeline, binding)?);
+                }
+            }
             if let Operation::Loop {
                 pipeline,
                 region,
@@ -572,27 +577,31 @@ impl Program {
         for (i, (current, next)) in bindings.enumerate() {
             let current = resource(self.scalar_resource(pipeline, current)?);
             let selected = format_ident!("carried_{i}");
-            let value = match next {
-                BufferSource::Binding(binding) => {
-                    let source = resource(self.scalar_resource(pipeline, binding)?);
-                    quote!(#source.clone())
-                }
-                BufferSource::Select { tag, cases } => {
-                    let tag = self.rust_scalar(pipeline, tag)?;
-                    let cases = cases
-                        .iter()
-                        .map(|(key, source)| {
-                            let source = resource(self.scalar_resource(pipeline, source)?);
-                            Ok(quote!(#key => #source.clone()))
-                        })
-                        .collect::<Result<Vec<_>, HostError>>()?;
-                    quote!(match #tag { #(#cases,)* _ => return Err(HostError::Invalid("invalid loop memory tag".into())) })
-                }
-            };
+            let value = self.rust_buffer_source(pipeline, next)?;
             selections.push(quote!(let #selected = #value;));
             assignments.push(quote!(#current = #selected;));
         }
         Ok(quote!({ #(#selections)* #(#assignments)* }))
+    }
+
+    fn rust_buffer_source(&self, pipeline: usize, source: &BufferSource) -> Result<TokenStream, HostError> {
+        Ok(match source {
+            BufferSource::Binding(binding) => {
+                let source = resource(self.scalar_resource(pipeline, binding)?);
+                quote!(#source.clone())
+            }
+            BufferSource::Select { tag, cases } => {
+                let tag = self.rust_scalar(pipeline, tag)?;
+                let cases = cases
+                    .iter()
+                    .map(|(key, source)| {
+                        let source = resource(self.scalar_resource(pipeline, source)?);
+                        Ok(quote!(#key => #source.clone()))
+                    })
+                    .collect::<Result<Vec<_>, HostError>>()?;
+                quote!(match #tag { #(#cases,)* _ => return Err(HostError::Invalid("invalid memory tag".into())) })
+            }
+        })
     }
 
     fn rust_operations(
@@ -611,6 +620,15 @@ impl Program {
                     quote!(let #name = #value;)
                 }
                 Operation::Allocate(allocation) => self.rust_allocation(allocation, entry, context)?,
+                Operation::JoinBuffer { pipeline, target, source } => {
+                    let bytes = format_ident!("resource_{}_bytes", target.0);
+                    let target = resource(*target);
+                    let value = self.rust_buffer_source(*pipeline, source)?;
+                    quote! {
+                        let #target = #value;
+                        let #bytes = #target.size();
+                    }
+                }
                 Operation::Loop { pipeline, region, test, body } => {
                     let repeated = &self.interface.dispatch_loops[*region];
                     let test = self.rust_operations(test, entry, format, context)?;

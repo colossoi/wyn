@@ -467,6 +467,12 @@ fn adapt_host_interface_for_wgsl(
                     .iter_mut()
                     .filter(|repeated| repeated.pipeline == pipeline_index)
                     .map(|repeated| repeated.control.expression_mut()),
+            )
+            .chain(
+                descriptor.buffer_joins.iter_mut().filter_map(|join| match &mut join.source {
+                    host::BufferSource::Select { tag, .. } if join.pipeline == pipeline_index => Some(tag),
+                    _ => None,
+                }),
             );
         let mut missing = None;
         let mut legalize = |source: &mut ScalarSource, offset: &mut u32, stage: Option<&str>| {

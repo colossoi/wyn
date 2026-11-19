@@ -161,6 +161,112 @@ fn cpu_known_branch_shapes_need_no_device_readback() {
 }
 
 #[test]
+fn branch_selects_the_buffer_and_length_from_the_same_arm() {
+    let source = pipeline::source(
+        "entry choose(xs: []i32, ys: []i32) []i32 =
+           if length(xs) > 2 then map(|x| x + 1, xs)
+           else map(|y| y * 2, ys)",
+    );
+    let ssa = pipeline::lower(&source, CodegenTarget::Portable);
+    for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+        let compiled = match format {
+            ShaderFormat::Spirv => lower_ssa_to_spirv(ssa.clone()).unwrap().program,
+            ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa.clone()).unwrap().program,
+        };
+        let entry = &compiled.entries[0];
+        let joins: Vec<_> = entry
+            .operations
+            .iter()
+            .filter_map(|op| match op {
+                Operation::JoinBuffer { target, .. } => Some(*target),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(entry.results, joins);
+        assert!(entry.allocations().all(|allocation| !joins.contains(&allocation.resource())));
+        compiled.to_rust_wgpu("branch", format).unwrap();
+        let program = Program::parse(&compiled.to_whl("branch", format).unwrap()).unwrap();
+        for (xs, ys, expected) in [(1, 5, 5), (3, 5, 3), (1, 0, 0)] {
+            let mut backend = Trace::default();
+            let inputs = program
+                .entry("choose")
+                .unwrap()
+                .parameters
+                .iter()
+                .map(|param| {
+                    let count = match param.source_name() {
+                        "xs" => xs,
+                        "ys" => ys,
+                        name => panic!("unexpected input {name}"),
+                    };
+                    backend.input(vec![0; count * 4])
+                })
+                .collect::<Vec<_>>();
+            let result = program.run("choose", &inputs, &mut backend).unwrap();
+            assert_eq!(backend.buffers[&result.handle().unwrap()].len(), expected * 4);
+            assert!(backend.device_reads.is_empty());
+        }
+    }
+}
+
+#[test]
+fn host_loop_sizes_its_initial_storage_from_the_selected_branch_buffer() {
+    let source = pipeline::source(
+        "entry branch_loop(xs: []i32, ys: []i32, n: i32) []i32 =
+           let a = if length(xs) > 2 then map(|x| x+1,xs) else map(|y| y*2,ys) in
+           loop a = a for k < n do
+             map(|i| if i < length(a) then a[i]+1 else k,iota(length(a)+1))",
+    );
+    let ssa = pipeline::lower(&source, CodegenTarget::Wgsl);
+    let compiled = lower_ssa_to_wgsl_with_program(ssa).unwrap().program;
+    let target = compiled.entries[0]
+        .operations
+        .iter()
+        .find_map(|op| match op {
+            Operation::JoinBuffer { target, .. } => Some(target.0),
+            _ => None,
+        })
+        .expect("host branch selects a buffer");
+    let rust = compiled.to_rust_wgpu("branch_loop", ShaderFormat::Wgsl).unwrap();
+    let capacity = format!("let resource_{target}_bytes = resource_{target}.size();");
+    let allocation = format!("signed_size(resource_{target}_bytes)");
+    assert!(rust.contains(&capacity), "missing joined buffer capacity");
+    assert!(rust.find(&capacity).unwrap() < rust.find(&allocation).unwrap());
+}
+
+#[test]
+fn a_later_dispatch_consumes_the_selected_branch_buffer() {
+    let source = pipeline::source(
+        "entry consume(xs: []i32, ys: []i32) []i32 =
+           let chosen = if length(xs) > 2 then map(|x| x + 1, xs)
+                        else map(|y| y * 2, ys) in
+           map(|value| value + 3, chosen)",
+    );
+    let ssa = pipeline::lower(&source, CodegenTarget::Wgsl);
+    let compiled = lower_ssa_to_wgsl_with_program(ssa).unwrap().program;
+    let operations = &compiled.entries[0].operations;
+    let (join, target) = operations
+        .iter()
+        .enumerate()
+        .find_map(|(index, op)| match op {
+            Operation::JoinBuffer { target, .. } => Some((index, *target)),
+            _ => None,
+        })
+        .expect("selected array backing");
+    let consumer = compiled
+        .interface
+        .frame_graph
+        .passes
+        .iter()
+        .find(|pass| pass.reads.iter().any(|read| read.resource == target.0))
+        .expect("dispatch reading the selected array");
+    assert!(operations[join + 1..].iter().any(|operation| matches!(operation,
+        Operation::Dispatch { pipeline, stage, .. }
+            if (*pipeline, *stage) == (consumer.pipeline_index, consumer.stage_index)
+    )));
+}
+
+#[test]
 fn returned_array_views_preserve_each_live_range_without_shape_readback() {
     let program = generated(include_str!(
         "../../testfiles/regressions/runtime_array_three_outputs.wyn"

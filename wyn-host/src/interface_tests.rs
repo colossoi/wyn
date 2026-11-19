@@ -120,6 +120,7 @@ fn frame_graph_aliases_storage_texture_views_and_orders_consumers() {
     let mut descriptor = ModuleInterface {
         scalar_tasks: vec![],
         dispatch_loops: vec![],
+        buffer_joins: vec![],
         pipelines: vec![
             Pipeline::Compute(ComputePipeline {
                 bindings: vec![Binding::StorageTexture {
@@ -228,6 +229,7 @@ fn frame_graph_fragment_target_write_orders_downstream_reader() {
     let mut descriptor = ModuleInterface {
         scalar_tasks: vec![],
         dispatch_loops: vec![],
+        buffer_joins: vec![],
         pipelines: vec![
             Pipeline::Graphics(GraphicsPipeline {
                 source_operation: None,
@@ -343,6 +345,7 @@ fn producer_consumer_descriptor(producer_first: bool) -> ModuleInterface {
     let mut descriptor = ModuleInterface {
         scalar_tasks: vec![],
         dispatch_loops: vec![],
+        buffer_joins: vec![],
         pipelines,
         source_results: Vec::new(),
         frame_graph: FrameGraph::default(),
@@ -465,6 +468,7 @@ fn frame_graph_target_write_merges_with_storage_read_view() {
     let mut descriptor = ModuleInterface {
         scalar_tasks: vec![],
         dispatch_loops: vec![],
+        buffer_joins: vec![],
         pipelines: vec![
             Pipeline::Graphics(GraphicsPipeline {
                 source_operation: None,

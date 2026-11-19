@@ -66,6 +66,7 @@ pub(super) struct Body<'a, 'p, 'source> {
     pub active_dispatch: Option<Value>,
     pub host_values: Bindings<Value, ScalarExpr>,
     pub collections: LookupMap<Value, Collection>,
+    pub collection_outputs: LookupMap<Value, Type>,
     pub reused_buffers: LookupSet<BindingRef>,
     pub guard: Option<ScalarExpr>,
     pub generated: Option<GeneratedBuffers>,
@@ -104,6 +105,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
             active_dispatch: None,
             host_values: Bindings::default(),
             collections: LookupMap::default(),
+            collection_outputs: LookupMap::default(),
             reused_buffers: LookupSet::default(),
             guard: None,
             generated: None,
@@ -112,6 +114,10 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
 
     pub fn query(&self) -> Query<'_> {
         Query(&self.compiler.program.graph)
+    }
+
+    pub(super) fn collection_output_type(&self, name: Value, logical: Type) -> Type {
+        self.collection_outputs.get(&name).cloned().unwrap_or(logical)
     }
 
     pub fn finish(mut self, result: Typed) -> Result<FuncBody, OptimizeError> {

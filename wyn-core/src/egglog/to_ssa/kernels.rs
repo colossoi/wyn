@@ -329,7 +329,7 @@ impl Body<'_, '_, '_> {
                             .transpose()
                     })
                     .collect::<Result<Vec<_>, OptimizeError>>()?;
-                let ty = collection_shape(&ty, &dimensions)?;
+                let ty = collection_shape(&self.collection_output_type(name, ty), &dimensions)?;
                 let Some(axis) = axes.first() else {
                     return Err(error("collection requires an axis"));
                 };

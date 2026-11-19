@@ -9,6 +9,7 @@ pub struct ModuleInterface {
     /// Scalar evaluations ordered at their consuming or replaced dispatch sites.
     pub scalar_tasks: Vec<ScalarTask>,
     pub dispatch_loops: Vec<DispatchLoop>,
+    pub buffer_joins: Vec<BufferJoin>,
     /// Individual pipelines in this program (one per top-level entry or multi-dispatch SOAC).
     pub pipelines: Vec<Pipeline>,
     /// Storage bindings that implement authored entry results. This preserves
@@ -100,6 +101,15 @@ pub struct LoopCarry {
     pub binding: ScalarSource,
     pub initial: BufferSource,
     pub next: BufferSource,
+}
+
+#[derive(Debug, Clone)]
+pub struct BufferJoin {
+    pub pipeline: usize,
+    /// Install the selected backing after this stage, including when it is skipped.
+    pub stage: usize,
+    pub binding: ScalarSource,
+    pub source: BufferSource,
 }
 
 #[derive(Debug, Clone)]

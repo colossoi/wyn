@@ -158,6 +158,7 @@ impl Body<'_, '_, '_> {
                 let Some(value) = values.next() else {
                     return Err(error("statement result arity is too small"));
                 };
+                let ty = self.collection_output_type(name, ty);
                 let value =
                     if same_value_structure(&value.ty, &ty) { value } else { self.cast(value, &ty)? };
                 self.values.insert(name, value);

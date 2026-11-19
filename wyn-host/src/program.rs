@@ -250,6 +250,11 @@ pub enum Operation {
         value: ScalarExpr,
     },
     Allocate(Allocation),
+    JoinBuffer {
+        pipeline: usize,
+        target: ResourceId,
+        source: BufferSource,
+    },
     Loop {
         pipeline: usize,
         region: usize,
@@ -276,6 +281,7 @@ impl Operation {
         match self {
             Self::Allocate(_) | Self::Bind { .. } => None,
             Self::Loop { pipeline, .. }
+            | Self::JoinBuffer { pipeline, .. }
             | Self::Scalar { pipeline, .. }
             | Self::Dispatch { pipeline, .. }
             | Self::Draw { pipeline } => Some(*pipeline),
@@ -307,6 +313,14 @@ impl Entry {
     pub fn allocations(&self) -> impl Iterator<Item = &Allocation> {
         walk_operations(&self.operations).filter_map(|op| match op {
             Operation::Allocate(allocation) => Some(allocation),
+            _ => None,
+        })
+    }
+
+    pub(crate) fn owned_resources(&self) -> impl Iterator<Item = ResourceId> + '_ {
+        walk_operations(&self.operations).filter_map(|op| match op {
+            Operation::Allocate(allocation) => Some(allocation.resource()),
+            Operation::JoinBuffer { target, .. } => Some(*target),
             _ => None,
         })
     }
@@ -489,6 +503,32 @@ impl Program {
             }
             if !replaced {
                 entry.operations.push(operation);
+            }
+            for join in &program.interface.buffer_joins {
+                if (join.pipeline, join.stage) == key {
+                    let target = program.scalar_resource(pipeline, &join.binding)?;
+                    if program.interface.frame_graph.resources[target.0].kind
+                        != FrameResourceKind::StorageBuffer
+                    {
+                        return Err(HostError::Invalid(
+                            "buffer join target must be a storage buffer".into(),
+                        ));
+                    }
+                    let mut source = join.source.clone();
+                    if let BufferSource::Select { tag, .. } = &mut source {
+                        let mut expression = Expr::Scalar(tag.clone());
+                        program.resolve_size_sources(pipeline, &mut expression)?;
+                        let Expr::Scalar(value) = expression else {
+                            unreachable!()
+                        };
+                        *tag = value;
+                    }
+                    entry.operations.push(Operation::JoinBuffer {
+                        pipeline,
+                        target,
+                        source,
+                    });
+                }
             }
             stage_operations.insert(key, entry.operations[start..].to_vec());
         }
@@ -739,8 +779,14 @@ impl Program {
     fn prepare_entry(&self, entry: &mut Entry) -> Result<(), HostError> {
         let mut dependencies = Dependencies::default();
         let mut pipelines = BTreeSet::new();
+        let mut joined = BTreeSet::new();
         for op in walk_operations(&entry.operations) {
             dependencies.extend(self.operation_dependencies(op)?);
+            if let Operation::JoinBuffer { target, .. } = op {
+                if !joined.insert(*target) {
+                    return Err(HostError::Invalid("buffer join redefines a binding".into()));
+                }
+            }
             let Some(pipeline) = op.pipeline() else {
                 return Err(HostError::Invalid("entry was already scheduled".into()));
             };
@@ -797,7 +843,7 @@ impl Program {
         let mut unresolved = dependencies.resources.iter().copied().collect::<Vec<_>>();
         let mut seen = BTreeSet::new();
         while let Some(id) = unresolved.pop() {
-            if !seen.insert(id) {
+            if joined.contains(&id) || !seen.insert(id) {
                 continue;
             }
             if let Some(allocation) = self.allocation(id, &pipelines)? {
@@ -812,8 +858,12 @@ impl Program {
                 pending.insert(id, (allocation, refs, reads));
             }
         }
-        entry.inputs =
-            dependencies.resources.difference(&pending.keys().copied().collect()).copied().collect();
+        entry.inputs = dependencies
+            .resources
+            .iter()
+            .copied()
+            .filter(|id| !pending.contains_key(id) && !joined.contains(id))
+            .collect();
         for &id in dependencies.host_inputs.keys() {
             if !entry.inputs.contains(&id)
                 || !matches!(
@@ -948,6 +998,9 @@ impl Program {
             } else if !required.reads.is_subset(initialized) {
                 return Err(HostError::Invalid("operation reads uninitialized storage".into()));
             }
+            if let Operation::JoinBuffer { target, .. } = operation {
+                available.insert(target);
+            }
             initialized.extend(required.writes);
             operations.push(operation);
         }
@@ -968,7 +1021,7 @@ impl Program {
             let keys: BTreeSet<_> = cases.iter().map(|(key, _)| key).collect();
             if cases.is_empty() || keys.len() != cases.len() {
                 return Err(HostError::Invalid(
-                    "loop buffer selection requires distinct cases".into(),
+                    "buffer selection requires distinct cases".into(),
                 ));
             }
             dependencies.scalar(tag, |source| self.scalar_resource(pipeline, source))?;
@@ -982,6 +1035,14 @@ impl Program {
             Operation::Bind { value, .. } => dependencies.scalar(value, ScalarSource::resource)?,
             Operation::Allocate(_) => {
                 return Err(HostError::Invalid("entry was already scheduled".into()));
+            }
+            Operation::JoinBuffer {
+                pipeline,
+                target,
+                source,
+            } => {
+                dependencies.extend(self.buffer_dependencies(*pipeline, source)?);
+                dependencies.writes.insert(*target);
             }
             Operation::Loop {
                 pipeline,
