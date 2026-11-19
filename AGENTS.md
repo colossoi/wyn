@@ -12,3 +12,14 @@ coverage.
 Run integration tests through `python scripts/test_integrations.py`: each test
 case has a hard five-minute deadline; timeout is an immediate gate failure and
 must terminate its compiler descendants. Direct Cargo commands do not enforce it.
+
+For each full-gate round, keep the logs in a new directory under `tmp/`. Create
+an empty `workspace.jsonl` at the start so interrupted rounds are visible. Write
+one JSON object per check to `workspace.jsonl`, `integrations.jsonl`,
+`standalone.jsonl`, `spirv.jsonl`, or `wgsl.jsonl`. Use the check names in
+`scripts/report_full_gates.py` for workspace checks. Include `name`, `seconds`,
+and `exit_code`, and save the output as `<name>.log`. After the round ends,
+including a failed or interrupted round, run `python scripts/report_full_gates.py`
+and link `tmp/full-gates.html` in the report. Keep targeted rechecks out of those
+five streams. An optional `run.json` can provide a `title` and the path to a
+separate `integration_recheck` log.
