@@ -2112,17 +2112,8 @@
           "type": "CHOICE",
           "members": [
             {
-              "type": "CHOICE",
-              "members": [
-                {
-                  "type": "SYMBOL",
-                  "name": "integer_literal"
-                },
-                {
-                  "type": "SYMBOL",
-                  "name": "identifier"
-                }
-              ]
+              "type": "SYMBOL",
+              "name": "_expression"
             },
             {
               "type": "BLANK"
@@ -5816,14 +5807,6 @@
     [
       "existential_type",
       "function_type"
-    ],
-    [
-      "size_argument",
-      "_literal"
-    ],
-    [
-      "size_argument",
-      "_primary_expression"
     ],
     [
       "binary_expression"

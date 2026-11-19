@@ -46,8 +46,6 @@ module.exports = grammar({
 
   conflicts: $ => [
     [$.existential_type, $.function_type],
-    [$.size_argument, $._literal],
-    [$.size_argument, $._primary_expression],
     [$.binary_expression],
     [$._expression, $._update_operand],
   ],
@@ -459,7 +457,7 @@ module.exports = grammar({
     // or closing angle. `[n]A` remains an ordinary array-type argument.
     size_argument: $ => seq(
       '[',
-      optional(choice($.integer_literal, $.identifier)),
+      optional($._expression),
       ']',
     ),
 
