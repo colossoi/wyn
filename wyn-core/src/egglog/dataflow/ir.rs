@@ -234,6 +234,8 @@ pub(in crate::egglog) fn properties(
                 }
                 Code::Range => {
                     sink.add("RangeOperation", operation)?;
+                    sink.add("DiscardableOperation", operation)?;
+                    sink.add("RepeatableOperation", operation)?;
                 }
                 _ => {}
             }

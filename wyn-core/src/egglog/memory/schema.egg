@@ -113,6 +113,8 @@
 
 (function OperationIndex (OperationKey i64) IndexExp :no-merge)
 (function OperationSlices (OperationKey) Slices :no-merge)
+(datatype ArrayLayout (TransposeAxes) (FlattenAxes))
+(function OperationLayout (OperationKey) ArrayLayout :no-merge)
 (function OperationShape (OperationKey) Shape :no-merge)
 (function OperationDomain (OperationKey) Domain :no-merge)
 (function OperationWidth (OperationKey) i64 :no-merge)

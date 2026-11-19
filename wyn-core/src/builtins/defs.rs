@@ -770,6 +770,8 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
     hof_intrinsic!("target_load", builtins::scheme::target_load_scheme),
     hof_intrinsic!("target_sample", builtins::scheme::target_sample_scheme),
     // ---- HOF / SOAC intrinsics: scheme only, lowered earlier in the pipeline ----
+    hof_intrinsic!("transpose", builtins::scheme::transpose_scheme),
+    hof_intrinsic!("flatten", builtins::scheme::flatten_scheme),
     hof_intrinsic!(
         "_w_intrinsic_replicate",
         builtins::scheme::replicate_scheme,

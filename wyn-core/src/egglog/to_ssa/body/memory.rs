@@ -373,20 +373,26 @@ impl Body<'_, '_, '_> {
             }
             Code::Length { axis } => {
                 let array = self.named(inputs[0])?;
-                if axis != 0 {
-                    return Err(error("logical length requires an outer array axis"));
-                }
+                let host_extent = if axis == 0 {
+                    self.host_array_length(&array).ok()
+                } else {
+                    self.host_shape(&array).and_then(|shape| shape.into_iter().nth(axis))
+                };
                 if let [binding] = pattern.as_slice() {
                     if let Some((name, _)) = runtime_binding(self.query(), *binding)? {
-                        if let Ok(length) = self.host_array_length(&array) {
-                            let scalar = host::scalar_extent(&length);
-                            if let Some(scalar) = scalar {
-                                self.host_values.insert(name, scalar);
-                            }
+                        if let Some(length) = host_extent.as_ref().and_then(host::scalar_extent) {
+                            self.host_values.insert(name, length);
                         }
                     }
                 }
-                vec![self.array_length(array)?]
+                if axis == 0 {
+                    vec![self.array_length(array)?]
+                } else {
+                    let Some(dimension) = self.view_dimensions(array)?.into_iter().nth(axis) else {
+                        return Err(error("logical length axis is outside the array rank"));
+                    };
+                    vec![dimension]
+                }
             }
             Code::Index => {
                 let mut array = self.named(inputs[0])?;

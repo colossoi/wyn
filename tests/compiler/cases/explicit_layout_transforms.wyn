@@ -1,0 +1,38 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! warnings = []
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"transposed\"", ":source-name \"flattened\"", ":source-name \"generated\"", ":source-name \"runtime_shape\"", ":source-name \"array_elements\"", ":source-name \"runtime_array_elements\""]
+--! [[artifacts]]
+--! path = "output.{target}"
+--! targets = ["wgsl"]
+--! contains = ["fn generated_compute(", "fn literal_flatten_compute(", "fn literal_transpose_compute("]
+--! excludes = ["fn generated_compute_1("]
+--! [[host]]
+--! entry = "runtime_array_elements"
+--! inputs = {xs = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]}
+--! result_bytes = 48
+
+entry transposed(xs: [][3]i32) [3][]i32 = transpose(xs)
+
+def flatten_rows<[r], [c]>(xs: [r][c]i32) [r * c]i32 = flatten(xs)
+
+entry flattened(xs: [3][3]i32) [2 * 3]i32 = flatten_rows(xs[1..3])
+
+entry generated() []i32 =
+    flatten(transpose(map(|r| map(|c| 10 + 10*r + c, iota(3)), iota(2))))
+
+entry literal_flatten() [16]i32 =
+    let rows: [8][2]i32 = map(|i| [10*i,10*i+1], iota(8)) in flatten(rows)
+
+entry literal_transpose() [16]i32 =
+    let rows: [8][2]i32 = map(|i| [10*i,10*i+1], iota(8)) in flatten(transpose(rows))
+
+entry runtime_shape(rows: i32, cols: i32) []i32 =
+    flatten(transpose(map(|r| map(|c| 10 + 10*r + c, iota(cols)), iota(rows))))
+
+entry array_elements(xs: [2][3][2]i32) [6][2]i32 = flatten(transpose(xs))
+
+entry runtime_array_elements(xs: [][3][2]i32) [3][][2]i32 = transpose(xs)

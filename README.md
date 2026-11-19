@@ -185,6 +185,11 @@ expressions, array traversals, branches, loops, and accumulator updates all use
 this representation. Rust operation payloads hold attributes such as opcodes and
 types; operands and executable bodies live in graph relations.
 
+Slices use explicit views. Import records `transpose` and `flatten` as
+axis transforms with known source coordinates. Placement can compose those
+coordinates with a preceding rectangular traversal and eliminate its
+intermediate array when the shape and effect proofs permit it.
+
 [from_tlc.rs](wyn-core/src/egglog/from_tlc.rs) imports normalized TLC once. Fusion,
 placement, and scalar simplification edit that same graph. TLC remains available
 for source locations and public interfaces. Derived dependency, availability,
@@ -199,7 +204,7 @@ The public pass order is enforced by typed checkpoints in
 | --- | --- |
 | `egglog::from_tlc` | Import typed values, operation inputs and outputs, callable/control regions, logical shapes, and memory capabilities. |
 | `egglog::fuse` | Inline required helpers using structural facts, then analyze dependencies and effects; compose compatible traversals and accumulator scopes; simplify and hoist until graph edits reach a fixed point; validate memory bindings. |
-| `egglog::place` / `place_with_cost_model` | Apply the topology policy and portable cost model, canonicalize and distribute eligible nested traversals, and derive host regions and loop execution choices. |
+| `egglog::place` / `place_with_cost_model` | Apply the topology policy and portable cost model, canonicalize and distribute eligible nested traversals, fuse explicit axis transforms, and derive host regions and loop execution choices. |
 | `egglog::schedule` / `schedule_with_cost_model` | Commit logical execution choices for surviving parallel operations. The cost-model variant also accepts native subgroup support; default scheduling uses portable collectives. |
 | `egglog::prepare_interfaces` | Validate memory capabilities and bindings using placement's dataflow proofs, which scheduling preserves. Final scalar simplification refreshes analysis after inlining. |
 | `egglog::optimize_with_policy` / `optimize` | Simplify authoritative statements: fold constants, forward values, share common expressions, remove dead work, and perform legal code motion. `Full` additionally inlines nonrecursive helpers; `optimize` selects `Full`. |

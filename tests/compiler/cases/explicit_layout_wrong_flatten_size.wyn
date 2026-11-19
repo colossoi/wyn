@@ -1,0 +1,6 @@
+--! command = "check"
+--! exit = 1
+--! warnings = []
+--! errors = ["Type error: Entry point 'wrong' return type mismatch"]
+
+entry wrong(xs: [2][3]i32) [5]i32 = flatten(xs)

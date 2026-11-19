@@ -27,6 +27,7 @@ pub(in crate::egglog) const OPERATION_CELLS: &[&str] = &[
     "LoopCondition",
     "OperationIndex",
     "OperationSlices",
+    "OperationLayout",
     "OperationShape",
     "OperationDomain",
     "OperationWidth",

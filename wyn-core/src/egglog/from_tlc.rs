@@ -25,6 +25,8 @@ pub(super) type Term = tlc::Term<ExplicitClosurePayload, ExplicitCapturesPayload
 type Callback = SoacBody<ExplicitClosurePayload, ExplicitCapturesPayload>;
 type SourceArray = ArrayExpr<ExplicitClosurePayload, ExplicitCapturesPayload>;
 type Operator = SoacOp<ExplicitClosurePayload, ExplicitCapturesPayload>;
+mod layout;
+
 pub(super) fn import(
     source: &OwnershipApplied,
 ) -> Result<(EGraph, Interner<i64, SymbolId>), OptimizeError> {
@@ -820,17 +822,29 @@ impl<'source> Import<'_, '_, '_, 'source> {
         let length = self.operation(Code::Length { axis: 0 }, &[Name::Value(input.name)])?;
         let length = Self::leaf(self.emit(length, &types::i32(), scope)?)?;
         let count = self.node("IndexValue", length.name)?;
-        let index = self.scalar(&types::i32())?;
+        let (domain, mut axes) = self.domain(&[count])?;
+        let Some(axis) = axes.pop() else {
+            return Err(output_error("iteration domain is missing its axis"));
+        };
+        Ok((domain, axis))
+    }
+
+    fn domain(&mut self, extents: &[Value]) -> Result<(Domain, Vec<Leaf>), OptimizeError> {
         let ordinal = self.scalar(&types::i32())?;
         let id = self.domains.next_id();
         let domain = self.node("DomainId", id)?;
-        self.sink.set("DomainRank", domain, 1_i64)?;
+        self.sink.set("DomainRank", domain, extents.len() as i64)?;
         self.sink.set("DomainOrdinal", domain, ordinal.name)?;
-        self.sink.set("DomainAxis", (domain, 0_i64), index.name)?;
-        self.sink.set("DomainExtent", (domain, 0_i64), count)?;
+        let mut axes = Vec::new();
+        for (slot, &extent) in extents.iter().enumerate() {
+            let index = self.scalar(&types::i32())?;
+            self.sink.set("DomainAxis", (domain, slot as i64), index.name)?;
+            self.sink.set("DomainExtent", (domain, slot as i64), extent)?;
+            axes.push(index);
+        }
         let observe = self.unit("Observe")?;
-        let parameters = [&ordinal, &index]
-            .into_iter()
+        let parameters = std::iter::once(&ordinal)
+            .chain(&axes)
             .map(|value| Parameter {
                 name: Name::Value(value.name),
                 info: value.info,
@@ -842,7 +856,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
                 key: domain,
                 parameters,
             },
-            index,
+            axes,
         ))
     }
 
@@ -997,6 +1011,14 @@ impl<'source> Import<'_, '_, '_, 'source> {
         scope: &mut Scope,
     ) -> Result<Option<Imported<'source>>, OptimizeError> {
         let known = catalog().known();
+        if id == known.transpose || id == known.flatten {
+            let [source] = arguments else {
+                return Err(output_error("array layout transform expects one array"));
+            };
+            return self
+                .array_layout(Self::leaf(source.clone())?, ty, id == known.transpose, scope)
+                .map(Some);
+        }
         if ![
             known.length,
             known.storage_len,

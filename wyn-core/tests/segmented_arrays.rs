@@ -18,6 +18,7 @@ fn retained_prefixes_and_packed_outputs_publish_distinct_lengths() {
 fn maps_reject_nonuniform_result_shapes() {
     let source = "
 entry ragged() [][]i32=map(|n|map(|i|i+n,iota(n)),[0,1,3,7])
+entry ragged_transpose() [][]i32=transpose(map(|n|iota(n),[0,1,3,7]))
 entry nested() [][][]i32=map(|n|map(|j|map(|k|100*n+10*j+k,iota(j)),iota(n)),[0,1,3])
 entry mixed() [][]i32=map(|n|if n>3 then filter(|i|i>1,iota(n)) else filter(|i|true,scan((+),0,iota(n))),[0,1,3,7])
 entry packed() [][]i32=map(|n|filter(|i|i>1,iota(n)),[0,1,3,7])

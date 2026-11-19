@@ -370,6 +370,18 @@ integers `m` and `n` such that `[m][n]i32` describes the array. The
 restriction to regular arrays is rooted in low-level concerns about
 efficient compilation.
 
+For an array of shape `[rows][columns]t`, `transpose(xs)` swaps the
+first two axes and returns `[columns][rows]t`. The element at
+`xs[r,c]` becomes the element at `transpose(xs)[c,r]`.
+The row and column counts may be determined at runtime.
+
+`flatten(xs)` combines the first two axes and returns
+`[rows * columns]t`. It visits each row in order and then each column
+within that row. For example, `flatten([[1,2,3],[4,5,6]])` is
+`[1,2,3,4,5,6]`, while `flatten(transpose([[1,2,3],[4,5,6]]))`
+is `[1,4,2,5,3,6]`. Either operation preserves the shape of each
+element of type `t`.
+
 ### Vector Types
 
 In addition to arrays, Wyn provides fixed-width vector types. They are

@@ -4,8 +4,8 @@ use super::query::Query;
 use super::{memory, output_error, OptimizeError, ScalarOptimization};
 use crate::types;
 use egglog_engine::sort::S;
-use egglog_engine::EGraph;
 use egglog_engine::Write;
+use egglog_engine::{EGraph, Value};
 
 mod fold;
 
@@ -92,25 +92,32 @@ pub(super) fn apply(graph: &mut EGraph) -> Result<bool, OptimizeError> {
         return Ok(true);
     }
     if let Some(candidate) = Query(graph).first("ForwardLength")? {
-        let operation = candidate[0];
-        let index = candidate[1];
-        let code = if let Some(bits) = Query(graph).lookup("StaticIndex", index)? {
-            Code::Constant {
-                ty: types::i32(),
-                bits: graph.value_to_base::<i64>(bits),
-            }
-        } else {
-            Code::IndexValue
-        };
-        let indexed = matches!(code, Code::IndexValue);
-        edit::set_code(graph, operation, code)?;
-        edit::inputs(graph, operation, &[])?;
-        if indexed {
-            graph.update(|mut sink| sink.set("OperationIndex", (operation, 0_i64), index))?;
-        }
+        forward_length(graph, candidate[0], candidate[1])?;
         return Ok(true);
     }
     Ok(false)
+}
+
+pub(super) fn forward_length(
+    graph: &mut EGraph,
+    operation: Value,
+    index: Value,
+) -> Result<(), OptimizeError> {
+    let code = if let Some(bits) = Query(graph).lookup("StaticIndex", index)? {
+        Code::Constant {
+            ty: types::i32(),
+            bits: graph.value_to_base::<i64>(bits),
+        }
+    } else {
+        Code::IndexValue
+    };
+    let indexed = matches!(code, Code::IndexValue);
+    edit::set_code(graph, operation, code)?;
+    edit::inputs(graph, operation, &[])?;
+    if indexed {
+        graph.update(|mut sink| sink.set("OperationIndex", (operation, 0_i64), index))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

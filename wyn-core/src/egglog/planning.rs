@@ -7,6 +7,7 @@ use egglog_engine::{EGraph, RawValues, Write};
 
 mod conditional;
 mod distribution;
+mod layout;
 
 pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
     graph.parse_and_run_program(
@@ -19,6 +20,8 @@ pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
             include_str!("planning/conditional.egg"),
             "\n",
             include_str!("planning/shapes.egg"),
+            "\n",
+            include_str!("planning/layout.egg"),
             "\n",
             include_str!("planning/reuse.egg"),
             "\n",
@@ -218,6 +221,9 @@ pub(super) fn place(
             (saturate distribution-select))",
         )?;
         let Some(candidate) = Query(graph).first("DistributeNest")? else {
+            if layout::fuse(graph)? {
+                continue;
+            }
             break;
         };
         distribution::apply(graph, candidate[0], candidate[1])?;

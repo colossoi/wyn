@@ -1,6 +1,7 @@
 use crate::ast::{Type, TypeName, TypeScheme};
 use crate::types;
 use crate::types::checker::TypeVarGenerator;
+use crate::types::size::SizeOperator;
 
 /// A scheme builder is a function that produces a fresh `TypeScheme` —
 /// fresh type variables drawn from the supplied generator. Schemes can't
@@ -249,6 +250,44 @@ pub fn vec_x_mat(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
 // ---------------------------------------------------------------------------
 // Array / HOF shapes
 // ---------------------------------------------------------------------------
+
+fn matrix_input(ctx: &mut dyn TypeVarGenerator) -> (Type, Type, Type, Type) {
+    let (element, rows, columns) = (ctx.new_variable(), ctx.new_variable(), ctx.new_variable());
+    let row = array_type(
+        element.clone(),
+        ctx.new_variable(),
+        columns.clone(),
+        ctx.new_variable(),
+    );
+    let matrix = array_type(row, ctx.new_variable(), rows.clone(), ctx.new_variable());
+    (matrix, element, rows, columns)
+}
+
+pub fn transpose_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    let (matrix, element, rows, columns) = matrix_input(ctx);
+    let row = array_type(
+        element,
+        types::array_variant_composite(),
+        rows,
+        types::no_buffer(),
+    );
+    let result = array_type(row, types::array_variant_composite(), columns, types::no_buffer());
+    quantify(arrow_chain(&[matrix], result))
+}
+
+pub fn flatten_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    let (matrix, element, rows, columns) = matrix_input(ctx);
+    let result = array_type(
+        element,
+        types::array_variant_composite(),
+        Type::Constructed(
+            TypeName::SizeArithmetic(SizeOperator::Multiply),
+            vec![rows, columns],
+        ),
+        types::no_buffer(),
+    );
+    quantify(arrow_chain(&[matrix], result))
+}
 
 /// `∀a n s. Array[a, s, n] -> i32` — array length.
 pub fn array_to_i32(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {

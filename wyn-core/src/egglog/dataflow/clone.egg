@@ -166,6 +166,8 @@
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (= value (OperationIndex operation k0))) ((CloneIndexDemand context value)) :ruleset clone-index)
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (= value (OperationIndex operation k0)) (= replacement (CloneIndex context value))) ((set (OperationIndex (ClonedOperation context operation) k0) replacement)) :ruleset clone-edges)
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (= value (OperationSlices operation))) ((CloneSliceDemand context value)) :ruleset clone-index)
+(rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (= layout (OperationLayout operation)))
+      ((set (OperationLayout (ClonedOperation context operation)) layout)) :ruleset clone-edges)
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (= value (OperationSlices operation)) (= replacement (CloneSlices context value))) ((set (OperationSlices (ClonedOperation context operation)) replacement)) :ruleset clone-edges)
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (= value (OperationShape operation))) ((CloneShapeDemand context value)) :ruleset clone-index)
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (= value (OperationShape operation)) (= replacement (CloneShape context value))) ((set (OperationShape (ClonedOperation context operation)) replacement)) :ruleset clone-edges)
