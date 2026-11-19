@@ -60,6 +60,15 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
         TypeName::Int(bits) => format!("i{}", bits),
         TypeName::Size(n) => format!("{}", n),
         TypeName::SizeVar(s) => s.clone(),
+        TypeName::SizeArithmetic(operator) => match args {
+            [left, right] => format!(
+                "({} {} {})",
+                format_type(left),
+                operator.symbol(),
+                format_type(right)
+            ),
+            _ => operator.symbol().to_string(),
+        },
         TypeName::SizePlaceholder => "?".to_string(),
         TypeName::Array => {
             // Array[elem, variant, dim_0, ...]

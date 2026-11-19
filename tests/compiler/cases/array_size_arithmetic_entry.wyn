@@ -1,0 +1,7 @@
+--! command = "check"
+--! exit = 1
+--! warnings = []
+--! errors = ["Type error: Entry parameter array size arithmetic must resolve to a constant"]
+
+entry main<[n]>(xs: [n]i32, pairs: [n * 2]i32) i32 =
+    length(xs) + length(pairs)

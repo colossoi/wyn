@@ -1,0 +1,10 @@
+--! command = "check"
+--! exit = 1
+--! warnings = []
+--! errors = ["Type error: Function argument type mismatch at argument 2"]
+--! contains = ["expected [6]i32"]
+
+def contract<[n]>(xs: [n]i32, pairs: [n * 2]i32) [n * 2]i32 = pairs
+
+entry main(xs: [3]i32, pairs: [5]i32) [5]i32 =
+    contract(xs, pairs)

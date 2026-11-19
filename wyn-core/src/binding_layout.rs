@@ -49,10 +49,8 @@ pub fn runtime_sized_array_elem(ty: &Type<TypeName>) -> Option<(&Type<TypeName>,
     Some((elem, elem_bytes))
 }
 
-/// Arrays larger than the portable push-constant budget are represented by a
-/// storage buffer even when every dimension is fixed. The outer element is
-/// the buffer element, so multidimensional shape and row stride remain part
-/// of the ordinary array type.
+/// Array views, consuming arrays, and arrays larger than the portable
+/// push-constant budget use a storage buffer even with a fixed extent.
 fn storage_array_elem(ty: &Type<TypeName>, consuming: bool) -> Option<(&Type<TypeName>, u32)> {
     if let Some(runtime) = runtime_sized_array_elem(ty) {
         return Some(runtime);
@@ -60,7 +58,8 @@ fn storage_array_elem(ty: &Type<TypeName>, consuming: bool) -> Option<(&Type<Typ
     const PORTABLE_PUSH_CONSTANT_BYTES: u32 = 128;
     let elem = ty.elem_type()?;
     let total_bytes = ssa::layout::type_byte_size(&ssa::layout::storage_value_type(ty))?;
-    (consuming || total_bytes > PORTABLE_PUSH_CONSTANT_BYTES).then(|| {
+    let view = ty.array_variant().is_some_and(types::is_array_variant_view);
+    (view || consuming || total_bytes > PORTABLE_PUSH_CONSTANT_BYTES).then(|| {
         ssa::layout::storage_elem_stride(&ssa::layout::storage_value_type(elem))
             .map(|stride| (elem, stride))
     })?

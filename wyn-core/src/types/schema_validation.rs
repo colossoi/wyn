@@ -39,9 +39,11 @@ fn arg_kind_of_name(name: &TypeName) -> ArgKind {
         | TypeName::ArrayVariantBounded
         | TypeName::ArrayVariantAbstract
         | TypeName::AddressPlaceholder => ArgKind::Variant,
-        TypeName::Size(_) | TypeName::SizeVar(_) | TypeName::SizePlaceholder | TypeName::Skolem(_) => {
-            ArgKind::Size
-        }
+        TypeName::Size(_)
+        | TypeName::SizeVar(_)
+        | TypeName::SizeArithmetic(_)
+        | TypeName::SizePlaceholder
+        | TypeName::Skolem(_) => ArgKind::Size,
         TypeName::Buffer(_) | TypeName::NoBuffer => ArgKind::Region,
         TypeName::PointerFunction
         | TypeName::PointerInput
@@ -115,6 +117,7 @@ pub fn validate_type_args(name: &TypeName, args: &[Type]) -> Result<(), String> 
     // (fixed-prefix kinds, optional repeated tail kind, optional repeated-min)
     let schema: Option<(&[ArgKind], Option<ArgKind>)> = match name {
         TypeName::Array => return validate_array_args(args),
+        TypeName::SizeArithmetic(_) => Some((&[ArgKind::Size, ArgKind::Size] as &[ArgKind], None)),
         TypeName::Vec => Some((&[ArgKind::Type, ArgKind::Size] as &[ArgKind], None)),
         TypeName::Mat => Some((&[ArgKind::Type, ArgKind::Size, ArgKind::Size] as &[ArgKind], None)),
         TypeName::Pointer => Some((&[ArgKind::Type, ArgKind::AddrSpace] as &[ArgKind], None)),

@@ -1,6 +1,7 @@
 use polytype::Context;
 
 use crate::ast::{Type, TypeName};
+use crate::types::size;
 
 /// Result of overload resolution: the index of the candidate that
 /// unified successfully and the inferred return type.
@@ -33,7 +34,7 @@ pub fn try_unify_with_args(
             return None;
         }
         let param_ty = param_ty.apply(ctx);
-        if ctx.unify(&param_ty, arg_type).is_err() {
+        if size::unify(ctx, &param_ty, arg_type).is_err() {
             return None;
         }
         current_type = rest_ty.apply(ctx);

@@ -1,0 +1,25 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! warnings = []
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"calculated\"", ":source-name \"specialized\"", ":source-name \"inferred\"", ":length 6"]
+
+def width = 3
+type cells<[rows], [columns]> = [rows * columns]i32
+
+def offset<[n]>(xs: [n]i32, pairs: [n * 2]i32) [n * 2]i32 =
+    map(|p| p + length(xs), pairs)
+
+def relay<[n]>(xs: [n]i32, pairs: [n * 2]i32) [n * 2]i32 =
+    offset(xs, pairs)
+
+entry calculated(xs: [2 * (width + 1) - 2]i32) cells<[1 + 1], [width]> =
+    map(|x| x + 1, xs)
+
+entry specialized(xs: [3]i32, pairs: [6]i32) [6]i32 =
+    relay(xs, pairs)
+
+entry inferred(xs: [3]i32, pairs: []i32) [6]i32 =
+    relay(xs, pairs)

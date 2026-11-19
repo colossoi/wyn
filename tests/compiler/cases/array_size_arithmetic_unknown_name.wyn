@@ -1,0 +1,7 @@
+--! command = "check"
+--! exit = 1
+--! warnings = []
+--! errors = ["Type error: Undeclared type or size parameter"]
+--! contains = ["missing * 2"]
+
+def identity(xs: [missing * 2]i32) [missing * 2]i32 = xs

@@ -8,6 +8,7 @@
 pub mod checker;
 pub mod patterns;
 pub mod run;
+pub(crate) mod size;
 mod stage_context;
 mod warnings;
 
@@ -230,6 +231,8 @@ pub enum TypeName {
     Size(usize),
     /// Size variable: [n]
     SizeVar(String),
+    /// Arithmetic on two dimension terms.
+    SizeArithmetic(size::SizeOperator),
     /// Type variable from user code: 'a, 'b (not yet bound to TypeVar)
     UserVar(String),
     /// Type names parsed from source code (user-defined types, type aliases)
@@ -368,6 +371,7 @@ impl std::fmt::Display for TypeName {
             TypeName::Mat => write!(f, "Mat"),
             TypeName::Size(n) => write!(f, "{}", n),
             TypeName::SizeVar(name) => write!(f, "{}", name),
+            TypeName::SizeArithmetic(operator) => write!(f, "{}", operator.symbol()),
             TypeName::UserVar(name) => write!(f, "'{}", name),
             TypeName::Named(name) => write!(f, "{}", name),
             TypeName::Record(fields) => {
@@ -443,6 +447,7 @@ impl polytype::Name for TypeName {
             TypeName::Mat => "Mat".to_string(),
             TypeName::Size(n) => format!("Size({})", n),
             TypeName::SizeVar(v) => format!("[{}]", v),
+            TypeName::SizeArithmetic(operator) => operator.symbol().to_string(),
             TypeName::UserVar(v) => format!("'{}", v),
             TypeName::Named(name) => name.clone(),
             TypeName::Record(fields) => {
@@ -1547,7 +1552,10 @@ pub fn debug_assert_top_level_type(ty: &Type, context: &str) {
                 );
             }
             // Size markers - only valid inside Array, Vec, Mat types
-            TypeName::Size(_) | TypeName::SizePlaceholder | TypeName::SizeVar(_) => {
+            TypeName::Size(_)
+            | TypeName::SizePlaceholder
+            | TypeName::SizeVar(_)
+            | TypeName::SizeArithmetic(_) => {
                 panic!(
                     "BUG: Size marker {:?} used as top-level type in {}. \
                      Size markers should only appear inside Array, Vec, or Mat types.",
@@ -1683,6 +1691,9 @@ pub fn format_type(ty: &Type) -> String {
                 .map(|dim| match dim {
                     Type::Constructed(TypeName::Size(n), _) => format!("[{}]", n),
                     Type::Constructed(TypeName::SizePlaceholder, _) => "[]".to_string(),
+                    Type::Constructed(TypeName::SizeArithmetic(_), _) => {
+                        format!("[{}]", crate::diags::format_type(dim))
+                    }
                     _ => format!("[{}]", format_type(dim)),
                 })
                 .collect::<String>();

@@ -307,7 +307,10 @@ type ::= qualname
 
 tuple_type ::= "(" ")" | "(" type ("," type)+ [","] ")"
 
-array_type ::= "[" [exp] "]" type
+array_type ::= "[" [dimension] "]" type
+dimension  ::= size_product (("+" | "-") size_product)*
+size_product ::= size_atom ("*" size_atom)*
+size_atom    ::= integer_literal | name | "(" dimension ")"
 
 sum_type ::= sum_variant ("|" sum_variant)*
 sum_variant ::= constructor [ "(" type ("," type)* [","] ")" ]
@@ -315,7 +318,7 @@ sum_variant ::= constructor [ "(" type ("," type)* [","] ")" ]
 record_type ::= "{" "}" | "{" fieldid ":" type ("," fieldid ":" type)* [","] "}"
 
 type_application ::= qualname "<" type_argument ("," type_argument)* ">"
-type_argument    ::= "[" [dim] "]" | type
+type_argument    ::= "[" [dimension] "]" | type
 unique_type      ::= "*" type
 
 function_type ::= param_type "->" type
@@ -349,8 +352,8 @@ are of type `()`.
 An array value is written as a sequence of zero or more
 comma-separated values enclosed in square brackets: `[1, 2, 3]`. An
 array type is written as `[d]t`, where `t` is the element type of the
-array, and `d` is an expression of type `i64` indicating the number of
-elements in the array. We can elide `d` and write just `[]` (an
+array, and `d` is a size term indicating the number of elements in
+the array. We can elide `d` and write just `[]` (an
 anonymous size), in which case the size will be inferred.
 
 As an example, an array of three integers could be written as
@@ -1563,10 +1566,17 @@ applied. For example, `filter` has a return type along these lines:
 filter : <[n], A>(A -> bool, [n]A) -> ?k. [k]A
 ```
 
-Sizes may be any expression of type `i64` that does not consume any
-free variables. Size parameters can be used as ordinary `i64`
-variables within their scope. The type checker verifies that the
-program obeys any constraints imposed by size annotations.
+Sizes are integer literals, size names, or expressions built from
+them using `+`, `-`, and `*` with ordinary precedence and parentheses.
+For example, `[2 * (3 + 1)]i32` is `[8]i32`. An expression can use a
+declared size parameter or a top-level integer constant that can be
+used as a size. Constant arithmetic is checked against the nonnegative
+array size range.
+
+The type checker compares symbolic sizes by structure and folds them
+when their operands become known. For example, `[n * 2]` matches
+`[6]` once another argument has established `n = 3`. Entry
+parameters with arithmetic in their sizes require a constant result.
 
 ### Existential Size Quantifiers
 
@@ -1586,18 +1596,8 @@ length `k`". A caller of `evens` receives an array of
 unknown-but-fixed length; `k` is in scope within the type but cannot
 be statically determined by the caller.
 
-Size-dependent types are supported, as the names of value parameters
-can be used in the return type of a function:
-
-```wyn
-def replicate<T>(n: i64, x: T) [n]T = ???
-```
-
-An application `replicate(10, 0)` produces a value of type `[10]i32`.
-
-Whenever a type `[e]t` is written, `e` must be a well-typed
-expression of type `i64` in scope (possibly by referencing a name
-bound as a size parameter).
+Size names resolve through declared size parameters and top-level
+size constants. A scalar argument alone does not bind a size name.
 
 ### Unknown Sizes
 

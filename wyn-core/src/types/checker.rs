@@ -1,4 +1,4 @@
-use super::{FrontendWarning, SkolemId, Type, TypeExt, TypeName, TypeScheme};
+use super::{size, FrontendWarning, SkolemId, Type, TypeExt, TypeName, TypeScheme};
 use crate::ast;
 use crate::ast::*;
 use crate::builtins;
@@ -419,7 +419,10 @@ impl<'a> TypeChecker<'a> {
 
     /// Format a type for error messages by applying current substitution
     pub fn format_type(&self, ty: &Type) -> String {
-        let applied = ty.apply(&self.context);
+        let mut applied = ty.apply(&self.context);
+        if size::contains_arithmetic(&applied) && size::fold_type(&mut applied) {
+            return crate::diags::format_type(&applied);
+        }
         match &applied {
             Type::Constructed(TypeName::Arrow, args) if args.len() == 2 => {
                 // Special case for arrow types
@@ -578,8 +581,14 @@ impl<'a> TypeChecker<'a> {
     /// - The source spelling is then checked as an absolute name
     /// - Recursively resolves nested aliases
     fn resolve_type_aliases_scoped(&self, ty: &Type, current_module: Option<&str>) -> Result<Type> {
-        let mut visited = Vec::new();
-        self.resolve_type_aliases_impl(ty, current_module, &mut visited)
+        let resolved = self.resolve_type_aliases_impl(ty, current_module, &mut Vec::new())?;
+        if size::contains_arithmetic(&resolved) && Self::contains_user_or_size_var(&resolved) {
+            return Err(err_type!(
+                "Undeclared type or size parameter in {}",
+                crate::diags::format_type(&resolved)
+            ));
+        }
+        Ok(resolved)
     }
 
     fn resolve_type_aliases_impl(
@@ -652,7 +661,11 @@ impl<'a> TypeChecker<'a> {
                     .collect::<Result<_>>()?;
                 super::validate_type_args(name, &resolved_args)
                     .map_err(|message| err_type!("malformed type '{}': {}", name, message))?;
-                Ok(Type::Constructed(name.clone(), resolved_args))
+                let mut resolved = Type::Constructed(name.clone(), resolved_args);
+                if !size::fold(&mut resolved) {
+                    return Err(err_type!("Array size arithmetic is out of range"));
+                }
+                Ok(resolved)
             }
             Type::Variable(id) => Ok(Type::Variable(*id)),
         }
@@ -716,6 +729,7 @@ impl<'a> TypeChecker<'a> {
                 | Type::Constructed(
                     TypeName::Size(_)
                         | TypeName::SizeVar(_)
+                        | TypeName::SizeArithmetic(_)
                         | TypeName::SizePlaceholder
                         | TypeName::Skolem(_),
                     _
@@ -2201,6 +2215,21 @@ impl<'a> TypeChecker<'a> {
         self.scope_stack.pop_scope();
         let body_type = body_result?;
 
+        if is_entry {
+            for (param, ty) in params.iter().zip(&param_types) {
+                let mut resolved = ty.apply(&self.context);
+                if !size::fold_type(&mut resolved) {
+                    bail_type_at!(param.h.span, "Array size arithmetic is out of range");
+                }
+                if size::contains_arithmetic(&resolved) {
+                    bail_type_at!(
+                        param.h.span,
+                        "Entry parameter array size arithmetic must resolve to a constant"
+                    );
+                }
+            }
+        }
+
         Ok((param_types, body_type))
     }
 
@@ -2460,7 +2489,7 @@ impl<'a> TypeChecker<'a> {
             }
             Declaration::Frontend(ast::OpensResolvedFrontend::TypeBind(binding)) => {
                 debug!("Processing TypeBind: {}", binding.name);
-                self.resolve_type_aliases_scoped(&binding.definition, None).map(|_| ())
+                self.resolve_type_aliases_impl(&binding.definition, None, &mut Vec::new()).map(|_| ())
             }
         }
     }
@@ -3844,7 +3873,7 @@ impl<'a> TypeChecker<'a> {
 
     /// Unify two types or produce a "<context>, got A and B" type error.
     fn unify_or_err(&mut self, a: &Type, b: &Type, span: Span, ctx: &str) -> Result<()> {
-        self.context.unify(a, b).map_err(|_| {
+        size::unify(&mut self.context, a, b).map_err(|_| {
             err_type_at!(
                 span,
                 "{}, got {} and {}",
@@ -4117,11 +4146,13 @@ impl<'a> TypeChecker<'a> {
             )
         })?;
 
-        // Get expected param type after unification
+        // Close any size arithmetic whose operands earlier arguments supplied.
         let expected_param = param_var.apply(&self.context);
-
         let arg_applied = arg_ty.apply(&self.context);
-        let param_applied = expected_param.apply(&self.context);
+        let mut param_applied = expected_param.clone();
+        if !size::fold_type(&mut param_applied) {
+            bail_type_at!(arg.h.span, "Array size arithmetic is out of range");
+        }
 
         // Open the argument's existential type at the use site if the
         // expected parameter is not itself existential. Existential
@@ -4143,12 +4174,12 @@ impl<'a> TypeChecker<'a> {
         // from the callee's diet: a fresh local array is consumable, an
         // observing parameter is not, though both have the same value type.
         let checkpoint = self.context.len();
-        if self.context.unify(&arg_for_check, &param_applied).is_err() {
+        if size::unify(&mut self.context, &arg_for_check, &param_applied).is_err() {
             self.context.rollback(checkpoint);
             let base = format!(
                 "Function argument type mismatch at argument {}: expected {}, got {}",
                 arg_index + 1,
-                self.format_type(&param_applied),
+                self.format_type(&expected_param),
                 self.format_type(&arg_for_check),
             );
             let error_msg = if arg.h.span.is_generated() {
@@ -4452,7 +4483,11 @@ impl<'a> TypeChecker<'a> {
 
         // A `*` return is a signature-level contract; the applied value
         // is an ordinary observation, so no expression type carries it.
-        Ok(func_type.apply(&self.context))
+        let mut result = func_type.apply(&self.context);
+        if !size::fold_type(&mut result) {
+            return Err(err_type!("Array size arithmetic is out of range"));
+        }
+        Ok(result)
     }
 }
 

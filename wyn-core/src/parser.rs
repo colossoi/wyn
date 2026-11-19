@@ -5,6 +5,7 @@ use crate::lexer;
 use crate::lexer::{LocatedToken, Token};
 use crate::op;
 use crate::types;
+use crate::types::size::{self, SizeOperator};
 use crate::LookupMap;
 use crate::{bail_parse_at, err_parse, err_parse_at};
 use log::trace;
@@ -917,55 +918,13 @@ impl<'a> Parser<'a> {
                     self.advance();
                     wrapped_in_array = true;
 
-                    if self.check(&Token::RightBracket) {
-                        // Empty brackets [] - unsized array with placeholder address space
-                        // Array[elem, variant, size]
-                        self.advance();
-                        base = Type::Constructed(
-                            TypeName::Array,
-                            vec![
-                                base,
-                                Type::Constructed(TypeName::AddressPlaceholder, vec![]),
-                                Type::Constructed(TypeName::SizePlaceholder, vec![]),
-                                // region placeholder, resolved to a fresh var by resolve_placeholders.
-                                Type::Constructed(TypeName::AddressPlaceholder, vec![]),
-                            ],
-                        );
-                    } else if let Some(Token::Identifier(name)) = self.peek() {
-                        // Size variable [n]
-                        let size_var = name.clone();
-                        self.advance();
-                        self.expect(Token::RightBracket)?;
-                        // Array[elem, variant, size]
-                        base = Type::Constructed(
-                            TypeName::Array,
-                            vec![
-                                base,
-                                Type::Constructed(TypeName::AddressPlaceholder, vec![]),
-                                types::size_var(size_var),
-                                // region placeholder, resolved to a fresh var by resolve_placeholders.
-                                Type::Constructed(TypeName::AddressPlaceholder, vec![]),
-                            ],
-                        );
-                    } else if let Some(Token::IntLiteral(n)) = self.peek() {
-                        // Size literal [3]
-                        let size = usize::try_from(n).map_err(|_| err_parse!("Invalid array size"))?;
-                        self.advance();
-                        self.expect(Token::RightBracket)?;
-                        // Array[elem, variant, size]
-                        base = Type::Constructed(
-                            TypeName::Array,
-                            vec![
-                                base,
-                                Type::Constructed(TypeName::AddressPlaceholder, vec![]),
-                                Type::Constructed(TypeName::Size(size), vec![]),
-                                // region placeholder, resolved to a fresh var by resolve_placeholders.
-                                Type::Constructed(TypeName::AddressPlaceholder, vec![]),
-                            ],
-                        );
-                    } else {
-                        bail_parse_at!(self.current_span(), "Expected size in array type application");
-                    }
+                    let size = self.parse_size_dimension()?;
+                    base = types::make_array1(
+                        base,
+                        Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+                        size,
+                        Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+                    );
                 }
                 // Regular type argument application - not yet supported
                 Some(Token::Identifier(_)) | Some(Token::LeftParen) | Some(Token::LeftBrace) => {
@@ -1004,28 +963,7 @@ impl<'a> Parser<'a> {
         if self.check(&Token::LeftBracket) || self.check(&Token::LeftBracketSpaced) {
             let start = self.current;
             self.advance();
-            let size = match self.peek() {
-                Some(Token::RightBracket) => {
-                    self.advance();
-                    Type::Constructed(TypeName::SizePlaceholder, vec![])
-                }
-                Some(Token::Identifier(name)) => {
-                    let name = name.clone();
-                    self.advance();
-                    self.expect(Token::RightBracket)?;
-                    types::size_var(name)
-                }
-                Some(Token::IntLiteral(n)) => {
-                    let size = usize::try_from(n).map_err(|_| err_parse!("Invalid type size argument"))?;
-                    self.advance();
-                    self.expect(Token::RightBracket)?;
-                    Type::Constructed(TypeName::Size(size), vec![])
-                }
-                _ => bail_parse_at!(
-                    self.current_span(),
-                    "expected a size literal, size name, or ']' in type argument"
-                ),
-            };
+            let size = self.parse_size_dimension()?;
 
             // A bracketed token followed by comma/close is a size argument.
             // If a type follows the bracket, rewind and parse the whole array
@@ -1038,6 +976,45 @@ impl<'a> Parser<'a> {
             }
         } else {
             self.parse_type().map(|(ty, _)| ty)
+        }
+    }
+
+    fn parse_size_dimension(&mut self) -> Result<Type> {
+        if self.check(&Token::RightBracket) {
+            self.advance();
+            return Ok(Type::Constructed(TypeName::SizePlaceholder, vec![]));
+        }
+        let expression = self.parse_binary_expression()?;
+        self.expect(Token::RightBracket)?;
+        Self::size_dimension(expression)
+    }
+
+    fn size_dimension(expression: Expression) -> Result<Type> {
+        let span = expression.h.span;
+        match expression.kind {
+            ExprKind::IntLiteral(literal) => {
+                let size =
+                    usize::try_from(&literal).map_err(|_| err_parse_at!(span, "Invalid array size"))?;
+                Ok(Type::Constructed(TypeName::Size(size), vec![]))
+            }
+            ExprKind::Identifier(name) if name.qualifiers.is_empty() => Ok(types::size_var(name.name)),
+            ExprKind::BinaryOp(binary, left, right) => {
+                let Some(operator) = SizeOperator::from_binary(binary.op) else {
+                    bail_parse_at!(span, "Array dimensions support +, - and *");
+                };
+                let mut term = Type::Constructed(
+                    TypeName::SizeArithmetic(operator),
+                    vec![Self::size_dimension(*left)?, Self::size_dimension(*right)?],
+                );
+                if !size::fold(&mut term) {
+                    bail_parse_at!(span, "Array size arithmetic is out of range");
+                }
+                Ok(term)
+            }
+            _ => Err(err_parse_at!(
+                span,
+                "Expected array size arithmetic over literals or size names"
+            )),
         }
     }
 
@@ -1114,56 +1091,13 @@ impl<'a> Parser<'a> {
         if self.check(&Token::LeftBracket) || self.check(&Token::LeftBracketSpaced) {
             self.advance(); // consume '['
 
-            // An array is one storage unit: its diet is a leaf, consuming
-            // only if a `*` was buried inside it.
-            let build = |elem_type: Type, elem_diet: Diet, size: Type| {
-                (
-                    Type::Constructed(
-                        TypeName::Array,
-                        vec![
-                            elem_type,
-                            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
-                            size,
-                            // region placeholder, resolved to a fresh var by resolve_placeholders.
-                            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
-                        ],
-                    ),
-                    Diet::Leaf(elem_diet.is_consuming()),
-                )
-            };
-
-            // Check for empty brackets [] - unsized array with unknown address space
-            if self.check(&Token::RightBracket) {
-                self.advance();
-                let (elem_type, elem_diet) = self.parse_type_application()?;
-                return Ok(build(
-                    elem_type,
-                    elem_diet,
-                    Type::Constructed(TypeName::SizePlaceholder, vec![]),
-                ));
-            }
-
-            // Parse dimension - could be integer literal or identifier (size variable)
-            if let Some(Token::IntLiteral(n)) = self.peek() {
-                let size = usize::try_from(n).map_err(|_| err_parse!("Invalid array size"))?;
-                self.advance();
-                self.expect(Token::RightBracket)?;
-                let (elem_type, elem_diet) = self.parse_type_application()?; // Allow nested arrays and applied aliases
-                Ok(build(
-                    elem_type,
-                    elem_diet,
-                    Type::Constructed(TypeName::Size(size), vec![]),
-                ))
-            } else if let Some(Token::Identifier(name)) = self.peek() {
-                // Size variable [n]
-                let size_var = name.clone();
-                self.advance();
-                self.expect(Token::RightBracket)?;
-                let (elem_type, elem_diet) = self.parse_type_application()?;
-                Ok(build(elem_type, elem_diet, types::size_var(size_var)))
-            } else {
-                Err(err_parse!("Expected size literal or variable in array type"))
-            }
+            let size = self.parse_size_dimension()?;
+            let (element, diet) = self.parse_type_application()?;
+            let placeholder = Type::Constructed(TypeName::AddressPlaceholder, vec![]);
+            Ok((
+                types::make_array1(element, placeholder.clone(), size, placeholder),
+                Diet::Leaf(diet.is_consuming()),
+            ))
         } else {
             self.parse_base_type()
         }
