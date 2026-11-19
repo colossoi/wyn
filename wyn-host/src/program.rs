@@ -67,6 +67,7 @@ struct Dependencies {
     resources: BTreeSet<ResourceId>,
     reads: BTreeSet<ResourceId>,
     writes: BTreeSet<ResourceId>,
+    loop_allocations: BTreeSet<ResourceId>,
     host_inputs: BTreeMap<ResourceId, u64>,
     scalar_inputs: BTreeSet<String>,
 }
@@ -86,6 +87,7 @@ impl Dependencies {
         self.resources.extend(other.resources);
         self.reads.extend(other.reads);
         self.writes.extend(other.writes);
+        self.loop_allocations.extend(other.loop_allocations);
         self.scalar_inputs.extend(other.scalar_inputs);
         for (id, bytes) in other.host_inputs {
             self.resource(id, bytes);
@@ -830,11 +832,14 @@ impl Program {
         entry.scalar_inputs = dependencies.scalar_inputs;
         let mut available = entry.inputs.clone();
         let mut initialized = available.clone();
-        // Hoist only allocations whose sizes depend on immutable entry inputs.
+        // Carried results need fresh storage even when their sizes are invariant.
         let invariant = pending
             .iter()
             .filter_map(|(&id, (_, refs, reads))| {
-                (reads.is_empty() && refs.is_subset(&entry.inputs)).then_some(id)
+                (reads.is_empty()
+                    && refs.is_subset(&entry.inputs)
+                    && !dependencies.loop_allocations.contains(&id))
+                .then_some(id)
             })
             .collect::<Vec<_>>();
         let mut body = std::mem::take(&mut entry.operations);
@@ -1005,6 +1010,7 @@ impl Program {
                 for carry in &repeated.carried {
                     selections.extend(self.buffer_dependencies(*pipeline, &carry.next)?);
                 }
+                dependencies.loop_allocations.extend(selections.resources.intersection(&produced).copied());
                 selections.resources.retain(|resource| !produced.contains(resource));
                 selections.reads.retain(|resource| !produced.contains(resource));
                 dependencies.extend(selections);

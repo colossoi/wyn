@@ -73,6 +73,13 @@ impl Backend for Trace {
             }
             "gpu-dispatch" => {
                 let options = Options::parse(&args[1..], &[":groups", ":args"])?;
+                for argument in options.get(":args")?.list()? {
+                    if let Value::Resource(id) = argument {
+                        if !self.buffers.contains_key(id) {
+                            return Err(Error::Gpu(format!("dispatch uses freed buffer {id}")));
+                        }
+                    }
+                }
                 self.dispatches.push((
                     args[0].text()?.into(),
                     options.get(":groups")?.list()?.iter().map(Value::u32).collect::<Result<_>>()?,

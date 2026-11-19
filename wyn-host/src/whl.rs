@@ -456,12 +456,17 @@ impl Program {
     fn write_loop_bindings<'a>(
         &self,
         out: &mut String,
+        entry: &Entry,
         pipeline: usize,
         bindings: impl Iterator<Item = (&'a ScalarSource, &'a BufferSource)>,
     ) -> Result<(), HostError> {
         let mut assignments = Vec::new();
-        writeln!(out, "      (let (")?;
         for (i, (current, next)) in bindings.enumerate() {
+            let target = self.scalar_resource(pipeline, current)?;
+            if matches!(next, BufferSource::Binding(source) if self.scalar_resource(pipeline, source)? == target)
+            {
+                continue;
+            }
             let value = match next {
                 BufferSource::Binding(binding) => resource(self.scalar_resource(pipeline, binding)?),
                 BufferSource::Select { tag, cases } => {
@@ -478,18 +483,37 @@ impl Program {
                     value
                 }
             };
-            writeln!(out, "        (carried-{i} {value})")?;
-            assignments.push((i, resource(self.scalar_resource(pipeline, current)?)));
+            assignments.push((i, target, value));
+        }
+        if assignments.is_empty() {
+            return Ok(());
+        }
+        writeln!(out, "      (let (")?;
+        for (i, _, value) in &assignments {
+            // A carry must survive release or reallocation of its source slot.
+            writeln!(
+                out,
+                "        (carried-{i} (let ((incoming {value})) (gpu-buffer-view incoming (gpu-buffer-size incoming))))"
+            )?;
         }
         writeln!(out, "      )")?;
-        for (i, current) in assignments {
+        for (i, target, _) in assignments {
+            let current = resource(target);
+            if !entry.inputs.contains(&target) {
+                writeln!(out, "        (if {current} (gpu-free {current}))")?;
+            }
             writeln!(out, "        (setq {current} carried-{i})")?;
         }
         writeln!(out, "      )")?;
         Ok(())
     }
 
-    fn write_operations(&self, out: &mut String, operations: &[Operation]) -> Result<(), HostError> {
+    fn write_operations(
+        &self,
+        out: &mut String,
+        entry: &Entry,
+        operations: &[Operation],
+    ) -> Result<(), HostError> {
         for op in operations {
             let pipeline = match op {
                 Operation::Dispatch { pipeline, .. } | Operation::Draw { pipeline } => Some(*pipeline),
@@ -505,7 +529,7 @@ impl Program {
                 Operation::Allocate(allocation) => self.write_allocation(out, allocation)?,
                 Operation::Loop { pipeline, region, test, body } => {
                     let repeated = &self.interface.dispatch_loops[*region];
-                    self.write_loop_bindings(out, *pipeline, repeated.carried.iter().map(|carry| (&carry.binding, &carry.initial)))?;
+                    self.write_loop_bindings(out, entry, *pipeline, repeated.carried.iter().map(|carry| (&carry.binding, &carry.initial)))?;
                     match &repeated.control {
                         crate::DispatchLoopControl::Counted { count, index } => {
                             let index = resource(self.scalar_resource(*pipeline, index)?);
@@ -514,12 +538,12 @@ impl Program {
                         }
                         crate::DispatchLoopControl::While { condition } => {
                             writeln!(out, "    (do () ((not (progn")?;
-                            self.write_operations(out, test)?;
+                            self.write_operations(out, entry, test)?;
                             writeln!(out, "      {})) nil)", self.whl_scalar(*pipeline, condition)?)?;
                         }
                     }
-                    self.write_operations(out, body)?;
-                    self.write_loop_bindings(out, *pipeline, repeated.carried.iter().map(|carry| (&carry.binding, &carry.next)))?;
+                    self.write_operations(out, entry, body)?;
+                    self.write_loop_bindings(out, entry, *pipeline, repeated.carried.iter().map(|carry| (&carry.binding, &carry.next)))?;
                     writeln!(out, "    )")?;
                 }
                 Operation::Scalar { pipeline, task, value } => {
@@ -619,7 +643,7 @@ impl Program {
             writeln!(out, "    ({name} nil)")?;
         }
         writeln!(out, "  )")?;
-        self.write_operations(out, &entry.operations)?;
+        self.write_operations(out, entry, &entry.operations)?;
         writeln!(out, "    (let* (")?;
         let mut results = Vec::new();
         for (i, &id) in entry.results.iter().enumerate() {

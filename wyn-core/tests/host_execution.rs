@@ -97,6 +97,30 @@ fn uniform_sized_launches_allocate_capacity_and_clamp_the_grid() {
 }
 
 #[test]
+fn counted_loop_results_survive_releasing_temporary_buffers() {
+    let program = generated(
+        "entry counted(limit:i32) ([4]i32,[4]i32,i32) =
+           loop (a,b,total) = ([1,2,3,4],[10,20,30,40],0i32) for i < limit do
+             (map(|x|x+i,b),map(|x|x+1,a),total+reduce((+),0i32,a))",
+    );
+    let entry = program.entry("counted").unwrap();
+    for limit in [0_i32, 1, 3] {
+        let mut backend = Trace::default();
+        let inputs = entry
+            .parameters
+            .iter()
+            .map(|_| backend.input(limit.to_le_bytes().to_vec()))
+            .collect::<Vec<_>>();
+        let result = program.run("counted", &inputs, &mut backend).unwrap();
+        let results = result.list().unwrap();
+        assert_eq!(results.len(), 3);
+        for (result, size) in results.iter().zip([16, 16, 4]) {
+            assert_eq!(backend.buffers[&result.handle().unwrap()].len(), size);
+        }
+    }
+}
+
+#[test]
 fn branch_output_shape_is_read_before_temporary_storage_is_freed() {
     for source in [
         include_str!("../../testfiles/regressions/triangulation_runtime_array_branch.wyn"),
