@@ -106,8 +106,13 @@ cargo test -p wyn --test compiler_fixtures
   specifically concerns optimization. Build success is not numerical execution.
 - Preserve ignored tests and their reasons during migration. Do not silently
   enable unsupported cases or discard assertions that lack a replacement.
+- Name an intentionally disabled source fixture with the `.wyn_` suffix and put
+  `-- IGNORED: <reason>` on its first line. Test discovery includes only `.wyn`
+  files. Explicit Rust consumers must also use `#[ignore = "<reason>"]`; other
+  runners must omit the disabled fixture. Restore coverage by renaming the file
+  to `.wyn` and enabling every explicit consumer.
 
 See [Building and Testing](README.md#building-and-testing) for workspace,
 standalone-crate, WASM, and shader-validation gates. The CLI fixture validator uses
-`spirv-val` when available and Naga as its absence fallback; the standalone SPIR-V
-sweep specifically requires `spirv-val`.
+`spirv-val` when available and falls back to Naga for modules it supports.
+Install `spirv-val` to run the complete integration gate and standalone SPIR-V sweep.

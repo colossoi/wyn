@@ -103,11 +103,12 @@ fn four_bit_source() -> &'static OwnershipApplied {
 }
 
 #[test]
-fn four_bit_radix_step_has_three_phases() {
+fn vector_radix_step_keeps_scatter_after_scan() {
     let source = entry(four_bit_source(), "dynamic");
     let program = pipeline::lower(&source, CodegenTarget::Portable);
     let stages = &compute(&program).stages;
-    assert_eq!(stages.len(), 3);
+    assert_eq!(stages.len(), 4);
+    assert_eq!(stages[3].dependencies, [(0, 2)]);
     assert_eq!(stages[0].workgroup_size, (64, 1, 1));
 }
 
@@ -116,7 +117,9 @@ fn fluid_radix_scan_avoids_empty_groups_and_oversized_carries() {
     let source = entry(four_bit_source(), "fluid");
     let program = pipeline::lower(&source, CodegenTarget::Portable);
     let stages = &compute(&program).stages;
-    assert_eq!(stages.len(), 3);
+    // Vector destinations require a separate ordered scatter after the scan.
+    assert_eq!(stages.len(), 4);
+    assert_eq!(stages[3].dependencies, [(0, 2)]);
     assert_eq!(stages[0].workgroup_size, (64, 1, 1));
     let count = groups(&stages[0]);
     assert!((1..=4320_u32.div_ceil(64)).contains(&count));

@@ -34,7 +34,7 @@ fn fused_map_chain_keeps_permission_to_reuse_its_external_input() {
         panic!("compute")
     };
     assert_eq!(p.stages.len(), 1);
-    assert_eq!(p.bindings.len(), 1, "the input buffer also supplies its length");
+    assert_eq!(p.bindings.len(), 2, "the input length has its own binding");
     let host::ResultShape::Rectangular(dimensions) = &output.source_results[0].shape else {
         panic!("rectangular result");
     };
@@ -56,8 +56,8 @@ fn length_observers_do_not_block_content_reuse() {
     };
     assert_eq!(
         p.bindings.len(),
-        2,
-        "shared input/result array and a directly published scalar transport binding"
+        3,
+        "shared input/result array, its length, and the published scalar result"
     );
     assert_ne!(output.source_results[0].binding, output.source_results[1].binding);
 }
@@ -87,7 +87,7 @@ fn fused_intermediate_element_types_do_not_restrict_final_reuse() {
         panic!("compute")
     };
     assert_eq!(p.stages.len(), 1);
-    assert_eq!(p.bindings.len(), 1, "the input buffer also supplies its length");
+    assert_eq!(p.bindings.len(), 2, "the input length has its own binding");
     let host::ResultShape::Rectangular(dimensions) = &output.source_results[0].shape else {
         panic!("rectangular result");
     };
@@ -572,28 +572,35 @@ fn collective_phase_accesses_exclude_unused_inputs_and_producer_captures() {
             })
             .collect::<Vec<_>>();
     assert_eq!(stages.len(), 2, "partial reduction followed by combination");
-    let uses_bias = |name: &str| {
-        let entry = module.entry_points.iter().find(|entry| entry.name == name).unwrap();
-        let parameters = entry.parameter_inputs[2]
-            .iter()
-            .map(|&index| entry.body.param(index).unwrap().0)
-            .collect::<Vec<_>>();
-        entry.body.inner.insts.values().any(|instruction| {
-            instruction
-                .data
-                .value_uses()
-                .iter()
-                .any(|value| value.as_ssa().is_some_and(|value| parameters.contains(&value)))
+    let producer = module.entry_points.iter().find(|entry| entry.name == stages[0].entry_point).unwrap();
+    let bias = p
+        .bindings
+        .iter()
+        .position(|binding| {
+            let Some((set, slot)) = binding.slot() else {
+                return false;
+            };
+            matches!(
+                binding,
+                host::Binding::StorageBuffer {
+                    access: host::Access::ReadOnly,
+                    usage: host::BufferUsage::Intermediate,
+                    ..
+                }
+            ) && producer.storage_bindings.iter().any(|declaration| {
+                declaration.binding == crate::BindingRef::new(set, slot)
+                    && declaration.elem_ty == crate::types::i32()
+            })
         })
-    };
+        .unwrap();
     assert!(
         p.stages
             .iter()
-            .any(|stage| stage.entry_point != stages[1].entry_point && uses_bias(&stage.entry_point)),
+            .any(|stage| stage.entry_point != stages[1].entry_point && stage.uses.access(bias).is_some()),
         "producer computation must retain its scalar capture"
     );
     assert!(
-        !uses_bias(&stages[1].entry_point),
+        stages[1].uses.access(bias).is_none(),
         "the combiner must not evaluate producer captures"
     );
 }

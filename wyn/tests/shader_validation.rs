@@ -3,6 +3,7 @@ mod support;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use wspirv::{binary::Assemble, dr::Builder, spirv};
 
 struct TestDirectory(PathBuf);
 
@@ -76,4 +77,24 @@ fn validators_accept_compiled_shaders_and_reject_invalid_output() {
             assert!(error.contains("Naga validation failed"), "{error}");
         }
     }
+
+    let mut builder = Builder::new();
+    builder.capability(spirv::Capability::Shader);
+    builder.capability(spirv::Capability::Int64);
+    builder.memory_model(spirv::AddressingModel::Logical, spirv::MemoryModel::GLSL450);
+    let void = builder.type_void();
+    let long = builder.type_int(64, 1);
+    let value = builder.constant_bit64(long, 1);
+    let signature = builder.type_function(void, []);
+    let entry = builder.begin_function(void, None, spirv::FunctionControl::NONE, signature).unwrap();
+    builder.begin_block(None).unwrap();
+    builder.ret_value(value).unwrap();
+    builder.end_function().unwrap();
+    builder.entry_point(spirv::ExecutionModel::GLCompute, entry, "main", []);
+    builder.execution_mode(entry, spirv::ExecutionMode::LocalSize, [1, 1, 1]);
+    let bytes: Vec<_> = builder.module().assemble().iter().flat_map(|word| word.to_le_bytes()).collect();
+    wspirv::dr::load_bytes(&bytes).expect("parseable SPIR-V with an invalid return value");
+    let shader = directory.0.join("invalid-int64.spv");
+    fs::write(&shader, bytes).unwrap();
+    assert!(support::validate_shader_with(&shader, "spirv", &missing_validator).is_err());
 }

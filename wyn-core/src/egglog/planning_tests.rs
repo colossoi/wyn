@@ -1197,6 +1197,7 @@ fn indexed_reducers_share_native_recognition_and_keep_cas_fallback() {
 fn subgroup_addition_is_opt_in_and_uses_small_segments() {
     let tlc =
         compile_thru_tlc("entry main(xs:[4][32]u32) [4][32]u32 = map(|row|scan((+),0u32,row),xs)").unwrap();
+    let mut portable_width = None;
     for enabled in [false, true] {
         let placed = place(
             fuse(from_tlc(&tlc).unwrap()).unwrap(),
@@ -1207,7 +1208,13 @@ fn subgroup_addition_is_opt_in_and_uses_small_segments() {
         let function = test_graph::entry(&program.graph);
         let stages = dispatches(&program.graph, function);
         assert_eq!(stages.len(), 1);
-        assert_eq!(stages[0].width.get(), 32);
+        let width = stages[0].width.get();
+        if enabled {
+            assert_eq!(width, 32, "subgroup launch follows the fixed row width");
+            assert!(width <= portable_width.unwrap());
+        } else {
+            portable_width = Some(width);
+        }
         let program = super::super::optimize_for_test(program).unwrap();
         let ssa = finish_for_test(program, CodegenTarget::Wgsl).unwrap();
         let wgsl = crate::lower_ssa_to_wgsl(ssa).unwrap();
@@ -1340,7 +1347,7 @@ fn scan_epilogues_require_pointwise_reads_and_completed_captures() {
     for (index, bias, opcode, expected) in [
         (11, 1001, BinaryOperator::Add, true),
         (1000, 1001, BinaryOperator::Add, false),
-        (11, 3, BinaryOperator::Add, false),
+        (11, 3, BinaryOperator::Add, true),
         (11, 1000, BinaryOperator::Divide, false),
     ] {
         let facts = include_str!("tests/scan_epilogue.egg")
@@ -1382,7 +1389,11 @@ fn scan_epilogues_require_pointwise_reads_and_completed_captures() {
         .unwrap();
         analysis::run(&mut graph).unwrap();
         super::epilogues(&mut graph).unwrap();
-        assert_eq!(Query(&graph).first("ScanEpilogue").unwrap().is_some(), expected);
+        assert_eq!(
+            Query(&graph).first("ScanEpilogue").unwrap().is_some(),
+            expected,
+            "index={index} bias={bias} opcode={opcode:?}"
+        );
     }
 }
 

@@ -19,7 +19,7 @@
 --! [[host]]
 --! entry = "result_demand_2_reproduce"
 --! result_ownership = [":owned", ":borrowed"]
---! calls = { "gpu-alloc" = 1, "gpu-draw" = 1 }
+--! calls = { "gpu-alloc" = 2, "gpu-write-scalar" = 1, "gpu-draw" = 1 }
 --! minimum_calls = { "gpu-dispatch" = 1 }
 
 

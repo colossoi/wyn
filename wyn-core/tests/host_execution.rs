@@ -573,7 +573,12 @@ fn reduction_dispatches_parallel_stages_and_publishes_scalar_result_on_gpu() {
     let input = backend.input(vec![0; 137 * 4]);
     let result = program.run("sum", &[input], &mut backend).unwrap();
     assert_eq!(backend.dispatches.len(), 2);
-    assert!(backend.scalar_writes.is_empty());
+    assert_eq!(
+        backend.scalar_writes.len(),
+        1,
+        "the input length is published to the GPU"
+    );
+    assert_eq!(i32::from_le_bytes(backend.scalar_writes[0].1), 137);
     assert!(!backend.freed.is_empty());
     assert_eq!(backend.buffers[&result.handle().unwrap()].len(), 4);
 }

@@ -24,4 +24,12 @@ jobs:
       - run: rustup toolchain install 1.96.0 --profile minimal
       - run: rustup override set 1.96.0
       - run: python scripts/test_integrations_test.py
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-spirv-tools
+      - env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: Join-Path $env:MSYS2_LOCATION ucrt64/bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
       - run: python scripts/test_integrations.py

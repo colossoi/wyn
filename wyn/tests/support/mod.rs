@@ -96,8 +96,9 @@ pub fn validate_shader_with(path: &Path, target: &str, spirv_val: &Path) -> Resu
 
     // Naga supports a subset of SPIR-V; unsupported features fail rather than skip validation.
     let module = match target {
-        "spirv" => naga::front::spv::parse_u8_slice(&source, &Default::default())
-            .map_err(|error| format!("Naga SPIR-V parse failed: {error}"))?,
+        "spirv" => naga::front::spv::parse_u8_slice(&source, &Default::default()).map_err(|error| {
+            format!("Naga SPIR-V parse failed (install spirv-val for full support): {error}")
+        })?,
         "wgsl" => {
             let source = std::str::from_utf8(&source).map_err(|error| error.to_string())?;
             naga::front::wgsl::parse_str(source).map_err(|error| error.emit_to_string(source))?

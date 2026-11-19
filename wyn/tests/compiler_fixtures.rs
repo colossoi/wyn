@@ -76,6 +76,29 @@ struct Artifact {
 }
 
 struct OutputDirectory(PathBuf);
+impl OutputDirectory {
+    fn new(prefix: &str) -> Self {
+        for sequence in 0_u64.. {
+            let path = std::env::temp_dir().join(format!("{prefix}_{}_{sequence}", std::process::id()));
+            match fs::create_dir(&path) {
+                Ok(()) => return Self(path),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("create test output directory: {error}"),
+            }
+        }
+        panic!("test output directory sequence exhausted");
+    }
+}
+
+#[test]
+fn output_directories_preserve_existing_contents() {
+    let first = OutputDirectory::new("wyn_fixture_directory_test");
+    fs::write(first.0.join("sentinel"), "preserved").unwrap();
+    let second = OutputDirectory::new("wyn_fixture_directory_test");
+    assert_ne!(first.0, second.0);
+    assert_eq!(fs::read_to_string(first.0.join("sentinel")).unwrap(), "preserved");
+}
+
 impl Drop for OutputDirectory {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
@@ -176,9 +199,7 @@ fn run_fixture(path: &Path, compiler: &Path) {
         }
     }
     let name = path.file_stem().unwrap().to_str().unwrap();
-    let directory =
-        OutputDirectory(std::env::temp_dir().join(format!("wyn_fixture_{}_{name}", std::process::id(),)));
-    fs::create_dir(&directory.0).expect("create fixture output directory");
+    let directory = OutputDirectory::new(&format!("wyn_fixture_{name}"));
     for target in targets {
         let directory = OutputDirectory(directory.0.join(if target.is_empty() { "check" } else { target }));
         fs::create_dir(&directory.0).expect("create target output directory");
@@ -392,13 +413,12 @@ fn run_fixture(path: &Path, compiler: &Path) {
 #[test]
 fn compiler_fixtures() {
     // A running Windows executable cannot be rebuilt; keep this run's compiler snapshot.
-    let compiler =
-        OutputDirectory(std::env::temp_dir().join(format!("wyn_fixture_compiler_{}", std::process::id())));
-    fs::create_dir(&compiler.0).expect("create compiler snapshot directory");
-    let compiler = compiler.0.join("wyn.exe");
+    let snapshot_directory;
     let compiler = if let Some(snapshot) = std::env::var_os("WYN_TEST_COMPILER") {
         PathBuf::from(snapshot)
     } else {
+        snapshot_directory = OutputDirectory::new("wyn_fixture_compiler");
+        let compiler = snapshot_directory.0.join("wyn.exe");
         fs::copy(env!("CARGO_BIN_EXE_wyn"), &compiler).expect("snapshot fixture compiler");
         compiler
     };
