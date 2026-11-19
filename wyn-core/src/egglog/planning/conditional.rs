@@ -48,6 +48,16 @@ pub(super) fn apply(graph: &mut EGraph, branch: Value, yes: Value, no: Value) ->
     let domain = query.required("OperationDomain", yes)?;
     let execution = query.required("OperationExecution", yes)?;
     let width = query.lookup("OperationWidth", yes)?;
+    let mut arm_operations = Vec::new();
+    for (slot, (map, lane)) in [(yes, a), (no, b)].into_iter().enumerate() {
+        let arm = query.required("ControlRegion", (branch, slot as i64))?;
+        let mut operations = query.operations(arm)?;
+        operations.retain(|&operation| operation != map);
+        if !operations.is_empty() {
+            operations.extend(query.operations(lane)?);
+            arm_operations.push((lane, operations));
+        }
+    }
     let mut certificates = Vec::new();
     query.for_each("OperationCertificate", |row| {
         if [branch, yes, no].contains(&row[0]) {
@@ -64,6 +74,14 @@ pub(super) fn apply(graph: &mut EGraph, branch: Value, yes: Value, no: Value) ->
             sink.add("FlowScope", lane)?;
             ir::parameters(&mut sink, RegionId(lane), &parameters)?;
             ir::yields(&mut sink, RegionId(lane), &[])?;
+            for (arm, operations) in arm_operations {
+                for (slot, operation) in operations.into_iter().enumerate() {
+                    sink.remove("OperationRegion", operation)?;
+                    sink.set("OperationRegion", operation, arm)?;
+                    sink.remove("OperationOrder", operation)?;
+                    sink.set("OperationOrder", operation, slot as i64)?;
+                }
+            }
             for arm in [a, b] {
                 for slot in 0..parameter_count as i64 {
                     sink.remove("RegionParameter", (arm, slot))?;

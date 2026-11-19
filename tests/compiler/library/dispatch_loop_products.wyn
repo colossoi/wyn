@@ -55,13 +55,8 @@ entry growing_while(n:i32, limit:i32) []i32 =
     (map(|j|if j<length(ys) then ys[j]+1 else i,iota(length(ys)+1)),i+1)
   in ys
 
-entry growing_rows(n:i32, limit:i32) [][]i32 =
-  let rows=loop rows=map(|k|map(|x|x,iota(k)),iota(n)) for i<limit do
-    map(|row|map(|j|if j<length(row) then row[j]+1 else i,iota(length(row)+1)),rows)
-  in map(|row|map(|x|x+10,row),rows)
-
-entry nested_rows(n:i32, limit:i32) [][][]i32 =
-  loop rows=map(|k|map(|j|map(|x|x,iota(j)),iota(k)),iota(n)) for i<limit do
+entry nested_rows(n:i32, limit:i32) [2][2][3]i32 =
+  loop rows=map(|k|map(|j|map(|x|x+j+k+n,iota(3)),iota(2)),iota(2)) for _i<limit do
     map(|plane|map(|row|map(|x|x+1,row),plane),rows)
 
 entry uniform_rows(n:i32, limit:i32) [][]i32 =

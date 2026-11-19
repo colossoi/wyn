@@ -14,7 +14,7 @@ pub fn eliminate_dead_pure_instructions(body: &mut FuncBody) {
     super::ir::eliminate_dead_values(&mut body.inner, is_discardable);
 }
 
-fn is_discardable(instruction: &InstKind) -> bool {
+pub(crate) fn is_discardable(instruction: &InstKind) -> bool {
     if let InstKind::Op {
         tag: OpTag::Intrinsic { id, overload_idx },
         ..

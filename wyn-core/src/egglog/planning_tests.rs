@@ -103,6 +103,8 @@ fn every_collective_callback_must_be_available_before_distribution() {
 fn product_loops_track_array_component_length_proofs() {
     for (source, capacity) in [
         ("entry main(steps:i32) []i32=let (ys,k)=loop (ys,k)=([0,0,0,0],0) while k<steps do (ys with [k%4]=k,k+1) in ys", Some(4)),
+        ("entry main(steps:i32, choose:bool) []i32=let (ys,k)=loop (ys,k)=([0,0,0,0],0) while k<steps do if choose then (ys with [0]=k,k+1) else (ys with [1]=k,k+1) in ys", Some(4)),
+        ("entry main(steps:i32, choose:bool) []i32=let (ys,k)=loop (ys,k)=(replicate(4,0i32),0) while k<steps do if choose then (ys with [0]=k,k+1) else (replicate(length(ys)+1,0i32),k+1) in ys", None),
         ("entry main(steps:i32) []i32=let (ys,k)=loop (ys,k)=(replicate(4,0i32),0) while k<steps do (map(|i|if i<length(ys) then ys[i] else k,iota(length(ys)+1)),k+1) in ys", None),
     ] {
         let source = compile_thru_tlc(source).unwrap();
@@ -111,7 +113,7 @@ fn product_loops_track_array_component_length_proofs() {
         super::analyze(&mut program.graph).unwrap();let query=Query(&program.graph);let mut components=0;
         query.for_each("LoopArrayComponent",|row| {
             let bound=query.lookup("OuterCapacity",row[3])?.map(|value|program.graph.value_to_base::<i64>(value));
-            assert_eq!(bound,capacity);assert_eq!(query.contains("LoopPreservesComponentLength",(row[0],row[1],row[2]))?,capacity.is_some());components+=1;Ok(())
+            assert_eq!(query.contains("LoopPreservesComponentLength",(row[0],row[1],row[2]))?,capacity.is_some());assert_eq!(bound,capacity);components+=1;Ok(())
         }).unwrap();
         assert!(components > 0, "exercise a projected array in a product carry");
     }
@@ -261,8 +263,9 @@ fn top_level(graph: &EGraph, function: Value, constructor: &str) -> Vec<Value> {
 }
 
 fn dispatches(graph: &EGraph, function: Value) -> Vec<super::super::execution::Dispatch> {
-    let query = Query(graph);
-    let execution = super::super::execution::Execution::select(graph).unwrap();
+    let mut graph = graph.clone();
+    let execution = super::super::execution::Execution::select(&mut graph).unwrap();
+    let query = Query(&graph);
     fn collect(
         query: Query<'_>,
         execution: &super::super::execution::Execution,
@@ -1849,14 +1852,20 @@ fn fixed_loop_states_require_every_array_component_to_preserve_length() {
         } else {
             ""
         };
-        let mut graph = test_graph::fixture(&[], &format!(r#"
+        let mut graph = test_graph::fixture(
+            &[],
+            &format!(
+                r#"
             (LoopValueCarry (OperationId 0) 0 (ValueId 10) (ValueId 20) (ValueId 30))
-            (LoopArrayComponent (OperationId 0) 0 (FieldPath (RootPath) 0) (ValueId 11) (ValueId 21) (ValueId 31))
-            (LoopArrayComponent (OperationId 0) 0 (FieldPath (RootPath) 1) (ValueId 12) (ValueId 22) (ValueId 32))
+            (LoopArrayComponent (OperationId 0) 0 (FieldPath (RootPath) 0) (ValueId 11) (ValueId 21))
+            (LoopArrayComponent (OperationId 0) 0 (FieldPath (RootPath) 1) (ValueId 12) (ValueId 22))
             (LoopPreservesComponentLength (OperationId 0) 0 (FieldPath (RootPath) 0))
             {second}
             (run-schedule (saturate physical-legality))
-        "#)).unwrap();
+        "#
+            ),
+        )
+        .unwrap();
         super::load_execution(&mut graph).unwrap();
         graph
             .parse_and_run_program(

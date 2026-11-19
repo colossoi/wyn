@@ -39,6 +39,7 @@ use crate::ssa::types::{
 };
 use crate::types::as_soa_tuple;
 use crate::types::TypeExt;
+use crate::wgsl::bindings::is_scalar_literal;
 use crate::wgsl::int64_emulation::{self, U64Emulation};
 use crate::wgsl::{WgslInt64Mode, WgslOptions};
 use crate::BindingRef;
@@ -1872,16 +1873,6 @@ impl ValueBinding {
             ValueBinding::Alias(s) | ValueBinding::Variable(s) => s,
         }
     }
-}
-
-fn is_scalar_literal(inst: &WynInstNode) -> bool {
-    matches!(
-        inst.data,
-        InstKind::Op {
-            tag: op::OpTag::Int(_) | op::OpTag::Uint(_) | op::OpTag::Float(_) | op::OpTag::Bool(_),
-            ..
-        }
-    )
 }
 
 struct BodyLowerCtx<'a, 'b> {

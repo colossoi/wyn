@@ -7,7 +7,7 @@
 --! [[host]]
 --! entry = "runtime_rows"
 --! inputs = {xs=[10,20,30],n=[4]}
---! dispatches = 4
+--! dispatches = 3
 --! result_layouts = ["(:array :length :dynamic :stride 4 :range :caller :element :i32)", ":i32"]
 --! no_device_reads = true
 

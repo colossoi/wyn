@@ -229,6 +229,9 @@ pub(in crate::egglog) fn properties(
         Code::Scratch | Code::ArrayLiteral | Code::Range | Code::Uninitialized => {
             sink.add("FreshOutput", (operation, 0_i64))?;
             match code {
+                Code::Scratch | Code::Uninitialized => {
+                    sink.add("ScratchAllocation", operation)?;
+                }
                 Code::ArrayLiteral => {
                     sink.add("ArrayLiteralOperation", operation)?;
                 }

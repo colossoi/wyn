@@ -62,6 +62,7 @@ pub(super) struct Body<'a, 'p, 'source> {
     next_workgroup_array: u32,
     pub subgroup: Option<subgroups::Subgroup>,
     pub storage_accesses: LookupMap<BindingRef, crate::ResourceAccess>,
+    pub restored_reads: LookupMap<PlaceId, BindingRef>,
     pub active_dispatch: Option<Value>,
     pub host_values: Bindings<Value, ScalarExpr>,
     pub collections: LookupMap<Value, Collection>,
@@ -99,6 +100,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
             next_workgroup_array: 0,
             subgroup: None,
             storage_accesses: LookupMap::default(),
+            restored_reads: LookupMap::default(),
             active_dispatch: None,
             host_values: Bindings::default(),
             collections: LookupMap::default(),
@@ -130,6 +132,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
         self.collections.clear();
         self.reused_buffers.clear();
         self.storage_accesses.clear();
+        self.restored_reads.clear();
         self.next_workgroup_array = 0;
         self.active_dispatch = None;
         self.subgroup = None;

@@ -1,6 +1,8 @@
-use super::{liveness, run};
+use super::{ensure, invalidate, liveness, run};
 use crate::egglog::cost::CostModel;
+use crate::egglog::dataflow::edit;
 use crate::egglog::dataflow::ir::{operation, outputs, parameters, region, yields, Code, Name, Parameter};
+use crate::egglog::execution::Execution;
 use crate::egglog::fusion;
 use crate::egglog::query::Query;
 use crate::egglog::{planning, test_graph, OptimizeError};
@@ -8,8 +10,60 @@ use crate::types;
 use egglog_engine::{RawValues, Write};
 
 #[test]
+fn dataflow_requests_reuse_the_same_graph_revision() -> Result<(), OptimizeError> {
+    let mut graph = test_graph::import("entry main(x:i32,y:i32) i32=x+y")?;
+    let root = test_graph::root(&graph);
+    let query = Query(&graph);
+    let operation = query.operations(root)?[0];
+    let inputs = query.sequence("Input", operation)?;
+    ensure(&mut graph)?;
+    let revision = Query(&graph).required("AnalysisRevision", RawValues(Vec::new()))?;
+    ensure(&mut graph)?;
+    assert_eq!(
+        Query(&graph).required("AnalysisRevision", RawValues(Vec::new()))?,
+        revision
+    );
+    assert!(Query(&graph).contains("OperationUse", (operation, inputs[0]))?);
+    edit::inputs(&mut graph, operation, &[inputs[1], inputs[1]])?;
+    ensure(&mut graph)?;
+    assert!(!Query(&graph).contains("OperationUse", (operation, inputs[0]))?);
+    assert!(Query(&graph).contains("OperationUse", (operation, inputs[1]))?);
+    Ok(())
+}
+
+#[test]
+fn region_order_refreshes_the_changed_body() -> Result<(), OptimizeError> {
+    let mut graph =
+        test_graph::import("entry main(x:i32,y:i32) (i32,i32)=(x+y,x-y) entry other(x:i32) i32=x+1")?;
+    ensure(&mut graph)?;
+    let query = Query(&graph);
+    let mut roots = Vec::new();
+    query.for_function("EntryOrder", |keys, order| {
+        roots.push((
+            graph.value_to_base::<i64>(order),
+            query.required("FunctionRoot", keys[0])?,
+        ));
+        Ok(())
+    })?;
+    roots.sort_by_key(|&(order, _)| order);
+    let main = roots[0].1;
+    let other = roots[1].1;
+    let original = query.vector(query.required("RegionOperations", main)?)?;
+    let untouched = query.required("RegionOperations", other)?;
+    edit::move_before(&mut graph, original[1], original[0])?;
+    ensure(&mut graph)?;
+    let query = Query(&graph);
+    assert_eq!(query.required("RegionOperations", other)?, untouched);
+    assert!(query.contains("FirstOperation", (main, original[1]))?);
+    assert!(query.contains("LastOperation", (main, *original.last().unwrap()))?);
+    assert!(query.contains("NextOperation", (original[1], original[0]))?);
+    assert!(!query.contains("NextOperation", (original[0], original[1]))?);
+    Ok(())
+}
+
+#[test]
 fn rewriting_defers_live_after_and_host_classification() -> Result<(), OptimizeError> {
-    let mut graph = test_graph::import("entry main(x:i32) i32=(x+1)*x")?;
+    let mut graph = test_graph::import("entry main(x:i32) i32=(x+1)*x entry other(x:i32) i32=(x+2)*x")?;
     run(&mut graph)?;
     planning::analyze(&mut graph)?;
     for table in ["FlowLive", "NameLiveAfter", "LaneDependentFunction", "HostRegion"] {
@@ -18,8 +72,17 @@ fn rewriting_defers_live_after_and_host_classification() -> Result<(), OptimizeE
             "{table} was calculated before its consumer"
         );
     }
-    liveness(&mut graph)?;
-    assert!(Query(&graph).first("NameLiveAfter")?.is_some());
+    let root = test_graph::root(&graph);
+    liveness(&mut graph, &[root])?;
+    let query = Query(&graph);
+    query.for_function("EntryOrder", |keys, _| {
+        let candidate = query.required("FunctionRoot", keys[0])?;
+        assert_eq!(query.contains("LivenessRegion", candidate)?, candidate == root);
+        Ok(())
+    })?;
+    assert!(query.first("NameLiveAfter")?.is_some());
+    liveness(&mut graph, &[root])?;
+    assert_eq!(graph.get_size("LivenessRequest"), 1);
     planning::place(
         &mut graph,
         crate::PipelineTopologyPolicy::AuthoredOnly,
@@ -56,6 +119,8 @@ fn loop_and_reducer_metadata_is_computed_by_its_consumers() -> Result<(), Optimi
     }
     planning::schedule(&mut graph)?;
     planning::epilogues(&mut graph)?;
+    assert!(Query(&graph).first("ReducerState")?.is_none());
+    Execution::select(&mut graph)?;
     assert!(Query(&graph).first("ReducerState")?.is_some());
     assert!(Query(&graph).first("NativeAddition")?.is_some());
     Ok(())
@@ -81,6 +146,43 @@ fn constant_index_arithmetic_does_not_prove_wrapping_counts() {
 }
 
 #[test]
+fn immutable_term_facts_survive_an_analysis_refresh() -> Result<(), OptimizeError> {
+    let mut graph = fusion::new_graph()?;
+    graph.parse_and_run_program(
+        None,
+        r#"
+        (let n (ValueId 1))
+        (let index (IndexAdd (IndexValue n) (IndexConstant 2)))
+        (let element (ScalarElement (I32)))
+        (set (OperationShape (OperationId 1)) (vec-of index))
+        (set (OperationSlices (OperationId 1)) (vec-of (At index)))
+        (let shape (OperationShape (OperationId 1)))
+        (let slices (OperationSlices (OperationId 1)))
+        (run-schedule (saturate graph-indices dataflow-dependencies type-sizes))
+        "#,
+    )?;
+    invalidate(&mut graph)?;
+    graph.parse_and_run_program(
+        None,
+        r#"
+        (check (IndexUse index n))
+        (check (= (ShapeAt shape 0) index) (ShapeUse shape n))
+        (check (= (SliceAt slices 0) (At index)) (SliceUse slices n))
+        (check (= (ElementBytes element) (bigint 4)))
+        (let m (ValueId 2))
+        (delete (OperationShape (OperationId 1)))
+        (delete (OperationSlices (OperationId 1)))
+        (set (OperationShape (OperationId 1)) (vec-of (IndexValue m)))
+        (let revised (OperationShape (OperationId 1)))
+        (run-schedule (saturate graph-indices dataflow-dependencies))
+        (check (ShapeUse revised m) (DirectOperationUse (OperationId 1) (ValueNameRef m)))
+        (fail (check (DirectOperationUse (OperationId 1) (ValueNameRef n))))
+        "#,
+    )?;
+    Ok(())
+}
+
+#[test]
 fn logical_values_and_storage_reads_have_distinct_effects() {
     let mut graph = fusion::new_graph().unwrap();
     graph.parse_and_run_program(None,r#"
@@ -103,6 +205,72 @@ fn logical_values_and_storage_reads_have_distinct_effects() {
         (check (OperationsConflict (OperationId 2) (OperationId 4)))
         (check (OperationsConflict (OperationId 2) (OperationId 3)))
     "#).unwrap();
+}
+
+#[test]
+fn reducer_width_requires_agreement_and_a_length_preserving_combiner() -> Result<(), OptimizeError> {
+    for (item_width, preserves, expected) in [(4, true, true), (3, true, false), (4, false, false)] {
+        let result_bound = if preserves { "(IndexValue length)" } else { "(IndexConstant 3)" };
+        let mut graph = fusion::new_graph()?;
+        graph.parse_and_run_program(
+            None,
+            &format!(
+                r#"
+            (let fold (OperationId 0)) (let reducer (RegionId 0))
+            (let neutral (ValueId 0)) (let item (ValueId 1))
+            (let left (ValueId 2)) (let right (ValueId 3))
+            (let result (ValueId 4)) (let length (ValueId 5)) (let measure (OperationId 1))
+            (set (ResultKindOf fold 0) (Folded (Total)))
+            (set (ResultNeutralCount fold 0) 1) (set (ResultValueCount fold 0) 1)
+            (set (ResultNeutral fold 0 0) (ValueNameRef neutral))
+            (set (ResultValue fold 0 0) (ValueNameRef item))
+            (set (ResultReducer fold 0) reducer)
+            (set (RegionParameterCount reducer) 2)
+            (set (RegionParameter reducer 0) (ValueNameRef left))
+            (set (RegionParameter reducer 1) (ValueNameRef right))
+            (set (RegionYield reducer 0) (ValueNameRef result))
+            (LengthOperation measure 0)
+            (set (Input measure 0) (ValueNameRef left))
+            (set (Output measure 0) (ValueNameRef length))
+            (ArrayOuterBound neutral (IndexConstant 4))
+            (ArrayOuterBound item (IndexConstant {item_width}))
+            (ArrayOuterBound result {result_bound})
+            (run-schedule (saturate dataflow-dependencies))
+        "#
+            ),
+        )?;
+        let check = "(check (ArrayOuterBound right (IndexConstant 4)))";
+        let check = if expected { check.to_string() } else { format!("(fail {check})") };
+        graph.parse_and_run_program(None, &check)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn counted_shift_requires_a_proven_in_range_amount() -> Result<(), OptimizeError> {
+    for (limit, total) in [("16", true), ("17", false), ("n", false)] {
+        let source = format!(
+            "entry main(x:i32,n:i32,b:bool) i32 =
+             let count = if b then {limit} else 0 in
+             loop acc=0 for i<count do acc + (x >> (i*2+1))"
+        );
+        let mut graph = test_graph::import(&source)?;
+        run(&mut graph)?;
+        let query = Query(&graph);
+        let mut shifts = 0;
+        query.for_each("LiveOperation", |row| {
+            let operation = row[0];
+            if let Some(payload) = query.lookup("ScalarPayload", operation)? {
+                if query.contains("ShiftPayload", payload)? {
+                    shifts += 1;
+                    assert_eq!(!query.contains("OperationTrap", operation)?, total);
+                }
+            }
+            Ok(())
+        })?;
+        assert_eq!(shifts, 1);
+    }
+    Ok(())
 }
 
 #[test]
@@ -165,6 +333,16 @@ fn bounded_work_counts_every_loop_iteration() {
     run(&mut graph).unwrap();
     planning::analyze(&mut graph).unwrap();
     graph
-        .parse_and_run_program(None, "(check (= (OperationWork (OperationId 1)) (bigint 40)))")
+        .parse_and_run_program(
+            None,
+            r#"
+            (fail (check (= wanted (OperationWork operation))))
+            (OperationWorkDemand (OperationId 1))
+            (run-schedule (saturate graph-work))
+            (check (= (OperationWork (OperationId 1)) (bigint 40)))
+            (check (= (RegionWork (RegionId 0)) (bigint 1)))
+            (fail (check (= unused (RegionWork (RegionId 1)))))
+        "#,
+        )
         .unwrap();
 }

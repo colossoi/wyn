@@ -1,4 +1,6 @@
-use super::{domain_names, error, host, names_in, Body, EntryEmission, OptimizeError, Typed};
+use super::{
+    domain_names, error, host, names_in, statement_names, Body, EntryEmission, OptimizeError, Typed,
+};
 use crate::builtins::catalog;
 use crate::egglog::execution::Collective;
 use crate::egglog::to_ssa::kernels::CollectivePhase;
@@ -48,6 +50,10 @@ impl EntryEmission<'_, '_, '_> {
         inside.extend(output_names.iter().copied());
         inside.extend(reducer_names.iter().copied());
         inside.extend(domain_names(query, domain)?);
+        if let Some(epilogue) = epilogue {
+            inside.extend(statement_names(query, preparation)?);
+            inside.extend(names_in(query, "OperationUse", epilogue)?);
+        }
         let count = host::guarded_index(
             query,
             &self.body.host_values,

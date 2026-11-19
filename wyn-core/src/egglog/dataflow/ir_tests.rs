@@ -2,6 +2,7 @@ use super::{code, operation, outputs, parameters, region, yields, Code, Name, Pa
 use crate::egglog::memory::load;
 use crate::egglog::payload::Payload;
 use crate::egglog::query::Query;
+use crate::egglog::test_graph;
 use crate::egglog::OptimizeError;
 use crate::op::BinaryOperator;
 use egglog_engine::{EGraph, RawValues, Write};
@@ -111,7 +112,8 @@ fn operations_share_connectivity_without_sharing_occurrences_or_payloads() {
     assert_eq!(sub_code, Code::Scalar(Payload::Binary(BinaryOperator::Subtract)));
     crate::egglog::analysis::run(&mut graph).unwrap();
     assert!(Query(&graph).first("NameLiveAfter").unwrap().is_none());
-    crate::egglog::analysis::liveness(&mut graph).unwrap();
+    let root = test_graph::root(&graph);
+    crate::egglog::analysis::liveness(&mut graph, &[root]).unwrap();
     let query = Query(&graph);
     let input = query.required("Input", (add.0, 0_i64)).unwrap();
     assert!(query.contains("AvailableAt", (add.0, input)).unwrap());

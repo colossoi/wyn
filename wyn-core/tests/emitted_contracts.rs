@@ -41,20 +41,29 @@ fn output_copies_preserve_views_and_use_parallel_dispatches() {
         let prefix = program.entries.iter().find(|entry| entry.name == "prefix").unwrap();
         assert_eq!(prefix.results[0], *prefix.inputs.first().unwrap());
         assert!(prefix.operations.is_empty());
-        for name in ["shifted", "produced", "mixed", "range", "compacted", "effects"] {
+        for (name, slot) in [
+            ("shifted", 0),
+            ("produced", 0),
+            ("mixed", 1),
+            ("range", 0),
+            ("compacted", 0),
+            ("effects", 0),
+        ] {
             let entry = program.entries.iter().find(|entry| entry.name == name).unwrap();
-            let copies: Vec<_> = entry
-                .operations
+            let result = entry.results[slot];
+            assert!(entry.allocations().any(|allocation| allocation.resource() == result));
+            let copies: Vec<_> = program
+                .interface
+                .frame_graph
+                .passes
                 .iter()
-                .filter_map(|op| {
-                    let Operation::Dispatch { pipeline, stage, .. } = op else {
-                        return None;
+                .filter(|pass| pass.writes.iter().any(|access| access.resource == result.0))
+                .map(|pass| {
+                    let Pipeline::Compute(pipeline) = &program.interface.pipelines[pass.pipeline_index]
+                    else {
+                        panic!("array output must be written by a compute pass");
                     };
-                    let Pipeline::Compute(pipeline) = &program.interface.pipelines[*pipeline] else {
-                        panic!()
-                    };
-                    let stage = &pipeline.stages[*stage];
-                    stage.entry_point.ends_with("_finish").then_some(stage)
+                    &pipeline.stages[pass.stage_index]
                 })
                 .collect();
             assert_eq!(copies.len(), 1, "{format:?}: {name}");
@@ -876,25 +885,20 @@ fn tuple_projections_keep_result_capacity_on_both_backends() {
     for program in host_outputs(include_str!(
         "../../testfiles/regressions/fusion_shared_tuple.wyn"
     )) {
-        let outputs: Vec<_> = program
-            .interface
-            .pipelines
-            .iter()
-            .flat_map(|p| match p {
-                Pipeline::Compute(p) => &p.bindings,
-                _ => panic!("compute pipeline"),
-            })
-            .filter_map(|b| match b {
-                Binding::StorageBuffer {
-                    usage: host::BufferUsage::Output,
-                    length,
-                    ..
-                } => Some(length),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(outputs.len(), 2);
-        assert!(outputs.iter().all(|n| matches!(n, Some(BufferLen::Fixed { bytes: 64 }))));
+        assert_eq!(program.interface.source_results.len(), 2);
+        let entry = program.entries.iter().find(|entry| entry.name == "repro").unwrap();
+        let [first, second] = entry.results.as_slice() else {
+            panic!("two published tuple projections");
+        };
+        assert_ne!(first, second);
+        for result in [first, second] {
+            let Some(Allocation::Buffer { bytes, .. }) =
+                entry.allocations().find(|allocation| allocation.resource() == *result)
+            else {
+                panic!("tuple projection result must have a backing buffer");
+            };
+            assert_eq!(bytes.constant().unwrap(), Some(64));
+        }
     }
 }
 
@@ -964,7 +968,7 @@ fn grouped_entries_keep_storage_and_dispatch_contracts() {
                     })
                     .expect("read-write input buffer");
                 assert_eq!((results[0].set, results[0].binding), (set, binding));
-                assert_eq!(p.bindings.len(), if scan { 5 } else { 2 });
+                assert_eq!(p.bindings.len(), if scan { 4 } else { 2 });
                 assert_eq!(p.stages.len(), if scan { 3 } else { 1 });
             }
             "observed_scatter" | "captured_scatter" => {
@@ -986,9 +990,22 @@ fn grouped_entries_keep_storage_and_dispatch_contracts() {
             "partial_whole" => assert_eq!(p.stages.len(), 1),
             "partial_slice" => assert_eq!(p.stages.len(), 2),
             "scalar_loop" => {
-                assert_eq!(p.stages.len(), 2);
-                assert_eq!(p.stages[0].workgroup_size, (1, 1, 1));
-                assert_eq!(p.stages[1].workgroup_size, (64, 1, 1));
+                assert_eq!(p.stages.len(), 1);
+                let mut setup =
+                    entry.operations.iter().take_while(|op| !matches!(op, Operation::Dispatch { .. }));
+                assert!(
+                    setup.any(|operation| {
+                        let Operation::Scalar { value, .. } = operation else {
+                            return false;
+                        };
+                        let mut sources = Vec::new();
+                        value.sources(&mut sources);
+                        sources.into_iter().any(|source| {
+                            matches!(source, host::ScalarSource::Resource(id) if entry.host_inputs.contains_key(id))
+                        })
+                    }),
+                    "the bias is evaluated from a CPU parameter before the map dispatch"
+                );
             }
             "large_fixed" => {
                 assert_eq!(p.stages.len(), 1);
@@ -1077,7 +1094,7 @@ fn empty_dimensions_keep_logical_counts_and_physical_strides() {
             else {
                 panic!("array result");
             };
-            assert_eq!(*stride, 4);
+            assert_eq!(*stride, if result.entry == "fields" { 8 } else { 4 });
             let expected = match result.entry.as_str() {
                 "empty" => 0,
                 "rows" => 3,
@@ -1085,8 +1102,25 @@ fn empty_dimensions_keep_logical_counts_and_physical_strides() {
                 name => panic!("unexpected result {name}"),
             };
             assert_eq!(*length, Some(expected));
-            if result.entry == "fields" && result.result == 1 {
-                assert!(matches!(**element, ResultLayout::Scalar(ResultScalar::I32)));
+            if result.entry == "fields" {
+                let ResultLayout::Tuple { fields, .. } = element.as_ref() else {
+                    panic!("one authored array of tuples");
+                };
+                assert_eq!(result.result, 0);
+                assert_eq!(fields.len(), 2);
+                assert!(matches!(
+                    fields[0].layout,
+                    ResultLayout::Sequence {
+                        count: 0,
+                        stride: 4,
+                        ..
+                    }
+                ));
+                assert_eq!(fields[1].offset, 4);
+                assert!(matches!(
+                    fields[1].layout,
+                    ResultLayout::Scalar(ResultScalar::I32)
+                ));
             } else if result.entry != "empty" {
                 assert!(matches!(
                     **element,

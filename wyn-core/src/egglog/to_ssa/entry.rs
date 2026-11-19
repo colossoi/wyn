@@ -219,12 +219,14 @@ pub(super) fn lower(
             next,
             declarations: vec![],
             scalar_tasks: vec![],
+            input_length_buffer: None,
         });
         let mut emission = EntryEmission {
             body,
             templates,
             params,
             parameter_inputs,
+            input_lengths: LookupMap::default(),
             inputs: vec![],
             parameters: LookupSet::default(),
             saved: StableMap::default(),
@@ -246,6 +248,7 @@ pub(super) fn lower(
             entries: vec![],
             loops: vec![],
         };
+        emission.prepare_input_lengths()?;
         emission.restart()?;
         let live = live_names(emission.body.query(), &[], region)?;
         emission
@@ -256,7 +259,8 @@ pub(super) fn lower(
             || (output_arity == 1
                 && (declaration.source_entry.is_some()
                     || declaration.outputs.first().is_some_and(|output| output.ty.is_array())));
-        let mut output_values = emission.body.results(region)?;
+        let mut output_values =
+            if output_arity == 0 { Vec::new() } else { emission.body.results(region)? };
         if !whole_result
             && matches!(
                 strip_existentials(&source_body.ty),
@@ -267,18 +271,34 @@ pub(super) fn lower(
             output_values = emission.body.unpack(output_values.remove(0))?;
         }
         let lowered_types = match strip_existentials(&source_body.ty) {
+            _ if output_arity == 0 => &[],
             ty if whole_result => std::slice::from_ref(ty),
             Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) => fields.as_slice(),
             ty => std::slice::from_ref(ty),
+        };
+        let declared_product = match declaration.outputs.as_slice() {
+            [output] if !whole_result && output.attribute.is_none() => {
+                match strip_existentials(&output.ty) {
+                    Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) => {
+                        Some(fields.as_slice())
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
         };
         let output_types = lowered_types
             .iter()
             .enumerate()
             .map(|(index, ty)| {
-                let declared = declaration.outputs.get(index).map_or(ty, |output| &output.ty);
+                let declared = match declared_product {
+                    Some(fields) => fields.get(index).unwrap_or(ty),
+                    None if declaration.buffer_demand => ty,
+                    None => declaration.outputs.get(index).map_or(ty, |output| &output.ty),
+                };
                 let Some(ty) = output_type(declared, ty) else {
                     return Err(error(format!(
-                        "entry {}: output representation differs from its declared array nesting",
+                        "entry {}: output representation {ty} differs from declared {declared}",
                         declaration.name,
                     )));
                 };
@@ -546,6 +566,7 @@ pub(super) fn lower(
         }
         let cpu_results = if declaration.entry_kind == EntryKind::Compute
             && emission.entries.is_empty()
+            && !output_values.is_empty()
             && output_values.iter().all(|value| host::scalar_type(&value.ty).is_some())
         {
             let parameters = emission
@@ -561,7 +582,39 @@ pub(super) fn lower(
         if declaration.entry_kind == EntryKind::Compute {
             emission.pending = emission.pending_observable || emission.body.active_dispatch.is_some();
         }
-        emission.pending |= write_results(&mut emission.body, &output_values, &outputs)?;
+        let copy_width = if declaration.entry_kind == EntryKind::Compute
+            && declaration.compute_dispatch.is_none()
+            && !emission.pending
+        {
+            let query = emission.body.query();
+            if let Some(width) = query.lookup("ParallelPublicationWidth", function)? {
+                let width = u32::try_from(query.0.value_to_base::<i64>(width))
+                    .map_err(|_| error("invalid output copy workgroup size"))?;
+                let mut lengths = output_values.iter().zip(&outputs).filter_map(|(value, output)| {
+                    let binding = output.storage_binding()?;
+                    if types::array_view_buffer(&value.ty) == Some(binding) {
+                        return None;
+                    }
+                    output.host.elements.as_ref().map(|(_, length)| length.clone())
+                });
+                if let Some(first) = lengths.next() {
+                    let extent =
+                        lengths.fold(first, |max, count| Expr::Max(Box::new(max), Box::new(count)));
+                    let extent = Expr::Max(Box::new(Expr::Integer(1)), Box::new(extent));
+                    let size = DispatchSize::linear(extent, width)
+                        .map_err(|failure| error(failure.to_string()))?;
+                    emission.dispatch_override = Some(((width, 1, 1), size));
+                    Some(width)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        emission.pending |= write_results(&mut emission.body, &output_values, &outputs, copy_width)?;
         if !emission.pending && !emission.entries.is_empty() {
             let Some(generated) = emission.body.generated.as_ref() else {
                 return Err(error("entry buffers missing"));
@@ -867,6 +920,7 @@ struct EntryEmission<'a, 'p, 'source> {
     templates: Vec<(EntryInput, Type)>,
     params: Vec<Value>,
     parameter_inputs: Vec<Vec<usize>>,
+    input_lengths: LookupMap<usize, (BindingRef, u32)>,
     inputs: Vec<EntryInput>,
     parameters: LookupSet<Value>,
     saved: StableMap<Value, Location>,
@@ -982,7 +1036,7 @@ impl EntryEmission<'_, '_, '_> {
         values = self.restored_results(results, values.len())?;
         let mut materialized = false;
         for (i, plan) in counts.into_iter().enumerate() {
-            let Some((binding, rank, leaf, known_shape)) = plan else {
+            let Some((binding, rank, mut leaf, known_shape)) = plan else {
                 if let Some(ResultShape::Rectangular(shape)) = &shapes[i] {
                     self.body.set_shape(&values[i], shape.clone())?;
                 }
@@ -1025,8 +1079,16 @@ impl EntryEmission<'_, '_, '_> {
                 offset_sources.push(scalar_source(binding));
             }
             let length = self.body.index(totals, Body::number((rank - 1) as u32))?;
-            let Some(stride) = storage_elem_stride(&storage_value_type(&leaf)) else {
-                return Err(error("output leaf has no storage stride"));
+            let stride = match storage_elem_stride(&storage_value_type(&leaf)) {
+                Some(stride) => stride,
+                None => {
+                    // A product result can contain views whose logical arrays have dynamic lengths.
+                    leaf = (0..rank)
+                        .try_fold(values[i].ty.clone(), |ty, _| Body::indexed_type(&ty))
+                        .ok_or_else(|| error("output leaf has no physical element type"))?;
+                    storage_elem_stride(&storage_value_type(&leaf))
+                        .ok_or_else(|| error(format!("output leaf has no storage stride: {leaf:?}")))?
+                }
             };
             let bytes = Expr::Multiply(
                 Box::new(lengths[rank - 1].clone()),
@@ -1051,6 +1113,66 @@ impl EntryEmission<'_, '_, '_> {
         Ok((values, shapes))
     }
 
+    fn prepare_input_lengths(&mut self) -> Result<(), OptimizeError> {
+        if self.kind != EntryKind::Compute {
+            return Ok(());
+        }
+        let query = self.body.query();
+        let mut inputs = Vec::new();
+        for (&parameter, components) in self.params.iter().zip(&self.parameter_inputs) {
+            let ([index], Some(name)) = (components.as_slice(), query.value_name(parameter)?) else {
+                continue;
+            };
+            let input = &self.templates[*index].0;
+            let (Some(source), Some(element)) = (input.storage_binding(), input.ty.elem_type()) else {
+                continue;
+            };
+            if !query.contains("HostInputLength", name)?
+                || matches!(
+                    input.ty.array_size(),
+                    Some(Type::Constructed(TypeName::Size(_), _))
+                )
+            {
+                continue;
+            }
+            let Some(stride) = storage_elem_stride(&storage_value_type(element)) else {
+                return Err(error("input length requires a storage stride"));
+            };
+            inputs.push((*index, source, stride));
+        }
+        if inputs.is_empty() {
+            return Ok(());
+        }
+        let count = u32::try_from(inputs.len()).map_err(|_| error("too many input lengths"))?;
+        let Some(bytes) = count.checked_mul(4) else {
+            return Err(error("input length buffer exceeds host offset range"));
+        };
+        let (binding, _) = self.body.device_buffer(
+            &Body::number(0).ty,
+            Expr::Integer(bytes.into()),
+            Body::number(count),
+        )?;
+        let Some(generated) = self.body.generated.as_mut() else {
+            return Err(error("input length buffer has no host interface"));
+        };
+        generated.input_length_buffer = Some(binding);
+        for (word, (index, source, stride)) in (0..count).zip(inputs) {
+            self.input_lengths.insert(index, (binding, word));
+            generated.scalar_tasks.push(ScalarTask {
+                stage: String::new(),
+                destination: scalar_source(binding),
+                offset: word * 4,
+                ty: ScalarType::I32,
+                value: ScalarExpr::BufferLength {
+                    source: scalar_source(source),
+                    stride,
+                },
+                replaces_dispatch: false,
+            });
+        }
+        Ok(())
+    }
+
     fn restart(&mut self) -> Result<(), OptimizeError> {
         self.body.reset_shader();
         self.inputs.clear();
@@ -1064,7 +1186,9 @@ impl EntryEmission<'_, '_, '_> {
             let mut host = None;
             for &index in components {
                 let (input, ty) = &self.templates[index];
-                let (value, scalar) = bind_input(&mut self.body, input.clone(), ty, &mut self.inputs)?;
+                let length = self.input_lengths.get(&index).copied();
+                let (value, scalar) =
+                    bind_input(&mut self.body, input.clone(), ty, length, &mut self.inputs)?;
                 values.push(value);
                 host = scalar;
             }
@@ -1131,9 +1255,14 @@ impl EntryEmission<'_, '_, '_> {
                 let atomic = self.body.atomic_contributions(statement)?;
                 let rank = crate::egglog::analysis::count(query, "LaunchRank", statement)?;
                 let domain = query.required("OperationDomain", statement)?;
+                let columns = query.lookup("ColumnScan", statement)?;
+                let extents = if let Some(plan) = columns {
+                    vec![query.fields("ScanColumns", plan)?[1]]
+                } else {
+                    query.indexed("DomainExtent", &[domain], rank)?
+                };
                 let mut elements = Expr::Integer(1);
-                for slot in 0..rank {
-                    let extent = query.required("DomainExtent", (domain, slot))?;
+                for extent in extents {
                     let length = host::guarded_index(
                         query,
                         &self.body.host_values,
@@ -1148,10 +1277,10 @@ impl EntryEmission<'_, '_, '_> {
                 let grouping = query.required("SelectedLaunchGrouping", (statement, atomic))?;
                 let (grouping, _) =
                     query.application(grouping, &["SingleGroup", "ElementGroups", "WorkgroupGroups"])?;
-                let groups = match grouping {
-                    "SingleGroup" => Expr::Integer(1),
-                    "ElementGroups" => elements.clone(),
-                    "WorkgroupGroups" => Expr::Ceiling(
+                let groups = match (columns.is_some(), grouping) {
+                    (false, "SingleGroup") => Expr::Integer(1),
+                    (false, "ElementGroups") => elements.clone(),
+                    (true, _) | (false, "WorkgroupGroups") => Expr::Ceiling(
                         Box::new(elements.clone()),
                         Box::new(Expr::Integer(i64::from(dispatch.width.get()))),
                     ),
@@ -1197,6 +1326,7 @@ impl EntryEmission<'_, '_, '_> {
         };
         let inputs = self.inputs.clone();
         let storage_bindings = generated.declarations.clone();
+        let input_lengths = generated.input_length_buffer;
         let mut accesses = std::mem::take(&mut self.body.storage_accesses);
         for input in &inputs {
             if matches!(
@@ -1218,7 +1348,47 @@ impl EntryEmission<'_, '_, '_> {
                 explicit: true,
             };
         }
-        let function_body = self.body.finish_shader()?;
+        let mut function_body = self.body.finish_shader()?;
+        let restored = &self.body.restored_reads;
+        if input_lengths.is_some() || !restored.is_empty() {
+            crate::ssa::ir::eliminate_dead_values(&mut function_body.inner, |instruction| {
+                crate::ssa::uses::is_discardable(instruction)
+                    || matches!(instruction, InstKind::Load { place } if restored.contains_key(place))
+            });
+            let mut live_restores = LookupSet::default();
+            for node in function_body.inner.insts.values() {
+                let binding = match &node.data {
+                    InstKind::Load { place } => restored.get(place).copied().inspect(|_| {
+                        live_restores.insert(*place);
+                    }),
+                    InstKind::Op {
+                        tag: OpTag::Index,
+                        operands,
+                    } => operands
+                        .first()
+                        .and_then(|value| value.as_ssa())
+                        .and_then(|value| types::array_view_buffer(function_body.get_value_type(value)))
+                        .filter(|&binding| input_lengths == Some(binding)),
+                    _ => None,
+                };
+                if let Some(binding) = binding {
+                    accesses
+                        .entry(binding)
+                        .and_modify(|access| *access = access.merge(ResourceAccess::Read))
+                        .or_insert(ResourceAccess::Read);
+                }
+            }
+            if live_restores.len() < restored.len() {
+                let function = &mut function_body.inner;
+                function.insts.retain(|_, node| {
+                    !matches!(&node.data, InstKind::ViewIndex { result, .. }
+                        if restored.contains_key(result) && !live_restores.contains(result))
+                });
+                for block in function.blocks.values_mut() {
+                    block.insts.retain(|id| function.insts.contains_key(*id));
+                }
+            }
+        }
         let phase = match self.kind {
             EntryKind::Vertex => "vertex",
             EntryKind::Fragment => "fragment",
@@ -1641,8 +1811,12 @@ impl EntryEmission<'_, '_, '_> {
             return Err(error("loop carry arity mismatch"));
         }
         let mut carried = Vec::new();
-        for ((_, _, _, current, initial_slots), value) in carried_values.iter().zip(values) {
-            let next = self.capture(value)?;
+        for ((_, _, initial, current, initial_slots), value) in carried_values.iter().zip(values) {
+            let next = self.reuse_loop_descriptor(initial, current, &value)?;
+            let next = match next {
+                Some(next) => next,
+                None => self.capture(value)?,
+            };
             let current_slots = saved_slots(current)?;
             let next_slots = saved_slots(&next)?;
             if next_slots.len() != current_slots.len() {
@@ -1661,7 +1835,14 @@ impl EntryEmission<'_, '_, '_> {
                 });
             }
         }
-        self.flush(after, vec![], true)?;
+        // Any live values from this iteration have already been captured as carry slots.
+        self.pending =
+            self.pending_observable
+                || self.body.active_dispatch.is_some()
+                || self.body.generated.as_ref().is_some_and(|generated| {
+                    generated.scalar_tasks.iter().any(|task| task.stage.is_empty())
+                });
+        self.flush(after, vec![], false)?;
         let completion = self.stages.len();
         self.saved = incoming;
         self.body.host_values = incoming_host.into();
@@ -1680,6 +1861,46 @@ impl EntryEmission<'_, '_, '_> {
             carried,
         });
         Ok(())
+    }
+
+    fn reuse_loop_descriptor(
+        &mut self,
+        initial: &Location,
+        current: &Location,
+        value: &Typed,
+    ) -> Result<Option<Location>, OptimizeError> {
+        let (Location::Array(initial), Location::Array(current)) = (initial, current) else {
+            return Ok(None);
+        };
+        if initial.dimensions.len() != 1
+            || !matches!(
+                initial.offset.host().and_then(|offset| offset.constant().ok()),
+                Some(Some(0))
+            )
+            || types::array_view_buffer(&value.ty).is_none()
+        {
+            return Ok(None);
+        }
+        let mut next = self.body.array_location(value)?;
+        let ([(_, length)], [(_, previous_length)]) =
+            (next.dimensions.as_slice(), current.dimensions.as_slice())
+        else {
+            return Ok(None);
+        };
+        let length = length.host();
+        // The backedge uses the same count as the incoming view in every iteration.
+        if length.is_none()
+            || length != previous_length.host_value()
+            || !matches!(
+                next.offset.host().and_then(|offset| offset.constant().ok()),
+                Some(Some(0))
+            )
+        {
+            return Ok(None);
+        }
+        next.offset = current.offset.clone();
+        next.dimensions = current.dimensions.clone();
+        Ok(Some(Location::Array(next)))
     }
 
     fn install_saved(&mut self, name: Value, saved: Location) {
@@ -1792,7 +2013,31 @@ impl EntryEmission<'_, '_, '_> {
             }
             return self.body.tuple(fields);
         }
-        if matches!((yes, no), (Location::Array(_), Location::Array(_))) {
+        if let (Location::Array(yes_array), Location::Array(no_array)) = (yes, no) {
+            let [a, b] = [yes_array, no_array];
+            if let ([(_, yes_length)], [(_, no_length)]) =
+                (a.dimensions.as_slice(), b.dimensions.as_slice())
+            {
+                let backing = if a.binding == b.binding || b.empty_storage_view() {
+                    a.binding
+                } else if a.empty_storage_view() {
+                    b.binding
+                } else {
+                    None
+                };
+                if let Some(binding) = backing.filter(|_| a.element == b.element) {
+                    let restore = |body: &mut Body<'_, '_, '_>, array: &ArrayLocation| {
+                        let mut array = array.clone();
+                        array.binding = Some(binding);
+                        restore_value(body, &Location::Array(array))
+                    };
+                    let value = self.body.branch(test, |body| restore(body, a), |body| restore(body, b))?;
+                    if let Some(length) = joined_extent(condition, yes_length, no_length)? {
+                        self.body.set_shape(&value, vec![length])?;
+                    }
+                    return Ok(value);
+                }
+            }
             let left = saved_slots(yes)?;
             let right = saved_slots(no)?;
             if left.len() != right.len() {
@@ -1829,8 +2074,13 @@ impl EntryEmission<'_, '_, '_> {
             }
             let mut result = remap_saved(yes, &yes_bindings);
             if let (Location::Array(a), Location::Array(b)) = (&result, remap_saved(no, &no_bindings)) {
+                // Restored views always use a runtime outer extent.
                 if a.element != b.element
-                    || a.dimensions.iter().map(|(ty, _)| ty).ne(b.dimensions.iter().map(|(ty, _)| ty))
+                    || a.dimensions.iter().skip(1).map(|(ty, _)| ty).ne(b
+                        .dimensions
+                        .iter()
+                        .skip(1)
+                        .map(|(ty, _)| ty))
                 {
                     return Err(error("branch arrays have incompatible nested alias structures"));
                 }
@@ -1841,21 +2091,7 @@ impl EntryEmission<'_, '_, '_> {
                 for ((_, extent), ((_, a), (_, b))) in
                     result.dimensions.iter_mut().zip(a.dimensions.iter().zip(&b.dimensions))
                 {
-                    extent.host = match (a.host(), b.host()) {
-                        (Some(a), Some(b)) if a == b => Some(a),
-                        (Some(a), Some(b)) => Some(Expr::Scalar(ScalarExpr::If {
-                            condition: Box::new(condition.clone()),
-                            yes: Box::new(
-                                host::scalar_extent(&a)
-                                    .ok_or_else(|| error("branch extent is not scalar"))?,
-                            ),
-                            no: Box::new(
-                                host::scalar_extent(&b)
-                                    .ok_or_else(|| error("branch extent is not scalar"))?,
-                            ),
-                        })),
-                        _ => None,
-                    };
+                    extent.host = joined_extent(condition, a, b)?;
                 }
             }
             // Descriptors keep their offsets: copy their entire backing buffers,
@@ -1893,6 +2129,21 @@ fn scalar_source(binding: BindingRef) -> ScalarSource {
         set: binding.set,
         binding: binding.binding,
     }
+}
+
+fn joined_extent(condition: &ScalarExpr, a: &Extent, b: &Extent) -> Result<Option<Expr>, OptimizeError> {
+    let (Some(a), Some(b)) = (a.host(), b.host()) else {
+        return Ok(None);
+    };
+    if a == b {
+        return Ok(Some(a));
+    }
+    let scalar = |extent| host::scalar_extent(extent).ok_or_else(|| error("branch extent is not scalar"));
+    Ok(Some(Expr::Scalar(ScalarExpr::If {
+        condition: Box::new(condition.clone()),
+        yes: Box::new(scalar(&a)?),
+        no: Box::new(scalar(&b)?),
+    })))
 }
 
 fn statement_names(query: Query<'_>, statements: &[Value]) -> Result<LookupSet<Value>, OptimizeError> {
@@ -1934,6 +2185,7 @@ pub(super) struct GeneratedBuffers {
     next: u32,
     declarations: Vec<StorageBindingDecl>,
     scalar_tasks: Vec<ScalarTask>,
+    input_length_buffer: Option<BindingRef>,
 }
 
 impl Body<'_, '_, '_> {
@@ -2004,6 +2256,8 @@ pub(super) enum Location {
     Product(Vec<Location>),
     Parameter(Value),
     Constant(i64, Type),
+    ConstantArray(Vec<i64>, Type),
+    InputLength(BindingRef, u32, Type),
     Buffer(BindingRef, Type),
     Array(ArrayLocation),
 }
@@ -2018,7 +2272,11 @@ impl Location {
                         .chain(array.dimensions.iter().map(|(_, extent)| extent))
                         .all(|extent| !matches!(extent.value, ExtentValue::Local(_)))
             }
-            Self::Parameter(_) | Self::Constant(..) | Self::Buffer(..) => true,
+            Self::Parameter(_)
+            | Self::Constant(..)
+            | Self::ConstantArray(..)
+            | Self::InputLength(..)
+            | Self::Buffer(..) => true,
         }
     }
 }
@@ -2029,6 +2287,19 @@ pub(super) struct ArrayLocation {
     element: Type,
     offset: Extent,
     dimensions: Vec<(Type, Extent)>,
+}
+
+impl ArrayLocation {
+    fn empty_storage_view(&self) -> bool {
+        let [(_, length)] = self.dimensions.as_slice() else {
+            return false;
+        };
+        // A zero-offset empty view is valid over either backing. Unknown
+        // extents and arithmetic errors keep the normal join plan.
+        [&self.offset, length]
+            .iter()
+            .all(|extent| extent.host().is_some_and(|expr| matches!(expr.constant(), Ok(Some(0)))))
+    }
 }
 
 #[derive(Clone)]
@@ -2046,14 +2317,22 @@ enum ExtentValue {
 
 impl Extent {
     fn local(body: &Body<'_, '_, '_>, value: Typed) -> Self {
+        let location = match body.locations.get(&value.value) {
+            Some(Location::InputLength(binding, word, _)) => ExtentValue::Stored(*binding, *word),
+            _ => body.integer_literal(&value).map_or(ExtentValue::Local(value), ExtentValue::Constant),
+        };
         Self {
-            value: body.integer_literal(&value).map_or(ExtentValue::Local(value), ExtentValue::Constant),
+            value: location,
             host: None,
         }
     }
 
     fn host(&self) -> Option<Expr> {
-        self.host.clone().or_else(|| match self.value {
+        self.host.clone().or_else(|| self.host_value())
+    }
+
+    fn host_value(&self) -> Option<Expr> {
+        match self.value {
             ExtentValue::Constant(n) => Some(Expr::Integer(n)),
             ExtentValue::Stored(binding, index) => Some(Expr::Scalar(ScalarExpr::Read {
                 source: scalar_source(binding),
@@ -2061,7 +2340,7 @@ impl Extent {
                 ty: ScalarType::I32,
             })),
             ExtentValue::Local(_) => None,
-        })
+        }
     }
 
     fn emit(&self, body: &mut Body<'_, '_, '_>) -> Result<Typed, OptimizeError> {
@@ -2069,8 +2348,7 @@ impl Extent {
             ExtentValue::Constant(n) => body.literal(*n, &types::i32()),
             ExtentValue::Local(value) => Ok(value.clone()),
             ExtentValue::Stored(binding, index) => {
-                let storage = storage_view(body, *binding, Body::number(0).ty, Body::number(index + 1))?;
-                let value = body.index(storage, Body::number(*index))?;
+                let value = restore_slot(body, *binding, Body::number(0).ty, *index)?;
                 body.cast(value, &types::i32())
             }
         }
@@ -2150,6 +2428,13 @@ impl Body<'_, '_, '_> {
     }
 
     pub(super) fn set_shape(&mut self, value: &Typed, shape: Vec<Expr>) -> Result<(), OptimizeError> {
+        if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = &value.ty {
+            for index in 0..fields.len() {
+                let field = self.field(value.clone(), index)?;
+                self.set_shape(&field, shape.clone())?;
+            }
+            return Ok(());
+        }
         let mut location = self.array_location(value)?;
         if shape.len() > location.dimensions.len() {
             return Err(error("host shape exceeds the array location rank"));
@@ -2166,6 +2451,7 @@ impl Body<'_, '_, '_> {
             Location::Array(location) => {
                 location.dimensions.iter().map(|(_, extent)| extent.host()).collect()
             }
+            Location::ConstantArray(..) => self.located_length(value).map(|extent| vec![extent]),
             _ => None,
         }
     }
@@ -2188,6 +2474,11 @@ impl Body<'_, '_, '_> {
     pub(super) fn located_length(&self, value: &Typed) -> Option<Expr> {
         match self.locations.get(&value.value)? {
             Location::Array(location) => location.dimensions.first()?.1.host(),
+            Location::ConstantArray(bits, ty) => Some(Expr::Integer(if types::is_virtual_array(ty) {
+                bits[2]
+            } else {
+                bits.len() as i64
+            })),
             Location::Buffer(binding, ty)
                 if ty.array_variant().is_some_and(types::is_array_variant_virtual) =>
             {
@@ -2210,6 +2501,8 @@ fn remap_saved(saved: &Location, bindings: &LookupMap<BindingRef, BindingRef>) -
         }
         Location::Parameter(name) => Location::Parameter(*name),
         Location::Constant(n, ty) => Location::Constant(*n, remap_type(ty, bindings)),
+        Location::ConstantArray(bits, ty) => Location::ConstantArray(bits.clone(), remap_type(ty, bindings)),
+        Location::InputLength(binding, word, ty) => Location::InputLength(get(binding), *word, ty.clone()),
         Location::Buffer(binding, ty) => Location::Buffer(get(binding), remap_type(ty, bindings)),
         Location::Array(location) => {
             let mut location = location.clone();
@@ -2280,9 +2573,10 @@ fn saved_slots(saved: &Location) -> Result<Vec<(BindingRef, Type)>, OptimizeErro
                     visit(slots, field)?;
                 }
             }
-            Location::Constant(..) | Location::Parameter(..) => {
-                return Err(error("carried value has not been materialized"))
-            }
+            Location::Constant(..)
+            | Location::ConstantArray(..)
+            | Location::InputLength(..)
+            | Location::Parameter(..) => return Err(error("carried value has not been materialized")),
             Location::Buffer(binding, ty) => {
                 add(slots, *binding, storage_value_type(ty));
                 nested(slots, ty)?;
@@ -2345,13 +2639,44 @@ fn restore_value(body: &mut Body<'_, '_, '_>, saved: &Location) -> Result<Typed,
             )?
         }
         Location::Constant(n, ty) => body.literal(*n, ty)?,
+        Location::ConstantArray(bits, ty) => {
+            let Some(element) = ty.elem_type() else {
+                return Err(error("saved array has no element type"));
+            };
+            let operands = bits.iter().map(|&n| body.literal(n, element)).collect::<Result<_, _>>()?;
+            let tag = if types::is_virtual_array(ty) { OpTag::Tuple } else { OpTag::ArrayLit };
+            body.op(tag, operands, ty.clone())?
+        }
+        Location::InputLength(binding, word, ty) => {
+            let length = read_input_length(body, *binding, *word)?;
+            body.cast(length, ty)?
+        }
         Location::Buffer(binding, ty) => {
-            let storage = storage_view(body, *binding, storage_value_type(ty), Body::number(1))?;
-            let value = body.index(storage, Body::number(0))?;
+            let value = restore_slot(body, *binding, storage_value_type(ty), 0)?;
             body.cast(value, ty)?
         }
     };
     body.locations.insert(value.value, saved.clone());
+    Ok(value)
+}
+
+fn restore_slot(
+    body: &mut Body<'_, '_, '_>,
+    binding: BindingRef,
+    ty: Type,
+    word: u32,
+) -> Result<Typed, OptimizeError> {
+    let view = storage_view(body, binding, ty, Body::number(word + 1))?;
+    let (place, ty) = body.index_place(view, Body::number(word))?;
+    let value = body.builder.push_inst(InstKind::Load { place }, ty.clone()).map_err(builder_error)?;
+    body.restored_reads.insert(place, binding);
+    let value = Typed {
+        value: value.into(),
+        ty,
+    };
+    if body.generated.as_ref().and_then(|generated| generated.input_length_buffer) == Some(binding) {
+        body.locations.insert(value.value, Location::InputLength(binding, word, value.ty.clone()));
+    }
     Ok(value)
 }
 
@@ -2379,6 +2704,9 @@ fn save_component(
     if !materialize {
         if let Some(n) = body.literal_bits(&value) {
             return Ok(Location::Constant(n, value.ty));
+        }
+        if let Some(bits) = body.constant_array(&value) {
+            return Ok(Location::ConstantArray(bits, value.ty));
         }
     }
     if value.ty.is_array()
@@ -2424,6 +2752,9 @@ fn save_component(
                 Body::number(count),
             )?;
             for (index, extent) in extents.into_iter().enumerate() {
+                if let ExtentValue::Constant(n) = extent.value {
+                    extent.host.get_or_insert(Expr::Integer(n));
+                }
                 let value = extent.emit(body)?;
                 let value = body.cast(value, &Body::number(0).ty)?;
                 body.store(storage.clone(), Body::number(index as u32), value)?;
@@ -2537,6 +2868,23 @@ fn save(
             }
             if value.ty == types::unit() {
                 continue;
+            }
+            if value.ty == types::i32() {
+                if let Some(value @ ScalarExpr::BufferLength { .. }) = body.host_values.get(&name) {
+                    let input_length = body.generated.as_ref().and_then(|generated| {
+                        let binding = generated.input_length_buffer?;
+                        let destination = scalar_source(binding);
+                        let task = generated
+                            .scalar_tasks
+                            .iter()
+                            .find(|task| task.destination == destination && &task.value == value)?;
+                        Some(Location::InputLength(binding, task.offset / 4, types::i32()))
+                    });
+                    if let Some(location) = input_length {
+                        saved.insert(name, location);
+                        continue;
+                    }
+                }
             }
             let location = save_component(body, value, false)?;
             if !body.host_values.contains_key(&name) {
@@ -2694,6 +3042,7 @@ fn write_results(
     body: &mut Body<'_, '_, '_>,
     values: &[Typed],
     outputs: &[EntryOutput],
+    copy_width: Option<u32>,
 ) -> Result<bool, OptimizeError> {
     if outputs.is_empty() {
         return Ok(false);
@@ -2701,21 +3050,18 @@ fn write_results(
     if values.len() != outputs.len() {
         return Err(error("public output arity differs from SSA results"));
     }
-    let partition = if let Some(statement) = body.active_dispatch {
+    let launch = if let Some(statement) = body.active_dispatch {
         let dispatch = *body.compiler.execution.dispatch(statement)?;
-        let (group, groups) = body.workgroups(dispatch.grid)?;
+        Some((dispatch.grid, dispatch.width.get()))
+    } else {
+        copy_width.map(|width| (None, width))
+    };
+    let partition = if let Some((grid, width)) = launch {
+        let (group, groups) = body.workgroups(grid)?;
         let lane = body.local_id()?;
-        let base = body.binary(
-            BinaryOperator::Multiply,
-            group.clone(),
-            Body::number(dispatch.width.get()),
-        )?;
+        let base = body.binary(BinaryOperator::Multiply, group.clone(), Body::number(width))?;
         let start = body.binary(BinaryOperator::Add, base, lane.clone())?;
-        let step = body.binary(
-            BinaryOperator::Multiply,
-            groups,
-            Body::number(dispatch.width.get()),
-        )?;
+        let step = body.binary(BinaryOperator::Multiply, groups, Body::number(width))?;
         let first_group = body.binary(BinaryOperator::Equal, group, Body::number(0))?;
         let first_lane = body.binary(BinaryOperator::Equal, lane, Body::number(0))?;
         let leader = body.binary(BinaryOperator::LogicalAnd, first_group, first_lane)?;
@@ -2739,6 +3085,31 @@ fn write_results(
             destination.element = storage_value_type(&destination.element);
             destination.offset = Extent::local(body, Body::number(0));
             let destination = restore_value(body, &Location::Array(destination))?;
+            let function = body.builder.func();
+            if let Some(InstKind::Op {
+                tag: OpTag::ArrayLit,
+                operands,
+            }) = value
+                .value
+                .as_ssa()
+                .and_then(|id| function.inst_of_value(id))
+                .map(|inst| &function.insts[inst].data)
+            {
+                if let ([element], Some(ty)) = (operands.as_slice(), value.ty.elem_type()) {
+                    let element = Typed {
+                        value: *element,
+                        ty: ty.clone(),
+                    };
+                    if let Some((_, _, leader)) = &partition {
+                        body.when(leader.clone(), |body| {
+                            body.store(destination, Body::number(0), element)
+                        })?;
+                    } else {
+                        body.store(destination, Body::number(0), element)?;
+                    }
+                    continue;
+                }
+            }
             body.counted(
                 partition.as_ref().map_or_else(|| Body::number(0), |(start, ..)| start.clone()),
                 count,
@@ -2808,6 +3179,7 @@ fn bind_input(
     body: &mut Body<'_, '_, '_>,
     mut input: EntryInput,
     ty: &Type,
+    length: Option<(BindingRef, u32)>,
     inputs: &mut Vec<EntryInput>,
 ) -> Result<(Typed, Option<ScalarExpr>), OptimizeError> {
     let scalar_storage = input.storage_binding().is_some() && !ty.is_array();
@@ -2846,6 +3218,8 @@ fn bind_input(
     if let Some(binding) = input.storage_binding() {
         let length = if let Some(Type::Constructed(TypeName::Size(n), _)) = input.ty.array_size() {
             Body::number(u32::try_from(*n).map_err(|_| error("input size exceeds u32"))?)
+        } else if let Some((metadata, word)) = length {
+            read_input_length(body, metadata, word)?
         } else {
             body.op(
                 OpTag::Intrinsic {
@@ -2893,6 +3267,18 @@ fn bind_input(
     };
     inputs.push(input);
     Ok((value, host))
+}
+
+fn read_input_length(
+    body: &mut Body<'_, '_, '_>,
+    metadata: BindingRef,
+    word: u32,
+) -> Result<Typed, OptimizeError> {
+    let ty = Body::number(0).ty;
+    let view = storage_view(body, metadata, ty.clone(), Body::number(word + 1))?;
+    let value = body.op(OpTag::Index, vec![view, Body::number(word)], ty)?;
+    body.locations.insert(value.value, Location::InputLength(metadata, word, value.ty.clone()));
+    Ok(value)
 }
 
 fn input_host_value(

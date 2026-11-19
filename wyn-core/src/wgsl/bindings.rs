@@ -2,7 +2,7 @@
 //! Instructions stay in place; only their variable declarations move outward.
 
 use crate::op::OpTag;
-use crate::ssa::types::{FuncBody, InstKind, PlaceId, ValueId, ValueRef};
+use crate::ssa::types::{FuncBody, InstKind, PlaceId, ValueId, ValueRef, WynInstNode};
 use crate::structured::{Body, Node, Scope, ScopeId};
 use crate::{LookupMap, LookupSet};
 
@@ -12,6 +12,16 @@ struct Binding {
     assigned: bool,
     same_scope_uses: bool,
     global: bool,
+}
+
+pub(super) fn is_scalar_literal(inst: &WynInstNode) -> bool {
+    matches!(
+        inst.data,
+        InstKind::Op {
+            tag: OpTag::Int(_) | OpTag::Uint(_) | OpTag::Float(_) | OpTag::Bool(_),
+            ..
+        }
+    )
 }
 
 /// Fill each scope's declarations and return values eligible for inlining.
@@ -120,13 +130,15 @@ impl Analysis<'_> {
                 Node::Inst(id) => {
                     let instruction = self.body.get_inst(*id);
                     if let Some(result) = instruction.result {
-                        let global = matches!(
-                            instruction.data,
-                            InstKind::Op {
-                                tag: OpTag::AddressableConstant(_),
-                                ..
-                            }
-                        );
+                        // Literals can be substituted in any scope without capturing local state.
+                        let global = is_scalar_literal(instruction)
+                            || matches!(
+                                instruction.data,
+                                InstKind::Op {
+                                    tag: OpTag::AddressableConstant(_),
+                                    ..
+                                }
+                            );
                         self.define(
                             result,
                             if global { self.tree.root.id } else { scope.id },

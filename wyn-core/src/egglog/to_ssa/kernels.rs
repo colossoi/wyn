@@ -2,6 +2,7 @@
 use super::body::{Collection, CollectionShape};
 use super::{domain_axes, error, Axis, Body, OptimizeError, Typed};
 use crate::builtins::catalog;
+use crate::egglog::execution::Dispatch;
 use crate::egglog::to_ssa::host;
 use crate::egglog::to_ssa::runtime_binding;
 use crate::host::Expr;
@@ -96,6 +97,9 @@ impl Body<'_, '_, '_> {
         pattern: &[Value],
         phase: Option<CollectivePhase<'_>>,
     ) -> Result<Vec<Typed>, OptimizeError> {
+        if let Some(plan) = self.query().lookup("ColumnScan", operation)? {
+            return self.scan_columns(operation, pattern, plan);
+        }
         let execution = self.query().required("OperationExecution", operation)?;
         let dispatch = if self.query().enode("DeviceKernel", execution)?.is_some() {
             let Some(statement) = self.active_dispatch else {
@@ -105,6 +109,20 @@ impl Body<'_, '_, '_> {
         } else {
             None
         };
+        let workgroup_map = dispatch.is_some() && self.query().flag("WorkgroupMap", operation)?;
+        let cooperative_width = if let Some(dispatch) = dispatch {
+            Some(dispatch.width.get())
+        } else if self.query().contains("WorkgroupCollective", operation)? {
+            let parent =
+                self.active_dispatch.ok_or_else(|| error("workgroup reduction has no dispatch"))?;
+            Some(self.compiler.execution.dispatch(parent)?.width.get())
+        } else {
+            None
+        };
+        let scan_size = self
+            .query()
+            .lookup("WorkgroupScan", operation)?
+            .map(|size| self.query().0.value_to_base::<i64>(size) as u32);
         let domain = self.query().required("OperationDomain", operation)?;
         let ordinal_name = self.query().required("DomainOrdinal", domain)?;
         let axes = domain_axes(self.query(), domain)?;
@@ -315,12 +333,22 @@ impl Body<'_, '_, '_> {
                 let Some(axis) = axes.first() else {
                     return Err(error("collection requires an axis"));
                 };
+                if let Some(size) = scan_size {
+                    let element =
+                        ty.elem_type().ok_or_else(|| error("workgroup scan has no scalar element"))?;
+                    let storage = self.workgroup_array(size, element)?;
+                    self.collections.insert(name, Collection::Allocated(storage));
+                    continue;
+                }
                 if let Some(storage) = self.reuse_storage(name, &ty)? {
                     self.collections.insert(name, Collection::Allocated(storage));
                     continue;
                 }
                 let shape = if dispatch.is_some() {
-                    let rank = if rank > 1 && dimensions[1..].contains(&None) { rank } else { 1 };
+                    let ranked = rank > 1
+                        && (dimensions[1..].contains(&None)
+                            || self.query().contains("RankedLoopCollection", name)?);
+                    let rank = if ranked { rank } else { 1 };
                     let mut shape = Vec::new();
                     for &axis in &axes[..rank] {
                         let count = self.index_expression(axis.extent)?;
@@ -335,6 +363,12 @@ impl Body<'_, '_, '_> {
                         )?;
                         shape.push((count, Expr::Max(Box::new(length), Box::new(Expr::Integer(0)))));
                     }
+                    if let Some(row) = self.query().lookup("LoopInitialRow", name)? {
+                        let row = self.named(row)?;
+                        let length = self.host_array_length(&row)?;
+                        let count = self.array_length(row)?;
+                        shape.push((count, length));
+                    }
                     CollectionShape::Device(shape)
                 } else {
                     CollectionShape::Local(self.index_expression(axis.extent)?)
@@ -347,6 +381,9 @@ impl Body<'_, '_, '_> {
             && compacts.is_empty()
             && folds.is_empty()
             && self.atomic_contributions(operation)?;
+        if contributes && !atomic_updates && matches!(phase, Some(CollectivePhase::Epilogue { .. })) {
+            return Err(error("scan overwrite epilogue requires atomic storage"));
+        }
         let algorithm = self.query().required("SelectedKernelAlgorithm", (operation, atomic_updates))?;
         let compact = self.query().enode("CompactionKernel", algorithm)?.is_some();
         if compact || self.query().enode("OrderedKernel", algorithm)?.is_some() {
@@ -383,6 +420,7 @@ impl Body<'_, '_, '_> {
                                     &collects,
                                     &folds,
                                     state[compacts.len()..].to_vec(),
+                                    None,
                                 )?;
                                 let mut next = Vec::new();
                                 for (compact, ((predicate, outputs), count)) in
@@ -519,23 +557,10 @@ impl Body<'_, '_, '_> {
         let partition = if phase.is_some() {
             None
         } else if let Some(dispatch) = dispatch {
-            let (group, groups) = self.workgroups(dispatch.grid)?;
-            if folds.is_empty() {
-                let base = self.binary(
-                    BinaryOperator::Multiply,
-                    group,
-                    Self::number(dispatch.width.get()),
-                )?;
-                let lane = self.local_id()?;
-                let start = self.binary(BinaryOperator::Add, base, lane)?;
-                let step = self.binary(
-                    BinaryOperator::Multiply,
-                    groups,
-                    Self::number(dispatch.width.get()),
-                )?;
-                Some((start, step))
+            if folds.is_empty() && !workgroup_map {
+                Some(self.invocation_partition(dispatch)?)
             } else {
-                Some((group, groups))
+                Some(self.workgroups(dispatch.grid)?)
             }
         } else {
             None
@@ -569,7 +594,7 @@ impl Body<'_, '_, '_> {
                 |body_lower, index, _| {
                     body_lower.values.insert(axis.name, index.clone());
                     body_lower.values.insert(ordinal_name, index);
-                    body_lower.parallel_lane(region, domain, &collects, &folds, vec![])
+                    body_lower.parallel_lane(region, domain, &collects, &folds, vec![], None)
                 },
             )?
         } else {
@@ -583,12 +608,18 @@ impl Body<'_, '_, '_> {
                 partition,
                 &mut |body_lower, coordinates, _| {
                     if folds.is_empty() {
-                        body_lower.parallel_lane(region, domain, &collects, &folds, vec![])?;
+                        let leader = if workgroup_map {
+                            let lane = body_lower.local_id()?;
+                            Some(body_lower.binary(BinaryOperator::Equal, lane, Self::number(0))?)
+                        } else {
+                            None
+                        };
+                        body_lower.parallel_lane(region, domain, &collects, &folds, vec![], leader)?;
                         return Ok(vec![]);
                     }
                     let total_coordinates = coordinates.to_vec();
                     let ordinal = body_lower.named(ordinal_name)?;
-                    let state = if let Some(dispatch) = dispatch {
+                    let state = if let Some(width) = cooperative_width {
                         body_lower.cooperative_segment(
                             domain,
                             axes[axes.len() - 1],
@@ -597,7 +628,7 @@ impl Body<'_, '_, '_> {
                             region,
                             &collects,
                             &folds,
-                            dispatch.width.get(),
+                            width,
                             if let Some(CollectivePhase::Chunks { range, .. }) = &phase {
                                 Some(range.clone())
                             } else {
@@ -616,7 +647,7 @@ impl Body<'_, '_, '_> {
                             initial,
                             None,
                             &mut |body_lower, _, state| {
-                                body_lower.parallel_lane(region, domain, &collects, &folds, state)
+                                body_lower.parallel_lane(region, domain, &collects, &folds, state, None)
                             },
                         )?
                     };
@@ -662,6 +693,9 @@ impl Body<'_, '_, '_> {
                 },
             )?
         };
+        if scan_size.is_some() {
+            self.workgroup_barrier()?;
+        }
         let mut scalars = scalar_results.into_iter();
         let mut values = Vec::new();
         for &binding in pattern {
@@ -690,6 +724,81 @@ impl Body<'_, '_, '_> {
             return Err(error("parallel scalar result arity mismatch"));
         }
         Ok(values)
+    }
+
+    fn scan_columns(
+        &mut self,
+        operation: Value,
+        pattern: &[Value],
+        plan: Value,
+    ) -> Result<Vec<Typed>, OptimizeError> {
+        let query = self.query();
+        let fields = query.fields("ScanColumns", plan)?;
+        let source = self.named(fields[0])?;
+        let map = fields[2];
+        let columns = query.required("OperationDomain", map)?;
+        let axis = query.required("DomainAxis", (columns, 0_i64))?;
+        let ordinal = query.required("DomainOrdinal", columns)?;
+        let lane = query.required("ControlRegion", (map, 0_i64))?;
+        let result = query.required("ResultValue", (map, 0_i64, 0_i64))?;
+        let domain = query.required("OperationDomain", operation)?;
+        let rows = query.required("DomainExtent", (domain, 0_i64))?;
+        let neutral =
+            self.named(query.name(query.required("ResultNeutral", (operation, 0_i64, 0_i64))?)?)?;
+        let [binding] = pattern else {
+            return Err(error("column scan requires one result"));
+        };
+        let Some((name, ty)) = runtime_binding(query, *binding)? else {
+            return Err(error("column scan result cannot be a capability"));
+        };
+        let steps = query.operations(lane)?;
+        let row_count = self.array_length(source.clone())?;
+        let width = self.array_length(neutral.clone())?;
+        let shape = [(rows, row_count.clone()), (fields[1], width.clone())]
+            .into_iter()
+            .map(|(extent, size)| {
+                host::guarded_index(self.query(), &self.host_values, extent, self.guard.as_ref())
+                    .map(|count| (size, count))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.values.insert(fields[3], width.clone());
+        let output =
+            self.collection_storage(&ty, &CollectionShape::Device(shape), None, self.current()?)?;
+        self.collections.insert(name, Collection::Allocated(output.clone()));
+        let dispatch = *self.compiler.execution.dispatch(operation)?;
+        let (start, step) = self.invocation_partition(dispatch)?;
+        self.counted(start, width, step, vec![], |body, column, _| {
+            body.values.insert(axis, column.clone());
+            body.values.insert(ordinal, column.clone());
+            let initial = body.index(neutral, column.clone())?;
+            body.counted(
+                Self::number(0),
+                row_count,
+                Self::number(1),
+                vec![initial],
+                |body, row, state| {
+                    let item = body.index(source.clone(), row.clone())?;
+                    let inputs = [state[0].clone(), body.index(item, column.clone())?];
+                    for &step in &steps {
+                        let query = body.query();
+                        if let Some(slot) = query.lookup("ColumnScanLoad", (operation, step))? {
+                            let slot = query.0.value_to_base::<i64>(slot) as usize;
+                            let name = query.name(query.required("Output", (step, 0_i64))?)?;
+                            body.values.insert(name, inputs[slot].clone());
+                        } else {
+                            body.statement(step)?;
+                        }
+                    }
+                    let Some(next) = body.operand(result)? else {
+                        return Err(error("column reducer returns a capability"));
+                    };
+                    body.write_array(name, &[row, column.clone()], next.clone())?;
+                    Ok(vec![next])
+                },
+            )?;
+            Ok(vec![])
+        })?;
+        Ok(vec![output])
     }
 
     pub(super) fn collection_storage(
@@ -913,14 +1022,42 @@ impl Body<'_, '_, '_> {
         collects: &[(Value, Value)],
         folds: &[Fold],
         state: Vec<Typed>,
+        leader: Option<Typed>,
     ) -> Result<Vec<Typed>, OptimizeError> {
         let coordinates = self.domain_coordinates(domain)?;
-        self.statements(&self.query().operations(statements)?)?;
-        for &(output, result) in collects {
-            let Some(value) = self.operand(result)? else {
-                return Err(error("collected result is a capability"));
-            };
-            self.write_array(output, &coordinates, value)?;
+        let operations = self.query().operations(statements)?;
+        let suffix = if let (Some(_), Some(active)) = (&leader, self.active_dispatch) {
+            self.query().lookup("WorkgroupMapSuffix", active)?
+        } else {
+            None
+        };
+        let split = if let Some(suffix) = suffix {
+            operations
+                .iter()
+                .position(|&operation| operation == suffix)
+                .ok_or_else(|| error("workgroup scan consumer is outside the map"))?
+        } else {
+            operations.len()
+        };
+        let (prefix, tail) = operations.split_at(split);
+        self.statements(prefix)?;
+        let publish = |body: &mut Self| {
+            body.statements(tail)?;
+            for &(output, result) in collects {
+                let Some(value) = body.operand(result)? else {
+                    return Err(error("collected result is a capability"));
+                };
+                body.write_array(output, &coordinates, value)?;
+            }
+            Ok(())
+        };
+        if let Some(leader) = leader {
+            self.when(leader, publish)?;
+        } else {
+            publish(self)?;
+        }
+        if suffix.is_some() {
+            self.workgroup_barrier()?;
         }
         let mut state = state.into_iter();
         let mut next = Vec::new();
@@ -1008,6 +1145,16 @@ impl Body<'_, '_, '_> {
         let count = self.index_expression(axis.extent)?;
         let base = self.binary(BinaryOperator::Multiply, ordinal, count.clone())?;
         Ok((axis.name, base, count))
+    }
+
+    fn invocation_partition(&mut self, dispatch: Dispatch) -> Result<(Typed, Typed), OptimizeError> {
+        let (group, groups) = self.workgroups(dispatch.grid)?;
+        let lanes = Self::number(dispatch.width.get());
+        let base = self.binary(BinaryOperator::Multiply, group, lanes.clone())?;
+        let lane = self.local_id()?;
+        let start = self.binary(BinaryOperator::Add, base, lane)?;
+        let step = self.binary(BinaryOperator::Multiply, groups, lanes)?;
+        Ok((start, step))
     }
 
     pub(super) fn workgroups(
@@ -1275,7 +1422,7 @@ impl Body<'_, '_, '_> {
                     .collect::<Result<Vec<_>, OptimizeError>>()?;
                 let mut payloads = Vec::new();
                 body.when(active, |body| {
-                    body.parallel_lane(statements, domain, collects, &[], vec![])?;
+                    body.parallel_lane(statements, domain, collects, &[], vec![], None)?;
                     for ((predicate, outputs), flag) in compacts.iter().zip(&flags) {
                         let keep = body.atom(*predicate)?;
                         let keep = body.cast(keep, &Self::number(0).ty)?;

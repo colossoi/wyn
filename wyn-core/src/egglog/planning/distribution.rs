@@ -5,6 +5,17 @@ use crate::egglog::query::Query;
 use crate::egglog::{analysis, OptimizeError};
 use egglog_engine::{Core, EGraph, RawValues, Value, Write};
 
+pub(super) fn lift_row_length(graph: &mut EGraph) -> Result<bool, OptimizeError> {
+    let Some(candidate) = Query(graph).first("LiftUniformRowLength")? else {
+        return Ok(false);
+    };
+    let (length, outer, array) = (candidate[0], candidate[1], candidate[2]);
+    edit::set_code(graph, length, Code::Length { axis: 1 })?;
+    edit::inputs(graph, length, &[array])?;
+    edit::move_before(graph, length, outer)?;
+    Ok(true)
+}
+
 pub(super) fn canonicalize(graph: &mut EGraph) -> Result<bool, OptimizeError> {
     let query = Query(graph);
     let mut replacements = Vec::new();
@@ -19,7 +30,6 @@ pub(super) fn canonicalize(graph: &mut EGraph) -> Result<bool, OptimizeError> {
     if replacements.is_empty() {
         return Ok(false);
     }
-    analysis::invalidate(graph)?;
     graph.update(|mut sink| {
         for (domain, slot, n) in replacements {
             let value = sink.add("IndexConstant", n)?;

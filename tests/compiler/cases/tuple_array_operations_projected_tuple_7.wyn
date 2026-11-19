@@ -7,7 +7,7 @@
 --! contains = [":source-name \"projected_tuple_7_kept\""]
 --! [[host]]
 --! entry = "projected_tuple_7_kept"
---! result_layouts = ["(:array :length :dynamic :stride 4 :range :caller :element :i32)", "(:array :length :dynamic :stride 8 :range :caller :element (:tuple :size 8 :fields ((\"result_0\" :offset 0 :layout :bool) (\"result_1\" :offset 4 :layout :i32))))"]
+--! result_layouts = ["(:array :length :dynamic :stride 12 :range :caller :element (:tuple :size 12 :fields ((\"result_0\" :offset 0 :layout :i32) (\"result_1\" :offset 4 :layout (:tuple :size 8 :fields ((\"result_0\" :offset 0 :layout :bool) (\"result_1\" :offset 4 :layout :i32)))))))"]
 
 entry projected_tuple_7_kept(projected_tuple_7_xs:[]i32) [](i32,(bool,i32))=filter(|(x,p)|x>0,map(|x|(x,(x>1,x+1)),projected_tuple_7_xs))
 

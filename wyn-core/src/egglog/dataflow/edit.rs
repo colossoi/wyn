@@ -84,6 +84,7 @@ pub(in crate::egglog) const OPERATION_RELATIONS: &[&str] = &[
     "ConsumesInput",
     "AliasesInput",
     "FreshOutput",
+    "ScratchAllocation",
     "ProvenTotalOperation",
 ];
 
@@ -139,11 +140,6 @@ pub(in crate::egglog) fn clear(graph: &mut EGraph) -> Result<(), OptimizeError> 
 }
 
 pub(in crate::egglog) fn remove(graph: &mut EGraph, operations: &[Value]) -> Result<(), OptimizeError> {
-    analysis::invalidate(graph)?;
-    remove_unanalyzed(graph, operations)
-}
-
-fn remove_unanalyzed(graph: &mut EGraph, operations: &[Value]) -> Result<(), OptimizeError> {
     let operations: LookupSet<_> = operations.iter().copied().collect();
     let query = Query(graph);
     let mut rows = Vec::new();
@@ -221,16 +217,6 @@ pub(in crate::egglog) fn splice(
     at: Value,
     inserted: &[Value],
 ) -> Result<(), OptimizeError> {
-    analysis::invalidate(graph)?;
-    splice_unanalyzed(graph, at, inserted)
-}
-
-/// Splice operations when body-dependent analyses have already been cleared.
-pub(in crate::egglog) fn splice_unanalyzed(
-    graph: &mut EGraph,
-    at: Value,
-    inserted: &[Value],
-) -> Result<(), OptimizeError> {
     let query = Query(graph);
     let region = query.required("OperationRegion", at)?;
     let mut order = query.operations(region)?;
@@ -261,7 +247,7 @@ pub(in crate::egglog) fn splice_unanalyzed(
         }
         Ok(())
     })?;
-    remove_unanalyzed(graph, &[at])
+    remove(graph, &[at])
 }
 
 pub(in crate::egglog) fn move_before(
@@ -291,7 +277,6 @@ pub(in crate::egglog) fn move_into(
         order.len()
     };
     order.insert(position, operation);
-    analysis::invalidate(graph)?;
     graph.update(|mut sink| {
         for (slot, item) in order.into_iter().enumerate() {
             sink.remove("OperationRegion", item)?;
@@ -358,8 +343,9 @@ pub(in crate::egglog) fn set_code(
         sink.remove("InstructionWork", operation)?;
         sink.remove("LiteralBits", operation)?;
         sink.remove("OperationPayload", operation)?;
-        Ok(ir::properties(&mut sink, operation, code))
-    })??;
+        Ok(())
+    })?;
+    graph.update(|mut sink| Ok(ir::properties(&mut sink, operation, code)))??;
     changed(graph)?;
     Ok(())
 }
@@ -481,7 +467,6 @@ pub(in crate::egglog) fn remove_clause(
             Ok(())
         })?;
     }
-    analysis::invalidate(graph)?;
     graph.update(|mut sink| {
         for (table, keys) in old {
             sink.remove(table, RawValues(keys))?;

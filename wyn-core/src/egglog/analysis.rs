@@ -1,11 +1,12 @@
 //! Derived facts are disposable; executable edges remain in the flat graph.
-use super::dataflow::ir;
+use super::dataflow::{edit, ir};
 use super::query::Query;
 use super::{output_error, timing, OptimizeError};
+use crate::{LookupMap, StableMap};
+use egglog_engine::sort::VecContainer;
 use egglog_engine::sort::S;
-use egglog_engine::{EGraph, IntoValues, RawValues, Value, Write};
+use egglog_engine::{Core, EGraph, IntoValues, RawValues, Value, Write};
 
-mod live;
 mod signatures;
 
 pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
@@ -16,16 +17,23 @@ pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
             "\n",
             include_str!("analysis/dataflow.egg"),
             "\n",
-            include_str!("analysis/resources.egg")
+            include_str!("analysis/resources.egg"),
+            "\n",
+            include_str!("analysis/integer-ranges.egg")
         ),
     )?;
     Ok(())
 }
 
-/// Clear proofs before editing edges. No irreversible value unions are used here.
+/// Retire body-dependent proofs before solving a new graph revision.
 pub(super) fn invalidate(graph: &mut EGraph) -> Result<(), OptimizeError> {
+    let _timing = timing::span("egglog full analysis invalidation");
     for table in [
-        "NextOperation",
+        "DataflowRevision",
+        "LivenessRequest",
+        "LivenessRegion",
+        "LivenessOperation",
+        "LivenessName",
         "CallReach",
         "RecursiveFunction",
         "NameOrdinal",
@@ -65,17 +73,12 @@ pub(super) fn invalidate(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "SameRowShape",
         "RowExtent",
         "IrregularResult",
-        "IndexUse",
         "ShapeDemand",
-        "ShapeWalk",
-        "ShapeAt",
-        "ShapeUse",
         "SliceDemand",
-        "SliceWalk",
-        "SliceAt",
-        "SliceUse",
         "TotalIndex",
         "ArrayOuterBound",
+        "ArrayRowWidth",
+        "LoopMatchesOuterBound",
         "ConstantBound",
         "StorageValue",
         "ArrayValue",
@@ -96,6 +99,10 @@ pub(super) fn invalidate(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "OperationsConflict",
         "EffectCompare",
         "OperationTotal",
+        "IntegerBoundsDemand",
+        "TrackedI32",
+        "IntegerLower",
+        "IntegerUpper",
         "DiscardableRead",
         "PureOperation",
         "MovableOperation",
@@ -162,33 +169,149 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
         None,
         "(run-schedule
         (saturate dataflow-resources)
-        (saturate dataflow-total)
+        (saturate dataflow-total integer-ranges)
         (saturate dataflow-effects)
         (saturate dataflow-motion dataflow-purity))",
     )?;
-    let mut edges = Vec::new();
-    Query(graph).for_each("LiveRegion", |row| {
-        for pair in Query(graph).operations(row[0])?.windows(2) {
-            edges.push((pair[0], pair[1]));
+    publish_order(graph)?;
+    validate(graph)?;
+    let revision = edit::revision(graph)?;
+    graph.update(|mut sink| sink.set("DataflowRevision", RawValues(Vec::new()), revision))?;
+    Ok(())
+}
+
+/// Reuse body-dependent proofs until the canonical graph is edited.
+pub(super) fn ensure(graph: &mut EGraph) -> Result<(), OptimizeError> {
+    let revision = edit::revision(graph)?;
+    if Query(graph).lookup("DataflowRevision", RawValues(Vec::new()))?
+        == Some(graph.base_to_value(revision))
+    {
+        return Ok(());
+    }
+    run(graph)
+}
+
+fn publish_order(graph: &mut EGraph) -> Result<(), OptimizeError> {
+    let query = Query(graph);
+    let mut operations = StableMap::<Value, Vec<(i64, Value)>>::default();
+    query.for_each("LiveRegion", |row| {
+        operations.entry(row[0]).or_default();
+        Ok(())
+    })?;
+    query.for_each("LiveOperation", |row| {
+        let operation = row[0];
+        let region = query.required("OperationRegion", operation)?;
+        let order = query.required("OperationOrder", operation)?;
+        operations.entry(region).or_default().push((graph.value_to_base(order), operation));
+        Ok(())
+    })?;
+    // Region order depends only on the occurrences in that region.
+    let mut previous = LookupMap::default();
+    query.for_function("RegionOperations", |keys, old| {
+        previous.insert(keys[0], query.vector(old)?);
+        Ok(())
+    })?;
+    let mut removed = Vec::new();
+    let mut updated = Vec::new();
+    for (region, mut body) in operations {
+        body.sort_by_key(|&(order, _)| order);
+        let body = body.into_iter().map(|(_, operation)| operation).collect::<Vec<_>>();
+        let old = previous.remove(&region);
+        if old.as_ref() == Some(&body) {
+            continue;
+        }
+        if let Some(old) = old {
+            removed.push((region, old));
+        }
+        updated.push((region, body));
+    }
+    removed.extend(previous);
+    if removed.is_empty() && updated.is_empty() {
+        return Ok(());
+    }
+    graph.update(|mut sink| {
+        for (region, body) in removed {
+            sink.remove("RegionOperations", region)?;
+            sink.remove("RegionOperationCount", region)?;
+            if let (Some(&first), Some(&last)) = (body.first(), body.last()) {
+                sink.remove("FirstOperation", (region, first))?;
+                sink.remove("LastOperation", (region, last))?;
+            } else {
+                sink.remove("EmptyRegion", region)?;
+            }
+            for pair in body.windows(2) {
+                sink.remove("NextOperation", (pair[0], pair[1]))?;
+            }
         }
         Ok(())
     })?;
     graph.update(|mut sink| {
-        for edge in edges {
-            sink.add("NextOperation", edge)?;
+        for (region, body) in updated {
+            sink.set("RegionOperationCount", region, body.len() as i64)?;
+            if let (Some(&first), Some(&last)) = (body.first(), body.last()) {
+                sink.add("FirstOperation", (region, first))?;
+                sink.add("LastOperation", (region, last))?;
+            } else {
+                sink.add("EmptyRegion", region)?;
+            }
+            for pair in body.windows(2) {
+                sink.add("NextOperation", (pair[0], pair[1]))?;
+            }
+            let value = sink.container_to_value(VecContainer {
+                data: body,
+                do_rebuild: true,
+            });
+            sink.set("RegionOperations", region, value)?;
         }
         Ok(())
     })?;
-    validate(graph)
+    Ok(())
 }
 
-/// Compute live-after values for final execution preparation.
-pub(super) fn liveness(graph: &mut EGraph) -> Result<(), OptimizeError> {
+/// Compute live-after values for the requested function roots.
+pub(super) fn liveness(graph: &mut EGraph, roots: &[Value]) -> Result<(), OptimizeError> {
+    ensure(graph)?;
+    let query = Query(graph);
+    let mut pending = Vec::new();
+    for &root in roots {
+        if !query.contains("LivenessRequest", root)? {
+            pending.push(root);
+        }
+    }
+    if pending.is_empty() {
+        return Ok(());
+    }
     let _timing = timing::span("egglog execution liveness");
-    live::publish(graph)?;
+    graph.update(|mut sink| {
+        for root in pending {
+            sink.add("LivenessRequest", root)?;
+        }
+        Ok(())
+    })?;
+    graph.parse_and_run_program(None, "(run-schedule (saturate dataflow-live-index))")?;
+    let query = Query(graph);
+    let mut next = 0_i64;
+    query.for_function("NameOrdinal", |_, ordinal| {
+        next = next.max(graph.value_to_base::<i64>(ordinal) + 1);
+        Ok(())
+    })?;
+    let mut names = Vec::new();
+    query.for_each("LivenessName", |row| {
+        if query.lookup("NameOrdinal", row[0])?.is_none() {
+            names.push(row[0]);
+        }
+        Ok(())
+    })?;
+    graph.update(|mut sink| {
+        for name in names {
+            sink.set("NameOrdinal", name, next)?;
+            next += 1;
+        }
+        Ok(())
+    })?;
     graph.parse_and_run_program(
         None,
-        "(run-schedule (saturate flow-live dataflow-live) (saturate dataflow-resources))",
+        "(run-schedule (saturate dataflow-live-seeds) (saturate flow-live dataflow-live) (saturate dataflow-resources))",
     )?;
     Ok(())
 }

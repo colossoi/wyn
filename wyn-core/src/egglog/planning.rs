@@ -25,11 +25,11 @@ pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
             "\n",
             include_str!("planning/reuse.egg"),
             "\n",
+            include_str!("planning/legality.egg"),
+            "\n",
             include_str!("planning/epilogue.egg"),
             "\n",
             include_str!("planning/compaction.egg"),
-            "\n",
-            include_str!("planning/legality.egg"),
             "\n",
             include_str!("analysis/regularity.egg")
         ),
@@ -45,6 +45,10 @@ pub(super) fn analyze(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "CollectionRank",
         "CollectionExtent",
         "CollectionElement",
+        "LoopCapturedRow",
+        "LoopInitialRow",
+        "RankedLoopCollection",
+        "LoopReadsRowWidth",
         "CompactPath",
         "CompactPair",
         "CompactSafe",
@@ -58,16 +62,16 @@ pub(super) fn analyze(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "LengthWitness",
         "ProductField",
         "ProductComponent",
+        "ComponentLengthWitness",
         "ProjectionPath",
         "LoopValueCarry",
         "LoopArrayComponent",
         "LoopPreservesComponentLength",
         "ArrayElementRange",
         "LiteralRangePrefix",
-        "IntegerLower",
-        "IntegerUpper",
         "ConsumedScalarArray",
         "ReuseCandidate",
+        "ReuseDomainInput",
         "SnapshotCopy",
         "SnapshotUpdate",
         "SnapshotUseSafe",
@@ -80,6 +84,9 @@ pub(super) fn analyze(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "EpiloguePair",
         "EpiloguePath",
         "EpilogueReuse",
+        "EpilogueConsumer",
+        "EpilogueScratch",
+        "EpilogueOverwrite",
         "PointwisePair",
         "PointwiseSource",
         "EpilogueDomainPrefix",
@@ -91,6 +98,7 @@ pub(super) fn analyze(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "PointwiseRegionPrefix",
         "PointwiseSafeRegion",
         "PointwiseHandledUse",
+        "EpilogueRequiresCompletedTotal",
         "PointwiseLegal",
         "LogicalOuterCount",
         "OuterCapacity",
@@ -99,19 +107,17 @@ pub(super) fn analyze(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "ReducerPreservesOuterLength",
         "FreshArray",
         "LocalLoop",
-        "LoopStateBytes",
+        "OperationWorkDemand",
+        "RegionWorkDemand",
         "OperationWork",
         "RegionWorkPrefix",
         "RegionWork",
         "DomainWork",
         "LaneDependentFunction",
         "HostRegion",
+        "KernelPreparationCandidate",
         "KernelPreparation",
         "SelectedExecution",
-        "FirstOperation",
-        "LastOperation",
-        "EmptyRegion",
-        "RegionOperationCount",
         "DistributionPair",
         "DistributionReturnPrefix",
         "DistributionPrefixAt",
@@ -125,7 +131,17 @@ pub(super) fn analyze(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "KnownIndex",
         "EstimatedDomain",
         "DistributeNest",
+        "ReadyDistribution",
+        "RectangularRows",
+        "RowWidthLoop",
+        "RowWidthLength",
+        "RowWidthPreparation",
+        "RowWidthInput",
+        "RowWidthInputReady",
+        "RowWidthLegal",
+        "LiftUniformRowLength",
         "ConditionalPair",
+        "ConditionalPrefix",
         "ConditionalDomainPrefix",
         "ConditionalReturnPrefix",
         "ConditionalTypePrefix",
@@ -138,11 +154,6 @@ pub(super) fn analyze(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "RequiresSnapshot",
         "CanReuse",
         "ForwardLength",
-        "LogicalBytes",
-        "ExtentProduct",
-        "ProductBytes",
-        "ElementBytes",
-        "ElementProductBytes",
         "IndexArithmetic",
         "IndexArithmeticOperands",
         "SelectOutputPrefix",
@@ -156,32 +167,9 @@ pub(super) fn analyze(graph: &mut EGraph) -> Result<(), OptimizeError> {
         graph.clear_function(table)?;
     }
     analysis::advance(graph)?;
-    let mut boundaries = Vec::new();
-    Query(graph).for_each("LiveRegion", |row| {
-        let operations = Query(graph).operations(row[0])?;
-        boundaries.push((
-            row[0],
-            operations.len() as i64,
-            operations.first().copied(),
-            operations.last().copied(),
-        ));
-        Ok(())
-    })?;
-    graph.update(|mut sink| {
-        for (region, count, first, last) in boundaries {
-            sink.set("RegionOperationCount", region, count)?;
-            if let (Some(first), Some(last)) = (first, last) {
-                sink.add("FirstOperation", (region, first))?;
-                sink.add("LastOperation", (region, last))?;
-            } else {
-                sink.add("EmptyRegion", region)?;
-            }
-        }
-        Ok(())
-    })?;
     graph.parse_and_run_program(
         None,
-        "(run-schedule (saturate scalar-analysis graph-sizes graph-work))",
+        "(run-schedule (saturate scalar-analysis graph-sizes integer-ranges type-sizes))",
     )?;
     Ok(())
 }
@@ -205,7 +193,7 @@ pub(super) fn place(
         )
     })?;
     loop {
-        analysis::run(graph)?;
+        analysis::ensure(graph)?;
         analyze(graph)?;
         if distribution::canonicalize(graph)? {
             continue;
@@ -217,9 +205,15 @@ pub(super) fn place(
             (saturate transform-availability dataflow-scopes)
             (saturate dataflow-effects)
             (saturate distribution-prefix)
+            (run row-width-legality)
+            (run row-width-select)
             (saturate distribution-legality)
             (saturate distribution-select))",
         )?;
+        if distribution::lift_row_length(graph)? {
+            super::memory::simplify(graph, true)?;
+            continue;
+        }
         let Some(candidate) = Query(graph).first("DistributeNest")? else {
             if layout::fuse(graph)? {
                 continue;
@@ -228,10 +222,24 @@ pub(super) fn place(
         };
         distribution::apply(graph, candidate[0], candidate[1])?;
     }
+    loop_layout(graph)?;
     graph.parse_and_run_program(
         None,
-        "(run-schedule (saturate graph-placement) (saturate graph-loop-select) (saturate graph-host))",
+        "(run-schedule (saturate entry-invocations graph-placement) (saturate graph-loop-select graph-work) (saturate graph-host))",
     )?;
+    Ok(())
+}
+
+fn loop_layout(graph: &mut EGraph) -> Result<(), OptimizeError> {
+    for table in [
+        "LoopStateBytes",
+        "LoopFieldType",
+        "LoopFieldBytes",
+        "LoopProductBytes",
+    ] {
+        graph.clear_function(table)?;
+    }
+    graph.parse_and_run_program(None, "(run-schedule (saturate graph-loop-layout))")?;
     Ok(())
 }
 
@@ -261,16 +269,21 @@ pub(super) fn load_execution(graph: &mut EGraph) -> Result<(), OptimizeError> {
     // Physical policies are loaded after the final structural analysis.
     graph.parse_and_run_program(
         Some("physical execution policies".into()),
-        include_str!("planning/execution.egg"),
+        concat!(
+            include_str!("planning/execution.egg"),
+            "\n",
+            include_str!("planning/column-scan.egg")
+        ),
     )?;
     Ok(())
 }
 
 pub(super) fn epilogues(graph: &mut EGraph) -> Result<(), OptimizeError> {
     analyze(graph)?;
+    loop_layout(graph)?;
     load_execution(graph)?;
-    graph.parse_and_run_program(None, "(run-schedule (saturate physical-legality) (saturate execution-features) (saturate execution-atomics))")?;
-    graph.parse_and_run_program(None, "(run-schedule (saturate reuse-reads epilogue-index) (saturate reuse-legality epilogue-legality) (saturate reuse-select epilogue-select))")?;
+    graph.parse_and_run_program(None, "(run-schedule (saturate entry-invocations physical-legality graph-work) (saturate execution-features) (saturate execution-atomics))")?;
+    graph.parse_and_run_program(None, "(run-schedule (saturate reuse-reads epilogue-index) (saturate dataflow-effects) (saturate reuse-legality epilogue-legality) (saturate reuse-select epilogue-select))")?;
     let query = Query(graph);
     query.for_each("LiveOperation", |row| {
         if query.contains("ParallelOperation", row[0])? {
@@ -297,6 +310,7 @@ pub(super) fn factor_conditionals(graph: &mut EGraph) -> Result<bool, OptimizeEr
         "(run-schedule
         (saturate conditional-index)
         (saturate transform-availability dataflow-scopes)
+        (saturate dataflow-effects)
         (saturate conditional-legality)
         (saturate conditional-select))",
     )?;

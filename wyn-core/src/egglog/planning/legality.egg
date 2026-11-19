@@ -20,6 +20,9 @@
 (rule ((SelectOutputPrefix operation slot) (= (Output operation slot) (AccNameRef token)))
       ((SelectOutputPrefix operation (+ slot 1))) :ruleset physical-legality)
 (rule ((SelectOutputPrefix operation (OutputCount operation)) (= (PureOperation operation) true)
+       (= arm (ControlRegion operation slot)))
+      ((RegionWorkDemand arm)) :ruleset physical-legality)
+(rule ((SelectOutputPrefix operation (OutputCount operation)) (= (PureOperation operation) true)
        (= yes (ControlRegion operation 0)) (= no (ControlRegion operation 1))
        (= a (RegionWork yes)) (= b (RegionWork no)) (>= a (bigint 0)) (>= b (bigint 0))
        (<= a (bigint 4)) (<= b (bigint 4)))
@@ -40,7 +43,7 @@
 
 (function LoopComponentPreserved (OperationKey i64 LogicalPath) bool :merge (or old new))
 (relation LoopHasArrayComponents (OperationKey i64))
-(rule ((LoopArrayComponent operation slot path array first last))
+(rule ((LoopArrayComponent operation slot path array first))
       ((set (LoopComponentPreserved operation slot path) false) (LoopHasArrayComponents operation slot)) :ruleset physical-legality)
 (rule ((LoopPreservesComponentLength operation slot path))
       ((set (LoopComponentPreserved operation slot path) true)) :ruleset physical-legality)

@@ -44,10 +44,21 @@ impl Body<'_, '_, '_> {
             self.set_shape(&counts, vec![length])?;
             counts
         } else {
-            let Some(Type::Constructed(TypeName::Size(capacity), _)) = destination.ty.array_size() else {
+            let query = self.query();
+            let capacity = self
+                .integer_literal(&buckets)
+                .and_then(|count| usize::try_from(count).ok())
+                .or_else(|| match destination.ty.array_size() {
+                    Some(Type::Constructed(TypeName::Size(size), _)) => Some(*size),
+                    _ => None,
+                });
+            let capacity = capacity.or(query
+                .lookup("OuterCapacity", destination_name)?
+                .and_then(|value| usize::try_from(query.0.value_to_base::<i64>(value)).ok()));
+            let Some(capacity) = capacity else {
                 return Err(error("local bucket counters require a capacity bound"));
             };
-            self.local_array(types::sized_array(*capacity, uint))?
+            self.local_array_with_length(types::sized_array(capacity, uint), buckets.clone())?
         };
         self.counted(
             Self::number(0),

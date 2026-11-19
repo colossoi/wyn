@@ -10,7 +10,25 @@ use crate::tlc::{
 use crate::{Interner, LookupMap, LookupSet, StableMap, SymbolId};
 pub(crate) use egglog_engine::Value;
 use egglog_engine::{EGraph, Error, FullState, RawValues, Write};
+use std::cell::RefCell;
 use std::hash::Hash;
+
+thread_local! {
+    static FLOW_TEMPLATE: RefCell<Option<EGraph>> = const { RefCell::new(None) };
+}
+
+fn flow_graph() -> Result<EGraph, Error> {
+    FLOW_TEMPLATE.with(|template| {
+        let mut template = template.borrow_mut();
+        if let Some(graph) = template.as_ref() {
+            return Ok(graph.clone());
+        }
+        let mut graph = EGraph::default();
+        graph.parse_and_run_program(Some("dataflow".into()), include_str!("flow.egg"))?;
+        *template = Some(graph.clone());
+        Ok(graph)
+    })
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Origin {
@@ -76,8 +94,7 @@ impl Dataflow {
         program: &Program<Tag, F, G>,
         mut transfer: impl FnMut(Action) -> (LookupSet<R>, LookupSet<R>),
     ) -> Result<LookupMap<TermId, LookupSet<R>>, OptimizeError> {
-        let mut graph = EGraph::default();
-        graph.parse_and_run_program(None, include_str!("flow.egg"))?;
+        let mut graph = flow_graph()?;
         let mut flow = Self::default();
         let mut resources = Interner::<i64, R>::new();
         graph.update(|mut sink| {
@@ -116,8 +133,7 @@ impl Dataflow {
     }
 
     pub fn try_build<C: Payload, S: Payload>(term: &Term<C, S>) -> Result<(Self, Value), OptimizeError> {
-        let mut graph = EGraph::default();
-        graph.parse_and_run_program(Some("dataflow".into()), include_str!("flow.egg"))?;
+        let mut graph = flow_graph()?;
         let mut flow = Self::default();
         let result = graph.update(|mut sink| Ok(flow.import(term, &mut sink)?.value))?;
         graph.parse_and_run_program(

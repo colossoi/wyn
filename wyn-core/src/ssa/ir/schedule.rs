@@ -16,6 +16,7 @@ pub(crate) struct LoopScopes {
 }
 
 impl LoopScopes {
+    #[cfg(test)]
     pub fn analyze<I, T>(function: &Function<I, T>) -> Self {
         let dominators = DominatorTree::build(function.entry, |block, successors| {
             successors.extend(function.blocks[block].term.successors())
@@ -56,14 +57,6 @@ impl LoopScopes {
     /// Innermost lexical loop containing a reachable block.
     pub fn scope(&self, block: BlockId) -> Option<BlockId> {
         self.scopes.get(&block).copied().flatten()
-    }
-
-    /// Whether a value is defined within a lexical loop scope.
-    pub fn value_varies<I, T>(&self, function: &Function<I, T>, value: ValueRef) -> bool {
-        let ValueRef::Ssa(value) = value else {
-            return false;
-        };
-        function.block_of_value(value).and_then(|block| self.scope(block)).is_some()
     }
 }
 

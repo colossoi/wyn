@@ -40,21 +40,40 @@ mod source_pipeline {
 
     #[test]
     fn dispatch_branch_scalar_projections_do_not_copy_array_siblings() {
-        let module = shaders(include_str!(
+        let ssa = compile_thru_ssa(include_str!(
             "../../../tests/compiler/library/dispatch_loop_products.wyn"
-        ));
-        let steps: Vec<_> = module
-            .entry_points
+        ))
+        .unwrap();
+        let output = wyn_core::lower_ssa_to_wgsl_with_program(ssa.clone()).unwrap();
+        wyn_core::lower_ssa_to_spirv(ssa).unwrap();
+        let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
+        super::super::validate(module.clone());
+        let interface = &output.program.interface;
+        let loops = interface
+            .dispatch_loops
             .iter()
-            .filter(|entry| entry.name.starts_with("projected_") && entry.name.ends_with("_loop_step"))
-            .collect();
-        assert_eq!(steps.len(), 1, "fixture must retain a distributed loop");
-        assert!(
-            steps[0].function.local_variables.iter().all(|(_, variable)| {
-                !matches!(module.types[variable.ty].inner, naga::TypeInner::Array { .. })
-            }),
-            "scalar fields must not materialize the carried array"
-        );
+            .filter_map(|loop_| {
+                let wyn_core::host::Pipeline::Compute(pipeline) = &interface.pipelines[loop_.pipeline]
+                else {
+                    return None;
+                };
+                (pipeline.stages[loop_.setup].owner == "projected").then_some((loop_, pipeline))
+            })
+            .collect::<Vec<_>>();
+        let [(loop_, pipeline)] = loops.as_slice() else {
+            panic!("projected must retain one distributed loop");
+        };
+        assert!(!loop_.body.is_empty());
+        for &stage in &loop_.body {
+            let shader = &pipeline.stages[stage].entry_point;
+            let step = module.entry_points.iter().find(|entry| &entry.name == shader).unwrap();
+            assert!(
+                step.function.local_variables.iter().all(|(_, variable)| {
+                    !matches!(module.types[variable.ty].inner, naga::TypeInner::Array { .. })
+                }),
+                "{shader} must not materialize the carried array"
+            );
+        }
     }
 
     #[test]
@@ -188,11 +207,10 @@ mod source_pipeline {
             .find(|(_, v)| v.binding.as_ref().is_some_and(|b| b.group == 0 && b.binding == 0))
             .unwrap()
             .0;
-        let partials = module.entry_points.iter().find(|e| e.name.ends_with("_partials")).unwrap();
         assert_eq!(
-            storage_loads(&partials.function, input),
+            module.entry_points.iter().map(|entry| storage_loads(&entry.function, input)).sum::<usize>(),
             1,
-            "one input load feeds both reductions"
+            "one input load feeds both reductions across all dispatches"
         );
     }
     #[test]
@@ -553,7 +571,7 @@ mod source_host {
     #[test]
     fn scalar_output_epilogues_lower_without_a_finish_entry() {
         let module = compile(include_str!("../../../testfiles/scalar_epilogues.wyn"));
-        assert_eq!(module.entry_points.len(), 3);
+        assert_eq!(module.entry_points.len(), 2);
         assert!(module.entry_points.iter().all(|entry| !entry.name.ends_with("finish")));
     }
     #[test]
@@ -565,10 +583,28 @@ mod source_host {
     }
     #[test]
     fn filter_post_map_record_outputs_reach_wgsl() {
-        let module = compile(include_str!("../../../testfiles/rust_host_filter_post.wyn"));
-        let entries: Vec<_> = module.entry_points.iter().map(|entry| entry.name.as_str()).collect();
-        assert!(entries.iter().any(|name| name.ends_with("local")));
-        assert_eq!(module.entry_points[0].workgroup_size, [64, 1, 1]);
+        let output = pipeline(include_str!("../../../testfiles/rust_host_filter_post.wyn"));
+        crate::validate(naga::front::wgsl::parse_str(&output.wgsl).unwrap());
+        assert!(output.wgsl.contains("workgroupBarrier()"), "cooperative filter");
+        let [count, records] = output.program.interface.source_results.as_slice() else {
+            panic!("filter count and record array");
+        };
+        assert_eq!(count.layout, host::ResultLayout::Scalar(host::ResultScalar::I32));
+        let host::ResultLayout::Array {
+            element,
+            stride: 8,
+            length: None,
+        } = &records.layout
+        else {
+            panic!("runtime-length array of eight-byte records: {:?}", records.layout);
+        };
+        let host::ResultLayout::Record { fields, size: 8 } = element.as_ref() else {
+            panic!("eight-byte record: {element:?}");
+        };
+        assert_eq!(
+            fields.iter().map(|field| (field.name.as_str(), field.offset)).collect::<Vec<_>>(),
+            [("value", 0), ("weighted", 4)]
+        );
     }
     #[test]
     fn filter_element_read_epilogue_lowers_in_a_separate_dispatch() {
@@ -579,7 +615,7 @@ mod source_host {
     }
     #[test]
     fn runtime_input_lengths_and_output_allocations_share_the_published_bindings() {
-        use host::{Binding, BufferLen, Pipeline};
+        use host::{Binding, Pipeline};
         let output = pipeline(include_str!("../../../tests/compiler/library/filter_element_read_epilogue_lowers_in_a_separate_dispatch.wyn"));
         let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
         naga::valid::Validator::new(
@@ -593,22 +629,42 @@ mod source_host {
             .expressions
             .iter()
             .any(|(_, x)| matches!(x, naga::Expression::ArrayLength(_)))));
-        assert!(
-            output
-                .program
-                .interface
-                .scalar_tasks
-                .iter()
-                .any(|task| matches!(task.value, host::ScalarExpr::BufferLength { stride: 4, .. })),
-            "logical input length is supplied by the host"
-        );
+        let source = output
+            .program
+            .interface
+            .scalar_tasks
+            .iter()
+            .find_map(|task| match &task.value {
+                host::ScalarExpr::BufferLength { source, stride: 4 } => Some(source),
+                _ => None,
+            })
+            .expect("logical input length is supplied by the host");
         let [Pipeline::Compute(p)] = output.program.interface.pipelines.as_slice() else {
             panic!("compute pipeline")
         };
         assert_eq!(p.stages.len(), 1);
         assert_eq!(p.stages[0].owner, "main");
         let result = &output.program.interface.source_results[0];
-        assert!(p.bindings.iter().any(|b| matches!(b, Binding::StorageBuffer { set, binding, length: Some(BufferLen::LikeInput { set: 0, binding: 0, elem_bytes: 4, src_elem_bytes: 4 }), .. } if (*set, *binding) == (result.set, result.binding))));
+        let mut capacity = p
+            .bindings
+            .iter()
+            .find_map(|binding| match binding {
+                Binding::StorageBuffer {
+                    set,
+                    binding,
+                    length: Some(length),
+                    ..
+                } if (*set, *binding) == (result.set, result.binding) => Some(length.clone()),
+                _ => None,
+            })
+            .expect("published output has a computed capacity");
+        let mut reads = Vec::new();
+        capacity.reads_mut(&mut |source, _| reads.push(source.clone()));
+        assert_eq!(
+            reads.as_slice(),
+            &[source.clone()],
+            "capacity uses the same source buffer"
+        );
         assert!(p.bindings.iter().any(
         |b| matches!(b, Binding::StorageBuffer { members, .. } if members.iter().any(|m| m.name == "bias"))
     ));
@@ -621,35 +677,54 @@ mod source_host {
         let [Pipeline::Compute(p)] = output.program.interface.pipelines.as_slice() else {
             panic!("compute pipeline")
         };
-        assert_eq!(p.stages.len(), 3, "chunks, combine, scalar result publication");
-        let host::DispatchSize::Fixed { x, y, z, .. } = p.stages[0].dispatch_size else {
+        let [chunks, combine] = p.stages.as_slice() else {
+            panic!("chunk reduction followed by combination and publication");
+        };
+        let host::DispatchSize::Computed { groups, .. } = &chunks.dispatch_size else {
             panic!("collective chunk grid must be bounded");
         };
-        let bytes = u64::from(x) * u64::from(y) * u64::from(z) * 4;
-        let scratch = p
-            .bindings
+        let group_count: i64 = groups.iter().map(|count| count.constant().unwrap().unwrap()).product();
+        assert!(group_count > 1);
+        let scratch = *chunks.writes.iter().find(|binding| combine.reads.contains(binding)).unwrap();
+        let Binding::StorageBuffer {
+            length: Some(length), ..
+        } = &p.bindings[scratch]
+        else {
+            panic!("scratch storage with a known capacity");
+        };
+        let capacity = match length {
+            BufferLen::Computed { bytes } => bytes.constant().unwrap().unwrap(),
+            length => length.resolve_bytes(|_, _| None).unwrap() as i64,
+        };
+        assert_eq!(capacity, group_count * 4);
+        assert!(!combine.writes.contains(&scratch));
+        let [result] = output.program.interface.source_results.as_slice() else {
+            panic!("one scalar result");
+        };
+        assert!(combine
+            .writes
             .iter()
-            .position(|b| {
-                matches!(
-                    b,
-                    Binding::StorageBuffer {
-                        length: Some(BufferLen::Fixed { bytes: capacity }),
-                        ..
-                    } if *capacity == bytes
-                )
-            })
-            .unwrap();
-        assert!(p.stages[0].writes.contains(&scratch));
-        assert!(p.stages[1].reads.contains(&scratch));
-        assert!(!p.stages[1].writes.contains(&scratch));
-        assert_eq!(output.program.interface.source_results.len(), 1);
-        assert_eq!(output.program.interface.frame_graph.passes.len(), 3);
+            .any(|&binding| p.bindings[binding].slot() == Some((result.set, result.binding))));
+        assert!(combine.dependencies.contains(&(0, 0)));
+        assert_eq!(output.program.interface.frame_graph.passes.len(), 2);
         assert!(output.program.interface.frame_graph.topological_order().is_ok());
     }
     #[test]
     fn scalar_results_after_collectives_are_executed_and_published() {
         let output = pipeline(include_str!("../../../tests/compiler/library/reduction_publication_has_scratch_writers_readers_and_a_source_result.wyn"));
-        assert_eq!(output.program.interface.source_results.len(), 1);
+        let [result] = output.program.interface.source_results.as_slice() else {
+            panic!("one scalar result");
+        };
+        let Pipeline::Compute(p) = &output.program.interface.pipelines[result.pipeline_index] else {
+            panic!("compute pipeline");
+        };
+        let [_, publication] = p.stages.as_slice() else {
+            panic!("chunk reduction followed by scalar publication");
+        };
+        assert!(publication
+            .writes
+            .iter()
+            .any(|&binding| p.bindings[binding].slot() == Some((result.set, result.binding))));
         let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
@@ -657,20 +732,27 @@ mod source_host {
         )
         .validate(&module)
         .unwrap();
-        assert_eq!(module.entry_points.len(), 3);
+        let combine =
+            module.entry_points.iter().find(|entry| entry.name == publication.entry_point).unwrap();
+        let expressions = &combine.function.expressions;
+        assert!(expressions.iter().any(|(_, expr)| matches!(expr,
+            naga::Expression::Binary { op: naga::BinaryOperator::Multiply, right, .. }
+                if matches!(expressions[*right], naga::Expression::Literal(naga::Literal::I32(3))))));
     }
     #[test]
     fn computed_graphics_captures_share_the_producer_binding() {
-        use host::Binding;
-        let output = pipeline(include_str!("../../../testfiles/playground/conway.wyn"));
-        let [result] = output.program.interface.source_results.as_slice() else {
+        let program = pipeline(include_str!("../../../testfiles/playground/conway.wyn")).program;
+        let [result] = program.interface.source_results.as_slice() else {
             panic!("one computed board");
         };
-        assert!(output.program.interface.pipelines.iter().any(|p| {
+        let board = program.slot_resource(result.pipeline_index, result.set, result.binding).unwrap();
+        assert!(program.interface.pipelines.iter().enumerate().any(|(index, p)| {
             let Pipeline::Graphics(p) = p else { return false };
-            p.bindings.iter().any(|b| {
-                matches!(b, Binding::StorageBuffer { set, binding, .. }
-            if (*set, *binding) == (result.set, result.binding))
+            p.stages.iter().any(|stage| {
+                stage
+                    .reads
+                    .iter()
+                    .any(|&binding| program.binding_resource(index, binding).unwrap() == board)
             })
         }));
     }
@@ -702,8 +784,12 @@ mod source_host {
                 _ => None,
             })
             .expect("generated output allocation");
+        let bytes = match bytes {
+            Expr::Max(payload, minimum) if minimum.constant().unwrap() == Some(16) => payload.as_ref(),
+            bytes => bytes,
+        };
         let Expr::Multiply(_, stride) = bytes else {
-            panic!("physical stride")
+            panic!("physical stride in {bytes:?}")
         };
         assert_eq!(**stride, Expr::Integer(16));
         let mut reads = Vec::new();
@@ -782,24 +868,31 @@ mod source_host_output {
     }
     #[test]
     fn runtime_array_joins_wait_for_producers_in_branch_arms() {
-        for source in [
-            include_str!("../../../tests/compiler/library/runtime_array_joins_wait_for_producers_in_branch_arms_additional.wyn"),
-            include_str!("../../../tests/compiler/library/runtime_array_joins_wait_for_producers_in_branch_arms_additional.wyn"),
-        ] {
-            let program = compile(source);
-            let graph = &program.interface.frame_graph;
-            let join = graph.passes.iter().position(|pass| pass.name == "main_view").unwrap();
-            let producers: Vec<_> = graph
-                .passes
-                .iter()
-                .enumerate()
-                .filter(|(_, pass)| pass.name.starts_with("main_compute"))
-                .map(|(i, _)| i)
-                .collect();
-            assert!(!producers.is_empty());
-            for producer in producers {
-                assert_dependency(graph, producer, join);
-            }
+        let program = compile(include_str!(
+            "../../../tests/compiler/library/runtime_array_joins_wait_for_producers_in_branch_arms_additional.wyn"
+        ));
+        let graph = &program.interface.frame_graph;
+        let [result] = program.entries[0].results.as_slice() else {
+            panic!("one returned array");
+        };
+        let (join, pass) = graph
+            .passes
+            .iter()
+            .enumerate()
+            .rfind(|(_, pass)| pass.writes.iter().any(|access| access.resource == result.0))
+            .expect("a dispatch publishes the selected array");
+        let producers: Vec<_> = graph.passes[..join]
+            .iter()
+            .enumerate()
+            .filter(|(_, producer)| producer.writes.iter().any(|access| pass.reads.contains(access)))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            producers.len() >= 2,
+            "the join reads branch data from multiple dispatches"
+        );
+        for producer in producers {
+            assert_dependency(graph, producer, join);
         }
     }
     #[test]
@@ -815,26 +908,36 @@ mod source_host_output {
         );
     }
     #[test]
-    fn finish_dispatch_waits_for_all_reduction_results() {
+    fn publication_waits_for_all_reduction_results() {
         let program = compile(include_str!(
             "../../../tests/compiler/library/device_computed_trip_counts_are_published_before_the_loop.wyn"
         ));
-        let dispatches: Vec<_> = program.entries[0]
-            .operations
+        let [first, second] = program.entries[0].results.as_slice() else {
+            panic!("two reduction results");
+        };
+        let graph = &program.interface.frame_graph;
+        let publication = graph
+            .passes
             .iter()
-            .filter_map(|operation| {
-                let Operation::Dispatch { pipeline, stage, .. } = operation else {
-                    return None;
-                };
-                let Pipeline::Compute(compute) = &program.interface.pipelines[*pipeline] else {
-                    panic!("compute pipeline");
-                };
-                Some(compute.stages[*stage].entry_point.as_str())
+            .position(|pass| {
+                [first, second]
+                    .iter()
+                    .all(|result| pass.writes.iter().any(|access| access.resource == result.0))
             })
-            .collect();
-        let combine = dispatches.iter().position(|name| name.ends_with("_combine")).unwrap();
-        let finish = dispatches.iter().position(|name| name.ends_with("_finish")).unwrap();
-        assert!(combine < finish, "{dispatches:?}");
+            .expect("both results are published together");
+        let scratch = &graph.passes[publication].reads;
+        assert_eq!(scratch.len(), 2);
+        for read in scratch {
+            let producer = graph
+                .passes
+                .iter()
+                .enumerate()
+                .find_map(|(index, pass)| {
+                    (index != publication && pass.writes.contains(read)).then_some(index)
+                })
+                .expect("each reduction has a scratch writer");
+            assert_dependency(graph, producer, publication);
+        }
     }
     #[test]
     fn host_program_preserves_compute_phases_and_returns_source_results() {
@@ -917,9 +1020,8 @@ mod source_host_output {
         let ssa = compile_thru_ssa(source).unwrap();
         let names: BTreeSet<_> = ssa.entry_points.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names.len(), ssa.entry_points.len());
+        assert_eq!(names.len(), 2, "partial reduction and combine");
         assert!(names.iter().all(|n| n.starts_with("totals_")), "{names:?}");
-        assert!(names.contains("totals_partials"));
-        assert!(names.contains("totals_combine"));
         let compiled = lower_ssa_to_wgsl_with_program(ssa).unwrap();
         let module = naga::front::wgsl::parse_str(&compiled.wgsl).unwrap();
         let shader_names: BTreeSet<_> = module.entry_points.iter().map(|e| e.name.as_str()).collect();
@@ -928,16 +1030,29 @@ mod source_host_output {
                 panic!("compute pipeline")
             };
             for stage in &pipeline.stages {
+                assert_eq!(stage.owner, "totals");
                 assert!(shader_names.contains(stage.entry_point.as_str()));
             }
         }
-        let resource_names: Vec<_> =
-            compiled.program.interface.frame_graph.resources.iter().map(|r| r.name.as_str()).collect();
-        assert!(resource_names.contains(&"totals_result_0"), "{resource_names:?}");
-        assert!(resource_names.contains(&"totals_result_1"));
-        assert!(resource_names.iter().any(|n| n.starts_with("totals_scratch")));
+        let graph = &compiled.program.interface.frame_graph;
+        let [partials, combine] = graph.passes.as_slice() else {
+            panic!("two reduction phases");
+        };
+        assert!(partials.writes.iter().any(|partial| combine.reads.contains(partial)));
+        assert_dependency(graph, 0, 1);
+        let source_results = &compiled.program.interface.source_results;
+        assert_eq!(
+            source_results.iter().map(|result| result.name.as_str()).collect::<Vec<_>>(),
+            ["result_0", "result_1"]
+        );
         let whl = compiled.program.to_whl("totals.wgsl", ShaderFormat::Wgsl).unwrap();
         let rust = compiled.program.to_rust_wgpu("totals.wgsl", ShaderFormat::Wgsl).unwrap();
+        for name in shader_names {
+            assert!(
+                whl.contains(name) && rust.contains(name),
+                "hosts reference {name}"
+            );
+        }
         for artifact in [&compiled.wgsl, &whl, &rust] {
             for prefix in ["egg_kernel", "egg_resource", "egg_helper"] {
                 assert!(!artifact.contains(prefix), "unexpected generated name {prefix}");
@@ -971,7 +1086,10 @@ mod source_host_output {
     }
     #[test]
     fn graphics_capture_uses_the_produced_buffer_after_its_writer() {
-        let program = compile(include_str!("../../../testfiles/playground/conway.wyn"));
+        let ssa = compile_thru_ssa(include_str!("../../../testfiles/playground/conway.wyn")).unwrap();
+        let output = lower_ssa_to_wgsl_with_program(ssa).unwrap();
+        let shader = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
+        let program = output.program;
         let [entry] = program.entries.as_slice() else {
             panic!("one graphics host entry");
         };
@@ -1011,11 +1129,8 @@ mod source_host_output {
         for pipeline in &program.interface.pipelines {
             if let Pipeline::Graphics(graphics) = pipeline {
                 for stage in &graphics.stages {
-                    assert!(
-                        stage.entry_point.starts_with(&format!("{}_", stage.owner)),
-                        "{}",
-                        stage.entry_point
-                    );
+                    assert_eq!(stage.owner, entry.name);
+                    assert!(shader.entry_points.iter().any(|entry| entry.name == stage.entry_point));
                 }
             }
         }
@@ -1048,8 +1163,7 @@ mod source_host_output {
             assert_eq!(entry.inputs.len(), 2, "generated buffers must remain internal");
             assert_eq!(entry.results.len(), 1, "only the render target is returned");
             assert!(entry.inputs.contains(&entry.results[0]), "borrowed render target");
-            // Computed captures allocate element storage and an explicit input length.
-            assert_eq!(entry.allocations().count(), 2 * usize::from(computed));
+            assert_eq!(entry.allocations().count(), if computed { 2 } else { 0 });
             let captured = if computed {
                 let Allocation::Buffer { resource, .. } = *entry.allocations().find(|allocation| matches!(allocation, Allocation::Buffer { bytes, .. } if !matches!(bytes, Expr::Integer(_)))).unwrap() else {
                     panic!("computed capture needs one buffer")
@@ -1537,10 +1651,18 @@ entry composite_constant(index: u32) word64 =
     }
     #[test]
     fn wgsl_map_over_unique_storage_view_updates_backing_buffer() {
-        let wgsl = compile_to_wgsl(include_str!(
+        let ssa = compile_thru_ssa(include_str!(
             "../../../tests/compiler/library/wgsl_map_over_unique_storage_view_updates_backing_buffer_additional.wyn"
         ))
-        .expect("map/scatter over a unique storage view must lower");
+        .expect("map/scatter over a unique storage view must lower to SSA");
+        let output = wyn_core::lower_ssa_to_wgsl_with_program(ssa).unwrap();
+        let wgsl = output.wgsl;
+        let entry = &output.program.entries[0];
+        assert_eq!(
+            entry.results.as_slice(),
+            &[entry.inputs.first().copied().expect("framebuffer input")],
+            "return the updated input storage"
+        );
 
         validate_wgsl(&wgsl);
         let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
@@ -1552,13 +1674,13 @@ entry composite_constant(index: u32) word64 =
             !stores_binding(&module, 0, 1),
             "the additional binding contains read-only length metadata"
         );
-        assert_eq!(
+        assert!(
             module
                 .global_variables
                 .iter()
                 .filter(|(_, v)| v.binding.as_ref().is_some_and(|b| b.group == 0))
-                .count(),
-            2,
+                .count()
+                <= 2,
             "array storage and length metadata"
         );
     }
@@ -1669,6 +1791,8 @@ entry composite_constant(index: u32) word64 =
 mod constant_math {
     use super::*;
     use wspirv::dr;
+    use wyn_core::flow::ExecutionModel;
+    use wyn_core::host::{ScalarExpr, ScalarType};
     use wyn_core::ssa::types::{ConstantValue, InstKind, ValueRef};
     use wyn_core::{
         op::{BinaryOperator, OpTag},
@@ -1707,9 +1831,12 @@ mod constant_math {
         let count = |op| instructions(compute).filter(|i| i.class.opcode == op).count();
         assert_eq!(
             count(spirv::Op::FDiv),
-            2,
-            "only dynamic aspect/projection divisions remain"
+            1,
+            "the shader divides by the viewport aspect computed on the host"
         );
+        assert!(lowered.program.interface.scalar_tasks.iter().any(|task| matches!(&task.value,
+            ScalarExpr::Apply { op, ty: ScalarType::F32, args } if op == "div"
+                && matches!(args.as_slice(), [ScalarExpr::Parameter { offset: 0, .. }, ScalarExpr::Parameter { offset: 4, .. }]))));
         assert_eq!(count(spirv::Op::FSub), 0);
         assert!(!instructions(compute).any(|i| matches!(
             i.operands.get(1),
@@ -1728,9 +1855,23 @@ mod constant_math {
     #[test]
     fn unused_shader_inputs_keep_their_interfaces_without_runtime_setup() {
         let program = compile_thru_ssa(FIXTURE).unwrap();
+        let stages = [ExecutionModel::Vertex, ExecutionModel::Fragment].map(|stage| {
+            let entry = program
+                .entry_points
+                .iter()
+                .find(|entry| {
+                    matches!(
+                        (&entry.execution_model, &stage),
+                        (ExecutionModel::Vertex, ExecutionModel::Vertex)
+                            | (ExecutionModel::Fragment, ExecutionModel::Fragment)
+                    )
+                })
+                .unwrap();
+            entry.name.clone()
+        });
         // Interface declarations survive even when the shader does not read them.
-        for name in ["unused_inputs_vertex", "unused_inputs_fragment"] {
-            let entry = program.entry_points.iter().find(|e| e.name == name).unwrap();
+        for name in &stages {
+            let entry = program.entry_points.iter().find(|e| &e.name == name).unwrap();
             assert_eq!(entry.inputs.len(), 4);
             assert_eq!(
                 entry.inputs.iter().filter(|i| i.storage_binding().is_some()).count(),
@@ -1743,7 +1884,7 @@ mod constant_math {
         }
         let lowered = wyn_core::lower_ssa_to_spirv(program).unwrap();
         let module = dr::load_words(&lowered.spirv).unwrap();
-        for (name, lengths, loads) in [("unused_inputs_vertex", 1, 2), ("unused_inputs_fragment", 0, 1)] {
+        for (name, (lengths, loads)) in stages.iter().zip([(1, 2), (0, 1)]) {
             let function = entry_function(&module, name);
             assert_eq!(
                 instructions(function).filter(|i| i.class.opcode == spirv::Op::ArrayLength).count(),

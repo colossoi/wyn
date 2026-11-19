@@ -235,6 +235,8 @@
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (WritesInput operation v0) ) ((WritesInput (ClonedOperation context operation) v0)) :ruleset clone-edges)
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (AliasesInput operation v0 v1) ) ((AliasesInput (ClonedOperation context operation) v0 v1)) :ruleset clone-edges)
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (FreshOutput operation v0) ) ((FreshOutput (ClonedOperation context operation) v0)) :ruleset clone-edges)
+(rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (ScratchAllocation operation))
+      ((ScratchAllocation (ClonedOperation context operation))) :ruleset clone-edges)
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (ProvenTotalOperation operation) ) ((ProvenTotalOperation (ClonedOperation context operation))) :ruleset clone-edges)
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (= bits (LiteralBits operation)))
       ((set (LiteralBits (ClonedOperation context operation)) bits)) :ruleset clone-edges)

@@ -39,6 +39,8 @@ fn clear(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "FusionOutputBase",
         "FusionOperationBase",
         "MotionCandidate",
+        "RepeatedArrayMotion",
+        "ArrayMotionReadOnly",
         "FusionPreparation",
         "FusionBoundary",
         "FusionNested",
@@ -77,9 +79,9 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
     memory::simplify(graph, false)?;
     loop {
         clear(graph)?;
-        analysis::run(graph)?;
+        analysis::ensure(graph)?;
         crate::egglog::planning::analyze(graph)?;
-        graph.parse_and_run_program(None, "(run-schedule (saturate placement-index) (saturate placement-demand dataflow-scopes) (saturate placement-legality) (saturate placement-select) (saturate graph-fusion dataflow-scopes) (saturate dataflow-effects) (saturate graph-fusion-legality) (saturate graph-fusion-select))")?;
+        graph.parse_and_run_program(None, "(run-schedule (saturate placement-index) (saturate placement-demand dataflow-scopes) (saturate placement-legality graph-work) (saturate placement-select) (saturate graph-fusion dataflow-scopes) (saturate dataflow-effects) (saturate graph-fusion-legality) (saturate graph-fusion-select))")?;
         let query = Query(graph);
         let mut selected = None;
         query.for_each("FuseCandidate", |row| {
@@ -177,7 +179,6 @@ fn sink_producer(graph: &mut EGraph) -> Result<bool, OptimizeError> {
             }
             Ok(())
         })?;
-        analysis::invalidate(graph)?;
         edit::changed(graph)?;
     }
     Ok(true)
@@ -243,7 +244,7 @@ pub(super) fn motion(graph: &mut EGraph, hoist: bool) -> Result<bool, OptimizeEr
     analysis::advance(graph)?;
     graph.parse_and_run_program(
         None,
-        "(run-schedule (saturate graph-fusion) (saturate dataflow-scopes dataflow-effects))",
+        "(run-schedule (saturate graph-fusion motion-work graph-work) (saturate dataflow-scopes dataflow-effects))",
     )?;
     let query = Query(graph);
     let mut selected = Vec::new();

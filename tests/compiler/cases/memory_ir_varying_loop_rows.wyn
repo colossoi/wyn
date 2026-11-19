@@ -1,0 +1,10 @@
+--! command = "build"
+--! exit = 1
+--! targets = ["spirv", "wgsl"]
+--! errors = ["egglog output: map callback results must have the same array shape"]
+--! contains = ["map callback results must have the same array shape"]
+
+entry growing_rows(n:i32, limit:i32) [][]i32 =
+  let rows=loop rows=map(|k|map(|x|x,iota(k)),iota(n)) for i<limit do
+    map(|row|map(|j|if j<length(row) then row[j]+1 else i,iota(length(row)+1)),rows)
+  in map(|row|map(|x|x+10,row),rows)

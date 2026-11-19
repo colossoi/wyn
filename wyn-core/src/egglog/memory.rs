@@ -60,7 +60,6 @@ pub(super) fn inline(graph: &mut EGraph) -> Result<(), OptimizeError> {
             }
         },
     );
-    analysis::invalidate(graph)?;
     drop(selection);
     for caller in order {
         if let Some(sites) = calls.remove(&caller) {
@@ -87,7 +86,7 @@ fn inline_call(graph: &mut EGraph, call: Value, callee: Value) -> Result<(), Opt
     drop(substitution);
     let _splicing = timing::span("egglog inline splicing");
     let operations = Query(graph).operations(region)?;
-    edit::splice_unanalyzed(graph, call, &operations)
+    edit::splice(graph, call, &operations)
 }
 
 pub(super) fn simplify(graph: &mut EGraph, hoist: bool) -> Result<(), OptimizeError> {
@@ -98,11 +97,11 @@ pub(super) fn simplify(graph: &mut EGraph, hoist: bool) -> Result<(), OptimizeEr
     });
     loop {
         edit::clear(graph)?;
-        analysis::run(graph)?;
+        analysis::ensure(graph)?;
         super::planning::analyze(graph)?;
         graph.parse_and_run_program(
             None,
-            "(run-schedule (saturate graph-candidates scalar-analysis dataflow-scopes))",
+            "(run-schedule (saturate graph-candidate-index graph-candidates scalar-analysis dataflow-scopes))",
         )?;
         if scalar::apply(graph)? || scratch_shapes(graph)? {
             continue;
@@ -115,18 +114,16 @@ pub(super) fn simplify(graph: &mut EGraph, hoist: bool) -> Result<(), OptimizeEr
         })?;
         if !replacements.is_empty() {
             let mut copies = Vec::new();
-            for (&old, &new) in &replacements {
-                Query(graph).for_each("Defines", |row| {
-                    if row[0] == old {
-                        if let Some(site) = Query(graph).enode("OperationSite", row[1])? {
-                            if analysis::count(Query(graph), "OutputCount", site[0])? == 1 {
-                                copies.push((site[0], new));
-                            }
+            query.for_each("Defines", |row| {
+                if let Some(&new) = replacements.get(&row[0]) {
+                    if let Some(site) = query.enode("OperationSite", row[1])? {
+                        if analysis::count(query, "OutputCount", site[0])? == 1 {
+                            copies.push((site[0], new));
                         }
                     }
-                    Ok(())
-                })?;
-            }
+                }
+                Ok(())
+            })?;
             // A proven redundant partial evaluation becomes a pure copy before DCE.
             for (operation, name) in copies {
                 edit::set_code(graph, operation, Code::Use)?;
@@ -134,12 +131,12 @@ pub(super) fn simplify(graph: &mut EGraph, hoist: bool) -> Result<(), OptimizeEr
             }
             edit::replace(graph, &replacements.into_iter().collect::<Vec<_>>())?;
             // Forwarded definitions become dead once all consumers have been redirected.
-            analysis::run(graph)?;
+            analysis::ensure(graph)?;
             edit::clear(graph)?;
         }
         graph.parse_and_run_program(
             None,
-            "(run-schedule (saturate graph-candidates) (saturate graph-needed) (saturate graph-result-select))",
+            "(run-schedule (saturate graph-candidate-index graph-needed) (saturate graph-result-select))",
         )?;
         let query = Query(graph);
         let mut dead = Vec::new();
@@ -201,6 +198,7 @@ fn scratch_shapes(graph: &mut EGraph) -> Result<bool, OptimizeError> {
     Ok(!replacements.is_empty())
 }
 
+#[cfg(test)]
 pub(super) fn validate(graph: &mut EGraph) -> Result<(), OptimizeError> {
     analysis::run(graph)
 }

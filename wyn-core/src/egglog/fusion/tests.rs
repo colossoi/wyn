@@ -76,21 +76,28 @@ fn motion_preserves_array_storage_inside_repeated_regions() {
         (set (OperationRegion (OperationId 2)) (RegionId 0))
         (set (Output (OperationId 1) 0) (ValueNameRef (ValueId 1)))
         (set (Output (OperationId 2) 0) (ValueNameRef (ValueId 2)))
+        (set (RegionYield (RegionId 0) 0) (ValueNameRef (ValueId 1)))
         (ArrayValue (ValueId 1))
+        (ArrayValue (ValueId 2))
+        (set (Input (OperationId 3) 0) (ValueNameRef (ValueId 2)))
+        (set (Output (OperationId 3) 0) (ValueNameRef (ValueId 3)))
+        (set (ValueType (ValueId 3)) (ScalarInfo (ScalarElement (I32))))
+        (IndexOperation (OperationId 3))
         (MotionCandidate (OperationId 1) (OperationId 0))
         (MotionCandidate (OperationId 2) (OperationId 0))
         "#,
     )
     .unwrap();
-    graph.parse_and_run_program(
-        None,
-        r#"
-        (run-schedule (saturate dataflow-effects))
+    graph
+        .parse_and_run_program(
+            None,
+            r#"
+        (run-schedule (saturate dataflow-dependencies graph-fusion) (saturate dataflow-effects))
         (check (OperationsConflict (OperationId 1) (OperationId 0)))
         (fail (check (OperationsConflict (OperationId 2) (OperationId 0))))
         "#,
-    )
-    .unwrap();
+        )
+        .unwrap();
 }
 
 #[test]

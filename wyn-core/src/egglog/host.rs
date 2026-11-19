@@ -119,24 +119,14 @@ pub(super) fn scalar_index(
     ) else {
         return Ok(None);
     };
-    if matches!(kind, "IndexMin" | "IndexMax") {
-        let condition = ScalarExpr::Apply {
-            op: if kind == "IndexMin" { "lt" } else { "gt" }.into(),
-            ty: ScalarType::I32,
-            args: vec![a.clone(), b.clone()],
-        };
-        return Ok(Some(ScalarExpr::If {
-            condition: Box::new(condition),
-            yes: Box::new(a),
-            no: Box::new(b),
-        }));
-    }
     let op = match kind {
         "IndexAdd" => "add",
         "IndexSub" => "sub",
         "IndexMul" => "mul",
         "IndexDiv" => "div",
         "IndexMod" => "rem",
+        "IndexMin" => "min",
+        "IndexMax" => "max",
         _ => unreachable!(),
     };
     Ok(Some(ScalarExpr::Apply {
@@ -493,9 +483,22 @@ pub(super) fn scalar_extent(extent: &Expr) -> Option<ScalarExpr> {
 }
 
 fn field(tuple: ScalarExpr, index: usize) -> ScalarExpr {
+    if let ScalarExpr::Tuple(fields) = &tuple {
+        if let Some(selected) = fields.get(index).filter(|_| fields.iter().all(parameter_field)) {
+            return selected.clone();
+        }
+    }
     ScalarExpr::Field {
         tuple: Box::new(tuple),
         index,
+    }
+}
+
+fn parameter_field(value: &ScalarExpr) -> bool {
+    match value {
+        ScalarExpr::Parameter { .. } => true,
+        ScalarExpr::Tuple(fields) => fields.iter().all(parameter_field),
+        _ => false,
     }
 }
 

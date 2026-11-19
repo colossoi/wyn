@@ -1,0 +1,11 @@
+entry gather_literal_rows() [12]i32 =
+  let rows = map(|i| [[10*i,10*i+1],[10*i+2,10*i+3]], iota(3)) in
+  map(|a| rows[a%3][(a/3)%2][a/6], iota(12))
+
+entry gather_ranked_map() [24]i32 =
+  let rows = map(|i| map(|j| map(|k| 100*i+10*j+k, iota(4)), iota(3)), iota(2)) in
+  map(|a| rows[a%2][(a/2)%3][a/6], iota(24))
+
+entry gather_repeated_cells() [16]i32 =
+  let rows = map(|i| [10*i,10*i+1], iota(8)) in
+  map(|a| rows[a%8][a%2], iota(16))

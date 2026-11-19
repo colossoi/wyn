@@ -1,6 +1,7 @@
 use super::*;
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::eliminate_dead_pure_instructions;
+use crate::ssa::ir::LoopScopes;
 use crate::ssa::types::{ConstantValue, Terminator};
 use crate::types::{i32, sized_array};
 use crate::{BindingRef, FunctionId};

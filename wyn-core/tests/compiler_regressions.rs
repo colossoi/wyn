@@ -162,22 +162,22 @@ entry case_5(xs:[][17]i32) []i32=map(|row|if row[0]>0 then reduce((+),0,row) els
     }
 }
 #[test]
-fn output_coordinate_maps_cover_every_axis_of_ranked_producers() {
-    let sources = [
-        "entry main() [12]i32=let rows=map(|i|[[10*i,10*i+1],[10*i+2,10*i+3]],iota(3)) in map(|a|rows[a%3][(a/3)%2][a/6],iota(12))",
-        "entry main() [24]i32=let rows=map(|i|map(|j|map(|k|100*i+10*j+k,iota(4)),iota(3)),iota(2)) in map(|a|rows[a%2][(a/2)%3][a/6],iota(24))",
-    ];
-    let source = sources
-        .iter()
-        .enumerate()
-        .map(|(i, source)| source.replacen("entry main(", &format!("entry case_{i}("), 1))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let source = pipeline::source(&source);
-    for index in 0..sources.len() {
-        let source = entry(&source, &format!("case_{index}"));
+fn gathers_from_ranked_producers_preserve_shape_and_validate_on_both_backends() {
+    let source = pipeline::source(include_str!(
+        "../../tests/compiler/library/handwritten_gathers.wyn"
+    ));
+    for (name, length) in [
+        ("gather_literal_rows", 12),
+        ("gather_ranked_map", 24),
+        ("gather_repeated_cells", 16),
+    ] {
+        let source = entry(&source, name);
         let program = pipeline::lower(&source, CodegenTarget::Portable);
-        assert_eq!(compute(&program).stages.len(), 1, "{}", sources[index]);
+        let [result] = program.global_context.pipeline.source_results.as_slice() else {
+            panic!("expected one result for {name}");
+        };
+        let shape = result.shape.expressions().iter().map(fixed).collect::<Vec<_>>();
+        assert_eq!(shape, [length], "{name}");
         shaders(program);
     }
 }

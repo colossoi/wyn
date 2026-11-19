@@ -79,6 +79,7 @@
 (relation Operation (OperationKey))
 (relation Region (RegionKey))
 (function InstructionWork (OperationKey) i64 :no-merge)
+(relation OperationWorkDemand (OperationKey))
 (function OperationWork (OperationKey) BigInt :no-merge)
 (function OperationSpan (OperationKey) SourceSpan :no-merge)
 (function OperationPayload (OperationKey) OperationCode :no-merge)
@@ -171,6 +172,8 @@
 (relation LeftIntegerIdentity (InstructionPayload i64))
 (relation SubtractionPayload (InstructionPayload))
 (relation MultiplicationPayload (InstructionPayload))
+(relation DivisionPayload (InstructionPayload))
+(relation ShiftPayload (InstructionPayload))
 (relation IndexCastPayload (InstructionPayload))
 (relation AdditionPayload (InstructionPayload))
 (relation SelectPayload (InstructionPayload))
@@ -199,6 +202,7 @@
 (relation FreshOutput (OperationKey i64))
 
 (relation MaterializedCopyOperation (OperationKey))
+(relation ScratchAllocation (OperationKey))
 
 (relation ViewOperation (OperationKey))
 

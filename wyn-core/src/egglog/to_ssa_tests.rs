@@ -134,7 +134,7 @@ fn reuse_requires_ownership_pointwise_access_and_no_live_alias() {
 fn selected_grid_dimensions_are_positive() {
     use crate::egglog::execution::Execution;
     for x in [0, 1, 32] {
-        let graph=crate::egglog::test_graph::fixture(&[(0,crate::egglog::dataflow::ir::Code::Parallel)],&format!(r#"
+        let mut graph=crate::egglog::test_graph::fixture(&[(0,crate::egglog::dataflow::ir::Code::Parallel)],&format!(r#"
             (let name (FunctionId 0 "grid"))
             (let grid (Grid3D (vec-of (IndexConstant 2) (IndexConstant 3) (IndexConstant 4))
                 (vec-of (IndexConstant {x}) (IndexConstant 1) (IndexConstant 1))))
@@ -142,7 +142,7 @@ fn selected_grid_dimensions_are_positive() {
             (set (OperationRegion (OperationId 0)) (RegionId 0)) (set (OperationOrder (OperationId 0)) 0)
             (set (OperationExecution (OperationId 0)) (DeviceKernel grid)) (set (OperationWidth (OperationId 0)) {x})
         "#)).unwrap();
-        let result = Execution::select(&graph);
+        let result = Execution::select(&mut graph);
         if x == 0 {
             assert!(result.is_err());
         } else {

@@ -33,15 +33,29 @@ pub(super) struct Dispatch {
 
 impl Execution {
     pub fn prepare(program: &mut Program<'_, Optimized>) -> Result<Self, OptimizeError> {
-        let mut execution = Self::select(&program.graph)?;
+        let mut execution = Self::select(&mut program.graph)?;
         program.graph.update(|mut sink| {
             for &operation in execution.dispatches.keys() {
                 sink.add("EmittedDispatch", operation)?;
             }
             Ok(())
         })?;
-        program.graph.parse_and_run_program(None, "(run-schedule (saturate execution-features))")?;
+        program
+            .graph
+            .parse_and_run_program(None, "(run-schedule (saturate execution-features graph-work) (saturate execution-atomics) (saturate execution-policy) (saturate execution-select))")?;
         let query = Query(&program.graph);
+        query.for_function("WorkgroupMapWidth", |keys, width| {
+            let dispatch = execution
+                .dispatches
+                .get_mut(&keys[0])
+                .ok_or_else(|| error("workgroup scan has no dispatch"))?;
+            dispatch.width = u32::try_from(query.0.value_to_base::<i64>(width))
+                .ok()
+                .and_then(NonZeroU32::new)
+                .ok_or_else(|| error("invalid workgroup map width"))?;
+            dispatch.local_size = (dispatch.width.get(), 1, 1);
+            Ok(())
+        })?;
         execution.plan_states(query)?;
         for (&operation, dispatch) in &execution.dispatches {
             if let Some(collective) = collective(
@@ -55,11 +69,11 @@ impl Execution {
             }
         }
         execution.plan_regions(query)?;
-        program.graph.parse_and_run_program(None, "(run-schedule (saturate execution-features) (saturate execution-atomics) (saturate execution-policy) (saturate execution-select))")?;
         Ok(execution)
     }
 
-    pub fn select(graph: &EGraph) -> Result<Self, OptimizeError> {
+    pub fn select(graph: &mut EGraph) -> Result<Self, OptimizeError> {
+        graph.parse_and_run_program(None, "(run-schedule (saturate reducer-state))")?;
         let query = Query(graph);
         let mut execution = Self::default();
         query.for_function("EntryOrder", |keys, _| {
@@ -192,7 +206,10 @@ pub(super) fn width(query: Query<'_>, operation: Value, selected: Value) -> Resu
     } else {
         128
     };
-    if rank > 1 && state_bytes > 0 {
+    if rank > 1
+        && state_bytes > 0
+        && query.0.value_to_base::<bool>(query.required("SubgroupsEnabled", RawValues(Vec::new()))?)
+    {
         let extent = query.required("DomainExtent", (domain, rank - 1))?;
         if let Some(size) = query.lookup("StaticIndex", extent)? {
             if let Ok(size) = u32::try_from(query.0.value_to_base::<i64>(size).max(0)) {
@@ -344,10 +361,27 @@ pub(super) struct Epilogue {
     pub capacity: Value,
 }
 
+#[derive(Clone, Copy)]
+struct RegionPlanning<'a> {
+    query: Query<'a>,
+    live_after: &'a LookupMap<Value, LookupSet<Value>>,
+}
+
 impl Execution {
     fn plan_regions(&mut self, query: Query<'_>) -> Result<(), OptimizeError> {
         let generated =
             query.0.value_to_base::<bool>(query.required("GeneratedDispatches", RawValues(Vec::new()))?);
+        let mut live_after = LookupMap::<_, LookupSet<_>>::default();
+        query.for_each("NameLiveAfter", |row| {
+            if let Some(name) = query.value_name(row[1])? {
+                live_after.entry(row[0]).or_default().insert(name);
+            }
+            Ok(())
+        })?;
+        let planning = RegionPlanning {
+            query,
+            live_after: &live_after,
+        };
         let mut roots = Vec::new();
         query.for_function("EntryOrder", |keys, _| {
             roots.push(keys[0]);
@@ -367,21 +401,29 @@ impl Execution {
             let invocation = query
                 .lookup("InvocationEntry", function)?
                 .is_some_and(|value| query.0.value_to_base::<bool>(value));
-            self.plan_region(query, function, root, true, generated && !invocation, host_values)?;
+            self.plan_region(
+                planning,
+                function,
+                root,
+                true,
+                generated && !invocation,
+                host_values,
+            )?;
         }
         Ok(())
     }
 
     fn plan_region(
         &mut self,
-        query: Query<'_>,
+        planning: RegionPlanning<'_>,
         function: Value,
         region: Value,
         terminal: bool,
         generated: bool,
         mut host_values: Bindings<Value, ScalarExpr>,
     ) -> Result<(), OptimizeError> {
-        let operations = query.operations(region)?;
+        let query = planning.query;
+        let operations = query.vector(query.required("RegionOperations", region)?)?;
         let mut steps = Vec::new();
         let mut ordered = false;
         let mut host_ordered = Vec::new();
@@ -395,15 +437,24 @@ impl Execution {
                 let dispatch = self.dispatch(operation)?;
                 boundary |=
                     ordered || !self.launch_evaluates(query, operation, &host_values, &host_ordered)?;
-                let epilogue_index = if generated && dispatch.groups.is_none() {
+                let epilogue_index = if generated
+                    && dispatch.groups.is_none()
+                    && query.lookup("ColumnScan", operation)?.is_none()
+                {
                     operations
                         .iter()
                         .enumerate()
                         .skip(i + 1)
                         .map(|(index, &next)| {
-                            query
-                                .contains("ScanEpilogue", (operation, next))
-                                .map(|yes| yes.then_some(index))
+                            query.contains("ScanEpilogue", (operation, next)).and_then(|yes| {
+                                if !yes {
+                                    return Ok(None);
+                                }
+                                let ready = self.collectives.get(&operation).is_some_and(|plan| plan.scan)
+                                    || !query
+                                        .contains("EpilogueRequiresCompletedTotal", (operation, next))?;
+                                Ok((ready && !query.flag("WorkgroupMap", next)?).then_some(index))
+                            })
                         })
                         .collect::<Result<Vec<_>, _>>()?
                         .into_iter()
@@ -465,6 +516,14 @@ impl Execution {
                 let host_effect = children.iter().try_fold(false, |any, &child| {
                     Ok::<_, OptimizeError>(any || query.contains("DispatchInRegion", child)?)
                 })?;
+                let fixed_state = buffer_result
+                    && !matches!(code, Code::Branch)
+                    && query
+                        .lookup(
+                            "LoopStateBytes",
+                            (operation, count(query, "OutputCount", operation)?),
+                        )?
+                        .is_some();
                 if !matches!(code, Code::Branch)
                     && generated
                     && !pattern.is_empty()
@@ -477,14 +536,14 @@ impl Execution {
                     && host::cpu_loop(query, function, &host_values, operation)?.is_some()
                 {
                     StepKind::ScalarLoop
-                } else if buffer_result || host_effect {
+                } else if host_effect || (buffer_result && !fixed_state) {
                     for child in children {
                         let values = host_values
                             .iter()
                             .map(|(&name, value)| (name, value.clone()))
                             .collect::<StableMap<_, _>>()
                             .into();
-                        self.plan_region(query, function, child, false, generated, values)?;
+                        self.plan_region(planning, function, child, false, generated, values)?;
                     }
                     ordered = false;
                     host_ordered.clear();
@@ -498,13 +557,14 @@ impl Execution {
                 }
             } else if matches!(code, Code::WithAcc) {
                 let child = query.required("ControlRegion", (operation, 0_i64))?;
+                boundary |= query.contains("AtomicInitialization", operation)?;
                 let values = host_values
                     .iter()
                     .map(|(&name, value)| (name, value.clone()))
                     .collect::<StableMap<_, _>>()
                     .into();
                 self.plan_region(
-                    query,
+                    planning,
                     function,
                     child,
                     terminal && i + 1 == operations.len(),
@@ -607,15 +667,7 @@ impl Execution {
                     }
                 }
             }
-            let mut live = LookupSet::default();
-            query.for_each("NameLiveAfter", |row| {
-                if row[0] == operations[i] {
-                    if let Some(name) = query.value_name(row[1])? {
-                        live.insert(name);
-                    }
-                }
-                Ok(())
-            })?;
+            let live = planning.live_after.get(&operations[i]).cloned().unwrap_or_default();
             let mut cpu_captures = Vec::new();
             if let StepKind::Dispatch { epilogue, .. } = &kind {
                 let mut lanes = vec![query.required("ControlRegion", (operation, 0_i64))?];
@@ -703,6 +755,9 @@ impl Execution {
     fn plan_states(&mut self, query: Query<'_>) -> Result<(), OptimizeError> {
         query.for_each("ReducerState", |row| {
             let operation = row[0];
+            if query.lookup("ColumnScan", operation)?.is_some() {
+                return Ok(());
+            }
             let clause = query.0.value_to_base::<i64>(row[1]);
             let slot = usize::try_from(query.0.value_to_base::<i64>(row[2]))
                 .map_err(|_| error("negative reducer state slot"))?;

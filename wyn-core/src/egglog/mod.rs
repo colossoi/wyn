@@ -8,6 +8,7 @@
 //! SSA emission instantiates the recipes with concrete bindings and operands;
 //! physical eligibility and kernel policies remain queryable in egglog.
 use self::dataflow::edit;
+use self::query::Query;
 use crate::ssa::stage::Elaborated;
 use crate::tlc::stage::OwnershipApplied;
 use crate::{CodegenTarget, PipelineTopologyPolicy, SymbolId};
@@ -83,7 +84,7 @@ pub fn fuse(mut program: Program<'_, Imported>) -> Result<Program<'_, Fused>, Op
             break;
         }
     }
-    memory::validate(&mut program.graph)?;
+    analysis::ensure(&mut program.graph)?;
     Ok(program.advance(Fused))
 }
 
@@ -166,7 +167,7 @@ pub fn optimize_with_policy(
     policy: ScalarOptimization,
 ) -> Result<Program<'_, Optimized>, OptimizeError> {
     scalar::run(&mut program.graph, policy)?;
-    analysis::run(&mut program.graph)?;
+    analysis::ensure(&mut program.graph)?;
     timing::tables(&program.graph, "after-optimization");
     Ok(program.advance(Optimized))
 }
@@ -174,7 +175,13 @@ pub fn optimize_with_policy(
 /// Finish graph analysis and freeze physical execution and storage choices.
 pub fn prepare_host(mut program: Program<'_, Optimized>) -> Result<HostPrepared<'_>, OptimizeError> {
     let _timing = timing::span("egglog host preparation");
-    analysis::liveness(&mut program.graph)?;
+    let query = Query(&program.graph);
+    let mut roots = Vec::new();
+    query.for_function("EntryOrder", |keys, _| {
+        roots.push(query.required("FunctionRoot", keys[0])?);
+        Ok(())
+    })?;
+    analysis::liveness(&mut program.graph, &roots)?;
     planning::epilogues(&mut program.graph)?;
     let execution = execution::Execution::prepare(&mut program)?;
     Ok(HostPrepared { program, execution })

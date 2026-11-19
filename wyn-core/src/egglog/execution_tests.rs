@@ -28,9 +28,9 @@ fn graph(grid: &str, rank: i64) -> EGraph {
 
 #[test]
 fn emitted_dispatches_reference_the_authoritative_statements() {
-    let graph = graph("(AutomaticGrid)", 1);
+    let mut graph = graph("(AutomaticGrid)", 1);
+    let execution = Execution::select(&mut graph).unwrap();
     let query = Query(&graph);
-    let execution = Execution::select(&graph).unwrap();
     let stages = execution.dispatches.keys().copied().collect::<Vec<_>>();
     assert_eq!(stages.len(), 1);
     let selected = query.required("OperationExecution", stages[0]).unwrap();
@@ -58,8 +58,8 @@ fn malformed_grids_are_rejected_during_interface_readout() {
         ("(Grid3D (vec-of (IndexConstant 1) (IndexConstant 1) (IndexConstant 1)) (vec-of (IndexConstant 0) (IndexConstant 1) (IndexConstant 1)))","invalid workgroup size"),
         ("(Grid3D (vec-of (IndexConstant 1) (IndexConstant 1) (IndexConstant 1)) (vec-of (IndexConstant 32)))","three dimensions"),
     ] {
-        let graph=graph(grid,0);
-        let Err(error)=Execution::select(&graph) else {panic!("accepted {grid}");};
+        let mut graph=graph(grid,0);
+        let Err(error)=Execution::select(&mut graph) else {panic!("accepted {grid}");};
         assert!(error.to_string().contains(expected),"{error}");
     }
 }

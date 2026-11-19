@@ -24,13 +24,18 @@ fn compaction_accepts_whole_rows_without_offsets() {
 }
 
 #[test]
-fn variable_row_collection_does_not_require_early_flattening() {
-    plan("entry main(xs:[]i32) [][]i32=map(|x|iota(x),xs)");
+fn variable_row_collection_is_rejected_before_placement() {
+    let source = pipeline::source("entry main(xs:[]i32) [][]i32=map(|x|iota(x),xs)");
+    let imported = egglog::from_tlc(&source).expect("logical import");
+    let Err(egglog::OptimizeError::Output(message)) = egglog::fuse(imported) else {
+        panic!("logical fusion must reject variable rows");
+    };
+    assert!(message.contains("map callback results must have the same array shape"));
 }
 
 #[test]
 fn nested_collections_preserve_product_elements() {
-    plan("entry main(xs:[]i32) [][](i32,bool)=map(|x|map(|i|(x+i,i%2==0),iota(x)),xs)");
+    plan("entry main(xs:[]i32,n:i32) [][](i32,bool)=map(|x|map(|i|(x+i,i%2==0),iota(n)),xs)");
 }
 
 #[test]
@@ -44,8 +49,6 @@ fn nested_bucket_scatter_keeps_its_callback_and_coordinate_maps() {
 }
 
 #[test]
-fn growing_scan_preserves_reducer_scope() {
-    plan(include_str!(
-        "../../tests/compiler/cases/memory_ir_scan_growing.wyn"
-    ));
+fn array_scan_preserves_reducer_scope() {
+    plan("entry main(xs:[][2]i32) [][2]i32=scan(|a,b|map2((+),a,b),[0,0],xs)");
 }

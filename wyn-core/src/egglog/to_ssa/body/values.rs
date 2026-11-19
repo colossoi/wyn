@@ -1,4 +1,4 @@
-use super::{builder_error, error, Body, OptimizeError, Typed};
+use super::{builder_error, error, Body, Location, OptimizeError, Typed};
 use crate::builtins::{catalog, select};
 use crate::host::{Expr, ScalarExpr, ScalarSource};
 use crate::op::{BinaryOperator, OpTag, PureViewSource};
@@ -193,6 +193,44 @@ impl Body<'_, '_, '_> {
                 Ok(positions)
             },
         )
+    }
+
+    pub(in crate::egglog::to_ssa) fn constant_array(&self, array: &Typed) -> Option<Vec<i64>> {
+        let element = array.ty.elem_type()?;
+        if self.local_arrays.contains_key(&array.value) {
+            return None;
+        }
+        let function = self.builder.func();
+        let inst = function.inst_of_value(array.value.as_ssa()?)?;
+        let InstKind::Op { tag, operands } = &function.insts[inst].data else {
+            return None;
+        };
+        if types::is_virtual_array(&array.ty) {
+            let (OpTag::Tuple, [start, step, length]) = (tag, operands.as_slice()) else {
+                return None;
+            };
+            let typed = |&value| Typed {
+                value,
+                ty: element.clone(),
+            };
+            return Some(vec![
+                self.literal_bits(&typed(start))?,
+                self.literal_bits(&typed(step))?,
+                self.integer_literal(&typed(length))?,
+            ]);
+        }
+        if !matches!(tag, OpTag::ArrayLit) {
+            return None;
+        }
+        operands
+            .iter()
+            .map(|&value| {
+                self.literal_bits(&Typed {
+                    value,
+                    ty: element.clone(),
+                })
+            })
+            .collect()
     }
 
     pub(in crate::egglog::to_ssa) fn snapshot(&mut self, array: Typed) -> Result<Typed, OptimizeError> {
@@ -554,7 +592,15 @@ impl Body<'_, '_, '_> {
                 value.ty
             )));
         };
-        self.op(OpTag::Intrinsic { id, overload_idx: 0 }, vec![value], ty.clone())
+        let input = value.value;
+        let converted = self.op(OpTag::Intrinsic { id, overload_idx: 0 }, vec![value], ty.clone())?;
+        if matches!(target, TypeName::Int(32) | TypeName::UInt(32)) {
+            if let Some(Location::InputLength(binding, word, _)) = self.locations.get(&input) {
+                let location = Location::InputLength(*binding, *word, ty.clone());
+                self.locations.insert(converted.value, location);
+            }
+        }
+        Ok(converted)
     }
     pub(in crate::egglog::to_ssa) fn binary(
         &mut self,
@@ -722,6 +768,23 @@ impl Body<'_, '_, '_> {
 }
 
 impl Body<'_, '_, '_> {
+    pub(in crate::egglog::to_ssa) fn indexed_type(ty: &Type) -> Option<Type> {
+        match ty {
+            Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) => Some(types::tuple(
+                fields.iter().map(Self::indexed_type).collect::<Option<Vec<_>>>()?,
+            )),
+            Type::Constructed(TypeName::Array, fields)
+                if ty.array_rank().is_some_and(|rank| rank > 1)
+                    && ty.array_variant().is_some_and(types::is_array_variant_view) =>
+            {
+                let mut fields = fields.clone();
+                fields.remove(2);
+                Some(Type::Constructed(TypeName::Array, fields))
+            }
+            _ => ty.elem_type().cloned(),
+        }
+    }
+
     pub fn index(&mut self, array: Typed, index: Typed) -> Result<Typed, OptimizeError> {
         if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = &array.ty {
             let mut elements = Vec::new();
@@ -739,11 +802,7 @@ impl Body<'_, '_, '_> {
             for dimension in &shape[1..] {
                 offset = self.binary(BinaryOperator::Multiply, offset, dimension.clone())?;
             }
-            let Type::Constructed(TypeName::Array, mut fields) = array.ty.clone() else {
-                return Err(error("ranked view type missing"));
-            };
-            fields.remove(2);
-            let ty = Type::Constructed(TypeName::Array, fields);
+            let ty = Self::indexed_type(&array.ty).ok_or_else(|| error("ranked view type missing"))?;
             let host_shape =
                 self.host_shape(&array).filter(|shape| shape.len() > 1).map(|shape| shape[1..].to_vec());
             let mut operands = vec![offset];

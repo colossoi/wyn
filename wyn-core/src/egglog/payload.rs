@@ -138,6 +138,12 @@ pub(super) fn publish_properties(graph: &mut EGraph) -> Result<(), OptimizeError
             ("AdditionPayload", Payload::Binary(BinaryOperator::Add)),
             ("SubtractionPayload", Payload::Binary(BinaryOperator::Subtract)),
             ("MultiplicationPayload", Payload::Binary(BinaryOperator::Multiply)),
+            ("DivisionPayload", Payload::Binary(BinaryOperator::Divide)),
+            ("DivisionPayload", Payload::Binary(BinaryOperator::Remainder)),
+            ("DivisionPayload", Payload::Binary(BinaryOperator::FloorDivide)),
+            ("DivisionPayload", Payload::Binary(BinaryOperator::FloorRemainder)),
+            ("ShiftPayload", Payload::Binary(BinaryOperator::ShiftLeft)),
+            ("ShiftPayload", Payload::Binary(BinaryOperator::ShiftRight)),
             ("SelectPayload", Payload::Select),
             ("IndexCastPayload", Payload::IndexCast),
         ] {

@@ -1,5 +1,6 @@
 (function AnalysisRevision () i64 :no-merge)
 (set (AnalysisRevision) 0)
+(function DataflowRevision () i64 :no-merge)
 (ruleset graph-structure)
 (ruleset graph-indices)
 (ruleset dataflow-scopes)
@@ -8,6 +9,12 @@
 (ruleset dataflow-effects)
 (ruleset dataflow-total)
 (ruleset dataflow-live)
+(ruleset dataflow-live-index)
+(ruleset dataflow-live-seeds)
+(relation LivenessRequest (RegionKey))
+(relation LivenessRegion (RegionKey))
+(relation LivenessOperation (OperationKey))
+(relation LivenessName (Name))
 (constructor FlowRegionEnd (RegionKey) SourceValue)
 (function NameOrdinal (Name) i64 :no-merge)
 (relation NameLiveAfter (OperationKey Name))
@@ -63,7 +70,12 @@
 (relation ProvenTotalOperation (OperationKey))
 
 (relation NextOperation (OperationKey OperationKey))
-
+(sort OrderedOperations (Vec OperationKey))
+(function RegionOperations (RegionKey) OrderedOperations :no-merge)
+(relation FirstOperation (RegionKey OperationKey))
+(relation LastOperation (RegionKey OperationKey))
+(relation EmptyRegion (RegionKey))
+(function RegionOperationCount (RegionKey) i64 :no-merge)
 
 (relation ConsumedToken (OperationKey AccName))
 (relation TokenUnavailableAt (OperationKey AccName))
@@ -74,6 +86,8 @@
 (function RecursiveFunction (FunctionName) bool :merge (or old new))
 
 (relation ArrayOuterBound (ValueName IndexExp))
+(relation ArrayRowWidth (ValueName i64))
+(relation LoopMatchesOuterBound (OperationKey i64))
 (relation ConstantBound (IndexExp i64))
 (function MovableOperation (OperationKey) bool :merge (and old new))
 (relation InvocationDependent (OperationKey))

@@ -3,7 +3,7 @@
 --! targets = ["spirv", "wgsl"]
 --! [[artifacts]]
 --! path = "output.wynhost"
---! contains = [":source-name \"branch_backings\""]
+--! contains = [":source-name \"branch_backings\"", ":source-name \"product_backings\""]
 
 -- Reconcile descriptors and their payloads at every nested array level.
 entry branch_backings(xs:[]i32,b:bool) [][]i32 =

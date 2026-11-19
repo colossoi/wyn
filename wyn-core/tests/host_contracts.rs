@@ -27,7 +27,7 @@ fn tiny_while_loops_have_no_host_readback_cycle() {
 
 #[test]
 fn dispatch_loops_share_product_carries_and_control_across_backends() {
-    use wyn_core::host::DispatchLoopControl;
+    use wyn_core::host::{DispatchLoopControl, ResultShape, ScalarExpr};
     let source = pipeline::source(include_str!(
         "../../tests/compiler/library/dispatch_loop_products.wyn"
     ));
@@ -38,14 +38,22 @@ fn dispatch_loops_share_product_carries_and_control_across_backends() {
             ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa.clone()).unwrap().program,
         };
         let loops = &program.interface.dispatch_loops;
-        assert!(loops
-            .iter()
-            .any(|loop_| matches!(loop_.control, DispatchLoopControl::While { .. })
-                && loop_.carried.len() == 3));
-        assert!(loops.iter().any(
-            |loop_| matches!(loop_.control, DispatchLoopControl::Counted { .. })
-                && loop_.carried.len() == 3
-        ));
+        for (name, counted) in [("conditional_runtime", false), ("counted_runtime", true)] {
+            let loop_ = loops
+                .iter()
+                .find(|loop_| {
+                    matches!(&program.interface.pipelines[loop_.pipeline],
+                    Pipeline::Compute(pipeline) if pipeline.stages[loop_.setup].owner == name)
+                })
+                .expect("runtime product carries remain distributed");
+            assert_eq!(
+                matches!(loop_.control, DispatchLoopControl::Counted { .. }),
+                counted
+            );
+            // The counted loop carries two array payload/descriptor pairs and a
+            // scalar. The while loop carries one pair, two scalars, and its predicate.
+            assert_eq!(loop_.carried.len(), 5, "{name}");
+        }
         let nested = program.entries.iter().find(|entry| entry.name == "nested_runtime").unwrap();
         let Some(Operation::Loop { region, body, .. }) =
             nested.operations.iter().find(|operation| matches!(operation, Operation::Loop { .. }))
@@ -65,7 +73,24 @@ fn dispatch_loops_share_product_carries_and_control_across_backends() {
             loops[*region].control,
             DispatchLoopControl::Counted { .. }
         ));
-        for entry in program.entries.iter().filter(|entry| entry.name.starts_with("growing")) {
+        let counted = program.entries.iter().find(|entry| entry.name == "counted").unwrap();
+        let Some(Operation::Loop { body, .. }) =
+            counted.operations.iter().find(|operation| matches!(operation, Operation::Loop { .. }))
+        else {
+            panic!("fixed-size product carries remain distributed");
+        };
+        assert!(
+            body.iter().any(|operation| {
+                matches!(operation, Operation::Allocate(Allocation::Buffer { bytes, .. })
+                if bytes.constant().unwrap() == Some(16))
+            }),
+            "each iteration needs fresh storage for its four-element results"
+        );
+        for entry in program
+            .entries
+            .iter()
+            .filter(|entry| entry.name.starts_with("growing") || entry.name == "uniform_rows")
+        {
             let body = entry
                 .operations
                 .iter()
@@ -80,9 +105,17 @@ fn dispatch_loops_share_product_carries_and_control_across_backends() {
                 entry.name
             );
         }
+        let rows =
+            program.interface.source_results.iter().find(|result| result.entry == "uniform_rows").unwrap();
+        assert!(matches!(&rows.shape, ResultShape::Rectangular(dimensions) if dimensions.len() == 2));
         for loop_ in loops {
-            if matches!(loop_.control, DispatchLoopControl::While { .. }) {
-                assert!(!loop_.test.is_empty());
+            if let DispatchLoopControl::While { condition } = &loop_.control {
+                if loop_.test.is_empty() {
+                    let ScalarExpr::Read { source, .. } = condition else {
+                        panic!("while predicate must come from its test dispatch or a carried binding");
+                    };
+                    assert!(loop_.carried.iter().any(|carry| &carry.binding == source));
+                }
             }
             assert!(!loop_.body.is_empty());
             let Pipeline::Compute(pipeline) = &program.interface.pipelines[loop_.pipeline] else {
@@ -115,8 +148,9 @@ fn tuple_loop_outputs_and_scalar_bounds_reach_host_backends() {
             if nested {
                 use wyn_core::host::{Binding, BufferLen, ResultLayout, ResultScalar};
                 let descriptor = &program.interface;
-                assert_eq!(descriptor.source_results.len(), 4);
+                assert_eq!(descriptor.source_results.len(), 2);
                 for result in &descriptor.source_results {
+                    assert_eq!(result.result, 0);
                     let Pipeline::Compute(p) = &descriptor.pipelines[result.pipeline_index] else {
                         panic!("compute result");
                     };
@@ -128,19 +162,22 @@ fn tuple_loop_outputs_and_scalar_bounds_reach_host_backends() {
                     else {
                         panic!("fixed array result: {:?}", result.layout);
                     };
-                    if result.result == 0 {
-                        assert_eq!(*stride, 4);
-                        assert_eq!(**element, ResultLayout::Scalar(ResultScalar::I32));
-                    } else {
-                        assert_eq!(*stride, 8);
-                        let ResultLayout::Tuple { fields, size: 8 } = &**element else {
-                            panic!("tuple element: {element:?}");
-                        };
-                        assert_eq!(fields.len(), 2);
-                        assert_eq!(fields[0].offset, 0);
-                        assert_eq!(fields[1].offset, 4);
-                        assert_eq!(fields[1].layout, ResultLayout::Scalar(ResultScalar::Bool));
-                    }
+                    assert_eq!(*stride, 12);
+                    let ResultLayout::Tuple { fields, size: 12 } = &**element else {
+                        panic!("tuple element: {element:?}");
+                    };
+                    assert_eq!(fields.len(), 2);
+                    assert_eq!(fields[0].offset, 0);
+                    assert_eq!(fields[0].layout, ResultLayout::Scalar(ResultScalar::I32));
+                    assert_eq!(fields[1].offset, 4);
+                    let ResultLayout::Tuple { fields, size: 8 } = &fields[1].layout else {
+                        panic!("nested tuple: {:?}", fields[1].layout);
+                    };
+                    assert_eq!(fields.len(), 2);
+                    assert_eq!(fields[0].offset, 0);
+                    assert_eq!(fields[0].layout, ResultLayout::Scalar(ResultScalar::I32));
+                    assert_eq!(fields[1].offset, 4);
+                    assert_eq!(fields[1].layout, ResultLayout::Scalar(ResultScalar::Bool));
                     assert!(p.bindings.iter().any(|b| matches!(b,
                 Binding::StorageBuffer { set, binding, length: Some(BufferLen::Fixed { bytes }), .. }
                     if (*set, *binding) == (result.set, result.binding) && *bytes == u64::from(*stride) * 2

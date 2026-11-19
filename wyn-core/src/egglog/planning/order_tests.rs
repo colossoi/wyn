@@ -1,9 +1,9 @@
 use super::{place, schedule, CostModel};
+use crate::egglog::dataflow::edit;
 use crate::egglog::dataflow::ir::{self, Code};
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, test_graph};
 use crate::PipelineTopologyPolicy;
-use egglog_engine::Write;
 
 #[test]
 fn placement_preserves_scopes_and_allocation_follows_scheduling() {
@@ -84,17 +84,7 @@ fn forward_dependencies_are_rejected_before_scheduling() {
         })
         .unwrap();
     let (add, multiply) = (add.unwrap(), multiply.unwrap());
-    let a = query.required("OperationOrder", add).unwrap();
-    let b = query.required("OperationOrder", multiply).unwrap();
-    graph
-        .update(|mut sink| {
-            sink.remove("OperationOrder", add)?;
-            sink.remove("OperationOrder", multiply)?;
-            sink.set("OperationOrder", add, b)?;
-            sink.set("OperationOrder", multiply, a)?;
-            Ok(())
-        })
-        .unwrap();
+    edit::move_before(&mut graph, multiply, add).unwrap();
     assert!(place(
         &mut graph,
         PipelineTopologyPolicy::AllowGenerated,

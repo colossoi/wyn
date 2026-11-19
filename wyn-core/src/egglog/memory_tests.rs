@@ -321,7 +321,7 @@ fn applied_rewrites_do_not_replay_when_another_pass_revisits_the_same_body() -> 
     let revision = edit::revision(&graph)?;
     graph.parse_and_run_program(
         None,
-        "(run-schedule (saturate graph-candidates graph-needed graph-apply))",
+        "(run-schedule (saturate graph-candidate-index graph-candidates graph-needed graph-apply))",
     )?;
     assert_eq!(edit::revision(&graph)?, revision);
     let operation = Query(&graph).first("Operation")?.unwrap()[0];

@@ -132,6 +132,10 @@ fn layout(ty: &Type, physical: &Type, root: bool) -> Option<ResultLayout> {
         });
     }
     if ty.is_array() {
+        if !root && physical.array_variant().is_some_and(types::is_array_variant_view) {
+            // Embedded views carry descriptors instead of inline elements.
+            return Some(ResultLayout::Unsupported(ty.to_string()));
+        }
         let element = ty.elem_type()?;
         let physical = physical.elem_type()?;
         let stride = storage_elem_stride(physical)?;
