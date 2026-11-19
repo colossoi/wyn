@@ -95,6 +95,13 @@
       ((MotionCandidate operation owner) (EffectCompare operation owner)) :ruleset graph-fusion)
 (rule ((= revision (AnalysisRevision)) (MotionCandidate operation owner) (OperationUse operation name))
       ((AvailabilityDemand owner name)) :ruleset graph-fusion)
+; Each execution of a loop body or parallel lane owns its fresh array storage.
+(relation RepeatedMotionRegion (RegionRole))
+(RepeatedMotionRegion (LoopRegion)) (RepeatedMotionRegion (LaneRegion))
+(rule ((= revision (AnalysisRevision)) (MotionCandidate operation owner) (= region (OperationRegion operation))
+       (= region (ControlRegion owner edge)) (= role (ControlRole owner edge)) (RepeatedMotionRegion role)
+       (= (Output operation slot) (ValueNameRef name)) (ArrayValue name))
+      ((OperationsConflict operation owner)) :ruleset dataflow-effects)
 (rule ((= revision (AnalysisRevision)) (FuseSelected first second) (= base (FusionClauseBase first second)) (= value (ResultKindOf second clause)))
       ((set (ResultKindOf first (+ base clause)) value)) :ruleset graph-fusion-apply)
 (rule ((= revision (AnalysisRevision)) (FuseSelected first second) (= base (FusionClauseBase first second)) (= value (ResultValueCount second clause)))

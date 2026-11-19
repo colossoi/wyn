@@ -66,6 +66,34 @@ fn placement_uses_complete_demand_and_effect_proofs() {
 }
 
 #[test]
+fn motion_preserves_array_storage_inside_repeated_regions() {
+    let graph = &mut test_graph::fixture(
+        &[],
+        r#"
+        (set (ControlRegion (OperationId 0) 0) (RegionId 0))
+        (set (ControlRole (OperationId 0) 0) (LaneRegion))
+        (set (OperationRegion (OperationId 1)) (RegionId 0))
+        (set (OperationRegion (OperationId 2)) (RegionId 0))
+        (set (Output (OperationId 1) 0) (ValueNameRef (ValueId 1)))
+        (set (Output (OperationId 2) 0) (ValueNameRef (ValueId 2)))
+        (ArrayValue (ValueId 1))
+        (MotionCandidate (OperationId 1) (OperationId 0))
+        (MotionCandidate (OperationId 2) (OperationId 0))
+        "#,
+    )
+    .unwrap();
+    graph.parse_and_run_program(
+        None,
+        r#"
+        (run-schedule (saturate dataflow-effects))
+        (check (OperationsConflict (OperationId 1) (OperationId 0)))
+        (fail (check (OperationsConflict (OperationId 2) (OperationId 0))))
+        "#,
+    )
+    .unwrap();
+}
+
+#[test]
 fn moving_into_empty_regions_preserves_operation_order() {
     let mut graph = test_graph::fixture(
         &[(1, Code::Use), (2, Code::Use)],
