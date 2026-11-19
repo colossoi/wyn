@@ -708,12 +708,7 @@ impl<I, O, S> EntryPoint<I, O, S> {
     /// access as a conservative fallback for directly constructed SSA.
     pub(crate) fn shader_storage_accesses(&self) -> LookupMap<BindingRef, ResourceAccess> {
         let mut accesses = self.stage_storage_accesses();
-        for (&binding, &access) in &self.pipeline_storage_accesses {
-            accesses
-                .entry(binding)
-                .and_modify(|current| *current = current.merge(access))
-                .or_insert(access);
-        }
+        accesses.extend(self.pipeline_storage_accesses.iter().map(|(&binding, &access)| (binding, access)));
         accesses
     }
 

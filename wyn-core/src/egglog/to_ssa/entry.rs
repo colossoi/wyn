@@ -444,7 +444,7 @@ pub(super) fn lower(
                     return Err(error("source result has no output buffer"));
                 };
                 let (logical, shape) = if ty.is_array() {
-                    let shape = if let Some(shape) = &output_shapes[index] {
+                    let mut shape = if let Some(shape) = &output_shapes[index] {
                         shape.clone()
                     } else {
                         ResultShape::Rectangular(output_shape(&emission.body, value)?)
@@ -474,6 +474,20 @@ pub(super) fn lower(
                         };
                         (ty.clone(), shape)
                     } else {
+                        if let ResultShape::Rectangular(dimensions) = &mut shape {
+                            let Some(rank) = value.ty.array_rank() else {
+                                return Err(error("output array rank missing"));
+                            };
+                            // Inline trailing axes are already included in the storage element stride.
+                            dimensions.truncate(rank);
+                            element = ty;
+                            for _ in 0..rank {
+                                let Some(next) = element.elem_type() else {
+                                    return Err(error("result element missing"));
+                                };
+                                element = strip_existentials(next);
+                            }
+                        }
                         (
                             types::view_array_with_size(
                                 element,
