@@ -276,6 +276,29 @@ fn shader_writes_cannot_invalidate_cpu_parameters() {
 }
 
 #[test]
+fn empty_buffer_has_typed_storage_backing_and_zero_logical_bytes() {
+    let program = Program::parse(
+        r#"
+        (define-host-program :version 1)
+        (define-gpu-module 'shaders :format :wgsl :path "empty.wgsl")
+        "#,
+    )
+    .unwrap();
+    let shader = br#"
+        struct Items { header: vec2<u32>, data: array<vec4<u32>> }
+        @group(0) @binding(0) var<storage, read> items: Items;
+    "#;
+    let (_, backend) = backend("(define-host-program :version 1)");
+    let sources = BTreeMap::from([("shaders".into(), shader.to_vec())]);
+    let mut backend = WgpuBackend::with_sources(backend.device, backend.queue, &program, &sources).unwrap();
+    let empty = backend.allocate_buffer(0).unwrap();
+    assert_eq!(backend.buffer_size(&empty).unwrap(), 0);
+    assert_eq!(backend.buffer(&empty).unwrap().size(), 32);
+    let scalar = backend.allocate_buffer(4).unwrap();
+    assert_eq!(backend.buffer(&scalar).unwrap().size(), 4);
+}
+
+#[test]
 fn storage_array_length_excludes_vertex_buffer_padding() {
     let source = r#"
         (define-host-program :version 1)

@@ -1,3 +1,4 @@
+use wgpu::naga::{self, AddressSpace, ArraySize, TypeInner};
 use wgpu::{BindGroupLayout, ErrorFilter, MapMode, PollType, PrimitiveTopology, TextureFormat};
 mod bindings;
 mod commands;
@@ -53,6 +54,7 @@ pub struct WgpuBackend {
     batching: bool,
     buffer_pool: Vec<Buffer>,
     pool_bytes: u64,
+    empty_storage_bytes: u64,
     profile: RefCell<profile::Profile>,
     pub dispatch_overrides: BTreeMap<String, [u32; 3]>,
     pub vertex_count: Option<u32>,
@@ -62,6 +64,35 @@ pub struct WgpuBackend {
 
 fn gpu_error(error: impl std::fmt::Display) -> Error {
     Error::Gpu(error.to_string())
+}
+
+fn empty_storage_requirement(module: &naga::Module) -> u64 {
+    module
+        .global_variables
+        .iter()
+        .filter_map(|(_, variable)| {
+            if !matches!(variable.space, AddressSpace::Storage { .. }) {
+                return None;
+            }
+            let storage = &module.types[variable.ty].inner;
+            let tail = match storage {
+                TypeInner::Struct { members, .. } => &module.types[members.last()?.ty].inner,
+                ty => ty,
+            };
+            if matches!(
+                tail,
+                TypeInner::Array {
+                    size: ArraySize::Dynamic,
+                    ..
+                }
+            ) {
+                storage.try_size(module.to_ctx()).map(u64::from)
+            } else {
+                None
+            }
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 impl WgpuBackend {
@@ -80,31 +111,40 @@ impl WgpuBackend {
         sources: &BTreeMap<String, Vec<u8>>,
     ) -> Result<Self> {
         let mut modules = BTreeMap::new();
+        let mut empty_storage_bytes = 4;
         for (name, declaration) in &program.modules {
             let _trace = profile::Span::new("shader", name);
             let Some(bytes) = sources.get(name) else {
                 return Err(gpu_error(format!("missing shader module {name}")));
             };
-            let source = match declaration.options.text(":format")? {
+            let ir = match declaration.options.text(":format")? {
                 ":wgsl" => {
-                    ShaderSource::Wgsl(Cow::Borrowed(std::str::from_utf8(bytes).map_err(gpu_error)?))
+                    let source = std::str::from_utf8(bytes).map_err(gpu_error)?;
+                    naga::front::wgsl::parse_str(source)
+                        .map_err(|error| gpu_error(error.emit_to_string(source)))?
                 }
                 ":spirv" => {
                     if bytes.len() % 4 != 0 {
                         return Err(gpu_error("SPIR-V length is not a multiple of four"));
                     }
-                    let words = bytes
-                        .chunks_exact(4)
-                        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                        .collect::<Vec<_>>();
-                    ShaderSource::SpirV(Cow::Owned(words))
+                    naga::front::spv::parse_u8_slice(
+                        bytes,
+                        &naga::front::spv::Options {
+                            // Match wgpu's native SPIR-V input convention.
+                            adjust_coordinate_space: false,
+                            strict_capabilities: true,
+                            block_ctx_dump_prefix: None,
+                        },
+                    )
+                    .map_err(gpu_error)?
                 }
                 other => return Err(gpu_error(format!("unsupported shader format {other}"))),
             };
+            empty_storage_bytes = empty_storage_bytes.max(empty_storage_requirement(&ir));
             device.push_error_scope(ErrorFilter::Validation);
             let module = device.create_shader_module(ShaderModuleDescriptor {
                 label: Some(name),
-                source,
+                source: ShaderSource::Naga(Cow::Owned(ir)),
             });
             if let Some(error) = pollster::block_on(device.pop_error_scope()) {
                 return Err(gpu_error(error));
@@ -126,6 +166,7 @@ impl WgpuBackend {
             batching: false,
             buffer_pool: Vec::new(),
             pool_bytes: 0,
+            empty_storage_bytes,
             profile: RefCell::new(profile::Profile::new()),
             dispatch_overrides: BTreeMap::new(),
             vertex_count: None,
@@ -317,8 +358,10 @@ impl WgpuBackend {
     }
 
     pub fn allocate_buffer(&mut self, bytes: u64) -> Result<Value> {
+        // Storage bindings need room for one shader element even for empty logical arrays.
+        let capacity = if bytes == 0 { self.empty_storage_bytes } else { bytes.max(4) };
         let physical =
-            bytes.max(4).checked_add(3).ok_or_else(|| gpu_error("allocation size overflow"))? / 4 * 4;
+            capacity.checked_add(3).ok_or_else(|| gpu_error("allocation size overflow"))? / 4 * 4;
         if physical > self.device.limits().max_buffer_size {
             return Err(gpu_error("buffer exceeds device limit"));
         }

@@ -11,5 +11,5 @@ wgpu = ["dep:wgpu", "dep:pollster"]
 
 [dependencies]
 thiserror.workspace = true
-wgpu = { version = "27", features = ["spirv"], optional = true }
+wgpu = { version = "27", features = ["naga-ir", "spirv"], optional = true }
 pollster = { version = "0.3", optional = true }
