@@ -235,13 +235,9 @@ fn count(graph: &mut EGraph, operation: Value, clause: i64, output_slot: i64) ->
         Ok(())
     })?;
     if let Some(packed) = packed {
-        graph.update(|mut sink| {
-            for &(length, _) in &lengths {
-                sink.remove("Input", (length, 0_i64))?;
-                sink.set("Input", (length, 0_i64), packed)?;
-            }
-            Ok(())
-        })?;
+        for &(length, _) in &lengths {
+            edit::inputs(graph, length, &[packed])?;
+        }
         return Ok(());
     }
     lengths.sort_by_key(|&(operation, _)| operation);

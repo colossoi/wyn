@@ -10,6 +10,76 @@ use crate::types;
 use egglog_engine::{RawValues, Write};
 
 #[test]
+fn planning_metadata_survives_candidate_resets_and_tracks_edits() -> Result<(), OptimizeError> {
+    let mut graph = test_graph::import("entry main(x:i32) i32=x+7")?;
+    let operation = Query(&graph).first("ConstantOperation")?.unwrap()[0];
+    // Introduce the identity after import so frontend folding cannot erase the candidate.
+    edit::set_code(
+        &mut graph,
+        operation,
+        Code::Constant {
+            ty: types::i32(),
+            bits: 0,
+        },
+    )?;
+    planning::analyze(&mut graph)?;
+    let query = Query(&graph);
+    let output = query.required("Output", (operation, 0_i64))?;
+    let candidate = query.first("ForwardCandidate")?.unwrap();
+    let revision = query.required("PlanningRevision", RawValues(Vec::new()))?;
+    let constant = query.required("ConstantValue", output)?;
+
+    edit::clear(&mut graph)?;
+    assert!(Query(&graph).first("ForwardCandidate")?.is_none());
+    assert_eq!(Query(&graph).required("ConstantValue", output)?, constant);
+    planning::analyze(&mut graph)?;
+    assert_eq!(Query(&graph).first("ForwardCandidate")?, Some(candidate));
+    assert_eq!(
+        Query(&graph).required("PlanningRevision", RawValues(Vec::new()))?,
+        revision
+    );
+
+    let epoch = Query(&graph).required("AnalysisRevision", RawValues(Vec::new()))?;
+    graph.update(|mut sink| sink.add("IntegerBoundsDemand", output))?;
+    planning::analyze(&mut graph)?;
+    assert_eq!(
+        Query(&graph).required("AnalysisRevision", RawValues(Vec::new()))?,
+        epoch
+    );
+    assert_eq!(Query(&graph).required("IntegerUpper", output)?, constant);
+
+    edit::set_code(
+        &mut graph,
+        operation,
+        Code::Constant {
+            ty: types::i32(),
+            bits: 7,
+        },
+    )?;
+    planning::analyze(&mut graph)?;
+    assert_ne!(
+        Query(&graph).required("PlanningRevision", RawValues(Vec::new()))?,
+        revision
+    );
+    assert_eq!(
+        graph.value_to_base::<i64>(Query(&graph).required("ConstantValue", output)?),
+        7
+    );
+    assert!(Query(&graph).first("ForwardCandidate")?.is_none());
+
+    let revision = edit::revision(&graph)?;
+    invalidate(&mut graph)?;
+    assert_eq!(edit::revision(&graph)?, revision);
+    assert!(Query(&graph).lookup("PlanningRevision", RawValues(Vec::new()))?.is_none());
+    planning::analyze(&mut graph)?;
+    assert_eq!(
+        graph.value_to_base::<i64>(Query(&graph).required("ConstantValue", output)?),
+        7
+    );
+    Ok(())
+}
+
+#[test]
 fn dataflow_requests_reuse_the_same_graph_revision() -> Result<(), OptimizeError> {
     let mut graph = test_graph::import("entry main(x:i32,y:i32) i32=x+y")?;
     let root = test_graph::root(&graph);

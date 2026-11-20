@@ -74,7 +74,7 @@ fn clear(graph: &mut EGraph) -> Result<(), OptimizeError> {
     ] {
         graph.clear_function(table)?;
     }
-    Ok(())
+    analysis::advance(graph)
 }
 
 pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
@@ -464,7 +464,6 @@ fn fuse(graph: &mut EGraph, first: Value, second: Value) -> Result<(), OptimizeE
 
 pub(super) fn motion(graph: &mut EGraph, hoist: bool) -> Result<bool, OptimizeError> {
     clear(graph)?;
-    analysis::advance(graph)?;
     graph.parse_and_run_program(
         None,
         "(run-schedule (saturate graph-fusion motion-work graph-work) (saturate dataflow-scopes dataflow-effects))",

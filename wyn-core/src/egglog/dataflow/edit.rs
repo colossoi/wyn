@@ -118,8 +118,6 @@ pub(in crate::egglog) fn clear(graph: &mut EGraph) -> Result<(), OptimizeError> 
         "NeededName",
         "NeededOperation",
         "ObservableOperation",
-        "ValuePrimitive",
-        "ConstantValue",
         "FoldedConstant",
         "BranchCandidate",
         "RewrittenAccumulatorInfo",
@@ -136,7 +134,7 @@ pub(in crate::egglog) fn clear(graph: &mut EGraph) -> Result<(), OptimizeError> 
     ] {
         graph.clear_function(table)?;
     }
-    Ok(())
+    analysis::advance(graph)
 }
 
 pub(in crate::egglog) fn remove(graph: &mut EGraph, operations: &[Value]) -> Result<(), OptimizeError> {
@@ -174,7 +172,6 @@ pub(in crate::egglog) fn replace(
     replacements: &[(Value, Value)],
 ) -> Result<(), OptimizeError> {
     clear(graph)?;
-    analysis::advance(graph)?;
     graph.update(|mut sink| {
         for &(old, new) in replacements {
             sink.set("ValueReplacement", old, new)?;

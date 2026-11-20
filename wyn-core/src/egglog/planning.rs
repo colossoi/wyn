@@ -38,18 +38,75 @@ pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
     Ok(())
 }
 
-/// Recompute metadata after graph analysis has established live regions and edges.
+/// Retain graph metadata across candidate resets, while solving newly added demands.
 pub(super) fn analyze(graph: &mut EGraph) -> Result<(), OptimizeError> {
+    analysis::ensure(graph)?;
     let _timing = super::timing::span("egglog graph metadata");
+    let revision = edit::revision(graph)?;
+    let current = Query(graph).lookup("PlanningRevision", RawValues(Vec::new()))?
+        == Some(graph.base_to_value(revision));
+    if !current {
+        let _invalidation = super::timing::span("egglog metadata invalidation");
+        for table in [
+            "StaticIndex",
+            "CollectionRank",
+            "CollectionExtent",
+            "CollectionElement",
+            "LoopCapturedRow",
+            "LoopInitialRow",
+            "RankedLoopCollection",
+            "LoopReadsRowWidth",
+            "IndexUpper",
+            "CountLength",
+            "LengthWitness",
+            "ProductField",
+            "ProductComponent",
+            "ComponentLengthWitness",
+            "ProjectionPath",
+            "LoopValueCarry",
+            "LoopArrayComponent",
+            "LoopPreservesComponentLength",
+            "ArrayElementRange",
+            "LiteralRangePrefix",
+            "LogicalOuterCount",
+            "OuterCapacity",
+            "OuterShapeSource",
+            "LoopPreservesOuterLength",
+            "ReducerPreservesOuterLength",
+            "FreshArray",
+            "OperationWorkDemand",
+            "RegionWorkDemand",
+            "OperationWork",
+            "RegionWorkPrefix",
+            "RegionWork",
+            "DomainWork",
+            "KnownIndex",
+            "BinaryReducer",
+            "NativeBinaryReducer",
+            "ForwardLength",
+            "IndexArithmetic",
+            "IndexArithmeticOperands",
+        ] {
+            graph.clear_function(table)?;
+        }
+        clear_candidates(graph)?;
+    }
+    graph.parse_and_run_program(
+        None,
+        "(run-schedule (saturate scalar-analysis graph-sizes integer-ranges type-sizes))",
+    )?;
+    if !current {
+        graph.update(|mut sink| {
+            sink.remove("PlanningRevision", RawValues(Vec::new()))?;
+            sink.set("PlanningRevision", RawValues(Vec::new()), revision)
+        })?;
+    }
+    Ok(())
+}
+
+/// Selection depends on phase policy as well as the executable graph.
+fn clear_candidates(graph: &mut EGraph) -> Result<(), OptimizeError> {
     for table in [
-        "StaticIndex",
-        "CollectionRank",
-        "CollectionExtent",
-        "CollectionElement",
-        "LoopCapturedRow",
-        "LoopInitialRow",
-        "RankedLoopCollection",
-        "LoopReadsRowWidth",
         "CompactPath",
         "CompactPair",
         "CompactSafe",
@@ -58,18 +115,6 @@ pub(super) fn analyze(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "CompactObserved",
         "CompactCountCandidate",
         "CompactLengthUse",
-        "IndexUpper",
-        "CountLength",
-        "LengthWitness",
-        "ProductField",
-        "ProductComponent",
-        "ComponentLengthWitness",
-        "ProjectionPath",
-        "LoopValueCarry",
-        "LoopArrayComponent",
-        "LoopPreservesComponentLength",
-        "ArrayElementRange",
-        "LiteralRangePrefix",
         "ConsumedScalarArray",
         "ReuseCandidate",
         "ReuseDomainInput",
@@ -101,19 +146,7 @@ pub(super) fn analyze(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "PointwiseHandledUse",
         "EpilogueRequiresCompletedTotal",
         "PointwiseLegal",
-        "LogicalOuterCount",
-        "OuterCapacity",
-        "OuterShapeSource",
-        "LoopPreservesOuterLength",
-        "ReducerPreservesOuterLength",
-        "FreshArray",
         "LocalLoop",
-        "OperationWorkDemand",
-        "RegionWorkDemand",
-        "OperationWork",
-        "RegionWorkPrefix",
-        "RegionWork",
-        "DomainWork",
         "LaneDependentFunction",
         "HostRegion",
         "KernelPreparationCandidate",
@@ -129,7 +162,6 @@ pub(super) fn analyze(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "DistributionLaneDependent",
         "DistributionSafe",
         "DistributionHasFold",
-        "KnownIndex",
         "EstimatedDomain",
         "DistributeNest",
         "ReadyDistribution",
@@ -149,14 +181,9 @@ pub(super) fn analyze(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "ConditionalSafe",
         "FactorConditional",
         "ScanEpilogue",
-        "BinaryReducer",
-        "NativeBinaryReducer",
         "NativeAddition",
         "RequiresSnapshot",
         "CanReuse",
-        "ForwardLength",
-        "IndexArithmetic",
-        "IndexArithmeticOperands",
         "SelectOutputPrefix",
         "CanSpeculate",
         "RetrySafe",
@@ -167,12 +194,7 @@ pub(super) fn analyze(graph: &mut EGraph) -> Result<(), OptimizeError> {
     ] {
         graph.clear_function(table)?;
     }
-    analysis::advance(graph)?;
-    graph.parse_and_run_program(
-        None,
-        "(run-schedule (saturate scalar-analysis graph-sizes integer-ranges type-sizes))",
-    )?;
-    Ok(())
+    analysis::advance(graph)
 }
 
 pub(super) fn place(
@@ -193,7 +215,7 @@ pub(super) fn place(
             topology == PipelineTopologyPolicy::AllowGenerated,
         )
     })?;
-    let mut simplified_revision = None;
+    clear_candidates(graph)?;
     loop {
         analysis::ensure(graph)?;
         analyze(graph)?;
@@ -220,12 +242,11 @@ pub(super) fn place(
             if layout::fuse(graph)? {
                 continue;
             }
-            if simplified_revision == Some(edit::revision(graph)?) {
+            let revision = edit::revision(graph)?;
+            memory::simplify(graph, true)?;
+            if edit::revision(graph)? == revision {
                 break;
             }
-            memory::simplify(graph, true)?;
-            simplified_revision = Some(edit::revision(graph)?);
-            // Rebuild distribution facts cleared by simplification, even without edits.
             continue;
         };
         distribution::apply(graph, candidate[0], candidate[1])?;
@@ -288,6 +309,7 @@ pub(super) fn load_execution(graph: &mut EGraph) -> Result<(), OptimizeError> {
 
 pub(super) fn epilogues(graph: &mut EGraph) -> Result<(), OptimizeError> {
     analyze(graph)?;
+    clear_candidates(graph)?;
     loop_layout(graph)?;
     load_execution(graph)?;
     graph.parse_and_run_program(None, "(run-schedule (saturate entry-invocations physical-legality graph-work) (saturate execution-features) (saturate execution-atomics))")?;

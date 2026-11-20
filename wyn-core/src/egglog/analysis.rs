@@ -28,8 +28,12 @@ pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
 /// Retire body-dependent proofs before solving a new graph revision.
 pub(super) fn invalidate(graph: &mut EGraph) -> Result<(), OptimizeError> {
     let _timing = timing::span("egglog full analysis invalidation");
+    edit::clear(graph)?;
     for table in [
         "DataflowRevision",
+        "PlanningRevision",
+        "ValuePrimitive",
+        "ConstantValue",
         "LivenessRequest",
         "LivenessRegion",
         "LivenessOperation",
