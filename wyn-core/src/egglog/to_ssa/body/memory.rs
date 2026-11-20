@@ -555,6 +555,9 @@ impl Body<'_, '_, '_> {
                             body.block(region)
                         },
                     )?
+                } else if self.query().contains("WorkgroupLoop", statement)? {
+                    let condition = self.query().required("LoopCondition", statement)?;
+                    self.workgroup_while(region, condition, &params, initial)?
                 } else {
                     let condition = self.query().required("LoopCondition", statement)?;
                     self.while_loop(
@@ -596,6 +599,11 @@ impl Body<'_, '_, '_> {
             }
             Code::WithAcc => {
                 let region = self.query().required("ControlRegion", (statement, 0_i64))?;
+                if self.query().contains("WorkgroupAccumulator", statement)? {
+                    let values = self.workgroup_accumulator(statement, region)?;
+                    let values = self.scope_outputs(&pattern, values)?;
+                    return self.bind(&pattern, values);
+                }
                 self.statements(&self.query().operations(region)?)?;
                 let mut values = Vec::new();
                 for group in

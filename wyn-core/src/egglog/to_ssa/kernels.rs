@@ -1040,10 +1040,14 @@ impl Body<'_, '_, '_> {
     ) -> Result<Vec<Typed>, OptimizeError> {
         let coordinates = self.domain_coordinates(domain)?;
         let operations = self.query().operations(statements)?;
-        let suffix = if let (Some(_), Some(active)) = (&leader, self.active_dispatch) {
-            self.query().lookup("WorkgroupMapSuffix", active)?
+        let (suffix, group_loop) = if let (Some(_), Some(active)) = (&leader, self.active_dispatch) {
+            let query = self.query();
+            (
+                query.lookup("WorkgroupMapSuffix", active)?,
+                query.contains("WorkgroupLoopMap", active)?,
+            )
         } else {
-            None
+            (None, false)
         };
         let split = if let Some(suffix) = suffix {
             operations
@@ -1070,7 +1074,7 @@ impl Body<'_, '_, '_> {
         } else {
             publish(self)?;
         }
-        if suffix.is_some() {
+        if suffix.is_some() || group_loop {
             self.workgroup_barrier()?;
         }
         let mut state = state.into_iter();

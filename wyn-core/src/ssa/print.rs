@@ -325,6 +325,9 @@ fn format_inst_kind(out: &mut fmt::Formatter<'_>, kind: &InstKind) -> fmt::Resul
         InstKind::Load { place } => {
             write!(out, "load {}", fmt_place(*place))?;
         }
+        InstKind::WorkgroupUniformLoad { place } => {
+            write!(out, "workgroup_uniform_load {}", fmt_place(*place))?;
+        }
         InstKind::Store { place, value } => {
             write!(out, "store {}, {}", fmt_place(*place), format_ref(value))?;
         }

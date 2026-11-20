@@ -18,6 +18,7 @@ mod control;
 mod memory;
 mod subgroups;
 mod values;
+mod workgroup;
 
 pub(super) enum CollectionShape {
     Local(Typed),

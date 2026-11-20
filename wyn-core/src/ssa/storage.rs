@@ -314,11 +314,14 @@ impl Dataflow {
                         }
                     }
                     InstKind::Load { place }
+                    | InstKind::WorkgroupUniformLoad { place }
                     | InstKind::Store { place, .. }
                     | InstKind::Atomic { place, .. } => {
                         let value = sink.add("SsaPlace", memory_id(*place))?;
                         let access = match node.data {
-                            InstKind::Load { .. } => ResourceAccess::Read,
+                            InstKind::Load { .. } | InstKind::WorkgroupUniformLoad { .. } => {
+                                ResourceAccess::Read
+                            }
                             InstKind::Store { .. } => ResourceAccess::Write,
                             _ => ResourceAccess::ReadWrite,
                         };

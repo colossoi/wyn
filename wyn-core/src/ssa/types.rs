@@ -184,6 +184,11 @@ pub enum InstKind<R = BindingRef> {
     /// chain so it isn't reordered around the workgroup-shared loads/stores
     /// it synchronizes. Emitted by the workgroup-parallel reduce phase 2.
     ControlBarrier,
+
+    /// Synchronized read of the same workgroup location by every lane.
+    WorkgroupUniformLoad {
+        place: PlaceId,
+    },
 }
 
 impl<R: Clone> InstKind<R> {
@@ -206,6 +211,7 @@ impl<R: Clone> InstKind<R> {
             InstKind::Alloca { .. }
             | InstKind::OutputSlot { .. }
             | InstKind::Load { .. }
+            | InstKind::WorkgroupUniformLoad { .. }
             | InstKind::ControlBarrier => vec![],
             InstKind::Store { value, .. } => vec![*value],
             InstKind::Copy {
@@ -230,7 +236,7 @@ impl<R: Clone> InstKind<R> {
     /// `place_result()` for the latter.
     pub fn place_uses(&self) -> Vec<PlaceId> {
         match self {
-            InstKind::Load { place } => vec![*place],
+            InstKind::Load { place } | InstKind::WorkgroupUniformLoad { place } => vec![*place],
             InstKind::Store { place, .. } | InstKind::Atomic { place, .. } => vec![*place],
             InstKind::PlaceIndex { place, .. } => vec![*place],
             _ => vec![],
@@ -283,6 +289,7 @@ impl<R: Clone> InstKind<R> {
             InstKind::Alloca { .. }
             | InstKind::OutputSlot { .. }
             | InstKind::Load { .. }
+            | InstKind::WorkgroupUniformLoad { .. }
             | InstKind::ControlBarrier => {}
         }
     }
@@ -291,7 +298,7 @@ impl<R: Clone> InstKind<R> {
     /// instruction (both operand places and the `result` place, if any).
     pub fn substitute_places(&mut self, sub: &mut impl FnMut(&mut PlaceId)) {
         match self {
-            InstKind::Load { place } => sub(place),
+            InstKind::Load { place } | InstKind::WorkgroupUniformLoad { place } => sub(place),
             InstKind::Store { place, .. } | InstKind::Atomic { place, .. } => sub(place),
             InstKind::Alloca { result, .. }
             | InstKind::OutputSlot { result, .. }
@@ -333,6 +340,7 @@ impl<R> InstKind<R> {
             },
             InstKind::Alloca { result } => InstKind::Alloca { result },
             InstKind::Load { place } => InstKind::Load { place },
+            InstKind::WorkgroupUniformLoad { place } => InstKind::WorkgroupUniformLoad { place },
             InstKind::Store { place, value } => InstKind::Store { place, value },
             InstKind::Copy {
                 destination,

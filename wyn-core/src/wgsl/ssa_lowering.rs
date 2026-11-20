@@ -2400,7 +2400,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         // Load: materialize the place's current value
                         // into a stable binding. It remains immutable
                         // unless an in-place array update consumes it.
-                        InstKind::Load { place } => {
+                        InstKind::Load { place } | InstKind::WorkgroupUniformLoad { place } => {
                             let result_id = inst.result.ok_or_else(|| {
                                 err_wgsl_at!(self.blame_span(), "Load must have a result")
                             })?;
@@ -2411,7 +2411,9 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                     place
                                 )
                             })?;
-                            let target = if self.is_atomic_place(*place) {
+                            let target = if matches!(inst.data, InstKind::WorkgroupUniformLoad { .. }) {
+                                format!("workgroupUniformLoad(&{})", target)
+                            } else if self.is_atomic_place(*place) {
                                 format!("atomicLoad(&{})", target)
                             } else {
                                 target
@@ -3560,6 +3562,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             | InstKind::PlaceIndex { .. }
             | InstKind::Alloca { .. }
             | InstKind::Load { .. }
+            | InstKind::WorkgroupUniformLoad { .. }
             | InstKind::Store { .. }
             | InstKind::Atomic { .. }
             | InstKind::ControlBarrier

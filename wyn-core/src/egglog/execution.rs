@@ -40,9 +40,29 @@ impl Execution {
             }
             Ok(())
         })?;
-        program
-            .graph
-            .parse_and_run_program(None, "(run-schedule (saturate execution-features graph-work) (saturate execution-atomics) (saturate execution-policy) (saturate execution-select))")?;
+        program.graph.parse_and_run_program(
+            None,
+            "(run-schedule (saturate execution-features graph-work) (saturate execution-atomics))",
+        )?;
+        let mut workgroup_bytes = LookupMap::<_, i64>::default();
+        Query(&program.graph).for_each("WorkgroupStorageRequest", |row| {
+            let bytes = i64::try_from(&*program.graph.value_to_base::<Z>(row[3])).unwrap_or(i64::MAX);
+            let total = workgroup_bytes.entry(row[0]).or_default();
+            *total = total.saturating_add(bytes);
+            Ok(())
+        })?;
+        if !workgroup_bytes.is_empty() {
+            program.graph.update(|mut sink| {
+                for (operation, bytes) in workgroup_bytes {
+                    sink.set("WorkgroupStorageBytes", operation, bytes)?;
+                }
+                Ok(())
+            })?;
+        }
+        program.graph.parse_and_run_program(
+            None,
+            "(run-schedule (saturate execution-policy) (saturate execution-select))",
+        )?;
         let query = Query(&program.graph);
         query.for_function("WorkgroupMapWidth", |keys, width| {
             let dispatch = execution

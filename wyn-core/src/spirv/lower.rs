@@ -596,6 +596,18 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 self.constructor.const_i32(0)
             }
 
+            InstKind::WorkgroupUniformLoad { place } => {
+                let ptr = self.place_ptr(*place)?;
+                let scope = self.constructor.const_u32(spirv::Scope::Workgroup as u32);
+                let semantics = self.constructor.const_u32(
+                    (spirv::MemorySemantics::WORKGROUP_MEMORY | spirv::MemorySemantics::ACQUIRE_RELEASE)
+                        .bits(),
+                );
+                self.constructor.builder.control_barrier(scope, scope, semantics)?;
+                let value = self.constructor.builder.load(result_ty, None, ptr, None, [])?;
+                self.constructor.builder.control_barrier(scope, scope, semantics)?;
+                value
+            }
             InstKind::Load { place } => {
                 let ptr_id = self.place_ptr(*place)?;
                 if matches!(

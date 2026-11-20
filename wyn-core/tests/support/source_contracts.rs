@@ -367,7 +367,7 @@ mod source_pipeline {
             let mut barriers = 0;
             for statement in block.iter() {
                 match statement {
-                    Statement::ControlBarrier(_) => {
+                    Statement::ControlBarrier(_) | Statement::WorkGroupUniformLoad { .. } => {
                         assert!(!conditional, "traversal barrier inside a partial-lane branch");
                         barriers += 1;
                     }
@@ -403,6 +403,27 @@ mod source_pipeline {
             module.entry_points[0].workgroup_size[0] > 1,
             "queries need a parallel workgroup"
         );
+    }
+    #[test]
+    fn scan_driven_while_uses_shared_storage_within_the_portable_budget() {
+        for (width, shared) in [(8, true), (2048, false)] {
+            let source = format!(
+                "entry prefix_loop(xs:[][{width}]i32) []i32 =
+                    map(|row|
+                        let (prefix, _remaining) = loop (prefix, remaining) = (row, row[0])
+                            while remaining > 0 do
+                                let next = scan((+), 0i32, prefix) in
+                                (next, if next[{last}] > 0 then remaining - 1 else 0) in
+                        prefix[{last}], xs)",
+                last = width - 1,
+            );
+            let module = shaders(&source);
+            assert_eq!(
+                module.global_variables.iter().any(|(_, v)| v.space == naga::AddressSpace::WorkGroup),
+                shared,
+                "shared storage for a {width}-element loop carry",
+            );
+        }
     }
     #[test]
     fn ranked_bucket_scatter_inside_map_reaches_both_backends() {
