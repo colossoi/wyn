@@ -1,0 +1,11 @@
+--! command = "build"
+--! exit = 0
+--! targets = ["spirv", "wgsl"]
+--! warnings = []
+--! [[artifacts]]
+--! path = "output.wynhost"
+--! contains = [":source-name \"main\""]
+
+entry main(dest:*[4][8]i32, rows:[4][6]i32) ([4][8]i32,[4]u32,u32) =
+  let items = map(|row| map(|x| (0,x),row),rows)
+  in bucket_scatter_2d(dest,items)

@@ -317,6 +317,23 @@ pub(super) fn lower(
             .collect::<Result<Vec<_>, OptimizeError>>()?;
         let (output_values, output_shapes) =
             emission.prepare_array_outputs(region, output_values, &output_types)?;
+        let mut physical_values = Vec::new();
+        let mut physical_types = Vec::new();
+        let mut physical_shapes = Vec::new();
+        for ((value, ty), shape) in output_values.into_iter().zip(output_types).zip(output_shapes) {
+            flatten_product_output(
+                &mut emission.body,
+                value,
+                ty,
+                shape,
+                &mut physical_values,
+                &mut physical_types,
+                &mut physical_shapes,
+            )?;
+        }
+        let output_values = physical_values;
+        let output_types = physical_types;
+        let output_shapes = physical_shapes;
         let Some(generated) = emission.body.generated.as_ref() else {
             return Err(error("entry buffers missing"));
         };
@@ -957,6 +974,37 @@ fn packed_collection_output(
     let proven =
         query.lookup("ReturnOnlyCollection", name)?.is_some_and(|flag| query.0.value_to_base::<bool>(flag));
     Ok(proven.then_some((name, ty)))
+}
+
+fn flatten_product_output(
+    body: &mut Body<'_, '_, '_>,
+    value: Typed,
+    ty: Type,
+    shape: Option<ResultShape>,
+    values: &mut Vec<Typed>,
+    types: &mut Vec<Type>,
+    shapes: &mut Vec<Option<ResultShape>>,
+) -> Result<(), OptimizeError> {
+    if let (
+        Type::Constructed(TypeName::Tuple(_), fields),
+        Type::Constructed(TypeName::Tuple(_), components),
+    ) = (strip_existentials(&ty), strip_existentials(&value.ty))
+    {
+        if fields.len() == components.len()
+            && components
+                .iter()
+                .any(|component| component.is_array() || types::as_soa_tuple(component).is_some())
+        {
+            for (value, ty) in body.unpack(value)?.into_iter().zip(fields.iter().cloned()) {
+                flatten_product_output(body, value, ty, None, values, types, shapes)?;
+            }
+            return Ok(());
+        }
+    }
+    values.push(value);
+    types.push(ty);
+    shapes.push(shape);
+    Ok(())
 }
 
 struct EntryEmission<'a, 'p, 'source> {

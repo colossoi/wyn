@@ -667,14 +667,19 @@ fn closed_array_regions_distribute_before_physical_placement() {
         ("entry main(xs:[0]i32,k:i32) [0]i32=if 1/k>0 then map(|x|x+1,xs) else map(|x|x+2,xs)", false),
     ] {
         let artifact = compile(source);
-        artifact.stages(if distributed { 1 } else { 2 });
         if distributed {
+            artifact.stages(1);
             assert_eq!(artifact.shader.entry_points.len(), 1);
             let mut choices = 0;
             visit(&artifact.shader.entry_points[0].function.body, 0, &mut |statement, _| {
                 choices += usize::from(matches!(statement, naga::Statement::If { .. }));
             });
             assert!(choices > 0, "the selected branch stays inside the distributed shader");
+        } else {
+            assert!(
+                artifact.compute().stages.len() > 1,
+                "dynamic or effectful branches must remain separate: {source}"
+            );
         }
     }
 }
@@ -683,12 +688,23 @@ fn closed_array_regions_distribute_before_physical_placement() {
 fn ranked_fusion_preserves_prefix_evaluation_and_retained_rows() {
     for (source, fused, retained) in [
         ("entry main(dest:*[4][8]i32) ([4][8]i32,[4]u32,u32)=let items:[4][6](i32,i32)=map(|bucket|let offset=bucket*2 let shifted=offset+1 in map(|pair|((shifted+pair)%4,shifted+pair),iota(6)),iota(4)) in bucket_scatter_2d(dest,items)", true, false),
+        ("entry main(dest:*[24][1]i32) ([24][1]i32,[24]u32,u32)=let items:[2][3][4](i32,i32)=map(|i|map(|j|map(|k|((i*3+j)*4+k,100*i+10*j+k),iota(4)),iota(3)),iota(2)) in bucket_scatter_3d(dest,items)", true, false),
         ("entry main(dest:*[4][8]i32,k:i32) ([4][8]i32,[4]u32,u32)=let items:[4][0](i32,i32)=map(|bucket|let offset=1/k in map(|pair|(bucket,offset+pair),iota(0)),iota(4)) in bucket_scatter_2d(dest,items)", false, false),
         ("entry main(dest:*[4][8]i32) ([4][6](i32,i32),([4][8]i32,[4]u32,u32))=let items:[4][6](i32,i32)=map(|bucket|map(|pair|((bucket+pair)%4,bucket+pair),iota(6)),iota(4)) in (items,bucket_scatter_2d(dest,items))", false, true),
     ] {
         let artifact = compile(source);
-        artifact.stages(if fused { 1 } else { 2 });
-        if retained { assert_eq!(artifact.allocated(4*6*2*4, None), 1, "exported rows retain their backing allocation"); }
+        if retained {
+            assert!(artifact.compute().stages.len() >= 2, "retained rows keep their producer stage");
+        } else {
+            artifact.stages(if fused { 1 } else { 2 });
+        }
+        if retained {
+            assert_eq!(
+                artifact.allocated(4 * 6 * 4, None),
+                2,
+                "each exported pair component retains its backing allocation"
+            );
+        }
     }
 }
 

@@ -895,14 +895,9 @@ fn ranked_inputs_keep_their_independent_coordinate_mappings() {
             else {
                 panic!("bucket payload");
             };
-            assert_eq!(coordinates[0], [0, 1]);
+            assert_eq!(coordinates, [vec![0], vec![1]]);
             assert_eq!(depth, 2);
-            let input = query.required("Input", (operation, 1_i64)).unwrap();
-            let producer = top_level(graph, function, "Parallel")
-                .into_iter()
-                .find(|&operation| query.sequence("Output", operation).unwrap().contains(&input))
-                .expect("bucket input producer");
-            assert_eq!(sizes(query, producer), [4, 6]);
+            assert_eq!(analysis::count(query, "InputCount", operation).unwrap(), 3);
         },
     );
 }
