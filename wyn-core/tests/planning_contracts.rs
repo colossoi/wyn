@@ -521,29 +521,37 @@ fn gathers_from_rectangular_rows_preserve_the_result_shape() {
 }
 
 #[test]
-fn tiled_outputs_require_complete_tiles_and_preserve_other_consumers() {
-    for (count, complete) in [(8, true), (7, false)] {
-        for reduced in [false, true] {
-            for retained in [false, true] {
-                let metadata =
-                    if reduced { "reduce((+),0,map(|r|r[2],rows))" } else { "map(|r|r[2],rows)" };
-                let metadata_type = if reduced { "i32".into() } else { format!("[{count}]i32") };
-                let row_type = if retained { format!(",[{count}][3]i32") } else { String::new() };
-                let row_result = if retained { ",rows" } else { "" };
-                let source = format!("def row(i:i32) [3]i32 = [i,i+1,i+2]
-                    entry main() ([16]i32,{metadata_type}{row_type}) = let rows=map(row,iota({count})) in
-                    (map(|a|let i=(a/8)*4+a%4 in if i<length(rows) then rows[i][(a%8)/4] else -1,iota(16)),{metadata}{row_result})");
-                let artifact = compile(&source);
-                artifact.stages(if complete { 1 } else { 2 });
-                assert_eq!(
-                    artifact.allocated(count * 3 * 4, None) > 0,
-                    retained || !complete,
-                    "retained rows and incomplete tiles need backing storage: {source}"
-                );
-                assert_eq!(
-                    artifact.interface.source_results.len(),
-                    if retained { 3 } else { 2 }
-                );
+fn tiled_outputs_publish_all_results() {
+    let source = pipeline::source(include_str!("../../tests/compiler/library/tiled_outputs.wyn"));
+    let ssa = pipeline::lower(&source, CodegenTarget::Portable);
+    let wgsl = lower_ssa_to_wgsl_with_program(ssa.clone()).unwrap();
+    let spirv = wyn_core::lower_ssa_to_spirv(ssa).unwrap();
+    for program in [wgsl.program, spirv.program] {
+        for count in [7, 8] {
+            for (metadata, metadata_extent) in [("mapped", Some(count)), ("reduced", None)] {
+                for suffix in ["", "_kept"] {
+                    let entry = format!("tiled_{metadata}_{count}{suffix}");
+                    let mut expected = vec![Some(16), metadata_extent];
+                    if suffix == "_kept" {
+                        expected.push(Some(count));
+                    }
+                    let mut results = program
+                        .interface
+                        .source_results
+                        .iter()
+                        .filter(|result| result.entry == entry)
+                        .collect::<Vec<_>>();
+                    results.sort_by_key(|result| result.result);
+                    assert_eq!(results.len(), expected.len(), "{entry}");
+                    for (slot, (result, extent)) in results.into_iter().zip(expected).enumerate() {
+                        assert_eq!(result.result, slot, "{entry}");
+                        assert_eq!(
+                            result.shape.expressions().first().and_then(constant),
+                            extent,
+                            "{entry} result {slot}"
+                        );
+                    }
+                }
             }
         }
     }

@@ -1,4 +1,4 @@
-"""Check handwritten gather order and published tuple values on both backends."""
+"""Check handwritten gathers, tiled outputs, and published tuple values on both backends."""
 
 import argparse
 import json
@@ -23,9 +23,24 @@ def main():
     tuple_entry = "projected_tuple_7_kept"
     inputs = [3, -2, 1, 0, 7]
     expected_tuple = [[x, [x > 1, x + 1]] for x in inputs if x > 0]
+    tiles = {
+        7: [0, 1, 2, 3, 1, 2, 3, 4, 4, 5, 6, -1, 5, 6, 7, -1],
+        8: [0, 1, 2, 3, 1, 2, 3, 4, 4, 5, 6, 7, 5, 6, 7, 8],
+    }
+    tiled = {}
+    for count, values in tiles.items():
+        metadata = list(range(2, count + 2))
+        rows = [[i, i + 1, i + 2] for i in range(count)]
+        for kind, other in (("mapped", metadata), ("reduced", sum(metadata))):
+            entry = f"tiled_{kind}_{count}"
+            results = {"result_0": values, "result_1": other}
+            tiled[entry] = results
+            tiled[f"{entry}_kept"] = results | {"result_2": rows}
     fixtures = [
-        ("library/handwritten_gathers.wyn", [], gathers),
-        ("cases/tuple_array_operations_projected_tuple_7.wyn", ["--graphics"], {tuple_entry: expected_tuple}),
+        ("library/handwritten_gathers.wyn", [], {name: {name: values} for name, values in gathers.items()}),
+        ("cases/tuple_array_operations_projected_tuple_7.wyn",
+         ["--graphics"], {tuple_entry: {tuple_entry: expected_tuple}}),
+        ("library/tiled_outputs.wyn", [], tiled),
     ]
     with tempfile.TemporaryDirectory(prefix="wyn-array-values-") as temporary:
         directory = Path(temporary)
@@ -41,11 +56,13 @@ def main():
                 if target == "spirv":
                     subprocess.run(["spirv-val", "--target-env", "vulkan1.3", str(shader)],
                                    check=True, timeout=60)
-                for entry, expected in cases.items():
-                    output = directory / "result.json"
-                    output.unlink(missing_ok=True)
+                for entry, expected_results in cases.items():
                     command = [VIZ, "pipeline", str(shader), "--headless", "--no-config",
-                               "--entry", entry, "--output", f"{entry}:{output}"]
+                               "--entry", entry]
+                    for name in expected_results:
+                        output = directory / f"{name}.json"
+                        output.unlink(missing_ok=True)
+                        command += ["--output", f"{name}:{output}"]
                     if entry == tuple_entry:
                         command += ["--input", f"projected_tuple_7_xs:{data}"]
                     if options.no_validate:
@@ -54,9 +71,10 @@ def main():
                     diagnostic = run.stdout + run.stderr
                     if run.returncode or "Validation Error" in diagnostic:
                         raise RuntimeError(f"{target} {entry}:\n{diagnostic}")
-                    result = json.loads(output.read_text(encoding="utf-8"))
-                    actual = result["backing_buffer"]
-                    assert actual == expected, (target, entry, actual, expected)
+                    for name, expected in expected_results.items():
+                        result = json.loads((directory / f"{name}.json").read_text(encoding="utf-8"))
+                        actual = result["backing_buffer"] if isinstance(result, dict) else result
+                        assert actual == expected, (target, entry, name, actual, expected)
                     print(f"{target} {entry}: values match", flush=True)
 
 
