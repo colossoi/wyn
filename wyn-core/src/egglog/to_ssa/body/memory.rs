@@ -655,9 +655,10 @@ impl Body<'_, '_, '_> {
                             let index = self.index_expression(at[0])?;
                             let source = self.snapshot(source)?;
                             let ty = source.ty.clone();
-                            // Value updates are total and immutable. Place them at
-                            // their use so old element reads precede optional reuse.
+                            // Delay updates until use without speculating them out of their branch.
+                            let scope = self.current()?;
                             let result = self.builder.func_mut().append_floating_inst(
+                                scope,
                                 InstKind::Op {
                                     tag: OpTag::Intrinsic {
                                         id: catalog().known().array_with,

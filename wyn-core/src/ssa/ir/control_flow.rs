@@ -63,8 +63,7 @@ pub(crate) fn fold_constant_selections<I, T>(function: &mut Function<I, T>) {
     }
     function.blocks.retain(|id, _| live.contains(&id));
     function.insts.retain(|_, node| match node.placement {
-        InstPlacement::Block(block) => live.contains(&block),
-        InstPlacement::Floating => true,
+        InstPlacement::Block(block) | InstPlacement::Floating { scope: block } => live.contains(&block),
     });
     function.values.retain(|_, value| match value.def {
         ValueDef::Param { block, .. } => live.contains(&block),

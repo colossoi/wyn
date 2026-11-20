@@ -71,7 +71,7 @@ pub(crate) enum ScheduleError {
     MissingBlock(BlockId),
 }
 
-/// Assign reachable floating instructions to the deepest operand block.
+/// Assign floating instructions within their control scope, after their operands.
 ///
 /// Pinned instructions and terminators are the roots. Floating dependencies
 /// are emitted once, in dependency order, after every pinned operand and
@@ -116,7 +116,7 @@ pub(crate) fn schedule_floating<I: VisitValues, T>(
         .insts
         .iter()
         .filter_map(|(instruction, node)| {
-            matches!(node.placement, InstPlacement::Floating).then_some(instruction)
+            matches!(node.placement, InstPlacement::Floating { .. }).then_some(instruction)
         })
         .collect::<Vec<_>>();
     for instruction in dead {
@@ -141,9 +141,9 @@ fn schedule_value<I: VisitValues, T>(
     let ValueDef::Inst { inst } = function.values[value].def else {
         return Ok(());
     };
-    if !matches!(function.insts[inst].placement, InstPlacement::Floating) {
+    let InstPlacement::Floating { scope } = function.insts[inst].placement else {
         return Ok(());
-    }
+    };
     if !visiting.insert(inst) {
         return Err(ScheduleError::Cycle(value));
     }
@@ -152,7 +152,7 @@ fn schedule_value<I: VisitValues, T>(
     for operand in &operands {
         schedule_value(function, *operand, depths, visiting)?;
     }
-    let mut destination = function.entry;
+    let mut destination = scope;
     for operand in operands.into_iter().filter_map(ValueRef::as_ssa) {
         let Some(block) = function.block_of_value(operand) else {
             return Err(ScheduleError::UnplacedOperand(operand));

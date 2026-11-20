@@ -115,6 +115,7 @@ fn materialize_dynamic_index(
     // the definition so nested loops share it without crossing its lifetime.
     let materialized = *expressions.entry(array).or_insert_with(|| {
         function.append_floating_inst(
+            function.entry,
             InstKind::Op {
                 tag: OpTag::Materialize,
                 operands: vec![array.into()],

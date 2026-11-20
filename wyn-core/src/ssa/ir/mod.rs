@@ -119,14 +119,17 @@ pub struct InstNode<I> {
 /// Whether an instruction has been assigned to a control-flow block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InstPlacement {
-    Floating,
+    /// May be delayed, but cannot move outside this control scope.
+    Floating {
+        scope: BlockId,
+    },
     Block(BlockId),
 }
 
 impl InstPlacement {
     pub fn block(self) -> Option<BlockId> {
         match self {
-            Self::Floating => None,
+            Self::Floating { .. } => None,
             Self::Block(block) => Some(block),
         }
     }
@@ -233,9 +236,9 @@ impl<I, T> Function<I, T> {
         value
     }
 
-    /// Create a value-producing instruction without assigning it to a block.
-    pub(crate) fn append_floating_inst(&mut self, data: I, ty: T) -> ValueId {
-        let (_, value) = self.insert_value_inst(data, ty, InstPlacement::Floating, None);
+    /// Create an instruction that may be delayed within its control scope.
+    pub(crate) fn append_floating_inst(&mut self, scope: BlockId, data: I, ty: T) -> ValueId {
+        let (_, value) = self.insert_value_inst(data, ty, InstPlacement::Floating { scope }, None);
         value
     }
 
