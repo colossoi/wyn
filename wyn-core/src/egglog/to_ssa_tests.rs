@@ -170,20 +170,12 @@ fn external_functions_retain_their_declared_signatures() {
     )
     .unwrap();
     let program = crate::egglog::optimize_with_policy(
-        crate::egglog::prepare_interfaces(
-            schedule(
-                place(
-                    fuse(from_tlc(&tlc).unwrap()).unwrap(),
-                    PipelineTopologyPolicy::AllowGenerated,
-                )
-                .unwrap(),
-            )
-            .unwrap(),
-        )
-        .unwrap(),
+        fuse(from_tlc(&tlc).unwrap()).unwrap(),
         crate::egglog::ScalarOptimization::Basic,
     )
     .unwrap();
+    let program = place(program, PipelineTopologyPolicy::AllowGenerated).unwrap();
+    let program = crate::egglog::prepare_interfaces(schedule(program).unwrap()).unwrap();
     let ssa = finish_for_test(program, CodegenTarget::Spirv).unwrap();
     let external = ssa.functions.iter().find(|f| f.linkage_name.as_deref() == Some("foreign_add")).unwrap();
     assert!(external.span.is_generated());
@@ -227,14 +219,13 @@ fn lowered_for_target(
     let tlc = compile_thru_tlc(source).unwrap();
     let program = schedule(
         place(
-            fuse(from_tlc(&tlc).unwrap()).unwrap(),
+            crate::egglog::optimize_with_policy(fuse(from_tlc(&tlc).unwrap()).unwrap(), policy).unwrap(),
             PipelineTopologyPolicy::AllowGenerated,
         )
         .unwrap(),
     )
     .unwrap();
     let program = crate::egglog::prepare_interfaces(program).unwrap();
-    let program = crate::egglog::optimize_with_policy(program, policy).unwrap();
     finish_for_test(program, target).unwrap()
 }
 

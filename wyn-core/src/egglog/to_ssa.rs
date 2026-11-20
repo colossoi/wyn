@@ -5,7 +5,7 @@ use super::representation::same_value_structure;
 pub(super) use super::representation::{
     domain_axes, reducer_state_type, runtime_binding, value_type, Axis,
 };
-use super::{execution::Execution, OptimizeError, Optimized, Program};
+use super::{execution::Execution, InterfacesPrepared, OptimizeError, Program};
 use crate::ast::Span;
 use crate::ssa::builder::BuilderError;
 use crate::ssa::stage::Elaborated;
@@ -22,7 +22,7 @@ mod kernels;
 use body::Body;
 
 pub(super) fn lower(
-    program: &Program<'_, Optimized>,
+    program: &Program<'_, InterfacesPrepared>,
     execution: &Execution,
     target: CodegenTarget,
 ) -> Result<Elaborated, OptimizeError> {
@@ -60,7 +60,7 @@ pub(super) fn lower(
 }
 
 pub(super) struct Compiler<'a, 'source> {
-    pub program: &'a Program<'source, Optimized>,
+    pub program: &'a Program<'source, InterfacesPrepared>,
     pub definitions: LookupMap<Value, Value>,
     externals: LookupMap<Value, Value>,
     pub functions: Vec<Function>,

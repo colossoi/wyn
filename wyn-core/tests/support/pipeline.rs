@@ -47,10 +47,10 @@ pub fn lower_with_options(
 ) -> wyn_core::ssa::stage::Elaborated {
     let program = egglog::from_tlc(source).unwrap();
     let program = egglog::fuse(program).unwrap();
+    let program = egglog::optimize_with_policy(program, policy).unwrap();
     let program = egglog::place(program, topology).unwrap();
     let program = egglog::schedule(program).unwrap();
     let program = egglog::prepare_interfaces(program).unwrap();
-    let program = egglog::optimize_with_policy(program, policy).unwrap();
     let program = egglog::prepare_host(program).unwrap();
     egglog::to_ssa(program, target).unwrap()
 }

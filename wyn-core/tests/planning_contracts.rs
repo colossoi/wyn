@@ -16,6 +16,7 @@ fn scheduling_costs_control_collective_launches_after_placement() {
         let mut launches = Vec::new();
         for resident_workgroups in [1, 256] {
             let program = egglog::fuse(egglog::from_tlc(&source).unwrap()).unwrap();
+            let program = egglog::optimize_with_policy(program, egglog::ScalarOptimization::Basic).unwrap();
             // Placement is identical; only the scheduling model changes.
             let program = egglog::place(program, PipelineTopologyPolicy::AllowGenerated).unwrap();
             let program = egglog::schedule_with_cost_model(
@@ -28,7 +29,6 @@ fn scheduling_costs_control_collective_launches_after_placement() {
             )
             .unwrap();
             let program = egglog::prepare_interfaces(program).unwrap();
-            let program = egglog::optimize_with_policy(program, egglog::ScalarOptimization::Basic).unwrap();
             let module =
                 egglog::to_ssa(egglog::prepare_host(program).unwrap(), CodegenTarget::Portable).unwrap();
             wyn_core::lower_ssa_to_spirv(module.clone()).unwrap();
@@ -820,5 +820,56 @@ fn packed_prefix_epilogues_preserve_retained_inputs_and_changed_elements() {
                 "packed result lengths are runtime values, not capacities"
             );
         }
+    }
+}
+
+#[test]
+fn helper_specialization_precedes_loop_placement() {
+    let source = pipeline::source(
+        "def step(x:i32,n:i32) i32=loop v=x for j<n do v*3+1
+         entry helper(xs:[4]i32) [4]i32=
+           loop ys=xs for i<128 do map(|x|step(x,2)+step(x*2,2),ys)
+         entry inline(xs:[4]i32) [4]i32=
+           loop ys=xs for i<128 do map(|x|
+             let a=loop v=x for j<2 do v*3+1
+             let b=loop v=x*2 for j<2 do v*3+1 in a+b,ys)",
+    );
+    let module = pipeline::lower_with_options(
+        &source,
+        CodegenTarget::Portable,
+        egglog::ScalarOptimization::Full,
+        PipelineTopologyPolicy::AllowGenerated,
+    );
+    assert!(
+        module.functions.is_empty(),
+        "scalar helpers must have been expanded"
+    );
+    let output = lower_ssa_to_wgsl_with_program(module).unwrap();
+    assert_eq!(output.program.entries.len(), 2);
+    for entry in &output.program.entries {
+        assert!(
+            !entry.operations.iter().any(|op| matches!(op, host::Operation::Loop { .. })),
+            "{}: the small loop must execute inside a kernel, not launch per iteration",
+            entry.name
+        );
+        assert!(
+            entry.operations.iter().any(|op| matches!(op, host::Operation::Dispatch { .. })),
+            "{}: computation must still be dispatched",
+            entry.name
+        );
+    }
+    let shader = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&shader)
+    .unwrap();
+    for entry in &shader.entry_points {
+        let mut loops = 0;
+        visit(&entry.function.body, 0, &mut |stmt, _| {
+            loops += usize::from(matches!(stmt, naga::Statement::Loop { .. }));
+        });
+        assert!(loops > 0, "{}: loop work must remain in the shader", entry.name);
     }
 }

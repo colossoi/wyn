@@ -7,7 +7,9 @@ fn plan(source: &str) {
     let source = pipeline::source(source);
     let imported = egglog::from_tlc(&source).expect("logical import");
     let fused = egglog::fuse(imported).expect("logical fusion");
-    let placed = egglog::place(fused, PipelineTopologyPolicy::AllowGenerated).expect("logical placement");
+    let optimized = egglog::optimize(fused).expect("scalar optimization");
+    let placed =
+        egglog::place(optimized, PipelineTopologyPolicy::AllowGenerated).expect("logical placement");
     // schedule validates that no physical array bindings or loads/stores were
     // introduced, and every surviving parallel body has an execution strategy.
     egglog::schedule(placed).expect("complete logical strategy selection");

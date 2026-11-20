@@ -12,10 +12,10 @@ fn size_hint_survives_egglog_optimization() {
 
     let source = "entry keep(#[size_hint(1024)] data:[]i32) []i32=data";
     let tlc = crate::compile_thru_tlc(source).unwrap();
-    let program = optimize_for_test(
+    let program = prepare_interfaces(
         schedule(
             place(
-                fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                optimize_for_test(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap(),
                 PipelineTopologyPolicy::AllowGenerated,
             )
             .unwrap(),
@@ -41,7 +41,7 @@ fn size_hint_survives_egglog_optimization() {
 fn host_preparation_preserves_the_authoritative_memory_program() {
     let tlc =
         crate::compile_thru_tlc("entry main(xs:[]i32,bias:i32) []i32=map(|x|x+bias*bias,xs)").unwrap();
-    let program = super::optimize_with_policy(interfaces_for_test(&tlc), ScalarOptimization::Full).unwrap();
+    let program = interfaces_for_test(&tlc);
     let before = super::dataflow::edit::revision(&program.graph).unwrap();
     let program = super::prepare_host(program).unwrap();
     let after = super::dataflow::edit::revision(&program.program.graph).unwrap();
@@ -55,7 +55,7 @@ fn host_preparation_preserves_the_authoritative_memory_program() {
 fn scalar_policy_controls_optional_templates() {
     let tlc =
         crate::compile_thru_tlc("def helper(x:i32) i32=x+1 entry main(x:i32) i32=helper(x)*2").unwrap();
-    let program = interfaces_for_test(&tlc);
+    let program = super::fuse(super::from_tlc(&tlc).unwrap()).unwrap();
     for policy in [super::ScalarOptimization::Basic, super::ScalarOptimization::Full] {
         let mut scalars = program.graph.clone();
         super::scalar::run(&mut scalars, policy).unwrap();
@@ -153,6 +153,7 @@ fn interfaces_for_test(
 ) -> super::Program<'_, super::InterfacesPrepared> {
     let program = super::from_tlc(tlc).unwrap();
     let program = super::fuse(program).unwrap();
+    let program = super::optimize(program).unwrap();
     let program = super::place(program, crate::PipelineTopologyPolicy::AllowGenerated).unwrap();
     let program = super::schedule(program).unwrap();
     prepare_interfaces(program).unwrap()

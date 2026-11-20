@@ -1,7 +1,8 @@
 //! Plan execution using the shared graph and the existing portable cost policies.
 use super::cost::{self, CostModel};
+use super::dataflow::edit;
 use super::query::Query;
-use super::{analysis, output_error, OptimizeError};
+use super::{analysis, memory, output_error, OptimizeError};
 use crate::PipelineTopologyPolicy;
 use egglog_engine::{EGraph, RawValues, Write};
 
@@ -192,6 +193,7 @@ pub(super) fn place(
             topology == PipelineTopologyPolicy::AllowGenerated,
         )
     })?;
+    let mut simplified_revision = None;
     loop {
         analysis::ensure(graph)?;
         analyze(graph)?;
@@ -211,14 +213,20 @@ pub(super) fn place(
             (saturate distribution-select))",
         )?;
         if distribution::lift_row_length(graph)? {
-            super::memory::simplify(graph, true)?;
+            memory::simplify(graph, true)?;
             continue;
         }
         let Some(candidate) = Query(graph).first("DistributeNest")? else {
             if layout::fuse(graph)? {
                 continue;
             }
-            break;
+            if simplified_revision == Some(edit::revision(graph)?) {
+                break;
+            }
+            memory::simplify(graph, true)?;
+            simplified_revision = Some(edit::revision(graph)?);
+            // Rebuild distribution facts cleared by simplification, even without edits.
+            continue;
         };
         distribution::apply(graph, candidate[0], candidate[1])?;
     }

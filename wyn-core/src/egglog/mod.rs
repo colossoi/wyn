@@ -1,7 +1,7 @@
 //! Compiler mid-end using [egglog](https://github.com/egraphs-good/egglog).
 //! Pass order is enforced by typestate:
-//! [`from_tlc`] → [`fuse`] → [`place`] → [`schedule`] → [`prepare_interfaces`]
-//! → [`optimize`] → [`prepare_host`] → [`to_ssa`].
+//! [`from_tlc`] → [`fuse`] → [`optimize`] → [`place`] → [`schedule`]
+//! → [`prepare_interfaces`] → [`prepare_host`] → [`to_ssa`].
 //!
 //! Egglog owns logical shapes, effects, aliasing, and transformation legality.
 //! Host preparation reads those proofs to freeze dispatch recipes and storage requirements.
@@ -91,14 +91,14 @@ pub fn fuse(mut program: Program<'_, Imported>) -> Result<Program<'_, Fused>, Op
 /// Choose execution domains and rematerialization. This is execution placement;
 /// scalar loop-invariant and common-branch hoisting belongs to the local optimizer.
 pub fn place(
-    program: Program<'_, Fused>,
+    program: Program<'_, Optimized>,
     topology: PipelineTopologyPolicy,
 ) -> Result<Program<'_, Placed>, OptimizeError> {
     place_with_cost_model(program, topology, cost::CostModel::default())
 }
 
 pub fn place_with_cost_model(
-    mut program: Program<'_, Fused>,
+    mut program: Program<'_, Optimized>,
     topology: PipelineTopologyPolicy,
     costs: cost::CostModel,
 ) -> Result<Program<'_, Placed>, OptimizeError> {
@@ -139,7 +139,7 @@ pub fn schedule_with_cost_model(
     Ok(program.advance(Scheduled))
 }
 
-/// Validate memory bindings before final scalar simplification.
+/// Validate memory bindings after executable rewrites and logical scheduling.
 pub fn prepare_interfaces(
     program: Program<'_, Scheduled>,
 ) -> Result<Program<'_, InterfacesPrepared>, OptimizeError> {
@@ -150,7 +150,7 @@ pub fn prepare_interfaces(
 }
 
 /// Simplify the authoritative statement bodies.
-pub fn optimize(program: Program<'_, InterfacesPrepared>) -> Result<Program<'_, Optimized>, OptimizeError> {
+pub fn optimize(program: Program<'_, Fused>) -> Result<Program<'_, Optimized>, OptimizeError> {
     optimize_with_policy(program, ScalarOptimization::Full)
 }
 
@@ -163,7 +163,7 @@ pub enum ScalarOptimization {
 }
 
 pub fn optimize_with_policy(
-    mut program: Program<'_, InterfacesPrepared>,
+    mut program: Program<'_, Fused>,
     policy: ScalarOptimization,
 ) -> Result<Program<'_, Optimized>, OptimizeError> {
     scalar::run(&mut program.graph, policy)?;
@@ -173,7 +173,9 @@ pub fn optimize_with_policy(
 }
 
 /// Finish graph analysis and freeze physical execution and storage choices.
-pub fn prepare_host(mut program: Program<'_, Optimized>) -> Result<HostPrepared<'_>, OptimizeError> {
+pub fn prepare_host(
+    mut program: Program<'_, InterfacesPrepared>,
+) -> Result<HostPrepared<'_>, OptimizeError> {
     let _timing = timing::span("egglog host preparation");
     let query = Query(&program.graph);
     let mut roots = Vec::new();
@@ -219,7 +221,7 @@ pub struct Imported;
 pub struct Fused;
 pub struct Placed;
 
-/// Logical execution strategies are selected; physical planning follows scalar optimization.
+/// Executable rewrites are complete and logical execution strategies are selected.
 pub struct Scheduled;
 
 pub struct InterfacesPrepared;
@@ -227,7 +229,7 @@ pub struct InterfacesPrepared;
 pub struct Optimized;
 
 pub struct HostPrepared<'source> {
-    program: Program<'source, Optimized>,
+    program: Program<'source, InterfacesPrepared>,
     execution: execution::Execution,
 }
 
@@ -235,13 +237,13 @@ pub struct HostPrepared<'source> {
 mod pipeline_tests;
 
 #[cfg(test)]
-fn optimize_for_test(program: Program<'_, Scheduled>) -> Result<Program<'_, Optimized>, OptimizeError> {
-    optimize(prepare_interfaces(program)?)
+fn optimize_for_test(program: Program<'_, Fused>) -> Result<Program<'_, Optimized>, OptimizeError> {
+    optimize_with_policy(program, ScalarOptimization::Basic)
 }
 
 #[cfg(test)]
 fn finish_for_test(
-    program: Program<'_, Optimized>,
+    program: Program<'_, InterfacesPrepared>,
     target: CodegenTarget,
 ) -> Result<Elaborated, OptimizeError> {
     let program = prepare_host(program)?;

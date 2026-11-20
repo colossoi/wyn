@@ -31,10 +31,10 @@ fn packed_product_arrays_pass_through_common_allocation() {
         let source = pipeline::source(source);
         let program = egglog::from_tlc(&source).unwrap();
         let program = egglog::fuse(program).unwrap();
+        let program = egglog::optimize(program).unwrap();
         let program = egglog::place(program, PipelineTopologyPolicy::AllowGenerated).unwrap();
         let program = egglog::schedule(program).unwrap();
         let program = egglog::prepare_interfaces(program).unwrap();
-        let program = egglog::optimize(program).unwrap();
         egglog::prepare_host(program).unwrap();
     }
 }

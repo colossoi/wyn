@@ -1,11 +1,14 @@
 use super::super::query::Query;
-use super::super::{finish_for_test, from_tlc, fuse, place, schedule, schedule_with_subgroups};
+use super::super::{
+    finish_for_test, from_tlc, fuse, optimize_for_test, place, schedule, schedule_with_subgroups,
+};
 use crate::egglog::dataflow::ir::{self, Bounds, Code};
 use crate::egglog::payload::read;
 use crate::egglog::{analysis, test_graph};
 use crate::{compile_thru_tlc, CodegenTarget, PipelineTopologyPolicy};
-use egglog_engine::{sort::S, EGraph, Value};
+use egglog_engine::sort::{S, Z};
 use egglog_engine::{Core, Write};
+use egglog_engine::{EGraph, Value};
 
 #[test]
 fn whole_row_fusion_preserves_conflicting_callback_effects() {
@@ -151,20 +154,20 @@ fn sliced_local_collections_retain_their_source_capacity() {
 
 fn selected(
     source: &crate::tlc::stage::OwnershipApplied,
-) -> super::super::Program<'_, super::super::Optimized> {
+) -> super::super::Program<'_, super::super::InterfacesPrepared> {
     let imported = from_tlc(source).unwrap();
     let fused = fuse(imported).unwrap();
-    let placed = place(fused, PipelineTopologyPolicy::AllowGenerated).unwrap();
+    let optimized = optimize_for_test(fused).unwrap();
+    let placed = place(optimized, PipelineTopologyPolicy::AllowGenerated).unwrap();
     let scheduled = schedule(placed).unwrap();
-    let interfaces = super::super::prepare_interfaces(scheduled).unwrap();
-    super::super::optimize_with_policy(interfaces, super::super::ScalarOptimization::Basic).unwrap()
+    super::super::prepare_interfaces(scheduled).unwrap()
 }
 
 fn planned(source: &str, check: impl FnOnce(&EGraph)) {
     let tlc = compile_thru_tlc(source).unwrap();
     let program = schedule(
         place(
-            fuse(from_tlc(&tlc).unwrap()).unwrap(),
+            optimize_for_test(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap(),
             PipelineTopologyPolicy::AllowGenerated,
         )
         .unwrap(),
@@ -210,7 +213,7 @@ fn planned_cases(sources: &[impl AsRef<str>], check: impl Fn(usize, &EGraph, Val
         let tlc = compile_thru_tlc(&cases_source(std::slice::from_ref(source))).unwrap();
         let program = schedule(
             place(
-                fuse(from_tlc(&tlc).unwrap()).unwrap(),
+                optimize_for_test(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap(),
                 PipelineTopologyPolicy::AllowGenerated,
             )
             .unwrap(),
@@ -224,7 +227,7 @@ fn placed_cases(sources: &[impl AsRef<str>], check: impl Fn(usize, &EGraph, Valu
     for (index, source) in sources.iter().enumerate() {
         let tlc = compile_thru_tlc(&cases_source(std::slice::from_ref(source))).unwrap();
         let program = place(
-            fuse(from_tlc(&tlc).unwrap()).unwrap(),
+            optimize_for_test(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap(),
             PipelineTopologyPolicy::AllowGenerated,
         )
         .unwrap();
@@ -236,7 +239,7 @@ fn distributed_cases(sources: &[impl AsRef<str>], check: impl Fn(usize, &EGraph,
     for (index, source) in sources.iter().enumerate() {
         let tlc = compile_thru_tlc(&cases_source(std::slice::from_ref(source))).unwrap();
         let mut program = place(
-            fuse(from_tlc(&tlc).unwrap()).unwrap(),
+            optimize_for_test(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap(),
             PipelineTopologyPolicy::AllowGenerated,
         )
         .unwrap();
@@ -686,7 +689,7 @@ fn accumulator_state_order_is_read_from_the_plan() {
     )
     .unwrap();
     let mut program = place(
-        fuse(from_tlc(&tlc).unwrap()).unwrap(),
+        optimize_for_test(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap(),
         PipelineTopologyPolicy::AllowGenerated,
     )
     .unwrap();
@@ -730,11 +733,7 @@ fn accumulator_state_order_is_read_from_the_plan() {
         })
         .unwrap();
     let ssa = finish_for_test(
-        super::super::optimize_with_policy(
-            super::super::prepare_interfaces(schedule(program).unwrap()).unwrap(),
-            super::super::ScalarOptimization::Basic,
-        )
-        .unwrap(),
+        super::super::prepare_interfaces(schedule(program).unwrap()).unwrap(),
         CodegenTarget::Wgsl,
     )
     .unwrap();
@@ -930,7 +929,7 @@ fn rectangular_planning_and_emission_use_fused_structure() {
     )
     .unwrap();
     let mut program = place(
-        fuse(from_tlc(&tlc).unwrap()).unwrap(),
+        optimize_for_test(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap(),
         PipelineTopologyPolicy::AllowGenerated,
     )
     .unwrap();
@@ -943,11 +942,7 @@ fn rectangular_planning_and_emission_use_fused_structure() {
         .collect::<Vec<_>>();
     assert_eq!(ranks, [2]);
     let program = schedule(program).unwrap();
-    let program = super::super::optimize_with_policy(
-        super::super::prepare_interfaces(program).unwrap(),
-        super::super::ScalarOptimization::Basic,
-    )
-    .unwrap();
+    let program = super::super::prepare_interfaces(program).unwrap();
     finish_for_test(program, CodegenTarget::Wgsl).unwrap();
 }
 
@@ -1195,7 +1190,7 @@ fn subgroup_addition_is_opt_in_and_uses_small_segments() {
     let mut portable_width = None;
     for enabled in [false, true] {
         let placed = place(
-            fuse(from_tlc(&tlc).unwrap()).unwrap(),
+            optimize_for_test(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap(),
             PipelineTopologyPolicy::AllowGenerated,
         )
         .unwrap();
@@ -1210,7 +1205,7 @@ fn subgroup_addition_is_opt_in_and_uses_small_segments() {
         } else {
             portable_width = Some(width);
         }
-        let program = super::super::optimize_for_test(program).unwrap();
+        let program = super::super::prepare_interfaces(program).unwrap();
         let ssa = finish_for_test(program, CodegenTarget::Wgsl).unwrap();
         let wgsl = crate::lower_ssa_to_wgsl(ssa).unwrap();
         assert_eq!(wgsl.contains("subgroupInclusiveAdd("), enabled);
@@ -1316,7 +1311,7 @@ fn calibrated_costs_select_among_the_same_legal_map_executions() {
             ..Default::default()
         };
         let placed = super::super::place_with_cost_model(
-            fuse(from_tlc(&tlc).unwrap()).unwrap(),
+            optimize_for_test(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap(),
             PipelineTopologyPolicy::AllowGenerated,
             costs,
         )
@@ -1329,8 +1324,6 @@ fn calibrated_costs_select_among_the_same_legal_map_executions() {
         };
         assert_eq!(rank(query, kernel), expected_rank, "barrier_ns={barrier_ns}");
         let program = super::super::prepare_interfaces(program).unwrap();
-        let program =
-            super::super::optimize_with_policy(program, super::super::ScalarOptimization::Basic).unwrap();
         finish_for_test(program, CodegenTarget::Wgsl).unwrap();
     }
 }
@@ -1883,5 +1876,58 @@ fn fixed_loop_states_require_every_array_component_to_preserve_length() {
             Query(&graph).first("FixedLoopState").unwrap().is_some(),
             preserved
         );
+    }
+}
+
+#[test]
+fn retained_call_work_composes_and_unknown_work_stays_unknown() {
+    for (callee, expected) in [
+        (
+            "(set (FunctionRoot leaf) (RegionId 2)) (set (RecursiveFunction leaf) false)",
+            Some(3),
+        ),
+        (
+            "(set (FunctionRoot leaf) (RegionId 2)) (set (RecursiveFunction leaf) true)",
+            None,
+        ),
+        ("(External leaf)", None),
+    ] {
+        let facts = format!(
+            r#"
+            (let middle (FunctionId 1 "middle")) (let leaf (FunctionId 2 "leaf"))
+            (set (FunctionRoot middle) (RegionId 1)) (set (RecursiveFunction middle) false)
+            {callee}
+            (set (CallTarget (OperationId 0)) middle)
+            (set (CallTarget (OperationId 1)) leaf)
+            (set (OperationRegion (OperationId 1)) (RegionId 1))
+            (set (OperationRegion (OperationId 2)) (RegionId 2))
+            (FirstOperation (RegionId 1) (OperationId 1)) (LastOperation (RegionId 1) (OperationId 1))
+            (FirstOperation (RegionId 2) (OperationId 2)) (LastOperation (RegionId 2) (OperationId 2))
+            (OperationWorkDemand (OperationId 0))
+            "#,
+        );
+        let mut graph = test_graph::fixture(
+            &[
+                (0, Code::Call),
+                (1, Code::Call),
+                (
+                    2,
+                    Code::Constant {
+                        ty: crate::types::i32(),
+                        bits: 7,
+                    },
+                ),
+            ],
+            &facts,
+        )
+        .unwrap();
+        let operation = Query(&graph).first("OperationWorkDemand").unwrap().unwrap()[0];
+        graph.parse_and_run_program(None, "(run-schedule (saturate graph-work))").unwrap();
+        let query = Query(&graph);
+        let work = query
+            .lookup("OperationWork", operation)
+            .unwrap()
+            .map(|value| u64::try_from(&*graph.value_to_base::<Z>(value)).unwrap());
+        assert_eq!(work, expected, "{callee}");
     }
 }

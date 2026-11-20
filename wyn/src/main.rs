@@ -773,6 +773,8 @@ fn compile_egglog(
     with_timings(verbose, || -> Result<_, DriverError> {
         let program = from_tlc(program)?;
         let program = fuse(program)?;
+        let policy = if algebra { ScalarOptimization::Full } else { ScalarOptimization::Basic };
+        let program = optimize_with_policy(program, policy)?;
         let topology = if direct {
             PipelineTopologyPolicy::AuthoredOnly
         } else {
@@ -781,8 +783,6 @@ fn compile_egglog(
         let program = place_with_cost_model(program, topology, gpu_costs)?;
         let program = schedule_with_cost_model(program, subgroups, gpu_costs)?;
         let program = prepare_interfaces(program)?;
-        let policy = if algebra { ScalarOptimization::Full } else { ScalarOptimization::Basic };
-        let program = optimize_with_policy(program, policy)?;
         let program = prepare_host(program)?;
         let ssa = to_ssa(
             program,

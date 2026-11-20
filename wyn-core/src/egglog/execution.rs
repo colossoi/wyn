@@ -5,7 +5,7 @@ use super::cost::{CollectiveWork, CostModel};
 use super::dataflow::ir::{self, Code};
 use super::host;
 use super::query::Query;
-use super::{output_error as error, representation, OptimizeError, Optimized, Program};
+use super::{output_error as error, representation, InterfacesPrepared, OptimizeError, Program};
 use crate::host::ScalarExpr;
 use crate::ssa::layout::{storage_elem_stride, storage_value_type};
 use crate::types::{self, Type, TypeExt, TypeName};
@@ -32,7 +32,7 @@ pub(super) struct Dispatch {
 }
 
 impl Execution {
-    pub fn prepare(program: &mut Program<'_, Optimized>) -> Result<Self, OptimizeError> {
+    pub fn prepare(program: &mut Program<'_, InterfacesPrepared>) -> Result<Self, OptimizeError> {
         let mut execution = Self::select(&mut program.graph)?;
         program.graph.update(|mut sink| {
             for &operation in execution.dispatches.keys() {
