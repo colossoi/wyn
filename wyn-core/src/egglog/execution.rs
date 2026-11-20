@@ -453,6 +453,7 @@ impl Execution {
             let code = ir::code(query.0, query.required("OperationPayload", operation)?);
             let pattern = query.sequence("Output", operation)?;
             let mut boundary = query.contains("RequiresSnapshot", operation)?;
+            let mut scalar_loop = None;
             let kind = if self.dispatches.contains_key(&operation) {
                 let dispatch = self.dispatch(operation)?;
                 boundary |=
@@ -553,8 +554,10 @@ impl Execution {
                                 .is_some_and(|(_, ty)| host::scalar_type(&ty).is_some()),
                         )
                     })?
-                    && host::cpu_loop(query, function, &host_values, operation)?.is_some()
                 {
+                    scalar_loop = host::cpu_loop(query, function, &host_values, operation)?;
+                }
+                if scalar_loop.is_some() {
                     StepKind::ScalarLoop
                 } else if host_effect || (buffer_result && !fixed_state) {
                     for child in children {
@@ -600,10 +603,7 @@ impl Execution {
                 host_ordered.clear();
             }
             if matches!(kind, StepKind::Shader | StepKind::ScalarLoop) {
-                if matches!(kind, StepKind::ScalarLoop) {
-                    let Some(value) = host::cpu_loop(query, function, &host_values, operation)? else {
-                        return Err(error("host loop plan has no expression"));
-                    };
+                if let Some(value) = scalar_loop {
                     for (slot, &binding) in pattern.iter().enumerate() {
                         if let Some(name) = query.value_name(binding)? {
                             host_values.insert(

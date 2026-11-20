@@ -1643,12 +1643,6 @@ impl EntryEmission<'_, '_, '_> {
     }
 
     fn statement_effects(&mut self, statement: Value) -> Result<(), OptimizeError> {
-        host::remember(
-            Query(&self.body.compiler.program.graph),
-            self.body.function,
-            &mut self.body.host_values,
-            statement,
-        )?;
         let query = self.body.query();
         let mut memory = false;
         for table in ["OperationRead", "OperationWrite"] {
