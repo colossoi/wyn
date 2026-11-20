@@ -7,6 +7,7 @@ use crate::egglog::to_ssa::host;
 use crate::egglog::to_ssa::runtime_binding;
 use crate::host::Expr;
 use crate::op::{BinaryOperator, OpTag, PureViewSource};
+use crate::ssa::ir::InstPlacement;
 use crate::ssa::layout::{storage_elem_stride, storage_value_type};
 use crate::ssa::types::{BlockId, InstKind};
 use crate::types::{self, Type, TypeExt, TypeName};
@@ -844,7 +845,20 @@ impl Body<'_, '_, '_> {
                 };
                 let capacity = usize::try_from(capacity.max(0))
                     .map_err(|_| error("collection capacity exceeds usize"))?;
-                return self.local_array_with_length(types::sized_array(capacity, element), count.clone());
+                let current = self.current()?;
+                let start = self.builder.func().blocks[current].insts.len();
+                let array =
+                    self.local_array_with_length(types::sized_array(capacity, element), count.clone())?;
+                // Deferred type resolution must keep storage outside its element loop.
+                if current != block {
+                    let instructions = self.builder.func_mut().blocks[current].insts.split_off(start);
+                    let function = self.builder.func_mut();
+                    for &instruction in &instructions {
+                        function.insts[instruction].placement = InstPlacement::Block(block);
+                    }
+                    function.blocks[block].insts.extend(instructions);
+                }
+                return Ok(array);
             }
             CollectionShape::Device(shape) => shape,
         };
