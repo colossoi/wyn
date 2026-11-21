@@ -6,7 +6,7 @@ pub mod call_graph;
 
 use crate::ast::Span;
 use crate::types::{Diet, Type};
-use crate::LookupMap;
+use crate::{LookupMap, LookupSet};
 use slotmap::{new_key_type, SlotMap};
 use wyn_graph::{ReplacementError, ReplacementForest};
 
@@ -70,14 +70,14 @@ pub struct RegionEdge {
     pub arguments: Vec<ValueRef>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum BodyRole {
     Control(usize),
     Reducer(usize),
     Combiner(usize),
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum UseSite {
     Input(OperationId, usize),
     Argument(OperationId, BodyRole, usize),
@@ -147,29 +147,40 @@ impl<D, T, A> MemoryIr<D, T, A> {
     /// Returns the terminal substitutions for metadata that refers to the same values.
     pub fn forward_copies(&mut self) -> Result<ForwardedCopies, ForwardError> {
         let mut replacements = ReplacementForest::new();
+        let mut removed = LookupSet::new();
         for (id, operation) in &self.operations {
             if matches!(operation.definition, Definition::Copy) {
                 let ([input], [_]) = (&operation.inputs[..], &operation.result_types[..]) else {
                     return Err(ForwardError::CopySignature(id));
                 };
                 replacements.replace(ValueRef::Result(id, 0), *input)?;
+                removed.insert(id);
             }
         }
         let values = replacements.into_map();
+        if !removed.is_empty() {
+            self.remove_operations(&removed);
+        }
+        let uses = self.redirect_uses(&values);
+        Ok(ForwardedCopies { values, uses })
+    }
+
+    /// Rewrite direct uses to their terminal replacements. The caller proves availability.
+    pub fn redirect_uses(
+        &mut self,
+        replacements: &LookupMap<ValueRef, ValueRef>,
+    ) -> Vec<(UseSite, ValueRef)> {
         let mut uses = Vec::new();
-        if values.is_empty() {
-            return Ok(ForwardedCopies { values, uses });
+        if replacements.is_empty() {
+            return uses;
         }
         let mut redirect = |site, value: &mut ValueRef| {
-            if let Some(&source) = values.get(value) {
+            if let Some(&source) = replacements.get(value) {
                 *value = source;
                 uses.push((site, source));
             }
         };
-        self.operations.retain(|id, op| {
-            if matches!(op.definition, Definition::Copy) {
-                return false;
-            }
+        for (id, op) in &mut self.operations {
             for (i, value) in op.inputs.iter_mut().enumerate() {
                 redirect(UseSite::Input(id, i), value);
             }
@@ -178,15 +189,23 @@ impl<D, T, A> MemoryIr<D, T, A> {
                     redirect(UseSite::Argument(id, edge.role, i), value);
                 }
             }
-            true
-        });
+        }
         for (id, region) in &mut self.regions {
             for (i, value) in region.yields.iter_mut().enumerate() {
                 redirect(UseSite::Yield(id, i), value);
             }
-            region.operations.retain(|id| self.operations.contains_key(*id));
         }
-        Ok(ForwardedCopies { values, uses })
+        uses
+    }
+
+    /// Remove occurrences whose results and nested bodies are no longer used.
+    pub fn remove_operations(&mut self, removed: &LookupSet<OperationId>) {
+        for &id in removed {
+            self.operations.remove(id);
+        }
+        for region in self.regions.values_mut() {
+            region.operations.retain(|id| !removed.contains(id));
+        }
     }
 }
 

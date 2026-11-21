@@ -10,6 +10,7 @@ use egglog_engine::sort::Z;
 use egglog_engine::{EGraph, Value, Write};
 
 mod compaction;
+mod parallel;
 
 #[cfg(test)]
 mod tests;
@@ -21,24 +22,15 @@ pub(super) fn new_graph() -> Result<EGraph, OptimizeError> {
 }
 
 pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
-    graph.parse_and_run_program(Some("graph fusion".into()), include_str!("graph.egg"))?;
+    graph.parse_and_run_program(
+        Some("graph fusion".into()),
+        concat!(include_str!("graph.egg"), "\n", include_str!("parallel.egg")),
+    )?;
     Ok(())
 }
 
 fn clear(graph: &mut EGraph) -> Result<(), OptimizeError> {
     for table in [
-        "ParallelPair",
-        "ParallelPath",
-        "FusionInputAvailable",
-        "FusionChildRegion",
-        "SameDomainPrefix",
-        "FusionLoadPrefix",
-        "FusionForwardLoad",
-        "FusionUnsafe",
-        "FusionHandledUse",
-        "FuseCandidate",
-        "FuseSelected",
-        "FusionClauseBase",
         "FusionOutputBase",
         "FusionOperationBase",
         "MotionCandidate",
@@ -46,10 +38,6 @@ fn clear(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "ArrayMotionReadOnly",
         "FusionPreparation",
         "FusionBoundary",
-        "FusionNested",
-        "FusionCollective",
-        "FusionHasForwardedLoad",
-        "FusionPrivateWrites",
         "SinkProducer",
         "PlacementReadOnly",
         "PlacementMember",
@@ -84,60 +72,38 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
         clear(graph)?;
         analysis::ensure(graph)?;
         crate::egglog::planning::analyze(graph)?;
-        graph.parse_and_run_program(None, "(run-schedule (saturate placement-index) (saturate placement-demand dataflow-scopes) (saturate placement-legality graph-work) (saturate placement-select) (saturate graph-fusion dataflow-scopes) (saturate dataflow-effects) (saturate graph-fusion-legality) (saturate graph-fusion-select))")?;
+        if parallel::run(graph)? {
+            let _handoff = super::timing::span("parallel fusion handoff");
+            memory::simplify(graph, false)?;
+            clear(graph)?;
+            analysis::ensure(graph)?;
+            crate::egglog::planning::analyze(graph)?;
+        }
+        graph.parse_and_run_program(None, "(run-schedule (saturate placement-index) (saturate placement-demand dataflow-scopes) (saturate placement-legality graph-work) (saturate placement-select) (saturate graph-fusion dataflow-scopes) (saturate dataflow-effects))")?;
         let query = Query(graph);
         let mut selected = None;
-        query.for_each("FuseCandidate", |row| {
+        query.for_each("AccumulatorPair", |row| {
             if selected.is_none()
-                && (!query.contains("OperationsConflict", (row[0], row[1]))?
-                    || query
-                        .lookup("FusionPrivateWrites", (row[0], row[1]))?
-                        .is_some_and(|safe| query.0.value_to_base::<bool>(safe)))
+                && !query.contains("OperationsConflict", (row[0], row[1]))?
+                && !query.contains("OperationDependency", (row[1], row[0]))?
             {
                 selected = Some((row[0], row[1]));
             }
             Ok(())
         })?;
         if let Some((first, second)) = selected {
-            fuse(graph, first, second)?;
+            fuse_accumulators(graph, first, second)?;
         } else {
-            query.for_each("AccumulatorPair", |row| {
-                if selected.is_none()
-                    && !query.contains("OperationsConflict", (row[0], row[1]))?
-                    && !query.contains("OperationDependency", (row[1], row[0]))?
-                {
-                    selected = Some((row[0], row[1]));
-                }
-                Ok(())
-            })?;
-            let Some((first, second)) = selected else {
-                let branch = query.first("BranchPair")?;
-                if fuse_ranked_bucket(graph)? {
-                    memory::simplify(graph, false)?;
-                    continue;
-                }
+            let branch = query.first("BranchPair")?;
+            if !fuse_ranked_bucket(graph)? {
                 if let Some(pair) = branch {
                     graph.update(|mut sink| sink.add("BranchFuseSelected", (pair[0], pair[1])))?;
                     graph.parse_and_run_program(None, "(run-schedule (run graph-fusion-apply))")?;
                     edit::remove(graph, &[pair[1]])?;
-                    memory::simplify(graph, false)?;
-                    continue;
+                } else if !compaction::run(graph)? && !sink_producer(graph)? && !motion(graph, false)? {
+                    return Ok(());
                 }
-                if compaction::run(graph)? {
-                    memory::simplify(graph, false)?;
-                    continue;
-                }
-                if sink_producer(graph)? {
-                    memory::simplify(graph, false)?;
-                    continue;
-                }
-                if motion(graph, false)? {
-                    memory::simplify(graph, false)?;
-                    continue;
-                }
-                return Ok(());
-            };
-            fuse_accumulators(graph, first, second)?;
+            }
         }
         memory::simplify(graph, false)?;
     }
@@ -427,41 +393,6 @@ fn fuse_accumulators(graph: &mut EGraph, first: Value, second: Value) -> Result<
     edit::remove(graph, &[second])
 }
 
-fn fuse(graph: &mut EGraph, first: Value, second: Value) -> Result<(), OptimizeError> {
-    let query = Query(graph);
-    let a = query.required("ControlRegion", (first, 0_i64))?;
-    let b = query.required("ControlRegion", (second, 0_i64))?;
-    let parameters = query.sequence("RegionParameter", b)?;
-    let arguments = query.sequence("RegionParameter", a)?;
-    let mut replacements: Vec<_> = parameters.into_iter().zip(arguments).collect();
-    let mut loads = Vec::new();
-    query.for_each("FusionForwardLoad", |row| {
-        if row[0] == first && row[1] == second {
-            replacements.push((query.required("Output", (row[2], 0_i64))?, row[3]));
-            loads.push(row[2]);
-        }
-        Ok(())
-    })?;
-    let clauses = analysis::count(query, "ResultCount", first)?;
-    let outputs = analysis::count(query, "OutputCount", first)?;
-    let mut offset = 0;
-    for operation in query.operations(a)? {
-        let order = query.0.value_to_base::<i64>(query.required("OperationOrder", operation)?);
-        offset = offset.max(order + 1);
-    }
-    edit::replace(graph, &replacements)?;
-    graph.update(|mut sink| {
-        sink.add("FuseSelected", (first, second))?;
-        sink.set("FusionClauseBase", (first, second), clauses)?;
-        sink.set("FusionOutputBase", (first, second), outputs)?;
-        sink.set("FusionOperationBase", (first, second), offset)?;
-        Ok(())
-    })?;
-    graph.parse_and_run_program(None, "(run-schedule (run graph-fusion-apply))")?;
-    loads.push(second);
-    edit::remove(graph, &loads)
-}
-
 pub(super) fn motion(graph: &mut EGraph, hoist: bool) -> Result<bool, OptimizeError> {
     clear(graph)?;
     graph.parse_and_run_program(
@@ -507,11 +438,14 @@ pub(super) fn motion(graph: &mut EGraph, hoist: bool) -> Result<bool, OptimizeEr
     })?;
     // Keep every destination fixed until the next analysis round.
     selected.retain(|&(_, owner)| !operations.contains(&owner));
-    let changed = !selected.is_empty();
+    if selected.is_empty() {
+        return Ok(false);
+    }
+    let _timing = super::timing::span("egglog fusion motion edits");
     for (operation, owner) in selected {
         edit::move_before(graph, operation, owner)?;
     }
-    Ok(changed)
+    Ok(true)
 }
 
 #[cfg(test)]

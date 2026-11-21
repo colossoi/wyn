@@ -4,7 +4,7 @@ use crate::egglog::dataflow::{
     ir::{self, Code},
 };
 use crate::egglog::payload::Payload;
-use crate::egglog::{analysis, from_tlc, fuse, query::Query, test_graph};
+use crate::egglog::{analysis, from_tlc, fuse, memory, query::Query, test_graph, OptimizeError};
 use crate::op::BinaryOperator;
 
 #[test]
@@ -302,6 +302,56 @@ fn scan_barriers_survive_intermediate_map_contraction() {
         })
         .unwrap();
     assert_eq!((scans, totals), (1, 1));
+}
+
+#[test]
+fn one_fusion_publication_contracts_independent_bodies_and_pointwise_chains() -> Result<(), OptimizeError> {
+    let mut graph = test_graph::import(
+        "entry chain(xs:[8]i32) ([8]i32,[8]i32,[8]i32) =
+            let a = map(|x| x+1,xs)
+            let b = map(|x| x*2,a)
+            in (a,b,map(|x| x-3,b))
+         entry pair(xs:[8]i32) ([8]i32,[8]i32) =
+            let a = map(|x| x-1,xs)
+            in (a,map(|x| x*3,a))
+         entry capture(xs:[8]i32, n:i32) ([8]i32,[8]i32,[8]i32) =
+            let a = map(|x| x+1,xs)
+            let k = n*n
+            let b = map(|x| x*2,a)
+            in (a,b,map(|x| x+k,b))
+         entry disjoint(xs:[8]i32, ys:[16]i32) ([8]i32,[16]i32) =
+            let a = map(|x| x+1,xs)
+            let b = map(|x| x*2,a)
+            let c = map(|x| x-1,ys)
+            in (b,map(|x| x*3,c))
+         entry final_value(xs:[8]i32) [8]i32 =
+            let a = map(|x| x+1,xs)
+            let b = map(|x| x*2,a)
+            in map(|x| x-3,b)",
+    )?;
+    memory::simplify(&mut graph, false)?;
+    let query = Query(&graph);
+    let mut roots = Vec::new();
+    query.for_function("EntryOrder", |keys, _| {
+        roots.push(query.required("FunctionRoot", keys[0])?);
+        Ok(())
+    })?;
+    assert!(super::parallel::run(&mut graph)?);
+    let mut counts = Vec::new();
+    for region in roots {
+        let query = Query(&graph);
+        let mut outputs = Vec::new();
+        for op in query.operations(region)? {
+            if query.contains("ParallelOperation", op)? {
+                outputs.push(analysis::count(query, "OutputCount", op)?);
+            }
+        }
+        outputs.sort_unstable();
+        counts.push(outputs);
+    }
+    counts.sort_unstable();
+    assert_eq!(counts, [vec![1], vec![1, 1], vec![1, 2], vec![2], vec![3]]);
+    memory::validate(&mut graph)
 }
 
 #[test]

@@ -81,19 +81,15 @@ fn consumer(graph: &mut EGraph, first: Value, second: Value, clause: i64) -> Res
             Ok(())
         })?;
     }
-    if !collected {
-        mask(graph, second, predicate)?;
-    }
-    graph.update(|mut sink| {
-        for (load, value) in loads {
-            sink.add("FusionForwardLoad", (first, second, load, value))?;
-        }
-        Ok(())
-    })?;
-    super::fuse(graph, first, second)
+    let new_regions = if collected { Vec::new() } else { mask(graph, second, predicate)? };
+    super::parallel::apply(graph, first, second, &loads, &new_regions)
 }
 
-fn mask(graph: &mut EGraph, operation: Value, predicate: Value) -> Result<(), OptimizeError> {
+fn mask(
+    graph: &mut EGraph,
+    operation: Value,
+    predicate: Value,
+) -> Result<Vec<(Value, Vec<Value>)>, OptimizeError> {
     let query = Query(graph);
     let yes = query.required("ControlRegion", (operation, 0_i64))?;
     let mut parameters = Vec::new();
@@ -144,8 +140,8 @@ fn mask(graph: &mut EGraph, operation: Value, predicate: Value) -> Result<(), Op
             types.push((Name::Value(value), info, query.fields("ScalarInfo", info)?[0]));
         }
     }
-    graph.update(|mut sink| {
-        Ok((|| -> Result<(), OptimizeError> {
+    let (branch, lane, otherwise) = graph.update(|mut sink| {
+        Ok((|| -> Result<_, OptimizeError> {
             let no = sink.add("DerivedRegion", (operation, 91_i64, 0_i64))?;
             let lane = sink.add("DerivedRegion", (operation, 91_i64, 1_i64))?;
             for region in [no, lane] {
@@ -203,10 +199,10 @@ fn mask(graph: &mut EGraph, operation: Value, predicate: Value) -> Result<(), Op
             ir::outputs(&mut sink, branch, &outputs)?;
             sink.remove("ControlRegion", (operation, 0_i64))?;
             sink.set("ControlRegion", (operation, 0_i64), lane)?;
-            Ok(())
+            Ok((id, lane, no))
         })())
     })??;
-    Ok(())
+    Ok(vec![(lane, vec![branch]), (otherwise, vec![])])
 }
 
 fn count(graph: &mut EGraph, operation: Value, clause: i64, output_slot: i64) -> Result<(), OptimizeError> {

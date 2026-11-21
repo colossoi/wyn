@@ -1,5 +1,8 @@
 //! Import the live body graph and publish changes to its direct operands.
-use super::ir::{self, Code};
+use super::{
+    edit,
+    ir::{self, Code},
+};
 use crate::ast::Span;
 use crate::egglog::{analysis, output_error, query::Query, OptimizeError};
 use crate::memory_ir::{
@@ -13,13 +16,15 @@ use slotmap::SecondaryMap;
 
 pub(in crate::egglog) struct BodyGraph {
     pub ir: MemoryIr<Code, Value, Value>,
-    operations: SecondaryMap<OperationId, Value>,
-    regions: SecondaryMap<RegionId, Value>,
-    names: LookupMap<ValueRef, Value>,
+    pub operations: SecondaryMap<OperationId, Value>,
+    pub regions: SecondaryMap<RegionId, Value>,
+    pub names: LookupMap<ValueRef, Value>,
+    pub operation_ids: LookupMap<Value, OperationId>,
+    pub refs: LookupMap<Value, ValueRef>,
 }
 
 impl BodyGraph {
-    pub fn read(query: Query<'_>) -> Result<Self, OptimizeError> {
+    pub fn read(query: Query<'_>, new_regions: &[(Value, Vec<Value>)]) -> Result<Self, OptimizeError> {
         let mut ir = MemoryIr::default();
         let mut regions = SecondaryMap::new();
         let mut region_ids = StableMap::new();
@@ -27,12 +32,18 @@ impl BodyGraph {
         let mut operation_ids = LookupMap::new();
         let mut names = LookupMap::new();
         let mut refs = LookupMap::new();
-        query.for_each("LiveRegion", |row| {
+        let mut add_region = |region| {
             let id = ir.regions.insert(Region::default());
-            regions.insert(id, row[0]);
-            region_ids.insert(row[0], id);
+            regions.insert(id, region);
+            region_ids.insert(region, id);
+        };
+        query.for_each("LiveRegion", |row| {
+            add_region(row[0]);
             Ok(())
         })?;
+        for &(region, _) in new_regions {
+            add_region(region);
+        }
         let mut functions = LookupMap::new();
         query.for_each("LiveFunction", |row| {
             let function = if let Some(key) = query.lookup("FunctionRoot", row[0])? {
@@ -57,7 +68,14 @@ impl BodyGraph {
                     diet: query.required("ParameterDiet", (region, index as i64))?,
                 });
             }
-            for op in query.vector(query.required("RegionOperations", region)?)? {
+            let ordered;
+            let body = if let Some((_, body)) = new_regions.iter().find(|(key, _)| *key == region) {
+                body
+            } else {
+                ordered = query.vector(query.required("RegionOperations", region)?)?;
+                &ordered
+            };
+            for &op in body {
                 let code = ir::code(query.0, query.required("OperationPayload", op)?);
                 let outputs = query.sequence("Output", op)?;
                 let definition = match code {
@@ -158,10 +176,32 @@ impl BodyGraph {
             names,
             regions,
             operations,
+            operation_ids,
+            refs,
         })
     }
 
-    fn publish_edges(
+    pub fn publish_substitutions(
+        &self,
+        graph: &mut EGraph,
+        values: &LookupMap<ValueRef, ValueRef>,
+        uses: Vec<(UseSite, ValueRef)>,
+    ) -> Result<(), OptimizeError> {
+        let names: Vec<_> = values
+            .iter()
+            .filter_map(|(old, new)| {
+                let (old, new) = (self.names[old], self.names[new]);
+                (old != new).then_some((old, new))
+            })
+            .collect();
+        self.publish_edges(graph, uses)?;
+        if !names.is_empty() {
+            edit::replace_attributes(graph, &names)?;
+        }
+        Ok(())
+    }
+
+    pub fn publish_edges(
         &self,
         graph: &mut EGraph,
         edits: Vec<(UseSite, ValueRef)>,
@@ -215,19 +255,16 @@ pub(in crate::egglog) fn forward_copies(graph: &mut EGraph) -> Result<bool, Opti
     if !found {
         return Ok(false);
     }
-    let mut body = BodyGraph::read(query)?;
+    let mut body = BodyGraph::read(query, &[])?;
     let redirected = body.ir.forward_copies().map_err(|err| output_error(err.to_string()))?;
-    let mut names = Vec::new();
     let mut removed = Vec::new();
-    for (old, new) in redirected.values {
+    for &old in redirected.values.keys() {
         let ValueRef::Result(op, _) = old else {
             return Err(output_error("cannot remove a parameter as a copy"));
         };
-        names.push((body.names[&old], body.names[&new]));
         removed.push(body.operations[op]);
     }
-    body.publish_edges(graph, redirected.uses)?;
-    super::edit::replace_attributes(graph, &names)?;
-    super::edit::remove(graph, &removed)?;
+    body.publish_substitutions(graph, &redirected.values, redirected.uses)?;
+    edit::remove(graph, &removed)?;
     Ok(true)
 }

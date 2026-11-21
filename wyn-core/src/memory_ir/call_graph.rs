@@ -1,9 +1,9 @@
 //! Direct call sites in the structured memory IR.
 
-use super::{Definition, Function, FunctionId, MemoryIr, OperationId};
+use super::{FunctionId, OperationId};
 use crate::{LookupMap, LookupSet, StableMap};
 use std::hash::Hash;
-use wyn_graph::{dfs_postorder, for_each_reachable, WalkOrder};
+use wyn_graph::dfs_postorder;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CallSite<F = FunctionId, O = OperationId> {
@@ -15,40 +15,6 @@ pub struct CallSite<F = FunctionId, O = OperationId> {
 #[derive(Debug)]
 pub struct CallGraph<F = FunctionId, O = OperationId> {
     pub calls: StableMap<F, Vec<CallSite<F, O>>>,
-}
-
-impl CallGraph {
-    /// Include sites in every attached body. External callees are leaves.
-    pub fn from_ir<D, T, A>(ir: &MemoryIr<D, T, A>) -> Self {
-        let mut calls = StableMap::default();
-        for (function, body) in &ir.functions {
-            let Function::Defined(root) = *body else {
-                continue;
-            };
-            let mut sites = Vec::new();
-            for_each_reachable(
-                [root],
-                WalkOrder::DepthFirst,
-                |region, children| {
-                    for &id in ir.regions[region].operations.iter().rev() {
-                        children.extend(ir.operations[id].bodies.iter().rev().map(|edge| edge.region));
-                    }
-                },
-                |region| {
-                    for &id in &ir.regions[region].operations {
-                        if let Definition::Call(callee) = &ir.operations[id].definition {
-                            sites.push(CallSite {
-                                operation: id,
-                                callee: *callee,
-                            });
-                        }
-                    }
-                },
-            );
-            calls.insert(function, sites);
-        }
-        Self { calls }
-    }
 }
 
 impl<F: Copy + Eq + Hash, O> CallGraph<F, O> {

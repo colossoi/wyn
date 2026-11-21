@@ -1,6 +1,5 @@
 ; Generic constant propagation and identities over explicit scalar edges.
 (ruleset scalar-analysis)
-(function ValuePrimitive (Name) PrimType :no-merge)
 (function ConstantValue (Name) i64 :no-merge)
 (relation FoldedConstant (OperationKey i64))
 (rule ((= revision (AnalysisRevision)) (= (ValueType name) (ScalarInfo (ScalarElement primitive))))
