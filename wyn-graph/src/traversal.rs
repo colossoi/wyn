@@ -34,14 +34,15 @@ where
     reachable
 }
 
-/// Visit a DAG in dependency-first order, preserving root and child order.
+/// Visit reachable nodes in depth-first finish order. For a DAG this places
+/// dependencies first. Root and child order break traversal ties.
 ///
 /// `complete` prunes nodes whose summaries the caller already has, including
 /// their descendants. Shared nodes are returned once. Each call costs O(V + E)
 /// in the newly visited graph; callers can extend a cache between calls without
-/// walking previously summarized subgraphs. The caller must supply an acyclic
-/// graph. Uses an explicit stack, so long dependency chains cannot overflow it.
-pub fn dag_postorder<N, I, P, F>(roots: I, mut complete: P, mut children: F) -> Vec<N>
+/// walking previously summarized subgraphs. Uses an explicit stack, so long
+/// dependency chains cannot overflow it.
+pub fn dfs_postorder<N, I, P, F>(roots: I, mut complete: P, mut children: F) -> Vec<N>
 where
     N: Copy + Eq + Hash,
     I: IntoIterator<Item = N>,

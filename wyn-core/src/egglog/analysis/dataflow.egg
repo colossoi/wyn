@@ -23,15 +23,12 @@
 (rule ((= revision (AnalysisRevision)) (LiveRegion child) (FlowScopeParent child parent) (FlowScopeAncestor child parent))
       ((InvalidDataflow "cyclic execution-region nesting")) :ruleset dataflow-scopes)
 
-(rule ((= revision (AnalysisRevision)) (= order (EntryOrder function))) ((LiveFunction function)) :ruleset graph-structure)
 (rule ((= revision (AnalysisRevision)) (LiveFunction function) (= root (FunctionRoot function)))
       ((LiveRegion root)) :ruleset graph-structure)
 (rule ((= revision (AnalysisRevision)) (LiveRegion region) (Operation operation) (= region (OperationRegion operation)))
       ((LiveOperation operation)) :ruleset graph-structure)
 (rule ((= revision (AnalysisRevision)) (LiveOperation operation) (RegionOwnedBy child operation))
       ((LiveRegion child)) :ruleset graph-structure)
-(rule ((= revision (AnalysisRevision)) (LiveOperation operation) (= target (CallTarget operation)))
-      ((LiveFunction target)) :ruleset graph-structure)
 
 (rule ((= revision (AnalysisRevision)) (AvailabilityDemand operation name) (= region (OperationRegion operation)) (AvailableIn region name))
       ((AvailableAt operation name)) :ruleset dataflow-scopes)
@@ -146,19 +143,6 @@
 (rule ((= revision (AnalysisRevision)) (= child (ControlRegion operation 0)) (= value (RegionYield child slot))
        (= initial (EdgeArgument operation 0 slot)))
       ((set (LoopBackedge operation slot) value)) :ruleset dataflow-scopes)
-
-(rule ((= revision (AnalysisRevision)) (Function function) (= (RetainAllFunctions) true))
-      ((LiveFunction function)) :ruleset graph-structure)
-
-(rule ((= revision (AnalysisRevision)) (Function function))
-      ((set (RecursiveFunction function) false)) :ruleset graph-structure)
-(rule ((= revision (AnalysisRevision)) (LiveOperation operation) (= region (OperationRegion operation))
-       (FlowScopeAncestor root region) (RootFunction root caller) (= callee (CallTarget operation)))
-      ((CallReach caller callee)) :ruleset graph-structure)
-(rule ((= revision (AnalysisRevision)) (CallReach first middle) (CallReach middle last))
-      ((CallReach first last)) :ruleset graph-structure)
-(rule ((= revision (AnalysisRevision)) (CallReach function function))
-      ((set (RecursiveFunction function) true)) :ruleset graph-structure)
 
 (rule ((= revision (AnalysisRevision)) (OperationCertificate operation name))
       ((DirectOperationUse operation (ValueNameRef name))) :ruleset dataflow-dependencies)

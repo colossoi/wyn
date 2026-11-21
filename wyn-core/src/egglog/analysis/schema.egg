@@ -83,7 +83,6 @@
 (datatype TokenBinding (TokenBindingAt OperationKey i64))
 (function TokenCapability (AccName) TokenBinding :no-merge)
 
-(relation CallReach (FunctionName FunctionName))
 (function RecursiveFunction (FunctionName) bool :merge (or old new))
 
 (relation ArrayOuterBound (ValueName IndexExp))

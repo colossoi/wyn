@@ -7,6 +7,7 @@ use egglog_engine::sort::VecContainer;
 use egglog_engine::sort::S;
 use egglog_engine::{Core, EGraph, IntoValues, RawValues, Value, Write};
 
+mod calls;
 mod signatures;
 
 pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
@@ -38,7 +39,7 @@ pub(super) fn invalidate(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "LivenessRegion",
         "LivenessOperation",
         "LivenessName",
-        "CallReach",
+        "InlineCall",
         "RecursiveFunction",
         "NameOrdinal",
         "NameLiveAfter",
@@ -154,6 +155,7 @@ pub(super) fn advance(graph: &mut EGraph) -> Result<(), OptimizeError> {
 pub(super) fn structure(graph: &mut EGraph) -> Result<(), OptimizeError> {
     let _timing = timing::span("egglog graph structure");
     invalidate(graph)?;
+    calls::publish(graph)?;
     graph.parse_and_run_program(None, "(run-schedule (saturate graph-structure flow-scopes))")?;
     Ok(())
 }

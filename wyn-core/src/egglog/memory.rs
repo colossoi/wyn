@@ -8,7 +8,7 @@ use super::{analysis, scalar, timing, OptimizeError};
 use crate::LookupMap;
 use egglog_engine::sort::VecContainer;
 use egglog_engine::{Core, EGraph, Value, Write};
-use wyn_graph::dag_postorder;
+use wyn_graph::dfs_postorder;
 
 pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
     super::dataflow::ir::load(graph)?;
@@ -51,7 +51,7 @@ pub(super) fn inline(graph: &mut EGraph) -> Result<(), OptimizeError> {
     }
     // Selected targets are nonrecursive. Preparing their bodies first ensures
     // that copying a callee cannot introduce more selected calls.
-    let order = dag_postorder(
+    let order = dfs_postorder(
         roots,
         |_| false,
         |region, dependencies| {

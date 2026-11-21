@@ -84,6 +84,51 @@ fn inlining_exposes_parallel_work_through_scalar_helpers_before_copying_them() -
 }
 
 #[test]
+fn nested_calls_mark_only_the_reachable_cycle_recursive() -> Result<(), OptimizeError> {
+    let mut graph = test_graph::fixture(
+        &[
+            (1, Code::Call),
+            (2, Code::Call),
+            (3, Code::Call),
+            (4, Code::Range),
+            (5, Code::Uninitialized),
+            (6, Code::Call),
+        ],
+        include_str!("tests/inline_arguments.egg"),
+    )?;
+    graph.parse_and_run_program(
+        None,
+        r#"
+        (set (ResultReducer (OperationId 5) 0) (RegionId 10))
+        (set (OperationRegion (OperationId 6)) (RegionId 10))
+        (set (CallTarget (OperationId 6)) (FunctionId 2 "identity"))
+        (set (AccumulatorCombiner (OperationId 6) 0) (RegionId 11))
+        (delete (OperationRegion (OperationId 2)))
+        (set (OperationRegion (OperationId 2)) (RegionId 11))
+        (delete (OperationRegion (OperationId 1)))
+        (set (OperationRegion (OperationId 1)) (RegionId 2))
+        (Function (FunctionId 3 "unused"))
+    "#,
+    )?;
+    analysis::structure(&mut graph)?;
+    graph.parse_and_run_program(
+        None,
+        r#"
+        (check (InlineCall (FunctionId 0 "main") (OperationId 6) (FunctionId 2 "identity")))
+        (check (InlineCall (FunctionId 0 "main") (OperationId 2) (FunctionId 1 "forward")))
+        (check (= (RecursiveFunction (FunctionId 0 "main")) false))
+        (check (= (RecursiveFunction (FunctionId 1 "forward")) true))
+        (check (= (RecursiveFunction (FunctionId 2 "identity")) true))
+        (fail (check (LiveFunction (FunctionId 3 "unused"))))
+        (set (RetainAllFunctions) true)
+    "#,
+    )?;
+    analysis::structure(&mut graph)?;
+    graph.parse_and_run_program(None, r#"(check (LiveFunction (FunctionId 3 "unused")))"#)?;
+    Ok(())
+}
+
+#[test]
 fn inline_all_leaves_recursive_calls_intact() -> Result<(), OptimizeError> {
     let mut graph = test_graph::fixture(
         &[

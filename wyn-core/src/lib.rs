@@ -12,6 +12,7 @@ pub mod flow;
 mod frontend;
 pub mod interface;
 pub mod lexer;
+pub mod memory_ir;
 mod name_resolution;
 pub mod op;
 mod parser;

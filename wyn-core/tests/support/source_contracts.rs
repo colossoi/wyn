@@ -1107,6 +1107,30 @@ mod source_host_output {
         assert!(!rust.contains("read_gpu_word"));
     }
     #[test]
+    fn graphics_capture_waits_for_a_selected_branch_buffer() {
+        let source = r#"
+entry branch_draw(xs: []i32, shorter: bool, screen: render_target<vec4f32>) ([]i32, render_target<vec4f32>) =
+  let out = if shorter then map(|x| x+1, xs[1..length(xs)]) else map(|x| x+2, xs) in
+  let triangles = rasterize_triangles(direct_draw(3u32, 1u32), |i, _, _|
+    let x = if i == 1u32 then 3.0 else -1.0 in
+    let y = if i == 2u32 then 3.0 else -1.0 in
+    vertex_output(@[x, y, 0.0, 1.0], 0i32)) in
+  let image = shade(screen, triangles, |_, _, _, _, _|
+    @[f32.i32(if length(out) > 0 then out[0] else 0), 0.0, 0.0, 1.0]) in
+  (out, image)
+"#;
+        let ssa = compile_thru_ssa(source).unwrap();
+        for program in [
+            lower_ssa_to_wgsl_with_program(ssa.clone()).unwrap().program,
+            wyn_core::lower_ssa_to_spirv(ssa).unwrap().program,
+        ] {
+            let operations = &program.entries[0].operations;
+            let join = operations.iter().position(|op| matches!(op, Operation::JoinBuffer { .. })).unwrap();
+            let draw = operations.iter().position(|op| matches!(op, Operation::Draw { .. })).unwrap();
+            assert!(join < draw, "draw must run after its captured buffer is selected");
+        }
+    }
+    #[test]
     fn graphics_capture_uses_the_produced_buffer_after_its_writer() {
         let ssa = compile_thru_ssa(include_str!("../../../testfiles/playground/conway.wyn")).unwrap();
         let output = lower_ssa_to_wgsl_with_program(ssa).unwrap();

@@ -435,6 +435,25 @@ impl Program {
             };
             graphics.invocation.draw = draw;
         }
+        // Buffer joins publish handles after a pass, outside its shader accesses.
+        for join in &program.interface.buffer_joins {
+            let target = program.scalar_resource(join.pipeline, &join.binding)?;
+            let passes = &mut program.interface.frame_graph.passes;
+            let Some(producer) = passes
+                .iter()
+                .position(|pass| (pass.pipeline_index, pass.stage_index) == (join.pipeline, join.stage))
+            else {
+                return Err(HostError::Invalid("buffer join has no published pass".into()));
+            };
+            for (index, pass) in passes.iter_mut().enumerate() {
+                if index != producer
+                    && pass.reads.iter().chain(&pass.writes).any(|access| access.resource == target.0)
+                    && !pass.depends_on.contains(&producer)
+                {
+                    pass.depends_on.push(producer);
+                }
+            }
+        }
         let order = program
             .interface
             .frame_graph

@@ -1,4 +1,4 @@
-use super::{dag_postorder, forest_intervals, reachable_targets, DfsInterval};
+use super::{dfs_postorder, forest_intervals, reachable_targets, DfsInterval};
 use crate::{reachable_set, WalkOrder};
 use std::collections::HashSet;
 
@@ -32,7 +32,7 @@ fn target_propagation_matches_individual_walks_through_cycles_and_shared_paths()
 fn shared_dag_is_bottom_up_and_cached_subgraphs_are_not_revisited() {
     let edges = [vec![], vec![0], vec![0, 1], vec![1, 2, 1], vec![3, 2]];
     let mut complete = HashSet::new();
-    let first = dag_postorder(
+    let first = dfs_postorder(
         [3, 2, 3],
         |n| complete.contains(&n),
         |n, out| out.extend(&edges[n]),
@@ -40,7 +40,7 @@ fn shared_dag_is_bottom_up_and_cached_subgraphs_are_not_revisited() {
     assert_eq!(first, [0, 1, 2, 3]);
     complete.extend(first);
     let mut expanded = Vec::new();
-    let next = dag_postorder(
+    let next = dfs_postorder(
         [4, 3],
         |n| complete.contains(&n),
         |n, out| {
@@ -71,7 +71,7 @@ fn long_chains_use_an_explicit_stack() {
             out.push(n - 1)
         }
     };
-    let order = dag_postorder([100_000], |_| false, children);
+    let order = dfs_postorder([100_000], |_| false, children);
     assert!(order.iter().copied().eq(0..=100_000));
     let bounds = forest_intervals([100_000], children);
     assert_eq!(
