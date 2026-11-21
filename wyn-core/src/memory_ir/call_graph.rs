@@ -19,7 +19,7 @@ pub struct CallGraph<F = FunctionId, O = OperationId> {
 
 impl CallGraph {
     /// Include sites in every attached body. External callees are leaves.
-    pub fn from_ir<D>(ir: &MemoryIr<D>) -> Self {
+    pub fn from_ir<D, T, A>(ir: &MemoryIr<D, T, A>) -> Self {
         let mut calls = StableMap::default();
         for (function, body) in &ir.functions {
             let Function::Defined(root) = *body else {

@@ -171,6 +171,20 @@ pub(in crate::egglog) fn replace(
     graph: &mut EGraph,
     replacements: &[(Value, Value)],
 ) -> Result<(), OptimizeError> {
+    seed_replacements(graph, replacements)?;
+    graph.parse_and_run_program(None, "(run-schedule (saturate graph-operands))")?;
+    replace_attributes_with_seeded_values(graph)
+}
+
+pub(in crate::egglog) fn replace_attributes(
+    graph: &mut EGraph,
+    replacements: &[(Value, Value)],
+) -> Result<(), OptimizeError> {
+    seed_replacements(graph, replacements)?;
+    replace_attributes_with_seeded_values(graph)
+}
+
+fn seed_replacements(graph: &mut EGraph, replacements: &[(Value, Value)]) -> Result<(), OptimizeError> {
     clear(graph)?;
     graph.update(|mut sink| {
         for &(old, new) in replacements {
@@ -178,6 +192,10 @@ pub(in crate::egglog) fn replace(
         }
         Ok(())
     })?;
+    Ok(())
+}
+
+fn replace_attributes_with_seeded_values(graph: &mut EGraph) -> Result<(), OptimizeError> {
     graph.parse_and_run_program(
         None,
         "(run-schedule (saturate graph-indices graph-substitution-index) (saturate graph-substitution) (saturate graph-apply))",

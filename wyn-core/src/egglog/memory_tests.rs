@@ -1,9 +1,88 @@
-use crate::egglog::dataflow::edit;
-use crate::egglog::dataflow::ir::Code;
+use crate::egglog::dataflow::{
+    body, edit,
+    ir::{self, Code, Name},
+};
+use crate::egglog::payload::Payload;
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, planning, test_graph, OptimizeError};
+use crate::op::BinaryOperator;
 use crate::types;
 use egglog_engine::{EGraph, RawValues, Write};
+
+#[test]
+fn copy_forwarding_preserves_captures_loop_entries_and_backedges() -> Result<(), OptimizeError> {
+    let mut graph =
+        test_graph::import("entry main(a:i32,b:i32,n:i32) i32 = loop t = a for i < n do t - b")?;
+    let query = Query(&graph);
+    let root = test_graph::root(&graph);
+    let owner = query.first("CountedLoopOperation")?.unwrap()[0];
+    let inner = query.required("ControlRegion", (owner, 0_i64))?;
+    let subtract = query
+        .operations(inner)?
+        .into_iter()
+        .find(|&op| {
+            ir::code(&graph, query.required("OperationPayload", op).unwrap())
+                == Code::Scalar(Payload::Binary(BinaryOperator::Subtract))
+        })
+        .expect("loop body has a subtraction");
+    let initial = query.required("EdgeArgument", (owner, 0_i64, 0_i64))?;
+    let operands = query.sequence("Input", subtract)?;
+    let backedge = query.required("RegionYield", (inner, 0_i64))?;
+    let ty = query.required("ValueType", query.name(initial)?)?;
+    let sources = [
+        query.name(initial)?,
+        query.name(operands[0])?,
+        query.name(backedge)?,
+        query.name(operands[1])?,
+    ];
+    graph.update(|mut sink| {
+        Ok((|| -> Result<(), OptimizeError> {
+            for (i, (region, order, source)) in [
+                (root, -1_i64, sources[0]),
+                (inner, -1, sources[1]),
+                (inner, 100, sources[2]),
+                (root, -2, sources[3]),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let id = 1000 + i as i64;
+                let raw = sink.add("ValueId", id)?;
+                let name = Name::Value(raw);
+                let copy = ir::operation(&mut sink, id, Code::Use, &[Name::Value(source)])?;
+                ir::outputs(&mut sink, copy, &[name])?;
+                sink.set("ValueType", raw, ty)?;
+                sink.set("OperationRegion", copy.0, region)?;
+                sink.set("OperationOrder", copy.0, order)?;
+            }
+            let mut alias = |id| {
+                let raw = sink.add("ValueId", id)?;
+                sink.add("ValueNameRef", raw)
+            };
+            let (start, left, end) = (alias(1000_i64)?, alias(1001_i64)?, alias(1002_i64)?);
+            let capture = alias(1003_i64)?;
+            sink.remove("EdgeArgument", (owner, 0_i64, 0_i64))?;
+            sink.set("EdgeArgument", (owner, 0_i64, 0_i64), start)?;
+            sink.remove("Input", (subtract, 0_i64))?;
+            sink.set("Input", (subtract, 0_i64), left)?;
+            sink.remove("Input", (subtract, 1_i64))?;
+            sink.set("Input", (subtract, 1_i64), capture)?;
+            sink.remove("RegionYield", (inner, 0_i64))?;
+            sink.set("RegionYield", (inner, 0_i64), end)?;
+            Ok(())
+        })())
+    })??;
+    analysis::run(&mut graph)?;
+    assert!(body::forward_copies(&mut graph)?);
+    analysis::ensure(&mut graph)?;
+    let query = Query(&graph);
+    assert_eq!(query.required("EdgeArgument", (owner, 0_i64, 0_i64))?, initial);
+    assert_eq!(query.sequence("Input", subtract)?, operands);
+    assert!(query.contains("RegionCapture", (inner, operands[1]))?);
+    assert_eq!(query.required("RegionYield", (inner, 0_i64))?, backedge);
+    assert!(query.first("CopyOperation")?.is_none());
+    Ok(())
+}
 
 #[test]
 fn inlining_does_not_run_scalar_candidate_discovery() -> Result<(), OptimizeError> {

@@ -1,6 +1,6 @@
 //! Pass orchestration over the authoritative graph.
 use super::dataflow::{
-    edit,
+    body, edit,
     ir::{self, Code},
 };
 use super::query::Query;
@@ -98,6 +98,9 @@ pub(super) fn simplify(graph: &mut EGraph, hoist: bool) -> Result<(), OptimizeEr
     loop {
         edit::clear(graph)?;
         analysis::ensure(graph)?;
+        if body::forward_copies(graph)? {
+            continue;
+        }
         super::planning::analyze(graph)?;
         graph.parse_and_run_program(
             None,
@@ -118,19 +121,24 @@ pub(super) fn simplify(graph: &mut EGraph, hoist: bool) -> Result<(), OptimizeEr
                 if let Some(&new) = replacements.get(&row[0]) {
                     if let Some(site) = query.enode("OperationSite", row[1])? {
                         if analysis::count(query, "OutputCount", site[0])? == 1 {
-                            copies.push((site[0], new));
+                            copies.push((site[0], row[0], new));
                         }
                     }
                 }
                 Ok(())
             })?;
             // A proven redundant partial evaluation becomes a pure copy before DCE.
-            for (operation, name) in copies {
+            for (operation, old, name) in copies {
                 edit::set_code(graph, operation, Code::Use)?;
                 edit::inputs(graph, operation, &[name])?;
+                replacements.remove(&old);
             }
-            edit::replace(graph, &replacements.into_iter().collect::<Vec<_>>())?;
-            // Forwarded definitions become dead once all consumers have been redirected.
+            if !replacements.is_empty() {
+                edit::replace(graph, &replacements.into_iter().collect::<Vec<_>>())?;
+            }
+            if body::forward_copies(graph)? {
+                continue;
+            }
             analysis::ensure(graph)?;
             edit::clear(graph)?;
         }

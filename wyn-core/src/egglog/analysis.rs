@@ -431,7 +431,7 @@ pub(super) fn count(query: Query<'_>, table: &str, owner: impl IntoValues) -> Re
     Ok(count)
 }
 
-fn typed(query: Query<'_>, name: Value) -> Result<Value, OptimizeError> {
+pub(super) fn typed(query: Query<'_>, name: Value) -> Result<Value, OptimizeError> {
     let (kind, fields) = query.application(name, &["ValueNameRef", "AccNameRef"])?;
     let info = query.lookup(
         if kind == "ValueNameRef" { "ValueType" } else { "AccumulatorType" },
