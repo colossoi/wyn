@@ -3,7 +3,7 @@
 --! targets = ["spirv", "wgsl"]
 --! [[artifacts]]
 --! path = "output.wynhost"
---! contains = [":source-name \"boolean_reduce_0_repro\"", ":source-name \"boolean_reduce_1_repro\"", ":source-name \"boolean_reduce_2_repro\"", ":source-name \"boolean_reduce_3_repro\""]
+--! contains = [":source-name \"boolean_reduce_0_repro\"", ":source-name \"boolean_reduce_1_repro\"", ":source-name \"boolean_reduce_2_repro\"", ":source-name \"boolean_reduce_3_repro\"", ":source-name \"boolean_reduce_4_collected\""]
 
 entry boolean_reduce_0_repro(boolean_reduce_0_xs: []i32) []i32 = let any = reduce(|a,b| a || b,false,map(|x| x != 0,boolean_reduce_0_xs)) in [if boolean_reduce_0_xs[0] > 0 || any then 1i32 else 0i32]
 
@@ -16,3 +16,9 @@ entry boolean_reduce_2_repro(boolean_reduce_2_xs: []i32) []i32 = let any = reduc
 
 entry boolean_reduce_3_repro(boolean_reduce_3_xs: []i32) []i32 = let any = reduce(|a,b| a || b,false,map(|x| x != 0,boolean_reduce_3_xs)) in [if !any then 1i32 else 0i32]
 
+
+-- The carry dispatch computes the total and still needs the collected counts.
+entry boolean_reduce_4_collected(rows: [4096][2]i32, fallback: bool) ([4096]i32, bool) =
+  let counts = map(|row| row[0], rows) in
+  let any = reduce(|a,b| a || b, false, map(|row| row[1] != 0, rows)) in
+  (counts, fallback || any)

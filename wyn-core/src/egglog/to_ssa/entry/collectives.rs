@@ -24,31 +24,38 @@ impl EntryEmission<'_, '_, '_> {
         let query = self.body.query();
         let dispatch = *self.body.compiler.execution.dispatch(statement)?;
         let domain = query.required("OperationDomain", statement)?;
-        let mut reducer_names = LookupSet::default();
+        let mut carry_inputs = LookupSet::default();
         for clause in 0..crate::egglog::analysis::count(query, "ResultCount", statement)? {
             if let Some(reducer) = query.lookup("ResultReducer", (statement, clause))? {
-                reducer_names.extend(names_in(query, "RegionCapture", reducer)?);
+                carry_inputs.extend(names_in(query, "RegionCapture", reducer)?);
                 for slot in
                     0..crate::egglog::analysis::count(query, "ResultNeutralCount", (statement, clause))?
                 {
                     if let Some(name) =
                         query.value_name(query.required("ResultNeutral", (statement, clause, slot))?)?
                     {
-                        reducer_names.insert(name);
+                        carry_inputs.insert(name);
                     }
                 }
             }
         }
         let pattern = query.sequence("Output", statement)?;
         let mut output_names = LookupSet::default();
-        for &binding in &pattern {
+        for (slot, &binding) in pattern.iter().enumerate() {
             if let Some((name, _)) = runtime_binding(query, binding)? {
                 output_names.insert(name);
+                // The final carry dispatch can use arrays already published by the chunk dispatch.
+                if terminal && !plan.scan && after.contains(&name) {
+                    let role = query.required("OutputRole", (statement, slot as i64))?;
+                    if query.enode("CollectedOutput", role)?.is_some() {
+                        carry_inputs.insert(name);
+                    }
+                }
             }
         }
         let mut inside = after.clone();
         inside.extend(output_names.iter().copied());
-        inside.extend(reducer_names.iter().copied());
+        inside.extend(carry_inputs.iter().copied());
         inside.extend(domain_names(query, domain)?);
         if let Some(epilogue) = epilogue {
             inside.extend(statement_names(query, preparation)?);
@@ -99,9 +106,9 @@ impl EntryEmission<'_, '_, '_> {
         self.body.bind(&pattern, values)?;
         self.pending = true;
         if terminal {
-            reducer_names.extend(after.iter().filter(|name| !output_names.contains(name)).copied());
+            carry_inputs.extend(after.iter().filter(|name| !output_names.contains(name)).copied());
         }
-        self.restore_names = Some(reducer_names);
+        self.restore_names = Some(carry_inputs);
         self.dispatch_override = Some((
             dispatch.local_size,
             DispatchSize::Computed {

@@ -109,7 +109,10 @@ pub(super) fn lower(
                     templates.push((input, ty.clone()));
                 }
             } else {
-                let mut host = InputHost::default();
+                let mut host = InputHost {
+                    device_produced: declared.device_produced,
+                    ..InputHost::default()
+                };
                 let kind = if let Some(binding) = binding
                     .map(|binding| binding.first_buffer().0)
                     .or_else(|| extract_storage_binding(declared))
@@ -603,6 +606,7 @@ pub(super) fn lower(
                 .collect::<StableMap<_, _>>()
                 .into();
             host::cpu_body(emission.body.query(), function, &parameters, region)?
+                .filter(host::cpu_available)
         } else {
             None
         };
@@ -3502,7 +3506,11 @@ fn input_host_value(
     } else {
         return Ok(None);
     };
-    Ok(Some(ScalarExpr::Parameter { source, offset, ty }))
+    Ok(Some(if input.host.device_produced {
+        ScalarExpr::Read { source, offset, ty }
+    } else {
+        ScalarExpr::Parameter { source, offset, ty }
+    }))
 }
 
 #[cfg(test)]

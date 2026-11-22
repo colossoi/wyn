@@ -561,7 +561,10 @@ fn generated_compute_captures_are_allocated_by_the_authored_host_entry() {
         assert_eq!(inputs, BTreeSet::from(["xs", "target"]), "{format:?}");
         assert!(!entry.inputs.contains(&entry.results[0]));
         assert!(entry.allocations().any(|a| a.resource() == entry.results[0]));
-        WhlProgram::parse(&program.to_whl("staged", format).unwrap()).unwrap();
+        let whl = program.to_whl("staged", format).unwrap();
+        assert!(whl.contains("gpu-read-scalar"), "{whl}");
+        assert!(entry.host_inputs.is_empty(), "{format:?}");
+        WhlProgram::parse(&whl).unwrap();
     }
 }
 

@@ -8,6 +8,7 @@ use super::query::Query;
 use super::{output_error as error, representation, InterfacesPrepared, OptimizeError, Program};
 use crate::host::ScalarExpr;
 use crate::ssa::layout::{storage_elem_stride, storage_value_type};
+use crate::tlc::DefMeta;
 use crate::types::{self, Type, TypeExt, TypeName};
 use crate::{LookupMap, LookupSet, StableMap};
 use egglog_engine::sort::Z;
@@ -88,7 +89,7 @@ impl Execution {
                 execution.collectives.insert(operation, collective);
             }
         }
-        execution.plan_regions(query)?;
+        execution.plan_regions(program)?;
         Ok(execution)
     }
 
@@ -388,7 +389,8 @@ struct RegionPlanning<'a> {
 }
 
 impl Execution {
-    fn plan_regions(&mut self, query: Query<'_>) -> Result<(), OptimizeError> {
+    fn plan_regions(&mut self, program: &Program<'_, InterfacesPrepared>) -> Result<(), OptimizeError> {
+        let query = Query(&program.graph);
         let generated =
             query.0.value_to_base::<bool>(query.required("GeneratedDispatches", RawValues(Vec::new()))?);
         let mut live_after = LookupMap::<_, LookupSet<_>>::default();
@@ -403,16 +405,30 @@ impl Execution {
             live_after: &live_after,
         };
         let mut roots = Vec::new();
-        query.for_function("EntryOrder", |keys, _| {
-            roots.push(keys[0]);
+        query.for_function("EntryOrder", |keys, order| {
+            roots.push((keys[0], query.0.value_to_base::<i64>(order)));
             Ok(())
         })?;
-        for function in roots {
+        let declarations = program
+            .source
+            .defs
+            .iter()
+            .filter_map(|definition| match &definition.meta {
+                DefMeta::EntryPoint(entry) => Some((definition.name, &entry.declaration.params)),
+                _ => None,
+            })
+            .collect::<LookupMap<_, _>>();
+        for (function, order) in roots {
             let root = query.required("FunctionRoot", function)?;
+            let Some(&declarations) = declarations.get(program.symbols.resolve(order)) else {
+                return Err(error("entry source metadata missing"));
+            };
             let mut host_values = Bindings::default();
             for (i, parameter) in query.sequence("RegionParameter", root)?.into_iter().enumerate() {
                 if let Some((name, ty)) = representation::runtime_binding(query, parameter)? {
-                    host_values.insert(name, ScalarExpr::Local(format!("parameter_{i}")));
+                    if !declarations.get(i).is_some_and(|param| param.device_produced) {
+                        host_values.insert(name, ScalarExpr::Local(format!("parameter_{i}")));
+                    }
                     if ty.is_array() {
                         self.host_shapes.insert(name);
                     }

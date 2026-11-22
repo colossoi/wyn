@@ -1693,6 +1693,7 @@ fn append_target_captures(
                     backing: None,
                     resource: Some(name),
                 }],
+                device_produced: false,
             });
             leaves.push((symbol, leaf_ty));
         }
@@ -1743,6 +1744,7 @@ fn append_external_param(
             layout: interface::StorageLayout::Std430,
             access: interface::StorageAccess::ReadOnly,
         }],
+        device_produced: true,
     });
 }
 
@@ -2874,6 +2876,7 @@ fn interface_param(
         span,
         ty,
         attributes: vec![attribute],
+        device_produced: false,
     }
 }
 

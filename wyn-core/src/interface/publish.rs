@@ -26,6 +26,7 @@ pub(crate) struct InputHost {
     pub backing: Option<BindingRef>,
     pub image_size: crate::host::StorageTextureSize,
     pub resource: Option<String>,
+    pub device_produced: bool,
 }
 
 #[derive(Debug, Clone, Default)]

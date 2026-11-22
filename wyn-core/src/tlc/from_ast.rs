@@ -222,6 +222,7 @@ impl<'a> Transformer<'a> {
             span: pattern.h.span,
             ty: Self::type_of(&pattern.h),
             attributes,
+            device_produced: false,
         }
     }
 

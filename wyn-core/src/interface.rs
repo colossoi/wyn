@@ -537,6 +537,8 @@ pub struct EntryParamDecl {
     pub span: Span,
     pub ty: Type,
     pub attributes: Vec<ResolvedAttribute>,
+    /// Storage supplied by an earlier extracted compute stage.
+    pub device_produced: bool,
 }
 
 /// Source interface metadata retained by TLC after the entry body has been
