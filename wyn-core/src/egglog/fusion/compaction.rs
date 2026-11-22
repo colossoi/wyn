@@ -1,12 +1,10 @@
 //! Compose compacted consumers and preserve the predicate around partial callbacks.
-use crate::egglog::dataflow::edit;
 use crate::egglog::dataflow::ir::{self, Code, Name, OperationId, Parameter, RegionId};
-use crate::egglog::payload::Payload;
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, OptimizeError};
-use crate::op::BinaryOperator;
-use crate::types;
-use egglog_engine::{EGraph, FullState, RawValues, Value, Write};
+use egglog_engine::{EGraph, RawValues, Value, Write};
+
+mod count;
 
 pub(super) fn run(graph: &mut EGraph) -> Result<bool, OptimizeError> {
     graph.parse_and_run_program(
@@ -21,16 +19,7 @@ pub(super) fn run(graph: &mut EGraph) -> Result<bool, OptimizeError> {
         consumer(graph, pair[0], pair[1], graph.value_to_base::<i64>(pair[2]))?;
         return Ok(true);
     }
-    if let Some(candidate) = Query(graph).first("CompactCountCandidate")? {
-        count(
-            graph,
-            candidate[0],
-            graph.value_to_base::<i64>(candidate[1]),
-            graph.value_to_base::<i64>(candidate[2]),
-        )?;
-        return Ok(true);
-    }
-    Ok(false)
+    count::run(graph)
 }
 
 fn consumer(graph: &mut EGraph, first: Value, second: Value, clause: i64) -> Result<(), OptimizeError> {
@@ -203,160 +192,4 @@ fn mask(
         })())
     })??;
     Ok(vec![(lane, vec![branch]), (otherwise, vec![])])
-}
-
-fn count(graph: &mut EGraph, operation: Value, clause: i64, output_slot: i64) -> Result<(), OptimizeError> {
-    let query = Query(graph);
-    let source = query.required("Output", (operation, output_slot))?;
-    let lane = query.required("ControlRegion", (operation, 0_i64))?;
-    let predicate = query.required("ResultPredicate", (operation, clause))?;
-    let mut lengths = Vec::new();
-    query.for_each("LengthOperation", |row| {
-        if query.0.value_to_base::<i64>(row[1]) == 0 && query.required("Input", (row[0], 0_i64))? == source
-        {
-            lengths.push((row[0], query.required("Output", (row[0], 0_i64))?));
-        }
-        Ok(())
-    })?;
-    let mut packed = None;
-    query.for_function("OutputRole", |keys, role| {
-        if keys[0] == operation && query.enode("CompactedOutput", role)?.is_some() {
-            let other = query.required("OutputClause", (operation, keys[1]))?;
-            if query.enode("Folded", query.required("ResultKindOf", (operation, other))?)?.is_some()
-                && query.lookup("ResultPredicate", (operation, other))? == Some(predicate)
-            {
-                packed = Some(query.required("Output", (operation, keys[1]))?);
-            }
-        }
-        Ok(())
-    })?;
-    if let Some(packed) = packed {
-        for &(length, _) in &lengths {
-            edit::inputs(graph, length, &[packed])?;
-        }
-        return Ok(());
-    }
-    lengths.sort_by_key(|&(operation, _)| operation);
-    let Some(&(_, output)) = lengths.first() else {
-        return Ok(());
-    };
-    edit::replace(
-        graph,
-        &lengths.iter().skip(1).map(|&(_, name)| (name, output)).collect::<Vec<_>>(),
-    )?;
-    let mut order = 0;
-    for operation in Query(graph).operations(lane)? {
-        order = order.max(analysis::count(Query(graph), "OperationOrder", operation)? + 1);
-    }
-    let (zero, one) = graph.update(|mut sink| {
-        Ok((|| -> Result<(Value, Value), OptimizeError> {
-            let context = sink.add("DerivedOperation", (operation, 92_i64, clause))?;
-            let element = sink.add("I32", RawValues(Vec::new()))?;
-            let element = sink.add("ScalarElement", element)?;
-            let info = sink.add("ScalarInfo", element)?;
-            let returns = sink.add("ReturnScalar", element)?;
-            let observe = sink.add("Observe", RawValues(Vec::new()))?;
-            let zero = constant(&mut sink, context, 0, 0, info)?;
-            let one = constant(&mut sink, context, 1, 1, info)?;
-            let flag = sink.add("DerivedValue", (context, 92_i64, 2_i64))?;
-            sink.set("ValueType", flag, info)?;
-            let id = sink.add("DerivedOperation", (context, 92_i64, 2_i64))?;
-            let choose = ir::operation_at(
-                &mut sink,
-                OperationId(id),
-                Code::Scalar(Payload::Select),
-                &[Name::Value(zero.1), Name::Value(one.1), Name::Value(predicate)],
-            )?;
-            sink.add("DiscardableOperation", id)?;
-            sink.add("RepeatableOperation", id)?;
-            ir::outputs(&mut sink, choose, &[Name::Value(flag)])?;
-            sink.set("OperationRegion", id, lane)?;
-            sink.set("OperationOrder", id, order)?;
-            let left = sink.add("DerivedValue", (context, 92_i64, 3_i64))?;
-            let right = sink.add("DerivedValue", (context, 92_i64, 4_i64))?;
-            let sum = sink.add("DerivedValue", (context, 92_i64, 5_i64))?;
-            sink.set("ValueType", sum, info)?;
-            let id = sink.add("DerivedOperation", (context, 92_i64, 3_i64))?;
-            let add = ir::operation_at(
-                &mut sink,
-                OperationId(id),
-                Code::Scalar(Payload::Binary(BinaryOperator::Add)),
-                &[Name::Value(left), Name::Value(right)],
-            )?;
-            sink.add("DiscardableOperation", id)?;
-            sink.add("RepeatableOperation", id)?;
-            ir::outputs(&mut sink, add, &[Name::Value(sum)])?;
-            let reducer = sink.add("DerivedRegion", (context, 92_i64, 0_i64))?;
-            sink.add("Region", reducer)?;
-            sink.add("FlowScope", reducer)?;
-            ir::parameters(
-                &mut sink,
-                RegionId(reducer),
-                &[
-                    Parameter {
-                        name: Name::Value(left),
-                        info,
-                        diet: observe,
-                    },
-                    Parameter {
-                        name: Name::Value(right),
-                        info,
-                        diet: observe,
-                    },
-                ],
-            )?;
-            ir::yields(&mut sink, RegionId(reducer), &[Name::Value(sum)])?;
-            sink.set("RegionReturnType", (reducer, 0_i64), returns)?;
-            sink.set("OperationRegion", id, reducer)?;
-            sink.set("OperationOrder", id, 0_i64)?;
-            let kind = sink.add("Total", RawValues(Vec::new()))?;
-            let kind = sink.add("Folded", kind)?;
-            sink.remove("ResultKindOf", (operation, clause))?;
-            sink.set("ResultKindOf", (operation, clause), kind)?;
-            sink.remove("ResultPredicate", (operation, clause))?;
-            sink.remove("ResultValue", (operation, clause, 0_i64))?;
-            let flag = Name::Value(flag).fact(&mut sink)?;
-            sink.set("ResultValue", (operation, clause, 0_i64), flag)?;
-            sink.set("ResultReducer", (operation, clause), reducer)?;
-            sink.set("ResultNeutralCount", (operation, clause), 1_i64)?;
-            let neutral = Name::Value(zero.1).fact(&mut sink)?;
-            sink.set("ResultNeutral", (operation, clause, 0_i64), neutral)?;
-            sink.set("ResultCommutative", (operation, clause), true)?;
-            sink.remove("Output", (operation, output_slot))?;
-            sink.set("Output", (operation, output_slot), output)?;
-            let role = sink.add("TotalOutput", RawValues(Vec::new()))?;
-            sink.remove("OutputRole", (operation, output_slot))?;
-            sink.set("OutputRole", (operation, output_slot), role)?;
-            Ok((zero.0, one.0))
-        })())
-    })??;
-    edit::move_before(graph, zero, operation)?;
-    edit::move_before(graph, one, operation)?;
-    edit::remove(
-        graph,
-        &lengths.into_iter().map(|(operation, _)| operation).collect::<Vec<_>>(),
-    )
-}
-
-fn constant(
-    sink: &mut FullState<'_, '_>,
-    owner: Value,
-    slot: i64,
-    bits: i64,
-    info: Value,
-) -> Result<(Value, Value), OptimizeError> {
-    let value = sink.add("DerivedValue", (owner, 92_i64, slot))?;
-    sink.set("ValueType", value, info)?;
-    let id = sink.add("DerivedOperation", (owner, 92_i64, slot))?;
-    let operation = ir::operation_at(
-        sink,
-        OperationId(id),
-        Code::Constant {
-            ty: types::i32(),
-            bits,
-        },
-        &[],
-    )?;
-    ir::outputs(sink, operation, &[Name::Value(value)])?;
-    Ok((id, value))
 }

@@ -251,6 +251,31 @@ fn compact_length_uses_a_count_without_a_collection() {
 }
 
 #[test]
+fn count_compaction_batches_independent_lengths_and_preserves_observed_arrays() -> Result<(), OptimizeError>
+{
+    let mut graph = test_graph::import(
+        "entry main(xs:[]i32,ys:[]i32) (i32,i32,[]i32,i32) =
+            let a=filter(|x|x>0,xs)
+            let b=filter(|y|y<0,ys)
+            let c=filter(|x|x<7,xs)
+            in (length(a),length(b),c,length(c))",
+    )?;
+    memory::simplify(&mut graph, false)?;
+    let revision = edit::revision(&graph)?;
+    assert!(super::compaction::run(&mut graph)?);
+    assert_eq!(edit::revision(&graph)?, revision + 1);
+    let query = Query(&graph);
+    let mut roles = (0, 0);
+    query.for_function("OutputRole", |_, role| {
+        roles.0 += usize::from(query.enode("TotalOutput", role)?.is_some());
+        roles.1 += usize::from(query.enode("CompactedOutput", role)?.is_some());
+        Ok(())
+    })?;
+    assert_eq!(roles, (2, 1));
+    memory::validate(&mut graph)
+}
+
+#[test]
 fn compact_consumers_preserve_an_unrelated_scan_and_guard_partial_callbacks() {
     for (source, reduction) in [
         ("entry main(xs:[]i32) ([]i32,[]i32)=(scan((+),0,xs),map(|x|x+1,filter(|x|x>0,xs)))", false),
