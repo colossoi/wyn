@@ -21,69 +21,30 @@ pub(super) fn new_graph() -> Result<EGraph, OptimizeError> {
 }
 
 pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
-    graph.parse_and_run_program(
-        Some("graph fusion".into()),
-        concat!(include_str!("graph.egg"), "\n", include_str!("parallel.egg")),
-    )?;
+    graph.parse_and_run_program(Some("graph fusion".into()), include_str!("parallel.egg"))?;
     Ok(())
-}
-
-fn clear(graph: &mut EGraph) -> Result<(), OptimizeError> {
-    for table in [
-        "FusionOutputBase",
-        "SinkProducer",
-        "PlacementReadOnly",
-        "PlacementMember",
-        "PlacementValue",
-        "PlacementInput",
-        "PlacementPath",
-        "PlacementDemand",
-        "PlacementHasDemand",
-        "PlacementDead",
-        "PlacementSite",
-        "PlacementGuarded",
-        "PlacementAvailable",
-        "PlacementUnsafe",
-        "BranchPair",
-        "BranchUnsafe",
-        "BranchFuseSelected",
-        "BranchOperationBase",
-    ] {
-        graph.clear_function(table)?;
-    }
-    analysis::advance(graph)
 }
 
 pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
     let _timing = super::timing::span("egglog graph fusion");
     memory::simplify(graph, false)?;
     loop {
-        clear(graph)?;
         analysis::ensure(graph)?;
         crate::egglog::planning::analyze(graph)?;
         if parallel::run(graph)? {
             let _handoff = super::timing::span("parallel fusion handoff");
             memory::simplify(graph, false)?;
-            clear(graph)?;
             analysis::ensure(graph)?;
             crate::egglog::planning::analyze(graph)?;
         }
-        if !parallel::accumulators(graph, false)? {
-            graph.parse_and_run_program(None, "(run-schedule (saturate placement-index) (saturate placement-demand dataflow-scopes) (saturate placement-legality graph-work) (saturate placement-select) (saturate graph-fusion))")?;
-            let branch = Query(graph).first("BranchPair")?;
-            if !fuse_ranked_bucket(graph)? {
-                if let Some(pair) = branch {
-                    graph.update(|mut sink| sink.add("BranchFuseSelected", (pair[0], pair[1])))?;
-                    graph.parse_and_run_program(None, "(run-schedule (run graph-fusion-apply))")?;
-                    edit::remove(graph, &[pair[1]])?;
-                } else if !compaction::run(graph)?
-                    && !parallel::accumulators(graph, true)?
-                    && !sink_producer(graph)?
-                    && !parallel::move_siblings(graph)?
-                {
-                    return Ok(());
-                }
-            }
+        if !parallel::accumulators(graph, false)?
+            && !fuse_ranked_bucket(graph)?
+            && !parallel::branches(graph)?
+            && !compaction::run(graph)?
+            && !parallel::accumulators(graph, true)?
+            && !parallel::move_siblings(graph)?
+        {
+            return Ok(());
         }
         memory::simplify(graph, false)?;
     }
@@ -301,52 +262,6 @@ fn fuse_ranked_bucket(graph: &mut EGraph) -> Result<bool, OptimizeError> {
     })??;
     let removed = levels.iter().flat_map(|level| [level.index, level.operation]).collect::<Vec<_>>();
     edit::remove(graph, &removed)?;
-    Ok(true)
-}
-
-fn sink_producer(graph: &mut EGraph) -> Result<bool, OptimizeError> {
-    let query = Query(graph);
-    let mut dead = Vec::new();
-    query.for_each("PlacementDead", |row| {
-        dead.push(row[0]);
-        Ok(())
-    })?;
-    if !dead.is_empty() {
-        edit::remove(graph, &dead)?;
-        return Ok(true);
-    }
-    let Some(site) = query.first("SinkProducer")? else {
-        return Ok(false);
-    };
-    let (producer, scope, body) = (site[0], site[1], site[2]);
-    let first = query.operations(body)?.first().copied();
-    let mut moved = Vec::new();
-    let parent = query.required("OperationRegion", producer)?;
-    for operation in query.operations(parent)? {
-        if query
-            .lookup("PlacementMember", (producer, operation))?
-            .is_some_and(|v| graph.value_to_base::<bool>(v))
-        {
-            moved.push((operation, query.required("OperationOrder", operation)?));
-        }
-    }
-    let edge = i64::from(query.required("ControlRegion", (scope, 1_i64))? == body);
-    for &(operation, _) in &moved {
-        edit::move_into(graph, operation, body, first)?;
-    }
-    let cloned = edit::clone_region(graph, scope, body, &[])?;
-    graph.update(|mut sink| {
-        sink.remove("ControlRegion", (scope, edge))?;
-        sink.set("ControlRegion", (scope, edge), cloned)?;
-        for (operation, order) in moved {
-            sink.remove("OperationRegion", operation)?;
-            sink.set("OperationRegion", operation, parent)?;
-            sink.remove("OperationOrder", operation)?;
-            sink.set("OperationOrder", operation, order)?;
-        }
-        Ok(())
-    })?;
-    edit::changed(graph)?;
     Ok(true)
 }
 

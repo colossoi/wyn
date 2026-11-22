@@ -12,6 +12,7 @@ use std::mem::take;
 use wyn_graph::ReplacementForest;
 
 mod accumulator;
+mod branch;
 mod guard;
 use guard::Guard;
 
@@ -132,6 +133,8 @@ pub(super) struct Body {
     changed_clauses: LookupSet<ClauseId>,
     packed_outputs: LookupSet<(OperationId, i64)>,
     accumulator_origins: SecondaryMap<OperationId, Vec<OperationId>>,
+    joined_yields: SecondaryMap<RegionId, Vec<RegionId>>,
+    joined_branches: SortedSet<OperationId>,
 }
 
 impl Body {
@@ -172,6 +175,8 @@ impl Body {
             changed_clauses: LookupSet::new(),
             packed_outputs: LookupSet::new(),
             accumulator_origins: SecondaryMap::new(),
+            joined_yields: SecondaryMap::new(),
+            joined_branches: SortedSet::new(),
         };
         for (region, block) in &body.graph.ir.regions {
             for (index, &op) in block.operations.iter().enumerate() {
@@ -308,12 +313,16 @@ impl Body {
     }
 
     pub fn lane(&self, operation: OperationId) -> Result<RegionId, OptimizeError> {
+        self.control_region(operation, 0)
+    }
+
+    pub fn control_region(&self, operation: OperationId, slot: usize) -> Result<RegionId, OptimizeError> {
         let Some(edge) = self.graph.ir.operations[operation]
             .bodies
             .iter()
-            .find(|edge| edge.role == BodyRole::Control(0))
+            .find(|edge| edge.role == BodyRole::Control(slot))
         else {
-            return Err(output_error("parallel operation has no lane body"));
+            return Err(output_error("operation has no requested control region"));
         };
         Ok(edge.region)
     }
@@ -785,6 +794,7 @@ impl Body {
 
     pub fn publish(self, graph: &mut EGraph) -> Result<(), OptimizeError> {
         let _timing = timing::span("Rust parallel fusion publication");
+        self.publish_joins(graph)?;
         self.publish_accumulators(graph)?;
         // Motion and accumulator-only batches do not rewrite parallel clauses.
         if self.edited.is_empty() {

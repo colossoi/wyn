@@ -1,7 +1,7 @@
 use super::{Body, Effects, Site};
 use crate::egglog::{analysis::count, output_error, query::Query, OptimizeError};
-use crate::memory_ir::{BodyRole, OperationId, RegionId, UseSite, ValueRef};
-use crate::{LookupMap, LookupSet};
+use crate::memory_ir::{BodyRole, OperationId, RegionId, ValueRef};
+use crate::LookupSet;
 use egglog_engine::{EGraph, RawValues, Write};
 use std::mem::take;
 
@@ -22,21 +22,7 @@ impl Body {
             );
         }
         self.graph.ir.regions[destination].parameters.extend(parameters);
-        let yields = take(&mut self.graph.ir.regions[source].yields);
-        let start = self.graph.ir.regions[destination].yields.len();
-        for (slot, value) in yields.iter().enumerate() {
-            self.forget(Site::Operand(UseSite::Yield(source, slot)));
-            self.uses.add(
-                Site::Operand(UseSite::Yield(destination, start + slot)),
-                self.graph.names[value],
-            );
-        }
-        self.graph.ir.regions[destination].yields.extend(yields);
-        let region_uses = self.uses.at(Site::Region(source)).map(|(_, name)| name).collect::<Vec<_>>();
-        for name in region_uses {
-            self.uses.add(Site::Region(destination), name);
-        }
-        self.forget(Site::Region(source));
+        self.append_yields(destination, source)?;
         let combiners = self.graph.ir.operations[second]
             .bodies
             .iter()
@@ -104,8 +90,6 @@ impl Body {
         let query = Query(graph);
         let index = |slot: usize| graph.base_to_value(slot as i64);
         let mut rows = Vec::new();
-        let mut certificates = Vec::new();
-        let mut destinations = LookupMap::new();
         for (op, origins) in &self.accumulator_origins {
             let key = self.graph.operations[op];
             let region = self.lane(op)?;
@@ -114,8 +98,6 @@ impl Body {
             let mut base = 0;
             for &origin in origins {
                 let origin = self.graph.operations[origin];
-                let incoming = query.required("ControlRegion", (origin, 0_i64))?;
-                destinations.insert(incoming, (wire_region, base));
                 let size = count(query, "AccumulatorGroupCount", origin)?;
                 for slot in 0..size {
                     let group = index(base + slot as usize);
@@ -139,9 +121,6 @@ impl Body {
                     {
                         rows.push(("AccumulatorArray", vec![key, group, index(field)], array));
                     }
-                    if let Some(ty) = query.lookup("RegionReturnType", (incoming, slot))? {
-                        rows.push(("RegionReturnType", vec![wire_region, group], ty));
-                    }
                 }
                 base += size as usize;
             }
@@ -154,53 +133,19 @@ impl Body {
                     self.graph.names[&ValueRef::Parameter(region, slot)],
                 ));
             }
-            for (slot, value) in body.yields.iter().enumerate() {
-                rows.push((
-                    "RegionYield",
-                    vec![wire_region, index(slot)],
-                    self.graph.names[value],
-                ));
-            }
-            let outputs = self.graph.ir.operations[op].result_types.len();
-            for slot in 0..outputs {
-                rows.push((
-                    "Output",
-                    vec![key, index(slot)],
-                    self.graph.names[&ValueRef::Result(op, slot)],
-                ));
-            }
             rows.extend([
                 ("AccumulatorGroupCount", vec![key], index(base)),
-                ("OutputCount", vec![key], index(outputs)),
                 (
                     "RegionParameterCount",
                     vec![wire_region],
                     index(body.parameters.len()),
                 ),
-                ("RegionYieldCount", vec![wire_region], index(body.yields.len())),
             ]);
-            for (_, name) in self.uses.at(Site::Certificate(op)) {
-                certificates.push((key, query.name(name)?));
-            }
         }
-        let mut yields = Vec::new();
-        query.for_each("YieldCertificate", |row| {
-            if let Some(&(destination, base)) = destinations.get(&row[0]) {
-                let slot = graph.value_to_base::<i64>(row[1]) + base as i64;
-                yields.push((destination, slot, row[2]));
-            }
-            Ok(())
-        })?;
         graph.update(|mut sink| {
             for (table, keys, value) in rows {
                 sink.remove(table, RawValues(keys.clone()))?;
                 sink.set(table, RawValues(keys), value)?;
-            }
-            for certificate in certificates {
-                sink.add("OperationCertificate", certificate)?;
-            }
-            for certificate in yields {
-                sink.add("YieldCertificate", certificate)?;
             }
             Ok(())
         })?;

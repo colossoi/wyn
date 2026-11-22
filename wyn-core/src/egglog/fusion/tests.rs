@@ -6,64 +6,56 @@ use crate::egglog::dataflow::{
 use crate::egglog::payload::Payload;
 use crate::egglog::{analysis, from_tlc, fuse, memory, query::Query, test_graph, OptimizeError};
 use crate::op::BinaryOperator;
-use egglog_engine::RawValues;
+use egglog_engine::{RawValues, Write};
 
 #[test]
-fn placement_uses_complete_demand_and_effect_proofs() {
-    let facts = r#"
-        (LiveOperation (OperationId 1)) (LiveOperation (OperationId 2))
-        (LiveOperation (OperationId 3)) (LiveOperation (OperationId 4))
-        (LiveRegion (RegionId 0)) (LiveRegion (RegionId 20)) (LiveRegion (RegionId 21))
-        (set (ControlRegion (OperationId 1) 0) (RegionId 10))
-        (set (ControlRegion (OperationId 2) 0) (RegionId 20))
-        (set (ControlRegion (OperationId 2) 1) (RegionId 21))
-        (set (OperationRegion (OperationId 1)) (RegionId 0))
-        (set (OperationOrder (OperationId 1)) 0)
-        (set (OperationRegion (OperationId 2)) (RegionId 0))
-        (set (OperationOrder (OperationId 2)) 2)
-        (set (OperationRegion (OperationId 3)) (RegionId 21))
-        (set (OperationOrder (OperationId 3)) 0)
-        (set (OperationRegion (OperationId 4)) (RegionId 0))
-        (set (OperationOrder (OperationId 4)) 1)
-        (set (Output (OperationId 1) 0) (ValueNameRef (ValueId 1)))
-        (DirectOperationUse (OperationId 3) (ValueNameRef (ValueId 1)))
-        (set (PureOperation (OperationId 3)) true)
-        (NextOperation (OperationId 1) (OperationId 4))
-        (NextOperation (OperationId 4) (OperationId 2))
-        (FlowScopeAncestor (RegionId 20) (RegionId 20))
-        (FlowScopeAncestor (RegionId 21) (RegionId 21))
-    "#;
-    let template = test_graph::fixture(
-        &[
-            (1, Code::CountedLoop),
-            (2, Code::Branch),
-            (3, Code::Use),
-            (4, Code::Use),
-        ],
-        facts,
-    )
-    .unwrap();
-    for (extra, sinks) in [
-        ("", true),
-        ("(set (OperationWork (OperationId 1)) (bigint 4))", false),
-        ("(set (OperationWork (OperationId 1)) (bigint 5))", true),
-        ("(OperationUse (OperationId 2) (ValueNameRef (ValueId 1)))", true),
-        ("(DirectOperationUse (OperationId 99) (ValueNameRef (ValueId 1))) (set (OperationRegion (OperationId 99)) (RegionId 99))", true),
-        ("(OperationWrite (OperationId 1) (ExternalMemory))", false),
-        ("(OperationWrite (OperationId 4) (ExternalMemory))", false),
-        ("(ConsumedToken (OperationId 1) (AccumulatorId 1))", false),
-        ("(InvocationDependent (OperationId 1))", false),
-        ("(EndDemand (RegionId 0) (ValueNameRef (ValueId 1)))", false),
-        ("(EndDemand (RegionId 20) (ValueNameRef (ValueId 1)))", false),
-        ("(DirectOperationUse (OperationId 2) (ValueNameRef (ValueId 1)))", false),
-        ("(OperationUse (OperationId 1) (ValueNameRef (ValueId 9)))", false),
-        ("(OperationUse (OperationId 1) (ValueNameRef (ValueId 9))) (AvailableAt (OperationId 2) (ValueNameRef (ValueId 9)))", true),
-    ] {
-        let mut graph = template.clone();
-        graph.parse_and_run_program(None, extra).unwrap();
-        graph.parse_and_run_program(None, "(run-schedule (saturate placement-index) (saturate placement-demand dataflow-scopes) (saturate placement-legality) (saturate placement-select))").unwrap();
-        assert_eq!(Query(&graph).first("SinkProducer").unwrap().is_some(), sinks, "{extra}");
+fn branch_sinking_moves_single_arm_producers_and_copies_for_distinct_guards() -> Result<(), OptimizeError> {
+    let mut graph = test_graph::import(
+        "entry one(b:bool,x:i32,n:i32) i32 =
+            let p=loop s=x for i<n do s*2+i in if b then p+1 else x
+         entry both(b:bool,x:i32,n:i32) i32 =
+            let p=loop s=x for i<n do s*2+i in if b then p+1 else p-1
+         entry separate(b:bool,c:bool,x:i32,n:i32) (i32,i32) =
+            let p=loop s=x for i<n do s*2+i
+            let y=if b then p+1 else x
+            let z=if c then p-1 else x
+            in (y,z)",
+    )?;
+    memory::simplify(&mut graph, false)?;
+    let query = Query(&graph);
+    let mut loops = Vec::new();
+    query.for_each("CountedLoopOperation", |row| {
+        if query.contains("LiveOperation", row[0])? {
+            loops.push((row[0], query.required("OperationRegion", row[0])?));
+        }
+        Ok(())
+    })?;
+    assert_eq!(loops.len(), 3);
+    let analyzed = query.required("DataflowRevision", RawValues(vec![]))?;
+    assert!(super::parallel::branches(&mut graph)?);
+    let query = Query(&graph);
+    assert_eq!(query.required("DataflowRevision", RawValues(vec![]))?, analyzed);
+    let mut moved = 0;
+    let mut replaced = 0;
+    for (op, parent) in loops {
+        let Some(region) = query.lookup("OperationRegion", op)? else {
+            replaced += 1;
+            continue;
+        };
+        if region != parent {
+            assert!(query.row("ControlRegion", |row| row[2] == region)?.is_some());
+            moved += 1;
+        }
     }
+    assert_eq!(moved, 1);
+    assert_eq!(replaced, 1);
+    let mut copies = 0;
+    query.for_each("CountedLoopOperation", |row| {
+        copies += usize::from(query.enode("ClonedOperation", row[0])?.is_some());
+        Ok(())
+    })?;
+    assert_eq!(copies, 2);
+    memory::validate(&mut graph)
 }
 
 #[test]
@@ -148,66 +140,55 @@ fn moving_into_empty_regions_preserves_operation_order() {
 }
 
 #[test]
-fn merging_matching_branches_preserves_certificates_and_path_order() {
-    let mut graph = test_graph::fixture(
-        &[
-            (1, Code::Branch),
-            (2, Code::Branch),
-            (3, Code::Use),
-            (4, Code::Use),
-            (5, Code::Use),
-            (6, Code::Use),
-        ],
-        r#"
-        (set (ControlRegion (OperationId 1) 0) (RegionId 10))
-        (set (ControlRegion (OperationId 1) 1) (RegionId 11))
-        (set (ControlRegion (OperationId 2) 0) (RegionId 20))
-        (set (ControlRegion (OperationId 2) 1) (RegionId 21))
-        (set (OutputCount (OperationId 1)) 1) (set (OutputCount (OperationId 2)) 1)
-        (set (Output (OperationId 1) 0) (ValueNameRef (ValueId 1)))
-        (set (Output (OperationId 2) 0) (ValueNameRef (ValueId 2)))
-        (set (RegionYieldCount (RegionId 10)) 1) (set (RegionYieldCount (RegionId 11)) 1)
-        (set (RegionYieldCount (RegionId 20)) 1) (set (RegionYieldCount (RegionId 21)) 1)
-        (set (RegionYield (RegionId 10) 0) (ValueNameRef (ValueId 3)))
-        (set (RegionYield (RegionId 11) 0) (ValueNameRef (ValueId 4)))
-        (set (RegionYield (RegionId 20) 0) (ValueNameRef (ValueId 5)))
-        (set (RegionYield (RegionId 21) 0) (ValueNameRef (ValueId 6)))
-        (set (RegionReturnType (RegionId 20) 0) (ReturnScalar (ScalarElement (I32))))
-        (set (RegionReturnType (RegionId 21) 0) (ReturnScalar (ScalarElement (I32))))
-        (set (OperationRegion (OperationId 3)) (RegionId 10)) (set (OperationOrder (OperationId 3)) 4)
-        (set (OperationRegion (OperationId 4)) (RegionId 11)) (set (OperationOrder (OperationId 4)) 9)
-        (set (OperationRegion (OperationId 5)) (RegionId 20)) (set (OperationOrder (OperationId 5)) 0)
-        (set (OperationRegion (OperationId 6)) (RegionId 21)) (set (OperationOrder (OperationId 6)) 0)
-        (YieldCertificate (RegionId 20) 0 (ValueId 8))
-        (YieldCertificate (RegionId 21) 0 (ValueId 9))
-        (OperationCertificate (OperationId 2) (ValueId 7))
-        (BranchPair (OperationId 1) (OperationId 2))
-        (set (FusionOutputBase (OperationId 1) (OperationId 2)) 1)
-    "#,
-    )
-    .unwrap();
-    graph
-        .parse_and_run_program(
-            None,
-            r#"
-        (run-schedule (saturate graph-fusion))
-        (BranchFuseSelected (OperationId 1) (OperationId 2))
-        (run-schedule (run graph-fusion-apply))
-        (check (= (OutputCount (OperationId 1)) 2))
-        (check (= (Output (OperationId 1) 1) (ValueNameRef (ValueId 2))))
-        (check (= (RegionYieldCount (RegionId 10)) 2) (= (RegionYieldCount (RegionId 11)) 2))
-        (check (= (RegionYield (RegionId 10) 1) (ValueNameRef (ValueId 5))))
-        (check (= (RegionYield (RegionId 11) 1) (ValueNameRef (ValueId 6))))
-        (check (= (RegionReturnType (RegionId 10) 1) (ReturnScalar (ScalarElement (I32)))))
-        (check (= (RegionReturnType (RegionId 11) 1) (ReturnScalar (ScalarElement (I32)))))
-        (check (YieldCertificate (RegionId 10) 1 (ValueId 8)))
-        (check (YieldCertificate (RegionId 11) 1 (ValueId 9)))
-        (check (OperationCertificate (OperationId 1) (ValueId 7)))
-        (check (= (OperationRegion (OperationId 5)) (RegionId 10)) (= (OperationOrder (OperationId 5)) 5))
-        (check (= (OperationRegion (OperationId 6)) (RegionId 11)) (= (OperationOrder (OperationId 6)) 10))
-    "#,
-        )
-        .unwrap();
+fn merging_matching_branches_preserves_certificates_and_path_order() -> Result<(), OptimizeError> {
+    let mut graph = test_graph::import(
+        "entry main(b:bool,x:i32) (i32,i32,i32) =
+            let a=if b then x+x else x*x
+            let c=if b then x*x*x else x-x*x
+            let d=if b then x-a*a else x+a
+            in (a,c,d)",
+    )?;
+    memory::simplify(&mut graph, false)?;
+    let root = test_graph::root(&graph);
+    let query = Query(&graph);
+    let mut branches = Vec::new();
+    for op in query.operations(root)? {
+        if query.contains("BranchOperation", op)? {
+            branches.push(op);
+        }
+    }
+    let [first, second, dependent] = branches[..] else {
+        panic!("three authored branches")
+    };
+    let condition = query.name(query.required("Input", (first, 0_i64))?)?;
+    let mut arms = Vec::new();
+    for edge in [0_i64, 1] {
+        let a = query.required("ControlRegion", (first, edge))?;
+        let b = query.required("ControlRegion", (second, edge))?;
+        let offset = analysis::count(query, "RegionYieldCount", a)?;
+        let operations = [query.operations(a)?, query.operations(b)?].concat();
+        arms.push((a, b, offset, operations));
+    }
+    graph.update(|mut sink| {
+        sink.add("OperationCertificate", (second, condition))?;
+        for &(_, arm, _, _) in &arms {
+            sink.add("YieldCertificate", (arm, 0_i64, condition))?;
+        }
+        Ok(())
+    })?;
+    let revision = edit::revision(&graph)?;
+    assert!(super::parallel::branches(&mut graph)?);
+    assert_eq!(edit::revision(&graph)?, revision + 1);
+    let query = Query(&graph);
+    assert_eq!(analysis::count(query, "OutputCount", first)?, 2);
+    assert!(query.contains("OperationCertificate", (first, condition))?);
+    assert!(!query.contains("Operation", second)?);
+    assert!(query.contains("Operation", dependent)?);
+    for (arm, _, slot, operations) in arms {
+        assert_eq!(query.operations(arm)?, operations);
+        assert!(query.contains("YieldCertificate", (arm, slot, condition))?);
+    }
+    memory::validate(&mut graph)
 }
 
 #[test]

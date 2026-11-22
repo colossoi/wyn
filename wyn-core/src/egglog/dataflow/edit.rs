@@ -372,10 +372,22 @@ pub(in crate::egglog) fn clone_region(
     region: Value,
     arguments: &[Value],
 ) -> Result<Value, OptimizeError> {
+    clone_region_with_prefix(graph, context, region, arguments, &[])
+}
+
+/// Copy the arm and its selected preparations using one local name mapping.
+pub(in crate::egglog) fn clone_region_with_prefix(
+    graph: &mut EGraph,
+    context: Value,
+    region: Value,
+    arguments: &[Value],
+    prefix: &[Value],
+) -> Result<Value, OptimizeError> {
     for table in [
         "CloneRequest",
         "CloneMember",
         "CloneOperation",
+        "CloneDestination",
         "CloneLocal",
         "CloneNameDemand",
         "CloneSubstitute",
@@ -410,6 +422,12 @@ pub(in crate::egglog) fn clone_region(
         sink.add("CloneRequest", (context, region))?;
         for (parameter, &argument) in parameters.into_iter().zip(arguments) {
             sink.set("CloneSubstitute", (context, parameter), argument)?;
+        }
+        for &operation in prefix {
+            let cloned = sink.add("ClonedOperation", (context, operation))?;
+            sink.add("Operation", cloned)?;
+            sink.add("CloneOperation", (context, operation))?;
+            sink.set("CloneDestination", (context, operation), region)?;
         }
         Ok(())
     })?;

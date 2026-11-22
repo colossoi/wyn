@@ -11,12 +11,15 @@ use std::collections::VecDeque;
 
 mod accumulator;
 mod body;
+mod branch;
 mod compact;
 mod hoist;
 mod motion;
+mod placement;
 
 pub(super) use accumulator::run as accumulators;
 use body::{Body, Effects, Site};
+pub(super) use branch::run as branches;
 pub(super) use compact::compact;
 pub(super) use hoist::hoist;
 use motion::Motion;
@@ -137,6 +140,15 @@ fn splice_first(
         }
     }
     Ok(false)
+}
+
+fn fuse_region(graph: &mut EGraph, body: &mut Body, region: RegionId) -> Result<(), OptimizeError> {
+    loop {
+        let candidates = current_pairs(body, region);
+        if !splice_first(graph, body, candidates)? {
+            return Ok(());
+        }
+    }
 }
 
 pub(super) fn run(graph: &mut EGraph) -> Result<bool, OptimizeError> {

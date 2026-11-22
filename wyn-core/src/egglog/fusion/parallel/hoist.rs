@@ -112,7 +112,7 @@ pub(in crate::egglog::fusion) fn hoist(graph: &mut EGraph) -> Result<bool, Optim
     Ok(changed)
 }
 
-fn cheap(graph: &mut EGraph, operation: Value) -> Result<bool, OptimizeError> {
+pub(super) fn cheap(graph: &mut EGraph, operation: Value) -> Result<bool, OptimizeError> {
     let query = Query(graph);
     if let Some(work) = query.lookup("InstructionWork", operation)? {
         return Ok(graph.value_to_base::<i64>(work) <= 4);

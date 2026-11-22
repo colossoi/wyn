@@ -1,8 +1,6 @@
 //! Stream pointwise consumers over packed outputs on the current region graph.
 use super::body::{ClauseId, ClauseKind};
-use super::{
-    barriers, current_pairs, domains, effects_conflict, splice_first, Body, Code, Effects, Query, Site,
-};
+use super::{barriers, domains, effects_conflict, fuse_region, Body, Code, Effects, Query, Site};
 use crate::egglog::{output_error, timing, OptimizeError};
 use crate::memory_ir::{OperationId, RegionId, UseSite, ValueRef};
 use crate::{LookupMap, LookupSet};
@@ -119,12 +117,7 @@ pub(in crate::egglog::fusion) fn compact(graph: &mut EGraph) -> Result<bool, Opt
                 body.splice(Query(graph), first, second, &loads)?;
                 // Removing a consumer can unblock ordinary same-domain producers.
                 // Fuse them before a second guard turns their callbacks into barriers.
-                loop {
-                    let candidates = current_pairs(&body, region);
-                    if !splice_first(graph, &mut body, candidates)? {
-                        break;
-                    }
-                }
+                fuse_region(graph, &mut body, region)?;
                 changed = true;
                 break;
             }
