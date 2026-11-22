@@ -6,7 +6,7 @@ use crate::egglog::query::Query;
 use crate::egglog::{output_error, timing, OptimizeError};
 use crate::memory_ir::{BodyRole, Definition, OperationId, RegionId, UseSite, ValueRef};
 use crate::{LookupMap, LookupSet, SortedSet};
-use egglog_engine::{EGraph, RawValues, Value, Write};
+use egglog_engine::{EGraph, FullState, RawValues, Value, Write};
 use slotmap::SecondaryMap;
 use std::mem::take;
 use wyn_graph::ReplacementForest;
@@ -101,6 +101,7 @@ pub(super) struct Body {
     operand_changes: LookupMap<UseSite, Value>,
     edited: SortedSet<OperationId>,
     moved: SortedSet<RegionId>,
+    relocated: LookupSet<OperationId>,
     removed: SortedSet<OperationId>,
     pruned: LookupSet<ClauseId>,
     dirty: SortedSet<RegionId>,
@@ -136,6 +137,7 @@ impl Body {
             operand_changes: LookupMap::new(),
             edited: SortedSet::default(),
             moved: SortedSet::default(),
+            relocated: LookupSet::new(),
             removed: SortedSet::default(),
             pruned: LookupSet::new(),
             dirty: SortedSet::default(),
@@ -298,6 +300,47 @@ impl Body {
         self.graph.ir.operations[op].bodies.iter().map(|edge| edge.region).collect()
     }
 
+    pub fn parent(&self, region: RegionId) -> Option<OperationId> {
+        self.parents.get(region).copied()
+    }
+
+    pub fn users(&self, name: Value) -> impl Iterator<Item = Site> + '_ {
+        self.uses.sites.get(&name).into_iter().flatten().copied()
+    }
+
+    pub fn captures_available_before(&self, operation: OperationId, before: OperationId) -> bool {
+        let children = self.subregions(operation);
+        self.tree_uses(operation).into_iter().all(|(_, name)| {
+            let Some(&value) = self.graph.refs.get(&name) else {
+                return false;
+            };
+            let (definition, order) = match value {
+                ValueRef::Parameter(region, _) => (region, None),
+                ValueRef::Result(producer, _) => {
+                    if producer == operation {
+                        return true;
+                    }
+                    let (region, order) = self.positions[producer];
+                    (region, Some(order))
+                }
+            };
+            if children.iter().any(|&region| self.inside(definition, region)) {
+                return true;
+            }
+            let mut before = before;
+            loop {
+                let (scope, position) = self.positions[before];
+                if scope == definition {
+                    return order.is_none_or(|order| order < position);
+                }
+                let Some(owner) = self.parent(scope) else {
+                    return false;
+                };
+                before = owner;
+            }
+        })
+    }
+
     pub fn has_parallel_in(&self, region: RegionId) -> bool {
         let mut pending = vec![region];
         while let Some(region) = pending.pop() {
@@ -390,6 +433,37 @@ impl Body {
         }
         self.moved.insert(region);
         self.dirty(region);
+    }
+
+    pub fn lift(&mut self, operation: OperationId, owner: OperationId) {
+        let (source, index) = self.positions[operation];
+        let (destination, before) = self.positions[owner];
+        self.graph.ir.regions[source].operations.remove(index);
+        self.graph.ir.regions[destination].operations.insert(before, operation);
+        self.relocated.insert(operation);
+        for (region, start) in [(source, index), (destination, before)] {
+            for (index, &op) in self.graph.ir.regions[region].operations.iter().enumerate().skip(start) {
+                self.positions[op] = (region, index);
+            }
+            self.moved.insert(region);
+            self.dirty(region);
+        }
+        // These owners derive their reads entirely from their children. Their
+        // enclosing region still observes the same reads after the hoist.
+        if matches!(
+            self.graph.ir.operations[owner].definition,
+            Definition::Other(Code::Parallel | Code::Branch | Code::CountedLoop | Code::WhileLoop)
+        ) && self.effects.get(operation).is_some_and(|effect| !effect.reads.is_empty())
+        {
+            let reads = self
+                .subregions(owner)
+                .iter()
+                .flat_map(|&region| &self.graph.ir.regions[region].operations)
+                .filter_map(|&op| self.effects.get(op))
+                .flat_map(|effect| effect.reads.iter().copied())
+                .collect();
+            self.effects[owner].reads = reads;
+        }
     }
 
     fn forget(&mut self, site: Site) {
@@ -567,6 +641,7 @@ impl Body {
         let moved = take(&mut self.graph.ir.regions[source].operations);
         for (index, &op) in moved.iter().enumerate() {
             self.positions[op] = (destination, start + index);
+            self.relocated.insert(op);
         }
         self.graph.ir.regions[destination].operations.extend(moved);
         self.moved.insert(destination);
@@ -596,16 +671,7 @@ impl Body {
         let _timing = timing::span("Rust parallel fusion publication");
         // Pure motion changes neither result clauses nor operands.
         if self.edited.is_empty() && self.removed.is_empty() {
-            graph.update(|mut sink| {
-                for region in self.moved {
-                    for (order, &op) in self.graph.ir.regions[region].operations.iter().enumerate() {
-                        let op = self.graph.operations[op];
-                        sink.remove("OperationOrder", op)?;
-                        sink.set("OperationOrder", op, order as i64)?;
-                    }
-                }
-                Ok(())
-            })?;
+            graph.update(|mut sink| self.publish_order(&mut sink))?;
             return edit::changed(graph);
         }
         let query = Query(graph);
@@ -688,18 +754,7 @@ impl Body {
                     sink.set(table, op, count)?;
                 }
             }
-            for region in self.moved {
-                let Some(body) = self.graph.ir.regions.get(region) else {
-                    continue;
-                };
-                for (order, &op) in body.operations.iter().enumerate() {
-                    let op = self.graph.operations[op];
-                    sink.remove("OperationRegion", op)?;
-                    sink.remove("OperationOrder", op)?;
-                    sink.set("OperationRegion", op, self.graph.regions[region])?;
-                    sink.set("OperationOrder", op, order as i64)?;
-                }
-            }
+            self.publish_order(&mut sink)?;
             for certificate in certificates {
                 sink.add("OperationCertificate", certificate)?;
             }
@@ -716,5 +771,23 @@ impl Body {
             graph,
             &self.removed.into_iter().map(|op| self.graph.operations[op]).collect::<Vec<_>>(),
         )
+    }
+
+    fn publish_order(&self, sink: &mut FullState<'_, '_>) -> Result<(), egglog_engine::Error> {
+        for &region in &self.moved {
+            let Some(body) = self.graph.ir.regions.get(region) else {
+                continue;
+            };
+            for (order, &op) in body.operations.iter().enumerate() {
+                let key = self.graph.operations[op];
+                if self.relocated.contains(&op) {
+                    sink.remove("OperationRegion", key)?;
+                    sink.set("OperationRegion", key, self.graph.regions[region])?;
+                }
+                sink.remove("OperationOrder", key)?;
+                sink.set("OperationOrder", key, order as i64)?;
+            }
+        }
+        Ok(())
     }
 }

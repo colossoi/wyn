@@ -66,38 +66,58 @@ fn placement_uses_complete_demand_and_effect_proofs() {
 }
 
 #[test]
-fn motion_preserves_array_storage_inside_repeated_regions() {
-    let graph = &mut test_graph::fixture(
-        &[],
-        r#"
-        (set (ControlRegion (OperationId 0) 0) (RegionId 0))
-        (set (ControlRole (OperationId 0) 0) (LaneRegion))
-        (set (OperationRegion (OperationId 1)) (RegionId 0))
-        (set (OperationRegion (OperationId 2)) (RegionId 0))
-        (set (Output (OperationId 1) 0) (ValueNameRef (ValueId 1)))
-        (set (Output (OperationId 2) 0) (ValueNameRef (ValueId 2)))
-        (set (RegionYield (RegionId 0) 0) (ValueNameRef (ValueId 1)))
-        (ArrayValue (ValueId 1))
-        (ArrayValue (ValueId 2))
-        (set (Input (OperationId 3) 0) (ValueNameRef (ValueId 2)))
-        (set (Output (OperationId 3) 0) (ValueNameRef (ValueId 3)))
-        (set (ValueType (ValueId 3)) (ScalarInfo (ScalarElement (I32))))
-        (IndexOperation (OperationId 3))
-        (MotionCandidate (OperationId 1) (OperationId 0))
-        (MotionCandidate (OperationId 2) (OperationId 0))
-        "#,
-    )
-    .unwrap();
-    graph
-        .parse_and_run_program(
-            None,
-            r#"
-        (run-schedule (saturate dataflow-dependencies graph-fusion) (saturate dataflow-effects))
-        (check (OperationsConflict (OperationId 1) (OperationId 0)))
-        (fail (check (OperationsConflict (OperationId 2) (OperationId 0))))
-        "#,
-        )
-        .unwrap();
+fn motion_preserves_array_storage_inside_repeated_regions() -> Result<(), OptimizeError> {
+    for (program, lifted) in [
+        ("entry main(n:i32) [2]i32=map(|i|[n,n+1][i],iota(2))", true),
+        ("entry main(n:i32) [2][2]i32=map(|i|[n,n+1],iota(2))", false),
+    ] {
+        let mut graph = test_graph::import(program)?;
+        memory::simplify(&mut graph, false)?;
+        let root = test_graph::root(&graph);
+        let query = Query(&graph);
+        let literal = query.first("ArrayLiteralOperation")?.unwrap()[0];
+        assert_ne!(query.required("OperationRegion", literal)?, root);
+        super::parallel::hoist(&mut graph)?;
+        assert_eq!(
+            Query(&graph).required("OperationRegion", literal)? == root,
+            lifted
+        );
+        memory::validate(&mut graph)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn cross_region_motion_moves_a_capture_chain_in_one_edit() -> Result<(), OptimizeError> {
+    let mut graph = test_graph::import(
+        "entry main(xs:[8]i32,n:i32,b:bool) [8]i32=map(|x|
+            if b then let k=n*n let j=k+n in x+j else x,xs)",
+    )?;
+    memory::simplify(&mut graph, false)?;
+    let root = test_graph::root(&graph);
+    let query = Query(&graph);
+    let mut multiply = None;
+    query.for_each("LiveOperation", |row| {
+        if ir::code(query.0, query.required("OperationPayload", row[0])?)
+            == Code::Scalar(Payload::Binary(BinaryOperator::Multiply))
+        {
+            multiply = Some(row[0]);
+        }
+        Ok(())
+    })?;
+    let multiply = multiply.unwrap();
+    assert_ne!(query.required("OperationRegion", multiply)?, root);
+    let revision = edit::revision(&graph)?;
+    assert!(super::parallel::hoist(&mut graph)?);
+    assert_eq!(edit::revision(&graph)?, revision + 1);
+    let query = Query(&graph);
+    assert_eq!(query.required("OperationRegion", multiply)?, root);
+    assert!(query.operations(root)?.into_iter().any(|op| {
+        query.lookup("Input", (op, 0_i64)).unwrap() == query.lookup("Output", (multiply, 0_i64)).unwrap()
+            && ir::code(query.0, query.required("OperationPayload", op).unwrap())
+                == Code::Scalar(Payload::Binary(BinaryOperator::Add))
+    }));
+    memory::validate(&mut graph)
 }
 
 #[test]

@@ -1,5 +1,5 @@
 //! Move siblings on the live graph without publishing each move.
-use super::body::Body;
+use super::body::{Body, Effects};
 use super::{effects_conflict, Query};
 use crate::egglog::OptimizeError;
 use crate::memory_ir::{RegionId, ValueRef};
@@ -119,14 +119,15 @@ impl Motion {
             }) {
                 continue;
             }
-            let effect = body.effects.get(moving).cloned().unwrap_or_default();
+            let no_effects = Effects::default();
+            let effect = body.effects.get(moving).unwrap_or(&no_effects);
             if effect.traps {
                 continue;
             }
             let mut conflict = false;
             for &crossed in &operations[before..index] {
-                let prior = body.effects.get(crossed).cloned().unwrap_or_default();
-                if effects_conflict(graph, prior, effect.clone())? {
+                let prior = body.effects.get(crossed).unwrap_or(&no_effects);
+                if effects_conflict(graph, prior, effect)? {
                     conflict = true;
                     break;
                 }

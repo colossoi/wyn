@@ -6,7 +6,6 @@ use super::dataflow::{
 use super::query::Query;
 use super::{analysis, memory, OptimizeError};
 use crate::LookupSet;
-use egglog_engine::sort::Z;
 use egglog_engine::{EGraph, Value, Write};
 
 mod compaction;
@@ -33,9 +32,6 @@ fn clear(graph: &mut EGraph) -> Result<(), OptimizeError> {
     for table in [
         "FusionOutputBase",
         "FusionOperationBase",
-        "MotionCandidate",
-        "RepeatedArrayMotion",
-        "ArrayMotionReadOnly",
         "SinkProducer",
         "PlacementReadOnly",
         "PlacementMember",
@@ -395,58 +391,10 @@ fn fuse_accumulators(graph: &mut EGraph, first: Value, second: Value) -> Result<
 }
 
 pub(super) fn hoist(graph: &mut EGraph) -> Result<bool, OptimizeError> {
-    clear(graph)?;
-    graph.parse_and_run_program(
-        None,
-        "(run-schedule (saturate graph-fusion motion-work graph-work) (saturate dataflow-scopes dataflow-effects))",
-    )?;
-    let query = Query(graph);
-    let mut selected = Vec::new();
-    let mut operations = LookupSet::default();
-    query.for_each("MotionCandidate", |row| {
-        let crosses_scope =
-            query.required("OperationRegion", row[0])? != query.required("OperationRegion", row[1])?;
-        if operations.contains(&row[0])
-            || !crosses_scope
-            // Accumulator scopes execute once; hoisting only undoes producer sinking.
-            || (crosses_scope && query.contains("AccumulatorOperation", row[1])?)
-            || query.contains("InvocationDependent", row[0])?
-            || query.contains("OperationTrap", row[0])?
-            || query.contains("OperationsConflict", (row[0], row[1]))?
-        {
-            return Ok(());
-        }
-        if query.contains("BranchOperation", row[1])? {
-            let Some(work) = query.lookup("OperationWork", row[0])? else {
-                return Ok(());
-            };
-            if u64::try_from(&*query.0.value_to_base::<Z>(work)).map_or(true, |work| work > 4) {
-                return Ok(());
-            }
-        }
-        let mut available = true;
-        query.for_each("OperationUse", |use_| {
-            if use_[0] == row[0] {
-                available &= query.contains("AvailableAt", (row[1], use_[1]))?;
-            }
-            Ok(())
-        })?;
-        if available {
-            operations.insert(row[0]);
-            selected.push((row[0], row[1]));
-        }
-        Ok(())
-    })?;
-    // Keep every destination fixed until the next analysis round.
-    selected.retain(|&(_, owner)| !operations.contains(&owner));
-    if selected.is_empty() {
-        return parallel::move_siblings(graph);
+    if parallel::hoist(graph)? {
+        return Ok(true);
     }
-    let _timing = super::timing::span("egglog fusion motion edits");
-    for (operation, owner) in selected {
-        edit::move_before(graph, operation, owner)?;
-    }
-    Ok(true)
+    parallel::move_siblings(graph)
 }
 
 #[cfg(test)]

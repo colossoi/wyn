@@ -10,9 +10,11 @@ use egglog_engine::{EGraph, RawValues, Value, Write};
 use std::collections::VecDeque;
 
 mod body;
+mod hoist;
 mod motion;
 
 use body::{Body, Effects, Site};
+pub(super) use hoist::hoist;
 use motion::Motion;
 
 #[derive(Clone)]
@@ -281,8 +283,9 @@ fn legal(
     {
         return Ok(None);
     }
-    let a = body.effects.get(first).cloned().unwrap_or_default();
-    let b = body.effects.get(second).cloned().unwrap_or_default();
+    let no_effects = Effects::default();
+    let a = body.effects.get(first).unwrap_or(&no_effects);
+    let b = body.effects.get(second).unwrap_or(&no_effects);
     if body.unknown_aliases && (!a.writes.is_empty() || !b.writes.is_empty()) {
         return Ok(None);
     }
@@ -297,7 +300,7 @@ fn legal(
     Ok((!effects_conflict(graph, a, b)?).then_some(loads))
 }
 
-fn effects_conflict(graph: &mut EGraph, a: Effects, b: Effects) -> Result<bool, OptimizeError> {
+fn effects_conflict(graph: &mut EGraph, a: &Effects, b: &Effects) -> Result<bool, OptimizeError> {
     if a.writes.is_empty() && b.writes.is_empty() && !(a.traps && b.traps) {
         return Ok(false);
     }
@@ -311,10 +314,10 @@ fn effects_conflict(graph: &mut EGraph, a: Effects, b: Effects) -> Result<bool, 
     }
     graph.update(|mut sink| {
         for (side, summary) in [(0_i64, a), (1, b)] {
-            for root in summary.reads {
+            for &root in &summary.reads {
                 sink.add("ParallelRead", (side, root))?;
             }
-            for root in summary.writes {
+            for &root in &summary.writes {
                 sink.add("ParallelWrite", (side, root))?;
             }
             if summary.traps {
