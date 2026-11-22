@@ -1,12 +1,11 @@
-//! Join matching guards and move producers dominated by a single arm.
+//! Join matching guards and execute each sunk producer at most once.
 use super::hoist::cheap;
 use super::placement::{child_on_path, demands, movable_group, pinned_operations, read_only};
 use super::{barriers, domains, fuse_region, Body, Code, Query};
-use crate::egglog::dataflow::edit;
-use crate::egglog::{output_error, timing, OptimizeError};
-use crate::memory_ir::{OperationId, RegionId, ValueRef};
-use crate::{LookupMap, LookupSet, SortedSet, StableMap};
-use egglog_engine::{EGraph, Value, Write};
+use crate::egglog::{timing, OptimizeError};
+use crate::memory_ir::{Definition, OperationId, RegionId, ValueRef};
+use crate::{LookupSet, SortedSet, StableMap};
+use egglog_engine::EGraph;
 
 pub(in crate::egglog::fusion) fn run(graph: &mut EGraph) -> Result<bool, OptimizeError> {
     let _timing = timing::span("Rust branch fusion and sinking");
@@ -49,13 +48,13 @@ pub(in crate::egglog::fusion) fn run(graph: &mut EGraph) -> Result<bool, Optimiz
     let mut body = Body::read(query, domains(query)?, barriers(query)?)?;
     body.pinned.extend(pinned.iter().filter_map(|key| body.graph.operation_ids.get(key).copied()));
     let mut pending: SortedSet<_> = regions.into_iter().map(|region| body.regions[&region]).collect();
-    let mut visited = SortedSet::new();
     let mut changed = false;
     while let Some(region) = pending.pop_first() {
-        visited.insert(region);
         let affected = if let Some((first, second)) = adjacent(&body, region) {
             body.join_branches(first, second)?.to_vec()
         } else if let Some(destination) = sink_one(graph, &mut body, region)? {
+            vec![destination]
+        } else if let Some(destination) = sink_shared_loop(graph, &mut body, region)? {
             vec![destination]
         } else {
             continue;
@@ -67,15 +66,10 @@ pub(in crate::egglog::fusion) fn run(graph: &mut EGraph) -> Result<bool, Optimiz
         }
         pending.extend(body.take_dirty());
     }
-    let copies = plan_copies(graph, &body, visited)?;
     if changed {
         body.publish(graph)?;
     }
-    if copies.is_empty() {
-        return Ok(changed);
-    }
-    publish_copies(graph, copies)?;
-    Ok(true)
+    Ok(changed)
 }
 
 fn adjacent(body: &Body, region: RegionId) -> Option<(OperationId, OperationId)> {
@@ -135,143 +129,78 @@ fn sink_one(
     Ok(Some(destination))
 }
 
-struct ArmCopy {
-    scope: Value,
-    arm: Value,
-    members: Vec<Value>,
-    operations: Vec<Value>,
-    depth: usize,
-}
-
-fn plan_copies(
+fn sink_shared_loop(
     graph: &mut EGraph,
-    body: &Body,
-    regions: SortedSet<RegionId>,
-) -> Result<Vec<ArmCopy>, OptimizeError> {
-    let mut arms = StableMap::<RegionId, Vec<OperationId>>::new();
-    for region in regions {
-        for &producer in &body.graph.ir.regions[region].operations {
-            if body.graph.ir.operations[producer].bodies.is_empty() || !read_only(body, producer) {
-                continue;
-            }
-            let (members, uses) = demands(Query(graph), body, producer)?;
-            let Some(targets) = uses
-                .iter()
-                .map(|&use_| child_on_path(body, use_, region))
-                .collect::<Option<SortedSet<_>>>()
-            else {
-                continue;
-            };
-            if targets.len() < 2 {
-                continue;
-            }
-            let mut guards = LookupSet::new();
-            if !targets.iter().all(|&(scope, arm)| {
-                body.is_code(scope, &Code::Branch)
-                    && body.graph.ir.regions[arm].parameters.is_empty()
-                    && guards.insert(body.graph.ir.operations[scope].inputs[0])
-            }) {
-                continue;
-            }
-            let Some(moves) = targets
-                .into_iter()
-                .map(|(scope, arm)| {
-                    movable_group(body, producer, scope, &members).map(|members| (arm, members))
-                })
-                .collect::<Option<Vec<_>>>()
-            else {
-                continue;
-            };
-            if cheap(graph, body.graph.operations[producer])? {
-                continue;
-            }
-            for (arm, members) in moves {
-                arms.entry(arm).or_default().extend(members);
-            }
+    body: &mut Body,
+    region: RegionId,
+) -> Result<Option<RegionId>, OptimizeError> {
+    let mut selected = None;
+    for &producer in &body.graph.ir.regions[region].operations {
+        let query = Query(graph);
+        let op = &body.graph.ir.operations[producer];
+        if !matches!(
+            op.definition,
+            Definition::Other(Code::CountedLoop | Code::WhileLoop)
+        ) || !read_only(body, producer)
+        {
+            continue;
         }
-    }
-    let mut copies = Vec::new();
-    for (arm, mut members) in arms {
-        let Some(scope) = body.parent(arm) else {
-            return Err(output_error("copy destination has no branch owner"));
+        let [ty] = op.result_types[..] else { continue };
+        let [edge] = &op.bodies[..] else { continue };
+        let [fallback] = edge.arguments[..] else { continue };
+        if query.enode("ScalarInfo", ty)?.is_none() {
+            continue;
+        }
+        let (members, uses) = demands(query, body, producer)?;
+        if members.len() != 1 {
+            continue;
+        }
+        let Some(targets) =
+            uses.iter().map(|&use_| child_on_path(body, use_, region)).collect::<Option<SortedSet<_>>>()
+        else {
+            continue;
         };
-        members.sort_unstable_by_key(|&op| body.positions[op].1);
-        members.dedup();
-        let mut depth = 0;
-        let mut region = arm;
-        while let Some(owner) = body.parent(region) {
-            depth += 1;
-            region = body.positions[owner].0;
+        if targets.len() < 2 {
+            continue;
         }
-        copies.push(ArmCopy {
-            scope: body.graph.operations[scope],
-            arm: body.graph.regions[arm],
-            members: members.into_iter().map(|op| body.graph.operations[op]).collect(),
-            operations: body.graph.ir.regions[arm]
-                .operations
-                .iter()
-                .map(|&op| body.graph.operations[op])
-                .collect(),
-            depth,
-        });
-    }
-    // Finish inner rewrites before a containing arm is copied.
-    copies.sort_by_key(|copy| std::cmp::Reverse(copy.depth));
-    Ok(copies)
-}
-
-fn publish_copies(graph: &mut EGraph, copies: Vec<ArmCopy>) -> Result<(), OptimizeError> {
-    let _timing = timing::span("branch producer copy publication");
-    let mut remaining = LookupMap::<_, usize>::new();
-    for copy in &copies {
-        for &member in &copy.members {
-            *remaining.entry(member).or_default() += 1;
-        }
-    }
-    for copy in copies {
-        let query = Query(graph);
-        let mut operations = Vec::new();
-        for op in copy.operations {
-            if query.lookup("OperationRegion", op)? == Some(copy.arm) {
-                operations.push(op);
+        let Some(before) =
+            targets.iter().map(|&(scope, _)| scope).min_by_key(|&scope| body.positions[scope].1)
+        else {
+            continue;
+        };
+        let mut conditions = StableMap::new();
+        let mut legal = true;
+        for (scope, arm) in targets {
+            if !body.is_code(scope, &Code::Branch) {
+                legal = false;
+                break;
+            }
+            let condition = body.graph.ir.operations[scope].inputs[0];
+            let taken = body.control_region(scope, 0)? == arm;
+            if !body.available_before(condition, before)
+                || conditions.insert(condition, taken).is_some_and(|previous| previous != taken)
+            {
+                legal = false;
+                break;
             }
         }
-        let edge = i64::from(query.required("ControlRegion", (copy.scope, 1_i64))? == copy.arm);
-        let cloned = edit::clone_region_with_prefix(graph, copy.scope, copy.arm, &[], &copy.members)?;
-        let query = Query(graph);
-        let cloned_operations = copy
-            .members
-            .iter()
-            .copied()
-            .chain(operations)
-            .map(|operation| {
-                let Some(key) = query.constructor("ClonedOperation", (copy.scope, operation))? else {
-                    return Err(output_error("branch producer copy lost a scheduled operation"));
-                };
-                Ok(key)
-            })
-            .collect::<Result<Vec<_>, OptimizeError>>()?;
-        let retired = copy
-            .members
-            .into_iter()
-            .filter(|op| {
-                let count = remaining.entry(*op).or_default();
-                *count -= 1;
-                *count == 0
-            })
-            .collect::<Vec<_>>();
-        graph.update(|mut sink| {
-            for (order, operation) in cloned_operations.into_iter().enumerate() {
-                sink.remove("OperationOrder", operation)?;
-                sink.set("OperationOrder", operation, order as i64)?;
-            }
-            sink.remove("ControlRegion", (copy.scope, edge))?;
-            sink.set("ControlRegion", (copy.scope, edge), cloned)?;
-            for op in retired {
-                sink.remove("OperationRegion", op)?;
-            }
-            Ok(())
-        })?;
+        if legal
+            && movable_group(body, producer, before, &members).is_some()
+            && !cheap(graph, body.graph.operations[producer])?
+        {
+            selected = Some((producer, before, conditions, fallback));
+            break;
+        }
     }
-    edit::remove(graph, &remaining.into_keys().collect::<Vec<_>>())
+    let Some((producer, before, conditions, fallback)) = selected else {
+        return Ok(None);
+    };
+    body.guard_shared_loop(
+        graph,
+        producer,
+        before,
+        conditions.into_iter().collect(),
+        fallback,
+    )
+    .map(Some)
 }

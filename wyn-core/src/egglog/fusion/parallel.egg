@@ -1,10 +1,3 @@
-(ruleset parallel-index-equality)
-(relation ParallelCancellation (Name Name Name Name Name))
-(relation ParallelIndexEqual (Name Name))
-; Rust supplies the current operands of a typed (a + b) - c.
-(rule ((ParallelCancellation result axis axis delta delta))
-      ((ParallelIndexEqual result axis)) :ruleset parallel-index-equality)
-
 (ruleset parallel-effects)
 (relation ParallelRead (i64 Resource))
 (relation ParallelWrite (i64 Resource))

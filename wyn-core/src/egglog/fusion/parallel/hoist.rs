@@ -1,10 +1,10 @@
 //! Lift total invariant operations through their current region owners.
 use super::{domains, effects_conflict, Body, Code, Effects, Query, Site};
 use crate::egglog::{timing, OptimizeError};
-use crate::memory_ir::{Definition, OperationId, UseSite, ValueRef};
+use crate::memory_ir::{BodyRole, Definition, OperationId, UseSite, ValueRef};
 use crate::{LookupMap, LookupSet, SortedSet};
 use egglog_engine::sort::Z;
-use egglog_engine::{EGraph, RawValues, Value, Write};
+use egglog_engine::{EGraph, Value, Write};
 use std::collections::VecDeque;
 
 pub(in crate::egglog::fusion) fn hoist(graph: &mut EGraph) -> Result<bool, OptimizeError> {
@@ -49,18 +49,6 @@ pub(in crate::egglog::fusion) fn hoist(graph: &mut EGraph) -> Result<bool, Optim
         return Ok(false);
     }
 
-    let mut repeated = LookupSet::new();
-    let roles = ["LoopRegion", "LaneRegion"]
-        .into_iter()
-        .map(|role| query.constructor(role, RawValues(vec![])))
-        .collect::<Result<Vec<_>, _>>()?;
-    query.for_function("ControlRole", |key, role| {
-        if roles.contains(&Some(role)) {
-            repeated.insert(query.required("ControlRegion", (key[0], key[1]))?);
-        }
-        Ok(())
-    })?;
-
     let mut body = Body::read(query, domains(query)?, LookupSet::new())?;
     let mut queued: LookupSet<_> = initial.values().map(|region| body.regions[region]).collect();
     let ordered: SortedSet<_> = queued.iter().copied().collect();
@@ -77,7 +65,17 @@ pub(in crate::egglog::fusion) fn hoist(graph: &mut EGraph) -> Result<bool, Optim
             continue;
         }
         let branch = Query(graph).contains("BranchOperation", target)?;
-        let repeated = repeated.contains(&body.graph.regions[region]);
+        let operation = &body.graph.ir.operations[owner];
+        let repeated =
+            operation.bodies.iter().filter(|edge| edge.region == region).any(|edge| match edge.role {
+                BodyRole::Reducer(_) | BodyRole::Combiner(_) => true,
+                BodyRole::Control(_) => matches!(
+                    operation.definition,
+                    Definition::Other(
+                        Code::Parallel | Code::CountedLoop | Code::WhileLoop | Code::BucketScatter { .. }
+                    )
+                ),
+            });
         let mut index = 0;
         while let Some(&op) = body.graph.ir.regions[region].operations.get(index) {
             let key = body.graph.operations[op];

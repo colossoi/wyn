@@ -1,15 +1,79 @@
 use crate::compile_thru_tlc;
 use crate::egglog::dataflow::{
     edit,
-    ir::{self, Code},
+    ir::{self, Code, Name, OperationId},
 };
 use crate::egglog::payload::Payload;
 use crate::egglog::{analysis, from_tlc, fuse, memory, query::Query, test_graph, OptimizeError};
 use crate::op::BinaryOperator;
-use egglog_engine::{RawValues, Write};
+use egglog_engine::{EGraph, RawValues, Value, Write};
+
+fn change_lane_index(
+    graph: &mut EGraph,
+    traversal: Value,
+    delta: Option<Value>,
+    commute: bool,
+) -> Result<(), OptimizeError> {
+    let query = Query(graph);
+    let lane = query.required("ControlRegion", (traversal, 0_i64))?;
+    let operations = query.operations(lane)?;
+    let position = operations.iter().position(|&op| query.contains("IndexOperation", op).unwrap()).unwrap();
+    let load = operations[position];
+    let index = query.required("Input", (load, 1_i64))?;
+    let info = query.required("ValueType", query.name(index)?)?;
+    let index = Name::Value(query.name(index)?);
+    let delta = delta.map(|name| query.name(name)).transpose()?.map(Name::Value);
+    graph.update(|mut sink| {
+        Ok((|| -> Result<_, OptimizeError> {
+            let mut inserted = Vec::new();
+            let mut insert = |code, inputs: &[Name]| -> Result<Name, OptimizeError> {
+                let slot = inserted.len() as i64;
+                let key = sink.add("DerivedOperation", (load, 99_i64, slot))?;
+                let result = sink.add("DerivedValue", (load, 99_i64, slot))?;
+                let operation = ir::operation_at(&mut sink, OperationId(key), code, inputs)?;
+                sink.set("ValueType", result, info)?;
+                let output = Name::Value(result);
+                ir::outputs(&mut sink, operation, &[output])?;
+                inserted.push(key);
+                Ok(output)
+            };
+            let add = Code::Scalar(Payload::Binary(BinaryOperator::Add));
+            let new_index = if let Some(delta) = delta {
+                let operands = if commute { [delta, index] } else { [index, delta] };
+                let sum = insert(add, &operands)?;
+                insert(
+                    Code::Scalar(Payload::Binary(BinaryOperator::Subtract)),
+                    &[sum, delta],
+                )?
+            } else {
+                let one = insert(
+                    Code::Constant {
+                        ty: crate::types::i32(),
+                        bits: 1,
+                    },
+                    &[],
+                )?;
+                insert(add, &[index, one])?
+            };
+            for (slot, key) in inserted.iter().enumerate() {
+                sink.set("OperationRegion", *key, lane)?;
+                sink.set("OperationOrder", *key, (position + slot) as i64)?;
+            }
+            for (slot, key) in operations[position..].iter().enumerate() {
+                sink.remove("OperationOrder", *key)?;
+                sink.set("OperationOrder", *key, (position + inserted.len() + slot) as i64)?;
+            }
+            sink.remove("Input", (load, 1_i64))?;
+            let new_index = new_index.fact(&mut sink)?;
+            sink.set("Input", (load, 1_i64), new_index)?;
+            Ok(())
+        })())
+    })??;
+    edit::changed(graph)
+}
 
 #[test]
-fn branch_sinking_moves_single_arm_producers_and_copies_for_distinct_guards() -> Result<(), OptimizeError> {
+fn branch_sinking_moves_single_arm_producers_and_shares_overlapping_demands() -> Result<(), OptimizeError> {
     let mut graph = test_graph::import(
         "entry one(b:bool,x:i32,n:i32) i32 =
             let p=loop s=x for i<n do s*2+i in if b then p+1 else x
@@ -36,44 +100,59 @@ fn branch_sinking_moves_single_arm_producers_and_copies_for_distinct_guards() ->
     let query = Query(&graph);
     assert_eq!(query.required("DataflowRevision", RawValues(vec![]))?, analyzed);
     let mut moved = 0;
-    let mut replaced = 0;
     for (op, parent) in loops {
-        let Some(region) = query.lookup("OperationRegion", op)? else {
-            replaced += 1;
-            continue;
-        };
+        let region = query.required("OperationRegion", op)?;
         if region != parent {
             assert!(query.row("ControlRegion", |row| row[2] == region)?.is_some());
             moved += 1;
         }
     }
-    assert_eq!(moved, 1);
-    assert_eq!(replaced, 1);
+    assert_eq!(moved, 2);
     let mut copies = 0;
     query.for_each("CountedLoopOperation", |row| {
         copies += usize::from(query.enode("ClonedOperation", row[0])?.is_some());
         Ok(())
     })?;
-    assert_eq!(copies, 2);
+    assert_eq!(copies, 0);
     memory::validate(&mut graph)
 }
 
 #[test]
 fn motion_preserves_array_storage_inside_repeated_regions() -> Result<(), OptimizeError> {
-    for (program, lifted) in [
-        ("entry main(n:i32) [2]i32=map(|i|[n,n+1][i],iota(2))", true),
-        ("entry main(n:i32) [2][2]i32=map(|i|[n,n+1],iota(2))", false),
+    for (program, allocation_kind, lifted) in [
+        (
+            "entry main(n:i32) [2]i32=map(|i|[n,n+1][i],iota(2))",
+            "ArrayLiteralOperation",
+            true,
+        ),
+        (
+            "entry main(n:i32) [2][2]i32=map(|i|[n,n+1],iota(2))",
+            "ArrayLiteralOperation",
+            false,
+        ),
+        (
+            "entry main(xs:[]i32) i32=reduce(|a,b|
+            let first=scratch(2) with [0]=a
+            let both=first with [1]=b in both[0]+both[1],0i32,xs)",
+            "ScratchAllocation",
+            false,
+        ),
     ] {
         let mut graph = test_graph::import(program)?;
         memory::simplify(&mut graph, false)?;
         let root = test_graph::root(&graph);
         let query = Query(&graph);
-        let literal = query.first("ArrayLiteralOperation")?.unwrap()[0];
-        assert_ne!(query.required("OperationRegion", literal)?, root);
+        let allocation = query.first(allocation_kind)?.unwrap()[0];
+        let owner = query.required("OperationRegion", allocation)?;
+        assert_ne!(owner, root);
+        if allocation_kind == "ScratchAllocation" {
+            assert!(query.row("ResultReducer", |row| row[2] == owner)?.is_some());
+        }
         super::parallel::hoist(&mut graph)?;
         assert_eq!(
-            Query(&graph).required("OperationRegion", literal)? == root,
-            lifted
+            Query(&graph).required("OperationRegion", allocation)?,
+            if lifted { root } else { owner },
+            "{allocation_kind} in {program}"
         );
         memory::validate(&mut graph)?;
     }
@@ -259,28 +338,53 @@ fn count_compaction_batches_independent_lengths_and_preserves_observed_arrays() 
 
 #[test]
 fn guarded_compaction_streams_a_map_into_a_reduce_in_one_batch() -> Result<(), OptimizeError> {
-    let mut graph = test_graph::import(
-        "entry main(xs:[]i32,zero:i32) ([]i32,i32) =
+    let source = ["commuted", "ordered", "shifted"]
+        .map(|entry| {
+            format!(
+                "entry {entry}(xs:[]i32,zero:i32,d:i32) ([]i32,i32) =
             let kept=filter(|x|x>0,xs)
             let mapped=map(|x|x+1,kept)
-            in (mapped,reduce((+),zero,mapped))",
-    )?;
+            in (mapped,reduce((+),zero,mapped))"
+            )
+        })
+        .join("\n");
+    let mut graph = test_graph::import(&source)?;
     memory::simplify(&mut graph, false)?;
-    let root = test_graph::root(&graph);
-    let parallels = |query: Query<'_>| -> Result<usize, OptimizeError> {
-        let mut count = 0;
+    let parallels = |query: Query<'_>, root| -> Result<Vec<Value>, OptimizeError> {
+        let mut traversals = Vec::new();
         for op in query.operations(root)? {
-            count += usize::from(query.contains("ParallelOperation", op)?);
+            if query.contains("ParallelOperation", op)? {
+                traversals.push(op);
+            }
         }
-        Ok(count)
+        Ok(traversals)
     };
     let query = Query(&graph);
-    assert_eq!(parallels(query)?, 3);
+    let mut roots = Vec::new();
+    query.for_function("EntryOrder", |keys, order| {
+        roots.push((
+            query.0.value_to_base::<i64>(order),
+            query.required("FunctionRoot", keys[0])?,
+        ));
+        Ok(())
+    })?;
+    roots.sort();
+    for (index, &(_, root)) in roots.iter().enumerate() {
+        let query = Query(&graph);
+        let traversals = parallels(query, root)?;
+        assert_eq!(traversals.len(), 3);
+        let delta = if index < 2 { Some(query.required("RegionParameter", (root, 2_i64))?) } else { None };
+        change_lane_index(&mut graph, traversals[1], delta, index == 0)?;
+    }
+    memory::simplify(&mut graph, false)?;
+    let query = Query(&graph);
     let analyzed = query.required("DataflowRevision", RawValues(vec![]))?;
     assert!(super::parallel::compact(&mut graph)?);
     let query = Query(&graph);
     assert_eq!(query.required("DataflowRevision", RawValues(vec![]))?, analyzed);
-    assert_eq!(parallels(query)?, 1);
+    for ((_, root), expected) in roots.into_iter().zip([1, 1, 3]) {
+        assert_eq!(parallels(query, root)?.len(), expected);
+    }
     assert!(query.first("BranchOperation")?.is_some());
     memory::validate(&mut graph)
 }
@@ -362,11 +466,14 @@ fn scan_barriers_survive_intermediate_map_contraction() {
 #[test]
 fn one_fusion_publication_contracts_independent_bodies_and_pointwise_chains() -> Result<(), OptimizeError> {
     let mut graph = test_graph::import(
-        "entry chain(xs:[8]i32) ([8]i32,[8]i32,[8]i32) =
+        "entry chain(xs:[8]i32,d:i32) ([8]i32,[8]i32,[8]i32) =
             let a = map(|x| x+1,xs)
             let b = map(|x| x*2,a)
             in (a,b,map(|x| x-3,b))
-         entry pair(xs:[8]i32) ([8]i32,[8]i32) =
+         entry pair(xs:[8]i32,d:i32) ([8]i32,[8]i32) =
+            let a = map(|x| x-1,xs)
+            in (a,map(|x| x*3,a))
+         entry shifted(xs:[8]i32) ([8]i32,[8]i32) =
             let a = map(|x| x-1,xs)
             in (a,map(|x| x*3,a))
          entry capture(xs:[8]i32, n:i32) ([8]i32,[8]i32,[8]i32) =
@@ -387,13 +494,30 @@ fn one_fusion_publication_contracts_independent_bodies_and_pointwise_chains() ->
     memory::simplify(&mut graph, false)?;
     let query = Query(&graph);
     let mut roots = Vec::new();
-    query.for_function("EntryOrder", |keys, _| {
-        roots.push(query.required("FunctionRoot", keys[0])?);
+    query.for_function("EntryOrder", |keys, order| {
+        roots.push((
+            query.0.value_to_base::<i64>(order),
+            query.required("FunctionRoot", keys[0])?,
+        ));
         Ok(())
     })?;
+    roots.sort();
+    for (_, root) in roots.iter().take(3).copied() {
+        let query = Query(&graph);
+        let consumer = query
+            .operations(root)?
+            .into_iter()
+            .filter(|&op| query.contains("ParallelOperation", op).unwrap())
+            .nth(1)
+            .unwrap();
+        let delta = query.lookup("RegionParameter", (root, 1_i64))?;
+        let commute = root == roots[0].1;
+        change_lane_index(&mut graph, consumer, delta, commute)?;
+    }
+    memory::simplify(&mut graph, false)?;
     assert!(super::parallel::run(&mut graph)?);
     let mut counts = Vec::new();
-    for region in roots {
+    for (_, region) in roots {
         let query = Query(&graph);
         let mut outputs = Vec::new();
         for op in query.operations(region)? {
@@ -405,7 +529,10 @@ fn one_fusion_publication_contracts_independent_bodies_and_pointwise_chains() ->
         counts.push(outputs);
     }
     counts.sort_unstable();
-    assert_eq!(counts, [vec![1], vec![1, 1], vec![1, 2], vec![2], vec![3]]);
+    assert_eq!(
+        counts,
+        [vec![1], vec![1, 1], vec![1, 1], vec![1, 2], vec![2], vec![3]]
+    );
     memory::validate(&mut graph)
 }
 

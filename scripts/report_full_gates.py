@@ -158,7 +158,18 @@ def render_run(directory, base):
             logs = [(row, directory / row.get("log", f"{row['name']}.log")) for row in rows]
             detail = ""
             if logs and stream == "integrations":
-                detail = integration_detail(text(logs[-1][1]))
+                log = text(logs[-1][1])
+                detail = integration_detail(log)
+                completed = re.search(
+                    r"^\d+ integration cases completed in (\d+\.\d+)s \(build excluded\)$",
+                    log,
+                    re.MULTILINE,
+                )
+                if completed:
+                    detail = f"{detail} Build excluded. Gate total including build {seconds}.".strip()
+                    seconds = duration(float(completed[1]))
+                else:
+                    detail = f"{detail} Gate time includes build.".strip()
             elif logs and stream in ("spirv", "wgsl"):
                 counts = re.search(r"^Results: (.+)$", text(logs[-1][1]), re.MULTILINE)
                 if counts:

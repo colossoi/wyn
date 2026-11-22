@@ -5,7 +5,7 @@ use super::super::query::Query;
 use super::super::{timing, OptimizeError};
 use crate::memory_ir::{OperationId, RegionId, UseSite, ValueRef};
 use crate::op::BinaryOperator;
-use crate::{LookupMap, LookupSet, StableMap};
+use crate::{LookupMap, LookupSet};
 use egglog_engine::{EGraph, RawValues, Value, Write};
 use std::collections::VecDeque;
 
@@ -29,18 +29,7 @@ struct Domain {
     execution: Value,
     extents: Vec<(Value, Option<Value>)>,
     axes: Vec<Value>,
-}
-
-impl Domain {
-    fn compatible(&self, other: &Self) -> bool {
-        self.execution == other.execution
-            && self.extents.len() == other.extents.len()
-            && self
-                .extents
-                .iter()
-                .zip(&other.extents)
-                .all(|((a, n), (b, m))| a == b || (n.is_some() && n == m))
-    }
+    group: usize,
 }
 
 fn domains(query: Query<'_>) -> Result<LookupMap<Value, Domain>, OptimizeError> {
@@ -50,6 +39,7 @@ fn domains(query: Query<'_>) -> Result<LookupMap<Value, Domain>, OptimizeError> 
         Ok(())
     })?;
     let mut domains = LookupMap::new();
+    let mut groups = LookupMap::new();
     query.for_each("ParallelOperation", |row| {
         let op = row[0];
         if let Some(execution) = query.lookup("OperationExecution", op)? {
@@ -59,7 +49,13 @@ fn domains(query: Query<'_>) -> Result<LookupMap<Value, Domain>, OptimizeError> 
                 .indexed("DomainExtent", &[domain], rank)?
                 .into_iter()
                 .map(|extent| (extent, bounds.get(&extent).copied()))
-                .collect();
+                .collect::<Vec<_>>();
+            let key = extents
+                .iter()
+                .map(|&(extent, bound)| (bound.is_some(), bound.unwrap_or(extent)))
+                .collect::<Vec<_>>();
+            let next_group = groups.len();
+            let group = *groups.entry((execution, key)).or_insert(next_group);
             let mut axes = Vec::new();
             for axis in query.indexed("DomainAxis", &[domain], rank)? {
                 if let Some(name) = query.constructor("ValueNameRef", axis)? {
@@ -72,6 +68,7 @@ fn domains(query: Query<'_>) -> Result<LookupMap<Value, Domain>, OptimizeError> 
                     execution,
                     extents,
                     axes,
+                    group,
                 },
             );
         }
@@ -93,62 +90,166 @@ fn barriers(query: Query<'_>) -> Result<LookupSet<Value>, OptimizeError> {
     Ok(barriers)
 }
 
-fn pairs<'a, K: Copy>(
-    operations: &[K],
-    domain: impl Fn(K) -> Option<&'a Domain>,
-    barrier: impl Fn(K) -> bool,
-) -> impl Iterator<Item = (K, K)> {
-    let mut preceding = Vec::<(K, &Domain)>::new();
-    let mut candidates = Vec::new();
-    for &operation in operations {
-        let domain = domain(operation);
-        if let Some(domain) = domain {
-            candidates.extend(
-                preceding
-                    .iter()
-                    .filter_map(|(first, a)| a.compatible(domain).then_some((*first, operation))),
-            );
-        }
-        if barrier(operation) {
-            preceding.clear();
-        }
-        if let Some(domain) = domain {
-            preceding.push((operation, domain));
+fn compatible_pair(body: &Body, region: RegionId, first: OperationId, second: OperationId) -> bool {
+    let (Some(first_domain), Some(second_domain)) = (body.domains.get(first), body.domains.get(second))
+    else {
+        return false;
+    };
+    let (a, start) = body.positions[first];
+    let (b, end) = body.positions[second];
+    if a != region || b != region || start >= end || first_domain.group != second_domain.group {
+        return false;
+    }
+    let operations = &body.graph.ir.regions[region].operations;
+    let middle = &operations[operations.partition_point(|&op| body.positions[op].1 <= start)
+        ..operations.partition_point(|&op| body.positions[op].1 < end)];
+    middle.iter().all(|op| !body.barriers.contains(op))
+}
+
+fn parallel_users(
+    body: &Body,
+    producer: OperationId,
+    region: RegionId,
+) -> Result<LookupSet<OperationId>, OptimizeError> {
+    let mut users = LookupSet::new();
+    for slot in 0..body.graph.ir.operations[producer].result_types.len() {
+        let name = body.graph.names[&ValueRef::Result(producer, slot)];
+        for site in body.users(name) {
+            let demand = body.demand_region(site)?;
+            if let Some((consumer, _)) = placement::child_on_path(body, demand, region) {
+                if body.domains.contains_key(consumer) {
+                    users.insert(consumer);
+                }
+            }
         }
     }
-    candidates.into_iter()
+    Ok(users)
 }
 
-fn current_pairs(body: &Body, region: RegionId) -> Vec<(OperationId, OperationId)> {
-    pairs(
-        &body.graph.ir.regions[region].operations,
-        |op| body.domains.get(op),
-        |op| body.barriers.contains(&op),
-    )
-    .collect()
+type Pair = (OperationId, OperationId);
+
+#[derive(Default)]
+struct Vertical {
+    pending: VecDeque<Pair>,
+    queued: LookupSet<Pair>,
 }
 
-fn splice_first(
+impl Vertical {
+    fn enqueue(&mut self, body: &Body, mut pairs: Vec<Pair>) -> usize {
+        pairs.sort_unstable_by_key(|&(first, second)| (body.positions[second].1, body.positions[first].1));
+        let before = self.pending.len();
+        self.pending.extend(pairs.into_iter().filter(|&pair| self.queued.insert(pair)));
+        self.pending.len() - before
+    }
+
+    fn seed(&mut self, body: &Body, region: RegionId) -> Result<usize, OptimizeError> {
+        let mut pairs = Vec::new();
+        for &producer in &body.graph.ir.regions[region].operations {
+            if body.domains.contains_key(producer) {
+                pairs.extend(
+                    parallel_users(body, producer, region)?
+                        .into_iter()
+                        .map(|consumer| (producer, consumer)),
+                );
+            }
+        }
+        Ok(self.enqueue(body, pairs))
+    }
+
+    fn reconsider(&mut self, body: &Body, region: RegionId, consumers: LookupSet<OperationId>) -> usize {
+        let mut pairs = Vec::new();
+        for consumer in consumers {
+            if !body.domains.contains_key(consumer) {
+                continue;
+            }
+            // A consumer can now depend on a result defined earlier in this region.
+            for (_, name) in body.tree_uses(consumer) {
+                if let Some(&ValueRef::Result(producer, _)) = body.graph.refs.get(&name) {
+                    if body.domains.contains_key(producer) && body.positions[producer].0 == region {
+                        pairs.push((producer, consumer));
+                    }
+                }
+            }
+        }
+        self.enqueue(body, pairs)
+    }
+
+    fn pop(&mut self) -> Option<Pair> {
+        let pair = self.pending.pop_front()?;
+        self.queued.remove(&pair);
+        Some(pair)
+    }
+}
+
+fn horizontal_pair(
     graph: &mut EGraph,
     body: &mut Body,
-    candidates: Vec<(OperationId, OperationId)>,
-) -> Result<bool, OptimizeError> {
-    for (first, second) in candidates {
-        if let Some(loads) = legal(graph, body, first, second)? {
-            body.splice(Query(graph), first, second, &loads)?;
-            return Ok(true);
+    region: RegionId,
+    examined: &mut usize,
+) -> Result<Option<Pair>, OptimizeError> {
+    let mut preceding = LookupMap::<usize, Vec<OperationId>>::new();
+    for next in body.graph.ir.regions[region].operations.clone() {
+        let group = body.domains.get(next).map(|domain| domain.group);
+        if let Some(earlier) = group.and_then(|group| preceding.get(&group)) {
+            for &first in earlier {
+                *examined += 1;
+                if legal(graph, body, first, next)?.is_some_and(|loads| loads.is_empty()) {
+                    return Ok(Some((first, next)));
+                }
+            }
+        }
+        if body.barriers.contains(&next) {
+            preceding.clear();
+        }
+        if let Some(group) = group {
+            preceding.entry(group).or_default().push(next);
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
-fn fuse_region(graph: &mut EGraph, body: &mut Body, region: RegionId) -> Result<(), OptimizeError> {
+fn fuse_region(graph: &mut EGraph, body: &mut Body, region: RegionId) -> Result<bool, OptimizeError> {
+    let mut vertical = Vertical::default();
+    let mut generated = vertical.seed(body, region)?;
+    let mut vertical_checks = 0;
+    let mut horizontal_checks = 0;
+    let mut changed = false;
     loop {
-        let candidates = current_pairs(body, region);
-        if !splice_first(graph, body, candidates)? {
-            return Ok(());
+        let mut selected = None;
+        while let Some((first, second)) = vertical.pop() {
+            if !compatible_pair(body, region, first, second) {
+                continue;
+            }
+            vertical_checks += 1;
+            if let Some(loads) = legal(graph, body, first, second)? {
+                if !loads.is_empty() {
+                    selected = Some((first, second, loads));
+                    break;
+                }
+            }
         }
+        let (first, second, loads) = if let Some(selected) = selected {
+            selected
+        } else if let Some((first, second)) = horizontal_pair(graph, body, region, &mut horizontal_checks)?
+        {
+            (first, second, Vec::new())
+        } else {
+            break;
+        };
+        let barrier_moved = body.barriers.contains(&second);
+        let consumers = parallel_users(body, second, region)?;
+        body.splice(Query(graph), first, second, &loads)?;
+        generated += if barrier_moved {
+            vertical.seed(body, region)?
+        } else {
+            vertical.reconsider(body, region, consumers)
+        };
+        changed = true;
     }
+    if std::env::var_os("WYN_FUSION_COUNTS").is_some() {
+        eprintln!("Rust fusion candidates\t{generated}\t{vertical_checks}\t{horizontal_checks}");
+    }
+    Ok(changed)
 }
 
 pub(super) fn run(graph: &mut EGraph) -> Result<bool, OptimizeError> {
@@ -159,49 +260,35 @@ pub(super) fn run(graph: &mut EGraph) -> Result<bool, OptimizeError> {
         return Ok(false);
     }
     let barriers = barriers(query)?;
-    let mut candidates = StableMap::new();
-    query.for_function("RegionOperations", |keys, ops| {
-        let operations = query.vector(ops)?;
-        let pairs: Vec<_> =
-            pairs(&operations, |op| domains.get(&op), |op| barriers.contains(&op)).collect();
-        if !pairs.is_empty() {
-            candidates.insert(keys[0], pairs);
+    let mut regions = Vec::new();
+    query.for_function("RegionOperations", |key, order| {
+        let mut seen = LookupSet::new();
+        for op in query.vector(order)? {
+            let group = domains.get(&op).map(|domain| domain.group);
+            if group.is_some_and(|group| seen.contains(&group)) {
+                regions.push(key[0]);
+                break;
+            }
+            if barriers.contains(&op) {
+                seen.clear();
+            }
+            seen.extend(group);
         }
         Ok(())
     })?;
-    if candidates.is_empty() {
+    if regions.is_empty() {
         return Ok(false);
     }
     let mut body = Body::read(query, domains, barriers)?;
-    let mut pending = VecDeque::new();
-    let mut queued = LookupSet::new();
-    for (region, pairs) in candidates {
-        let region = body.regions[&region];
-        pending.push_back((
-            region,
-            Some(
-                pairs
-                    .into_iter()
-                    .map(|(a, b)| (body.graph.operation_ids[&a], body.graph.operation_ids[&b]))
-                    .collect::<Vec<_>>(),
-            ),
-        ));
-        queued.insert(region);
-    }
-    let mut revised = LookupSet::new();
+    let mut pending: VecDeque<_> = regions.into_iter().map(|region| body.regions[&region]).collect();
+    let mut queued: LookupSet<_> = pending.iter().copied().collect();
     let mut changed = false;
-    while let Some((region, initial)) = pending.pop_front() {
+    while let Some(region) = pending.pop_front() {
         queued.remove(&region);
-        if !body.graph.ir.regions.contains_key(region) {
-            continue;
-        }
-        let candidates =
-            initial.filter(|_| !revised.contains(&region)).unwrap_or_else(|| current_pairs(&body, region));
-        if splice_first(graph, &mut body, candidates)? {
-            for region in body.take_dirty() {
-                revised.insert(region);
-                if queued.insert(region) {
-                    pending.push_back((region, None));
+        if body.graph.ir.regions.contains_key(region) && fuse_region(graph, &mut body, region)? {
+            for dirty in body.take_dirty() {
+                if dirty != region && queued.insert(dirty) {
+                    pending.push_back(dirty);
                 }
             }
             changed = true;
@@ -281,7 +368,7 @@ fn legal(
             return Ok(None);
         }
         for (&index, &axis) in indices.iter().zip(&domain.axes) {
-            if !index_equal(graph, body, index, axis)? {
+            if pointwise_index(Query(graph), body, index, axis)?.is_none() {
                 return Ok(None);
             }
         }
@@ -345,45 +432,46 @@ fn effects_conflict(
     Query(graph).contains("ParallelEffectConflict", RawValues(vec![]))
 }
 
-fn index_equal(
-    graph: &mut EGraph,
+fn pointwise_index(
+    query: Query<'_>,
     body: &Body,
     index: ValueRef,
     axis: Value,
-) -> Result<bool, OptimizeError> {
+) -> Result<Option<Vec<OperationId>>, OptimizeError> {
     let name = body.graph.names[&index];
     if name == axis {
-        return Ok(true);
+        return Ok(Some(Vec::new()));
     }
     let ValueRef::Result(sub, 0) = index else {
-        return Ok(false);
+        return Ok(None);
     };
     let [ValueRef::Result(add, 0), delta] = &body.graph.ir.operations[sub].inputs[..] else {
-        return Ok(false);
+        return Ok(None);
     };
     if !body.is_code(sub, &Code::Scalar(Payload::Binary(BinaryOperator::Subtract)))
         || !body.is_code(*add, &Code::Scalar(Payload::Binary(BinaryOperator::Add)))
     {
-        return Ok(false);
+        return Ok(None);
     }
     let [a, b] = &body.graph.ir.operations[*add].inputs[..] else {
-        return Ok(false);
+        return Ok(None);
     };
-    let query = Query(graph);
     let Some(width) = query.lookup("ValuePrimitive", name)? else {
-        return Ok(false);
+        return Ok(None);
     };
     if !query.contains("IntegerScalar", width)? {
-        return Ok(false);
+        return Ok(None);
     }
     let sum = body.graph.names[&ValueRef::Result(*add, 0)];
     let (a, b, delta) = (body.graph.names[a], body.graph.names[b], body.graph.names[delta]);
+    if (a, b) != (axis, delta) && (a, b) != (delta, axis) {
+        return Ok(None);
+    }
     for operand in [axis, a, b, delta, sum] {
         if query.lookup("ValuePrimitive", operand)? != Some(width) {
-            return Ok(false);
+            return Ok(None);
         }
     }
-    graph.update(|mut sink| sink.add("ParallelCancellation", (name, axis, a, b, delta)))?;
-    graph.parse_and_run_program(None, "(run-schedule (run parallel-index-equality))")?;
-    Query(graph).contains("ParallelIndexEqual", (name, axis))
+    // Addition and subtraction cancel in one wrapping integer type.
+    Ok(Some(vec![*add, sub]))
 }

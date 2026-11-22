@@ -20,7 +20,7 @@
 --! [[shader]]
 --! entry = "guarded_producer_3_repro"
 --! stage = "fragment"
---! guarded_loops = [2, 0]
+--! guarded_loops = [1, 0]
 --! [[shader]]
 --! entry = "guarded_producer_4_repro"
 --! stage = "fragment"

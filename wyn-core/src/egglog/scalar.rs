@@ -91,11 +91,16 @@ pub(super) fn apply(graph: &mut EGraph) -> Result<bool, OptimizeError> {
     if !constants.is_empty() {
         return Ok(true);
     }
-    if let Some(candidate) = Query(graph).first("ForwardLength")? {
-        forward_length(graph, candidate[0], candidate[1])?;
-        return Ok(true);
+    let mut lengths = Vec::new();
+    Query(graph).for_each("ForwardLength", |row| {
+        lengths.push((row[0], row[1]));
+        Ok(())
+    })?;
+    // Each replacement preserves the length value used by the other proofs.
+    for &(operation, index) in &lengths {
+        forward_length(graph, operation, index)?;
     }
-    Ok(false)
+    Ok(!lengths.is_empty())
 }
 
 pub(super) fn forward_length(

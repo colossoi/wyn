@@ -42,7 +42,10 @@ class FullGateReportTest(unittest.TestCase):
                 path.write_text("\n".join(map(json.dumps, data)))
                 stamp = 1_700_000_000 + index
                 os.utime(path, (stamp, stamp))
-                (run / "retry.log").write_text("2.000s ok: fixture\n")
+                log = "2.000s ok: fixture\n"
+                if index == 5:
+                    log += "1 integration cases completed in 2.300s (build excluded)\n"
+                (run / "retry.log").write_text(log)
             html = render(base)
             self.assertIn('<details open class="history"><summary>Last 5 runs</summary>', html)
             matrix = html.split('<table class="matrix">')[1]
@@ -50,7 +53,15 @@ class FullGateReportTest(unittest.TestCase):
             self.assertIn('title="Round &lt;5&gt;">Latest', matrix)
             self.assertIn('title="Round &lt;1&gt;">Run 5', matrix)
             self.assertEqual(matrix.count('<td title="'), 50)
-            self.assertIn('title="Passed. 3.0s. 1 integration test passed."', matrix)
+            self.assertIn(
+                'title="Passed. 2.3s. 1 integration test passed. Build excluded. Gate total including build 3.0s."',
+                matrix,
+            )
+            self.assertIn('<span class="cell-time">2.3s</span>', matrix)
+            self.assertIn(
+                'title="Passed. 3.0s. 1 integration test passed. Gate time includes build."',
+                matrix,
+            )
             self.assertIn('<span class="cell-time">3.0s</span>', matrix)
             self.assertIn("Round &lt;5&gt;", html.split("Last 5 runs")[0])
             self.assertNotIn("Round &lt;0&gt;", html)

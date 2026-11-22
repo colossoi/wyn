@@ -1,6 +1,8 @@
 //! Stream pointwise consumers over packed outputs on the current region graph.
 use super::body::{ClauseId, ClauseKind};
-use super::{barriers, domains, effects_conflict, fuse_region, Body, Code, Effects, Query, Site};
+use super::{
+    barriers, domains, effects_conflict, fuse_region, pointwise_index, Body, Code, Effects, Query, Site,
+};
 use crate::egglog::{output_error, timing, OptimizeError};
 use crate::memory_ir::{OperationId, RegionId, UseSite, ValueRef};
 use crate::{LookupMap, LookupSet};
@@ -192,7 +194,7 @@ fn legal(
         .flatten();
     let ordinal = ordinal.map(|name| body.resolve(name));
     let mut loads = Vec::new();
-    let mut index_uses = Vec::new();
+    let mut index_ops = LookupSet::new();
     for (site, name) in body.tree_uses(second) {
         let Some(&value) = body.graph.refs.get(&name) else {
             return Ok(None);
@@ -215,20 +217,23 @@ fn legal(
                 if !same_stream
                     || !body.is_code(load, &Code::Index)
                     || !body.inside(body.positions[load].0, lane)
-                    || !matches!(&inputs[..], [_, index] if body.graph.names[index] == axis)
                 {
                     return Ok(None);
                 }
+                let [_, index] = inputs[..] else {
+                    return Ok(None);
+                };
+                let Some(proof) = pointwise_index(query, body, index, axis)? else {
+                    return Ok(None);
+                };
+                index_ops.extend(proof);
                 loads.push((load, forwarded));
                 continue;
             }
         }
-        if name == axis || ordinal == Some(name) {
-            let Site::Operand(UseSite::Input(load, 1)) = site else {
-                return Ok(None);
-            };
-            index_uses.push(load);
-        } else if site != Site::Attribute(second)
+        if name != axis
+            && ordinal != Some(name)
+            && site != Site::Attribute(second)
             && !children.iter().any(|&region| body.inside(body.definition_region(value), region))
             && !body.available_before(value, first)
         {
@@ -236,7 +241,15 @@ fn legal(
         }
     }
     let pointwise: LookupSet<_> = loads.iter().map(|&(load, _)| load).collect();
-    if loads.is_empty() || index_uses.iter().any(|load| !pointwise.contains(load)) {
+    let indices = std::iter::once(axis)
+        .chain(ordinal)
+        .chain(index_ops.iter().map(|&op| body.graph.names[&ValueRef::Result(op, 0)]));
+    if loads.is_empty()
+        || indices.flat_map(|name| body.users(name)).any(|site| {
+            !matches!(site, Site::Operand(UseSite::Input(op, slot))
+            if index_ops.contains(&op) || (slot == 1 && pointwise.contains(&op)))
+        })
+    {
         return Ok(None);
     }
     match body.clause(consumer).kind {
