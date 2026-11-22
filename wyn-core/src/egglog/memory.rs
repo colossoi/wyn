@@ -163,7 +163,7 @@ pub(super) fn simplify(graph: &mut EGraph, hoist: bool) -> Result<(), OptimizeEr
             edit::remove_clause(graph, candidate[0], clause)?;
             continue;
         }
-        if hoist && (super::planning::factor_conditionals(graph)? || super::fusion::motion(graph, true)?) {
+        if hoist && (super::planning::factor_conditionals(graph)? || super::fusion::hoist(graph)?) {
             continue;
         }
         return Ok(());

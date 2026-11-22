@@ -10,8 +10,10 @@ use egglog_engine::{EGraph, RawValues, Value, Write};
 use std::collections::VecDeque;
 
 mod body;
+mod motion;
 
-use body::{Body, Site};
+use body::{Body, Effects, Site};
+use motion::Motion;
 
 #[derive(Clone)]
 struct Domain {
@@ -183,6 +185,38 @@ pub(super) fn run(graph: &mut EGraph) -> Result<bool, OptimizeError> {
     Ok(changed)
 }
 
+pub(super) fn move_siblings(graph: &mut EGraph) -> Result<bool, OptimizeError> {
+    let _timing = timing::span("Rust sibling motion");
+    let query = Query(graph);
+    let motion = Motion::read(query)?;
+    let mut regions = Vec::new();
+    query.for_function("RegionOperations", |keys, ops| {
+        let operations = query.vector(ops)?;
+        for (before, index) in motion.candidates(&operations, |op| op) {
+            if !query.contains("OperationDependency", (operations[index], operations[before]))? {
+                regions.push(keys[0]);
+                break;
+            }
+        }
+        Ok(())
+    })?;
+    if regions.is_empty() {
+        return Ok(false);
+    }
+    let mut body = Body::read(query, &[], LookupMap::new(), LookupSet::new())?;
+    let mut changed = false;
+    for region in regions {
+        let id = body.regions[&region];
+        while motion.step(graph, &mut body, id)? {
+            changed = true;
+        }
+    }
+    if changed {
+        body.publish(graph)?;
+    }
+    Ok(changed)
+}
+
 pub(super) fn apply(
     graph: &mut EGraph,
     first: Value,
@@ -252,9 +286,6 @@ fn legal(
     if body.unknown_aliases && (!a.writes.is_empty() || !b.writes.is_empty()) {
         return Ok(None);
     }
-    if a.writes.is_empty() && b.writes.is_empty() && !(a.traps && b.traps) {
-        return Ok(Some(loads));
-    }
     if !loads.is_empty()
         && body.contributes(second)
         && a.writes.is_empty()
@@ -262,6 +293,13 @@ fn legal(
         && b.writes.is_disjoint(&a.reads)
     {
         return Ok(Some(loads));
+    }
+    Ok((!effects_conflict(graph, a, b)?).then_some(loads))
+}
+
+fn effects_conflict(graph: &mut EGraph, a: Effects, b: Effects) -> Result<bool, OptimizeError> {
+    if a.writes.is_empty() && b.writes.is_empty() && !(a.traps && b.traps) {
+        return Ok(false);
     }
     for table in [
         "ParallelRead",
@@ -286,7 +324,7 @@ fn legal(
         Ok(())
     })?;
     graph.parse_and_run_program(None, "(run-schedule (run parallel-effects))")?;
-    Ok((!Query(graph).contains("ParallelEffectConflict", RawValues(vec![]))?).then_some(loads))
+    Query(graph).contains("ParallelEffectConflict", RawValues(vec![]))
 }
 
 fn index_equal(

@@ -36,8 +36,6 @@ fn clear(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "MotionCandidate",
         "RepeatedArrayMotion",
         "ArrayMotionReadOnly",
-        "FusionPreparation",
-        "FusionBoundary",
         "SinkProducer",
         "PlacementReadOnly",
         "PlacementMember",
@@ -100,7 +98,10 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
                     graph.update(|mut sink| sink.add("BranchFuseSelected", (pair[0], pair[1])))?;
                     graph.parse_and_run_program(None, "(run-schedule (run graph-fusion-apply))")?;
                     edit::remove(graph, &[pair[1]])?;
-                } else if !compaction::run(graph)? && !sink_producer(graph)? && !motion(graph, false)? {
+                } else if !compaction::run(graph)?
+                    && !sink_producer(graph)?
+                    && !parallel::move_siblings(graph)?
+                {
                     return Ok(());
                 }
             }
@@ -393,7 +394,7 @@ fn fuse_accumulators(graph: &mut EGraph, first: Value, second: Value) -> Result<
     edit::remove(graph, &[second])
 }
 
-pub(super) fn motion(graph: &mut EGraph, hoist: bool) -> Result<bool, OptimizeError> {
+pub(super) fn hoist(graph: &mut EGraph) -> Result<bool, OptimizeError> {
     clear(graph)?;
     graph.parse_and_run_program(
         None,
@@ -406,7 +407,7 @@ pub(super) fn motion(graph: &mut EGraph, hoist: bool) -> Result<bool, OptimizeEr
         let crosses_scope =
             query.required("OperationRegion", row[0])? != query.required("OperationRegion", row[1])?;
         if operations.contains(&row[0])
-            || (!hoist && crosses_scope)
+            || !crosses_scope
             // Accumulator scopes execute once; hoisting only undoes producer sinking.
             || (crosses_scope && query.contains("AccumulatorOperation", row[1])?)
             || query.contains("InvocationDependent", row[0])?
@@ -439,7 +440,7 @@ pub(super) fn motion(graph: &mut EGraph, hoist: bool) -> Result<bool, OptimizeEr
     // Keep every destination fixed until the next analysis round.
     selected.retain(|&(_, owner)| !operations.contains(&owner));
     if selected.is_empty() {
-        return Ok(false);
+        return parallel::move_siblings(graph);
     }
     let _timing = super::timing::span("egglog fusion motion edits");
     for (operation, owner) in selected {

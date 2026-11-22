@@ -381,6 +381,17 @@ impl Body {
         take(&mut self.dirty)
     }
 
+    pub fn move_within(&mut self, region: RegionId, before: usize, index: usize) {
+        let operations = &mut self.graph.ir.regions[region].operations[before..=index];
+        let positions = operations.iter().map(|&op| self.positions[op]).collect::<Vec<_>>();
+        operations.rotate_right(1);
+        for (&op, position) in operations.iter().zip(positions) {
+            self.positions[op] = position;
+        }
+        self.moved.insert(region);
+        self.dirty(region);
+    }
+
     fn forget(&mut self, site: Site) {
         self.dead.extend(self.uses.remove(site));
         if let Site::Operand(site) = site {
@@ -583,6 +594,20 @@ impl Body {
 
     pub fn publish(self, graph: &mut EGraph) -> Result<(), OptimizeError> {
         let _timing = timing::span("Rust parallel fusion publication");
+        // Pure motion changes neither result clauses nor operands.
+        if self.edited.is_empty() && self.removed.is_empty() {
+            graph.update(|mut sink| {
+                for region in self.moved {
+                    for (order, &op) in self.graph.ir.regions[region].operations.iter().enumerate() {
+                        let op = self.graph.operations[op];
+                        sink.remove("OperationOrder", op)?;
+                        sink.set("OperationOrder", op, order as i64)?;
+                    }
+                }
+                Ok(())
+            })?;
+            return edit::changed(graph);
+        }
         let query = Query(graph);
         let mut clauses = LookupMap::new();
         let mut outputs = LookupMap::new();

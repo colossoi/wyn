@@ -355,6 +355,40 @@ fn one_fusion_publication_contracts_independent_bodies_and_pointwise_chains() ->
 }
 
 #[test]
+fn sibling_motion_moves_a_preparation_chain_in_one_edit() -> Result<(), OptimizeError> {
+    let mut graph = test_graph::import(
+        "entry main(xs:[8]i32, ys:[16]i32, n:i32) ([8]i32,[16]i32) =
+            let a = map(|x| x+1,xs)
+            let k = n*n
+            let j = k+n
+            in (a,map(|x| x+j,ys))",
+    )?;
+    memory::simplify(&mut graph, false)?;
+    let root = test_graph::root(&graph);
+    let revision = edit::revision(&graph)?;
+    let arithmetic_positions = |query: Query<'_>| -> Result<Vec<usize>, OptimizeError> {
+        let mut positions = Vec::new();
+        for (position, operation) in query.operations(root)?.into_iter().enumerate() {
+            let code = ir::code(query.0, query.required("OperationPayload", operation)?);
+            if matches!(
+                code,
+                Code::Scalar(Payload::Binary(BinaryOperator::Multiply | BinaryOperator::Add))
+            ) {
+                positions.push(position);
+            }
+        }
+        Ok(positions)
+    };
+    let before = arithmetic_positions(Query(&graph))?;
+    assert_eq!(before.len(), 2);
+    assert!(super::parallel::move_siblings(&mut graph)?);
+    assert_eq!(edit::revision(&graph)?, revision + 1);
+    let after = arithmetic_positions(Query(&graph))?;
+    assert!(after.iter().zip(before).all(|(after, before)| *after < before));
+    memory::validate(&mut graph)
+}
+
+#[test]
 fn free_names_preserve_large_shared_fanout() {
     let mut source = String::from("entry main(x:i32) (");
     source.push_str(&vec!["i32"; 256].join(","));
