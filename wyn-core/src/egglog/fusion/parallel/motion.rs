@@ -127,7 +127,7 @@ impl Motion {
             let mut conflict = false;
             for &crossed in &operations[before..index] {
                 let prior = body.effects.get(crossed).unwrap_or(&no_effects);
-                if effects_conflict(graph, prior, effect)? {
+                if effects_conflict(graph, prior, effect, true)? {
                     conflict = true;
                     break;
                 }

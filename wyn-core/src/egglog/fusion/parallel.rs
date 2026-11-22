@@ -3,17 +3,19 @@ use super::super::dataflow::ir::Code;
 use super::super::payload::Payload;
 use super::super::query::Query;
 use super::super::{timing, OptimizeError};
-use crate::memory_ir::{OperationId, UseSite, ValueRef};
+use crate::memory_ir::{OperationId, RegionId, UseSite, ValueRef};
 use crate::op::BinaryOperator;
 use crate::{LookupMap, LookupSet, StableMap};
 use egglog_engine::{EGraph, RawValues, Value, Write};
 use std::collections::VecDeque;
 
 mod body;
+mod compact;
 mod hoist;
 mod motion;
 
 use body::{Body, Effects, Site};
+pub(super) use compact::compact;
 pub(super) use hoist::hoist;
 use motion::Motion;
 
@@ -112,6 +114,29 @@ fn pairs<'a, K: Copy>(
     candidates.into_iter()
 }
 
+fn current_pairs(body: &Body, region: RegionId) -> Vec<(OperationId, OperationId)> {
+    pairs(
+        &body.graph.ir.regions[region].operations,
+        |op| body.domains.get(op),
+        |op| body.barriers.contains(&op),
+    )
+    .collect()
+}
+
+fn splice_first(
+    graph: &mut EGraph,
+    body: &mut Body,
+    candidates: Vec<(OperationId, OperationId)>,
+) -> Result<bool, OptimizeError> {
+    for (first, second) in candidates {
+        if let Some(loads) = legal(graph, body, first, second)? {
+            body.splice(Query(graph), first, second, &loads)?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(super) fn run(graph: &mut EGraph) -> Result<bool, OptimizeError> {
     let _timing = timing::span("Rust parallel fusion");
     let query = Query(graph);
@@ -133,7 +158,7 @@ pub(super) fn run(graph: &mut EGraph) -> Result<bool, OptimizeError> {
     if candidates.is_empty() {
         return Ok(false);
     }
-    let mut body = Body::read(query, &[], domains, barriers)?;
+    let mut body = Body::read(query, domains, barriers)?;
     let mut pending = VecDeque::new();
     let mut queued = LookupSet::new();
     for (region, pairs) in candidates {
@@ -153,24 +178,12 @@ pub(super) fn run(graph: &mut EGraph) -> Result<bool, OptimizeError> {
     let mut changed = false;
     while let Some((region, initial)) = pending.pop_front() {
         queued.remove(&region);
-        let Some(current) = body.graph.ir.regions.get(region) else {
+        if !body.graph.ir.regions.contains_key(region) {
             continue;
-        };
-        let candidates = if let Some(initial) = initial.filter(|_| !revised.contains(&region)) {
-            initial
-        } else {
-            pairs(
-                &current.operations,
-                |op| body.domains.get(op),
-                |op| body.barriers.contains(&op),
-            )
-            .collect()
-        };
-        for (first, second) in candidates {
-            let Some(loads) = legal(graph, &mut body, first, second)? else {
-                continue;
-            };
-            body.splice(Query(graph), first, second, &loads)?;
+        }
+        let candidates =
+            initial.filter(|_| !revised.contains(&region)).unwrap_or_else(|| current_pairs(&body, region));
+        if splice_first(graph, &mut body, candidates)? {
             for region in body.take_dirty() {
                 revised.insert(region);
                 if queued.insert(region) {
@@ -178,7 +191,6 @@ pub(super) fn run(graph: &mut EGraph) -> Result<bool, OptimizeError> {
                 }
             }
             changed = true;
-            break;
         }
     }
     if changed {
@@ -205,7 +217,7 @@ pub(super) fn move_siblings(graph: &mut EGraph) -> Result<bool, OptimizeError> {
     if regions.is_empty() {
         return Ok(false);
     }
-    let mut body = Body::read(query, &[], LookupMap::new(), LookupSet::new())?;
+    let mut body = Body::read(query, LookupMap::new(), LookupSet::new())?;
     let mut changed = false;
     for region in regions {
         let id = body.regions[&region];
@@ -217,22 +229,6 @@ pub(super) fn move_siblings(graph: &mut EGraph) -> Result<bool, OptimizeError> {
         body.publish(graph)?;
     }
     Ok(changed)
-}
-
-pub(super) fn apply(
-    graph: &mut EGraph,
-    first: Value,
-    second: Value,
-    loads: &[(Value, Value)],
-    new_regions: &[(Value, Vec<Value>)],
-) -> Result<(), OptimizeError> {
-    let query = Query(graph);
-    let mut body = Body::read(query, new_regions, domains(query)?, barriers(query)?)?;
-    let first = body.graph.operation_ids[&first];
-    let second = body.graph.operation_ids[&second];
-    let loads = loads.iter().map(|&(op, value)| (body.graph.operation_ids[&op], value)).collect::<Vec<_>>();
-    body.splice(query, first, second, &loads)?;
-    body.publish(graph)
 }
 
 fn legal(
@@ -297,11 +293,16 @@ fn legal(
     {
         return Ok(Some(loads));
     }
-    Ok((!effects_conflict(graph, a, b)?).then_some(loads))
+    Ok((!effects_conflict(graph, a, b, true)?).then_some(loads))
 }
 
-fn effects_conflict(graph: &mut EGraph, a: &Effects, b: &Effects) -> Result<bool, OptimizeError> {
-    if a.writes.is_empty() && b.writes.is_empty() && !(a.traps && b.traps) {
+fn effects_conflict(
+    graph: &mut EGraph,
+    a: &Effects,
+    b: &Effects,
+    compare_traps: bool,
+) -> Result<bool, OptimizeError> {
+    if a.writes.is_empty() && b.writes.is_empty() && !(compare_traps && a.traps && b.traps) {
         return Ok(false);
     }
     for table in [
@@ -320,7 +321,7 @@ fn effects_conflict(graph: &mut EGraph, a: &Effects, b: &Effects) -> Result<bool
             for &root in &summary.writes {
                 sink.add("ParallelWrite", (side, root))?;
             }
-            if summary.traps {
+            if compare_traps && summary.traps {
                 sink.add("ParallelTrap", side)?;
             }
         }

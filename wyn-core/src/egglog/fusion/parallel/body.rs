@@ -11,6 +11,9 @@ use slotmap::SecondaryMap;
 use std::mem::take;
 use wyn_graph::ReplacementForest;
 
+mod guard;
+use guard::Guard;
+
 fn value_name(query: Query<'_>, value: Value) -> Result<Value, OptimizeError> {
     let Some(name) = query.constructor("ValueNameRef", value)? else {
         return Err(output_error("missing value reference in fusion metadata"));
@@ -18,7 +21,7 @@ fn value_name(query: Query<'_>, value: Value) -> Result<Value, OptimizeError> {
     Ok(name)
 }
 
-type ClauseId = (OperationId, i64);
+pub(super) type ClauseId = (OperationId, i64);
 
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub(super) enum Site {
@@ -66,16 +69,32 @@ pub(super) struct Effects {
     pub traps: bool,
 }
 
-struct Clause {
-    can_prune: bool,
-    folded: bool,
-    contributes: bool,
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ClauseKind {
+    Collected,
+    Compacted,
+    Folded,
+    Contributed,
+}
+
+pub(super) struct Clause {
+    pub kind: ClauseKind,
+    pub values: Vec<Value>,
+    pub neutral: Vec<Value>,
+    pub predicate: Option<Value>,
+}
+
+impl Clause {
+    fn can_prune(&self) -> bool {
+        self.values.len() == 1 && matches!(self.kind, ClauseKind::Collected | ClauseKind::Compacted)
+    }
 }
 
 struct Output {
     original: (OperationId, i64),
     clause: ClauseId,
-    forwarded: Option<Value>,
+    field: usize,
+    prefix: bool,
 }
 
 #[derive(Default)]
@@ -106,17 +125,19 @@ pub(super) struct Body {
     pruned: LookupSet<ClauseId>,
     dirty: SortedSet<RegionId>,
     dead: Vec<Value>,
+    guards: Vec<Guard>,
+    changed_clauses: LookupSet<ClauseId>,
+    packed_outputs: LookupSet<(OperationId, i64)>,
 }
 
 impl Body {
     pub fn read(
         query: Query<'_>,
-        new_regions: &[(Value, Vec<Value>)],
         domains: LookupMap<Value, Domain>,
         barriers: LookupSet<Value>,
     ) -> Result<Self, OptimizeError> {
         let _timing = timing::span("Rust parallel fusion graph import");
-        let graph = BodyGraph::read(query, new_regions)?;
+        let graph = BodyGraph::read(query)?;
         let mut body = Self {
             regions: graph.regions.iter().map(|(key, &region)| (region, key)).collect(),
             domains: domains
@@ -142,6 +163,9 @@ impl Body {
             pruned: LookupSet::new(),
             dirty: SortedSet::default(),
             dead: Vec::new(),
+            guards: Vec::new(),
+            changed_clauses: LookupSet::new(),
+            packed_outputs: LookupSet::new(),
         };
         for (region, block) in &body.graph.ir.regions {
             for (index, &op) in block.operations.iter().enumerate() {
@@ -211,7 +235,6 @@ impl Body {
         for (op, _) in &body.domains {
             let key = body.graph.operations[op];
             let mut results = Results::default();
-            let mut fields = LookupMap::new();
             for slot in 0..count(query, "ResultCount", key)? {
                 let id = (op, slot);
                 let kind = query.required("ResultKindOf", (key, slot))?;
@@ -220,48 +243,56 @@ impl Body {
                     &[key, query.0.base_to_value(slot)],
                     count(query, "ResultValueCount", (key, slot))?,
                 )?;
-                for (index, &name) in values.iter().enumerate() {
-                    fields.insert((slot, index as i64), name);
+                for &name in &values {
                     body.uses.add(Site::Result(id), name);
                 }
-                if let Some(predicate) = query.lookup("ResultPredicate", (key, slot))? {
-                    body.uses.add(Site::Result(id), value_name(query, predicate)?);
+                let predicate = query
+                    .lookup("ResultPredicate", (key, slot))?
+                    .map(|value| value_name(query, value))
+                    .transpose()?;
+                if let Some(predicate) = predicate {
+                    body.uses.add(Site::Result(id), predicate);
                 }
-                if let Some(n) = query.lookup("ResultNeutralCount", (key, slot))? {
-                    for name in query.indexed(
+                let neutral = if let Some(n) = query.lookup("ResultNeutralCount", (key, slot))? {
+                    query.indexed(
                         "ResultNeutral",
                         &[key, query.0.base_to_value(slot)],
                         query.0.value_to_base(n),
-                    )? {
-                        body.uses.add(Site::Neutral(id), name);
-                    }
+                    )?
+                } else {
+                    Vec::new()
+                };
+                for &name in &neutral {
+                    body.uses.add(Site::Neutral(id), name);
                 }
-                let can_prune = values.len() == 1
-                    && (query.enode("Collected", kind)?.is_some()
-                        || query.enode("Compacted", kind)?.is_some());
+                let (kind, _) =
+                    query.application(kind, &["Collected", "Compacted", "Folded", "Contributed"])?;
+                let kind = match kind {
+                    "Collected" => ClauseKind::Collected,
+                    "Compacted" => ClauseKind::Compacted,
+                    "Folded" => ClauseKind::Folded,
+                    _ => ClauseKind::Contributed,
+                };
                 body.clauses.insert(
                     id,
                     Clause {
-                        can_prune,
-                        folded: query.enode("Folded", kind)?.is_some(),
-                        contributes: query.enode("Contributed", kind)?.is_some(),
+                        kind,
+                        values,
+                        neutral,
+                        predicate,
                     },
                 );
                 results.clauses.push(id);
             }
             for slot in 0..count(query, "OutputCount", key)? {
                 let clause = count(query, "OutputClause", (key, slot))?;
-                let field = count(query, "OutputField", (key, slot))?;
+                let field = count(query, "OutputField", (key, slot))? as usize;
                 let role = query.required("OutputRole", (key, slot))?;
-                let forwarded = if query.enode("CollectedOutput", role)?.is_some() {
-                    fields.get(&(clause, field)).copied()
-                } else {
-                    None
-                };
                 results.outputs.push(Output {
                     original: (op, slot),
                     clause: (op, clause),
-                    forwarded,
+                    field,
+                    prefix: query.enode("PrefixOutput", role)?.is_some(),
                 });
             }
             body.results.insert(op, results);
@@ -314,31 +345,34 @@ impl Body {
             let Some(&value) = self.graph.refs.get(&name) else {
                 return false;
             };
-            let (definition, order) = match value {
-                ValueRef::Parameter(region, _) => (region, None),
-                ValueRef::Result(producer, _) => {
-                    if producer == operation {
-                        return true;
-                    }
-                    let (region, order) = self.positions[producer];
-                    (region, Some(order))
-                }
-            };
-            if children.iter().any(|&region| self.inside(definition, region)) {
-                return true;
-            }
-            let mut before = before;
-            loop {
-                let (scope, position) = self.positions[before];
-                if scope == definition {
-                    return order.is_none_or(|order| order < position);
-                }
-                let Some(owner) = self.parent(scope) else {
-                    return false;
-                };
-                before = owner;
-            }
+            matches!(value, ValueRef::Result(producer, _) if producer == operation)
+                || children.iter().any(|&region| self.inside(self.definition_region(value), region))
+                || self.available_before(value, before)
         })
+    }
+
+    pub fn definition_region(&self, value: ValueRef) -> RegionId {
+        match value {
+            ValueRef::Parameter(region, _) => region,
+            ValueRef::Result(producer, _) => self.positions[producer].0,
+        }
+    }
+
+    pub fn available_before(&self, value: ValueRef, mut before: OperationId) -> bool {
+        let definition = self.definition_region(value);
+        loop {
+            let (scope, position) = self.positions[before];
+            if scope == definition {
+                return match value {
+                    ValueRef::Parameter(..) => true,
+                    ValueRef::Result(producer, _) => self.positions[producer].1 < position,
+                };
+            }
+            let Some(owner) = self.parent(scope) else {
+                return false;
+            };
+            before = owner;
+        }
     }
 
     pub fn has_parallel_in(&self, region: RegionId) -> bool {
@@ -354,7 +388,7 @@ impl Body {
         false
     }
 
-    fn clauses_of(&self, op: OperationId) -> impl Iterator<Item = ClauseId> + '_ {
+    pub fn clauses_of(&self, op: OperationId) -> impl Iterator<Item = ClauseId> + '_ {
         self.results
             .get(op)
             .into_iter()
@@ -363,18 +397,45 @@ impl Body {
     }
 
     pub fn folded(&self, op: OperationId) -> bool {
-        self.clauses_of(op).any(|id| self.clauses[&id].folded)
+        self.clauses_of(op).any(|id| self.clauses[&id].kind == ClauseKind::Folded)
     }
 
     pub fn contributes(&self, op: OperationId) -> bool {
         let mut clauses = self.clauses_of(op);
-        clauses.next().is_some_and(|id| self.clauses[&id].contributes) && clauses.next().is_none()
+        clauses.next().is_some_and(|id| self.clauses[&id].kind == ClauseKind::Contributed)
+            && clauses.next().is_none()
     }
 
     pub fn forwarded_value(&mut self, op: OperationId, slot: usize) -> Option<Value> {
-        let output = &self.results[op].outputs[slot];
-        let value = output.forwarded?;
-        (!self.pruned.contains(&output.clause)).then(|| self.substitutions.resolve(value))
+        let (id, value) = self.output_value(op, slot)?;
+        (self.clause(id).kind == ClauseKind::Collected).then(|| self.resolve(value))
+    }
+
+    pub fn output_value(&self, op: OperationId, slot: usize) -> Option<(ClauseId, Value)> {
+        let output = self.results.get(op)?.outputs.get(slot)?;
+        if self.pruned.contains(&output.clause) {
+            return None;
+        }
+        Some((
+            output.clause,
+            *self.clause(output.clause).values.get(output.field)?,
+        ))
+    }
+
+    pub fn clause(&self, id: ClauseId) -> &Clause {
+        &self.clauses[&id]
+    }
+
+    pub fn reducer(&self, operation: OperationId, id: ClauseId) -> Option<RegionId> {
+        let slot = self.results[operation].clauses.iter().position(|&clause| clause == id)?;
+        self.graph.ir.operations[operation]
+            .bodies
+            .iter()
+            .find_map(|edge| (edge.role == BodyRole::Reducer(slot)).then_some(edge.region))
+    }
+
+    pub fn resolve(&mut self, value: Value) -> Value {
+        self.substitutions.resolve(value)
     }
 
     fn op_sites(&self, op: OperationId) -> Vec<Site> {
@@ -479,7 +540,8 @@ impl Body {
         }
         let region = self.positions[op].0;
         self.graph.ir.regions[region].operations.retain(|&other| op != other);
-        self.graph.ir.operations.remove(op);
+        // Original occurrence keys still address result and output rows at publication.
+        // Keep their slots reserved while new guard operations can be allocated.
         self.removed.insert(op);
         self.dirty(region);
     }
@@ -546,12 +608,15 @@ impl Body {
             let Some(&ValueRef::Result(op, slot)) = self.graph.refs.get(&name) else {
                 continue;
             };
+            if self.removed.contains(&op) {
+                continue;
+            }
             let Some(operation) = self.graph.ir.operations.get(op) else {
                 continue;
             };
             if let Some(result) = self.results.get(op) {
                 let clause = result.outputs[slot].clause;
-                if self.clauses[&clause].can_prune
+                if self.clauses[&clause].can_prune()
                     && result
                         .outputs
                         .iter()
@@ -649,7 +714,6 @@ impl Body {
         for site in dropped {
             self.forget(site);
         }
-        self.graph.ir.regions.remove(source);
         let b = self.effects.remove(second).unwrap_or_default();
         let mut a = self.effects.remove(first).unwrap_or_default();
         a.reads.extend(b.reads);
@@ -659,6 +723,8 @@ impl Body {
         if self.barriers.contains(&second) {
             self.barriers.insert(first);
         }
+        // Its result sites now belong to first, even though their original keys
+        // are retained for publication.
         self.drop_op(second);
         self.domains.remove(second);
         self.edited.insert(first);
@@ -674,6 +740,7 @@ impl Body {
             graph.update(|mut sink| self.publish_order(&mut sink))?;
             return edit::changed(graph);
         }
+        self.publish_guards(graph)?;
         let query = Query(graph);
         let mut clauses = LookupMap::new();
         let mut outputs = LookupMap::new();

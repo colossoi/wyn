@@ -6,6 +6,7 @@ use crate::egglog::dataflow::{
 use crate::egglog::payload::Payload;
 use crate::egglog::{analysis, from_tlc, fuse, memory, query::Query, test_graph, OptimizeError};
 use crate::op::BinaryOperator;
+use egglog_engine::RawValues;
 
 #[test]
 fn placement_uses_complete_demand_and_effect_proofs() {
@@ -272,6 +273,34 @@ fn count_compaction_batches_independent_lengths_and_preserves_observed_arrays() 
         Ok(())
     })?;
     assert_eq!(roles, (2, 1));
+    memory::validate(&mut graph)
+}
+
+#[test]
+fn guarded_compaction_streams_a_map_into_a_reduce_in_one_batch() -> Result<(), OptimizeError> {
+    let mut graph = test_graph::import(
+        "entry main(xs:[]i32,zero:i32) ([]i32,i32) =
+            let kept=filter(|x|x>0,xs)
+            let mapped=map(|x|x+1,kept)
+            in (mapped,reduce((+),zero,mapped))",
+    )?;
+    memory::simplify(&mut graph, false)?;
+    let root = test_graph::root(&graph);
+    let parallels = |query: Query<'_>| -> Result<usize, OptimizeError> {
+        let mut count = 0;
+        for op in query.operations(root)? {
+            count += usize::from(query.contains("ParallelOperation", op)?);
+        }
+        Ok(count)
+    };
+    let query = Query(&graph);
+    assert_eq!(parallels(query)?, 3);
+    let analyzed = query.required("DataflowRevision", RawValues(vec![]))?;
+    assert!(super::parallel::compact(&mut graph)?);
+    let query = Query(&graph);
+    assert_eq!(query.required("DataflowRevision", RawValues(vec![]))?, analyzed);
+    assert_eq!(parallels(query)?, 1);
+    assert!(query.first("BranchOperation")?.is_some());
     memory::validate(&mut graph)
 }
 

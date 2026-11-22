@@ -357,6 +357,18 @@ fn observing_an_intermediate_filter_length_preserves_its_cardinality() {
 }
 
 #[test]
+fn independent_guarded_reductions_share_chunk_and_combine_dispatches() {
+    let artifact = compile(
+        "entry main(xs:[]i32,zero:i32) (i32,i32,i32,i32) =
+            (reduce((+),zero,map(|x|100/x,filter(|x|x>0,xs))),
+             reduce((+),zero,map(|x|100/x,filter(|x|x>1,xs))),
+             reduce((+),zero,map(|x|100/x,filter(|x|x>2,xs))),
+             reduce((+),zero,map(|x|100/x,filter(|x|x>3,xs))))",
+    );
+    artifact.stages(2);
+}
+
+#[test]
 fn guarded_streams_feed_updates_and_prefixes_without_a_compaction_buffer() {
     // Both fixed and runtime domains preserve the callback guard without packing an intermediate.
     for (source, stages) in [

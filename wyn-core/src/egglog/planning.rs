@@ -30,8 +30,6 @@ pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
             "\n",
             include_str!("planning/epilogue.egg"),
             "\n",
-            include_str!("planning/compaction.egg"),
-            "\n",
             include_str!("analysis/regularity.egg")
         ),
     )?;
@@ -107,11 +105,6 @@ pub(super) fn analyze(graph: &mut EGraph) -> Result<(), OptimizeError> {
 /// Selection depends on phase policy as well as the executable graph.
 fn clear_candidates(graph: &mut EGraph) -> Result<(), OptimizeError> {
     for table in [
-        "CompactPath",
-        "CompactPair",
-        "CompactSafe",
-        "CompactMaskPrefix",
-        "CompactCandidate",
         "ConsumedScalarArray",
         "ReuseCandidate",
         "ReuseDomainInput",

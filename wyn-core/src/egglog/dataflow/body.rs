@@ -24,7 +24,7 @@ pub(in crate::egglog) struct BodyGraph {
 }
 
 impl BodyGraph {
-    pub fn read(query: Query<'_>, new_regions: &[(Value, Vec<Value>)]) -> Result<Self, OptimizeError> {
+    pub fn read(query: Query<'_>) -> Result<Self, OptimizeError> {
         let mut ir = MemoryIr::default();
         let mut regions = SecondaryMap::new();
         let mut region_ids = StableMap::new();
@@ -41,9 +41,6 @@ impl BodyGraph {
             add_region(row[0]);
             Ok(())
         })?;
-        for &(region, _) in new_regions {
-            add_region(region);
-        }
         let mut functions = LookupMap::new();
         query.for_each("LiveFunction", |row| {
             let function = if let Some(key) = query.lookup("FunctionRoot", row[0])? {
@@ -68,14 +65,7 @@ impl BodyGraph {
                     diet: query.required("ParameterDiet", (region, index as i64))?,
                 });
             }
-            let ordered;
-            let body = if let Some((_, body)) = new_regions.iter().find(|(key, _)| *key == region) {
-                body
-            } else {
-                ordered = query.vector(query.required("RegionOperations", region)?)?;
-                &ordered
-            };
-            for &op in body {
+            for op in query.vector(query.required("RegionOperations", region)?)? {
                 let code = ir::code(query.0, query.required("OperationPayload", op)?);
                 let outputs = query.sequence("Output", op)?;
                 let definition = match code {
@@ -255,7 +245,7 @@ pub(in crate::egglog) fn forward_copies(graph: &mut EGraph) -> Result<bool, Opti
     if !found {
         return Ok(false);
     }
-    let mut body = BodyGraph::read(query, &[])?;
+    let mut body = BodyGraph::read(query)?;
     let redirected = body.ir.forward_copies().map_err(|err| output_error(err.to_string()))?;
     let mut removed = Vec::new();
     for &old in redirected.values.keys() {

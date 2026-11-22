@@ -61,7 +61,7 @@ pub(in crate::egglog::fusion) fn hoist(graph: &mut EGraph) -> Result<bool, Optim
         Ok(())
     })?;
 
-    let mut body = Body::read(query, &[], domains(query)?, LookupSet::new())?;
+    let mut body = Body::read(query, domains(query)?, LookupSet::new())?;
     let mut queued: LookupSet<_> = initial.values().map(|region| body.regions[region]).collect();
     let ordered: SortedSet<_> = queued.iter().copied().collect();
     let mut pending: VecDeque<_> = ordered.into_iter().collect();
@@ -89,6 +89,7 @@ pub(in crate::egglog::fusion) fn hoist(graph: &mut EGraph) -> Result<bool, Optim
                     graph,
                     body.effects.get(op).unwrap_or(&no_effects),
                     body.effects.get(owner).unwrap_or(&no_effects),
+                    true,
                 )?
             {
                 index += 1;
