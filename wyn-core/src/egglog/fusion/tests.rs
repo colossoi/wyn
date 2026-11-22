@@ -523,6 +523,80 @@ fn scatter_fuses_across_copy_and_repeated_shape_calculations() {
 }
 
 #[test]
+fn adjacent_accumulators_keep_distinct_capabilities_in_one_batch() -> Result<(), OptimizeError> {
+    let mut graph = test_graph::import(
+        "entry main(xs:[]i32) ([]i32,[]i32,[]i32) =
+            let a=replicate(length(xs),0i32)
+            let b=replicate(length(xs),1i32)
+            let c=replicate(length(xs),2i32)
+            in (scatter(a,xs,xs),scatter(b,xs,xs),scatter(c,xs,xs))",
+    )?;
+    memory::simplify(&mut graph, false)?;
+    if super::parallel::run(&mut graph)? {
+        memory::simplify(&mut graph, false)?;
+    }
+    if super::parallel::move_siblings(&mut graph)? {
+        memory::simplify(&mut graph, false)?;
+    }
+    let root = test_graph::root(&graph);
+    let query = Query(&graph);
+    let accumulators = |query: Query<'_>| -> Result<Vec<_>, OptimizeError> {
+        let mut found = Vec::new();
+        for op in query.operations(root)? {
+            if query.contains("AccumulatorOperation", op)? {
+                found.push(analysis::count(query, "AccumulatorGroupCount", op)?);
+            }
+        }
+        Ok(found)
+    };
+    assert_eq!(accumulators(query)?, [1, 1, 1]);
+    let analyzed = query.required("DataflowRevision", RawValues(vec![]))?;
+    assert!(super::parallel::accumulators(&mut graph, false)?);
+    let query = Query(&graph);
+    assert_eq!(query.required("DataflowRevision", RawValues(vec![]))?, analyzed);
+    assert_eq!(accumulators(query)?, [3]);
+    memory::validate(&mut graph)
+}
+
+#[test]
+fn accumulator_sinking_batches_independent_producers() -> Result<(), OptimizeError> {
+    let mut graph = test_graph::import(
+        "entry first(dst:*[]i32,xs:[]i32) []i32 =
+            let ys=map(|x|x+1,xs) in scatter(dst,iota(length(xs)),ys)
+         entry second(dst:*[]i32,xs:[]i32) []i32 =
+            let ys=map(|x|x*2,xs) in scatter(dst,iota(length(xs)),ys)",
+    )?;
+    memory::simplify(&mut graph, false)?;
+    let query = Query(&graph);
+    let mut regions = Vec::new();
+    query.for_function("EntryOrder", |key, _| {
+        regions.push(query.required("FunctionRoot", key[0])?);
+        Ok(())
+    })?;
+    let analyzed = query.required("DataflowRevision", RawValues(vec![]))?;
+    assert!(super::parallel::accumulators(&mut graph, true)?);
+    let query = Query(&graph);
+    assert_eq!(query.required("DataflowRevision", RawValues(vec![]))?, analyzed);
+    for region in regions {
+        let operations = query.operations(region)?;
+        assert!(operations.iter().all(|&op| !query.contains("ParallelOperation", op).unwrap()));
+        let acc =
+            operations.into_iter().find(|&op| query.contains("AccumulatorOperation", op).unwrap()).unwrap();
+        let body = query.required("ControlRegion", (acc, 0_i64))?;
+        let traversals = query
+            .operations(body)?
+            .into_iter()
+            .filter(|&op| query.contains("ParallelOperation", op).unwrap())
+            .count();
+        assert_eq!(
+            traversals, 2,
+            "external reads and writes retain separate traversals"
+        );
+    }
+    memory::validate(&mut graph)
+}
+
+#[test]
 fn accumulator_sinking_stabilizes_when_domains_differ() {
     let source = compile_thru_tlc("entry main(dest:*[]i32,n:i32,m:i32) []i32 = let values=map(|i|i+1,iota(n)) in scatter(dest,iota(m),values)").unwrap();
     let program = fuse(from_tlc(&source).unwrap()).unwrap();

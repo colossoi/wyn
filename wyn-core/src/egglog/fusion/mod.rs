@@ -31,7 +31,6 @@ pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
 fn clear(graph: &mut EGraph) -> Result<(), OptimizeError> {
     for table in [
         "FusionOutputBase",
-        "FusionOperationBase",
         "SinkProducer",
         "PlacementReadOnly",
         "PlacementMember",
@@ -42,7 +41,6 @@ fn clear(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "PlacementHasDemand",
         "PlacementDead",
         "PlacementSite",
-        "PlacementUnder",
         "PlacementGuarded",
         "PlacementAvailable",
         "PlacementUnsafe",
@@ -50,9 +48,6 @@ fn clear(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "BranchUnsafe",
         "BranchFuseSelected",
         "BranchOperationBase",
-        "AccumulatorPair",
-        "AccumulatorFuseSelected",
-        "FusionGroupBase",
     ] {
         graph.clear_function(table)?;
     }
@@ -73,28 +68,16 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
             analysis::ensure(graph)?;
             crate::egglog::planning::analyze(graph)?;
         }
-        graph.parse_and_run_program(None, "(run-schedule (saturate placement-index) (saturate placement-demand dataflow-scopes) (saturate placement-legality graph-work) (saturate placement-select) (saturate graph-fusion dataflow-scopes) (saturate dataflow-effects))")?;
-        let query = Query(graph);
-        let mut selected = None;
-        query.for_each("AccumulatorPair", |row| {
-            if selected.is_none()
-                && !query.contains("OperationsConflict", (row[0], row[1]))?
-                && !query.contains("OperationDependency", (row[1], row[0]))?
-            {
-                selected = Some((row[0], row[1]));
-            }
-            Ok(())
-        })?;
-        if let Some((first, second)) = selected {
-            fuse_accumulators(graph, first, second)?;
-        } else {
-            let branch = query.first("BranchPair")?;
+        if !parallel::accumulators(graph, false)? {
+            graph.parse_and_run_program(None, "(run-schedule (saturate placement-index) (saturate placement-demand dataflow-scopes) (saturate placement-legality graph-work) (saturate placement-select) (saturate graph-fusion))")?;
+            let branch = Query(graph).first("BranchPair")?;
             if !fuse_ranked_bucket(graph)? {
                 if let Some(pair) = branch {
                     graph.update(|mut sink| sink.add("BranchFuseSelected", (pair[0], pair[1])))?;
                     graph.parse_and_run_program(None, "(run-schedule (run graph-fusion-apply))")?;
                     edit::remove(graph, &[pair[1]])?;
                 } else if !compaction::run(graph)?
+                    && !parallel::accumulators(graph, true)?
                     && !sink_producer(graph)?
                     && !parallel::move_siblings(graph)?
                 {
@@ -347,47 +330,24 @@ fn sink_producer(graph: &mut EGraph) -> Result<bool, OptimizeError> {
             moved.push((operation, query.required("OperationOrder", operation)?));
         }
     }
-    let copy = query.contains("BranchOperation", scope)?;
-    let edge = i64::from(copy && query.required("ControlRegion", (scope, 1_i64))? == body);
+    let edge = i64::from(query.required("ControlRegion", (scope, 1_i64))? == body);
     for &(operation, _) in &moved {
         edit::move_into(graph, operation, body, first)?;
     }
-    if copy {
-        let cloned = edit::clone_region(graph, scope, body, &[])?;
-        graph.update(|mut sink| {
-            sink.remove("ControlRegion", (scope, edge))?;
-            sink.set("ControlRegion", (scope, edge), cloned)?;
-            for (operation, order) in moved {
-                sink.remove("OperationRegion", operation)?;
-                sink.set("OperationRegion", operation, parent)?;
-                sink.remove("OperationOrder", operation)?;
-                sink.set("OperationOrder", operation, order)?;
-            }
-            Ok(())
-        })?;
-        edit::changed(graph)?;
-    }
-    Ok(true)
-}
-
-fn fuse_accumulators(graph: &mut EGraph, first: Value, second: Value) -> Result<(), OptimizeError> {
-    let query = Query(graph);
-    let region = query.required("ControlRegion", (first, 0_i64))?;
-    let groups = analysis::count(query, "AccumulatorGroupCount", first)?;
-    let outputs = analysis::count(query, "OutputCount", first)?;
-    let mut order = 0_i64;
-    for operation in query.operations(region)? {
-        order = order.max(query.0.value_to_base::<i64>(query.required("OperationOrder", operation)?) + 1);
-    }
+    let cloned = edit::clone_region(graph, scope, body, &[])?;
     graph.update(|mut sink| {
-        sink.add("AccumulatorFuseSelected", (first, second))?;
-        sink.set("FusionGroupBase", (first, second), groups)?;
-        sink.set("FusionOutputBase", (first, second), outputs)?;
-        sink.set("FusionOperationBase", (first, second), order)?;
+        sink.remove("ControlRegion", (scope, edge))?;
+        sink.set("ControlRegion", (scope, edge), cloned)?;
+        for (operation, order) in moved {
+            sink.remove("OperationRegion", operation)?;
+            sink.set("OperationRegion", operation, parent)?;
+            sink.remove("OperationOrder", operation)?;
+            sink.set("OperationOrder", operation, order)?;
+        }
         Ok(())
     })?;
-    graph.parse_and_run_program(None, "(run-schedule (run graph-fusion-apply))")?;
-    edit::remove(graph, &[second])
+    edit::changed(graph)?;
+    Ok(true)
 }
 
 pub(super) fn hoist(graph: &mut EGraph) -> Result<bool, OptimizeError> {

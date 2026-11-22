@@ -9,11 +9,13 @@ use crate::{LookupMap, LookupSet, StableMap};
 use egglog_engine::{EGraph, RawValues, Value, Write};
 use std::collections::VecDeque;
 
+mod accumulator;
 mod body;
 mod compact;
 mod hoist;
 mod motion;
 
+pub(super) use accumulator::run as accumulators;
 use body::{Body, Effects, Site};
 pub(super) use compact::compact;
 pub(super) use hoist::hoist;

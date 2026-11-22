@@ -11,6 +11,7 @@ use slotmap::SecondaryMap;
 use std::mem::take;
 use wyn_graph::ReplacementForest;
 
+mod accumulator;
 mod guard;
 use guard::Guard;
 
@@ -78,6 +79,7 @@ pub(super) enum ClauseKind {
 }
 
 pub(super) struct Clause {
+    owner: OperationId,
     pub kind: ClauseKind,
     pub values: Vec<Value>,
     pub neutral: Vec<Value>,
@@ -109,6 +111,7 @@ pub(super) struct Body {
     pub regions: LookupMap<Value, RegionId>,
     pub domains: SecondaryMap<OperationId, Domain>,
     pub barriers: LookupSet<OperationId>,
+    pub pinned: LookupSet<OperationId>,
     pub effects: SecondaryMap<OperationId, Effects>,
     pub unknown_aliases: bool,
     pub external: Option<Value>,
@@ -128,6 +131,7 @@ pub(super) struct Body {
     guards: Vec<Guard>,
     changed_clauses: LookupSet<ClauseId>,
     packed_outputs: LookupSet<(OperationId, i64)>,
+    accumulator_origins: SecondaryMap<OperationId, Vec<OperationId>>,
 }
 
 impl Body {
@@ -145,6 +149,7 @@ impl Body {
                 .filter_map(|(op, domain)| Some((*graph.operation_ids.get(&op)?, domain)))
                 .collect(),
             barriers: barriers.into_iter().filter_map(|op| graph.operation_ids.get(&op).copied()).collect(),
+            pinned: LookupSet::new(),
             graph,
             positions: SecondaryMap::new(),
             effects: SecondaryMap::new(),
@@ -166,6 +171,7 @@ impl Body {
             guards: Vec::new(),
             changed_clauses: LookupSet::new(),
             packed_outputs: LookupSet::new(),
+            accumulator_origins: SecondaryMap::new(),
         };
         for (region, block) in &body.graph.ir.regions {
             for (index, &op) in block.operations.iter().enumerate() {
@@ -276,6 +282,7 @@ impl Body {
                 body.clauses.insert(
                     id,
                     Clause {
+                        owner: op,
                         kind,
                         values,
                         neutral,
@@ -337,6 +344,29 @@ impl Body {
 
     pub fn users(&self, name: Value) -> impl Iterator<Item = Site> + '_ {
         self.uses.sites.get(&name).into_iter().flatten().copied()
+    }
+
+    pub fn site_operation(&self, site: Site) -> Option<OperationId> {
+        match site {
+            Site::Operand(UseSite::Input(op, _) | UseSite::Argument(op, _, _))
+            | Site::Attribute(op)
+            | Site::Certificate(op) => Some(op),
+            Site::Neutral(id) => Some(self.clause(id).owner),
+            Site::Operand(UseSite::Yield(..)) | Site::Region(_) | Site::Result(_) => None,
+        }
+    }
+
+    pub fn demand_region(&self, site: Site) -> Result<RegionId, OptimizeError> {
+        match site {
+            Site::Operand(UseSite::Yield(region, _)) | Site::Region(region) => Ok(region),
+            Site::Result(id) => self.lane(self.clause(id).owner),
+            _ => {
+                let Some(op) = self.site_operation(site) else {
+                    return Err(output_error("use has no execution scope"));
+                };
+                Ok(self.positions[op].0)
+            }
+        }
     }
 
     pub fn captures_available_before(&self, operation: OperationId, before: OperationId) -> bool {
@@ -588,7 +618,7 @@ impl Body {
         Ok(())
     }
 
-    fn move_output(&mut self, old: ValueRef, new: ValueRef) {
+    fn move_value(&mut self, old: ValueRef, new: ValueRef) {
         let name = self.graph.names[&old];
         self.graph.names.insert(new, name);
         self.graph.refs.insert(name, new);
@@ -597,6 +627,47 @@ impl Body {
             if let Site::Operand(site) = site {
                 self.bind_operand(site, name);
             }
+        }
+    }
+
+    fn append_results(&mut self, first: OperationId, second: OperationId) {
+        let offset = self.graph.ir.operations[first].result_types.len();
+        let result_types = take(&mut self.graph.ir.operations[second].result_types);
+        for i in 0..result_types.len() {
+            self.move_value(ValueRef::Result(second, i), ValueRef::Result(first, offset + i));
+        }
+        self.graph.ir.operations[first].result_types.extend(result_types);
+        let copied = self.uses.at(Site::Certificate(second)).map(|(_, name)| name).collect::<Vec<_>>();
+        for name in copied {
+            self.uses.add(Site::Certificate(first), name);
+        }
+    }
+
+    fn append_operations(&mut self, destination: RegionId, source: RegionId) {
+        let start =
+            self.graph.ir.regions[destination].operations.last().map_or(0, |op| self.positions[*op].1 + 1);
+        let moved = take(&mut self.graph.ir.regions[source].operations);
+        for (index, &op) in moved.iter().enumerate() {
+            self.positions[op] = (destination, start + index);
+            self.relocated.insert(op);
+        }
+        self.graph.ir.regions[destination].operations.extend(moved);
+        self.moved.insert(destination);
+        self.dirty(destination);
+    }
+
+    fn absorb_effects(&mut self, first: OperationId, second: OperationId) {
+        let b = self.effects.remove(second).unwrap_or_default();
+        let mut a = self.effects.remove(first).unwrap_or_default();
+        a.reads.extend(b.reads);
+        a.writes.extend(b.writes);
+        a.traps |= b.traps;
+        self.effects.insert(first, a);
+        if self.barriers.contains(&second) {
+            self.barriers.insert(first);
+        }
+        if self.pinned.remove(&second) {
+            self.pinned.insert(first);
         }
     }
 
@@ -669,21 +740,16 @@ impl Body {
             self.redirect(name, value)?;
             self.drop_op(load);
         }
-        let offset = self.graph.ir.operations[first].result_types.len();
-        let result_types = take(&mut self.graph.ir.operations[second].result_types);
-        for i in 0..result_types.len() {
-            self.move_output(ValueRef::Result(second, i), ValueRef::Result(first, offset + i));
-        }
-        self.graph.ir.operations[first].result_types.extend(result_types);
+        self.append_results(first, second);
         let clause_offset = self.results[first].clauses.len();
         let results = take(&mut self.results[second]);
+        for id in &results.clauses {
+            if let Some(clause) = self.clauses.get_mut(id) {
+                clause.owner = first;
+            }
+        }
         self.results[first].clauses.extend(results.clauses);
         self.results[first].outputs.extend(results.outputs);
-        let certificates =
-            self.uses.at(Site::Certificate(second)).map(|(_, name)| name).collect::<Vec<_>>();
-        for name in certificates {
-            self.uses.add(Site::Certificate(first), name);
-        }
         // Only reducer bodies remain attached to their clauses after the lane splice.
         let reducers = self.graph.ir.operations[second]
             .bodies
@@ -701,28 +767,12 @@ impl Body {
             self.parents.insert(edge.region, first);
         }
         self.graph.ir.operations[first].bodies.extend(reducers);
-        let start =
-            self.graph.ir.regions[destination].operations.last().map_or(0, |op| self.positions[*op].1 + 1);
-        let moved = take(&mut self.graph.ir.regions[source].operations);
-        for (index, &op) in moved.iter().enumerate() {
-            self.positions[op] = (destination, start + index);
-            self.relocated.insert(op);
-        }
-        self.graph.ir.regions[destination].operations.extend(moved);
-        self.moved.insert(destination);
+        self.append_operations(destination, source);
         let dropped = self.region_sites(source).collect::<Vec<_>>();
         for site in dropped {
             self.forget(site);
         }
-        let b = self.effects.remove(second).unwrap_or_default();
-        let mut a = self.effects.remove(first).unwrap_or_default();
-        a.reads.extend(b.reads);
-        a.writes.extend(b.writes);
-        a.traps |= b.traps;
-        self.effects.insert(first, a);
-        if self.barriers.contains(&second) {
-            self.barriers.insert(first);
-        }
+        self.absorb_effects(first, second);
         // Its result sites now belong to first, even though their original keys
         // are retained for publication.
         self.drop_op(second);
@@ -735,10 +785,17 @@ impl Body {
 
     pub fn publish(self, graph: &mut EGraph) -> Result<(), OptimizeError> {
         let _timing = timing::span("Rust parallel fusion publication");
-        // Pure motion changes neither result clauses nor operands.
-        if self.edited.is_empty() && self.removed.is_empty() {
+        self.publish_accumulators(graph)?;
+        // Motion and accumulator-only batches do not rewrite parallel clauses.
+        if self.edited.is_empty() {
             graph.update(|mut sink| self.publish_order(&mut sink))?;
-            return edit::changed(graph);
+            if self.removed.is_empty() {
+                return edit::changed(graph);
+            }
+            return edit::remove(
+                graph,
+                &self.removed.into_iter().map(|op| self.graph.operations[op]).collect::<Vec<_>>(),
+            );
         }
         self.publish_guards(graph)?;
         let query = Query(graph);
