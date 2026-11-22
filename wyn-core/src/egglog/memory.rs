@@ -1,6 +1,6 @@
 //! Pass orchestration over the authoritative graph.
 use super::dataflow::{
-    body, edit,
+    body, cse, edit,
     ir::{self, Code},
 };
 use super::query::Query;
@@ -102,10 +102,8 @@ pub(super) fn simplify(graph: &mut EGraph, hoist: bool) -> Result<(), OptimizeEr
             continue;
         }
         super::planning::analyze(graph)?;
-        graph.parse_and_run_program(
-            None,
-            "(run-schedule (saturate graph-candidate-index graph-candidates scalar-analysis dataflow-scopes))",
-        )?;
+        cse::publish(graph)?;
+        graph.parse_and_run_program(None, "(run-schedule (saturate graph-candidates scalar-analysis))")?;
         if scalar::apply(graph)? || scratch_shapes(graph)? {
             continue;
         }
@@ -144,7 +142,7 @@ pub(super) fn simplify(graph: &mut EGraph, hoist: bool) -> Result<(), OptimizeEr
         }
         graph.parse_and_run_program(
             None,
-            "(run-schedule (saturate graph-candidate-index graph-needed) (saturate graph-result-select))",
+            "(run-schedule (saturate graph-needed) (saturate graph-result-select))",
         )?;
         let query = Query(graph);
         let mut dead = Vec::new();

@@ -89,7 +89,7 @@ fn inlining_does_not_run_scalar_candidate_discovery() -> Result<(), OptimizeErro
     let mut graph = test_graph::import("entry main(x:i32) i32=x+x")?;
     assert!(Query(&graph).first("ScalarPayload")?.is_some());
     super::inline(&mut graph)?;
-    assert!(Query(&graph).first("CseOperation")?.is_none());
+    assert!(Query(&graph).first("ForwardCandidate")?.is_none());
     Ok(())
 }
 
@@ -445,7 +445,7 @@ fn applied_rewrites_do_not_replay_when_another_pass_revisits_the_same_body() -> 
     let revision = edit::revision(&graph)?;
     graph.parse_and_run_program(
         None,
-        "(run-schedule (saturate graph-candidate-index graph-candidates graph-needed graph-apply))",
+        "(run-schedule (saturate graph-candidates graph-needed graph-apply))",
     )?;
     assert_eq!(edit::revision(&graph)?, revision);
     let operation = Query(&graph).first("Operation")?.unwrap()[0];

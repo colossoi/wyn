@@ -1,6 +1,7 @@
 //! Move siblings on the live graph without publishing each move.
 use super::body::{Body, Effects};
 use super::{effects_conflict, Query};
+use crate::egglog::dataflow::ir;
 use crate::egglog::OptimizeError;
 use crate::memory_ir::{RegionId, ValueRef};
 use crate::LookupSet;
@@ -21,10 +22,7 @@ impl Motion {
     pub fn read(query: Query<'_>) -> Result<Self, OptimizeError> {
         let mut motion = Self::default();
         for (tables, set) in [
-            (
-                &["CseOperation", "FreshOutput", "IndexCalculationOperation"][..],
-                &mut motion.preparation,
-            ),
+            (&["FreshOutput"][..], &mut motion.preparation),
             (&["TotalIndex"][..], &mut motion.total_index),
             (&["InvocationDependent"][..], &mut motion.invocation_dependent),
             (&["ParallelOperation"][..], &mut motion.parallel),
@@ -38,6 +36,12 @@ impl Motion {
                 })?;
             }
         }
+        query.for_function("OperationPayload", |keys, payload| {
+            if ir::code(query.0, payload).has_expression_identity() {
+                motion.preparation.insert(keys[0]);
+            }
+            Ok(())
+        })?;
         motion.boundary.extend(&motion.parallel);
         motion.boundary.extend(&motion.branch);
         Ok(motion)

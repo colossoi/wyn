@@ -295,6 +295,11 @@ pub(super) fn run(graph: &mut EGraph) -> Result<bool, OptimizeError> {
         }
     }
     if changed {
+        let _handoff = timing::span("parallel fusion handoff");
+        body.simplify(Query(graph))?;
+        if accumulator::join(graph, &mut body)? {
+            body.simplify(Query(graph))?;
+        }
         body.publish(graph)?;
     }
     Ok(changed)

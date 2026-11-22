@@ -1,7 +1,7 @@
 //! Structural state owned by a parallel fusion pass until it publishes its edits.
 use super::Domain;
 use crate::egglog::analysis::count;
-use crate::egglog::dataflow::{body::BodyGraph, edit, ir::Code};
+use crate::egglog::dataflow::{body::BodyGraph, cse, edit, ir::Code};
 use crate::egglog::query::Query;
 use crate::egglog::{output_error, timing, OptimizeError};
 use crate::memory_ir::{BodyRole, Definition, OperationId, RegionId, UseSite, ValueRef};
@@ -718,6 +718,41 @@ impl Body {
                 self.drop_op(op);
             }
         }
+    }
+
+    pub fn simplify(&mut self, query: Query<'_>) -> Result<(), OptimizeError> {
+        let mut regions = self.moved.clone();
+        for &site in self.operand_changes.keys() {
+            regions.insert(self.demand_region(Site::Operand(site))?);
+        }
+        let mut reuse = cse::Reuse::default();
+        for &region in &regions {
+            let mut prefixes = Vec::new();
+            let mut child = region;
+            while let Some(owner) = self.parent(child) {
+                let (ancestor, index) = self.positions[owner];
+                if self.removed.contains(&owner) || regions.contains(&ancestor) {
+                    break;
+                }
+                let end = self.graph.ir.regions[ancestor]
+                    .operations
+                    .partition_point(|&op| self.positions[op].1 < index);
+                prefixes.push((ancestor, end));
+                child = ancestor;
+            }
+            if self.parent(child).is_none() {
+                prefixes.reverse();
+                reuse.scope(query, &self.graph, region, &prefixes)?;
+            }
+        }
+        for (old, new) in reuse.replacements {
+            if let ValueRef::Result(op, _) = old {
+                self.redirect(self.graph.names[&old], self.graph.names[&new])?;
+                self.drop_op(op);
+            }
+        }
+        self.prune();
+        Ok(())
     }
 
     pub fn splice(

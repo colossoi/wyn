@@ -31,13 +31,12 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
     loop {
         analysis::ensure(graph)?;
         crate::egglog::planning::analyze(graph)?;
-        if parallel::run(graph)? {
-            let _handoff = super::timing::span("parallel fusion handoff");
-            memory::simplify(graph, false)?;
-            analysis::ensure(graph)?;
+        let fused = parallel::run(graph)?;
+        if fused {
+            // Ranked scatter and the remaining legacy readers consume the published tables.
             crate::egglog::planning::analyze(graph)?;
         }
-        if !parallel::accumulators(graph, false)?
+        if (fused || !parallel::accumulators(graph, false)?)
             && !fuse_ranked_bucket(graph)?
             && !parallel::branches(graph)?
             && !compaction::run(graph)?

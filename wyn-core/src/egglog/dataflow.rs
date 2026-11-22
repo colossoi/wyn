@@ -1,5 +1,6 @@
 //! Shared structural flow analysis; arithmetic remains in TLC.
 pub(super) mod body;
+pub(super) mod cse;
 pub(super) mod edit;
 pub(super) mod ir;
 use super::query::Query;

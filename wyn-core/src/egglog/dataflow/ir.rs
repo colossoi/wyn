@@ -83,6 +83,20 @@ pub(in crate::egglog) enum Code {
     },
 }
 
+impl Code {
+    pub fn has_expression_identity(&self) -> bool {
+        matches!(
+            self,
+            Self::Scalar(_)
+                | Self::Constant { .. }
+                | Self::Product
+                | Self::Project { .. }
+                | Self::Length { .. }
+                | Self::IndexValue
+        )
+    }
+}
+
 #[derive(Debug)]
 struct CodeSort;
 
