@@ -113,11 +113,6 @@ pub(in crate::egglog) fn clear(graph: &mut EGraph) -> Result<(), OptimizeError> 
     for table in [
         "ForwardCandidate",
         "ValueReplacement",
-        "ResultLive",
-        "DeadResultClause",
-        "NeededName",
-        "NeededOperation",
-        "ObservableOperation",
         "FoldedConstant",
         "BranchCandidate",
         "RewrittenAccumulatorInfo",
@@ -131,7 +126,27 @@ pub(in crate::egglog) fn clear(graph: &mut EGraph) -> Result<(), OptimizeError> 
     ] {
         graph.clear_function(table)?;
     }
+    clear_demand(graph)?;
     analysis::advance(graph)
+}
+
+pub(in crate::egglog) fn clear_demand(graph: &mut EGraph) -> Result<(), OptimizeError> {
+    for table in [
+        "ResultLive",
+        "DeadResultClause",
+        "NeededName",
+        "NeededOperation",
+        "ObservableOperation",
+    ] {
+        graph.clear_function(table)?;
+    }
+    let key = || RawValues(Vec::new());
+    let revision = analysis::count(Query(graph), "DemandRevision", key())?;
+    graph.update(|mut sink| {
+        sink.remove("DemandRevision", key())?;
+        sink.set("DemandRevision", key(), revision + 1)
+    })?;
+    Ok(())
 }
 
 pub(in crate::egglog) fn remove(graph: &mut EGraph, operations: &[Value]) -> Result<(), OptimizeError> {

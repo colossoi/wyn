@@ -22,10 +22,10 @@
 (relation NameLiveAfter (OperationKey Name))
 
 (datatype DefinitionSite (ParameterSite RegionKey i64) (OperationSite OperationKey i64))
-(relation Defines (Name DefinitionSite))
+(function Defines (Name) DefinitionSite :merge old)
 (relation DefinitionRegion (Name RegionKey))
 (relation RootFunction (RegionKey FunctionName))
-(relation RegionOwnedBy (RegionKey OperationKey))
+(function RegionOwnedBy (RegionKey) OperationKey :merge old)
 (relation LiveFunction (FunctionName))
 (relation LiveRegion (RegionKey))
 (relation LiveOperation (OperationKey))

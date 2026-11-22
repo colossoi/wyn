@@ -2,12 +2,12 @@
 use super::dataflow::{edit, ir::Code};
 use super::query::Query;
 use super::{memory, output_error, OptimizeError, ScalarOptimization};
-use crate::types;
 use egglog_engine::sort::S;
+use egglog_engine::EGraph;
 use egglog_engine::Write;
-use egglog_engine::{EGraph, Value};
 
 mod fold;
+mod leaf;
 
 pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
     fold::register(graph);
@@ -77,6 +77,7 @@ pub(super) fn apply(graph: &mut EGraph) -> Result<bool, OptimizeError> {
         };
         constants.push((
             row[0],
+            row[1],
             Code::Constant {
                 ty,
                 bits: query.0.value_to_base::<i64>(row[1]),
@@ -84,46 +85,29 @@ pub(super) fn apply(graph: &mut EGraph) -> Result<bool, OptimizeError> {
         ));
         Ok(())
     })?;
-    for (operation, code) in &constants {
+    let mut scoped = false;
+    let mut structural = Vec::new();
+    for (operation, bits, code) in constants {
+        if leaf::fold(graph, operation, bits, code.clone())? {
+            scoped = true;
+        } else {
+            structural.push((operation, code));
+        }
+    }
+    if scoped {
+        leaf::preserve_revisions(graph)?;
+    }
+    if structural.is_empty() {
+        return Ok(false);
+    }
+    for (operation, code) in &structural {
         edit::set_code(graph, *operation, code.clone())?;
         edit::inputs(graph, *operation, &[])?;
     }
-    if !constants.is_empty() {
-        return Ok(true);
-    }
-    let mut lengths = Vec::new();
-    Query(graph).for_each("ForwardLength", |row| {
-        lengths.push((row[0], row[1]));
-        Ok(())
-    })?;
-    // Each replacement preserves the length value used by the other proofs.
-    for &(operation, index) in &lengths {
-        forward_length(graph, operation, index)?;
-    }
-    Ok(!lengths.is_empty())
+    Ok(true)
 }
 
-pub(super) fn forward_length(
-    graph: &mut EGraph,
-    operation: Value,
-    index: Value,
-) -> Result<(), OptimizeError> {
-    let code = if let Some(bits) = Query(graph).lookup("StaticIndex", index)? {
-        Code::Constant {
-            ty: types::i32(),
-            bits: graph.value_to_base::<i64>(bits),
-        }
-    } else {
-        Code::IndexValue
-    };
-    let indexed = matches!(code, Code::IndexValue);
-    edit::set_code(graph, operation, code)?;
-    edit::inputs(graph, operation, &[])?;
-    if indexed {
-        graph.update(|mut sink| sink.set("OperationIndex", (operation, 0_i64), index))?;
-    }
-    Ok(())
-}
+pub(super) use leaf::{forward_lengths, materialize_scratch};
 
 #[cfg(test)]
 #[path = "scalar_tests.rs"]

@@ -7,7 +7,7 @@
 (function ReturnOnlyCollection (ValueName) bool :merge (and old new))
 (rule ((= (EntryOrder function) order) (= root (FunctionRoot function))
        (= (RegionYield root slot) (ValueNameRef name))
-       (Defines (ValueNameRef name) (OperationSite operation result)) (= root (OperationRegion operation))
+       (= (Defines (ValueNameRef name)) (OperationSite operation result)) (= root (OperationRegion operation))
        (EmittedDispatch operation) (= (OutputRole operation result) (CollectedOutput)))
       ((set (ReturnOnlyCollection name) true)) :ruleset execution-features)
 (rule ((= known (ReturnOnlyCollection name)) (OperationUse operation (ValueNameRef name)))

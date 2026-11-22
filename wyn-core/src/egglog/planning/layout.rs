@@ -19,18 +19,10 @@ pub(super) fn fuse(graph: &mut EGraph) -> Result<bool, OptimizeError> {
         None,
         "(run-schedule (saturate layout-fusion) (run layout-fusion-select))",
     )?;
-    let query = Query(graph);
-    let mut extents = Vec::new();
-    query.for_each("ForwardLayoutExtent", |row| {
-        extents.push((row[0], row[1]));
-        Ok(())
-    })?;
-    if !extents.is_empty() {
-        for (operation, index) in extents {
-            scalar::forward_length(graph, operation, index)?;
-        }
+    if scalar::forward_lengths(graph, "ForwardLayoutExtent")? {
         return Ok(true);
     }
+    let query = Query(graph);
     let Some(candidate) = query.first("FuseLayout")? else {
         return Ok(false);
     };

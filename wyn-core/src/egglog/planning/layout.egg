@@ -8,7 +8,7 @@
 ; The transform's imported read carries its source coordinates explicitly.
 (rule ((= transform (OperationLayout layout)) (LiveOperation layout)
        (= (ResultCount layout) 1) (= (ResultValueCount layout 0) 1)
-       (= value (ResultValue layout 0 0)) (Defines value (OperationSite read 0))
+       (= value (ResultValue layout 0 0)) (= (Defines value) (OperationSite read 0))
        (IndexOperation read) (= (InputCount read) 3) (ProvenTotalOperation read)
        (= (OperationRegion read) (ControlRegion layout 0))
        (= (Input read 0) (ValueNameRef source)))
@@ -18,7 +18,7 @@
        (= (Input operation 0) (ValueNameRef source)))
       ((ForwardLayoutExtent operation extent)) :ruleset layout-fusion)
 (rule ((LayoutRead layout read source)
-       (Defines (ValueNameRef source) (OperationSite producer 0)) (= parent (OperationRegion producer))
+       (= (Defines (ValueNameRef source)) (OperationSite producer 0)) (= parent (OperationRegion producer))
        (= parent (OperationRegion layout))
        (< (OperationOrder producer) (OperationOrder layout))
        (ParallelOperation producer) (= (DomainRank (OperationDomain producer)) 2)

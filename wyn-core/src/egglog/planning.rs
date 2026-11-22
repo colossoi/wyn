@@ -87,6 +87,12 @@ pub(super) fn analyze(graph: &mut EGraph) -> Result<(), OptimizeError> {
         ] {
             graph.clear_function(table)?;
         }
+        let key = || RawValues(Vec::new());
+        let revision = analysis::count(Query(graph), "ShapeRevision", key())?;
+        graph.update(|mut sink| {
+            sink.remove("ShapeRevision", key())?;
+            sink.set("ShapeRevision", key(), revision + 1)
+        })?;
         clear_candidates(graph)?;
     }
     graph.parse_and_run_program(
