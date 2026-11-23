@@ -1,5 +1,6 @@
 //! Instantiate a region using its actual edges and the caller's argument identities.
 use super::ir::Code;
+use super::properties;
 use crate::egglog::graph::{
     ArgumentSite, CertificateSite, CollectiveInput, Formula, Graph, IterationDomain, ParallelResults, State,
 };
@@ -360,7 +361,22 @@ impl CloneNames {
     ) -> Result<(), Error> {
         let key = sink.add("ClonedOperation", (context, operation.source))?;
         sink.copy_occurrence(operation.source, key)?;
-        self.properties(sink, key, &operation)?;
+        properties::visit(
+            &operation.code,
+            operation.inputs.len() as i64,
+            operation.outputs.len() as i64,
+            |property| {
+                if let Some(mut value) = property.read(sink, operation.source)? {
+                    if property.table == "CallReturnType" {
+                        if let properties::Contents::Value(info) = &mut value {
+                            *info = self.return_type(sink, *info)?;
+                        }
+                    }
+                    property.write(sink, key, value)?;
+                }
+                Ok(())
+            },
+        )?;
         for certificate in operation.certificates {
             sink.add_certificate(CertificateSite::Operation(key), self.value(certificate));
         }
@@ -409,88 +425,6 @@ impl CloneNames {
         sink.set_order(key, operation.order);
         if let Some(target) = operation.target {
             sink.set_call_target(key, target);
-        }
-        Ok(())
-    }
-
-    fn properties(
-        &mut self,
-        sink: &mut State<'_, '_, '_>,
-        target: Value,
-        operation: &Operation,
-    ) -> Result<(), Error> {
-        let source = operation.source;
-        for table in [
-            "InstructionWork",
-            "LiteralBits",
-            "OperationWidth",
-            "OperationExecution",
-            "ScalarPayload",
-        ] {
-            if let Some(value) = sink.lookup(table, source)? {
-                sink.set(table, target, value)?;
-            }
-        }
-        for table in [
-            "MaterializedCopyOperation",
-            "ViewOperation",
-            "ArrayLiteralOperation",
-            "RangeOperation",
-            "ConstantOperation",
-            "ProductOperation",
-            "IndexOperation",
-            "IndexCalculationOperation",
-            "CallOperation",
-            "BranchOperation",
-            "CountedLoopOperation",
-            "WhileLoopOperation",
-            "ParallelOperation",
-            "AccumulatorOperation",
-            "DiscardableOperation",
-            "RepeatableOperation",
-            "OrderedOperation",
-            "LaneDependentOperation",
-            "ScratchAllocation",
-            "ProvenTotalOperation",
-        ] {
-            if sink.contains(table, source)? {
-                sink.add(table, target)?;
-            }
-        }
-        match operation.code {
-            Code::Length { axis } => {
-                sink.add("LengthOperation", (target, axis as i64))?;
-            }
-            Code::Project { index } => {
-                sink.add("ProjectionOperation", (target, index as i64))?;
-            }
-            _ => {}
-        }
-        for slot in 0..operation.inputs.len() as i64 {
-            if let Some(diet) = sink.lookup("InputDiet", (source, slot))? {
-                sink.set("InputDiet", (target, slot), diet)?;
-            }
-            for table in ["ReadsInput", "WritesInput", "ConsumesInput"] {
-                if sink.contains(table, (source, slot))? {
-                    sink.add(table, (target, slot))?;
-                }
-            }
-        }
-        for slot in 0..operation.outputs.len() as i64 {
-            if let Some(info) = sink.lookup("CallReturnType", (source, slot))? {
-                let info = self.return_type(sink, info)?;
-                sink.set("CallReturnType", (target, slot), info)?;
-            }
-            if sink.contains("FreshOutput", (source, slot))? {
-                sink.add("FreshOutput", (target, slot))?;
-            }
-            for input in 0..operation.inputs.len() as i64 {
-                for table in ["AliasesInput", "PreservesInputShape"] {
-                    if sink.contains(table, (source, slot, input))? {
-                        sink.add(table, (target, slot, input))?;
-                    }
-                }
-            }
         }
         Ok(())
     }

@@ -50,13 +50,15 @@ impl PurePrim for ScalarPrimitive {
                 };
                 let input = scalar_type(string(input).as_str())?;
                 let output = scalar_type(string(output).as_str())?;
-                let value = binary(
-                    op,
-                    decode(&input, state.base_values().unwrap::<i64>(a))?,
-                    decode(&input, state.base_values().unwrap::<i64>(b))?,
+                evaluate_typed(
+                    Payload::Binary(op),
                     &input,
-                )?;
-                encode(&output, value)?
+                    &output,
+                    &[
+                        state.base_values().unwrap::<i64>(a),
+                        state.base_values().unwrap::<i64>(b),
+                    ],
+                )?
             }
             (Self::Unary, &[op, input, output, a]) => evaluate_unary(
                 state.value_to_base::<Boxed<Payload>>(op).0,
@@ -108,21 +110,26 @@ fn encode(ty: &Type, value: Scalar) -> Option<i64> {
 fn evaluate_unary(payload: Payload, input: &str, output: &str, bits: i64) -> Option<i64> {
     let input = scalar_type(input)?;
     let output = scalar_type(output)?;
-    let value = decode(&input, bits)?;
-    let result = match payload {
-        Payload::Unary(op) => unary(op, value, &input)?,
-        Payload::Intrinsic { id, overload } => {
+    evaluate_typed(payload, &input, &output, &[bits])
+}
+
+/// Evaluate the same scalar operations through either a graph edge or a rule.
+pub(super) fn evaluate_typed(payload: Payload, input: &Type, output: &Type, bits: &[i64]) -> Option<i64> {
+    let result = match (payload, bits) {
+        (Payload::Binary(op), &[a, b]) => binary(op, decode(input, a)?, decode(input, b)?, input)?,
+        (Payload::Unary(op), &[value]) => unary(op, decode(input, value)?, input)?,
+        (Payload::Intrinsic { id, overload }, &[value]) => {
             let overload = by_id(id).overloads().get(overload)?;
             constant_eval::builtin(
                 &overload.lowering,
-                &[(Constant::from_scalar(value), input)],
-                &output,
+                &[(Constant::from_scalar(decode(input, value)?), input.clone())],
+                output,
             )?
             .as_scalar()?
         }
         _ => return None,
     };
-    encode(&output, result)
+    encode(output, result)
 }
 
 #[cfg(test)]

@@ -57,11 +57,15 @@ pub(super) fn simplify(graph: &mut Graph, hoist: bool) -> Result<(), OptimizeErr
     });
     edit::clear(graph)?;
     loop {
-        if !analysis::current(graph)? {
-            forward::before_analysis(graph)?;
+        let current = analysis::current(graph)?;
+        if !current {
+            let reach = analysis::calls::Reachability::read(graph)?;
+            let roots = reach.roots(graph);
+            scalar::splice_static_branches(graph, &roots)?;
+            forward::before_analysis(graph, roots)?;
         }
         analysis::ensure(graph)?;
-        {
+        if current {
             let _timing = timing::span("Rust expression reuse");
             cse::publish(graph)?;
         }

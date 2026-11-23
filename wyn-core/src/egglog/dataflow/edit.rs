@@ -1,52 +1,12 @@
 //! Apply selected edits to keyed graph cells without reconstructing a program.
 use super::ir::{self, Code};
+use super::properties;
 use crate::egglog::graph::{Formula, Graph};
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, output_error, OptimizeError};
 use crate::LookupSet;
 use egglog_engine::{RawValues, Value, Write};
 use wyn_graph::ReplacementForest;
-
-pub(in crate::egglog) const OPERATION_CELLS: &[&str] = &[
-    "InstructionWork",
-    "LiteralBits",
-    "InputDiet",
-    "OperationWidth",
-    "OperationExecution",
-    "CallReturnType",
-    "ScalarPayload",
-];
-
-pub(in crate::egglog) const OPERATION_RELATIONS: &[&str] = &[
-    "MaterializedCopyOperation",
-    "ViewOperation",
-    "ArrayLiteralOperation",
-    "RangeOperation",
-    "PreservesInputShape",
-    "ConstantOperation",
-    "ProductOperation",
-    "ProjectionOperation",
-    "LengthOperation",
-    "IndexOperation",
-    "IndexCalculationOperation",
-    "CallOperation",
-    "BranchOperation",
-    "CountedLoopOperation",
-    "WhileLoopOperation",
-    "ParallelOperation",
-    "AccumulatorOperation",
-    "DiscardableOperation",
-    "RepeatableOperation",
-    "OrderedOperation",
-    "LaneDependentOperation",
-    "ReadsInput",
-    "WritesInput",
-    "ConsumesInput",
-    "AliasesInput",
-    "FreshOutput",
-    "ScratchAllocation",
-    "ProvenTotalOperation",
-];
 
 pub(in crate::egglog) fn revision(graph: &Graph) -> Result<i64, OptimizeError> {
     analysis::count(Query(graph), "GraphEditRevision", RawValues(Vec::new()))
@@ -123,65 +83,24 @@ pub(in crate::egglog) fn remove_without_revision(
     graph: &mut Graph,
     operations: &[Value],
 ) -> Result<(), OptimizeError> {
-    if let [operation] = operations {
-        if graph.has_operation(*operation) && graph.code(*operation)? == Code::Call {
-            return remove_call(graph, *operation);
+    let keys: LookupSet<_> = operations.iter().copied().collect();
+    let mut removed = Vec::new();
+    for operation in keys {
+        if graph.has_operation(operation) {
+            removed.push((
+                operation,
+                graph.code(operation)?,
+                graph.input_count(operation),
+                graph.output_count(operation),
+            ));
         }
-    }
-    let operations: LookupSet<_> = operations.iter().copied().collect();
-    let query = Query(graph);
-    let mut rows = Vec::new();
-    for &table in OPERATION_CELLS {
-        query.for_function(table, |keys, _| {
-            if operations.contains(&keys[0]) {
-                rows.push((table, keys.to_vec()));
-            }
-            Ok(())
-        })?;
-    }
-    for &table in OPERATION_RELATIONS {
-        query.for_each(table, |keys| {
-            if operations.contains(&keys[0]) {
-                rows.push((table, keys.to_vec()));
-            }
-            Ok(())
-        })?;
     }
     graph.update(|mut sink| {
-        for (table, keys) in rows {
-            sink.remove(table, RawValues(keys))?;
-        }
-        for operation in operations {
+        for (operation, code, inputs, outputs) in removed {
+            properties::remove(&mut sink, operation, &code, inputs, outputs)?;
             sink.remove_operation(operation)?;
         }
         Ok(())
-    })?;
-    Ok(())
-}
-
-/// Calls have direct signature cells and a call class. Their effects are derived
-/// from the callee, so removing one does not require scanning operation tables.
-fn remove_call(graph: &mut Graph, operation: Value) -> Result<(), OptimizeError> {
-    let inputs = graph.input_count(operation);
-    let outputs = graph.output_count(operation);
-    graph.update(|mut sink| {
-        for table in [
-            "InstructionWork",
-            "LiteralBits",
-            "OperationWidth",
-            "OperationExecution",
-            "ScalarPayload",
-        ] {
-            sink.remove(table, operation)?;
-        }
-        for slot in 0..inputs {
-            sink.remove("InputDiet", (operation, slot))?;
-        }
-        for slot in 0..outputs {
-            sink.remove("CallReturnType", (operation, slot))?;
-        }
-        sink.remove("CallOperation", operation)?;
-        sink.remove_operation(operation)
     })?;
     Ok(())
 }
@@ -465,45 +384,16 @@ pub(in crate::egglog) fn set_code(
     operation: Value,
     code: Code,
 ) -> Result<(), OptimizeError> {
-    // Operation classes and access properties describe the payload, so replace them together.
-    let mut rows = Vec::new();
-    for &table in OPERATION_RELATIONS {
-        Query(graph).for_each(table, |row| {
-            if row[0] == operation {
-                rows.push((table, row.to_vec()));
-            }
-            Ok(())
-        })?;
-    }
-    let mut obsolete = Vec::new();
-    for &table in OPERATION_CELLS {
-        if ["InstructionWork", "LiteralBits", "ScalarPayload"].contains(&table) {
-            continue;
-        }
-        Query(graph).for_function(table, |keys, _| {
-            if keys[0] == operation {
-                obsolete.push((table, keys.to_vec()));
-            }
-            Ok(())
-        })?;
-    }
+    let previous = graph.code(operation)?;
+    let (inputs, outputs) = (graph.input_count(operation), graph.output_count(operation));
     graph.update(|mut sink| {
+        properties::remove(&mut sink, operation, &previous, inputs, outputs)?;
         sink.clear_collective_inputs(operation);
         sink.clear_collective_layouts(operation);
         sink.clear_formulas(operation, matches!(code, Code::IndexValue));
         sink.clear_operation_domain(operation);
-        for (table, row) in rows {
-            sink.remove(table, RawValues(row))?;
-        }
-        for (table, keys) in obsolete {
-            sink.remove(table, RawValues(keys))?;
-        }
         sink.clear_bodies(operation);
         sink.remove_call_target(operation);
-        sink.remove("ScalarPayload", operation)?;
-        sink.remove("InstructionWork", operation)?;
-        sink.remove("LiteralBits", operation)?;
-
         Ok(())
     })?;
     graph.update(|mut sink| Ok(ir::properties(&mut sink, operation, code)))??;

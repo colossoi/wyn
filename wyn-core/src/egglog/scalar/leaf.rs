@@ -5,6 +5,7 @@ use crate::egglog::dataflow::{
 };
 use crate::egglog::graph::Formula;
 use crate::egglog::graph::{Graph, Origin};
+use crate::egglog::payload::Payload;
 use crate::egglog::{output_error, query::Query, timing, OptimizeError};
 use crate::{types, LookupSet};
 use egglog_engine::sort::VecContainer;
@@ -62,15 +63,25 @@ pub(super) fn fold(
 ) -> Result<bool, OptimizeError> {
     let query = Query(graph);
     let old = query.0.code(operation)?;
+    let ordered = query.contains("OrderedOperation", operation)?;
+    // A FoldedConstant for ordered arithmetic requires the typed evaluator
+    // to have accepted both operands and produced a result.
+    let evaluated_ordered =
+        ordered && matches!(old, Code::Scalar(Payload::Binary(operator)) if !operator.is_speculatable());
     if !matches!(old, Code::Scalar(_) | Code::IndexValue)
-        || !query.contains("DiscardableOperation", operation)?
-        || query.contains("OrderedOperation", operation)?
+        || !(evaluated_ordered || !ordered && query.contains("DiscardableOperation", operation)?)
         || query.contains("LaneDependentOperation", operation)?
         || !rewrite(graph, operation, old, constant, None)?
     {
         return Ok(false);
     }
-    graph.update(|mut sink| sink.remove("FoldedConstant", (operation, bits)))?;
+    graph.update(|mut sink| {
+        if evaluated_ordered {
+            sink.remove("OrderedOperation", operation)?;
+            sink.set("OperationTotal", operation, true)?;
+        }
+        sink.remove("FoldedConstant", (operation, bits))
+    })?;
     Ok(true)
 }
 

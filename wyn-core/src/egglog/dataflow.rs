@@ -5,6 +5,7 @@ mod clone;
 pub(super) mod cse;
 pub(super) mod edit;
 pub(super) mod ir;
+mod properties;
 use super::query::Query;
 use super::OptimizeError;
 use crate::tlc::{

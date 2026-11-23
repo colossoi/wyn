@@ -8,10 +8,9 @@ use crate::{LookupMap, LookupSet};
 use egglog_engine::{Value, Write};
 
 /// Resolve structural identities before creating dataflow and effect proofs.
-pub(super) fn before_analysis(graph: &mut Graph) -> Result<(), OptimizeError> {
+pub(super) fn before_analysis(graph: &mut Graph, roots: Vec<Value>) -> Result<(), OptimizeError> {
     let _timing = timing::span("Rust structural value forwarding");
-    let reach = analysis::calls::Reachability::read(graph)?;
-    let replacements: Vec<_> = cse::find(Query(graph), reach.roots(graph))?.into_iter().collect();
+    let replacements: Vec<_> = cse::find(Query(graph), roots)?.into_iter().collect();
     if replacements.is_empty() {
         return Ok(());
     }
