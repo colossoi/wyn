@@ -102,7 +102,7 @@ fn inlining_preserves_dependent_calls_and_shape_arguments() -> Result<(), Optimi
             calls.reverse();
         }
         calls.push((4, Code::Range));
-        calls.push((5, Code::Uninitialized));
+        calls.push((5, Code::Scratch));
         let mut graph = test_graph::fixture(&calls, include_str!("tests/inline_arguments.egg"))?;
         super::inline(&mut graph, true)?;
         assert!(
@@ -134,7 +134,7 @@ fn inlining_exposes_parallel_work_through_scalar_helpers_before_copying_them() -
             (2, Code::Call),
             (3, Code::Call),
             (4, Code::Range),
-            (5, Code::Uninitialized),
+            (5, Code::Scratch),
             (6, Code::Parallel),
         ],
         include_str!("tests/inline_arguments.egg"),
@@ -169,7 +169,7 @@ fn nested_calls_mark_only_the_reachable_cycle_recursive() -> Result<(), Optimize
             (2, Code::Call),
             (3, Code::Call),
             (4, Code::Range),
-            (5, Code::Uninitialized),
+            (5, Code::Scratch),
             (6, Code::Call),
         ],
         include_str!("tests/inline_arguments.egg"),
@@ -221,7 +221,7 @@ fn inline_all_leaves_recursive_calls_intact() -> Result<(), OptimizeError> {
             (2, Code::Call),
             (3, Code::Call),
             (4, Code::Range),
-            (5, Code::Uninitialized),
+            (5, Code::Scratch),
         ],
         include_str!("tests/inline_arguments.egg"),
     )?;
@@ -245,7 +245,7 @@ fn structural_cloning_renames_storage_shapes_without_analysis() -> Result<(), Op
             (2, Code::Call),
             (3, Code::Call),
             (4, Code::Range),
-            (5, Code::Uninitialized),
+            (5, Code::Scratch),
         ],
         include_str!("tests/inline_arguments.egg"),
     )?;

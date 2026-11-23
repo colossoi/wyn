@@ -98,7 +98,7 @@ pub(super) fn apply(graph: &mut Graph) -> Result<bool, OptimizeError> {
 }
 
 pub(super) use branch::before_analysis as splice_static_branches;
-pub(super) use leaf::{forward_lengths, materialize_scratch, remove_use, ScalarInputs};
+pub(super) use leaf::{forward_lengths, forward_scratch_extents, remove_use, ScalarInputs};
 
 #[cfg(test)]
 #[path = "scalar_tests.rs"]

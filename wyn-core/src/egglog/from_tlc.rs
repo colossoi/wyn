@@ -1103,7 +1103,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
         } else if id == known.scratch_alloc {
             let count = self.node("IndexValue", source.name)?;
             let shape = self.vector(vec![count]);
-            let operation = self.operation(Code::Uninitialized, &[])?;
+            let operation = self.operation(Code::Scratch, &[])?;
             self.sink.set_formula(operation.0, Formula::Extents, shape)?;
             operation
         } else {

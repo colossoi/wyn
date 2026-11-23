@@ -329,45 +329,7 @@ impl Body<'_, '_, '_> {
                 )?;
                 vec![destination]
             }
-            Code::Scratch => {
-                let source = self.named(inputs[0])?;
-                let count = self.array_length(source.clone())?;
-                let length = if self.active_dispatch.is_none() {
-                    Some(self.host_array_length(&source)?)
-                } else {
-                    None
-                };
-                let block = self.current()?;
-                vec![self.collection_storage(
-                    &source.ty,
-                    &CollectionShape::outer(count, length),
-                    None,
-                    block,
-                )?]
-            }
-            Code::Uninitialized => {
-                let shape = self.query().vector(self.query().0.formula(statement, Formula::Extents)?)?;
-                let [extent] = shape.as_slice() else {
-                    return Err(error("scratch allocation requires one outer extent"));
-                };
-                let [binding] = pattern.as_slice() else {
-                    return Err(error("scratch allocation must bind one array"));
-                };
-                let Some((_, ty)) = runtime_binding(self.query(), *binding)? else {
-                    return Err(error("scratch allocation has no value binding"));
-                };
-                let count = self.index_expression(*extent)?;
-                let nonnegative =
-                    self.binary(BinaryOperator::GreaterEqual, count.clone(), Self::number(0))?;
-                self.require_condition(nonnegative)?;
-                let length = if self.active_dispatch.is_none() {
-                    host::scalar_index(self.query(), &self.host_values, *extent)?.map(Expr::Scalar)
-                } else {
-                    None
-                };
-                let block = self.current()?;
-                vec![self.collection_storage(&ty, &CollectionShape::outer(count, length), None, block)?]
-            }
+            Code::Scratch => vec![self.scratch(statement, &inputs, &pattern)?],
             Code::Length { axis } => {
                 let array = self.named(inputs[0])?;
                 let host_extent = if axis == 0 {
@@ -831,6 +793,49 @@ impl Body<'_, '_, '_> {
             return self.write_array_value(array, indices, value);
         }
         Err(error("array destination has no SSA representation"))
+    }
+
+    fn scratch(
+        &mut self,
+        statement: Value,
+        inputs: &[Value],
+        pattern: &[Value],
+    ) -> Result<Typed, OptimizeError> {
+        let (ty, count, length, capacity) = if let Some(shape) =
+            self.query().0.formula_at(statement, Formula::Extents)
+        {
+            let [extent] = self.query().vector(shape)?[..] else {
+                return Err(error("scratch allocation requires one outer extent"));
+            };
+            let [binding] = pattern else {
+                return Err(error("scratch allocation must bind one array"));
+            };
+            let Some((name, ty)) = runtime_binding(self.query(), *binding)? else {
+                return Err(error("scratch allocation has no value binding"));
+            };
+            let count = self.index_expression(extent)?;
+            let nonnegative = self.binary(BinaryOperator::GreaterEqual, count.clone(), Self::number(0))?;
+            self.require_condition(nonnegative)?;
+            let length = if self.active_dispatch.is_none() {
+                host::scalar_index(self.query(), &self.host_values, extent)?.map(Expr::Scalar)
+            } else {
+                None
+            };
+            let capacity =
+                self.compiler.execution.storage.static_count.get(&name).copied().filter(|size| *size >= 0);
+            (ty, count, length, capacity)
+        } else {
+            let [source] = inputs else {
+                return Err(error("scratch allocation needs an array shape"));
+            };
+            let source = self.named(*source)?;
+            let count = self.array_length(source.clone())?;
+            let length =
+                if self.active_dispatch.is_none() { Some(self.host_array_length(&source)?) } else { None };
+            (source.ty, count, length, None)
+        };
+        let block = self.current()?;
+        self.collection_storage(&ty, &CollectionShape::outer(count, length), capacity, block)
     }
 
     pub(in crate::egglog::to_ssa) fn reuse_storage(

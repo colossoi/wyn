@@ -85,13 +85,13 @@ pub(super) fn fold(
     Ok(true)
 }
 
-pub(in crate::egglog) fn materialize_scratch(
+pub(in crate::egglog) fn forward_scratch_extents(
     graph: &mut Graph,
     candidates: Vec<(Value, Value)>,
 ) -> Result<(), OptimizeError> {
     let mut changed = false;
     for (operation, count) in candidates {
-        changed |= rewrite(graph, operation, Code::Scratch, Code::Uninitialized, Some(count))?;
+        changed |= rewrite(graph, operation, Code::Scratch, Code::Scratch, Some(count))?;
     }
     if changed {
         edit::preserve_revisions(graph)?;
@@ -159,7 +159,7 @@ fn rewrite(
                 }
             }
             if let Some(index) = extent {
-                if matches!(new, Code::Uninitialized) {
+                if matches!(new, Code::Scratch) {
                     let shape = sink.container_to_value(VecContainer {
                         data: vec![index],
                         do_rebuild: true,
@@ -170,7 +170,10 @@ fn rewrite(
                     sink.set_formula(operation, Formula::Index, index)?;
                 }
             }
-            ir::properties(&mut sink, operation, new)
+            if old != new {
+                ir::properties(&mut sink, operation, new)?;
+            }
+            Ok(())
         })())
     })??;
     for (name, path, used) in changes {

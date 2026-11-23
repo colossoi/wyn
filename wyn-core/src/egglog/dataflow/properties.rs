@@ -110,7 +110,7 @@ pub(super) fn visit(
         Code::Length { axis } => ("LengthOperation", Keys::Slot(*axis as i64)),
         Code::Index => ("IndexOperation", Keys::Operation),
         Code::IndexValue => ("IndexCalculationOperation", Keys::Operation),
-        Code::Scratch | Code::Uninitialized => ("ScratchAllocation", Keys::Operation),
+        Code::Scratch => ("ScratchAllocation", Keys::Operation),
         Code::Call => ("CallOperation", Keys::Operation),
         Code::Branch => ("BranchOperation", Keys::Operation),
         Code::CountedLoop => ("CountedLoopOperation", Keys::Operation),

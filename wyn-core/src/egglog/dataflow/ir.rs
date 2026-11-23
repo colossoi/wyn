@@ -70,7 +70,6 @@ pub(in crate::egglog) enum Code {
     View,
     ArrayLiteral,
     Range,
-    Uninitialized,
     Copy,
     Update {
         bounds: Bounds,
@@ -185,10 +184,10 @@ pub(in crate::egglog) fn properties(
             sink.add("ReadsInput", (operation, 0_i64))?;
             sink.add("OrderedOperation", operation)?;
         }
-        Code::Scratch | Code::ArrayLiteral | Code::Range | Code::Uninitialized => {
+        Code::Scratch | Code::ArrayLiteral | Code::Range => {
             sink.add("FreshOutput", (operation, 0_i64))?;
             match code {
-                Code::Scratch | Code::Uninitialized => {
+                Code::Scratch => {
                     sink.add("ScratchAllocation", operation)?;
                 }
                 Code::ArrayLiteral => {

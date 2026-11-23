@@ -1,5 +1,5 @@
 //! Pass orchestration over the authoritative graph.
-use super::dataflow::{cse, edit, ir::Code};
+use super::dataflow::{cse, edit};
 use super::query::Query;
 use super::{analysis, scalar, timing, OptimizeError};
 use crate::egglog::graph::Graph;
@@ -94,7 +94,7 @@ pub(super) fn simplify(graph: &mut Graph, hoist: bool) -> Result<(), OptimizeErr
         if reduce_values(graph)? {
             continue;
         }
-        scratch_shapes(graph)?;
+        forward_scratch_extents(graph)?;
         if edit::revision(graph)? != before_planning {
             continue;
         }
@@ -140,12 +140,12 @@ fn reduce_values(graph: &mut Graph) -> Result<bool, OptimizeError> {
     forward::run(graph)
 }
 
-fn scratch_shapes(graph: &mut Graph) -> Result<(), OptimizeError> {
+fn forward_scratch_extents(graph: &mut Graph) -> Result<(), OptimizeError> {
     let query = Query(graph);
     let mut replacements = Vec::new();
     query.for_each("ScratchAllocation", |row| {
         let operation = row[0];
-        if !query.contains("LiveOperation", operation)? || query.0.code(operation)? != Code::Scratch {
+        if !query.contains("LiveOperation", operation)? || query.0.input_count(operation) != 1 {
             return Ok(());
         }
         let source = query.name(query.0.input(operation, 0_i64)?)?;
@@ -162,7 +162,7 @@ fn scratch_shapes(graph: &mut Graph) -> Result<(), OptimizeError> {
         }
         Ok(())
     })?;
-    scalar::materialize_scratch(graph, replacements)
+    scalar::forward_scratch_extents(graph, replacements)
 }
 
 #[cfg(test)]

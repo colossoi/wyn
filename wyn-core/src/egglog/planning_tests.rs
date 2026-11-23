@@ -1451,7 +1451,7 @@ fn indexed_literal_bounds_require_every_element() {
 #[test]
 fn collection_shape_proofs_distinguish_extents_from_capacity() {
     let mut graph = test_graph::fixture(
-        &[(0, Code::Parallel), (1, Code::Uninitialized)],
+        &[(0, Code::Parallel), (1, Code::Scratch)],
         r#"
         (set (FixtureOperationShape (OperationId 1)) (vec-of (IndexConstant 2)))
         (set (FixtureOutput (OperationId 1) 0) (ValueNameRef (ValueId 30)))
