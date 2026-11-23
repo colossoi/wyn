@@ -34,7 +34,7 @@ fn cloned_parameters_preserve_the_callers_value_type() {
     let argument = query.constructor("ValueId", 2_i64).unwrap().unwrap();
     let argument_ref = query.constructor("ValueNameRef", argument).unwrap().unwrap();
     let cloned = super::super::edit::clone_region(&mut graph, context, body, &[argument_ref]).unwrap();
-    assert_eq!(graph.yield_at(cloned, 0), Some(argument_ref));
+    assert_eq!(graph.yield_at(cloned.region, 0), Some(argument_ref));
     graph
         .parse_and_run_program(
             None,

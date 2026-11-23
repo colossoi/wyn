@@ -36,8 +36,8 @@ pub(super) fn fuse(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let column = query.0.input(read, 2_i64)?;
     let cloned = edit::clone_region(graph, read, lane, &[row, row, column])?;
     let query = Query(graph);
-    let operations = query.operations(cloned)?;
-    let replacement = query.required("CloneName", (read, result))?;
+    let operations = query.operations(cloned.region)?;
+    let replacement = cloned.name(result);
     edit::replace(graph, &[(replaced, replacement)])?;
     edit::splice(graph, read, &operations)?;
     edit::remove(graph, &[producer, read])?;

@@ -1,6 +1,7 @@
 //! Shared structural flow analysis; arithmetic remains in TLC.
 use crate::egglog::graph::Graph;
 pub(super) mod body;
+mod clone;
 pub(super) mod cse;
 pub(super) mod edit;
 pub(super) mod ir;

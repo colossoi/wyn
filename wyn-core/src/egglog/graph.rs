@@ -947,14 +947,6 @@ impl Graph {
             })
         })
     }
-
-    pub fn copy_occurrence(&mut self, original: Value, copy: Value) -> Result<(), OptimizeError> {
-        let Some(occurrence) = self.operations.get(&original) else {
-            return Err(output_error(format!("missing executable operation {original:?}")));
-        };
-        self.operations.insert(copy, occurrence.clone());
-        Ok(())
-    }
 }
 
 impl Deref for Graph {
@@ -991,6 +983,16 @@ enum OperandProof {
 }
 
 impl State<'_, '_, '_> {
+    pub fn copy_occurrence(&mut self, original: Value, copy: Value) -> Result<(), Error> {
+        let Some(occurrence) = self.operations.get(&original) else {
+            return Err(Error::BackendError(format!(
+                "missing executable operation {original:?}"
+            )));
+        };
+        self.operations.insert(copy, occurrence.clone());
+        Ok(())
+    }
+
     pub fn set_function_root(&mut self, function: Value, region: Value) {
         self.structure.write().roots.insert(function, region);
     }

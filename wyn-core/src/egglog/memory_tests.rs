@@ -285,7 +285,7 @@ fn structural_cloning_follows_nested_regions_without_analysis() -> Result<(), Op
     let returns = query.0.yield_values(root);
     let mut arguments = query.0.parameters(root);
     arguments[1] = arguments[2];
-    let cloned_root = edit::clone_region(&mut graph, branch, root, &arguments)?;
+    let cloned_root = edit::clone_region(&mut graph, branch, root, &arguments)?.region;
     let query = Query(&graph);
     let copied_branch = query.constructor("ClonedOperation", (branch, branch))?.unwrap();
     let original_arm = query.0.control_region(branch, 0_i64)?;
