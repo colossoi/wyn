@@ -662,7 +662,7 @@ pub(super) fn lower(
             let Some(stage) = emission.entries.last() else {
                 return Err(error("CPU scalar result has no interface stage"));
             };
-            let logical_results = emission.body.query().sequence("RegionYield", region)?.len();
+            let logical_results = emission.body.query().0.yield_values(region).len();
             let result = if logical_results == 1 && output_values.len() > 1 {
                 ScalarExpr::Field {
                     tuple: Box::new(result),
@@ -968,7 +968,7 @@ fn packed_collection_output(
     let Some(ty) = output_type(declared, lowered) else {
         return Ok(None);
     };
-    let results = query.sequence("RegionYield", region)?;
+    let results = query.0.yield_values(region);
     let [result] = results.as_slice() else {
         return Ok(None);
     };
@@ -2029,8 +2029,7 @@ impl EntryEmission<'_, '_, '_> {
         let pattern = self.body.query().sequence("Output", operation)?;
         let yes = self.body.query().0.control_region(operation, 0_i64)?;
         let no = self.body.query().0.control_region(operation, 1_i64)?;
-        let condition_name =
-            self.body.query().name(self.body.query().required("Input", (operation, 0_i64))?)?;
+        let condition_name = self.body.query().name(self.body.query().0.input(operation, 0_i64)?)?;
         let mut before = live_names(self.body.query(), &self.body.query().operations(yes)?, yes)?;
         before.extend(live_names(
             self.body.query(),
@@ -2975,7 +2974,7 @@ fn live_names(
     results: Value,
 ) -> Result<LookupSet<Value>, OptimizeError> {
     let mut names = statement_names(query, statements)?;
-    for name in query.sequence("RegionYield", results)? {
+    for name in query.0.yield_values(results) {
         if let Some(name) = query.value_name(name)? {
             names.insert(name);
         }

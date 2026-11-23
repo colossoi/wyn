@@ -75,8 +75,8 @@ fn collected_map(query: Query<'_>, operation: Value) -> Result<Option<MapLevel>,
     let mut found = None;
     for candidate in query.operations(region)? {
         if query.contains("IndexOperation", candidate)?
-            && analysis::count(query, "InputCount", candidate)? == 2
-            && query.required("Input", (candidate, 1_i64))?
+            && query.0.input_count(candidate) == 2
+            && query.0.input(candidate, 1_i64)?
                 == query
                     .constructor("ValueNameRef", axis)?
                     .ok_or_else(|| super::output_error("axis name missing"))?
@@ -90,7 +90,7 @@ fn collected_map(query: Query<'_>, operation: Value) -> Result<Option<MapLevel>,
         operation,
         region,
         index,
-        source: query.required("Input", (index, 0_i64))?,
+        source: query.0.input(index, 0_i64)?,
         result: query.required("ResultValue", (operation, 0_i64, 0_i64))?,
     }))
 }
@@ -118,10 +118,10 @@ fn fuse_ranked_bucket(graph: &mut Graph) -> Result<bool, OptimizeError> {
             return Ok(());
         };
         let expected = vec![(0..depth).map(|axis| axis as i64).collect::<Vec<_>>()];
-        if depth == 0 || coordinates != expected || analysis::count(query, "InputCount", bucket)? != 2 {
+        if depth == 0 || coordinates != expected || query.0.input_count(bucket) != 2 {
             return Ok(());
         }
-        let items = query.required("Input", (bucket, 1_i64))?;
+        let items = query.0.input(bucket, 1_i64)?;
         let mut levels = Vec::new();
         let mut output = items;
         for _ in 0..depth {
@@ -221,7 +221,7 @@ fn fuse_ranked_bucket(graph: &mut Graph) -> Result<bool, OptimizeError> {
         edit::move_into(graph, operation, callback, first)?;
     }
     let query = Query(graph);
-    let destination = query.required("Input", (bucket, 0_i64))?;
+    let destination = query.0.input(bucket, 0_i64)?;
     let inputs =
         std::iter::once(destination).chain(levels.iter().map(|level| level.source)).collect::<Vec<_>>();
     edit::inputs(graph, bucket, &inputs)?;

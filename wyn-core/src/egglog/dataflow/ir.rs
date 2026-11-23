@@ -128,11 +128,8 @@ pub(in crate::egglog) fn operation_at(
         sink.set("InstructionWork", operation, inputs.len() as i64)?;
     }
     properties(sink, operation, code)?;
-    sink.set("InputCount", operation, inputs.len() as i64)?;
-    for (index, input) in inputs.iter().enumerate() {
-        let input = input.fact(sink)?;
-        sink.set("Input", (operation, index as i64), input)?;
-    }
+    let inputs = inputs.iter().map(|input| input.fact(sink)).collect::<Result<Vec<_>, _>>()?;
+    sink.set_inputs(operation, inputs)?;
     Ok(OperationId(operation))
 }
 
@@ -307,11 +304,8 @@ pub(in crate::egglog) fn yields(
     region: RegionId,
     values: &[Name],
 ) -> Result<(), OptimizeError> {
-    sink.set("RegionYieldCount", region.0, values.len() as i64)?;
-    for (index, value) in values.iter().enumerate() {
-        let name = value.fact(sink)?;
-        sink.set("RegionYield", (region.0, index as i64), name)?;
-    }
+    let values = values.iter().map(|value| value.fact(sink)).collect::<Result<Vec<_>, _>>()?;
+    sink.set_yields(region.0, values)?;
     Ok(())
 }
 

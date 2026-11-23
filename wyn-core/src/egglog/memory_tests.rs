@@ -24,8 +24,8 @@ fn copy_forwarding_preserves_captures_loop_entries_and_backedges() -> Result<(),
         .find(|&op| query.0.code(op).unwrap() == Code::Scalar(Payload::Binary(BinaryOperator::Subtract)))
         .expect("loop body has a subtraction");
     let initial = query.0.argument(owner, 0_i64, 0_i64)?;
-    let operands = query.sequence("Input", subtract)?;
-    let backedge = query.required("RegionYield", (inner, 0_i64))?;
+    let operands = query.0.inputs(subtract);
+    let backedge = query.0.yield_value(inner, 0_i64)?;
     let ty = query.required("ValueType", query.name(initial)?)?;
     let sources = [
         query.name(initial)?,
@@ -62,12 +62,9 @@ fn copy_forwarding_preserves_captures_loop_entries_and_backedges() -> Result<(),
             let (start, left, end) = (alias(1000_i64)?, alias(1001_i64)?, alias(1002_i64)?);
             let capture = alias(1003_i64)?;
             sink.set_argument(ArgumentSite(owner, 0, 0), start)?;
-            sink.remove("Input", (subtract, 0_i64))?;
-            sink.set("Input", (subtract, 0_i64), left)?;
-            sink.remove("Input", (subtract, 1_i64))?;
-            sink.set("Input", (subtract, 1_i64), capture)?;
-            sink.remove("RegionYield", (inner, 0_i64))?;
-            sink.set("RegionYield", (inner, 0_i64), end)?;
+            sink.set_input(subtract, 0_i64, left)?;
+            sink.set_input(subtract, 1_i64, capture)?;
+            sink.set_yield(inner, 0_i64, end)?;
             Ok(())
         })())
     })??;
@@ -77,9 +74,9 @@ fn copy_forwarding_preserves_captures_loop_entries_and_backedges() -> Result<(),
     analysis::ensure(&mut graph)?;
     let query = Query(&graph);
     assert_eq!(query.0.argument(owner, 0_i64, 0_i64)?, initial);
-    assert_eq!(query.sequence("Input", subtract)?, operands);
+    assert_eq!(query.0.inputs(subtract), operands);
     assert!(query.contains("RegionCapture", (inner, operands[1]))?);
-    assert_eq!(query.required("RegionYield", (inner, 0_i64))?, backedge);
+    assert_eq!(query.0.yield_value(inner, 0_i64)?, backedge);
     for id in 1000_i64..1004 {
         let copy = query.constructor("OperationId", id)?.unwrap();
         assert!(!query.contains("Operation", copy)?);
@@ -119,7 +116,7 @@ fn inlining_preserves_dependent_calls_and_shape_arguments() -> Result<(), Optimi
             (fail (check (LiveOperation call) (CallOperation call)))
             (check (= (OperationIndex (OperationId 4) 0) (IndexValue (ValueId 0))))
             (check (= (OperationShape (OperationId 5)) (vec-of (IndexValue (ValueId 0)))))
-            (check (= (RegionYield (RegionId 0) 0) (ValueNameRef (ValueId 3))))
+            (check (= (wyn-yield (RegionId 0) 0) (ValueNameRef (ValueId 3))))
             (check (= (ValueType (ValueId 0)) (ScalarInfo (ScalarElement (I32)))))
         "#,
         )?;
@@ -147,7 +144,6 @@ fn inlining_exposes_parallel_work_through_scalar_helpers_before_copying_them() -
         (delete (InlineAll)) (set (InlineAll) false)
         (set (FixtureRegion (OperationId 6)) (RegionId 2))
         (set (FixtureOrder (OperationId 6)) 0)
-        (set (InputCount (OperationId 6)) 0)
         (set (OutputCount (OperationId 6)) 0)
         "#,
     )?;
@@ -279,7 +275,7 @@ fn structural_cloning_follows_nested_regions_without_analysis() -> Result<(), Op
     let branch = query.first("BranchOperation")?.unwrap()[0];
     let view = query.first("ViewOperation")?.unwrap()[0];
     let slices = query.required("OperationSlices", view)?;
-    let returns = query.sequence("RegionYield", root)?;
+    let returns = query.0.yield_values(root);
     let mut arguments = query.sequence("RegionParameter", root)?;
     arguments[1] = arguments[2];
     let cloned_root = edit::clone_region(&mut graph, branch, root, &arguments)?;
@@ -295,7 +291,7 @@ fn structural_cloning_follows_nested_regions_without_analysis() -> Result<(), Op
     assert_eq!(query.0.operation_region(copied_view)?, copied_arm);
     assert_ne!(query.required("OperationSlices", copied_view)?, slices);
     assert!(query.first("FlowLive")?.is_none());
-    let results = query.sequence("RegionYield", cloned_root)?;
+    let results = query.0.yield_values(cloned_root);
     let operations = query.operations(cloned_root)?;
     edit::replace(&mut graph, &returns.into_iter().zip(results).collect::<Vec<_>>())?;
     edit::splice(&mut graph, branch, &operations)?;
@@ -352,14 +348,12 @@ fn unused_values_follow_complete_uses_and_the_current_program() -> Result<(), Op
     super::validate(&mut graph)?;
     let function = test_graph::entry(&graph);
     let root = test_graph::root(&graph);
-    let outputs = Query(&graph).sequence("RegionYield", root)?;
+    let outputs = Query(&graph).0.yield_values(root);
     super::simplify(&mut graph, false)?;
-    assert_eq!(Query(&graph).sequence("RegionYield", root)?, outputs);
+    assert_eq!(Query(&graph).0.yield_values(root), outputs);
     assert!(!Query(&graph).operations(root)?.is_empty());
     graph.update(|mut sink| {
-        sink.remove("RegionYield", (root, 0_i64))?;
-        sink.remove("RegionYieldCount", root)?;
-        sink.set("RegionYieldCount", root, 0_i64)?;
+        sink.set_yields(root, Vec::new())?;
         sink.remove("RegionReturnType", (root, 0_i64))?;
         sink.remove("FunctionResultCount", function)?;
         sink.set("FunctionResultCount", function, 0_i64)?;
@@ -461,8 +455,7 @@ fn reduction_combiner_cannot_capture_a_lane_index() -> Result<(), OptimizeError>
     let reducer = query.required("ResultReducer", (parallel, 0_i64))?;
     graph.update(|mut sink| {
         let value = sink.add("ValueNameRef", index)?;
-        sink.remove("RegionYield", (reducer, 0_i64))?;
-        sink.set("RegionYield", (reducer, 0_i64), value)
+        sink.set_yield(reducer, 0_i64, value)
     })?;
     assert!(super::validate(&mut graph).is_err());
     Ok(())
@@ -496,7 +489,7 @@ fn fusion_forwards_pointwise_reads_and_retains_both_results() -> Result<(), Opti
     let mut reads = 0;
     query.for_each("LiveOperation", |row| {
         if query.contains("IndexOperation", row[0])? {
-            let source = query.required("Input", (row[0], 0_i64))?;
+            let source = query.0.input(row[0], 0_i64)?;
             query.for_function("Output", |keys, output| {
                 reads += usize::from(output == source && query.contains("ParallelOperation", keys[0])?);
                 Ok(())
@@ -524,7 +517,7 @@ fn fusion_proves_a_computed_index_selects_the_produced_lane() -> Result<(), Opti
         .into_iter()
         .find(|&operation| query.contains("IndexOperation", operation).unwrap())
         .unwrap();
-    let axis = query.name(query.required("Input", (load, 1_i64))?)?;
+    let axis = query.name(query.0.input(load, 1_i64)?)?;
     let ty = query.required("ValueType", axis)?;
     graph.update(|mut sink| {
         Ok((|| -> Result<(), OptimizeError> {
@@ -544,8 +537,7 @@ fn fusion_proves_a_computed_index_selects_the_produced_lane() -> Result<(), Opti
                 left = result;
             }
             let index = sink.add("ValueNameRef", left)?;
-            sink.remove("Input", (load, 1_i64))?;
-            sink.set("Input", (load, 1_i64), index)?;
+            sink.set_input(load, 1_i64, index)?;
             Ok(())
         })())
     })??;
@@ -669,8 +661,8 @@ fn different_parameter_names_do_not_prove_disjoint_memory() -> Result<(), Optimi
         (set (ValueType (ValueId 0)) array) (set (ValueType (ValueId 1)) array)
         (set (RegionParameter (RegionId 0) 0) (ValueNameRef (ValueId 0)))
         (set (RegionParameter (RegionId 0) 1) (ValueNameRef (ValueId 1)))
-        (set (Input (OperationId 0) 0) (ValueNameRef (ValueId 0))) (WritesInput (OperationId 0) 0)
-        (set (Input (OperationId 1) 0) (ValueNameRef (ValueId 1))) (ReadsInput (OperationId 1) 0)
+        (set (FixtureInput (OperationId 0) 0) (ValueNameRef (ValueId 0))) (WritesInput (OperationId 0) 0)
+        (set (FixtureInput (OperationId 1) 0) (ValueNameRef (ValueId 1))) (ReadsInput (OperationId 1) 0)
         (EffectCompare (OperationId 0) (OperationId 1))
         (run-schedule (saturate dataflow-resources) (saturate dataflow-effects))
         (check (OperationsConflict (OperationId 0) (OperationId 1)))
@@ -694,7 +686,7 @@ fn consumption_follows_product_components_and_excludes_shape_witnesses() -> Resu
         r#"
         (check (External function) (= (ExternalParameterCount function) 1)
             (= (ExternalParameterDiet function 0) (ProductDiet (vec-of (Consume) (Observe)))))
-        (check (CallOperation operation) (= (InputCount operation) 1)
+        (check (CallOperation operation) (= (wyn-input-count operation) 1)
             (= (InputDiet operation 0) (ProductDiet (vec-of (Consume) (Observe)))))
     "#,
     )?;
@@ -733,7 +725,7 @@ fn allocation_bounds_do_not_assume_integer_sums_cannot_overflow() -> Result<(), 
         crate::egglog::fusion::run(&mut graph)?;
         planning::analyze(&mut graph)?;
         let query = Query(&graph);
-        let output = query.name(query.required("RegionYield", (test_graph::root(&graph), 0_i64))?)?;
+        let output = query.name(query.0.yield_value(test_graph::root(&graph), 0_i64)?)?;
         let index = graph.update(|mut sink| sink.add("IndexValue", output))?;
         let bound =
             Query(&graph).lookup("IndexUpper", index)?.map(|value| graph.value_to_base::<i64>(value));
@@ -747,7 +739,7 @@ fn range_lengths_clamp_negative_counts_before_shape_planning() -> Result<(), Opt
     let mut graph = test_graph::import("entry main() i32=length(iota(-3))")?;
     super::simplify(&mut graph, false)?;
     let query = Query(&graph);
-    let result = query.required("RegionYield", (test_graph::root(&graph), 0_i64))?;
+    let result = query.0.yield_value(test_graph::root(&graph), 0_i64)?;
     assert_eq!(
         graph.value_to_base::<i64>(query.required("ConstantValue", result)?),
         0
@@ -788,10 +780,10 @@ fn consumed_tokens_cannot_be_reused() -> Result<(), OptimizeError> {
         (set (AccumulatorType (AccumulatorId 0)) info) (set (AccumulatorType (AccumulatorId 1)) info) (set (AccumulatorType (AccumulatorId 2)) info)
         (Region (RegionId 0)) (FlowScope (RegionId 0))
         (set (RegionParameterCount (RegionId 0)) 1) (set (RegionParameter (RegionId 0) 0) (AccNameRef (AccumulatorId 0)))
-        (set (ParameterDiet (RegionId 0) 0) (Consume)) (set (RegionYieldCount (RegionId 0)) 0)
-        (set (InputCount (OperationId 0)) 1) (set (Input (OperationId 0) 0) (AccNameRef (AccumulatorId 0)))
+        (set (ParameterDiet (RegionId 0) 0) (Consume))
+        (set (FixtureInput (OperationId 0) 0) (AccNameRef (AccumulatorId 0)))
         (set (OutputCount (OperationId 0)) 1) (set (Output (OperationId 0) 0) (AccNameRef (AccumulatorId 1)))
-        (set (InputCount (OperationId 1)) 1) (set (Input (OperationId 1) 0) (AccNameRef (AccumulatorId 0)))
+        (set (FixtureInput (OperationId 1) 0) (AccNameRef (AccumulatorId 0)))
         (set (OutputCount (OperationId 1)) 1) (set (Output (OperationId 1) 0) (AccNameRef (AccumulatorId 2)))
         (set (FixtureRegion (OperationId 0)) (RegionId 0)) (set (FixtureOrder (OperationId 0)) 0)
         (set (FixtureRegion (OperationId 1)) (RegionId 0)) (set (FixtureOrder (OperationId 1)) 1)
@@ -812,13 +804,11 @@ fn validation_checks_live_functions_and_ignores_retired_programs() -> Result<(),
     graph.update(|mut sink| {
         let missing = sink.add("ValueId", 999_i64)?;
         let name = sink.add("ValueNameRef", missing)?;
-        let dead_root = sink.add("RegionId", 999_i64)?;
-        sink.set("RegionYieldCount", dead_root, 1_i64)?;
         let dead = sink.add("FunctionId", (999_i64, "dead"))?;
         let dead_root = sink.add("RegionId", 999_i64)?;
         sink.add("Function", dead)?;
         sink.set_function_root(dead, dead_root);
-        sink.set("RegionYield", (dead_root, 0_i64), name)?;
+        sink.set_yields(dead_root, vec![name])?;
         Ok(())
     })?;
     super::validate(&mut graph)?;
@@ -872,8 +862,7 @@ fn invariant_auditing_is_enabled_only_in_debug_builds() -> Result<(), OptimizeEr
     graph.update(|mut sink| {
         let value = sink.add("ValueId", 999_i64)?;
         let name = sink.add("ValueNameRef", value)?;
-        sink.remove("RegionYield", (root, 0_i64))?;
-        sink.set("RegionYield", (root, 0_i64), name)
+        sink.set_yield(root, 0_i64, name)
     })?;
     assert_eq!(super::validate(&mut graph).is_err(), cfg!(debug_assertions));
     Ok(())

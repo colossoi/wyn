@@ -66,6 +66,10 @@ pub(super) fn invalidate(graph: &mut Graph) -> Result<(), OptimizeError> {
         "AvailabilityDemand",
         "EntryDemand",
         "EndDemand",
+        "BranchResult",
+        "BinaryOperands",
+        "IndexOperands",
+        "LengthMeasure",
         "RegionAttributeUse",
         "RegionCapture",
         "DirectOperationUse",
@@ -155,7 +159,82 @@ pub(super) fn structure(graph: &mut Graph, for_inlining: bool) -> Result<(), Opt
     let _timing = timing::span("egglog graph structure");
     invalidate(graph)?;
     calls::publish(graph, for_inlining)?;
+    if !for_inlining {
+        publish_proof_operands(graph)?;
+    }
     graph.parse_and_run_program(None, "(run-schedule (saturate graph-structure flow-scopes))")?;
+    Ok(())
+}
+
+// Correlate the operands of each proof before the solver joins their types and ranges.
+pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeError> {
+    let query = Query(graph);
+    let mut branches = Vec::new();
+    query.for_each("BranchOperation", |row| {
+        let op = row[0];
+        let Some(yes) = graph.control_at(op, 0) else {
+            return Ok(());
+        };
+        let Some(no) = graph.control_at(op, 1) else {
+            return Ok(());
+        };
+        let Some(count) = query.lookup("OutputCount", op)? else {
+            return Ok(());
+        };
+        let results = query.indexed("Output", &[op], graph.value_to_base::<i64>(count))?;
+        let arms = graph.yield_values(yes).into_iter().zip(graph.yield_values(no));
+        for (slot, (result, (yes, no))) in results.into_iter().zip(arms).enumerate() {
+            branches.push((op, slot as i64, result, yes, no));
+        }
+        Ok(())
+    })?;
+    let mut binary = Vec::new();
+    let mut indices = Vec::new();
+    let mut lengths = Vec::new();
+    {
+        let structure = graph.structure().read();
+        query.for_function("ScalarPayload", |keys, _| {
+            if let Some([left, right]) = structure.inputs.values.get(&keys[0]).map(Vec::as_slice) {
+                binary.push((keys[0], *left, *right));
+            }
+            Ok(())
+        })?;
+        query.for_each("IndexOperation", |row| {
+            if let Some([array, index]) = structure.inputs.values.get(&row[0]).map(Vec::as_slice) {
+                if let (Some(array), Some(index)) = (query.value_name(*array)?, query.value_name(*index)?) {
+                    indices.push((row[0], array, index));
+                }
+            }
+            Ok(())
+        })?;
+        query.for_each("LengthOperation", |row| {
+            let Some(array) = structure.inputs.values.get(&row[0]).and_then(|inputs| inputs.first()) else {
+                return Ok(());
+            };
+            let Some(length) = query.lookup("Output", (row[0], 0_i64))? else {
+                return Ok(());
+            };
+            if let (Some(array), Some(length)) = (query.value_name(*array)?, query.value_name(length)?) {
+                lengths.push((row[0], row[1], array, length));
+            }
+            Ok(())
+        })?;
+    }
+    graph.update(|mut sink| {
+        for branch in branches {
+            sink.add("BranchResult", branch)?;
+        }
+        for operands in binary {
+            sink.add("BinaryOperands", operands)?;
+        }
+        for operands in indices {
+            sink.add("IndexOperands", operands)?;
+        }
+        for length in lengths {
+            sink.add("LengthMeasure", length)?;
+        }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -384,11 +463,8 @@ pub(super) fn validate(graph: &Graph) -> Result<(), OptimizeError> {
         graph.code(operation)?;
         query.0.operation_region(operation)?;
         query.0.operation_order(operation)?;
-        for table in ["Input", "Output"] {
-            let count = count(query, &format!("{table}Count"), operation)?;
-            for slot in 0..count {
-                typed(query, query.required(table, (operation, slot))?)?;
-            }
+        for value in graph.inputs(operation).into_iter().chain(query.sequence("Output", operation)?) {
+            typed(query, value)?;
         }
         if query.contains("CallOperation", operation)? {
             let target = query.0.call_target(operation)?;
@@ -397,7 +473,7 @@ pub(super) fn validate(graph: &Graph) -> Result<(), OptimizeError> {
             } else {
                 count(query, "RegionParameterCount", query.0.function_root(target)?)?
             };
-            if count(query, "InputCount", operation)? != expected {
+            if query.0.input_count(operation) != expected {
                 return Err(output_error("call argument count differs from its signature"));
             }
         }
@@ -409,14 +485,14 @@ pub(super) fn validate(graph: &Graph) -> Result<(), OptimizeError> {
             let results = count(query, "OutputCount", operation)?;
             let induction = i64::from(query.contains("CountedLoopOperation", operation)?);
             if count(query, "RegionParameterCount", body)? != results + induction
-                || count(query, "RegionYieldCount", body)? != results
+                || query.0.yield_count(body) != results
             {
                 return Err(output_error("loop carry signature is inconsistent"));
             }
             for slot in 0..results {
                 let initial = query.0.argument(operation, 0_i64, slot)?;
                 let parameter = query.required("RegionParameter", (body, slot))?;
-                let backedge = query.required("RegionYield", (body, slot))?;
+                let backedge = query.0.yield_value(body, slot)?;
                 let result = query.required("Output", (operation, slot))?;
                 let ty = typed(query, parameter)?;
                 for name in [initial, backedge, result] {
@@ -447,8 +523,8 @@ pub(super) fn validate(graph: &Graph) -> Result<(), OptimizeError> {
             typed(query, query.required("RegionParameter", (region, slot))?)?;
             query.required("ParameterDiet", (region, slot))?;
         }
-        for slot in 0..count(query, "RegionYieldCount", region)? {
-            let name = query.required("RegionYield", (region, slot))?;
+        for slot in 0..query.0.yield_count(region) {
+            let name = query.0.yield_value(region, slot)?;
             typed(query, name)?;
             if !query.contains("AvailableEnd", (region, name))? {
                 return Err(output_error("region yields a value outside its execution scope"));

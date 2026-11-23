@@ -93,7 +93,7 @@ fn rewrite(
     extent: Option<Value>,
 ) -> Result<bool, OptimizeError> {
     let query = Query(graph);
-    let inputs = query.sequence("Input", operation)?;
+    let inputs = query.0.inputs(operation);
     let old_index = query.lookup("OperationIndex", (operation, 0_i64))?;
     let old_attributes = index_operands(query, old_index)?;
     let new_attributes = index_operands(query, extent)?;
@@ -130,11 +130,9 @@ fn rewrite(
                 }
             }
             for slot in 0..inputs.len() as i64 {
-                sink.remove("Input", (operation, slot))?;
                 sink.remove("InputDiet", (operation, slot))?;
             }
-            sink.remove("InputCount", operation)?;
-            sink.set("InputCount", operation, 0_i64)?;
+            sink.set_inputs(operation, Vec::new())?;
             for &name in old_attributes.difference(&new_attributes) {
                 sink.remove("OperationAttributeUse", (operation, name))?;
             }

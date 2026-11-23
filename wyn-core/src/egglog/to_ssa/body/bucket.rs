@@ -14,7 +14,8 @@ impl Body<'_, '_, '_> {
     ) -> Result<Typed, OptimizeError> {
         let names = self
             .query()
-            .sequence("Input", operation)?
+            .0
+            .inputs(operation)
             .into_iter()
             .map(|name| self.query().name(name))
             .collect::<Result<Vec<_>, _>>()?;

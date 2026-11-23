@@ -30,8 +30,8 @@ pub(super) fn fuse(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let lane = query.0.control_region(producer, 0_i64)?;
     let result = query.required("ResultValue", (producer, 0_i64, 0_i64))?;
     let replaced = query.required("Output", (read, 0_i64))?;
-    let row = query.required("Input", (read, 1_i64))?;
-    let column = query.required("Input", (read, 2_i64))?;
+    let row = query.0.input(read, 1_i64)?;
+    let column = query.0.input(read, 2_i64)?;
     let cloned = edit::clone_region(graph, read, lane, &[row, row, column])?;
     let query = Query(graph);
     let operations = query.operations(cloned)?;

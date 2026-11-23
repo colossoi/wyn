@@ -10,8 +10,6 @@ use wyn_graph::ReplacementForest;
 pub(in crate::egglog) const OPERATION_CELLS: &[&str] = &[
     "InstructionWork",
     "LiteralBits",
-    "Input",
-    "InputCount",
     "InputDiet",
     "Output",
     "OutputCount",
@@ -191,20 +189,35 @@ pub(in crate::egglog) fn replace(
 ) -> Result<(), OptimizeError> {
     let mut resolved = ReplacementForest::new();
     for &(old, new) in replacements {
-        resolved.replace(old, new).map_err(|_| output_error("cyclic operand replacement"))?;
+        if old != new {
+            resolved.replace(old, new).map_err(|error| output_error(error.to_string()))?;
+        }
     }
     let mut arguments = Vec::new();
+    let mut operands = Vec::new();
+    let mut yields = Vec::new();
     {
         let graph = graph.structure().read();
         for (old, new) in resolved.into_map() {
             if let Some(sites) = graph.argument_uses.get(&old) {
                 arguments.extend(sites.iter().map(|&site| (site, new)));
             }
+            if let Some(sites) = graph.inputs.uses.get(&old) {
+                operands.extend(sites.iter().map(|&(op, slot)| (op, slot, new)));
+            }
+            if let Some(sites) = graph.yields.uses.get(&old) {
+                yields.extend(sites.iter().map(|&(region, slot)| (region, slot, new)));
+            }
         }
     }
     seed_replacements(graph, replacements)?;
-    graph.parse_and_run_program(None, "(run-schedule (saturate graph-operands))")?;
     graph.update(|mut sink| {
+        for (region, slot, value) in yields {
+            sink.set_yield(region, slot, value)?;
+        }
+        for (op, slot, value) in operands {
+            sink.set_input(op, slot, value)?;
+        }
         for (site, value) in arguments {
             sink.set_argument(site, value)?;
         }
@@ -246,18 +259,12 @@ pub(in crate::egglog) fn inputs(
     operation: Value,
     names: &[Value],
 ) -> Result<(), OptimizeError> {
-    let count = analysis::count(Query(graph), "InputCount", operation)?;
+    let count = graph.input_count(operation);
     graph.update(|mut sink| {
         for slot in 0..count {
-            sink.remove("Input", (operation, slot))?;
             sink.remove("InputDiet", (operation, slot))?;
         }
-        sink.remove("InputCount", operation)?;
-        sink.set("InputCount", operation, names.len() as i64)?;
-        for (slot, &name) in names.iter().enumerate() {
-            sink.set("Input", (operation, slot as i64), name)?;
-        }
-        Ok(())
+        sink.set_inputs(operation, names.to_vec())
     })?;
     changed(graph)?;
     Ok(())
@@ -359,8 +366,6 @@ pub(in crate::egglog) fn set_code(
             "InstructionWork",
             "LiteralBits",
             "ScalarPayload",
-            "Input",
-            "InputCount",
             "Output",
             "OutputCount",
         ]
@@ -443,8 +448,10 @@ pub(in crate::egglog) fn clone_region(
     let mut argument_names = LookupSet::new();
     while let Some(region) = pending.pop() {
         if members.insert(region) {
+            argument_names.extend(graph.yield_values(region));
             for operation in query.operations(region)? {
                 pending.extend(query.attached_regions(operation)?);
+                argument_names.extend(graph.inputs(operation));
                 for (slot, _) in graph.controls(operation) {
                     argument_names.extend(graph.arguments(operation, slot));
                 }
@@ -453,7 +460,7 @@ pub(in crate::egglog) fn clone_region(
         }
     }
     graph.update(|mut sink| {
-        for region in members {
+        for &region in &members {
             sink.add("CloneMember", (context, region))?;
         }
         for operation in operations {
@@ -474,6 +481,18 @@ pub(in crate::egglog) fn clone_region(
         "(run-schedule (saturate clone-index) (saturate clone-names) (saturate clone-edges))",
     )?;
     let query = Query(graph);
+    let mut cloned_yields = Vec::new();
+    for region in members {
+        let new_region = query
+            .constructor("ClonedRegion", (context, region))?
+            .ok_or_else(|| output_error("cloned region has no identity"))?;
+        let values = graph
+            .yield_values(region)
+            .into_iter()
+            .map(|name| query.required("CloneName", (context, name)))
+            .collect::<Result<Vec<_>, _>>()?;
+        cloned_yields.push((new_region, values));
+    }
     let mut operations = Vec::new();
     query.for_each("CloneOperation", |row| {
         if row[0] == context {
@@ -510,15 +529,24 @@ pub(in crate::egglog) fn clone_region(
                 query.0.operation_order(row[1])?,
                 target,
                 controls,
+                graph
+                    .inputs(row[1])
+                    .into_iter()
+                    .map(|name| query.required("CloneName", (context, name)))
+                    .collect::<Result<Vec<_>, _>>()?,
             ));
         }
         Ok(())
     })?;
-    for &(original, copy, _, _, _, _) in &operations {
+    for &(original, copy, _, _, _, _, _) in &operations {
         graph.copy_occurrence(original, copy)?;
     }
     graph.update(|mut sink| {
-        for (_, operation, region, order, target, controls) in operations {
+        for (region, values) in cloned_yields {
+            sink.set_yields(region, values)?;
+        }
+        for (_, operation, region, order, target, controls, inputs) in operations {
+            sink.set_inputs(operation, inputs)?;
             for (slot, child, arguments) in controls {
                 sink.set_control(operation, slot, child);
                 for (index, name) in arguments.into_iter().enumerate() {

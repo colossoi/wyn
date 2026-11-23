@@ -10,11 +10,11 @@ pub(super) fn function(query: Query<'_>, function: Value) -> Result<(), Optimize
     }
     let root = query.0.function_root(function)?;
     let results = count(query, "FunctionResultCount", function)?;
-    if count(query, "RegionYieldCount", root)? != results {
+    if query.0.yield_count(root) != results {
         return Err(output_error("function result count differs from its signature"));
     }
     for slot in 0..results {
-        let name = query.required("RegionYield", (root, slot))?;
+        let name = query.0.yield_value(root, slot)?;
         returns(
             query,
             name,
@@ -34,8 +34,8 @@ pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), Optimi
         let target = query.0.call_target(operation)?;
         let external = query.contains("External", target)?;
         let root = if external { None } else { Some(query.0.function_root(target)?) };
-        for slot in 0..count(query, "InputCount", operation)? {
-            let argument = query.required("Input", (operation, slot))?;
+        for slot in 0..query.0.input_count(operation) {
+            let argument = query.0.input(operation, slot)?;
             let expected = if let Some(root) = root {
                 typed(query, query.required("RegionParameter", (root, slot))?)?
             } else {
@@ -67,10 +67,10 @@ pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), Optimi
         }
     }
     if query.contains("BranchOperation", operation)? {
-        boolean(query, query.required("Input", (operation, 0_i64))?)?;
+        boolean(query, query.0.input(operation, 0_i64)?)?;
         for edge in 0_i64..2 {
             let child = query.0.control_region(operation, edge)?;
-            if count(query, "RegionYieldCount", child)? != count(query, "OutputCount", operation)? {
+            if query.0.yield_count(child) != count(query, "OutputCount", operation)? {
                 return Err(output_error("branch result count differs from its signature"));
             }
             for slot in 0..count(query, "OutputCount", operation)? {
@@ -131,7 +131,7 @@ pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), Optimi
                 let neutral = count(query, "ResultNeutralCount", (operation, clause))?;
                 if rank == 0
                     || count(query, "RegionParameterCount", reducer)? != 2 * neutral
-                    || count(query, "RegionYieldCount", reducer)? != neutral
+                    || query.0.yield_count(reducer) != neutral
                     || count(query, "ResultValueCount", (operation, clause))? != neutral
                 {
                     return Err(output_error(
@@ -156,13 +156,11 @@ pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), Optimi
     if query.contains("AccumulatorOperation", operation)? {
         let body = query.0.control_region(operation, 0_i64)?;
         let groups = count(query, "AccumulatorGroupCount", operation)?;
-        if count(query, "RegionParameterCount", body)? < groups
-            || count(query, "RegionYieldCount", body)? < groups
-        {
+        if count(query, "RegionParameterCount", body)? < groups || query.0.yield_count(body) < groups {
             return Err(output_error("accumulator scope loses a capability"));
         }
         for group in 0..groups {
-            let result = query.required("RegionYield", (body, group))?;
+            let result = query.0.yield_value(body, group)?;
             let token = query.fields("AccNameRef", result)?[0];
             let Some(capability) = query.lookup("TokenCapability", token)? else {
                 return Err(output_error(
@@ -208,8 +206,8 @@ pub(super) fn region(query: Query<'_>, region: Value) -> Result<(), OptimizeErro
         }
     }
     let mut tokens = LookupSet::default();
-    for slot in 0..count(query, "RegionYieldCount", region)? {
-        let name = query.required("RegionYield", (region, slot))?;
+    for slot in 0..query.0.yield_count(region) {
+        let name = query.0.yield_value(region, slot)?;
         if let Some(token) = query.enode("AccNameRef", name)? {
             if !tokens.insert(token[0]) {
                 return Err(output_error("body returns the same accumulator capability twice"));

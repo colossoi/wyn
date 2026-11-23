@@ -153,7 +153,7 @@ pub(super) fn remember(
 ) -> Result<(), OptimizeError> {
     let code = query.0.code(statement)?;
     let pattern = query.sequence("Output", statement)?;
-    let operands = query.sequence("Input", statement)?;
+    let operands = query.0.inputs(statement);
     let atoms = operands.iter().map(|&name| query.name(name)).collect::<Result<Vec<_>, _>>()?;
     if matches!(code, Code::Branch) {
         let condition = atom(query, values, atoms[0])?;
@@ -251,7 +251,7 @@ pub(super) fn remember(
                 let [record, _, replacement] = args.as_slice() else {
                     return Err(error("host record update arity mismatch"));
                 };
-                let operand = query.required("Input", (statement, 1_i64))?;
+                let operand = query.0.input(statement, 1_i64)?;
                 let Some(index) = query.lookup("ConstantValue", operand)? else {
                     return Ok(());
                 };
@@ -384,11 +384,7 @@ fn results(
     for statement in query.operations(region)? {
         remember(query, function, &mut values, statement)?;
     }
-    query
-        .sequence("RegionYield", region)?
-        .into_iter()
-        .map(|name| operand(query, &values, name))
-        .collect()
+    query.0.yield_values(region).into_iter().map(|name| operand(query, &values, name)).collect()
 }
 
 pub(super) fn scalar_type(ty: &crate::types::Type) -> Option<ScalarType> {
@@ -548,7 +544,7 @@ fn scalar_body(
             names.push(name);
         }
         let result = if matches!(code, Code::Branch) {
-            let condition = query.name(query.required("Input", (statement, 0_i64))?)?;
+            let condition = query.name(query.0.input(statement, 0_i64)?)?;
             let Some(condition) = atom(query, &values, condition)? else {
                 return Ok(None);
             };
@@ -608,7 +604,7 @@ fn scalar_body(
         }
     }
     let mut results = Vec::new();
-    for result in query.sequence("RegionYield", body)? {
+    for result in query.0.yield_values(body) {
         let Some(value) = operand(query, &values, result)? else {
             return Ok(None);
         };
@@ -720,7 +716,7 @@ fn scalar_call(
         return Ok(None);
     }
     let params = query.sequence("RegionParameter", root)?;
-    let arguments = query.sequence("Input", call)?;
+    let arguments = query.0.inputs(call);
     if params.len() != arguments.len() {
         return Err(error("scalar call arity mismatch"));
     }

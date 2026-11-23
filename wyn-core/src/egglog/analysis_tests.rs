@@ -85,7 +85,7 @@ fn dataflow_requests_reuse_the_same_graph_revision() -> Result<(), OptimizeError
     let root = test_graph::root(&graph);
     let query = Query(&graph);
     let operation = query.operations(root)?[0];
-    let inputs = query.sequence("Input", operation)?;
+    let inputs = query.0.inputs(operation);
     ensure(&mut graph)?;
     let revision = Query(&graph).required("AnalysisRevision", RawValues(Vec::new()))?;
     ensure(&mut graph)?;
@@ -252,16 +252,16 @@ fn immutable_term_facts_survive_an_analysis_refresh() -> Result<(), OptimizeErro
 #[test]
 fn logical_values_and_storage_reads_have_distinct_effects() {
     let mut graph = fusion::new_graph().unwrap();
-    graph.parse_and_run_program(None,r#"
+    super::super::test_graph::facts_with_positions(&mut graph,r#"
         (let value (ValueId 0)) (let storage (ValueId 1))
         (set (ValueType value) (LogicalValue (ArrayType (ValueArray) (vec-of (FixedExtent 4)) (ElementValue (ScalarElement (I32))))))
         (set (ValueType storage) (LogicalValue (ArrayType (StorageArray) (vec-of (FixedExtent 4)) (ElementValue (ScalarElement (I32))))))
         (set (RegionParameter (RegionId 0) 0) (ValueNameRef value))
         (set (RegionParameter (RegionId 0) 1) (ValueNameRef storage))
-        (set (Input (OperationId 0) 0) (ValueNameRef value)) (ReadsInput (OperationId 0) 0)
-        (set (Input (OperationId 1) 0) (ValueNameRef storage)) (ReadsInput (OperationId 1) 0)
+        (set (FixtureInput (OperationId 0) 0) (ValueNameRef value)) (ReadsInput (OperationId 0) 0)
+        (set (FixtureInput (OperationId 1) 0) (ValueNameRef storage)) (ReadsInput (OperationId 1) 0)
         (OrderedOperation (OperationId 2)) (OrderedOperation (OperationId 3))
-        (set (Input (OperationId 4) 0) (ValueNameRef storage)) (WritesInput (OperationId 4) 0)
+        (set (FixtureInput (OperationId 4) 0) (ValueNameRef storage)) (WritesInput (OperationId 4) 0)
         (EffectCompare (OperationId 2) (OperationId 1))
         (EffectCompare (OperationId 2) (OperationId 4))
         (EffectCompare (OperationId 2) (OperationId 3))
@@ -279,8 +279,8 @@ fn reducer_width_requires_agreement_and_a_length_preserving_combiner() -> Result
     for (item_width, preserves, expected) in [(4, true, true), (3, true, false), (4, false, false)] {
         let result_bound = if preserves { "(IndexValue length)" } else { "(IndexConstant 3)" };
         let mut graph = fusion::new_graph()?;
-        graph.parse_and_run_program(
-            None,
+        super::super::test_graph::facts_with_positions(
+            &mut graph,
             &format!(
                 r#"
             (let fold (OperationId 0)) (let reducer (RegionId 0))
@@ -295,9 +295,9 @@ fn reducer_width_requires_agreement_and_a_length_preserving_combiner() -> Result
             (set (RegionParameterCount reducer) 2)
             (set (RegionParameter reducer 0) (ValueNameRef left))
             (set (RegionParameter reducer 1) (ValueNameRef right))
-            (set (RegionYield reducer 0) (ValueNameRef result))
+            (set (FixtureYield reducer 0) (ValueNameRef result))
             (LengthOperation measure 0)
-            (set (Input measure 0) (ValueNameRef left))
+            (set (FixtureInput measure 0) (ValueNameRef left))
             (set (Output measure 0) (ValueNameRef length))
             (ArrayOuterBound neutral (IndexConstant 4))
             (ArrayOuterBound item (IndexConstant {item_width}))

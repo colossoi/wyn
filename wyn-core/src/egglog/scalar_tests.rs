@@ -116,7 +116,7 @@ fn unrelated_syntax_does_not_add_evaluation_dependencies() -> Result<(), Optimiz
     let mut graph = optimized("entry main(x:i32) i32=x")?;
     let entry = Query(&graph).first("EntryOrder")?.unwrap()[0];
     let root = Query(&graph).0.function_root(entry)?;
-    let before = Query(&graph).sequence("RegionYield", root)?;
+    let before = Query(&graph).0.yield_values(root);
     graph.update(|mut sink| {
         Ok((|| -> Result<(), OptimizeError> {
             let value = sink.add("ValueId", 999_i64)?;
@@ -130,7 +130,7 @@ fn unrelated_syntax_does_not_add_evaluation_dependencies() -> Result<(), Optimiz
         })())
     })??;
     super::run(&mut graph, ScalarOptimization::Full)?;
-    assert_eq!(Query(&graph).sequence("RegionYield", root)?, before);
+    assert_eq!(Query(&graph).0.yield_values(root), before);
     assert!(Query(&graph).operations(root)?.is_empty());
     Ok(())
 }

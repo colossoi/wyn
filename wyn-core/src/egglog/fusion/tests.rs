@@ -20,7 +20,7 @@ fn change_lane_index(
     let operations = query.operations(lane)?;
     let position = operations.iter().position(|&op| query.contains("IndexOperation", op).unwrap()).unwrap();
     let load = operations[position];
-    let index = query.required("Input", (load, 1_i64))?;
+    let index = query.0.input(load, 1_i64)?;
     let info = query.required("ValueType", query.name(index)?)?;
     let index = Name::Value(query.name(index)?);
     let delta = delta.map(|name| query.name(name)).transpose()?.map(Name::Value);
@@ -63,9 +63,8 @@ fn change_lane_index(
             for (slot, key) in operations[position..].iter().enumerate() {
                 sink.set_order(*key, (position + inserted.len() + slot) as i64);
             }
-            sink.remove("Input", (load, 1_i64))?;
             let new_index = new_index.fact(&mut sink)?;
-            sink.set("Input", (load, 1_i64), new_index)?;
+            sink.set_input(load, 1_i64, new_index)?;
             Ok(())
         })())
     })??;
@@ -189,7 +188,7 @@ fn cross_region_motion_moves_a_capture_chain_in_one_edit() -> Result<(), Optimiz
     let query = Query(&graph);
     assert_eq!(query.0.operation_region(multiply)?, root);
     assert!(query.operations(root)?.into_iter().any(|op| {
-        query.lookup("Input", (op, 0_i64)).unwrap() == query.lookup("Output", (multiply, 0_i64)).unwrap()
+        query.0.input_at(op, 0_i64) == query.lookup("Output", (multiply, 0_i64)).unwrap()
             && query.0.code(op).unwrap() == Code::Scalar(Payload::Binary(BinaryOperator::Add))
     }));
     // The repaired scope and work summaries must agree with a fresh solve.
@@ -258,12 +257,12 @@ fn merging_matching_branches_preserves_certificates_and_path_order() -> Result<(
     let [first, second, dependent] = branches[..] else {
         panic!("three authored branches")
     };
-    let condition = query.name(query.required("Input", (first, 0_i64))?)?;
+    let condition = query.name(query.0.input(first, 0_i64)?)?;
     let mut arms = Vec::new();
     for edge in [0_i64, 1] {
         let a = query.0.control_region(first, edge)?;
         let b = query.0.control_region(second, edge)?;
-        let offset = analysis::count(query, "RegionYieldCount", a)?;
+        let offset = query.0.yield_count(a);
         let operations = [query.operations(a)?, query.operations(b)?].concat();
         arms.push((a, b, offset, operations));
     }

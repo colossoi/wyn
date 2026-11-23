@@ -267,7 +267,7 @@ fn scalar_admission_uses_ir_literal_edits() {
     scalar::run(&mut program.graph, ScalarOptimization::Basic).unwrap();
     let root = super::test_graph::root(&program.graph);
     let query = Query(&program.graph);
-    let result = query.required("RegionYield", (root, 0_i64)).unwrap();
+    let result = query.0.yield_value(root, 0_i64).unwrap();
     assert_eq!(
         program.graph.value_to_base::<i64>(query.required("ConstantValue", result).unwrap()),
         7

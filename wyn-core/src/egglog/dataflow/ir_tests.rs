@@ -103,8 +103,8 @@ fn operations_share_connectivity_without_sharing_occurrences_or_payloads() {
     let query = Query(&graph);
     for slot in 0_i64..2 {
         assert_eq!(
-            query.required("Input", (add.0, slot)).unwrap(),
-            query.required("Input", (sub.0, slot)).unwrap()
+            query.0.input(add.0, slot).unwrap(),
+            query.0.input(sub.0, slot).unwrap()
         );
     }
     let add_code = graph.code(add.0).unwrap();
@@ -116,25 +116,15 @@ fn operations_share_connectivity_without_sharing_occurrences_or_payloads() {
     let root = test_graph::root(&graph);
     crate::egglog::analysis::liveness(&mut graph, &[root]).unwrap();
     let query = Query(&graph);
-    let input = query.required("Input", (add.0, 0_i64)).unwrap();
+    let input = query.0.input(add.0, 0_i64).unwrap();
     assert!(query.contains("AvailableAt", (add.0, input)).unwrap());
     assert!(query.contains("NameLiveAfter", (add.0, input)).unwrap());
     assert!(!query.contains("NameLiveAfter", (sub.0, input)).unwrap());
     let output = query.required("Output", (add.0, 0_i64)).unwrap();
-    graph
-        .update(|mut sink| {
-            sink.remove("Input", (sub.0, 0_i64))?;
-            sink.set("Input", (sub.0, 0_i64), output)
-        })
-        .unwrap();
+    graph.update(|mut sink| sink.set_input(sub.0, 0_i64, output)).unwrap();
     crate::egglog::analysis::run(&mut graph).unwrap();
     assert!(crate::egglog::analysis::uses_output_of(Query(&graph), sub.0, add.0).unwrap());
-    graph
-        .update(|mut sink| {
-            sink.remove("Input", (sub.0, 0_i64))?;
-            sink.set("Input", (sub.0, 0_i64), input)
-        })
-        .unwrap();
+    graph.update(|mut sink| sink.set_input(sub.0, 0_i64, input)).unwrap();
     crate::egglog::analysis::run(&mut graph).unwrap();
     assert!(!crate::egglog::analysis::uses_output_of(Query(&graph), sub.0, add.0).unwrap());
     let functions = graph.get_function_names();

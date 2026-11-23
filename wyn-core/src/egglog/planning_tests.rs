@@ -58,7 +58,7 @@ fn every_collective_callback_must_be_available_before_distribution() {
         let mut facts = include_str!("tests/collective_distribution.egg").to_owned();
         for (prefix, base) in [("FIRST", 20), ("SECOND", 30)] {
             let capture = if blocked == Some(base) {
-                format!("(set (InputCount (OperationId {})) 2) (set (Input (OperationId {}) 0) (ValueNameRef (ValueId {}))) (set (Input (OperationId {}) 1) (ValueNameRef (ValueId 10))) (set (OutputCount (OperationId {})) 1) (set (Output (OperationId {}) 0) (ValueNameRef (ValueId {}))) (set (ValueType (ValueId {})) scalar) (set (FixtureRegion (OperationId {})) (RegionId {})) (set (FixtureOrder (OperationId {})) 1) (DiscardableOperation (OperationId {})) (RepeatableOperation (OperationId {}))",base+1,base+1,base+2,base+1,base+1,base+1,base+3,base+3,base+1,base,base+1,base+1,base+1)
+                format!("(set (FixtureInput (OperationId {}) 0) (ValueNameRef (ValueId {}))) (set (FixtureInput (OperationId {}) 1) (ValueNameRef (ValueId 10))) (set (OutputCount (OperationId {})) 1) (set (Output (OperationId {}) 0) (ValueNameRef (ValueId {}))) (set (ValueType (ValueId {})) scalar) (set (FixtureRegion (OperationId {})) (RegionId {})) (set (FixtureOrder (OperationId {})) 1) (DiscardableOperation (OperationId {})) (RepeatableOperation (OperationId {}))",base+1,base+2,base+1,base+1,base+1,base+3,base+3,base+1,base,base+1,base+1,base+1)
             } else {
                 String::new()
             };
@@ -401,7 +401,7 @@ fn dependent_or_partial_regions_stay_inside_parallel_callbacks() {
         |index, graph, function| {
             let query = Query(graph);
             let root = query.0.function_root(function).unwrap();
-            let result = query.required("RegionYield", (root, 0_i64)).unwrap();
+            let result = query.0.yield_value(root, 0_i64).unwrap();
             let mut checked = false;
             for outer in top_level(graph, function, "Parallel") {
                 if !query.sequence("Output", outer).unwrap().contains(&result) {
@@ -444,7 +444,7 @@ fn exported_views_have_their_own_logical_domain() {
                 graph.value_to_base::<i64>(query.required("StaticIndex", slice[1]).unwrap()),
                 2
             );
-            let source = query.name(query.required("Input", (operation, 0_i64)).unwrap()).unwrap();
+            let source = query.name(query.0.input(operation, 0_i64).unwrap()).unwrap();
             let count = query.required("LogicalOuterCount", source).unwrap();
             assert_eq!(
                 graph.value_to_base::<i64>(query.required("StaticIndex", count).unwrap()),
@@ -511,7 +511,7 @@ fn updated_slice_preserves_its_descriptor() {
                 .for_each("LiveOperation", |row| {
                     if let Code::Update { .. } = query.0.code(row[0])? {
                         let output = query.name(query.required("Output", (row[0], 0_i64))?)?;
-                        let source = query.name(query.required("Input", (row[0], 0_i64))?)?;
+                        let source = query.name(query.0.input(row[0], 0_i64)?)?;
                         assert_eq!(
                             query.required("ValueType", output)?,
                             query.required("ValueType", source)?,
@@ -780,7 +780,7 @@ fn flat_and_ranked_collectives_share_dimension_metadata() {
             if kind == "bucket-scatter" {
                 if let Code::BucketScatter { coordinates, depth } = code {
                     assert_eq!(depth, expected_rank as usize);
-                    let inputs = query.sequence("Input", operation).unwrap();
+                    let inputs = query.0.inputs(operation);
                     let mut dimensions = vec![None; expected_rank as usize];
                     for (input, mapping) in inputs.into_iter().skip(1).zip(coordinates) {
                         let name = query.name(input).unwrap();
@@ -893,7 +893,7 @@ fn ranked_inputs_keep_their_independent_coordinate_mappings() {
             };
             assert_eq!(coordinates, [vec![0], vec![1]]);
             assert_eq!(depth, 2);
-            assert_eq!(analysis::count(query, "InputCount", operation).unwrap(), 3);
+            assert_eq!(query.0.input_count(operation), 3);
         },
     );
 }
@@ -962,7 +962,7 @@ fn rectangular_candidates_retain_expensive_but_legal_recomputation() {
     ];
     for i in 1_i64..=80 {
         codes.push((i, Code::Scalar(Payload::Binary(BinaryOperator::Multiply))));
-        prefix.push_str(&format!("(set (InputCount (OperationId {i})) 2) (set (Input (OperationId {i}) 0) (ValueNameRef (ValueId {}))) (set (Input (OperationId {i}) 1) (ValueNameRef (ValueId 1000))) (set (OutputCount (OperationId {i})) 1) (set (Output (OperationId {i}) 0) (ValueNameRef (ValueId {i}))) (set (ValueType (ValueId {i})) scalar) (set (FixtureRegion (OperationId {i})) (RegionId 1)) (set (FixtureOrder (OperationId {i})) {}) (RepeatableOperation (OperationId {i})) (DiscardableOperation (OperationId {i}))",i-1,i-1));
+        prefix.push_str(&format!("(set (FixtureInput (OperationId {i}) 0) (ValueNameRef (ValueId {}))) (set (FixtureInput (OperationId {i}) 1) (ValueNameRef (ValueId 1000))) (set (OutputCount (OperationId {i})) 1) (set (Output (OperationId {i}) 0) (ValueNameRef (ValueId {i}))) (set (ValueType (ValueId {i})) scalar) (set (FixtureRegion (OperationId {i})) (RegionId 1)) (set (FixtureOrder (OperationId {i})) {}) (RepeatableOperation (OperationId {i})) (DiscardableOperation (OperationId {i}))",i-1,i-1));
     }
     let mut graph = test_graph::fixture(
         &codes,
@@ -1091,7 +1091,7 @@ fn rectangular_runtime_dimensions_must_be_uniform_across_outer_coordinates() {
     planned_cases(&sources, |index, graph, function| {
         let query = Query(graph);
         let root = query.0.function_root(function).unwrap();
-        let output = query.required("RegionYield", (root, 0_i64)).unwrap();
+        let output = query.0.yield_value(root, 0_i64).unwrap();
         let ranks = top_level(graph, function, "Parallel")
             .into_iter()
             .filter(|&operation| query.sequence("Output", operation).unwrap().contains(&output))
@@ -1286,8 +1286,7 @@ fn update_handles_and_reservation_results_cannot_escape_their_scope() {
             .update(|mut sink| {
                 let missing = sink.add(if slot == 0 { "AccumulatorId" } else { "ValueId" }, 999999_i64)?;
                 let name = sink.add(if slot == 0 { "AccNameRef" } else { "ValueNameRef" }, missing)?;
-                sink.remove("Input", (operation, slot))?;
-                sink.set("Input", (operation, slot), name)
+                sink.set_input(operation, slot, name)
             })
             .unwrap();
         let error = super::super::memory::validate(&mut graph).unwrap_err();
@@ -1554,7 +1553,7 @@ fn element_update_snapshots_require_no_escaping_copy() {
     for (escape, safe) in [
         ("", true),
         (
-            "(set (RegionYield (RegionId 0) 0) (ValueNameRef (ValueId 1)))",
+            "(set (FixtureYield (RegionId 0) 0) (ValueNameRef (ValueId 1)))",
             false,
         ),
         (
@@ -1566,7 +1565,7 @@ fn element_update_snapshots_require_no_escaping_copy() {
             r#"
             (LiveOperation (OperationId 0)) (LiveOperation (OperationId 1)) (LiveOperation (OperationId 2))
             (set (Output (OperationId 0) 0) (ValueNameRef (ValueId 1)))
-            (set (Input (OperationId 1) 0) (ValueNameRef (ValueId 1)))
+            (set (FixtureInput (OperationId 1) 0) (ValueNameRef (ValueId 1)))
             (set (OperationSlices (OperationId 1)) (vec-of (At (IndexConstant 0))))
             (OperationUse (OperationId 1) (ValueNameRef (ValueId 1)))
             (OperationUse (OperationId 2) (ValueNameRef (ValueId 1)))
@@ -1598,7 +1597,7 @@ fn element_update_snapshots_require_no_escaping_copy() {
 #[test]
 fn slice_lengths_do_not_require_a_source_capacity_bound() {
     let graph = test_graph::fixture(&[(0, Code::View)], r#"
-        (set (Input (OperationId 0) 0) (ValueNameRef (ValueId 0)))
+        (set (FixtureInput (OperationId 0) 0) (ValueNameRef (ValueId 0)))
         (set (Output (OperationId 0) 0) (ValueNameRef (ValueId 1)))
         (set (OperationSlices (OperationId 0)) (vec-of (Slice (IndexConstant 2) (IndexConstant 5) (IndexConstant 1))))
         (run-schedule (saturate graph-sizes))

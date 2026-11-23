@@ -632,7 +632,7 @@ impl Execution {
                 } else {
                     host::remember(query, function, &mut host_values, operation)?;
                     if matches!(code, Code::Length { axis: 0 }) {
-                        let source = query.name(query.required("Input", (operation, 0_i64))?)?;
+                        let source = query.name(query.0.input(operation, 0_i64)?)?;
                         if self.host_shapes.contains(&source) {
                             let name = query.name(query.required("Output", (operation, 0_i64))?)?;
                             let length = query
@@ -676,7 +676,7 @@ impl Execution {
                 for (slot, &binding) in pattern.iter().enumerate() {
                     let mut known = true;
                     for child in control_regions(query, operation)? {
-                        let result = query.name(query.required("RegionYield", (child, slot as i64))?)?;
+                        let result = query.name(query.0.yield_value(child, slot as i64)?)?;
                         known &= self.host_shapes.contains(&result);
                     }
                     if known {

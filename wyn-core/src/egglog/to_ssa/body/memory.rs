@@ -130,7 +130,7 @@ impl Body<'_, '_, '_> {
     }
 
     pub fn results(&mut self, region: Value) -> Result<Vec<Typed>, OptimizeError> {
-        self.yield_values(&self.query().sequence("RegionYield", region)?)
+        self.yield_values(&self.query().0.yield_values(region))
     }
 
     pub fn block(&mut self, region: Value) -> Result<Vec<Typed>, OptimizeError> {
@@ -224,7 +224,7 @@ impl Body<'_, '_, '_> {
         )?;
         let query = self.query();
         let pattern = query.sequence("Output", statement)?;
-        let operands = query.sequence("Input", statement)?;
+        let operands = query.0.inputs(statement);
         let inputs = operands.iter().map(|&name| query.name(name)).collect::<Result<Vec<_>, _>>()?;
         let code = query.0.code(statement)?;
         if matches!(code, Code::Parallel)
@@ -1115,7 +1115,7 @@ impl Body<'_, '_, '_> {
 
     fn accumulate(&mut self, operation: Value) -> Result<Vec<Typed>, OptimizeError> {
         let query = self.query();
-        let operands = query.sequence("Input", operation)?;
+        let operands = query.0.inputs(operation);
         let token = query.fields("AccNameRef", operands[0])?[0];
         let capability = query.fields("TokenBindingAt", query.required("TokenCapability", token)?)?;
         let owner = capability[0];

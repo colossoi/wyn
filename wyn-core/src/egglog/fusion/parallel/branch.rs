@@ -25,7 +25,7 @@ pub(in crate::egglog::fusion) fn run(graph: &mut Graph) -> Result<bool, Optimize
         let mut previous_guard = None;
         for &op in operations {
             if branches.contains(&op) {
-                let guard = query.required("Input", (op, 0_i64))?;
+                let guard = query.0.input(op, 0_i64)?;
                 if producer || previous_guard == Some(guard) {
                     regions.push(region);
                     break;

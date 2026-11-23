@@ -5,8 +5,8 @@ use super::{output_error, OptimizeError};
 use crate::ast::Span;
 use crate::{LookupMap, LookupSet, StableMap};
 use egglog_engine::prelude::BaseSort;
-use egglog_engine::sort::I64Sort;
-use egglog_engine::{EGraph, Error, FullState, Value};
+use egglog_engine::sort::{BoolSort, I64Sort};
+use egglog_engine::{EGraph, Error, FullState, Value, Write};
 use std::collections::hash_map::Entry;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -39,6 +39,9 @@ pub(super) struct ExecutableStructure {
     pub targets: StableMap<Value, Value>,
     pub controls: LookupMap<(Value, i64), ControlEdge>,
     pub argument_uses: LookupMap<Value, LookupSet<ArgumentSite>>,
+    pub inputs: ValueLists,
+    pub yields: ValueLists,
+    arities: LookupSet<usize>,
 }
 
 pub(super) struct ControlEdge {
@@ -100,9 +103,24 @@ impl Graph {
             (
                 Field::ControlRegion,
                 vec![operation.clone(), index.clone()],
-                region,
+                region.clone(),
             ),
-            (Field::EdgeArgument, vec![operation, index.clone(), index], name),
+            (
+                Field::EdgeArgument,
+                vec![operation.clone(), index.clone(), index.clone()],
+                name.clone(),
+            ),
+            (Field::Input, vec![operation.clone(), index.clone()], name.clone()),
+            (Field::InputCount, vec![operation.clone()], index.clone()),
+            (Field::Yield, vec![region.clone(), index.clone()], name.clone()),
+            (Field::YieldCount, vec![region.clone()], index.clone()),
+            (
+                Field::ControlYield,
+                vec![operation, index.clone(), index],
+                name.clone(),
+            ),
+            (Field::Yielded, vec![name.clone()], BoolSort.to_arcsort()),
+            (Field::RegionYields, vec![region, name], BoolSort.to_arcsort()),
         ] {
             self.facts.add_pure_primitive(
                 ExecutableField {
@@ -187,6 +205,42 @@ impl Graph {
             .get(&(operation, edge))
             .map(|edge| edge.arguments.clone())
             .unwrap_or_default()
+    }
+
+    pub fn inputs(&self, operation: Value) -> Vec<Value> {
+        self.structure.read().inputs.values.get(&operation).cloned().unwrap_or_default()
+    }
+
+    pub fn input_count(&self, operation: Value) -> i64 {
+        self.structure.read().inputs.values.get(&operation).map_or(0, |values| values.len() as i64)
+    }
+
+    pub fn input_at(&self, operation: Value, slot: i64) -> Option<Value> {
+        self.structure.read().inputs.values.get(&operation)?.get(usize::try_from(slot).ok()?).copied()
+    }
+
+    pub fn input(&self, operation: Value, slot: i64) -> Result<Value, OptimizeError> {
+        self.input_at(operation, slot)
+            .ok_or_else(|| output_error(format!("operation {operation:?} has no input {slot}")))
+    }
+
+    pub fn yield_values(&self, region: Value) -> Vec<Value> {
+        self.structure.read().yields.values.get(&region).cloned().unwrap_or_default()
+    }
+
+    pub fn yield_count(&self, region: Value) -> i64 {
+        self.structure.read().yields.values.get(&region).map_or(0, |values| values.len() as i64)
+    }
+
+    pub fn yield_at(&self, region: Value, slot: i64) -> Option<Value> {
+        self.structure.read().yields.values.get(&region)?.get(usize::try_from(slot).ok()?).copied()
+    }
+
+    pub fn yield_value(&self, region: Value, slot: i64) -> Result<Value, OptimizeError> {
+        let Some(value) = self.yield_at(region, slot) else {
+            return Err(output_error(format!("region {region:?} has no yield {slot}")));
+        };
+        Ok(value)
     }
 
     pub fn region_of(&self, operation: Value) -> Option<Value> {
@@ -290,6 +344,26 @@ impl State<'_, '_, '_> {
         self.structure.write().targets.shift_remove(&operation);
     }
 
+    pub fn set_inputs(&mut self, operation: Value, inputs: Vec<Value>) -> Result<(), Error> {
+        register_arity(&mut self.facts, self.structure, inputs.len())?;
+        self.structure.write().inputs.replace(operation, inputs);
+        Ok(())
+    }
+
+    pub fn set_input(&mut self, operation: Value, slot: i64, input: Value) -> Result<(), Error> {
+        self.structure.write().inputs.redirect(operation, slot, input)
+    }
+
+    pub fn set_yields(&mut self, region: Value, values: Vec<Value>) -> Result<(), Error> {
+        register_arity(&mut self.facts, self.structure, values.len())?;
+        self.structure.write().yields.replace(region, values);
+        Ok(())
+    }
+
+    pub fn set_yield(&mut self, region: Value, slot: i64, value: Value) -> Result<(), Error> {
+        self.structure.write().yields.redirect(region, slot, value)
+    }
+
     pub fn set_control(&mut self, operation: Value, slot: i64, child: Value) {
         assert!(
             (0..2).contains(&slot),
@@ -326,7 +400,7 @@ impl State<'_, '_, '_> {
             if old == value {
                 return Ok(());
             }
-            graph.remove_argument_use(site, old);
+            remove_use(&mut graph.argument_uses, site, old);
         } else {
             return Err(Error::BackendError(format!(
                 "missing control argument {slot} on {operation:?}"
@@ -341,7 +415,11 @@ impl State<'_, '_, '_> {
         for slot in 0..2 {
             if let Some(edge) = structure.controls.remove(&(operation, slot)) {
                 for (index, value) in edge.arguments.into_iter().enumerate() {
-                    structure.remove_argument_use(ArgumentSite(operation, slot, index), value);
+                    remove_use(
+                        &mut structure.argument_uses,
+                        ArgumentSite(operation, slot, index),
+                        value,
+                    );
                 }
             }
         }
@@ -388,6 +466,7 @@ impl State<'_, '_, '_> {
         self.clear_control(operation);
         let mut structure = self.structure.write();
         structure.targets.shift_remove(&operation);
+        structure.inputs.replace(operation, Vec::new());
         if let Some(region) = structure.operations.remove(&operation).and_then(|position| position.region) {
             if let Some(operations) = structure.by_region.get_mut(&region) {
                 operations.remove(&operation);
@@ -396,13 +475,71 @@ impl State<'_, '_, '_> {
     }
 }
 
-impl ExecutableStructure {
-    fn remove_argument_use(&mut self, site: ArgumentSite, value: Value) {
-        if let Entry::Occupied(mut uses) = self.argument_uses.entry(value) {
-            uses.get_mut().remove(&site);
-            if uses.get().is_empty() {
-                uses.remove();
+#[derive(Default)]
+pub(super) struct ValueLists {
+    pub values: LookupMap<Value, Vec<Value>>,
+    pub uses: LookupMap<Value, LookupSet<(Value, i64)>>,
+}
+
+impl ValueLists {
+    fn replace(&mut self, owner: Value, values: Vec<Value>) {
+        if let Some(old) = self.values.remove(&owner) {
+            for (slot, value) in old.into_iter().enumerate() {
+                remove_use(&mut self.uses, (owner, slot as i64), value);
             }
+        }
+        for (slot, &value) in values.iter().enumerate() {
+            self.uses.entry(value).or_default().insert((owner, slot as i64));
+        }
+        if !values.is_empty() {
+            self.values.insert(owner, values);
+        }
+    }
+
+    fn redirect(&mut self, owner: Value, slot: i64, value: Value) -> Result<(), Error> {
+        let Ok(index) = usize::try_from(slot) else {
+            return Err(Error::BackendError(format!(
+                "negative value-list index {slot} on {owner:?}"
+            )));
+        };
+        let Some(current) = self.values.get_mut(&owner).and_then(|values| values.get_mut(index)) else {
+            return Err(Error::BackendError(format!(
+                "missing value at index {slot} on {owner:?}"
+            )));
+        };
+        if *current != value {
+            let old = std::mem::replace(current, value);
+            remove_use(&mut self.uses, (owner, slot), old);
+            self.uses.entry(value).or_default().insert((owner, slot));
+        }
+        Ok(())
+    }
+}
+
+fn register_arity(
+    facts: &mut FullState<'_, '_>,
+    structure: &SharedStructure,
+    count: usize,
+) -> Result<(), Error> {
+    let mut structure = structure.write();
+    if !structure.arities.contains(&count) {
+        for slot in 0..count {
+            facts.add("AritySlot", (count as i64, slot as i64))?;
+        }
+        structure.arities.insert(count);
+    }
+    Ok(())
+}
+
+fn remove_use<Site: Eq + std::hash::Hash>(
+    uses: &mut LookupMap<Value, LookupSet<Site>>,
+    site: Site,
+    value: Value,
+) {
+    if let Entry::Occupied(mut uses) = uses.entry(value) {
+        uses.get_mut().remove(&site);
+        if uses.get().is_empty() {
+            uses.remove();
         }
     }
 }

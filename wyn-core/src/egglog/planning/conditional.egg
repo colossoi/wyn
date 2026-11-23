@@ -47,7 +47,7 @@
       ((ConditionalDomainPrefix branch (+ slot 1))) :ruleset conditional-index)
 (rule ((= revision (TransformRevision)) (ConditionalPair branch yes no) (ConditionalReturnPrefix branch slot) (< slot (OutputCount branch))
        (= a (wyn-control-region branch 0)) (= b (wyn-control-region branch 1))
-       (= ay (Output yes slot)) (= by (Output no slot)) (= ay (RegionYield a slot)) (= by (RegionYield b slot)))
+       (= ay (Output yes slot)) (= by (Output no slot)) (= ay (wyn-yield a slot)) (= by (wyn-yield b slot)))
       ((ConditionalReturnPrefix branch (+ slot 1))) :ruleset conditional-index)
 (rule ((= revision (TransformRevision)) (ConditionalPair branch yes no) (ConditionalTypePrefix branch slot) (< slot (OutputCount branch))
        (= (ResultValue yes 0 slot) (ValueNameRef a)) (= (ResultValue no 0 slot) (ValueNameRef b))

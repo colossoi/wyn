@@ -60,7 +60,7 @@ pub(in crate::egglog::fusion) fn run(graph: &mut Graph) -> Result<bool, Optimize
     let mut length_uses = LookupSet::new();
     query.for_each("LengthOperation", |row| {
         if graph.value_to_base::<i64>(row[1]) == 0 {
-            let input = query.required("Input", (row[0], 0_i64))?;
+            let input = query.0.input(row[0], 0_i64)?;
             if let Some(candidate) = candidates.get_mut(&input) {
                 let output = query.required("Output", (row[0], 0_i64))?;
                 candidate.lengths.push((row[0], output));
@@ -128,9 +128,8 @@ pub(in crate::egglog::fusion) fn run(graph: &mut Graph) -> Result<bool, Optimize
     graph.update(|mut sink| {
         Ok((|| -> Result<(), OptimizeError> {
             for (length, packed) in reused {
-                sink.remove("Input", (length, 0_i64))?;
                 sink.remove("InputDiet", (length, 0_i64))?;
-                sink.set("Input", (length, 0_i64), packed)?;
+                sink.set_input(length, 0_i64, packed)?;
             }
             let mut before = LookupMap::<Value, Vec<Value>>::new();
             let mut generated = LookupSet::new();

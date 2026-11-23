@@ -41,7 +41,7 @@ pub(super) fn publish(graph: &mut Graph, for_inlining: bool) -> Result<(), Optim
             let Some(parameter) = query.lookup("RegionParameter", (edge.region, slot))? else {
                 continue;
             };
-            let Some(next) = query.lookup("RegionYield", (edge.region, slot))? else {
+            let Some(next) = query.0.yield_at(edge.region, slot) else {
                 continue;
             };
             if let (Some(parameter), Some(initial), Some(next)) = (

@@ -73,12 +73,12 @@ pub(super) fn inline(graph: &mut Graph) -> Result<(), OptimizeError> {
 
 fn inline_call(graph: &mut Graph, call: Value, callee: Value) -> Result<(), OptimizeError> {
     let cloning = timing::span("egglog inline cloning");
-    let arguments = Query(graph).sequence("Input", call)?;
+    let arguments = Query(graph).0.inputs(call);
     let outputs = Query(graph).sequence("Output", call)?;
     let region = edit::clone_region(graph, call, callee, &arguments)?;
     drop(cloning);
     let substitution = timing::span("egglog inline substitution");
-    let results = Query(graph).sequence("RegionYield", region)?;
+    let results = Query(graph).0.yield_values(region);
     if outputs.len() != results.len() {
         return Err(super::output_error("inlined result signature differs from call"));
     }
@@ -190,7 +190,7 @@ fn scratch_shapes(graph: &mut Graph) -> Result<(), OptimizeError> {
         if !query.contains("LiveOperation", operation)? || query.0.code(operation)? != Code::Scratch {
             return Ok(());
         }
-        let source = query.name(query.required("Input", (operation, 0_i64))?)?;
+        let source = query.name(query.0.input(operation, 0_i64)?)?;
         let Some(info) = query.enode("LogicalValue", query.required("ValueType", source)?)? else {
             return Ok(());
         };

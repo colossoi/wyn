@@ -75,8 +75,8 @@ fn arithmetic_payloads_share_generic_operand_structure() {
     let query = Query(&graph);
     for slot in 0_i64..2 {
         assert_eq!(
-            query.required("Input", (add.0, slot)).unwrap(),
-            query.required("Input", (sub.0, slot)).unwrap()
+            query.0.input(add.0, slot).unwrap(),
+            query.0.input(sub.0, slot).unwrap()
         );
     }
     assert_ne!(graph.code(add.0).unwrap(), graph.code(sub.0).unwrap());

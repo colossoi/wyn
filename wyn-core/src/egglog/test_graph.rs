@@ -42,6 +42,8 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
         "FixtureFunctionRoot",
         "FixtureCallTarget",
         "FixtureControlRegion",
+        "FixtureInput",
+        "FixtureYield",
     ];
     if !fields.iter().any(|field| facts.contains(field)) {
         graph.parse_and_run_program(None, facts)?;
@@ -56,6 +58,8 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
             (function FixtureFunctionRoot (FunctionName) RegionKey :no-merge)
             (function FixtureCallTarget (OperationKey) FunctionName :no-merge)
             (function FixtureControlRegion (OperationKey i64) RegionKey :no-merge)
+            (function FixtureInput (OperationKey i64) Name :no-merge)
+            (function FixtureYield (RegionKey i64) Name :no-merge)
         ",
         )?;
     }
@@ -87,7 +91,30 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
         controls.push((keys[0], graph.value_to_base::<i64>(keys[1]), child));
         Ok(())
     })?;
+    let mut inputs = crate::LookupMap::<Value, Vec<(i64, Value)>>::new();
+    query.for_function("FixtureInput", |keys, value| {
+        inputs.entry(keys[0]).or_default().push((graph.value_to_base::<i64>(keys[1]), value));
+        Ok(())
+    })?;
+    let mut yields = crate::LookupMap::<Value, Vec<(i64, Value)>>::new();
+    query.for_function("FixtureYield", |keys, value| {
+        yields.entry(keys[0]).or_default().push((graph.value_to_base::<i64>(keys[1]), value));
+        Ok(())
+    })?;
     graph.update(|mut sink| {
+        for (region, mut values) in yields {
+            values.sort_unstable_by_key(|&(slot, _)| slot);
+            assert!(values.iter().enumerate().all(|(i, &(slot, _))| i as i64 == slot));
+            sink.set_yields(region, values.into_iter().map(|(_, value)| value).collect())?;
+        }
+        for (operation, mut values) in inputs {
+            values.sort_unstable_by_key(|&(slot, _)| slot);
+            assert!(values.iter().enumerate().all(|(i, &(slot, _))| i as i64 == slot));
+            for &(_, value) in &values {
+                sink.add("DirectOperationUse", (operation, value))?;
+            }
+            sink.set_inputs(operation, values.into_iter().map(|(_, value)| value).collect())?;
+        }
         for (operation, slot, child) in controls {
             sink.set_control(operation, slot, child);
             sink.set("RegionOwnedBy", child, operation)?;
@@ -111,6 +138,7 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
         graph.clear_function(field)?;
     }
     if !checks.is_empty() {
+        super::analysis::publish_proof_operands(graph)?;
         graph.parse_and_run_program(None, &format!("(run-schedule{checks}"))?;
     }
     Ok(())

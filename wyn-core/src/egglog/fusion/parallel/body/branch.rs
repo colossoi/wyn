@@ -5,7 +5,7 @@ use crate::egglog::dataflow::ir::{
 };
 use crate::egglog::graph::Graph;
 use crate::egglog::payload::Payload;
-use crate::egglog::{analysis::count, output_error, query::Query, OptimizeError};
+use crate::egglog::{output_error, query::Query, OptimizeError};
 use crate::memory_ir::{
     BodyRole, Definition, Operation, OperationId, Region, RegionEdge, RegionId, UseSite, ValueRef,
 };
@@ -236,6 +236,7 @@ impl Body {
         let index = |slot: usize| graph.base_to_value(slot as i64);
         let mut rows = Vec::new();
         let mut destinations = LookupMap::new();
+        let mut region_yields = Vec::new();
         for (region, origins) in &self.joined_yields {
             let target = self.graph.regions[region];
             let yields = &self.graph.ir.regions[region].yields;
@@ -243,7 +244,7 @@ impl Body {
             for &origin in origins {
                 let origin = self.graph.regions[origin];
                 destinations.insert(origin, (target, base));
-                let size = count(query, "RegionYieldCount", origin)?;
+                let size = query.0.yield_count(origin);
                 for slot in 0..size {
                     if let Some(ty) = query.lookup("RegionReturnType", (origin, slot))? {
                         rows.push(("RegionReturnType", vec![target, index(base + slot as usize)], ty));
@@ -251,10 +252,10 @@ impl Body {
                 }
                 base += size as usize;
             }
-            for (slot, value) in yields.iter().enumerate() {
-                rows.push(("RegionYield", vec![target, index(slot)], self.graph.names[value]));
-            }
-            rows.push(("RegionYieldCount", vec![target], index(yields.len())));
+            region_yields.push((
+                target,
+                yields.iter().map(|value| self.graph.names[value]).collect(),
+            ));
         }
         let mut certificates = Vec::new();
         for op in self.joined_branches.iter().copied().chain(self.accumulator_origins.keys()) {
@@ -281,6 +282,9 @@ impl Body {
             Ok(())
         })?;
         graph.update(|mut sink| {
+            for (region, values) in region_yields {
+                sink.set_yields(region, values)?;
+            }
             for (table, keys, value) in rows {
                 sink.remove(table, RawValues(keys.clone()))?;
                 sink.set(table, RawValues(keys), value)?;

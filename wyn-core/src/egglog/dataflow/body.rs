@@ -8,7 +8,7 @@ use crate::memory_ir::{
     RegionEdge, RegionId, UseSite, ValueRef,
 };
 use crate::{LookupMap, StableMap};
-use egglog_engine::{RawValues, Value, Write};
+use egglog_engine::Value;
 use slotmap::SecondaryMap;
 
 pub(in crate::egglog) struct BodyGraph {
@@ -112,14 +112,11 @@ impl BodyGraph {
         };
         for (id, &op) in operations.iter() {
             ir.operations[id].inputs =
-                query.sequence("Input", op)?.into_iter().map(resolve).collect::<Result<_, _>>()?;
+                query.0.inputs(op).into_iter().map(resolve).collect::<Result<_, _>>()?;
         }
         for (&region, &id) in &region_ids {
-            ir.regions[id].yields = query
-                .sequence("RegionYield", region)?
-                .into_iter()
-                .map(resolve)
-                .collect::<Result<_, _>>()?;
+            ir.regions[id].yields =
+                query.0.yield_values(region).into_iter().map(resolve).collect::<Result<_, _>>()?;
         }
         for (op, &key) in &operations {
             for (slot, child) in query.0.controls(key) {
@@ -185,37 +182,37 @@ impl BodyGraph {
         graph: &mut Graph,
         edits: Vec<(UseSite, ValueRef)>,
     ) -> Result<(), OptimizeError> {
-        let mut rows = Vec::with_capacity(edits.len());
+        let mut yields = Vec::new();
         let mut arguments = Vec::new();
+        let mut inputs = Vec::new();
         for (site, value) in edits {
-            let (table, keys) = match site {
+            match site {
                 UseSite::Input(op, i) => {
-                    ("Input", vec![self.operations[op], graph.base_to_value(i as i64)])
+                    inputs.push((self.operations[op], i as i64, self.names[&value]));
                 }
-                UseSite::Yield(region, i) => (
-                    "RegionYield",
-                    vec![self.regions[region], graph.base_to_value(i as i64)],
-                ),
+                UseSite::Yield(region, i) => {
+                    yields.push((self.regions[region], i as i64, self.names[&value]));
+                }
                 UseSite::Argument(op, BodyRole::Control(edge), i) => {
                     arguments.push((
                         ArgumentSite(self.operations[op], edge as i64, i),
                         self.names[&value],
                     ));
-                    continue;
                 }
                 UseSite::Argument(_, _, _) => {
                     return Err(output_error("combiner arguments use collective metadata"))
                 }
-            };
-            rows.push((table, keys, self.names[&value]));
+            }
         }
         graph.update(|mut sink| {
+            for (op, slot, value) in inputs {
+                sink.set_input(op, slot, value)?;
+            }
             for (site, value) in arguments {
                 sink.set_argument(site, value)?;
             }
-            for (table, keys, value) in rows {
-                sink.remove(table, RawValues(keys.clone()))?;
-                sink.set(table, RawValues(keys), value)?;
+            for (region, slot, value) in yields {
+                sink.set_yield(region, slot, value)?;
             }
             Ok(())
         })?;

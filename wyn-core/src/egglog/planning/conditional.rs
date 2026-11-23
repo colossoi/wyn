@@ -88,7 +88,6 @@ pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> 
                 }
                 sink.remove("RegionParameterCount", arm)?;
                 sink.set("RegionParameterCount", arm, 0_i64)?;
-                sink.remove("RegionYieldCount", arm)?;
             }
             ir::yields(&mut sink, RegionId(a), &yes_values)?;
             ir::yields(&mut sink, RegionId(b), &no_values)?;
