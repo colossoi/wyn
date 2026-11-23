@@ -2,7 +2,7 @@
 use super::dataflow::ir::{self, Code};
 use super::query::Query;
 use super::{from_tlc, memory, OptimizeError};
-use crate::egglog::graph::{CollectiveInput, Graph};
+use crate::egglog::graph::{CollectiveInput, Formula, Graph};
 use egglog_engine::{Value, Write};
 
 pub(super) fn fixture(codes: &[(i64, Code)], facts: &str) -> Result<Graph, OptimizeError> {
@@ -48,6 +48,9 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
         "FixtureParameter",
         "FixtureResultReducer",
         "FixtureAccumulatorCombiner",
+        "FixtureOperationIndex",
+        "FixtureOperationShape",
+        "FixtureOperationSlices",
         "FixtureResultValue",
         "FixtureResultNeutral",
         "FixtureResultPredicate",
@@ -72,6 +75,9 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
             (function FixtureParameter (RegionKey i64) Name :no-merge)
             (function FixtureResultReducer (OperationKey i64) RegionKey :no-merge)
             (function FixtureAccumulatorCombiner (OperationKey i64) RegionKey :no-merge)
+            (function FixtureOperationIndex (OperationKey i64) IndexExp :no-merge)
+            (function FixtureOperationShape (OperationKey) Shape :no-merge)
+            (function FixtureOperationSlices (OperationKey) Slices :no-merge)
             (function FixtureResultValue (OperationKey i64 i64) Name :no-merge)
             (function FixtureResultNeutral (OperationKey i64 i64) Name :no-merge)
             (function FixtureResultPredicate (OperationKey i64) ValueName :no-merge)
@@ -154,7 +160,25 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
             Ok(())
         })?;
     }
+    let mut formulas = Vec::new();
+    query.for_function("FixtureOperationIndex", |keys, term| {
+        assert_eq!(graph.value_to_base::<i64>(keys[1]), 0);
+        formulas.push((keys[0], Formula::Index, term));
+        Ok(())
+    })?;
+    for (field, kind) in [
+        ("FixtureOperationShape", Formula::Extents),
+        ("FixtureOperationSlices", Formula::Slices),
+    ] {
+        query.for_function(field, |keys, term| {
+            formulas.push((keys[0], kind, term));
+            Ok(())
+        })?;
+    }
     graph.update(|mut sink| {
+        for (op, kind, formula) in formulas {
+            sink.set_formula(op, kind, formula)?;
+        }
         for ((op, group, kind), mut values) in collective {
             values.sort_unstable_by_key(|&(field, _)| field);
             assert!(values.iter().enumerate().all(|(index, &(field, _))| index as i64 == field));

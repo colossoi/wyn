@@ -45,6 +45,7 @@ pub(super) struct ExecutableStructure {
     pub outputs: LookupMap<Value, Vec<Value>>,
     pub yields: ValueLists,
     pub collective: CollectiveEdges,
+    pub formulas: OperationFormulas,
     pub parameters: LookupMap<Value, Vec<Value>>,
     arities: LookupSet<usize>,
 }
@@ -101,6 +102,23 @@ impl Graph {
         let name = sort("Name")?;
         let value_name = sort("ValueName")?;
         let index = I64Sort.to_arcsort();
+        for (kind, output) in [
+            (Formula::Index, sort("IndexExp")?),
+            (Formula::Extents, sort("Shape")?),
+            (Formula::Slices, sort("Slices")?),
+            (Formula::Layout, sort("ArrayLayout")?),
+            (Formula::LoopCount, sort("IndexExp")?),
+        ] {
+            self.facts.add_pure_primitive(
+                ExecutableField {
+                    structure: self.structure.clone(),
+                    field: Field::Formula(kind),
+                    inputs: vec![operation.clone()],
+                    output,
+                },
+                None,
+            );
+        }
         for (field, inputs, output) in [
             (Field::Region, vec![operation.clone()], region.clone()),
             (Field::Order, vec![operation.clone()], I64Sort.to_arcsort()),
@@ -272,6 +290,27 @@ impl Graph {
 
     pub fn outputs(&self, operation: Value) -> Vec<Value> {
         self.structure.read().outputs.get(&operation).cloned().unwrap_or_default()
+    }
+
+    pub fn formulas(&self, operation: Value) -> Vec<(Formula, Value)> {
+        let structure = self.structure.read();
+        Formula::ALL
+            .into_iter()
+            .filter_map(|kind| structure.formulas.get(operation, kind).map(|value| (kind, value)))
+            .collect()
+    }
+
+    pub fn has_formulas(&self, kind: Formula) -> bool {
+        self.structure.read().formulas.by_kind.get(&kind).is_some_and(|sites| !sites.is_empty())
+    }
+
+    pub fn formula_at(&self, operation: Value, kind: Formula) -> Option<Value> {
+        self.structure.read().formulas.get(operation, kind)
+    }
+
+    pub fn formula(&self, operation: Value, kind: Formula) -> Result<Value, OptimizeError> {
+        self.formula_at(operation, kind)
+            .ok_or_else(|| output_error(format!("missing {kind:?} on {operation:?}")))
     }
 
     pub fn collective_groups(&self, owner: Value) -> StableMap<(i64, CollectiveInput), Vec<Value>> {
@@ -655,6 +694,32 @@ impl State<'_, '_, '_> {
         Ok(())
     }
 
+    pub fn set_formula(&mut self, operation: Value, kind: Formula, value: Value) -> Result<(), Error> {
+        let demand = match kind {
+            Formula::Extents => Some("ShapeDemand"),
+            Formula::Slices => Some("SliceDemand"),
+            _ => None,
+        };
+        if let Some(demand) = demand {
+            self.facts.add(demand, value)?;
+        }
+        self.structure.write().formulas.set(operation, kind, value);
+        Ok(())
+    }
+
+    pub fn remove_formula(&mut self, operation: Value, kind: Formula) {
+        self.structure.write().formulas.remove(operation, kind);
+    }
+
+    pub fn clear_formulas(&mut self, operation: Value, retain_index: bool) {
+        let mut graph = self.structure.write();
+        for kind in Formula::ALL {
+            if kind != Formula::Index || !retain_index {
+                graph.formulas.remove(operation, kind);
+            }
+        }
+    }
+
     pub fn set_collective_inputs(
         &mut self,
         owner: Value,
@@ -736,6 +801,7 @@ impl State<'_, '_, '_> {
     pub fn remove_operation(&mut self, operation: Value) {
         self.operations.remove(&operation);
         self.clear_bodies(operation);
+        self.clear_formulas(operation, false);
         let mut structure = self.structure.write();
         structure.targets.shift_remove(&operation);
         structure.inputs.replace(operation, Vec::new());
@@ -745,6 +811,63 @@ impl State<'_, '_, '_> {
             if let Some(operations) = structure.by_region.get_mut(&region) {
                 operations.remove(&operation);
             }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) enum Formula {
+    Index,
+    Extents,
+    Slices,
+    Layout,
+    LoopCount,
+}
+
+impl Formula {
+    pub const ALL: [Self; 5] = [
+        Self::Index,
+        Self::Extents,
+        Self::Slices,
+        Self::Layout,
+        Self::LoopCount,
+    ];
+
+    pub fn access(self) -> &'static str {
+        match self {
+            Self::Index => "wyn-index-expression",
+            Self::Extents => "wyn-operation-extents",
+            Self::Slices => "wyn-operation-slices",
+            Self::Layout => "wyn-array-layout",
+            Self::LoopCount => "wyn-loop-count",
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct OperationFormulas {
+    pub by_kind: LookupMap<Formula, LookupMap<Value, Value>>,
+    pub sites: LookupMap<(Formula, Value), LookupSet<Value>>,
+}
+
+impl OperationFormulas {
+    pub fn get(&self, op: Value, kind: Formula) -> Option<Value> {
+        self.by_kind.get(&kind)?.get(&op).copied()
+    }
+
+    fn set(&mut self, op: Value, kind: Formula, formula: Value) {
+        if let Some(previous) = self.by_kind.entry(kind).or_default().insert(op, formula) {
+            if previous == formula {
+                return;
+            }
+            remove_use(&mut self.sites, op, (kind, previous));
+        }
+        self.sites.entry((kind, formula)).or_default().insert(op);
+    }
+
+    fn remove(&mut self, op: Value, kind: Formula) {
+        if let Some(previous) = self.by_kind.get_mut(&kind).and_then(|values| values.remove(&op)) {
+            remove_use(&mut self.sites, op, (kind, previous));
         }
     }
 }
@@ -907,10 +1030,10 @@ fn register_arity(
     Ok(())
 }
 
-fn remove_use<Site: Eq + std::hash::Hash>(
-    uses: &mut LookupMap<Value, LookupSet<Site>>,
+fn remove_use<Key: Eq + std::hash::Hash, Site: Eq + std::hash::Hash>(
+    uses: &mut LookupMap<Key, LookupSet<Site>>,
     site: Site,
-    value: Value,
+    value: Key,
 ) {
     if let Entry::Occupied(mut uses) = uses.entry(value) {
         uses.get_mut().remove(&site);

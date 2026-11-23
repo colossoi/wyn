@@ -68,7 +68,7 @@
 ; A statically in-bounds contiguous view is safe to repeat for each lane.
 (rule ((= revision (TransformRevision)) (DistributionPrefixAt outer inner operation) (!= operation inner)
        (ViewOperation operation) (= (wyn-input operation 0) (ValueNameRef array))
-       (= n (StaticIndex (LogicalOuterCount array))) (= slices (OperationSlices operation))
+       (= n (StaticIndex (LogicalOuterCount array))) (= slices (wyn-operation-slices operation))
        (= (vec-length slices) 1) (= (vec-get slices 0) (Slice start count (IndexConstant 1)))
        (= offset (StaticIndex start)) (= size (StaticIndex count))
        (>= offset 0) (>= size 0) (<= offset n) (<= size (- n offset))

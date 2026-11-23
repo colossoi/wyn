@@ -62,7 +62,7 @@
 (set (FixtureOutput (OperationId 3) 0) (ValueNameRef (ValueId 101)))
 
 (set (FixtureOutput (OperationId 4) 0) (ValueNameRef (ValueId 3)))
-(set (OperationIndex (OperationId 4) 0) (IndexValue (ValueId 2)))
+(set (FixtureOperationIndex (OperationId 4) 0) (IndexValue (ValueId 2)))
 
 (set (FixtureOutput (OperationId 5) 0) (ValueNameRef (ValueId 4)))
-(set (OperationShape (OperationId 5)) (vec-of (IndexValue (ValueId 2))))
+(set (FixtureOperationShape (OperationId 5)) (vec-of (IndexValue (ValueId 2))))

@@ -1,9 +1,10 @@
 use crate::egglog::graph::CollectiveInput;
+use crate::egglog::graph::Formula;
 use crate::egglog::graph::Graph;
 use crate::egglog::{dataflow::edit, query::Query, scalar, OptimizeError};
 
 pub(super) fn fuse(graph: &mut Graph) -> Result<bool, OptimizeError> {
-    if graph.get_size("OperationLayout") == 0 {
+    if !graph.has_formulas(Formula::Layout) {
         return Ok(false);
     }
     for table in [

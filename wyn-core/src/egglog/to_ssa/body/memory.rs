@@ -3,6 +3,7 @@ use super::{builder_error, error, Body, Collection, CollectionShape, OptimizeErr
 use crate::builtins::catalog;
 use crate::egglog::dataflow::ir::{Bounds, Code};
 use crate::egglog::graph::CollectiveInput;
+use crate::egglog::graph::Formula;
 use crate::egglog::payload::Payload;
 use crate::egglog::query::Query;
 use crate::egglog::to_ssa::{host, runtime_binding, same_value_structure};
@@ -249,7 +250,7 @@ impl Body<'_, '_, '_> {
                 vec![self.field(value, index)?]
             }
             Code::IndexValue => {
-                vec![self.index_expression(self.query().required("OperationIndex", (statement, 0_i64))?)?]
+                vec![self.index_expression(self.query().0.formula(statement, Formula::Index)?)?]
             }
             Code::Copy => {
                 let source = self.named(inputs[0])?;
@@ -345,7 +346,7 @@ impl Body<'_, '_, '_> {
                 )?]
             }
             Code::Uninitialized => {
-                let shape = self.query().vector(self.query().required("OperationShape", statement)?)?;
+                let shape = self.query().vector(self.query().0.formula(statement, Formula::Extents)?)?;
                 let [extent] = shape.as_slice() else {
                     return Err(error("scratch allocation requires one outer extent"));
                 };
@@ -399,7 +400,7 @@ impl Body<'_, '_, '_> {
                 vec![array]
             }
             Code::Range => {
-                let extent = self.query().required("OperationIndex", (statement, 0_i64))?;
+                let extent = self.query().0.formula(statement, Formula::Index)?;
                 let start = self.atom(inputs[0])?;
                 let step = self.atom(inputs[1])?;
                 let length = self.index_expression(extent)?;
@@ -533,9 +534,8 @@ impl Body<'_, '_, '_> {
                 };
                 if matches!(code, Code::CountedLoop) {
                     let index = self.query().loop_parameter(statement)?;
-                    let start = self.index_expression(self.query().required("LoopStart", statement)?)?;
-                    let count = self.index_expression(self.query().required("LoopCount", statement)?)?;
-                    let step = self.index_expression(self.query().required("LoopStep", statement)?)?;
+                    let count =
+                        self.index_expression(self.query().0.formula(statement, Formula::LoopCount)?)?;
                     self.counted(
                         Self::number(0),
                         count,
@@ -543,9 +543,7 @@ impl Body<'_, '_, '_> {
                         initial,
                         |body, ordinal, state| {
                             install(body, &state);
-                            let ordinal = body.cast(ordinal, &start.ty)?;
-                            let offset = body.binary(BinaryOperator::Multiply, ordinal, step)?;
-                            let value = body.binary(BinaryOperator::Add, start, offset)?;
+                            let value = body.cast(ordinal, &types::i32())?;
                             body.values.insert(index, value);
                             body.block(region)
                         },
@@ -624,7 +622,7 @@ impl Body<'_, '_, '_> {
             }
             Code::View => {
                 let mut array = self.named(inputs[0])?;
-                for slice in self.query().vector(self.query().required("OperationSlices", statement)?)? {
+                for slice in self.query().vector(self.query().0.formula(statement, Formula::Slices)?)? {
                     if let Some(at) = self.query().enode("At", slice)? {
                         let index = self.index_expression(at[0])?;
                         array = self.index(array, index)?;
@@ -651,7 +649,7 @@ impl Body<'_, '_, '_> {
                 vec![array]
             }
             Code::Update { bounds } => {
-                let slices = self.query().vector(self.query().required("OperationSlices", statement)?)?;
+                let slices = self.query().vector(self.query().0.formula(statement, Formula::Slices)?)?;
                 let value = self.atom(inputs[1])?;
                 let source = self.named(inputs[0])?;
                 if source.ty.array_variant().is_some_and(types::is_array_variant_composite) {
@@ -1127,7 +1125,7 @@ impl Body<'_, '_, '_> {
         let policy = query.required("AccumulatorPolicy", (owner, group))?;
         let combine = query.0.combiner_at(owner, group);
         let indices = query
-            .vector(query.required("OperationShape", operation)?)?
+            .vector(query.0.formula(operation, Formula::Extents)?)?
             .into_iter()
             .map(|index| self.index_expression(index))
             .collect::<Result<Vec<_>, _>>()?;

@@ -100,7 +100,7 @@
        (OperationUse user (ValueNameRef value)))
       ((set (SnapshotUseSafe value user) true)) :ruleset reuse-reads)
 (rule ((= revision (AnalysisRevision)) (SnapshotCopy value) (WritesInput user 0)
-       (= (wyn-input user 0) (ValueNameRef value)) (= slices (OperationSlices user))
+       (= (wyn-input user 0) (ValueNameRef value)) (= slices (wyn-operation-slices user))
        (= (vec-length slices) 1) (= (vec-get slices 0) (At index)))
       ((SnapshotUpdate value) (set (SnapshotUseSafe value user) true)) :ruleset reuse-reads)
 (rule ((= revision (AnalysisRevision)) (= (SnapshotUseSafe value user) false))

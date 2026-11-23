@@ -1,5 +1,5 @@
 //! Read executable fields from the Rust graph in planning rules.
-use super::graph::{callback_at, CollectiveInput, SharedStructure};
+use super::graph::{callback_at, CollectiveInput, Formula, SharedStructure};
 use egglog_engine::ast::Span;
 use egglog_engine::constraint::{SimpleTypeConstraint, TypeConstraint};
 use egglog_engine::{ArcSort, Core, Primitive, PurePrim, PureState, Value};
@@ -19,6 +19,7 @@ pub(super) enum Field {
     InputCount,
     Output,
     OutputCount,
+    Formula(Formula),
     Collective(CollectiveInput),
     CollectiveCount(CollectiveInput),
     Yield,
@@ -53,6 +54,7 @@ impl Primitive for ExecutableField {
             Field::InputCount => "wyn-input-count",
             Field::Output => "wyn-output",
             Field::OutputCount => "wyn-output-count",
+            Field::Formula(kind) => kind.access(),
             Field::Collective(CollectiveInput::Contribution) => "wyn-contribution",
             Field::CollectiveCount(CollectiveInput::Contribution) => "wyn-contribution-count",
             Field::Collective(CollectiveInput::Neutral) => "wyn-fold-seed",
@@ -122,6 +124,7 @@ impl PurePrim for ExecutableField {
                 let count = graph.collective.get(key, group, kind).len() as i64;
                 Some(state.base_to_value(count))
             }
+            Field::Formula(kind) => graph.formulas.get(key, kind),
             Field::OutputCount => {
                 let count = graph.outputs.get(&key).map_or(0, |names| names.len() as i64);
                 Some(state.base_to_value(count))

@@ -215,16 +215,16 @@ fn constant_index_arithmetic_does_not_prove_wrapping_counts() {
 #[test]
 fn immutable_term_facts_survive_an_analysis_refresh() -> Result<(), OptimizeError> {
     let mut graph = fusion::new_graph()?;
-    graph.parse_and_run_program(
-        None,
+    test_graph::facts_with_positions(
+        &mut graph,
         r#"
         (let n (ValueId 1))
         (let index (IndexAdd (IndexValue n) (IndexConstant 2)))
         (let element (ScalarElement (I32)))
-        (set (OperationShape (OperationId 1)) (vec-of index))
-        (set (OperationSlices (OperationId 1)) (vec-of (At index)))
-        (let shape (OperationShape (OperationId 1)))
-        (let slices (OperationSlices (OperationId 1)))
+        (set (FixtureOperationShape (OperationId 1)) (vec-of index))
+        (set (FixtureOperationSlices (OperationId 1)) (vec-of (At index)))
+        (let shape (FixtureOperationShape (OperationId 1)))
+        (let slices (FixtureOperationSlices (OperationId 1)))
         (run-schedule (saturate graph-indices dataflow-dependencies type-sizes))
         "#,
     )?;
@@ -236,11 +236,19 @@ fn immutable_term_facts_survive_an_analysis_refresh() -> Result<(), OptimizeErro
         (check (= (ShapeAt shape 0) index) (ShapeUse shape n))
         (check (= (SliceAt slices 0) (At index)) (SliceUse slices n))
         (check (= (ElementBytes element) (bigint 4)))
+        "#,
+    )?;
+    let key = Query(&graph).constructor("OperationId", 1_i64)?.unwrap();
+    graph.update(|mut sink| {
+        sink.remove_formula(key, crate::egglog::graph::Formula::Slices);
+        Ok(())
+    })?;
+    test_graph::facts_with_positions(
+        &mut graph,
+        r#"
         (let m (ValueId 2))
-        (delete (OperationShape (OperationId 1)))
-        (delete (OperationSlices (OperationId 1)))
-        (set (OperationShape (OperationId 1)) (vec-of (IndexValue m)))
-        (let revised (OperationShape (OperationId 1)))
+        (set (FixtureOperationShape (OperationId 1)) (vec-of (IndexValue m)))
+        (let revised (FixtureOperationShape (OperationId 1)))
         (run-schedule (saturate graph-indices dataflow-dependencies))
         (check (ShapeUse revised m) (DirectOperationUse (OperationId 1) (ValueNameRef m)))
         (fail (check (DirectOperationUse (OperationId 1) (ValueNameRef n))))
@@ -376,10 +384,8 @@ fn bounded_work_counts_every_loop_iteration() {
                 let loop_ = operation(&mut sink, 1, Code::CountedLoop, &[])?;
                 outputs(&mut sink, loop_, &[])?;
                 sink.set_control(loop_.0, 0_i64, body.0);
-                for (table, n) in [("LoopStart", 0_i64), ("LoopCount", 40_i64), ("LoopStep", 1_i64)] {
-                    let value = sink.add("IndexConstant", n)?;
-                    sink.set(table, loop_.0, value)?;
-                }
+                let count = sink.add("IndexConstant", 40_i64)?;
+                sink.set_formula(loop_.0, crate::egglog::graph::Formula::LoopCount, count)?;
                 let root = region(&mut sink, 1, &[loop_])?;
                 parameters(&mut sink, root, &[])?;
                 yields(&mut sink, root, &[])?;

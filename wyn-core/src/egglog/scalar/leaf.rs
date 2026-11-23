@@ -3,6 +3,7 @@ use crate::egglog::dataflow::{
     edit,
     ir::{self, Code},
 };
+use crate::egglog::graph::Formula;
 use crate::egglog::graph::Graph;
 use crate::egglog::{output_error, query::Query, timing, OptimizeError};
 use crate::{types, LookupSet};
@@ -94,7 +95,7 @@ fn rewrite(
 ) -> Result<bool, OptimizeError> {
     let query = Query(graph);
     let inputs = query.0.inputs(operation);
-    let old_index = query.lookup("OperationIndex", (operation, 0_i64))?;
+    let old_index = query.0.formula_at(operation, Formula::Index);
     let old_attributes = index_operands(query, old_index)?;
     let new_attributes = index_operands(query, extent)?;
     let mut removed = LookupSet::new();
@@ -121,7 +122,7 @@ fn rewrite(
                 Code::Length { axis } => sink.remove("LengthOperation", (operation, axis as i64))?,
                 Code::Scalar(_) => sink.remove("ScalarPayload", operation)?,
                 Code::IndexValue => {
-                    sink.remove("OperationIndex", (operation, 0_i64))?;
+                    sink.remove_formula(operation, Formula::Index);
                     sink.remove("IndexCalculationOperation", operation)?;
                 }
                 Code::Scratch => {}
@@ -150,11 +151,10 @@ fn rewrite(
                         data: vec![index],
                         do_rebuild: true,
                     });
-                    sink.set("OperationShape", operation, shape)?;
-                    sink.add("ShapeDemand", shape)?;
+                    sink.set_formula(operation, Formula::Extents, shape)?;
                     sink.set("ShapeAt", (shape, 0_i64), index)?;
                 } else {
-                    sink.set("OperationIndex", (operation, 0_i64), index)?;
+                    sink.set_formula(operation, Formula::Index, index)?;
                 }
             }
             ir::properties(&mut sink, operation, new)
@@ -170,7 +170,7 @@ fn index_operands(query: Query<'_>, index: Option<Value>) -> Result<LookupSet<Va
     let Some(index) = index else {
         return Ok(LookupSet::new());
     };
-    index_uses(query, index)?
+    crate::egglog::analysis::formula_names(query, Formula::Index, index)?
         .into_iter()
         .map(|value| {
             let Some(name) = query.constructor("ValueNameRef", value)? else {
@@ -179,39 +179,6 @@ fn index_operands(query: Query<'_>, index: Option<Value>) -> Result<LookupSet<Va
             Ok(name)
         })
         .collect()
-}
-
-fn index_uses(query: Query<'_>, index: Value) -> Result<LookupSet<Value>, OptimizeError> {
-    let mut pending = vec![index];
-    let mut seen = LookupSet::new();
-    let mut names = LookupSet::new();
-    while let Some(index) = pending.pop() {
-        if !seen.insert(index) {
-            continue;
-        }
-        let (kind, fields) = query.application(
-            index,
-            &[
-                "IndexValue",
-                "IndexConstant",
-                "IndexAdd",
-                "IndexSub",
-                "IndexMul",
-                "IndexDiv",
-                "IndexMod",
-                "IndexMin",
-                "IndexMax",
-            ],
-        )?;
-        match kind {
-            "IndexValue" => {
-                names.insert(fields[0]);
-            }
-            "IndexConstant" => {}
-            _ => pending.extend(fields),
-        }
-    }
-    Ok(names)
 }
 
 struct UsePath {

@@ -3,6 +3,7 @@ use super::{output_error as error, representation, OptimizeError};
 use crate::builtins::catalog;
 use crate::egglog::bindings::Bindings;
 use crate::egglog::dataflow::ir::Code;
+use crate::egglog::graph::Formula;
 use crate::egglog::query::Query;
 use crate::host::{Expr, ScalarExpr, ScalarSource, ScalarType};
 use crate::types::{Type, TypeName};
@@ -211,11 +212,7 @@ pub(super) fn remember(
             .collect::<Result<Option<Vec<_>>, _>>()?
             .map(ScalarExpr::Tuple),
         Code::Project { index } => atom(query, values, atoms[0])?.map(|value| field(value, index)),
-        Code::IndexValue => scalar_index(
-            query,
-            values,
-            query.required("OperationIndex", (statement, 0_i64))?,
-        )?,
+        Code::IndexValue => scalar_index(query, values, query.0.formula(statement, Formula::Index)?)?,
         Code::Scalar(payload) => {
             let opcode = payload.spelling();
             let builtin = opcode
@@ -651,22 +648,10 @@ fn scalar_loop(
         args,
     };
     let condition = if counted {
-        let Some(start) = scalar_index(query, outer, query.required("LoopStart", loop_)?)? else {
+        let Some(count) = scalar_index(query, outer, query.0.formula(loop_, Formula::LoopCount)?)? else {
             return Ok(None);
         };
-        let Some(count) = scalar_index(query, outer, query.required("LoopCount", loop_)?)? else {
-            return Ok(None);
-        };
-        let Some(step) = scalar_index(query, outer, query.required("LoopStep", loop_)?)? else {
-            return Ok(None);
-        };
-        values.insert(
-            query.loop_parameter(loop_)?,
-            apply(
-                "add",
-                vec![start, apply("mul", vec![field(state.clone(), 0), step])],
-            ),
-        );
+        values.insert(query.loop_parameter(loop_)?, field(state.clone(), 0));
         apply("lt", vec![field(state.clone(), 0), count])
     } else {
         let condition = query.loop_parameter(loop_)?;

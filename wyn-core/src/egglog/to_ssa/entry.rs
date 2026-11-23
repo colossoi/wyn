@@ -8,6 +8,7 @@ use crate::binding_layout::{
 use crate::builtins::catalog;
 use crate::egglog::execution::StepKind;
 use crate::egglog::graph::CollectiveInput;
+use crate::egglog::graph::Formula;
 use crate::egglog::query::Query;
 use crate::flow::ExecutionModel;
 use crate::host::{
@@ -1824,7 +1825,7 @@ impl EntryEmission<'_, '_, '_> {
             let Some(count) = host::scalar_index(
                 self.body.query(),
                 &self.body.host_values,
-                self.body.query().required("LoopCount", expression)?,
+                self.body.query().0.formula(expression, Formula::LoopCount)?,
             )?
             else {
                 return Err(error("loop count has no host value"));
@@ -1871,48 +1872,6 @@ impl EntryEmission<'_, '_, '_> {
             );
         }
         self.restart()?;
-        if counted {
-            let ordinal = self.body.named(loop_parameter)?;
-            let start = self.body.index_expression(self.body.query().required("LoopStart", expression)?)?;
-            let step = self.body.index_expression(self.body.query().required("LoopStep", expression)?)?;
-            let delta = self.body.binary(BinaryOperator::Multiply, ordinal, step)?;
-            let value = self.body.binary(BinaryOperator::Add, start, delta)?;
-            self.body.values.insert(loop_parameter, value);
-            let Some(ordinal) = self.body.host_values.get(&loop_parameter).cloned() else {
-                return Err(error("loop ordinal missing"));
-            };
-            let Some(start) = host::scalar_index(
-                self.body.query(),
-                &self.body.host_values,
-                self.body.query().required("LoopStart", expression)?,
-            )?
-            else {
-                return Err(error("loop start missing"));
-            };
-            let Some(step) = host::scalar_index(
-                self.body.query(),
-                &self.body.host_values,
-                self.body.query().required("LoopStep", expression)?,
-            )?
-            else {
-                return Err(error("loop step missing"));
-            };
-            self.body.host_values.insert(
-                loop_parameter,
-                ScalarExpr::Apply {
-                    op: "add".into(),
-                    ty: ScalarType::I32,
-                    args: vec![
-                        start,
-                        ScalarExpr::Apply {
-                            op: "mul".into(),
-                            ty: ScalarType::I32,
-                            args: vec![ordinal, step],
-                        },
-                    ],
-                },
-            );
-        }
         let mut live = live_names(self.body.query(), &[], region)?;
         live.extend(after.iter().copied());
         self.statements(region, &live)?;

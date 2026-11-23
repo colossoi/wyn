@@ -3,6 +3,7 @@ use super::super::{
     finish_for_test, from_tlc, fuse, optimize_for_test, place, schedule, schedule_with_subgroups,
 };
 use crate::egglog::dataflow::ir::{Bounds, Code};
+use crate::egglog::graph::Formula;
 use crate::egglog::graph::Graph;
 use crate::egglog::payload::read;
 use crate::egglog::{analysis, test_graph};
@@ -438,7 +439,7 @@ fn exported_views_have_their_own_logical_domain() {
             let views = top_level(graph, function, "View");
             assert_eq!(views.len(), 1);
             let operation = views[0];
-            let slices = query.vector(query.required("OperationSlices", operation).unwrap()).unwrap();
+            let slices = query.vector(query.0.formula(operation, Formula::Slices).unwrap()).unwrap();
             let slice = query.fields("Slice", slices[0]).unwrap();
             assert_eq!(
                 graph.value_to_base::<i64>(query.required("StaticIndex", slice[1]).unwrap()),
@@ -1485,7 +1486,7 @@ fn collection_shape_proofs_distinguish_extents_from_capacity() {
     let mut graph = test_graph::fixture(
         &[(0, Code::Parallel), (1, Code::Uninitialized)],
         r#"
-        (set (OperationShape (OperationId 1)) (vec-of (IndexConstant 2)))
+        (set (FixtureOperationShape (OperationId 1)) (vec-of (IndexConstant 2)))
         (set (FixtureOutput (OperationId 1) 0) (ValueNameRef (ValueId 30)))
         (LiveOperation (OperationId 0))
         (set (OperationDomain (OperationId 0)) (DomainId 0))
@@ -1576,7 +1577,7 @@ fn element_update_snapshots_require_no_escaping_copy() {
             (LiveOperation (OperationId 0)) (LiveOperation (OperationId 1)) (LiveOperation (OperationId 2))
             (set (FixtureOutput (OperationId 0) 0) (ValueNameRef (ValueId 1)))
             (set (FixtureInput (OperationId 1) 0) (ValueNameRef (ValueId 1)))
-            (set (OperationSlices (OperationId 1)) (vec-of (At (IndexConstant 0))))
+            (set (FixtureOperationSlices (OperationId 1)) (vec-of (At (IndexConstant 0))))
             (OperationUse (OperationId 1) (ValueNameRef (ValueId 1)))
             (OperationUse (OperationId 2) (ValueNameRef (ValueId 1)))
             {escape}
@@ -1609,7 +1610,7 @@ fn slice_lengths_do_not_require_a_source_capacity_bound() {
     let graph = test_graph::fixture(&[(0, Code::View)], r#"
         (set (FixtureInput (OperationId 0) 0) (ValueNameRef (ValueId 0)))
         (set (FixtureOutput (OperationId 0) 0) (ValueNameRef (ValueId 1)))
-        (set (OperationSlices (OperationId 0)) (vec-of (Slice (IndexConstant 2) (IndexConstant 5) (IndexConstant 1))))
+        (set (FixtureOperationSlices (OperationId 0)) (vec-of (Slice (IndexConstant 2) (IndexConstant 5) (IndexConstant 1))))
         (run-schedule (saturate graph-sizes))
         (check (= (LogicalOuterCount (ValueId 1)) (IndexConstant 5)))
     "#).unwrap();

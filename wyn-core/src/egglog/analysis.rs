@@ -8,6 +8,9 @@ use egglog_engine::sort::S;
 use egglog_engine::{IntoValues, RawValues, Value, Write};
 
 mod calls;
+mod formulas;
+
+pub(in crate::egglog) use formulas::formula_names;
 mod signatures;
 
 pub(super) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
@@ -170,7 +173,9 @@ pub(super) fn structure(graph: &mut Graph, for_inlining: bool) -> Result<(), Opt
     let _timing = timing::span("egglog graph structure");
     invalidate(graph)?;
     calls::publish(graph, for_inlining)?;
-    if !for_inlining {
+    if for_inlining {
+        formulas::publish(graph, true)?;
+    } else {
         publish_proof_operands(graph)?;
     }
     graph.parse_and_run_program(None, "(run-schedule (saturate graph-structure flow-scopes))")?;
@@ -318,6 +323,7 @@ pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeEr
         }
         Ok(())
     })?;
+    formulas::publish(graph, false)?;
     publish_collective_uses(graph)
 }
 

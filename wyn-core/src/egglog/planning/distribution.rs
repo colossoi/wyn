@@ -1,6 +1,7 @@
 //! Apply an admitted domain composition to keyed cells and coordinate proofs.
 use crate::egglog::dataflow::edit::{self, OPERATION_CELLS};
 use crate::egglog::dataflow::ir::{self, Code, Name, OperationId, Parameter, RegionId};
+use crate::egglog::graph::Formula;
 use crate::egglog::graph::Graph;
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, OptimizeError};
@@ -171,7 +172,7 @@ pub(super) fn apply(graph: &mut Graph, outer: Value, inner: Value) -> Result<(),
                     let coordinate = sink.add("IndexValue", axis)?;
                     index = sink.add("IndexAdd", (scaled, coordinate))?;
                 }
-                sink.set("OperationIndex", (operation.0, 0_i64), index)?;
+                sink.set_formula(operation.0, Formula::Index, index)?;
                 sink.set_region(operation.0, body);
                 sink.set_order(operation.0, slot as i64);
             }

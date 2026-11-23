@@ -2,6 +2,7 @@ use crate::egglog::dataflow::{
     body, edit,
     ir::{self, Bounds, Code, Name},
 };
+use crate::egglog::graph::Formula;
 use crate::egglog::graph::{ArgumentSite, Graph};
 use crate::egglog::payload::Payload;
 use crate::egglog::query::Query;
@@ -49,7 +50,7 @@ fn copy_forwarding_preserves_captures_loop_entries_and_backedges() -> Result<(),
                 let name = Name::Value(raw);
                 let copy = ir::operation(&mut sink, id, Code::IndexValue, &[])?;
                 let index = sink.add("IndexValue", source)?;
-                sink.set("OperationIndex", (copy.0, 0_i64), index)?;
+                sink.set_formula(copy.0, Formula::Index, index)?;
                 ir::outputs(&mut sink, copy, &[name])?;
                 sink.set("ValueType", raw, ty)?;
                 sink.set_region(copy.0, region);
@@ -114,8 +115,8 @@ fn inlining_preserves_dependent_calls_and_shape_arguments() -> Result<(), Optimi
             None,
             r#"
             (fail (check (LiveOperation call) (CallOperation call)))
-            (check (= (OperationIndex (OperationId 4) 0) (IndexValue (ValueId 0))))
-            (check (= (OperationShape (OperationId 5)) (vec-of (IndexValue (ValueId 0)))))
+            (check (= (wyn-index-expression (OperationId 4)) (IndexValue (ValueId 0))))
+            (check (= (wyn-operation-extents (OperationId 5)) (vec-of (IndexValue (ValueId 0)))))
             (check (= (wyn-yield (RegionId 0) 0) (ValueNameRef (ValueId 3))))
             (check (= (ValueType (ValueId 0)) (ScalarInfo (ScalarElement (I32)))))
         "#,
@@ -251,7 +252,7 @@ fn structural_cloning_renames_storage_shapes_without_analysis() -> Result<(), Op
     edit::clone_region(&mut graph, context, root, &arguments)?;
     let query = Query(&graph);
     let cloned = query.constructor("ClonedOperation", (context, storage))?.unwrap();
-    let shape = query.vector(query.required("OperationShape", cloned)?)?;
+    let shape = query.vector(query.0.formula(cloned, Formula::Extents)?)?;
     let index = query.fields("IndexValue", shape[0])?[0];
     let expected = query
         .constructor(
@@ -274,7 +275,7 @@ fn structural_cloning_follows_nested_regions_without_analysis() -> Result<(), Op
     let root = test_graph::root(&graph);
     let branch = query.first("BranchOperation")?.unwrap()[0];
     let view = query.first("ViewOperation")?.unwrap()[0];
-    let slices = query.required("OperationSlices", view)?;
+    let slices = query.0.formula(view, Formula::Slices)?;
     let returns = query.0.yield_values(root);
     let mut arguments = query.0.parameters(root);
     arguments[1] = arguments[2];
@@ -289,7 +290,7 @@ fn structural_cloning_follows_nested_regions_without_analysis() -> Result<(), Op
     );
     let copied_view = query.constructor("ClonedOperation", (branch, view))?.unwrap();
     assert_eq!(query.0.operation_region(copied_view)?, copied_arm);
-    assert_ne!(query.required("OperationSlices", copied_view)?, slices);
+    assert_ne!(query.0.formula(copied_view, Formula::Slices)?, slices);
     assert!(query.first("FlowLive")?.is_none());
     let results = query.0.yield_values(cloned_root);
     let operations = query.operations(cloned_root)?;
@@ -746,7 +747,7 @@ fn range_lengths_clamp_negative_counts_before_shape_planning() -> Result<(), Opt
     super::simplify(&mut graph, false)?;
     let query = Query(&graph);
     let calculation = query.first("IndexCalculationOperation")?.unwrap()[0];
-    let extent = query.required("OperationIndex", (calculation, 0_i64))?;
+    let extent = query.0.formula(calculation, Formula::Index)?;
     let max = query.fields("IndexMax", extent)?;
     assert_eq!(
         graph.value_to_base::<i64>(query.fields("IndexConstant", max[0])?[0]),

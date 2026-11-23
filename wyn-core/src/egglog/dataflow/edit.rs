@@ -1,10 +1,10 @@
 //! Apply selected edits to keyed graph cells without reconstructing a program.
 use super::ir::{self, Code};
-use crate::egglog::graph::CollectiveInput;
 use crate::egglog::graph::{ArgumentSite, Graph};
+use crate::egglog::graph::{CollectiveInput, Formula};
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, output_error, OptimizeError};
-use crate::{LookupMap, LookupSet};
+use crate::{LookupMap, LookupSet, StableMap};
 use egglog_engine::{RawValues, Value, Write};
 use wyn_graph::ReplacementForest;
 
@@ -12,13 +12,6 @@ pub(in crate::egglog) const OPERATION_CELLS: &[&str] = &[
     "InstructionWork",
     "LiteralBits",
     "InputDiet",
-    "LoopStart",
-    "LoopCount",
-    "LoopStep",
-    "OperationIndex",
-    "OperationSlices",
-    "OperationLayout",
-    "OperationShape",
     "OperationDomain",
     "OperationWidth",
     "OperationExecution",
@@ -272,8 +265,44 @@ fn seed_replacements(graph: &mut Graph, replacements: &[(Value, Value)]) -> Resu
 fn replace_attributes_with_seeded_values(graph: &mut Graph) -> Result<(), OptimizeError> {
     graph.parse_and_run_program(
         None,
-        "(run-schedule (saturate graph-indices graph-substitution-index) (saturate graph-substitution) (saturate graph-apply))",
+        "(run-schedule (saturate graph-indices graph-substitution-index) (saturate graph-substitution))",
     )?;
+    let query = Query(graph);
+    let mut formulas = Vec::new();
+    {
+        let structure = graph.structure().read();
+        for (table, kinds) in [
+            ("RewrittenIndex", &[Formula::Index, Formula::LoopCount][..]),
+            ("RewrittenShape", &[Formula::Extents][..]),
+            ("RewrittenSlices", &[Formula::Slices][..]),
+        ] {
+            if !kinds
+                .iter()
+                .any(|kind| structure.formulas.by_kind.get(kind).is_some_and(|terms| !terms.is_empty()))
+            {
+                continue;
+            }
+            query.for_function(table, |keys, replacement| {
+                if keys[0] != replacement {
+                    for &kind in kinds {
+                        if let Some(sites) = structure.formulas.sites.get(&(kind, keys[0])) {
+                            formulas.extend(sites.iter().map(|&op| (op, kind, replacement)));
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+        }
+    }
+    if !formulas.is_empty() {
+        graph.update(|mut sink| {
+            for (op, kind, replacement) in formulas {
+                sink.set_formula(op, kind, replacement)?;
+            }
+            Ok(())
+        })?;
+    }
+    graph.parse_and_run_program(None, "(run-schedule (saturate graph-apply))")?;
     changed(graph)?;
     Ok(())
 }
@@ -386,9 +415,7 @@ pub(in crate::egglog) fn set_code(
     }
     let mut obsolete = Vec::new();
     for &table in OPERATION_CELLS {
-        if ["InstructionWork", "LiteralBits", "ScalarPayload"].contains(&table)
-            || (table == "OperationIndex" && matches!(code, Code::IndexValue))
-        {
+        if ["InstructionWork", "LiteralBits", "ScalarPayload"].contains(&table) {
             continue;
         }
         Query(graph).for_function(table, |keys, _| {
@@ -400,6 +427,7 @@ pub(in crate::egglog) fn set_code(
     }
     graph.update(|mut sink| {
         sink.clear_collective_inputs(operation);
+        sink.clear_formulas(operation, matches!(code, Code::IndexValue));
         for (table, row) in rows {
             sink.remove(table, RawValues(row))?;
         }
@@ -426,6 +454,21 @@ fn collective_name(query: Query<'_>, kind: CollectiveInput, value: Value) -> Res
     query
         .constructor("ValueNameRef", value)?
         .ok_or_else(|| output_error("collective operand has no value identity"))
+}
+
+struct ClonedOperation {
+    source: Value,
+    key: Value,
+    region: Value,
+    order: i64,
+    target: Option<Value>,
+    controls: Vec<(i64, Value, Vec<Value>)>,
+    inputs: Vec<Value>,
+    outputs: Vec<Value>,
+    reducers: Vec<(i64, Value)>,
+    combiners: Vec<(i64, Value)>,
+    collective: StableMap<(i64, CollectiveInput), Vec<Value>>,
+    formulas: Vec<(Formula, Value)>,
 }
 
 /// Copy a selected region using fresh graph identities, substituting its entry edge.
@@ -474,6 +517,7 @@ pub(in crate::egglog) fn clone_region(
     let mut operations = Vec::new();
     let mut argument_names = LookupSet::new();
     let mut result_names = LookupSet::new();
+    let mut formula_demands = LookupSet::new();
     while let Some(region) = pending.pop() {
         if members.insert(region) {
             result_names.extend(graph.parameters(region));
@@ -490,11 +534,23 @@ pub(in crate::egglog) fn clone_region(
                 for (slot, _) in graph.controls(operation) {
                     argument_names.extend(graph.arguments(operation, slot));
                 }
+                for (kind, value) in graph.formulas(operation) {
+                    let demand = match kind {
+                        Formula::Index | Formula::LoopCount => "CloneIndexDemand",
+                        Formula::Extents => "CloneShapeDemand",
+                        Formula::Slices => "CloneSliceDemand",
+                        Formula::Layout => continue,
+                    };
+                    formula_demands.insert((demand, value));
+                }
                 operations.push(operation);
             }
         }
     }
     graph.update(|mut sink| {
+        for (demand, value) in formula_demands {
+            sink.add(demand, (context, value))?;
+        }
         for &region in &members {
             sink.add("CloneMember", (context, region))?;
         }
@@ -585,69 +641,71 @@ pub(in crate::egglog) fn clone_region(
                     *value = if kind.uses_raw_name() { query.name(clone)? } else { clone };
                 }
             }
-            operations.push((
-                row[1],
-                copy,
+            let mut formulas = graph.formulas(row[1]);
+            for (kind, value) in &mut formulas {
+                let clone = match kind {
+                    Formula::Index | Formula::LoopCount => "CloneIndex",
+                    Formula::Extents => "CloneShape",
+                    Formula::Slices => "CloneSlices",
+                    Formula::Layout => continue,
+                };
+                *value = query.required(clone, (context, *value))?;
+            }
+            operations.push(ClonedOperation {
+                source: row[1],
+                key: copy,
                 region,
-                query.0.operation_order(row[1])?,
+                order: query.0.operation_order(row[1])?,
                 target,
                 controls,
-                graph
+                inputs: graph
                     .inputs(row[1])
                     .into_iter()
                     .map(|name| query.required("CloneName", (context, name)))
                     .collect::<Result<Vec<_>, _>>()?,
-                graph
+                outputs: graph
                     .outputs(row[1])
                     .into_iter()
                     .map(|name| query.required("CloneName", (context, name)))
                     .collect::<Result<Vec<_>, _>>()?,
-                clone_callbacks(graph.reducers(row[1]))?,
-                clone_callbacks(graph.combiners(row[1]))?,
+                reducers: clone_callbacks(graph.reducers(row[1]))?,
+                combiners: clone_callbacks(graph.combiners(row[1]))?,
                 collective,
-            ));
+                formulas,
+            });
         }
         Ok(())
     })?;
-    for &(original, copy, ..) in &operations {
-        graph.copy_occurrence(original, copy)?;
+    for operation in &operations {
+        graph.copy_occurrence(operation.source, operation.key)?;
     }
     graph.update(|mut sink| {
         for (region, parameters, values) in cloned_yields {
             sink.set_parameters(region, parameters)?;
             sink.set_yields(region, values)?;
         }
-        for (
-            _,
-            operation,
-            region,
-            order,
-            target,
-            controls,
-            inputs,
-            outputs,
-            reducers,
-            combiners,
-            collective,
-        ) in operations
-        {
-            for ((group, kind), values) in collective {
-                sink.set_collective_inputs(operation, group, kind, values)?;
+        for operation in operations {
+            let key = operation.key;
+            for (kind, value) in operation.formulas {
+                sink.set_formula(key, kind, value)?;
             }
-            sink.set_reducers(operation, reducers);
-            sink.set_combiners(operation, combiners);
-            sink.set_inputs(operation, inputs)?;
-            sink.set_outputs(operation, outputs)?;
-            for (slot, child, arguments) in controls {
-                sink.set_control(operation, slot, child);
+            for ((group, kind), values) in operation.collective {
+                sink.set_collective_inputs(key, group, kind, values)?;
+            }
+            sink.set_reducers(key, operation.reducers);
+            sink.set_combiners(key, operation.combiners);
+            sink.set_inputs(key, operation.inputs)?;
+            sink.set_outputs(key, operation.outputs)?;
+            for (slot, child, arguments) in operation.controls {
+                sink.set_control(key, slot, child);
                 for (index, name) in arguments.into_iter().enumerate() {
-                    sink.set_argument(ArgumentSite(operation, slot, index), name)?;
+                    sink.set_argument(ArgumentSite(key, slot, index), name)?;
                 }
             }
-            sink.set_region(operation, region);
-            sink.set_order(operation, order);
-            if let Some(target) = target {
-                sink.set_call_target(operation, target);
+            sink.set_region(key, operation.region);
+            sink.set_order(key, operation.order);
+            if let Some(target) = operation.target {
+                sink.set_call_target(key, target);
             }
         }
         Ok(())

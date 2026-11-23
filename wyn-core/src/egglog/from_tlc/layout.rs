@@ -2,6 +2,7 @@ use super::{
     output_error, types, Clause, Code, Import, Imported, Leaf, Name, OptimizeError, Scope, Type, TypeExt,
     TypeName,
 };
+use crate::egglog::graph::Formula;
 use egglog_engine::{Value, Write};
 
 impl<'source> Import<'_, '_, '_, '_, 'source> {
@@ -45,7 +46,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
             for code in ["IndexDiv", "IndexMod"] {
                 let expression = self.node(code, (index, divisor))?;
                 let operation = self.operation(Code::IndexValue, &[])?;
-                self.sink.set("OperationIndex", (operation.0, 0_i64), expression)?;
+                self.sink.set_formula(operation.0, Formula::Index, expression)?;
                 coordinates.push(Self::leaf(self.emit(operation, &types::i32(), &mut inner)?)?.name);
             }
             (domain, [coordinates[0], coordinates[1]], "FlattenAxes")
@@ -66,7 +67,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
             vec![Clause::Collect(vec![Name::Value(value.name)])],
         )?;
         let layout = self.unit(layout)?;
-        self.sink.set("OperationLayout", operation.0, layout)?;
+        self.sink.set_formula(operation.0, Formula::Layout, layout)?;
         self.emit(operation, ty, scope)
     }
 

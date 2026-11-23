@@ -1,5 +1,6 @@
 //! Match repeatable expressions against the definitions visible at each occurrence.
 use super::{body::BodyGraph, ir::Code};
+use crate::egglog::graph::Formula;
 use crate::egglog::graph::Graph;
 use crate::egglog::{query::Query, OptimizeError};
 use crate::memory_ir::{Definition, Function, OperationId, RegionId, ValueRef};
@@ -47,7 +48,7 @@ impl Reuse {
                 .iter()
                 .map(|value| self.replacements.get(value).copied().unwrap_or(*value))
                 .collect(),
-            index: query.lookup("OperationIndex", (key, 0_i64))?,
+            index: query.0.formula_at(key, Formula::Index),
             ty: *ty,
         };
         if let Some(&existing) = self.visible.get(&expression) {

@@ -6,6 +6,7 @@ use super::{fusion, output_error, OptimizeError};
 use crate::ast::Span;
 use crate::builtins::{by_id, catalog, BuiltinId, Purity};
 use crate::egglog::graph::CollectiveInput;
+use crate::egglog::graph::Formula;
 use crate::egglog::graph::{ArgumentSite, Graph, State};
 use crate::op::BinaryOperator;
 use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
@@ -1002,7 +1003,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                 };
                 let expression =
                     self.operation(Code::Range, &[Name::Value(start_atom), Name::Value(step)])?;
-                self.sink.set("OperationIndex", (expression.0, 0_i64), length)?;
+                self.sink.set_formula(expression.0, Formula::Index, length)?;
                 self.emit(expression, &array.array_type(), scope)
             }
         }
@@ -1050,7 +1051,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
             let count = self.node("IndexValue", source.name)?;
             let shape = self.vector(vec![count]);
             let operation = self.operation(Code::Uninitialized, &[])?;
-            self.sink.set("OperationShape", operation.0, shape)?;
+            self.sink.set_formula(operation.0, Formula::Extents, shape)?;
             operation
         } else {
             let Some(index) = values.get(1) else {
@@ -1070,7 +1071,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                     let slice = self.node("Slice", (index, count, one))?;
                     let slices = self.vector(vec![slice]);
                     let operation = self.operation(Code::View, &[Name::Value(source.name)])?;
-                    self.sink.set("OperationSlices", operation.0, slices)?;
+                    self.sink.set_formula(operation.0, Formula::Slices, slices)?;
                     operation
                 } else {
                     let destination = if id == known.array_with
@@ -1089,7 +1090,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                         },
                         &[Name::Value(destination), Name::Value(value.name)],
                     )?;
-                    self.sink.set("OperationSlices", operation.0, slices)?;
+                    self.sink.set_formula(operation.0, Formula::Slices, slices)?;
                     operation
                 }
             }
@@ -1326,7 +1327,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
             },
             &[Name::Accumulator(token), Name::Value(value)],
         )?;
-        self.sink.set("OperationShape", operation.0, indices)?;
+        self.sink.set_formula(operation.0, Formula::Extents, indices)?;
         let next = self.fresh("AccumulatorId")?;
         self.sink.set("AccumulatorType", next, info)?;
         self.statement(vec![Name::Accumulator(next)], operation, scope)?;
@@ -1553,8 +1554,6 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
         let mut inner = Scope::default();
         let mut initial_values = vec![initial.clone()];
         let mut carried_values = vec![carried.clone()];
-        let zero = self.node("IndexConstant", 0i64)?;
-        let one = self.node("IndexConstant", 1i64)?;
         let mut induction = None;
         let form = match kind {
             LoopKind::ForRange { var, var_ty, bound } => {
@@ -1638,9 +1637,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
             self.sink.set_argument(ArgumentSite(operation.0, 0, index), name)?;
         }
         if let Some((_, count)) = induction {
-            self.sink.set("LoopStart", operation.0, zero)?;
-            self.sink.set("LoopCount", operation.0, count)?;
-            self.sink.set("LoopStep", operation.0, one)?;
+            self.sink.set_formula(operation.0, Formula::LoopCount, count)?;
         }
         self.statement(pattern, operation, scope)?;
         Ok(Imported::Leaf(output))
