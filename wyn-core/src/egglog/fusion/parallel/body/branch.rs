@@ -46,7 +46,7 @@ impl Body {
                     let slot = steps.len() as i64;
                     let operation = sink.add("DerivedOperation", (key, 94_i64, slot))?;
                     let result = sink.add("DerivedValue", (key, 94_i64, slot))?;
-                    sink.set("ValueType", result, bool_type)?;
+                    sink.set_value_type(result, bool_type)?;
                     let output = Name::Value(result);
                     let code = Code::Scalar(code);
                     let id = ir::operation_at(&mut sink, WireOperationId(operation), code.clone(), inputs)?;
@@ -75,7 +75,7 @@ impl Body {
                 };
                 let guard = sink.add("DerivedOperation", (key, 94_i64, -1_i64))?;
                 let inside = sink.add("DerivedValue", (key, 94_i64, -1_i64))?;
-                sink.set("ValueType", inside, ty)?;
+                sink.set_value_type(inside, ty)?;
                 let inner = Name::Value(inside);
                 let inner_name = inner.fact(&mut sink)?;
                 sink.set_output(key, 0_i64, inner_name)?;

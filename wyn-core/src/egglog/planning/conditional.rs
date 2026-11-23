@@ -87,7 +87,7 @@ pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> 
             let mut bindings = Vec::new();
             for (slot, (info, kind, ty)) in returns.into_iter().enumerate() {
                 let value = sink.add("DerivedValue", (branch, 61_i64, slot as i64))?;
-                sink.set("ValueType", value, info)?;
+                sink.set_value_type(value, info)?;
                 bindings.push(Name::Value(value));
                 let info = sink.add(kind, ty)?;
                 for arm in [a, b] {

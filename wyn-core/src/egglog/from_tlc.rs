@@ -7,7 +7,7 @@ use crate::ast::Span;
 use crate::builtins::{by_id, catalog, BuiltinId, Purity};
 use crate::egglog::graph::CollectiveInput;
 use crate::egglog::graph::Formula;
-use crate::egglog::graph::{ArgumentSite, Graph, State};
+use crate::egglog::graph::{ArgumentSite, Graph, ScalarCode, ScalarExpressionId, State};
 use crate::egglog::graph::{Dimension, IterationDomain};
 use crate::egglog::graph::{OutputBinding, ParallelResults};
 use crate::op::BinaryOperator;
@@ -17,9 +17,10 @@ use crate::tlc::{
     self, extract_lambda_params_ref, ArrayExpr, DefMeta, LoopKind, SoacBody, SoacOp, TermKind, VarRef,
 };
 use crate::types::{self, extract_function_signature, strip_existentials, Diet, Type, TypeExt, TypeName};
-use crate::SymbolId;
+use crate::{LookupMap, SymbolId};
 use egglog_engine::sort::VecContainer;
 use egglog_engine::{Core, IntoValues, RawValues, Value, Write};
+use smallvec::SmallVec;
 use wyn_base::{IdSource, Interner};
 
 #[cfg(test)]
@@ -68,6 +69,7 @@ enum Imported<'source> {
 struct Scope {
     statements: Vec<OperationId>,
     parameters: Vec<Parameter>,
+    scalar_results: LookupMap<ScalarExpressionId, Leaf>,
 }
 
 struct Domain {
@@ -267,8 +269,14 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
         bits: i64,
         scope: &mut Scope,
     ) -> Result<Imported<'source>, OptimizeError> {
-        let operation = self.operation(Code::Constant { ty: ty.clone(), bits }, &[])?;
-        self.emit(operation, ty, scope)
+        let code = Code::Constant { ty: ty.clone(), bits };
+        let info = self.value_info(ty)?;
+        let expression = self.sink.intern_scalar(ScalarCode::Literal(bits), &[], info);
+        if let Some(result) = scope.scalar_results.get(&expression) {
+            return Ok(Imported::Leaf(result.clone()));
+        }
+        let operation = self.operation(code, &[])?;
+        self.emit_scalar(operation, ty, info, Some(expression), scope)
     }
 
     fn primitive(
@@ -296,8 +304,22 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
             }
             _ => pure,
         };
-        let inputs = atoms.into_iter().map(Name::Value).collect::<Vec<_>>();
-        let operation = self.operation(Code::Scalar(payload), &inputs)?;
+        let code = Code::Scalar(payload);
+        let info = self.value_info(ty)?;
+        let inputs: Vec<_> = atoms.into_iter().map(Name::Value).collect();
+        let shared = if pure && repeatable {
+            let values = inputs
+                .iter()
+                .map(|input| input.fact(&mut self.sink))
+                .collect::<Result<SmallVec<[Value; 2]>, _>>()?;
+            Some(self.sink.intern_scalar(ScalarCode::Operation(payload), &values, info))
+        } else {
+            None
+        };
+        if let Some(result) = shared.and_then(|key| scope.scalar_results.get(&key)) {
+            return Ok(Imported::Leaf(result.clone()));
+        }
+        let operation = self.operation(code, &inputs)?;
         if pure {
             self.sink.add("DiscardableOperation", operation.0)?;
         } else {
@@ -321,7 +343,23 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                 self.sink.add("LaneDependentOperation", operation.0)?;
             }
         }
-        self.emit(operation, ty, scope)
+        self.emit_scalar(operation, ty, info, shared, scope)
+    }
+
+    fn emit_scalar(
+        &mut self,
+        operation: OperationId,
+        ty: &Type,
+        info: Value,
+        expression: Option<ScalarExpressionId>,
+        scope: &mut Scope,
+    ) -> Result<Imported<'source>, OptimizeError> {
+        let value = self.typed_leaf(ty, info)?;
+        self.statement(vec![Name::Value(value.name)], operation, scope)?;
+        if let Some(expression) = expression {
+            scope.scalar_results.insert(expression, value.clone());
+        }
+        Ok(Imported::Leaf(value))
     }
 
     fn index(&mut self, term: &'source Term, scope: &mut Scope) -> Result<Value, OptimizeError> {
@@ -451,23 +489,33 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
         self.node("ElementValue", element)
     }
 
-    fn scalar(&mut self, ty: &Type) -> Result<Leaf, OptimizeError> {
+    fn value_info(&mut self, ty: &Type) -> Result<Value, OptimizeError> {
         let ty = strip_existentials(ty);
-        let info = if ty.is_array()
+        if ty.is_array()
             || matches!(
                 strip_existentials(ty),
                 Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), _)
-            ) {
+            )
+        {
             let ty = self.logical_type(ty)?;
-            self.node("LogicalValue", ty)?
+            self.node("LogicalValue", ty)
         } else if let Some(resource) = self.resource_type(ty)? {
-            self.node("ResourceInfo", resource)?
+            self.node("ResourceInfo", resource)
         } else {
             let element = self.element(ty)?;
-            self.node("ScalarInfo", element)?
-        };
+            self.node("ScalarInfo", element)
+        }
+    }
+
+    fn scalar(&mut self, ty: &Type) -> Result<Leaf, OptimizeError> {
+        let info = self.value_info(ty)?;
+        self.typed_leaf(ty, info)
+    }
+
+    fn typed_leaf(&mut self, ty: &Type, info: Value) -> Result<Leaf, OptimizeError> {
+        let ty = strip_existentials(ty);
         let name = self.fresh("ValueId")?;
-        self.sink.set("ValueType", name, info)?;
+        self.sink.set_value_type(name, info)?;
         Ok(Leaf {
             name,
             info,

@@ -51,6 +51,47 @@ fn evaluation_edges_stay_direct_and_borrowed_values_do_not_repeat_effects() {
 }
 
 #[test]
+fn scalar_expressions_share_identity_at_import_and_after_an_operand_edit() {
+    let program = compile_thru_tlc(
+        "entry main(x:i32,y:i32,z:i32,b:bool) (i32,i32,i32,i32,i32,i32) =
+         (x+y,x+y,let y=z in x+y,if b then x+y else z,7,7)",
+    )
+    .unwrap();
+    let (mut graph, _) = import(&program).unwrap();
+    let body = function_body(&graph);
+    let additions: Vec<_> = body
+        .iter()
+        .copied()
+        .filter(|&op| matches!(graph.code(op).unwrap(), Code::Scalar(payload) if payload.spelling() == "+"))
+        .collect();
+    assert_eq!(additions.len(), 2);
+    let [first, second] = additions[..] else {
+        unreachable!()
+    };
+    let product = *body.last().unwrap();
+    let fields = graph.inputs(product);
+    assert_eq!(fields[0], fields[1]);
+    assert_ne!(fields[0], fields[2]);
+    assert_eq!(fields[4], fields[5]);
+
+    let nested = graph
+        .codes()
+        .find(|(op, code)| {
+            !body.contains(op) && matches!(code, Code::Scalar(payload) if payload.spelling() == "+")
+        })
+        .unwrap()
+        .0;
+    assert_ne!(graph.output(first, 0).unwrap(), graph.output(nested, 0).unwrap());
+    let identity = graph.scalar_expression(first).unwrap();
+    assert_eq!(graph.scalar_expression(nested), Some(identity));
+    assert_ne!(graph.scalar_expression(second), Some(identity));
+
+    let y = graph.inputs(first)[1];
+    graph.update(|mut sink| sink.set_input(second, 1, y)).unwrap();
+    assert_eq!(graph.scalar_expression(second), Some(identity));
+}
+
+#[test]
 fn indexed_write_effects_distinguish_owned_arrays_from_views() {
     for (ty, readonly) in [("[4]i32", true), ("[]i32", false)] {
         let source = format!("entry main(xs:{ty}) {ty} = scatter(xs,[0i32],[7i32])");

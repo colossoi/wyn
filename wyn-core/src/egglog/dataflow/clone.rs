@@ -154,7 +154,7 @@ pub(in crate::egglog) fn clone_region(
                 let replacement = if kind == "ValueNameRef" {
                     let value = sink.add("ClonedValue", (context, raw))?;
                     if let Some(ty) = sink.lookup("ValueType", raw)? {
-                        sink.set("ValueType", value, ty)?;
+                        sink.set_value_type(value, ty)?;
                     }
                     clone.values.insert(raw, value);
                     value

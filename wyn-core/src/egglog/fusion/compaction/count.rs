@@ -213,7 +213,7 @@ fn make_count(
     let zero = constant(sink, context, 0, 0, info)?;
     let one = constant(sink, context, 1, 1, info)?;
     let flag = sink.add("DerivedValue", (context, 92_i64, 2_i64))?;
-    sink.set("ValueType", flag, info)?;
+    sink.set_value_type(flag, info)?;
     let id = sink.add("DerivedOperation", (context, 92_i64, 2_i64))?;
     let flag_operation = ir::operation_at(
         sink,
@@ -227,7 +227,7 @@ fn make_count(
     let left = sink.add("DerivedValue", (context, 92_i64, 3_i64))?;
     let right = sink.add("DerivedValue", (context, 92_i64, 4_i64))?;
     let sum = sink.add("DerivedValue", (context, 92_i64, 5_i64))?;
-    sink.set("ValueType", sum, info)?;
+    sink.set_value_type(sum, info)?;
     let id = sink.add("DerivedOperation", (context, 92_i64, 3_i64))?;
     let add = ir::operation_at(
         sink,
@@ -284,7 +284,7 @@ fn constant(
     info: Value,
 ) -> Result<(Value, Value), OptimizeError> {
     let value = sink.add("DerivedValue", (owner, 92_i64, slot))?;
-    sink.set("ValueType", value, info)?;
+    sink.set_value_type(value, info)?;
     let id = sink.add("DerivedOperation", (owner, 92_i64, slot))?;
     let operation = ir::operation_at(
         sink,

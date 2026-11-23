@@ -1,15 +1,18 @@
 //! Rust owns executable operation metadata. Egglog consumes its derived facts.
 use super::dataflow::ir::Code;
 use super::executable_field::{ExecutableField, Field};
+use super::payload::Payload;
 use super::{output_error, OptimizeError};
 use crate::ast::Span;
 use crate::{LookupMap, LookupSet, StableMap};
 use egglog_engine::prelude::BaseSort;
 use egglog_engine::sort::{BoolSort, I64Sort};
 use egglog_engine::{EGraph, Error, FullState, Value, Write};
+use smallvec::SmallVec;
 use std::collections::hash_map::Entry;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use wyn_base::Interner;
 
 #[derive(Clone)]
 struct Occurrence {
@@ -43,8 +46,50 @@ pub(super) struct Position {
     pub order: Option<i64>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) struct ScalarExpressionId(u32);
+
+impl From<u32> for ScalarExpressionId {
+    fn from(index: u32) -> Self {
+        Self(index)
+    }
+}
+
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+struct ScalarOperand(Value);
+
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+struct ScalarResultType(Value);
+
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+pub(super) enum ScalarCode {
+    Operation(Payload),
+    Literal(i64),
+}
+
+impl ScalarCode {
+    fn from_code(code: &Code) -> Option<Self> {
+        match code {
+            Code::Scalar(payload) => Some(Self::Operation(*payload)),
+            Code::Constant { bits, .. } => Some(Self::Literal(*bits)),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct ScalarExpression {
+    code: ScalarCode,
+    inputs: SmallVec<[ScalarOperand; 2]>,
+    result_type: ScalarResultType,
+}
+
 #[derive(Default)]
 pub(super) struct ExecutableStructure {
+    expressions: Interner<ScalarExpressionId, Arc<ScalarExpression>>,
+    scalar_expressions: LookupMap<Value, ScalarExpressionId>,
+    value_types: LookupMap<Value, ScalarResultType>,
+
     pub operations: LookupMap<Value, Position>,
     pub by_region: LookupMap<Value, LookupSet<Value>>,
     pub roots: StableMap<Value, Value>,
@@ -175,6 +220,10 @@ impl RegionSite {
 }
 
 impl ExecutableStructure {
+    fn intern_scalar(&mut self, expression: ScalarExpression) -> ScalarExpressionId {
+        self.expressions.get(&expression).unwrap_or_else(|| self.expressions.intern(&Arc::new(expression)))
+    }
+
     fn replace_outputs(&mut self, operation: Value, names: Vec<Value>) {
         if let Some(removed) = self.outputs.remove(&operation) {
             for (slot, name) in removed.into_iter().enumerate() {
@@ -234,6 +283,11 @@ impl Graph {
             proof_scopes: self.proof_scopes.clone(),
             proof_changes: self.proof_changes.clone(),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn scalar_expression(&self, operation: Value) -> Option<ScalarExpressionId> {
+        self.structure.read().scalar_expressions.get(&operation).copied()
     }
 
     pub fn register_fields(&mut self) -> Result<(), OptimizeError> {
@@ -994,6 +1048,57 @@ enum OperandProof {
 }
 
 impl State<'_, '_, '_> {
+    pub fn set_value_type(&mut self, name: Value, ty: Value) -> Result<(), Error> {
+        let reference = self.facts.add("ValueNameRef", name)?;
+        self.facts.set("ValueType", name, ty)?;
+        let mut structure = self.structure.write();
+        let previous = structure.value_types.insert(reference, ScalarResultType(ty));
+        if previous != Some(ScalarResultType(ty)) {
+            if let Some(Origin::Result(operation, _)) = structure.definitions.get(&reference).copied() {
+                drop(structure);
+                self.refresh_scalar(operation);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn intern_scalar(
+        &mut self,
+        code: ScalarCode,
+        inputs: &[Value],
+        result_type: Value,
+    ) -> ScalarExpressionId {
+        self.structure.write().intern_scalar(ScalarExpression {
+            code,
+            inputs: inputs.iter().copied().map(ScalarOperand).collect(),
+            result_type: ScalarResultType(result_type),
+        })
+    }
+
+    fn refresh_scalar(&mut self, operation: Value) {
+        let Some(code) = self.operations.get(&operation).and_then(|op| ScalarCode::from_code(&op.code))
+        else {
+            return;
+        };
+        let mut structure = self.structure.write();
+        let result_type = structure.outputs.get(&operation).and_then(|outputs| {
+            let [output] = outputs.as_slice() else { return None };
+            structure.value_types.get(output).copied()
+        });
+        if let Some(result_type) = result_type {
+            let inputs = structure.inputs.values.get(&operation).map_or(&[][..], Vec::as_slice);
+            let key = ScalarExpression {
+                code,
+                inputs: inputs.iter().copied().map(ScalarOperand).collect(),
+                result_type,
+            };
+            let expression = structure.intern_scalar(key);
+            structure.scalar_expressions.insert(operation, expression);
+        } else {
+            structure.scalar_expressions.remove(&operation);
+        }
+    }
+
     pub fn copy_occurrence(&mut self, original: Value, copy: Value) -> Result<(), Error> {
         let Some(occurrence) = self.operations.get(&original) else {
             return Err(Error::BackendError(format!(
@@ -1001,6 +1106,7 @@ impl State<'_, '_, '_> {
             )));
         };
         self.operations.insert(copy, occurrence.clone());
+        self.refresh_scalar(copy);
         Ok(())
     }
 
@@ -1082,6 +1188,7 @@ impl State<'_, '_, '_> {
         before: Option<OperandProof>,
     ) -> Result<(), Error> {
         let after = self.operand_proof(operation);
+        self.refresh_scalar(operation);
         if before == after {
             return Ok(());
         }
@@ -1505,6 +1612,13 @@ impl State<'_, '_, '_> {
     pub fn set_code(&mut self, operation: Value, code: Code) -> Result<(), Error> {
         self.proof_changes.operations.insert(operation);
         let before = self.operand_proof(operation);
+        if matches!(
+            self.operations.get(&operation).map(|occurrence| &occurrence.code),
+            Some(Code::Scalar(_) | Code::Constant { .. })
+        ) && !matches!(code, Code::Scalar(_) | Code::Constant { .. })
+        {
+            self.structure.write().scalar_expressions.remove(&operation);
+        }
         match self.operations.entry(operation) {
             Entry::Occupied(mut entry) => entry.get_mut().code = code,
             Entry::Vacant(entry) => {
@@ -1539,6 +1653,7 @@ impl State<'_, '_, '_> {
         self.clear_collective_layouts(operation);
         let mut structure = self.structure.write();
         structure.targets.shift_remove(&operation);
+        structure.scalar_expressions.remove(&operation);
         structure.inputs.replace(operation, Vec::new());
         structure.replace_outputs(operation, Vec::new());
         structure.collective.remove(operation);

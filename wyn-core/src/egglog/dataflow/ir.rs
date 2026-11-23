@@ -286,7 +286,7 @@ pub(in crate::egglog) fn parameters(
     let mut names = Vec::with_capacity(parameters.len());
     for (index, parameter) in parameters.iter().enumerate() {
         match parameter.name {
-            Name::Value(value) => sink.set("ValueType", value, parameter.info)?,
+            Name::Value(value) => sink.set_value_type(value, parameter.info)?,
             Name::Accumulator(value) => sink.set("AccumulatorType", value, parameter.info)?,
         }
         let name = parameter.name.fact(sink)?;

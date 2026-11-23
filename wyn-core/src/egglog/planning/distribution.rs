@@ -159,7 +159,7 @@ pub(super) fn apply(graph: &mut Graph, outer: Value, inner: Value) -> Result<(),
                 sink.set_collective_inputs(outer, clause, kind, values)?;
             }
             let ordinal = sink.add("DerivedValue", (inner, 40_i64, 0_i64))?;
-            sink.set("ValueType", ordinal, info)?;
+            sink.set_value_type(ordinal, info)?;
             layout.ordinal = Some(ordinal);
             layout.dimensions.extend(inner_axes.iter().map(|&(axis, extent)| Dimension::new(axis, extent)));
             sink.set_domain(domain, layout);

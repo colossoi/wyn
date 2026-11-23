@@ -127,7 +127,7 @@ impl Body {
                     let (name, returns_type) = match original {
                         Name::Value(_) => {
                             let value = sink.add("DerivedValue", (key, 91_i64, slot as i64))?;
-                            sink.set("ValueType", value, info)?;
+                            sink.set_value_type(value, info)?;
                             (Name::Value(value), sink.add("ReturnScalar", returns_type)?)
                         }
                         Name::Accumulator(token) => {
