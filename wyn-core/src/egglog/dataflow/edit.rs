@@ -53,6 +53,27 @@ pub(in crate::egglog) fn preserve_revisions(graph: &mut Graph) -> Result<(), Opt
     Ok(())
 }
 
+/// Reorder existing siblings while retaining proofs about definitions and effects.
+pub(in crate::egglog) fn reorder_regions(
+    graph: &mut Graph,
+    updated: Vec<(Value, Vec<Value>)>,
+) -> Result<(), OptimizeError> {
+    let previous = updated
+        .iter()
+        .map(|&(region, _)| Ok((region, graph.region_order(region)?.to_vec())))
+        .collect::<Result<_, OptimizeError>>()?;
+    graph.update(|mut sink| {
+        for (_, order) in &updated {
+            for (slot, &operation) in order.iter().enumerate() {
+                sink.set_order(operation, slot as i64);
+            }
+        }
+        Ok(())
+    })?;
+    analysis::replace_order(graph, previous, updated)?;
+    preserve_revisions(graph)
+}
+
 pub(in crate::egglog) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
     graph.parse_and_run_program(Some("graph edits".into()), include_str!("edits.egg"))?;
     Ok(())

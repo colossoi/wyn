@@ -1,11 +1,11 @@
 //! Structural state owned by a parallel fusion pass until it publishes its edits.
-use super::Domain;
+use super::{Domain, Effects};
 use crate::egglog::dataflow::{body::BodyGraph, cse, edit, ir::Code};
 use crate::egglog::graph::CertificateSite;
 use crate::egglog::graph::{CollectiveInput, ParallelResults};
 use crate::egglog::graph::{Graph, State};
 use crate::egglog::query::Query;
-use crate::egglog::{analysis, output_error, timing, OptimizeError};
+use crate::egglog::{output_error, timing, OptimizeError};
 use crate::memory_ir::{BodyRole, Definition, OperationId, RegionId, UseSite, ValueRef};
 use crate::{LookupMap, LookupSet, SortedSet};
 use egglog_engine::{RawValues, Value};
@@ -66,13 +66,6 @@ impl Uses {
     fn dead(&self, name: Value) -> bool {
         self.sites.get(&name).is_none_or(LookupSet::is_empty)
     }
-}
-
-#[derive(Clone, Default)]
-pub(super) struct Effects {
-    pub reads: LookupSet<Value>,
-    pub writes: LookupSet<Value>,
-    pub traps: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -226,26 +219,14 @@ impl Body {
             }
             Ok(())
         })?;
-        for table in ["OperationRead", "OperationWrite", "OperationTrap"] {
-            query.for_each(table, |row| {
-                if let Some(&op) = body.graph.operation_ids.get(&row[0]) {
-                    if !body.effects.contains_key(op) {
-                        body.effects.insert(op, Effects::default());
-                    }
-                    let effect = &mut body.effects[op];
-                    match table {
-                        "OperationRead" => {
-                            effect.reads.insert(row[1]);
-                        }
-                        "OperationWrite" => {
-                            effect.writes.insert(row[1]);
-                        }
-                        _ => effect.traps = true,
-                    }
+        Effects::for_each(query, |operation, effect| {
+            if let Some(&op) = body.graph.operation_ids.get(&operation) {
+                if !body.effects.contains_key(op) {
+                    body.effects.insert(op, Effects::default());
                 }
-                Ok(())
-            })?;
-        }
+                body.effects[op].add(effect);
+            }
+        })?;
 
         for (op, _) in &body.domains {
             let key = body.graph.operations[op];
@@ -515,17 +496,6 @@ impl Body {
 
     pub fn take_dirty(&mut self) -> SortedSet<RegionId> {
         take(&mut self.dirty)
-    }
-
-    pub fn move_within(&mut self, region: RegionId, before: usize, index: usize) {
-        let operations = &mut self.graph.ir.regions[region].operations[before..=index];
-        let positions = operations.iter().map(|&op| self.positions[op]).collect::<Vec<_>>();
-        operations.rotate_right(1);
-        for (&op, position) in operations.iter().zip(positions) {
-            self.positions[op] = position;
-        }
-        self.moved.insert(region);
-        self.dirty(region);
     }
 
     pub fn lift(&mut self, operation: OperationId, owner: OperationId) {
@@ -926,15 +896,6 @@ impl Body {
             graph,
             &self.removed.into_iter().map(|op| self.graph.operations[op]).collect::<Vec<_>>(),
         )
-    }
-
-    /// Same-region motion preserves definitions, actual uses, ownership and effects.
-    pub fn publish_sibling_order(self, graph: &mut Graph) -> Result<(), OptimizeError> {
-        let _timing = timing::span("Rust sibling order publication");
-        let (previous, updated) = self.orders(Query(graph))?;
-        graph.update(|mut sink| self.publish_order(&mut sink))?;
-        analysis::replace_order(graph, previous, updated)?;
-        edit::preserve_revisions(graph)
     }
 
     fn orders(&self, query: Query<'_>) -> Result<(RegionOrders, RegionOrders), OptimizeError> {

@@ -19,11 +19,11 @@ mod motion;
 mod placement;
 
 pub(super) use accumulator::run as accumulators;
-use body::{Body, Effects, Site};
+use body::{Body, Site};
 pub(super) use branch::run as branches;
 pub(super) use compact::compact;
 pub(super) use hoist::hoist;
-use motion::Motion;
+pub(super) use motion::run as move_siblings;
 
 #[derive(Clone)]
 struct Domain {
@@ -305,34 +305,6 @@ pub(super) fn run(graph: &mut Graph) -> Result<bool, OptimizeError> {
     Ok(changed)
 }
 
-pub(super) fn move_siblings(graph: &mut Graph) -> Result<bool, OptimizeError> {
-    let _timing = timing::span("Rust sibling motion");
-    let query = Query(graph);
-    let motion = Motion::read(query)?;
-    let mut regions = Vec::new();
-    for (&region, operations) in &graph.region_orders {
-        for (before, index) in motion.candidates(operations, 0, |op| op) {
-            if !analysis::uses_output_of(query, operations[index], operations[before])? {
-                regions.push(region);
-                break;
-            }
-        }
-    }
-    if regions.is_empty() {
-        return Ok(false);
-    }
-    let mut body = Body::read(query, regions.iter().copied(), LookupMap::new(), LookupSet::new())?;
-    let mut changed = false;
-    for region in regions {
-        let id = body.regions[&region];
-        changed |= motion.run(graph, &mut body, id)?;
-    }
-    if changed {
-        body.publish_sibling_order(graph)?;
-    }
-    Ok(changed)
-}
-
 fn legal(
     graph: &mut Graph,
     body: &mut Body,
@@ -396,6 +368,48 @@ fn legal(
         return Ok(Some(loads));
     }
     Ok((!effects_conflict(graph, a, b, true)?).then_some(loads))
+}
+
+#[derive(Clone, Default)]
+struct Effects {
+    reads: LookupSet<Value>,
+    writes: LookupSet<Value>,
+    traps: bool,
+}
+
+enum Effect {
+    Read(Value),
+    Write(Value),
+    Trap,
+}
+
+impl Effects {
+    fn for_each(query: Query<'_>, mut visit: impl FnMut(Value, Effect)) -> Result<(), OptimizeError> {
+        query.for_each("OperationRead", |row| {
+            visit(row[0], Effect::Read(row[1]));
+            Ok(())
+        })?;
+        query.for_each("OperationWrite", |row| {
+            visit(row[0], Effect::Write(row[1]));
+            Ok(())
+        })?;
+        query.for_each("OperationTrap", |row| {
+            visit(row[0], Effect::Trap);
+            Ok(())
+        })
+    }
+
+    fn add(&mut self, effect: Effect) {
+        match effect {
+            Effect::Read(root) => {
+                self.reads.insert(root);
+            }
+            Effect::Write(root) => {
+                self.writes.insert(root);
+            }
+            Effect::Trap => self.traps = true,
+        }
+    }
 }
 
 fn effects_conflict(
