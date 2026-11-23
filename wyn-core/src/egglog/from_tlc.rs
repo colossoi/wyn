@@ -5,6 +5,7 @@ use super::payload::Payload;
 use super::{fusion, output_error, OptimizeError};
 use crate::ast::Span;
 use crate::builtins::{by_id, catalog, BuiltinId, Purity};
+use crate::egglog::graph::CollectiveInput;
 use crate::egglog::graph::{ArgumentSite, Graph, State};
 use crate::op::BinaryOperator;
 use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
@@ -874,7 +875,12 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
             let (kind, role, values) = match clause {
                 Clause::Collect(values) => (self.unit("Collected")?, self.unit("CollectedOutput")?, values),
                 Clause::Compact { predicate, values } => {
-                    self.sink.set("ResultPredicate", (operation.0, index), predicate)?;
+                    self.sink.set_collective_inputs(
+                        operation.0,
+                        index,
+                        CollectiveInput::Predicate,
+                        vec![predicate],
+                    )?;
                     (self.unit("Compacted")?, self.unit("CompactedOutput")?, values)
                 }
                 Clause::Contribute(values) => {
@@ -889,11 +895,16 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                 } => {
                     self.sink.set_reducer(operation.0, index, combine.0);
                     self.sink.set("ResultCommutative", (operation.0, index), false)?;
-                    self.sink.set("ResultNeutralCount", (operation.0, index), neutral.len() as i64)?;
-                    for (field, value) in neutral.into_iter().enumerate() {
-                        let value = value.fact(&mut self.sink)?;
-                        self.sink.set("ResultNeutral", (operation.0, index, field as i64), value)?;
-                    }
+                    let neutral = neutral
+                        .into_iter()
+                        .map(|value| value.fact(&mut self.sink))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    self.sink.set_collective_inputs(
+                        operation.0,
+                        index,
+                        CollectiveInput::Neutral,
+                        neutral,
+                    )?;
                     (
                         self.node("Folded", kind)?,
                         self.unit(if scan { "PrefixOutput" } else { "TotalOutput" })?,
@@ -902,15 +913,17 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                 }
             };
             self.sink.set("ResultKindOf", (operation.0, index), kind)?;
-            self.sink.set("ResultValueCount", (operation.0, index), values.len() as i64)?;
-            for (field, value) in values.into_iter().enumerate() {
+            let values = values
+                .into_iter()
+                .map(|value| value.fact(&mut self.sink))
+                .collect::<Result<Vec<_>, _>>()?;
+            for field in 0..values.len() {
                 self.sink.set("OutputClause", (operation.0, output), index)?;
                 self.sink.set("OutputField", (operation.0, output), field as i64)?;
                 self.sink.set("OutputRole", (operation.0, output), role)?;
                 output += 1;
-                let value = value.fact(&mut self.sink)?;
-                self.sink.set("ResultValue", (operation.0, index, field as i64), value)?;
             }
+            self.sink.set_collective_inputs(operation.0, index, CollectiveInput::Contribution, values)?;
         }
         Ok(operation)
     }
@@ -1284,8 +1297,12 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
         for (group, input) in inputs.into_iter().enumerate() {
             let group = group as i64;
             self.sink.set("AccumulatorPolicy", (operation.0, group), input.policy)?;
-            self.sink.set("AccumulatorArrayCount", (operation.0, group), 1_i64)?;
-            self.sink.set("AccumulatorArray", (operation.0, group, 0_i64), input.array)?;
+            self.sink.set_collective_inputs(
+                operation.0,
+                group,
+                CollectiveInput::Backing,
+                vec![input.array],
+            )?;
             if let Some(combine) = input.combine {
                 self.sink.set_combiner(operation.0, group, combine.0);
             }
@@ -1539,7 +1556,6 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
         let zero = self.node("IndexConstant", 0i64)?;
         let one = self.node("IndexConstant", 1i64)?;
         let mut induction = None;
-        let mut condition = None;
         let form = match kind {
             LoopKind::ForRange { var, var_ty, bound } => {
                 let bound = self.index(bound, scope)?;
@@ -1572,7 +1588,6 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                 initial_values.push(Self::leaf(self.visit(cond, scope)?)?);
                 let parameter = self.scalar(&types::bool_type())?;
                 carried_values.push(parameter.clone());
-                condition = Some(parameter.name);
                 Code::WhileLoop
             }
         };
@@ -1622,14 +1637,10 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
             let name = self.binding(initial).fact(&mut self.sink)?;
             self.sink.set_argument(ArgumentSite(operation.0, 0, index), name)?;
         }
-        if let Some((index, count)) = induction {
-            self.sink.set("LoopIndex", operation.0, index.name)?;
+        if let Some((_, count)) = induction {
             self.sink.set("LoopStart", operation.0, zero)?;
             self.sink.set("LoopCount", operation.0, count)?;
             self.sink.set("LoopStep", operation.0, one)?;
-        }
-        if let Some(condition) = condition {
-            self.sink.set("LoopCondition", operation.0, condition)?;
         }
         self.statement(pattern, operation, scope)?;
         Ok(Imported::Leaf(output))

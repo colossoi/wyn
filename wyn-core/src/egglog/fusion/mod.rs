@@ -5,6 +5,7 @@ use super::dataflow::{
 };
 use super::query::Query;
 use super::{analysis, memory, OptimizeError};
+use crate::egglog::graph::CollectiveInput;
 use crate::egglog::graph::Graph;
 use crate::LookupSet;
 use egglog_engine::{Value, Write};
@@ -62,7 +63,7 @@ fn collected_map(query: Query<'_>, operation: Value) -> Result<Option<MapLevel>,
     if !query.contains("ParallelOperation", operation)?
         || analysis::count(query, "ResultCount", operation)? != 1
         || query.enode("Collected", query.required("ResultKindOf", (operation, 0_i64))?)?.is_none()
-        || analysis::count(query, "ResultValueCount", (operation, 0_i64))? != 1
+        || query.0.collective_input_count(operation, 0_i64, CollectiveInput::Contribution) != 1
     {
         return Ok(None);
     }
@@ -91,7 +92,7 @@ fn collected_map(query: Query<'_>, operation: Value) -> Result<Option<MapLevel>,
         region,
         index,
         source: query.0.input(index, 0_i64)?,
-        result: query.required("ResultValue", (operation, 0_i64, 0_i64))?,
+        result: query.0.collective_input(operation, 0_i64, CollectiveInput::Contribution, 0_i64)?,
     }))
 }
 

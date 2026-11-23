@@ -2,6 +2,7 @@
 use super::super::dataflow::body::BodyGraph;
 use super::super::query::Query;
 use super::super::{analysis, output_error, OptimizeError};
+use crate::egglog::graph::CollectiveInput;
 use crate::memory_ir::{Definition, Function, OperationId, ValueRef};
 use crate::LookupSet;
 use egglog_engine::Value;
@@ -80,14 +81,16 @@ impl Needed {
             let key = body.operations[op];
             if let Some(count) = query.lookup("ResultCount", key)? {
                 for clause in 0..query.0.value_to_base::<i64>(count) {
-                    let fields = analysis::count(query, "ResultValueCount", (key, clause))?;
+                    let fields = query.0.collective_input_count(key, clause, CollectiveInput::Contribution);
                     for field in 0..fields {
                         names.push(value_ref(
                             body,
-                            query.required("ResultValue", (key, clause, field))?,
+                            query.0.collective_input(key, clause, CollectiveInput::Contribution, field)?,
                         )?);
                     }
-                    if let Some(predicate) = query.lookup("ResultPredicate", (key, clause))? {
+                    if let Some(predicate) =
+                        query.0.collective_input_at(key, clause, CollectiveInput::Predicate, 0)
+                    {
                         let name = query
                             .constructor("ValueNameRef", predicate)?
                             .ok_or_else(|| output_error("collective predicate has no value name"))?;
@@ -125,7 +128,7 @@ pub(super) fn dead_clause(
         let clause = query.0.value_to_base(keys[1]);
         if dead.is_some()
             || !query.contains("LiveOperation", operation)?
-            || analysis::count(query, "ResultValueCount", (operation, clause))? != 1
+            || query.0.collective_input_count(operation, clause, CollectiveInput::Contribution) != 1
             || (query.enode("Collected", kind)?.is_none() && query.enode("Compacted", kind)?.is_none())
         {
             return Ok(());

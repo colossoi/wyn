@@ -2,7 +2,7 @@
 use super::dataflow::edit;
 use super::query::Query;
 use super::{output_error, timing, OptimizeError};
-use crate::egglog::graph::Graph;
+use crate::egglog::graph::{CollectiveInput, Graph};
 use crate::{LookupMap, StableMap};
 use egglog_engine::sort::S;
 use egglog_engine::{IntoValues, RawValues, Value, Write};
@@ -57,6 +57,12 @@ pub(super) fn invalidate(graph: &mut Graph) -> Result<(), OptimizeError> {
         "ResultOrigin",
         "FormalOrigin",
         "ReducerBody",
+        "CollectiveScopeUse",
+        "CollectiveLaneUse",
+        "FoldSeedUse",
+        "PackedClause",
+        "AccumulatorBackingUse",
+        "SingleAccumulatorBacking",
         "ReducerWidthInputs",
         "DefinitionRegion",
         "RootFunction",
@@ -122,6 +128,7 @@ pub(super) fn invalidate(graph: &mut Graph) -> Result<(), OptimizeError> {
         "MovableOperation",
         "InvocationDependent",
         "InvocationRegion",
+        "LoopInduction",
         "LoopValueCarry",
         "AccumulatorParameter",
         "FlowScopeParent",
@@ -198,6 +205,20 @@ pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeEr
     let mut reducers = Vec::new();
     query.for_each("LiveOperation", |row| {
         reducers.extend(graph.reducers(row[0]).into_iter().map(|(slot, body)| (row[0], slot, body)));
+        Ok(())
+    })?;
+    let mut induction = Vec::new();
+    query.for_each("CountedLoopOperation", |row| {
+        let operation = row[0];
+        let Some(region) = graph.control_at(operation, 0) else {
+            return Ok(());
+        };
+        let position = graph.parameter_count(region) - 1;
+        if let Some(parameter) = graph.parameter_at(region, position) {
+            if let Some(index) = query.value_name(parameter)? {
+                induction.push((operation, index));
+            }
+        }
         Ok(())
     })?;
     let mut branches = Vec::new();
@@ -280,6 +301,9 @@ pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeEr
         for reducer in reducers {
             sink.add("ReducerBody", reducer)?;
         }
+        for index in induction {
+            sink.add("LoopInduction", index)?;
+        }
         for branch in branches {
             sink.add("BranchResult", branch)?;
         }
@@ -291,6 +315,58 @@ pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeEr
         }
         for length in lengths {
             sink.add("LengthMeasure", length)?;
+        }
+        Ok(())
+    })?;
+    publish_collective_uses(graph)
+}
+
+/// Publish the value sets needed by the scope, resource and execution proofs.
+pub(super) fn publish_collective_uses(graph: &mut Graph) -> Result<(), OptimizeError> {
+    let mut collective_uses = Vec::new();
+    {
+        let structure = graph.structure().read();
+        for (&operation, groups) in &structure.collective.groups {
+            let scope = structure.controls.get(&(operation, 0)).map(|edge| edge.region);
+            for (&(group, kind), names) in groups {
+                collective_uses.push((operation, scope, group, kind, names.clone()));
+            }
+        }
+    }
+    graph.update(|mut sink| {
+        for (owner, scope, group, kind, names) in collective_uses {
+            match kind {
+                CollectiveInput::Contribution => {
+                    for name in names {
+                        sink.add("CollectiveLaneUse", (owner, group, name))?;
+                        if let Some(scope) = scope {
+                            sink.add("CollectiveScopeUse", (scope, name))?;
+                        }
+                    }
+                }
+                CollectiveInput::Predicate => {
+                    if let Some(&predicate) = names.first() {
+                        sink.add("PackedClause", (owner, group))?;
+                        if let Some(scope) = scope {
+                            let name = sink.add("ValueNameRef", predicate)?;
+                            sink.add("CollectiveScopeUse", (scope, name))?;
+                        }
+                    }
+                }
+                CollectiveInput::Neutral => {
+                    for name in names {
+                        sink.add("FoldSeedUse", (owner, name))?;
+                    }
+                }
+                CollectiveInput::Backing => {
+                    if let [array] = names.as_slice() {
+                        sink.add("SingleAccumulatorBacking", (owner, group, *array))?;
+                    }
+                    for (slot, name) in names.into_iter().enumerate() {
+                        sink.add("AccumulatorBackingUse", (owner, group, slot as i64, name))?;
+                    }
+                }
+            }
         }
         Ok(())
     })?;

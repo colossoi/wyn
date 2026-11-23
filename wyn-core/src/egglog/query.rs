@@ -37,6 +37,18 @@ impl Query<'_> {
         Ok(operations.into_iter().map(|(_, operation)| operation).collect())
     }
 
+    pub fn loop_parameter(&self, operation: Value) -> Result<Value, OptimizeError> {
+        let body = self.0.control_region(operation, 0)?;
+        // The induction variable and while predicate are the last body parameters.
+        let parameter = self.0.parameter(body, self.0.parameter_count(body) - 1)?;
+        let Some(value) = self.value_name(parameter)? else {
+            return Err(super::output_error(
+                "loop control parameter has no value identity",
+            ));
+        };
+        Ok(value)
+    }
+
     pub fn name(&self, name: Value) -> Result<Value, OptimizeError> {
         let (_, fields) = self.application(name, &["ValueNameRef", "AccNameRef"])?;
         Ok(fields[0])

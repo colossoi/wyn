@@ -2,6 +2,7 @@
 use super::Domain;
 use crate::egglog::analysis::count;
 use crate::egglog::dataflow::{body::BodyGraph, cse, edit, ir::Code};
+use crate::egglog::graph::CollectiveInput;
 use crate::egglog::graph::{Graph, State};
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, output_error, planning, timing, OptimizeError};
@@ -254,30 +255,19 @@ impl Body {
             for slot in 0..count(query, "ResultCount", key)? {
                 let id = (op, slot);
                 let kind = query.required("ResultKindOf", (key, slot))?;
-                let values = query.indexed(
-                    "ResultValue",
-                    &[key, query.0.base_to_value(slot)],
-                    count(query, "ResultValueCount", (key, slot))?,
-                )?;
+                let values = query.0.collective_inputs(key, slot, CollectiveInput::Contribution);
                 for &name in &values {
                     body.uses.add(Site::Result(id), name);
                 }
                 let predicate = query
-                    .lookup("ResultPredicate", (key, slot))?
+                    .0
+                    .collective_input_at(key, slot, CollectiveInput::Predicate, 0)
                     .map(|value| value_name(query, value))
                     .transpose()?;
                 if let Some(predicate) = predicate {
                     body.uses.add(Site::Result(id), predicate);
                 }
-                let neutral = if let Some(n) = query.lookup("ResultNeutralCount", (key, slot))? {
-                    query.indexed(
-                        "ResultNeutral",
-                        &[key, query.0.base_to_value(slot)],
-                        query.0.value_to_base(n),
-                    )?
-                } else {
-                    Vec::new()
-                };
+                let neutral = query.0.collective_inputs(key, slot, CollectiveInput::Neutral);
                 for &name in &neutral {
                     body.uses.add(Site::Neutral(id), name);
                 }
@@ -865,6 +855,7 @@ impl Body {
         let mut clauses = LookupMap::new();
         let mut outputs = LookupMap::new();
         let mut counts = Vec::new();
+        let mut edges = Vec::new();
         for &op in &self.edited {
             if self.removed.contains(&op) {
                 continue;
@@ -877,6 +868,16 @@ impl Body {
                 clauses.insert((original, id.1), (key, clause_count));
                 if let Some(region) = query.0.reducer_at(original, id.1) {
                     reducers.push((clause_count, region));
+                }
+                for kind in [
+                    CollectiveInput::Contribution,
+                    CollectiveInput::Neutral,
+                    CollectiveInput::Predicate,
+                ] {
+                    let values = graph.collective_inputs(original, id.1, kind);
+                    if !values.is_empty() {
+                        edges.push((key, clause_count, kind, values));
+                    }
                 }
                 clause_count += 1;
             }
@@ -939,10 +940,14 @@ impl Body {
                 sink.set(table, RawValues(keys), value)?;
             }
             for (op, clauses, names, reducers) in counts {
+                sink.clear_collective_inputs(op);
                 sink.set_reducers(op, reducers);
                 sink.remove("ResultCount", op)?;
                 sink.set("ResultCount", op, clauses)?;
                 sink.set_outputs(op, names)?;
+            }
+            for (op, group, kind, values) in edges {
+                sink.set_collective_inputs(op, group, kind, values)?;
             }
             self.publish_order(&mut sink)?;
             for certificate in certificates {

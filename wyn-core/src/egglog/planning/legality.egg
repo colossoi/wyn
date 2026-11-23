@@ -37,7 +37,7 @@
 (relation AtomicElement (LogicalType))
 (AtomicElement (ElementValue (ScalarElement (I32)))) (AtomicElement (ElementValue (ScalarElement (U32))))
 (relation AtomicAccumulatorArray (OperationKey i64 ValueName))
-(rule ((= (AccumulatorArrayCount owner group) 1) (= array (AccumulatorArray owner group 0)) (FreshArray array)
+(rule ((SingleAccumulatorBacking owner group array) (FreshArray array)
        (= (ValueType array) (LogicalValue (ArrayType ownership extents element))) (AtomicElement element))
       ((AtomicAccumulatorArray owner group array)) :ruleset physical-legality)
 

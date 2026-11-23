@@ -90,11 +90,9 @@
 (function ParameterDiet (RegionKey i64) Diet :no-merge)
 (function RegionReturnType (RegionKey i64) ReturnInfo :no-merge)
 (relation YieldCertificate (RegionKey i64 ValueName))
-(function LoopIndex (OperationKey) ValueName :no-merge)
 (function LoopStart (OperationKey) IndexExp :no-merge)
 (function LoopCount (OperationKey) IndexExp :no-merge)
 (function LoopStep (OperationKey) IndexExp :no-merge)
-(function LoopCondition (OperationKey) ValueName :no-merge)
 
 (function OperationIndex (OperationKey i64) IndexExp :no-merge)
 (function OperationSlices (OperationKey) Slices :no-merge)
@@ -106,12 +104,7 @@
 (function OperationExecution (OperationKey) Execution :no-merge)
 (function ResultKindOf (OperationKey i64) ResultKind :no-merge)
 (function ResultCount (OperationKey) i64 :no-merge)
-(function ResultValueCount (OperationKey i64) i64 :no-merge)
-(function ResultValue (OperationKey i64 i64) Name :no-merge)
 ; Compacted values and packed scan prefixes share the lane predicate.
-(function ResultPredicate (OperationKey i64) ValueName :no-merge)
-(function ResultNeutral (OperationKey i64 i64) Name :no-merge)
-(function ResultNeutralCount (OperationKey i64) i64 :no-merge)
 (function ResultCommutative (OperationKey i64) bool :no-merge)
 (function OutputClause (OperationKey i64) i64 :no-merge)
 (function OutputField (OperationKey i64) i64 :no-merge)
@@ -119,8 +112,6 @@
 
 (function AccumulatorPolicy (OperationKey i64) AccPolicy :no-merge)
 (function AccumulatorGroupCount (OperationKey) i64 :no-merge)
-(function AccumulatorArrayCount (OperationKey i64) i64 :no-merge)
-(function AccumulatorArray (OperationKey i64 i64) ValueName :no-merge)
 (function AccumulatorParameter (OperationKey i64) AccName :no-merge)
 
 (function RetainAllFunctions () bool :merge (or old new))

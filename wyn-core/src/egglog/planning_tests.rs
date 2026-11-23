@@ -718,11 +718,16 @@ fn accumulator_state_order_is_read_from_the_plan() {
     outputs.reverse();
     let reducers =
         query.0.reducers(operation).into_iter().map(|(slot, region)| (1 - slot, region)).collect();
+    let edges = query.0.collective_groups(operation);
     program
         .graph
         .update(|mut sink| {
             sink.set_outputs(operation, outputs)?;
             sink.set_reducers(operation, reducers);
+            sink.clear_collective_inputs(operation);
+            for ((clause, kind), values) in edges {
+                sink.set_collective_inputs(operation, 1 - clause, kind, values)?;
+            }
             for (table, keys, _) in &rows {
                 sink.remove(table, egglog_engine::RawValues(keys.clone()))?;
             }
@@ -1492,7 +1497,7 @@ fn collection_shape_proofs_distinguish_extents_from_capacity() {
         (set (OutputClause (OperationId 0) 0) 0)
         (set (OutputField (OperationId 0) 0) 0)
         (set (ResultKindOf (OperationId 0) 0) (Collected))
-        (set (ResultValue (OperationId 0) 0 0) (ValueNameRef (ValueId 10)))
+        (set (FixtureResultValue (OperationId 0) 0 0) (ValueNameRef (ValueId 10)))
         (set (FixtureOutput (OperationId 0) 1) (ValueNameRef (ValueId 1)))
         (set (OutputRole (OperationId 0) 1) (CompactedOutput))
         (set (FixtureOutput (OperationId 0) 2) (ValueNameRef (ValueId 2)))
@@ -1501,7 +1506,7 @@ fn collection_shape_proofs_distinguish_extents_from_capacity() {
         (set (OutputField (OperationId 0) 2) 0)
         (set (FixtureResultReducer (OperationId 0) 2) (RegionId 2))
         (ReducerPreservesOuterLength (RegionId 2) 0)
-        (set (ResultNeutral (OperationId 0) 2 0) (ValueNameRef (ValueId 20)))
+        (set (FixtureResultNeutral (OperationId 0) 2 0) (ValueNameRef (ValueId 20)))
         (set (FixtureOutput (OperationId 0) 3) (ValueNameRef (ValueId 3)))
         (set (OutputRole (OperationId 0) 3) (UpdatedOutput))
         (run-schedule (saturate graph-sizes))
@@ -1688,9 +1693,11 @@ fn atomic_candidates_require_one_fresh_32_bit_scalar_array() {
         ("(ScalarElement (I32))", 1, false, false),
     ] {
         let fact = if fresh { "(FreshArray (ValueId 0))" } else { "" };
+        let extra =
+            if count == 2 { "(set (FixtureAccumulatorArray (OperationId 0) 0 1) (ValueId 1))" } else { "" };
         let graph = test_graph::fixture(&[], &format!(r#"
-            (set (AccumulatorArrayCount (OperationId 0) 0) {count})
-            (set (AccumulatorArray (OperationId 0) 0 0) (ValueId 0))
+            (set (FixtureAccumulatorArray (OperationId 0) 0 0) (ValueId 0))
+            {extra}
             (set (ValueType (ValueId 0)) (LogicalValue (ArrayType (ValueArray) (vec-of (FixedExtent 4)) (ElementValue {element}))))
             {fact}
             (run-schedule (saturate physical-legality))
@@ -1785,12 +1792,10 @@ fn kernel_policies_distinguish_compaction_atomics_and_native_scans() {
             (LiveOperation (OperationId 0))
             (set (OperationDomain (OperationId 0)) (DomainId 0)) (set (DomainRank (DomainId 0)) {rank})
             (set (ResultCount (OperationId 0)) 1) (set (ResultKindOf (OperationId 0) 0) {kind})
-            (set (ResultValueCount (OperationId 0) 0) 1)
-            (set (ResultValue (OperationId 0) 0 0) (AccNameRef (AccumulatorId 0)))
+            (set (FixtureResultValue (OperationId 0) 0 0) (AccNameRef (AccumulatorId 0)))
             (set (TokenCapability (AccumulatorId 0)) (TokenBindingAt (OperationId 1) 0))
             (set (FixtureResultReducer (OperationId 0) 0) (RegionId 1)) (LiveRegion (RegionId 1))
-            (set (ResultNeutralCount (OperationId 0) 0) 1)
-            (set (ResultNeutral (OperationId 0) 0 0) (ValueNameRef (ValueId 10)))
+            (set (FixtureResultNeutral (OperationId 0) 0 0) (ValueNameRef (ValueId 10)))
             (set (ConstantValue (ValueNameRef (ValueId 10))) 0) (NativeAddition (RegionId 1))
             (set (SubgroupsEnabled) true)
         "#
@@ -1802,18 +1807,17 @@ fn kernel_policies_distinguish_compaction_atomics_and_native_scans() {
             "{} {} {}",
             if device { "(EmittedDispatch (OperationId 0))" } else { "" },
             "",
-            if predicated { "(set (ResultPredicate (OperationId 0) 0) (ValueId 99))" } else { "" }
+            if predicated { "(set (FixtureResultPredicate (OperationId 0) 0) (ValueId 99))" } else { "" }
         );
-        graph
-            .parse_and_run_program(
-                None,
-                &format!(
-                    r#"{facts}
+        test_graph::facts_with_positions(
+            &mut graph,
+            &format!(
+                r#"{facts}
             (run-schedule (saturate physical-legality) (saturate execution-features)
                 (saturate execution-atomics) (saturate execution-policy) (saturate execution-select))"#
-                ),
-            )
-            .unwrap();
+            ),
+        )
+        .unwrap();
         let query = Query(&graph);
         let operation = query.constructor("OperationId", 0_i64).unwrap().unwrap();
         let selected = query.required("SelectedKernelAlgorithm", (operation, atomic)).unwrap();

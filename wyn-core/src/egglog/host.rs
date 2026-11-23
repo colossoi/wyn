@@ -661,7 +661,7 @@ fn scalar_loop(
             return Ok(None);
         };
         values.insert(
-            query.required("LoopIndex", loop_)?,
+            query.loop_parameter(loop_)?,
             apply(
                 "add",
                 vec![start, apply("mul", vec![field(state.clone(), 0), step])],
@@ -669,7 +669,7 @@ fn scalar_loop(
         );
         apply("lt", vec![field(state.clone(), 0), count])
     } else {
-        let condition = query.required("LoopCondition", loop_)?;
+        let condition = query.loop_parameter(loop_)?;
         let Some(condition) = values.get(&condition).cloned() else {
             return Ok(None);
         };

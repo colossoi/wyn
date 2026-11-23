@@ -6,6 +6,7 @@ use super::dataflow::ir::Code;
 use super::host;
 use super::query::Query;
 use super::{output_error as error, representation, InterfacesPrepared, OptimizeError, Program};
+use crate::egglog::graph::CollectiveInput;
 use crate::egglog::graph::Graph;
 use crate::host::ScalarExpr;
 use crate::ssa::layout::{storage_elem_stride, storage_value_type};
@@ -499,11 +500,7 @@ impl Execution {
                     None
                 };
                 let epilogue = if let Some(end) = epilogue_index {
-                    let mut packed = false;
-                    query.for_function("ResultPredicate", |keys, _| {
-                        packed |= keys[0] == operation;
-                        Ok(())
-                    })?;
+                    let packed = query.0.has_collective_inputs(operation, CollectiveInput::Predicate);
                     let domain = query.required("OperationDomain", operation)?;
                     Some(Epilogue {
                         operation: operations[end],

@@ -2,7 +2,7 @@
 use super::dataflow::ir::{self, Code};
 use super::query::Query;
 use super::{from_tlc, memory, OptimizeError};
-use crate::egglog::graph::Graph;
+use crate::egglog::graph::{CollectiveInput, Graph};
 use egglog_engine::{Value, Write};
 
 pub(super) fn fixture(codes: &[(i64, Code)], facts: &str) -> Result<Graph, OptimizeError> {
@@ -48,6 +48,10 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
         "FixtureParameter",
         "FixtureResultReducer",
         "FixtureAccumulatorCombiner",
+        "FixtureResultValue",
+        "FixtureResultNeutral",
+        "FixtureResultPredicate",
+        "FixtureAccumulatorArray",
     ];
     if !fields.iter().any(|field| facts.contains(field)) {
         graph.parse_and_run_program(None, facts)?;
@@ -68,6 +72,10 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
             (function FixtureParameter (RegionKey i64) Name :no-merge)
             (function FixtureResultReducer (OperationKey i64) RegionKey :no-merge)
             (function FixtureAccumulatorCombiner (OperationKey i64) RegionKey :no-merge)
+            (function FixtureResultValue (OperationKey i64 i64) Name :no-merge)
+            (function FixtureResultNeutral (OperationKey i64 i64) Name :no-merge)
+            (function FixtureResultPredicate (OperationKey i64) ValueName :no-merge)
+            (function FixtureAccumulatorArray (OperationKey i64 i64) ValueName :no-merge)
         ",
         )?;
     }
@@ -130,7 +138,33 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
             Ok(())
         })?;
     }
+    let mut collective = crate::LookupMap::<(Value, i64, CollectiveInput), Vec<(i64, Value)>>::new();
+    for (table, kind) in [
+        ("FixtureResultValue", CollectiveInput::Contribution),
+        ("FixtureResultNeutral", CollectiveInput::Neutral),
+        ("FixtureResultPredicate", CollectiveInput::Predicate),
+        ("FixtureAccumulatorArray", CollectiveInput::Backing),
+    ] {
+        query.for_function(table, |keys, value| {
+            let field = keys.get(2).map_or(0, |&key| graph.value_to_base::<i64>(key));
+            collective
+                .entry((keys[0], graph.value_to_base(keys[1]), kind))
+                .or_default()
+                .push((field, value));
+            Ok(())
+        })?;
+    }
     graph.update(|mut sink| {
+        for ((op, group, kind), mut values) in collective {
+            values.sort_unstable_by_key(|&(field, _)| field);
+            assert!(values.iter().enumerate().all(|(index, &(field, _))| index as i64 == field));
+            sink.set_collective_inputs(
+                op,
+                group,
+                kind,
+                values.into_iter().map(|(_, value)| value).collect(),
+            )?;
+        }
         for (op, slot, region) in reducers {
             sink.set_reducer(op, slot, region);
             sink.set("RegionOwnedBy", region, op)?;
@@ -202,6 +236,8 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
     if !checks.is_empty() {
         super::analysis::publish_proof_operands(graph)?;
         graph.parse_and_run_program(None, &format!("(run-schedule{checks}"))?;
+    } else {
+        super::analysis::publish_collective_uses(graph)?;
     }
     Ok(())
 }

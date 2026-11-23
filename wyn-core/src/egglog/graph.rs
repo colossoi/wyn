@@ -44,6 +44,7 @@ pub(super) struct ExecutableStructure {
     pub inputs: ValueLists,
     pub outputs: LookupMap<Value, Vec<Value>>,
     pub yields: ValueLists,
+    pub collective: CollectiveEdges,
     pub parameters: LookupMap<Value, Vec<Value>>,
     arities: LookupSet<usize>,
 }
@@ -98,11 +99,47 @@ impl Graph {
         let region = sort("RegionKey")?;
         let function = sort("FunctionName")?;
         let name = sort("Name")?;
+        let value_name = sort("ValueName")?;
         let index = I64Sort.to_arcsort();
         for (field, inputs, output) in [
             (Field::Region, vec![operation.clone()], region.clone()),
             (Field::Order, vec![operation.clone()], I64Sort.to_arcsort()),
             (Field::FunctionRoot, vec![function.clone()], region.clone()),
+            (
+                Field::Collective(CollectiveInput::Contribution),
+                vec![operation.clone(), index.clone(), index.clone()],
+                name.clone(),
+            ),
+            (
+                Field::CollectiveCount(CollectiveInput::Contribution),
+                vec![operation.clone(), index.clone()],
+                index.clone(),
+            ),
+            (
+                Field::Collective(CollectiveInput::Neutral),
+                vec![operation.clone(), index.clone(), index.clone()],
+                name.clone(),
+            ),
+            (
+                Field::CollectiveCount(CollectiveInput::Neutral),
+                vec![operation.clone(), index.clone()],
+                index.clone(),
+            ),
+            (
+                Field::Collective(CollectiveInput::Predicate),
+                vec![operation.clone(), index.clone()],
+                value_name.clone(),
+            ),
+            (
+                Field::Collective(CollectiveInput::Backing),
+                vec![operation.clone(), index.clone(), index.clone()],
+                value_name.clone(),
+            ),
+            (
+                Field::CollectiveCount(CollectiveInput::Backing),
+                vec![operation.clone(), index.clone()],
+                index.clone(),
+            ),
             (
                 Field::Reducer,
                 vec![operation.clone(), index.clone()],
@@ -235,6 +272,51 @@ impl Graph {
 
     pub fn outputs(&self, operation: Value) -> Vec<Value> {
         self.structure.read().outputs.get(&operation).cloned().unwrap_or_default()
+    }
+
+    pub fn collective_groups(&self, owner: Value) -> StableMap<(i64, CollectiveInput), Vec<Value>> {
+        self.structure.read().collective.groups.get(&owner).cloned().unwrap_or_default()
+    }
+
+    pub fn has_collective_inputs(&self, owner: Value, kind: CollectiveInput) -> bool {
+        self.structure
+            .read()
+            .collective
+            .groups
+            .get(&owner)
+            .is_some_and(|groups| groups.keys().any(|&(_, field)| field == kind))
+    }
+
+    pub fn collective_inputs(&self, owner: Value, group: i64, kind: CollectiveInput) -> Vec<Value> {
+        self.structure.read().collective.get(owner, group, kind).to_vec()
+    }
+
+    pub fn collective_input_count(&self, owner: Value, group: i64, kind: CollectiveInput) -> i64 {
+        self.structure.read().collective.get(owner, group, kind).len() as i64
+    }
+
+    pub fn collective_input_at(
+        &self,
+        owner: Value,
+        group: i64,
+        kind: CollectiveInput,
+        field: i64,
+    ) -> Option<Value> {
+        self.structure.read().collective.get(owner, group, kind).get(usize::try_from(field).ok()?).copied()
+    }
+
+    pub fn collective_input(
+        &self,
+        owner: Value,
+        group: i64,
+        kind: CollectiveInput,
+        field: i64,
+    ) -> Result<Value, OptimizeError> {
+        self.collective_input_at(owner, group, kind, field).ok_or_else(|| {
+            output_error(format!(
+                "missing {kind:?} on {owner:?}, group {group}, field {field}"
+            ))
+        })
     }
 
     pub fn output_count(&self, operation: Value) -> i64 {
@@ -573,6 +655,31 @@ impl State<'_, '_, '_> {
         Ok(())
     }
 
+    pub fn set_collective_inputs(
+        &mut self,
+        owner: Value,
+        group: i64,
+        kind: CollectiveInput,
+        values: Vec<Value>,
+    ) -> Result<(), Error> {
+        register_arity(&mut self.facts, self.structure, values.len())?;
+        self.structure.write().collective.replace(CollectiveSite { owner, group, kind }, values);
+        Ok(())
+    }
+
+    pub fn redirect_collective_input(
+        &mut self,
+        site: CollectiveSite,
+        field: i64,
+        value: Value,
+    ) -> Result<(), Error> {
+        self.structure.write().collective.redirect(site, field, value)
+    }
+
+    pub fn clear_collective_inputs(&mut self, owner: Value) {
+        self.structure.write().collective.remove(owner);
+    }
+
     pub fn clear_bodies(&mut self, operation: Value) {
         let mut structure = self.structure.write();
         structure.reducers.remove(&operation);
@@ -633,11 +740,92 @@ impl State<'_, '_, '_> {
         structure.targets.shift_remove(&operation);
         structure.inputs.replace(operation, Vec::new());
         structure.outputs.remove(&operation);
+        structure.collective.remove(operation);
         if let Some(region) = structure.operations.remove(&operation).and_then(|position| position.region) {
             if let Some(operations) = structure.by_region.get_mut(&region) {
                 operations.remove(&operation);
             }
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) enum CollectiveInput {
+    Contribution,
+    Neutral,
+    Predicate,
+    Backing,
+}
+
+impl CollectiveInput {
+    pub fn uses_raw_name(self) -> bool {
+        matches!(self, Self::Predicate | Self::Backing)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) struct CollectiveSite {
+    pub owner: Value,
+    pub group: i64,
+    pub kind: CollectiveInput,
+}
+
+#[derive(Default)]
+pub(super) struct CollectiveEdges {
+    pub groups: LookupMap<Value, StableMap<(i64, CollectiveInput), Vec<Value>>>,
+    pub uses: LookupMap<Value, LookupSet<(CollectiveSite, i64)>>,
+}
+
+impl CollectiveEdges {
+    pub fn get(&self, owner: Value, group: i64, kind: CollectiveInput) -> &[Value] {
+        self.groups.get(&owner).and_then(|groups| groups.get(&(group, kind))).map_or(&[], Vec::as_slice)
+    }
+
+    fn remove(&mut self, owner: Value) {
+        let Some(previous) = self.groups.remove(&owner) else {
+            return;
+        };
+        for (&(group, kind), names) in &previous {
+            let site = CollectiveSite { owner, group, kind };
+            for (field, &name) in names.iter().enumerate() {
+                remove_use(&mut self.uses, (site, field as i64), name);
+            }
+        }
+    }
+
+    fn replace(&mut self, site: CollectiveSite, values: Vec<Value>) {
+        let groups = self.groups.entry(site.owner).or_default();
+        if let Some(old) = groups.shift_remove(&(site.group, site.kind)) {
+            for (field, value) in old.into_iter().enumerate() {
+                remove_use(&mut self.uses, (site, field as i64), value);
+            }
+        }
+        for (field, &value) in values.iter().enumerate() {
+            self.uses.entry(value).or_default().insert((site, field as i64));
+        }
+        if !values.is_empty() {
+            groups.insert((site.group, site.kind), values);
+        }
+        if groups.is_empty() {
+            self.groups.remove(&site.owner);
+        }
+    }
+
+    fn redirect(&mut self, site: CollectiveSite, field: i64, value: Value) -> Result<(), Error> {
+        let old = self
+            .groups
+            .get_mut(&site.owner)
+            .and_then(|groups| groups.get_mut(&(site.group, site.kind)))
+            .and_then(|values| usize::try_from(field).ok().and_then(|field| values.get_mut(field)));
+        let Some(old) = old else {
+            return Err(Error::BackendError(format!(
+                "missing collective operand {site:?} field {field}"
+            )));
+        };
+        let previous = std::mem::replace(old, value);
+        remove_use(&mut self.uses, (site, field), previous);
+        self.uses.entry(value).or_default().insert((site, field));
+        Ok(())
     }
 }
 

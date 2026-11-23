@@ -1,4 +1,5 @@
 use super::{builder_error, error, Body, OptimizeError, Typed};
+use crate::egglog::graph::CollectiveInput;
 use crate::egglog::payload::{read, Payload};
 use crate::op::BinaryOperator;
 use crate::ssa::types::{AtomicOp, InstKind, PlaceId};
@@ -65,16 +66,16 @@ impl Body<'_, '_, '_> {
             if query.enode("Contributed", kind)?.is_none() {
                 return Ok(false);
             }
-            for field in 0..crate::egglog::analysis::count(query, "ResultValueCount", (operation, clause))?
+            for field in 0..query.0.collective_input_count(operation, clause, CollectiveInput::Contribution)
             {
-                let name = query.required("ResultValue", (operation, clause, field))?;
+                let name =
+                    query.0.collective_input(operation, clause, CollectiveInput::Contribution, field)?;
                 let token = query.fields("AccNameRef", name)?[0];
                 let capability =
                     query.fields("TokenBindingAt", query.required("TokenCapability", token)?)?;
                 let owner = capability[0];
                 let group = query.0.value_to_base::<i64>(capability[1]);
-                let count = crate::egglog::analysis::count(query, "AccumulatorArrayCount", (owner, group))?;
-                let arrays = query.indexed("AccumulatorArray", &[owner, capability[1]], count)?;
+                let arrays = query.0.collective_inputs(owner, group, CollectiveInput::Backing);
                 let policy = query.required("AccumulatorPolicy", (owner, group))?;
                 let combine = query.0.combiner_at(owner, group);
                 if self.atomic_policy(&arrays, policy, combine)?.is_none() {

@@ -95,6 +95,7 @@ pub(super) fn apply(graph: &mut Graph, outer: Value, inner: Value) -> Result<(),
     let base = query.0.operation_order(inner)? + 2;
     let result_count = analysis::count(query, "ResultCount", inner)?;
     let reducers = graph.reducers(inner);
+    let contributions = graph.collective_groups(inner);
     let mut removed = Vec::new();
     let mut copied = Vec::new();
     for &table in OPERATION_CELLS {
@@ -133,6 +134,10 @@ pub(super) fn apply(graph: &mut Graph, outer: Value, inner: Value) -> Result<(),
             sink.remove("ResultCount", outer)?;
             sink.set("ResultCount", outer, result_count)?;
             sink.set_reducers(outer, reducers);
+            sink.clear_collective_inputs(outer);
+            for ((clause, kind), values) in contributions {
+                sink.set_collective_inputs(outer, clause, kind, values)?;
+            }
             let ordinal = sink.add("DerivedValue", (inner, 40_i64, 0_i64))?;
             sink.set("ValueType", ordinal, info)?;
             sink.remove("DomainOrdinal", domain)?;

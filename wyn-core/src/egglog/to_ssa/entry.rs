@@ -7,6 +7,7 @@ use crate::binding_layout::{
 };
 use crate::builtins::catalog;
 use crate::egglog::execution::StepKind;
+use crate::egglog::graph::CollectiveInput;
 use crate::egglog::query::Query;
 use crate::flow::ExecutionModel;
 use crate::host::{
@@ -1621,13 +1622,17 @@ impl EntryEmission<'_, '_, '_> {
                         "AccumulatorGroupCount",
                         statement,
                     )? {
-                        for slot in 0..crate::egglog::analysis::count(
-                            self.body.query(),
-                            "AccumulatorArrayCount",
-                            (statement, group),
-                        )? {
-                            let name =
-                                self.body.query().required("AccumulatorArray", (statement, group, slot))?;
+                        for slot in 0..self.body.query().0.collective_input_count(
+                            statement,
+                            group,
+                            CollectiveInput::Backing,
+                        ) {
+                            let name = self.body.query().0.collective_input(
+                                statement,
+                                group,
+                                CollectiveInput::Backing,
+                                slot,
+                            )?;
                             values.push(self.body.named(name)?);
                         }
                     }
@@ -1814,6 +1819,7 @@ impl EntryEmission<'_, '_, '_> {
                 carried_values.push((name, output, initial, current, slots));
             }
         }
+        let loop_parameter = self.body.query().loop_parameter(expression)?;
         let control = if counted {
             let Some(count) = host::scalar_index(
                 self.body.query(),
@@ -1825,14 +1831,14 @@ impl EntryEmission<'_, '_, '_> {
             };
             let slot = self.scalar_slot(&types::i32())?;
             let zero = self.body.literal(0, &types::i32())?;
-            self.body.values.insert(self.body.query().required("LoopIndex", expression)?, zero);
-            before.insert(self.body.query().required("LoopIndex", expression)?);
+            self.body.values.insert(loop_parameter, zero);
+            before.insert(loop_parameter);
             DispatchLoopControl::Counted {
                 count,
                 index: scalar_source(slot),
             }
         } else {
-            let condition = self.body.query().required("LoopCondition", expression)?;
+            let condition = loop_parameter;
             let Some((_, _, _, Location::Buffer(slot, _), _)) =
                 carried_values.iter().find(|(name, ..)| *name == condition)
             else {
@@ -1860,21 +1866,19 @@ impl EntryEmission<'_, '_, '_> {
                 return Err(error("loop ordinal binding missing"));
             };
             self.install_saved(
-                self.body.query().required("LoopIndex", expression)?,
+                loop_parameter,
                 Location::Buffer(BindingRef::new(*set, *binding), types::i32()),
             );
         }
         self.restart()?;
         if counted {
-            let ordinal = self.body.named(self.body.query().required("LoopIndex", expression)?)?;
+            let ordinal = self.body.named(loop_parameter)?;
             let start = self.body.index_expression(self.body.query().required("LoopStart", expression)?)?;
             let step = self.body.index_expression(self.body.query().required("LoopStep", expression)?)?;
             let delta = self.body.binary(BinaryOperator::Multiply, ordinal, step)?;
             let value = self.body.binary(BinaryOperator::Add, start, delta)?;
-            self.body.values.insert(self.body.query().required("LoopIndex", expression)?, value);
-            let Some(ordinal) =
-                self.body.host_values.get(&self.body.query().required("LoopIndex", expression)?).cloned()
-            else {
+            self.body.values.insert(loop_parameter, value);
+            let Some(ordinal) = self.body.host_values.get(&loop_parameter).cloned() else {
                 return Err(error("loop ordinal missing"));
             };
             let Some(start) = host::scalar_index(
@@ -1894,7 +1898,7 @@ impl EntryEmission<'_, '_, '_> {
                 return Err(error("loop step missing"));
             };
             self.body.host_values.insert(
-                self.body.query().required("LoopIndex", expression)?,
+                loop_parameter,
                 ScalarExpr::Apply {
                     op: "add".into(),
                     ty: ScalarType::I32,

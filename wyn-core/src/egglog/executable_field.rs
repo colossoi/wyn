@@ -1,5 +1,5 @@
 //! Read executable fields from the Rust graph in planning rules.
-use super::graph::{callback_at, SharedStructure};
+use super::graph::{callback_at, CollectiveInput, SharedStructure};
 use egglog_engine::ast::Span;
 use egglog_engine::constraint::{SimpleTypeConstraint, TypeConstraint};
 use egglog_engine::{ArcSort, Core, Primitive, PurePrim, PureState, Value};
@@ -19,6 +19,8 @@ pub(super) enum Field {
     InputCount,
     Output,
     OutputCount,
+    Collective(CollectiveInput),
+    CollectiveCount(CollectiveInput),
     Yield,
     YieldCount,
     Parameter,
@@ -51,6 +53,14 @@ impl Primitive for ExecutableField {
             Field::InputCount => "wyn-input-count",
             Field::Output => "wyn-output",
             Field::OutputCount => "wyn-output-count",
+            Field::Collective(CollectiveInput::Contribution) => "wyn-contribution",
+            Field::CollectiveCount(CollectiveInput::Contribution) => "wyn-contribution-count",
+            Field::Collective(CollectiveInput::Neutral) => "wyn-fold-seed",
+            Field::CollectiveCount(CollectiveInput::Neutral) => "wyn-fold-seed-count",
+            Field::Collective(CollectiveInput::Predicate) => "wyn-pack-predicate",
+            Field::CollectiveCount(CollectiveInput::Predicate) => "wyn-pack-predicate-count",
+            Field::Collective(CollectiveInput::Backing) => "wyn-accumulator-backing",
+            Field::CollectiveCount(CollectiveInput::Backing) => "wyn-accumulator-backing-count",
             Field::Yield => "wyn-yield",
             Field::YieldCount => "wyn-yield-count",
             Field::Parameter => "wyn-parameter",
@@ -97,6 +107,20 @@ impl PurePrim for ExecutableField {
             Field::Output => {
                 let slot = usize::try_from(state.value_to_base::<i64>(args[1])).ok()?;
                 graph.outputs.get(&key)?.get(slot).copied()
+            }
+            Field::Collective(kind) => {
+                let group = state.value_to_base(args[1]);
+                let field = if kind == CollectiveInput::Predicate {
+                    0
+                } else {
+                    usize::try_from(state.value_to_base::<i64>(args[2])).ok()?
+                };
+                graph.collective.get(key, group, kind).get(field).copied()
+            }
+            Field::CollectiveCount(kind) => {
+                let group = state.value_to_base(args[1]);
+                let count = graph.collective.get(key, group, kind).len() as i64;
+                Some(state.base_to_value(count))
             }
             Field::OutputCount => {
                 let count = graph.outputs.get(&key).map_or(0, |names| names.len() as i64);

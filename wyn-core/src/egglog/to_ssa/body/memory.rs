@@ -2,6 +2,7 @@
 use super::{builder_error, error, Body, Collection, CollectionShape, OptimizeError, Typed, Value};
 use crate::builtins::catalog;
 use crate::egglog::dataflow::ir::{Bounds, Code};
+use crate::egglog::graph::CollectiveInput;
 use crate::egglog::payload::Payload;
 use crate::egglog::query::Query;
 use crate::egglog::to_ssa::{host, runtime_binding, same_value_structure};
@@ -531,7 +532,7 @@ impl Body<'_, '_, '_> {
                     }
                 };
                 if matches!(code, Code::CountedLoop) {
-                    let index = self.query().required("LoopIndex", statement)?;
+                    let index = self.query().loop_parameter(statement)?;
                     let start = self.index_expression(self.query().required("LoopStart", statement)?)?;
                     let count = self.index_expression(self.query().required("LoopCount", statement)?)?;
                     let step = self.index_expression(self.query().required("LoopStep", statement)?)?;
@@ -550,10 +551,10 @@ impl Body<'_, '_, '_> {
                         },
                     )?
                 } else if self.query().contains("WorkgroupLoop", statement)? {
-                    let condition = self.query().required("LoopCondition", statement)?;
+                    let condition = self.query().loop_parameter(statement)?;
                     self.workgroup_while(region, condition, &params, initial)?
                 } else {
-                    let condition = self.query().required("LoopCondition", statement)?;
+                    let condition = self.query().loop_parameter(statement)?;
                     self.while_loop(
                         initial,
                         |body, state| {
@@ -603,13 +604,15 @@ impl Body<'_, '_, '_> {
                 for group in
                     0..crate::egglog::analysis::count(self.query(), "AccumulatorGroupCount", statement)?
                 {
-                    let count = crate::egglog::analysis::count(
-                        self.query(),
-                        "AccumulatorArrayCount",
-                        (statement, group),
-                    )?;
+                    let count =
+                        self.query().0.collective_input_count(statement, group, CollectiveInput::Backing);
                     for slot in 0..count {
-                        let name = self.query().required("AccumulatorArray", (statement, group, slot))?;
+                        let name = self.query().0.collective_input(
+                            statement,
+                            group,
+                            CollectiveInput::Backing,
+                            slot,
+                        )?;
                         values.push(self.named(name)?);
                     }
                 }
@@ -1120,8 +1123,7 @@ impl Body<'_, '_, '_> {
         let capability = query.fields("TokenBindingAt", query.required("TokenCapability", token)?)?;
         let owner = capability[0];
         let group = query.0.value_to_base::<i64>(capability[1]);
-        let count = crate::egglog::analysis::count(query, "AccumulatorArrayCount", (owner, group))?;
-        let arrays = query.indexed("AccumulatorArray", &[owner, capability[1]], count)?;
+        let arrays = query.0.collective_inputs(owner, group, CollectiveInput::Backing);
         let policy = query.required("AccumulatorPolicy", (owner, group))?;
         let combine = query.0.combiner_at(owner, group);
         let indices = query

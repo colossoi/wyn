@@ -4,6 +4,7 @@ use crate::egglog::dataflow::{
     edit,
     ir::{self, Code, Name, OperationId, Parameter, RegionId},
 };
+use crate::egglog::graph::CollectiveInput;
 use crate::egglog::graph::{Graph, State};
 use crate::egglog::payload::Payload;
 use crate::egglog::query::Query;
@@ -31,7 +32,11 @@ pub(in crate::egglog::fusion) fn run(graph: &mut Graph) -> Result<bool, Optimize
     query.for_function("ResultKindOf", |key, kind| {
         if kind == compacted
             && query.contains("LiveOperation", key[0])?
-            && count(query, "ResultValueCount", (key[0], key[1]))? == 1
+            && query.0.collective_input_count(
+                key[0],
+                graph.value_to_base(key[1]),
+                CollectiveInput::Contribution,
+            ) == 1
             && count(query, "DomainRank", query.required("OperationDomain", key[0])?)? == 1
         {
             clauses.insert((key[0], key[1]));
@@ -97,7 +102,8 @@ pub(in crate::egglog::fusion) fn run(graph: &mut Graph) -> Result<bool, Optimize
     let mut replacements = Vec::new();
     for (_, mut candidate) in candidates {
         let operation = candidate.operation;
-        let predicate = query.required("ResultPredicate", (operation, candidate.clause))?;
+        let predicate =
+            query.0.collective_input(operation, candidate.clause, CollectiveInput::Predicate, 0)?;
         if let Some(packed) = packed_output(query, operation, predicate)? {
             reused.extend(candidate.lengths.into_iter().map(|(length, _)| (length, packed)));
             continue;
@@ -177,9 +183,10 @@ fn packed_output(
         if query.enode("CompactedOutput", role)?.is_none() {
             continue;
         }
-        let other = query.required("OutputClause", (operation, slot))?;
+        let other = query.0.value_to_base::<i64>(query.required("OutputClause", (operation, slot))?);
         if query.enode("Folded", query.required("ResultKindOf", (operation, other))?)?.is_some()
-            && query.lookup("ResultPredicate", (operation, other))? == Some(predicate)
+            && query.0.collective_input_at(operation, other, CollectiveInput::Predicate, 0)
+                == Some(predicate)
         {
             return Ok(Some(query.0.output(operation, slot)?));
         }
@@ -256,14 +263,12 @@ fn make_count(
     let kind = sink.add("Folded", kind)?;
     sink.remove("ResultKindOf", (operation, clause))?;
     sink.set("ResultKindOf", (operation, clause), kind)?;
-    sink.remove("ResultPredicate", (operation, clause))?;
-    sink.remove("ResultValue", (operation, clause, 0_i64))?;
+    sink.set_collective_inputs(operation, clause, CollectiveInput::Predicate, Vec::new())?;
     let flag = Name::Value(flag).fact(sink)?;
-    sink.set("ResultValue", (operation, clause, 0_i64), flag)?;
+    sink.set_collective_inputs(operation, clause, CollectiveInput::Contribution, vec![flag])?;
     sink.set_reducer(operation, clause, reducer);
-    sink.set("ResultNeutralCount", (operation, clause), 1_i64)?;
     let neutral = Name::Value(zero.1).fact(sink)?;
-    sink.set("ResultNeutral", (operation, clause, 0_i64), neutral)?;
+    sink.set_collective_inputs(operation, clause, CollectiveInput::Neutral, vec![neutral])?;
     sink.set("ResultCommutative", (operation, clause), true)?;
     sink.set_output(operation, output_slot, output)?;
     let role = sink.add("TotalOutput", RawValues(Vec::new()))?;

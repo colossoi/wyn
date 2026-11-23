@@ -3,6 +3,7 @@ use super::{
 };
 use crate::builtins::catalog;
 use crate::egglog::execution::Collective;
+use crate::egglog::graph::CollectiveInput;
 use crate::egglog::to_ssa::kernels::CollectivePhase;
 use crate::egglog::to_ssa::runtime_binding;
 use crate::host::{DispatchSize, Expr};
@@ -28,12 +29,13 @@ impl EntryEmission<'_, '_, '_> {
         for clause in 0..crate::egglog::analysis::count(query, "ResultCount", statement)? {
             if let Some(reducer) = query.0.reducer_at(statement, clause) {
                 carry_inputs.extend(names_in(query, "RegionCapture", reducer)?);
-                for slot in
-                    0..crate::egglog::analysis::count(query, "ResultNeutralCount", (statement, clause))?
-                {
-                    if let Some(name) =
-                        query.value_name(query.required("ResultNeutral", (statement, clause, slot))?)?
-                    {
+                for slot in 0..query.0.collective_input_count(statement, clause, CollectiveInput::Neutral) {
+                    if let Some(name) = query.value_name(query.0.collective_input(
+                        statement,
+                        clause,
+                        CollectiveInput::Neutral,
+                        slot,
+                    )?)? {
                         carry_inputs.insert(name);
                     }
                 }

@@ -3,6 +3,7 @@ use crate::ast::Span;
 use crate::egglog::dataflow::ir::{
     self, Code, Name, OperationId as WireOperationId, RegionId as WireRegionId,
 };
+use crate::egglog::graph::CollectiveInput;
 use crate::egglog::graph::Graph;
 use crate::egglog::{output_error, query::Query, OptimizeError};
 use crate::memory_ir::{
@@ -271,14 +272,14 @@ impl Body {
                         sink.set("ResultKindOf", (key, slot), compacted)?;
                     }
                     if let Some(predicate) = predicate {
-                        sink.remove("ResultPredicate", (key, slot))?;
-                        sink.set("ResultPredicate", (key, slot), predicate)?;
+                        sink.set_collective_inputs(key, slot, CollectiveInput::Predicate, vec![predicate])?;
                     }
-                    for (field, value) in clause.values.iter().enumerate() {
-                        let key = (key, slot, field as i64);
-                        sink.remove("ResultValue", key)?;
-                        sink.set("ResultValue", key, *value)?;
-                    }
+                    sink.set_collective_inputs(
+                        key,
+                        slot,
+                        CollectiveInput::Contribution,
+                        clause.values.clone(),
+                    )?;
                 }
                 for &(op, slot) in &self.packed_outputs {
                     let key = (self.graph.operations[op], slot);

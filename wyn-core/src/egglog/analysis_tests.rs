@@ -288,9 +288,8 @@ fn reducer_width_requires_agreement_and_a_length_preserving_combiner() -> Result
             (let left (ValueId 2)) (let right (ValueId 3))
             (let result (ValueId 4)) (let length (ValueId 5)) (let measure (OperationId 1))
             (set (ResultKindOf fold 0) (Folded (Total)))
-            (set (ResultNeutralCount fold 0) 1) (set (ResultValueCount fold 0) 1)
-            (set (ResultNeutral fold 0 0) (ValueNameRef neutral))
-            (set (ResultValue fold 0 0) (ValueNameRef item))
+            (set (FixtureResultNeutral fold 0 0) (ValueNameRef neutral))
+            (set (FixtureResultValue fold 0 0) (ValueNameRef item))
             (set (FixtureResultReducer fold 0) reducer)
 
             (set (FixtureParameter reducer 0) (ValueNameRef left))
@@ -377,7 +376,6 @@ fn bounded_work_counts_every_loop_iteration() {
                 let loop_ = operation(&mut sink, 1, Code::CountedLoop, &[])?;
                 outputs(&mut sink, loop_, &[])?;
                 sink.set_control(loop_.0, 0_i64, body.0);
-                sink.set("LoopIndex", loop_.0, index)?;
                 for (table, n) in [("LoopStart", 0_i64), ("LoopCount", 40_i64), ("LoopStep", 1_i64)] {
                     let value = sink.add("IndexConstant", n)?;
                     sink.set(table, loop_.0, value)?;

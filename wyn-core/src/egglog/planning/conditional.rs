@@ -1,6 +1,7 @@
 //! Factor admitted map arms by reparenting their regions around one branch occurrence.
 use crate::egglog::dataflow::edit;
 use crate::egglog::dataflow::ir::{self, Code, Name, OperationId, Parameter, RegionId};
+use crate::egglog::graph::CollectiveInput;
 use crate::egglog::graph::Graph;
 use crate::egglog::query::Query;
 use crate::egglog::OptimizeError;
@@ -30,8 +31,8 @@ pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> 
     let mut no_values = Vec::new();
     let mut returns = Vec::new();
     for slot in 0..count as i64 {
-        let y = query.required("ResultValue", (yes, 0_i64, slot))?;
-        let n = query.required("ResultValue", (no, 0_i64, slot))?;
+        let y = query.0.collective_input(yes, 0_i64, CollectiveInput::Contribution, slot)?;
+        let n = query.0.collective_input(no, 0_i64, CollectiveInput::Contribution, slot)?;
         yes_values.push(Name::Value(query.name(y)?));
         no_values.push(Name::Value(query.name(n)?));
         let info = query.required("ValueType", query.name(y)?)?;
@@ -119,15 +120,15 @@ pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> 
             sink.set("ResultCount", parallel.0, 1_i64)?;
             let kind = sink.add("Collected", RawValues(Vec::new()))?;
             sink.set("ResultKindOf", (parallel.0, 0_i64), kind)?;
-            sink.set("ResultValueCount", (parallel.0, 0_i64), count as i64)?;
+            let values =
+                bindings.into_iter().map(|value| value.fact(&mut sink)).collect::<Result<Vec<_>, _>>()?;
             let role = sink.add("CollectedOutput", RawValues(Vec::new()))?;
-            for (slot, value) in bindings.into_iter().enumerate() {
-                let name = value.fact(&mut sink)?;
-                sink.set("ResultValue", (parallel.0, 0_i64, slot as i64), name)?;
+            for slot in 0..values.len() {
                 sink.set("OutputClause", (parallel.0, slot as i64), 0_i64)?;
                 sink.set("OutputField", (parallel.0, slot as i64), slot as i64)?;
                 sink.set("OutputRole", (parallel.0, slot as i64), role)?;
             }
+            sink.set_collective_inputs(parallel.0, 0, CollectiveInput::Contribution, values)?;
             for value in certificates {
                 sink.add("OperationCertificate", (parallel.0, value))?;
             }

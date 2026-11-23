@@ -3,6 +3,7 @@ use super::body::{Collection, CollectionShape};
 use super::{domain_axes, error, Axis, Body, OptimizeError, Typed};
 use crate::builtins::catalog;
 use crate::egglog::execution::Dispatch;
+use crate::egglog::graph::CollectiveInput;
 use crate::egglog::to_ssa::host;
 use crate::egglog::to_ssa::runtime_binding;
 use crate::host::Expr;
@@ -135,13 +136,7 @@ impl Body<'_, '_, '_> {
         let mut fold_data = Vec::new();
         for clause in 0..crate::egglog::analysis::count(self.query(), "ResultCount", operation)? {
             let kind = self.query().required("ResultKindOf", (operation, clause))?;
-            let count =
-                crate::egglog::analysis::count(self.query(), "ResultValueCount", (operation, clause))?;
-            let values = self.query().indexed(
-                "ResultValue",
-                &[operation, self.query().0.base_to_value(clause)],
-                count,
-            )?;
+            let values = self.query().0.collective_inputs(operation, clause, CollectiveInput::Contribution);
             let output_names = |role: &str| -> Result<Vec<Value>, OptimizeError> {
                 let query = self.query();
                 let mut names = Vec::new();
@@ -158,7 +153,8 @@ impl Body<'_, '_, '_> {
             if self.query().enode("Collected", kind)?.is_some() {
                 collects.extend(output_names("CollectedOutput")?.into_iter().zip(values));
             } else if self.query().enode("Compacted", kind)?.is_some() {
-                let predicate = self.query().required("ResultPredicate", (operation, clause))?;
+                let predicate =
+                    self.query().0.collective_input(operation, clause, CollectiveInput::Predicate, 0)?;
                 compacts.push((
                     predicate,
                     output_names("CompactedOutput")?.into_iter().zip(values).collect::<Vec<_>>(),
@@ -182,16 +178,7 @@ impl Body<'_, '_, '_> {
                     }
                 };
                 let reducer = self.query().0.reducer(operation, clause)?;
-                let count = crate::egglog::analysis::count(
-                    self.query(),
-                    "ResultNeutralCount",
-                    (operation, clause),
-                )?;
-                let neutral = self.query().indexed(
-                    "ResultNeutral",
-                    &[operation, self.query().0.base_to_value(clause)],
-                    count,
-                )?;
+                let neutral = self.query().0.collective_inputs(operation, clause, CollectiveInput::Neutral);
                 let mut prefixes = output_names("PrefixOutput")?;
                 let packed = output_names("CompactedOutput")?;
                 let compact = if packed.is_empty() {
@@ -200,7 +187,12 @@ impl Body<'_, '_, '_> {
                     prefixes.extend(packed);
                     let index = compacts.len();
                     compacts.push((
-                        self.query().required("ResultPredicate", (operation, clause))?,
+                        self.query().0.collective_input(
+                            operation,
+                            clause,
+                            CollectiveInput::Predicate,
+                            0,
+                        )?,
                         vec![],
                     ));
                     Some(index)
@@ -741,11 +733,15 @@ impl Body<'_, '_, '_> {
         let axis = query.required("DomainAxis", (columns, 0_i64))?;
         let ordinal = query.required("DomainOrdinal", columns)?;
         let lane = query.0.control_region(map, 0_i64)?;
-        let result = query.required("ResultValue", (map, 0_i64, 0_i64))?;
+        let result = query.0.collective_input(map, 0_i64, CollectiveInput::Contribution, 0_i64)?;
         let domain = query.required("OperationDomain", operation)?;
         let rows = query.required("DomainExtent", (domain, 0_i64))?;
-        let neutral =
-            self.named(query.name(query.required("ResultNeutral", (operation, 0_i64, 0_i64))?)?)?;
+        let neutral = self.named(query.name(query.0.collective_input(
+            operation,
+            0_i64,
+            CollectiveInput::Neutral,
+            0_i64,
+        )?)?)?;
         let [binding] = pattern else {
             return Err(error("column scan requires one result"));
         };

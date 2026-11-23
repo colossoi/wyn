@@ -1,5 +1,6 @@
 //! Apply selected edits to keyed graph cells without reconstructing a program.
 use super::ir::{self, Code};
+use crate::egglog::graph::CollectiveInput;
 use crate::egglog::graph::{ArgumentSite, Graph};
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, output_error, OptimizeError};
@@ -11,11 +12,9 @@ pub(in crate::egglog) const OPERATION_CELLS: &[&str] = &[
     "InstructionWork",
     "LiteralBits",
     "InputDiet",
-    "LoopIndex",
     "LoopStart",
     "LoopCount",
     "LoopStep",
-    "LoopCondition",
     "OperationIndex",
     "OperationSlices",
     "OperationLayout",
@@ -25,19 +24,12 @@ pub(in crate::egglog) const OPERATION_CELLS: &[&str] = &[
     "OperationExecution",
     "ResultKindOf",
     "ResultCount",
-    "ResultValueCount",
-    "ResultValue",
-    "ResultPredicate",
-    "ResultNeutral",
-    "ResultNeutralCount",
     "ResultCommutative",
     "OutputClause",
     "OutputField",
     "OutputRole",
     "AccumulatorPolicy",
     "AccumulatorGroupCount",
-    "AccumulatorArrayCount",
-    "AccumulatorArray",
     "CallReturnType",
     "ScalarPayload",
 ];
@@ -232,7 +224,43 @@ pub(in crate::egglog) fn replace_attributes(
 
 fn seed_replacements(graph: &mut Graph, replacements: &[(Value, Value)]) -> Result<(), OptimizeError> {
     clear(graph)?;
+    let mut forest = ReplacementForest::new();
+    for &(old, new) in replacements {
+        if old != new {
+            forest.replace(old, new).map_err(|error| output_error(error.to_string()))?;
+        }
+    }
+    let mut collective = Vec::new();
+    {
+        let query = Query(graph);
+        let structure = graph.structure().read();
+        for (old, new) in forest.into_map() {
+            if let Some(sites) = structure.collective.uses.get(&old) {
+                collective.extend(
+                    sites
+                        .iter()
+                        .filter(|(site, _)| !site.kind.uses_raw_name())
+                        .map(|&(site, field)| (site, field, new)),
+                );
+            }
+            if let Some(raw_old) = query.value_name(old)? {
+                if let Some(sites) = structure.collective.uses.get(&raw_old) {
+                    if let Some(raw_new) = query.value_name(new)? {
+                        collective.extend(
+                            sites
+                                .iter()
+                                .filter(|(site, _)| site.kind.uses_raw_name())
+                                .map(|&(site, field)| (site, field, raw_new)),
+                        );
+                    }
+                }
+            }
+        }
+    }
     graph.update(|mut sink| {
+        for (site, field, value) in collective {
+            sink.redirect_collective_input(site, field, value)?;
+        }
         for &(old, new) in replacements {
             sink.set("ValueReplacement", old, new)?;
         }
@@ -371,6 +399,7 @@ pub(in crate::egglog) fn set_code(
         })?;
     }
     graph.update(|mut sink| {
+        sink.clear_collective_inputs(operation);
         for (table, row) in rows {
             sink.remove(table, RawValues(row))?;
         }
@@ -388,6 +417,15 @@ pub(in crate::egglog) fn set_code(
     graph.update(|mut sink| Ok(ir::properties(&mut sink, operation, code)))??;
     changed(graph)?;
     Ok(())
+}
+
+fn collective_name(query: Query<'_>, kind: CollectiveInput, value: Value) -> Result<Value, OptimizeError> {
+    if !kind.uses_raw_name() {
+        return Ok(value);
+    }
+    query
+        .constructor("ValueNameRef", value)?
+        .ok_or_else(|| output_error("collective operand has no value identity"))
 }
 
 /// Copy a selected region using fresh graph identities, substituting its entry edge.
@@ -443,6 +481,11 @@ pub(in crate::egglog) fn clone_region(
             for operation in query.operations(region)? {
                 pending.extend(graph.attached_regions(operation));
                 argument_names.extend(graph.inputs(operation));
+                for ((_, kind), values) in graph.collective_groups(operation) {
+                    for value in values {
+                        argument_names.insert(collective_name(query, kind, value)?);
+                    }
+                }
                 result_names.extend(graph.outputs(operation));
                 for (slot, _) in graph.controls(operation) {
                     argument_names.extend(graph.arguments(operation, slot));
@@ -534,6 +577,14 @@ pub(in crate::egglog) fn clone_region(
                     })
                     .collect()
             };
+            let mut collective = graph.collective_groups(row[1]);
+            for (&(_, kind), values) in &mut collective {
+                for value in values {
+                    let name = collective_name(query, kind, *value)?;
+                    let clone = query.required("CloneName", (context, name))?;
+                    *value = if kind.uses_raw_name() { query.name(clone)? } else { clone };
+                }
+            }
             operations.push((
                 row[1],
                 copy,
@@ -553,6 +604,7 @@ pub(in crate::egglog) fn clone_region(
                     .collect::<Result<Vec<_>, _>>()?,
                 clone_callbacks(graph.reducers(row[1]))?,
                 clone_callbacks(graph.combiners(row[1]))?,
+                collective,
             ));
         }
         Ok(())
@@ -565,9 +617,23 @@ pub(in crate::egglog) fn clone_region(
             sink.set_parameters(region, parameters)?;
             sink.set_yields(region, values)?;
         }
-        for (_, operation, region, order, target, controls, inputs, outputs, reducers, combiners) in
-            operations
+        for (
+            _,
+            operation,
+            region,
+            order,
+            target,
+            controls,
+            inputs,
+            outputs,
+            reducers,
+            combiners,
+            collective,
+        ) in operations
         {
+            for ((group, kind), values) in collective {
+                sink.set_collective_inputs(operation, group, kind, values)?;
+            }
             sink.set_reducers(operation, reducers);
             sink.set_combiners(operation, combiners);
             sink.set_inputs(operation, inputs)?;
@@ -661,7 +727,15 @@ pub(in crate::egglog) fn remove_clause(
             (slot != clause).then_some((if slot > clause { slot - 1 } else { slot }, region))
         })
         .collect();
+    let retained_edges = graph.collective_groups(operation);
     graph.update(|mut sink| {
+        sink.clear_collective_inputs(operation);
+        for ((group, kind), values) in retained_edges {
+            if group != clause {
+                let next = if group > clause { group - 1 } else { group };
+                sink.set_collective_inputs(operation, next, kind, values)?;
+            }
+        }
         sink.set_reducers(operation, reducers);
         for (table, keys) in old {
             sink.remove(table, RawValues(keys))?;

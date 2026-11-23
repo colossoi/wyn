@@ -1,4 +1,5 @@
 use super::{Body, Effects, Site};
+use crate::egglog::graph::CollectiveInput;
 use crate::egglog::graph::Graph;
 use crate::egglog::{analysis::count, output_error, query::Query, OptimizeError};
 use crate::memory_ir::{BodyRole, OperationId, RegionId, ValueRef};
@@ -93,6 +94,7 @@ impl Body {
         let mut rows = Vec::new();
         let mut parameters = Vec::new();
         let mut callbacks = Vec::new();
+        let mut backings = Vec::new();
         for (op, origins) in &self.accumulator_origins {
             let key = self.graph.operations[op];
             let region = self.lane(op)?;
@@ -108,22 +110,11 @@ impl Body {
                     if let Some(combine) = query.0.combiner_at(origin, slot) {
                         combiners.push((base as i64 + slot, combine));
                     }
-                    for table in ["AccumulatorPolicy", "AccumulatorArrayCount"] {
-                        if let Some(value) = query.lookup(table, (origin, slot))? {
-                            rows.push((table, vec![key, group], value));
-                        }
+                    if let Some(value) = query.lookup("AccumulatorPolicy", (origin, slot))? {
+                        rows.push(("AccumulatorPolicy", vec![key, group], value));
                     }
-                    for (field, array) in query
-                        .indexed(
-                            "AccumulatorArray",
-                            &[origin, graph.base_to_value(slot)],
-                            count(query, "AccumulatorArrayCount", (origin, slot))?,
-                        )?
-                        .into_iter()
-                        .enumerate()
-                    {
-                        rows.push(("AccumulatorArray", vec![key, group, index(field)], array));
-                    }
+                    let arrays = graph.collective_inputs(origin, slot, CollectiveInput::Backing);
+                    backings.push((key, base as i64 + slot, arrays));
                 }
                 base += size as usize;
             }
@@ -137,6 +128,9 @@ impl Body {
             rows.push(("AccumulatorGroupCount", vec![key], index(base)));
         }
         graph.update(|mut sink| {
+            for (key, group, arrays) in backings {
+                sink.set_collective_inputs(key, group, CollectiveInput::Backing, arrays)?;
+            }
             for (op, combiners) in callbacks {
                 sink.set_combiners(op, combiners);
             }

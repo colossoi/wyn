@@ -1,5 +1,6 @@
 //! Check signatures and capability boundaries on the selected graph.
 use super::{count, typed, Query};
+use crate::egglog::graph::CollectiveInput;
 use crate::egglog::{output_error, OptimizeError};
 use crate::LookupSet;
 use egglog_engine::Value;
@@ -80,7 +81,7 @@ pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), Optimi
         }
     }
     if query.contains("WhileLoopOperation", operation)? {
-        let condition = query.required("LoopCondition", operation)?;
+        let condition = query.loop_parameter(operation)?;
         let Some(condition) = query.constructor("ValueNameRef", condition)? else {
             return Err(output_error("loop predicate has no value identity"));
         };
@@ -110,13 +111,15 @@ pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), Optimi
                 return Err(output_error("parallel output refers to a missing result clause"));
             }
             let field = query.0.value_to_base::<i64>(query.required("OutputField", (operation, slot))?);
-            if field < 0 || field >= count(query, "ResultValueCount", (operation, clause))? {
+            if field < 0
+                || field >= query.0.collective_input_count(operation, clause, CollectiveInput::Contribution)
+            {
                 return Err(output_error("parallel output refers to a missing result field"));
             }
         }
         for clause in 0..clauses {
             let kind = query.required("ResultKindOf", (operation, clause))?;
-            let predicate = query.lookup("ResultPredicate", (operation, clause))?;
+            let predicate = query.0.collective_input_at(operation, clause, CollectiveInput::Predicate, 0);
             if query.enode("Compacted", kind)?.is_some() && predicate.is_none() {
                 return Err(output_error("compacted result has no predicate"));
             }
@@ -128,18 +131,20 @@ pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), Optimi
             }
             if query.enode("Folded", kind)?.is_some() {
                 let reducer = query.0.reducer(operation, clause)?;
-                let neutral = count(query, "ResultNeutralCount", (operation, clause))?;
+                let neutral = query.0.collective_input_count(operation, clause, CollectiveInput::Neutral);
                 if rank == 0
                     || query.0.parameter_count(reducer) != 2 * neutral
                     || query.0.yield_count(reducer) != neutral
-                    || count(query, "ResultValueCount", (operation, clause))? != neutral
+                    || query.0.collective_input_count(operation, clause, CollectiveInput::Contribution)
+                        != neutral
                 {
                     return Err(output_error(
                         "reducer must take two accumulator tuples and preserve their arity",
                     ));
                 }
                 for slot in 0..neutral {
-                    let initial = query.required("ResultNeutral", (operation, clause, slot))?;
+                    let initial =
+                        query.0.collective_input(operation, clause, CollectiveInput::Neutral, slot)?;
                     let parameter = query.0.parameter(reducer, slot)?;
                     let other = query.0.parameter(reducer, slot + neutral)?;
                     if !compatible(query, typed(query, initial)?, typed(query, parameter)?)?

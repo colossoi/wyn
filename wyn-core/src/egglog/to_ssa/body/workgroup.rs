@@ -1,6 +1,7 @@
 //! Lower group-wide control and transfers with explicit shared storage.
 use super::{builder_error, error, Body, OptimizeError, Typed};
 use crate::egglog::analysis;
+use crate::egglog::graph::CollectiveInput;
 use crate::op::{BinaryOperator, OpTag};
 use crate::ssa::array_copy::matching_view_element;
 use crate::ssa::types::InstKind;
@@ -214,8 +215,10 @@ impl Body<'_, '_, '_> {
         let checkpoint = self.values.checkpoint();
         let mut outputs = Vec::new();
         for group in 0..analysis::count(self.query(), "AccumulatorGroupCount", statement)? {
-            for slot in 0..analysis::count(self.query(), "AccumulatorArrayCount", (statement, group))? {
-                let name = self.query().required("AccumulatorArray", (statement, group, slot))?;
+            for slot in 0..self.query().0.collective_input_count(statement, group, CollectiveInput::Backing)
+            {
+                let name =
+                    self.query().0.collective_input(statement, group, CollectiveInput::Backing, slot)?;
                 let source = self.named(name)?;
                 let destination = self.shared_array_for(&source)?;
                 self.workgroup_copy(source, destination.clone())?;
