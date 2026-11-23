@@ -102,6 +102,8 @@
 (rule ((RetiredValue a0) (LengthWitness a0 a1)) ((delete (LengthWitness a0 a1))) :ruleset retire-shape)
 (rule ((RetiredValue a0) (ProductField a0 a1 a2)) ((delete (ProductField a0 a1 a2))) :ruleset retire-shape)
 (rule ((RetiredValue a0) (ProductComponent a0 a1 a2)) ((delete (ProductComponent a0 a1 a2))) :ruleset retire-shape)
+(rule ((RetiredValue result) (ProjectionComponentInput source path result))
+      ((delete (ProjectionComponentInput source path result))) :ruleset retire-shape)
 (rule ((RetiredValue a0) (ComponentLengthWitness a0 a1 a2)) ((delete (ComponentLengthWitness a0 a1 a2))) :ruleset retire-shape)
 (rule ((RetiredValue a0) (ProjectionPath a0 a1 a2)) ((delete (ProjectionPath a0 a1 a2))) :ruleset retire-shape)
 (rule ((RetiredOperation a0) (LoopArrayComponent a0 a1 a2 a3 a4)) ((delete (LoopArrayComponent a0 a1 a2 a3 a4))) :ruleset retire-shape)
