@@ -40,6 +40,8 @@
 (function ProjectionAlias (Name) Name :no-merge)
 (relation BinaryOperands (OperationKey Name Name))
 (relation IndexOperands (OperationKey Name Name))
+(relation ArrayLiteralOperand (OperationKey i64 Name))
+(relation RangeOperands (OperationKey Name Name))
 (relation LengthMeasure (OperationKey i64 Name Name))
 (relation RegionAttributeUse (RegionKey Name))
 (relation RegionCapture (RegionKey Name))

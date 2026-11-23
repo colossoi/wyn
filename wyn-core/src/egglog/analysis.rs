@@ -11,6 +11,7 @@ pub(super) mod calls;
 mod formulas;
 mod liveness;
 mod projections;
+pub(super) mod scopes;
 
 pub(super) use liveness::{liveness, Liveness};
 
@@ -24,6 +25,8 @@ pub(super) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
         concat!(
             include_str!("analysis/schema.egg"),
             "\n",
+            include_str!("analysis/proof-keys.egg"),
+            "\n",
             include_str!("analysis/dataflow.egg"),
             "\n",
             include_str!("analysis/resources.egg"),
@@ -32,98 +35,6 @@ pub(super) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
         ),
     )?;
     Ok(())
-}
-
-/// Retire body-dependent proofs before solving a new graph revision.
-pub(super) fn invalidate(graph: &mut Graph) -> Result<(), OptimizeError> {
-    let _timing = timing::span("egglog full analysis invalidation");
-    edit::clear(graph)?;
-    for table in [
-        "DataflowRevision",
-        "PlanningRevision",
-        "ConstantValue",
-        "RecursiveFunction",
-        "CallBody",
-        "ResultOrigin",
-        "FormalOrigin",
-        "ReducerBody",
-        "CollectiveScopeUse",
-        "CollectiveLaneUse",
-        "FoldSeedUse",
-        "PackedClause",
-        "IterationAxis",
-        "OperationGuardRequirement",
-        "YieldGuardRequirement",
-        "LaneAxisExtent",
-        "ReductionBoundOperands",
-        "CollectedClause",
-        "CompactedClause",
-        "ContributedClause",
-        "FoldClause",
-        "AccumulatorBackingUse",
-        "SingleAccumulatorBacking",
-        "ReducerWidthInputs",
-        "DefinitionRegion",
-        "RootFunction",
-        "LiveFunction",
-        "LiveRegion",
-        "LiveOperation",
-        "EndDemand",
-        "BranchResult",
-        "ProjectionAlias",
-        "RegionAttributeUse",
-        "RegionCapture",
-        "DirectOperationUse",
-        "OperationAttributeUse",
-        "OperationUse",
-        "InvalidDataflow",
-        "RegularLength",
-        "RowDependent",
-        "VaryingShape",
-        "RowShapePair",
-        "SameRowShape",
-        "RowExtent",
-        "IrregularResult",
-        "TotalIndex",
-        "ArrayOuterBound",
-        "ArrayRowWidth",
-        "LoopMatchesOuterBound",
-        "ConstantBound",
-        "ResourceDemand",
-        "ResourceParent",
-        "ResourceAnchor",
-        "ResourceRoot",
-        "TokenArray",
-        "TokenCapability",
-        "ConsumedToken",
-        "TokenUnavailableAt",
-        "OperationRead",
-        "OperationWrite",
-        "OperationTrap",
-        "RegionRead",
-        "RegionWrite",
-        "RegionTrap",
-        "OperationsConflict",
-        "EffectCompare",
-        "OperationTotal",
-        "IntegerBoundsDemand",
-        "TrackedI32",
-        "IntegerLower",
-        "IntegerUpper",
-        "DiscardableRead",
-        "PureOperation",
-        "MovableOperation",
-        "InvocationDependent",
-        "InvocationRegion",
-        "LoopInduction",
-        "LoopValueCarry",
-        "AccumulatorParameter",
-        "FlowScopeParent",
-        "FlowScopeAncestor",
-    ] {
-        graph.clear_function(table)?;
-    }
-    advance_revision(graph, "AnalysisRevision")
 }
 
 /// Reseed rules after clearing derived tables while keeping valid graph facts.
@@ -137,50 +48,48 @@ pub(super) fn advance_revision(graph: &mut Graph, table: &str) -> Result<(), Opt
 }
 
 /// Refresh lexical ownership, reachable calls, and recursion without solving dataflow.
-pub(super) fn structure(graph: &mut Graph) -> Result<(), OptimizeError> {
+pub(super) fn structure(graph: &mut Graph) -> Result<Vec<Value>, OptimizeError> {
     let _timing = timing::span("egglog graph structure");
-    invalidate(graph)?;
-    calls::publish(graph)?;
-    publish_proof_operands(graph)?;
+    edit::clear(graph)?;
+    let reach = calls::Reachability::read(graph)?;
+    let refresh = scopes::prepare(graph, &reach)?;
+    calls::publish(graph, &reach, &refresh.solve)?;
+    let operations = publish_proof_operands(graph, &refresh.solve)?;
     graph.parse_and_run_program(None, "(run-schedule (saturate graph-structure flow-scopes))")?;
-    Ok(())
+    Ok(operations)
 }
 
 // Correlate the operands of each proof before the solver joins their types and ranges.
-pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeError> {
+pub(super) fn publish_proof_operands(
+    graph: &mut Graph,
+    scopes: &[scopes::Subjects],
+) -> Result<Vec<Value>, OptimizeError> {
     let query = Query(graph);
+    let regions: Vec<_> = scopes.iter().flat_map(|scope| scope.regions.iter().copied()).collect();
+    let operations: Vec<_> = scopes.iter().flat_map(|scope| scope.operations.iter().copied()).collect();
     let mut definitions = Vec::new();
-    {
-        let structure = graph.structure().read();
-        query.for_each("LiveRegion", |row| {
-            let region = row[0];
-            for (slot, &name) in structure.parameters.get(&region).into_iter().flatten().enumerate() {
-                definitions.push((name, Origin::Parameter(region, slot), region));
-            }
-            Ok(())
-        })?;
-        query.for_each("LiveOperation", |row| {
-            let operation = row[0];
-            let Some(region) = structure.operations.get(&operation).and_then(|position| position.region)
-            else {
-                return Ok(());
-            };
-            for (slot, &name) in structure.outputs.get(&operation).into_iter().flatten().enumerate() {
-                definitions.push((name, Origin::Result(operation, slot), region));
-            }
-            Ok(())
-        })?;
-    }
     let mut reducers = Vec::new();
-    query.for_each("LiveOperation", |row| {
-        reducers.extend(graph.reducers(row[0]).into_iter().map(|(slot, body)| (row[0], slot, body)));
-        Ok(())
-    })?;
+    for &region in &regions {
+        for (slot, name) in graph.parameters(region).into_iter().enumerate() {
+            definitions.push((name, Origin::Parameter(region, slot), region));
+        }
+    }
+    for &operation in &operations {
+        let Ok(region) = graph.operation_region(operation) else {
+            continue;
+        };
+        for (slot, name) in graph.outputs(operation).into_iter().enumerate() {
+            definitions.push((name, Origin::Result(operation, slot), region));
+        }
+        reducers.extend(graph.reducers(operation).into_iter().map(|(slot, body)| (operation, slot, body)));
+    }
     let mut induction = Vec::new();
-    query.for_each("CountedLoopOperation", |row| {
-        let operation = row[0];
+    for &operation in &operations {
+        if !query.contains("CountedLoopOperation", operation)? {
+            continue;
+        }
         let Some(region) = graph.control_at(operation, 0) else {
-            return Ok(());
+            continue;
         };
         let position = graph.parameter_count(region) - 1;
         if let Some(parameter) = graph.parameter_at(region, position) {
@@ -188,45 +97,64 @@ pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeEr
                 induction.push((operation, index));
             }
         }
-        Ok(())
-    })?;
+    }
     let mut branches = Vec::new();
-    query.for_each("BranchOperation", |row| {
-        let op = row[0];
+    for &op in &operations {
+        if !query.contains("BranchOperation", op)? {
+            continue;
+        }
         let Some(yes) = graph.control_at(op, 0) else {
-            return Ok(());
+            continue;
         };
         let Some(no) = graph.control_at(op, 1) else {
-            return Ok(());
+            continue;
         };
         let results = graph.outputs(op);
         let arms = graph.yield_values(yes).into_iter().zip(graph.yield_values(no));
         for (slot, (result, (yes, no))) in results.into_iter().zip(arms).enumerate() {
             branches.push((op, slot as i64, result, yes, no));
         }
-        Ok(())
-    })?;
+    }
     let mut direct_uses = Vec::new();
+    let mut literal_elements = Vec::new();
+    let mut ranges = Vec::new();
     let mut operation_guards = Vec::new();
     let mut yield_guards = Vec::new();
     let mut end_demands = Vec::new();
     {
         let structure = graph.structure().read();
-        for (&operation, names) in &structure.certificates.operations {
-            let parallel = matches!(
-                graph.code(operation)?,
-                crate::egglog::dataflow::ir::Code::Parallel
-            );
-            operation_guards.extend(names.iter().map(|&name| (operation, name, parallel)));
+        for &operation in &operations {
+            let names = structure.certificates.operations.get(&operation).into_iter().flatten();
+            let parallel = query.contains("ParallelOperation", operation)?;
+            operation_guards.extend(names.map(|&name| (operation, name, parallel)));
         }
-        for (&region, values) in &structure.certificates.yields {
-            yield_guards.extend(values.iter().map(|&(_, value)| (region, value)));
-        }
-        for (&operation, inputs) in &structure.inputs.values {
+        for &operation in &operations {
+            let inputs = structure.inputs.values.get(&operation).map_or(&[][..], Vec::as_slice);
             direct_uses.extend(inputs.iter().map(|&input| (operation, input)));
+            if query.contains("ArrayLiteralOperation", operation)? {
+                literal_elements.extend(
+                    inputs.iter().enumerate().map(|(slot, &input)| (operation, slot as i64, input)),
+                );
+            }
+            if query.contains("RangeOperation", operation)? {
+                if let [start, step] = inputs {
+                    ranges.push((operation, *start, *step));
+                }
+            }
         }
-        for (&region, yields) in &structure.yields.values {
-            end_demands.extend(yields.iter().map(|&value| (region, value)));
+        for &region in &regions {
+            yield_guards.extend(
+                structure
+                    .certificates
+                    .yields
+                    .get(&region)
+                    .into_iter()
+                    .flatten()
+                    .map(|&(_, value)| (region, value)),
+            );
+            end_demands.extend(
+                structure.yields.values.get(&region).into_iter().flatten().map(|&value| (region, value)),
+            );
         }
     }
     graph.update(|mut sink| {
@@ -261,6 +189,12 @@ pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeEr
         for site in direct_uses {
             sink.add("DirectOperationUse", site)?;
         }
+        for element in literal_elements {
+            sink.add("ArrayLiteralOperand", element)?;
+        }
+        for range in ranges {
+            sink.add("RangeOperands", range)?;
+        }
         for site in end_demands {
             sink.add("EndDemand", site)?;
         }
@@ -275,19 +209,26 @@ pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeEr
         }
         Ok(())
     })?;
-    formulas::publish(graph)?;
-    publish_collective_uses(graph)
+    formulas::publish(graph, &operations)?;
+    publish_collective_uses(graph, &operations)?;
+    Ok(operations)
 }
 
 /// Publish the value sets needed by the scope, resource and execution proofs.
-pub(super) fn publish_collective_uses(graph: &mut Graph) -> Result<(), OptimizeError> {
+pub(super) fn publish_collective_uses(
+    graph: &mut Graph,
+    operations: &[Value],
+) -> Result<(), OptimizeError> {
     let query = Query(graph);
     let mut classes = Vec::new();
     let mut reduction_bounds = Vec::new();
     let mut collective_uses = Vec::new();
     {
         let structure = graph.structure().read();
-        for (&operation, results) in &structure.parallels {
+        for &operation in operations {
+            let Some(results) = structure.parallels.get(&operation) else {
+                continue;
+            };
             for (clause, &kind) in results.kinds.iter().enumerate() {
                 let Some(kind) = kind else { continue };
                 let (class, arguments) =
@@ -295,7 +236,10 @@ pub(super) fn publish_collective_uses(graph: &mut Graph) -> Result<(), OptimizeE
                 classes.push((operation, clause as i64, class, arguments.first().copied()));
             }
         }
-        for (&operation, results) in &structure.parallels {
+        for &operation in operations {
+            let Some(results) = structure.parallels.get(&operation) else {
+                continue;
+            };
             let domain = structure
                 .domains
                 .operations
@@ -329,7 +273,10 @@ pub(super) fn publish_collective_uses(graph: &mut Graph) -> Result<(), OptimizeE
                 reduction_bounds.push((output, reducer, extent, *neutral, value));
             }
         }
-        for (&operation, groups) in &structure.collective.groups {
+        for &operation in operations {
+            let Some(groups) = structure.collective.groups.get(&operation) else {
+                continue;
+            };
             let scope = structure.controls.get(&(operation, 0)).map(|edge| edge.region);
             for (&(group, kind), names) in groups {
                 collective_uses.push((operation, scope, group, kind, names.clone()));
@@ -399,9 +346,9 @@ pub(super) fn publish_collective_uses(graph: &mut Graph) -> Result<(), OptimizeE
 
 pub(super) fn run(graph: &mut Graph) -> Result<(), OptimizeError> {
     let _timing = timing::span("egglog graph analysis");
-    structure(graph)?;
-    projections::publish(graph)?;
-    totality::publish_literal_shifts(graph)?;
+    let operations = structure(graph)?;
+    projections::publish(graph, &operations)?;
+    totality::publish_literal_shifts(graph, &operations)?;
     graph.parse_and_run_program(
         None,
         "(run-schedule (saturate graph-indices dataflow-dependencies))",

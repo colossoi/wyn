@@ -1,4 +1,4 @@
-use super::{ensure, invalidate, liveness, run};
+use super::{ensure, liveness, run, structure};
 use crate::egglog::cost::CostModel;
 use crate::egglog::dataflow::edit;
 use crate::egglog::dataflow::ir::{operation, outputs, parameters, region, yields, Code, Name, Parameter};
@@ -68,7 +68,8 @@ fn planning_metadata_survives_candidate_resets_and_tracks_edits() -> Result<(), 
     assert!(Query(&graph).first("ForwardCandidate")?.is_none());
 
     let revision = edit::revision(&graph)?;
-    invalidate(&mut graph)?;
+    graph.proof_changes.operations.insert(operation);
+    structure(&mut graph)?;
     assert_eq!(edit::revision(&graph)?, revision);
     assert!(Query(&graph).lookup("PlanningRevision", RawValues(Vec::new()))?.is_none());
     planning::analyze(&mut graph)?;
@@ -226,7 +227,8 @@ fn immutable_term_facts_survive_an_analysis_refresh() -> Result<(), OptimizeErro
         (run-schedule (saturate graph-indices dataflow-dependencies type-sizes))
         "#,
     )?;
-    invalidate(&mut graph)?;
+    let previous = super::scopes::seed_fixture(&mut graph)?;
+    super::scopes::retire(&mut graph, &[previous])?;
     graph.parse_and_run_program(
         None,
         r#"
@@ -266,6 +268,7 @@ fn logical_values_and_storage_reads_have_distinct_effects() {
         (set (FixtureParameter (RegionId 0) 1) (ValueNameRef storage))
         (set (FixtureInput (OperationId 0) 0) (ValueNameRef value)) (ReadsInput (OperationId 0) 0)
         (set (FixtureInput (OperationId 1) 0) (ValueNameRef storage)) (ReadsInput (OperationId 1) 0)
+        (LiveOperation (OperationId 2)) (LiveOperation (OperationId 3))
         (OrderedOperation (OperationId 2)) (OrderedOperation (OperationId 3))
         (set (FixtureInput (OperationId 4) 0) (ValueNameRef storage)) (WritesInput (OperationId 4) 0)
         (EffectCompare (OperationId 2) (OperationId 1))

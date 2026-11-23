@@ -393,11 +393,12 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
     for field in fields {
         graph.clear_function(field)?;
     }
+    let scope = super::analysis::scopes::seed_fixture(graph)?;
     if !checks.is_empty() {
-        super::analysis::publish_proof_operands(graph)?;
+        super::analysis::publish_proof_operands(graph, &[scope])?;
         graph.parse_and_run_program(None, &format!("(run-schedule{checks}"))?;
     } else {
-        super::analysis::publish_collective_uses(graph)?;
+        super::analysis::publish_collective_uses(graph, &scope.operations)?;
     }
     Ok(())
 }

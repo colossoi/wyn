@@ -2,18 +2,17 @@
 use super::{Graph, OptimizeError, Origin, Query};
 use crate::egglog::dataflow::ir::Code;
 use crate::LookupMap;
-use egglog_engine::Write;
+use egglog_engine::{Value, Write};
 use wyn_graph::dfs_postorder;
 
-pub(super) fn publish(graph: &mut Graph) -> Result<(), OptimizeError> {
+pub(super) fn publish(graph: &mut Graph, operations: &[Value]) -> Result<(), OptimizeError> {
     let query = Query(graph);
     let mut selected = Vec::new();
-    query.for_each("ProjectionOperation", |row| {
-        if query.contains("LiveOperation", row[0])? {
-            selected.extend(graph.output_at(row[0], 0));
+    for &operation in operations {
+        if matches!(graph.code(operation)?, Code::Project { .. }) {
+            selected.extend(graph.output_at(operation, 0));
         }
-        Ok(())
-    })?;
+    }
 
     // Products can have projections as fields. Visit their inputs first so
     // following a field always reaches its existing definition.

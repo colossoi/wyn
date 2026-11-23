@@ -4,16 +4,23 @@ use crate::egglog::{query::Query, OptimizeError};
 use crate::LookupSet;
 use egglog_engine::{Value, Write};
 
-pub(super) fn publish(graph: &mut Graph) -> Result<(), OptimizeError> {
+pub(super) fn publish(graph: &mut Graph, operations: &[Value]) -> Result<(), OptimizeError> {
     let query = Query(graph);
     let mut uses = Vec::new();
     let mut dimensions = Vec::new();
     let mut lane_axes = Vec::new();
     {
         let structure = graph.structure().read();
-        for (&operation, domain) in &structure.domains.operations {
-            if let Some(domain) = structure.domains.values.get(domain) {
-                for dimension in &domain.dimensions {
+        let mut domains = LookupSet::new();
+        for &operation in operations {
+            let Some(&domain) = structure.domains.operations.get(&operation) else {
+                continue;
+            };
+            if let Some(layout) = structure.domains.values.get(&domain) {
+                if domains.insert(domain) {
+                    dimensions.extend((0..layout.dimensions.len()).map(|slot| (domain, slot as i64)));
+                }
+                for dimension in &layout.dimensions {
                     if let Some(extent) = dimension.extent {
                         if let (Some(lane), Some(axis)) =
                             (structure.controls.get(&(operation, 0)), dimension.coordinate)
@@ -29,11 +36,11 @@ pub(super) fn publish(graph: &mut Graph) -> Result<(), OptimizeError> {
                 }
             }
         }
-        for (&domain, layout) in &structure.domains.values {
-            dimensions.extend((0..layout.dimensions.len()).map(|slot| (domain, slot as i64)));
-        }
         for (&kind, formulas) in &structure.formulas.by_kind {
-            for (&operation, &formula) in formulas {
+            for &operation in operations {
+                let Some(&formula) = formulas.get(&operation) else {
+                    continue;
+                };
                 uses.extend(formula_names(query, kind, formula)?.into_iter().map(|name| (operation, name)));
             }
         }

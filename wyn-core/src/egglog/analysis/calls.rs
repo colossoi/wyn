@@ -12,15 +12,13 @@ use wyn_graph::{for_each_reachable, WalkOrder};
 struct RegionCalls {
     children: Vec<Value>,
     sites: Vec<CallSite<Value, Value>>,
-    operations: Vec<Value>,
 }
 
 pub(in crate::egglog) struct Reachability {
     pub calls: CallGraph<Value, Value>,
-    live: Vec<Value>,
+    pub(super) live: Vec<Value>,
     recursive: LookupSet<Value>,
-    bodies: LookupMap<Value, Vec<Value>>,
-    regions: LookupMap<Value, RegionCalls>,
+    pub(super) bodies: LookupMap<Value, Vec<Value>>,
     owners: LookupMap<Value, Value>,
     multiple_owners: bool,
 }
@@ -50,13 +48,6 @@ impl Reachability {
             {
                 regions.entry(region).or_default().sites.push(CallSite { operation, callee });
             }
-        }
-        for (&region, operations) in &positions.by_region {
-            regions
-                .entry(region)
-                .or_default()
-                .operations
-                .extend(operations.iter().copied().filter(|&operation| graph.has_operation(operation)));
         }
         let mut bodies = LookupMap::<Value, Vec<Value>>::new();
         let mut calls = StableMap::new();
@@ -90,7 +81,6 @@ impl Reachability {
             live,
             recursive,
             bodies,
-            regions,
             owners,
             multiple_owners,
         })
@@ -103,6 +93,7 @@ impl Reachability {
     /// Select calls in callee-first order so a clone contains all selected callee edits.
     pub fn inlines(&self, graph: &Graph, all: bool) -> Result<Vec<(Value, Value)>, OptimizeError> {
         let query = Query(graph);
+        let positions = graph.structure().read();
         let mut parallel = LookupSet::new();
         let mut required = LookupMap::new();
         let mut selected = Vec::new();
@@ -127,8 +118,8 @@ impl Reachability {
                 if all || exposes_parallel {
                     break;
                 }
-                for &operation in self.regions.get(&region).into_iter().flat_map(|body| &body.operations) {
-                    if graph.code(operation)? == Code::Parallel {
+                for &operation in positions.by_region.get(&region).into_iter().flatten() {
+                    if graph.has_operation(operation) && graph.code(operation)? == Code::Parallel {
                         exposes_parallel = true;
                         break;
                     }
@@ -171,15 +162,19 @@ fn has_memory_signature(query: Query<'_>, function: Value, root: Value) -> Resul
     Ok(false)
 }
 
-pub(super) fn publish(graph: &mut Graph) -> Result<(), OptimizeError> {
-    let reach = Reachability::read(graph)?;
+pub(super) fn publish(
+    graph: &mut Graph,
+    reach: &Reachability,
+    scopes: &[super::scopes::Subjects],
+) -> Result<(), OptimizeError> {
+    let affected: LookupSet<_> = scopes.iter().filter_map(|scope| scope.function).collect();
     let query = Query(graph);
     let mut loop_carries = Vec::new();
     let positions = graph.structure().read();
-    for (&(operation, edge_index), edge) in &positions.controls {
-        if edge_index != 0 {
+    for &operation in scopes.iter().flat_map(|scope| &scope.operations) {
+        let Some(edge) = positions.controls.get(&(operation, 0)) else {
             continue;
-        }
+        };
         for (slot, &initial) in edge.arguments.iter().enumerate() {
             let slot = slot as i64;
             let Some(parameter) = graph.parameter_at(edge.region, slot) else {
@@ -197,9 +192,12 @@ pub(super) fn publish(graph: &mut Graph) -> Result<(), OptimizeError> {
             }
         }
     }
-    let roots: Vec<_> = positions.roots.iter().map(|(&function, &root)| (function, root)).collect();
+    let roots: Vec<_> = affected
+        .iter()
+        .filter_map(|&function| positions.roots.get(&function).map(|&root| (function, root)))
+        .collect();
     let mut callees = Vec::new();
-    for caller in &reach.live {
+    for caller in &affected {
         for site in reach.calls.calls.get(caller).into_iter().flatten() {
             if let Some(&region) = positions.roots.get(&site.callee) {
                 callees.push((site.operation, region));
@@ -230,15 +228,15 @@ pub(super) fn publish(graph: &mut Graph) -> Result<(), OptimizeError> {
                 sink.set("RegionOwnedBy", region, operation)?;
             }
         }
-        for caller in reach.live {
-            sink.add("LiveFunction", caller)?;
-            for &region in reach.bodies.get(&caller).into_iter().flatten() {
+        for scope in scopes {
+            if let Some(function) = scope.function {
+                sink.add("LiveFunction", function)?;
+            }
+            for &region in &scope.regions {
                 sink.add("LiveRegion", region)?;
-                if let Some(body) = reach.regions.get(&region) {
-                    for &operation in &body.operations {
-                        sink.add("LiveOperation", operation)?;
-                    }
-                }
+            }
+            for &operation in &scope.operations {
+                sink.add("LiveOperation", operation)?;
             }
         }
         Ok(())

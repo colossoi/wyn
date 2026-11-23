@@ -25,6 +25,8 @@ pub(super) struct Graph {
     pub region_orders: StableMap<Value, Vec<Value>>,
     pub dirty_orders: LookupSet<Value>,
     pub dirty_owners: LookupSet<Value>,
+    pub(crate) proof_scopes: super::analysis::scopes::Scopes,
+    pub(crate) proof_changes: super::analysis::scopes::Changes,
     pub loop_layout_revision: Option<i64>,
 }
 
@@ -228,6 +230,8 @@ impl Graph {
             region_orders: self.region_orders.clone(),
             dirty_orders: self.dirty_orders.clone(),
             dirty_owners: self.dirty_owners.clone(),
+            proof_scopes: self.proof_scopes.clone(),
+            proof_changes: self.proof_changes.clone(),
             loop_layout_revision: self.loop_layout_revision,
         }
     }
@@ -937,12 +941,14 @@ impl Graph {
         let structure = &self.structure;
         let dirty_orders = &mut self.dirty_orders;
         let dirty_owners = &mut self.dirty_owners;
+        let proof_changes = &mut self.proof_changes;
         self.facts.update(|facts| {
             f(State {
                 facts,
                 operations,
                 dirty_orders,
                 dirty_owners,
+                proof_changes,
                 structure,
             })
         })
@@ -968,6 +974,7 @@ pub(super) struct State<'a, 'db, 'operations> {
     operations: &'operations mut LookupMap<Value, Occurrence>,
     dirty_orders: &'operations mut LookupSet<Value>,
     dirty_owners: &'operations mut LookupSet<Value>,
+    proof_changes: &'operations mut super::analysis::scopes::Changes,
     structure: &'operations SharedStructure,
 }
 
@@ -998,14 +1005,17 @@ impl State<'_, '_, '_> {
     }
 
     pub fn set_call_target(&mut self, operation: Value, target: Value) {
+        self.proof_changes.operations.insert(operation);
         self.structure.write().targets.insert(operation, target);
     }
 
     pub fn remove_call_target(&mut self, operation: Value) {
+        self.proof_changes.operations.insert(operation);
         self.structure.write().targets.shift_remove(&operation);
     }
 
     pub fn set_outputs(&mut self, operation: Value, names: Vec<Value>) -> Result<(), Error> {
+        self.proof_changes.operations.insert(operation);
         register_arity(&mut self.facts, self.structure, names.len())?;
         let before = self.operand_proof(operation);
         self.structure.write().replace_outputs(operation, names);
@@ -1013,6 +1023,7 @@ impl State<'_, '_, '_> {
     }
 
     pub fn set_output(&mut self, operation: Value, slot: i64, name: Value) -> Result<(), Error> {
+        self.proof_changes.operations.insert(operation);
         let Ok(index) = usize::try_from(slot) else {
             return Err(Error::BackendError(format!(
                 "negative result {slot} on {operation:?}"
@@ -1091,6 +1102,7 @@ impl State<'_, '_, '_> {
     }
 
     pub fn set_inputs(&mut self, operation: Value, inputs: Vec<Value>) -> Result<(), Error> {
+        self.proof_changes.operations.insert(operation);
         register_arity(&mut self.facts, self.structure, inputs.len())?;
         let before = self.operand_proof(operation);
         self.structure.write().inputs.replace(operation, inputs);
@@ -1098,12 +1110,14 @@ impl State<'_, '_, '_> {
     }
 
     pub fn set_input(&mut self, operation: Value, slot: i64, input: Value) -> Result<(), Error> {
+        self.proof_changes.operations.insert(operation);
         let before = self.operand_proof(operation);
         self.structure.write().inputs.redirect(operation, slot, input)?;
         self.refresh_operand_proof(operation, before)
     }
 
     pub fn set_parameters(&mut self, region: Value, names: Vec<Value>) -> Result<(), Error> {
+        self.proof_changes.regions.insert(region);
         register_arity(&mut self.facts, self.structure, names.len())?;
         let mut graph = self.structure.write();
         if let Some(removed) = graph.parameters.remove(&region) {
@@ -1123,16 +1137,19 @@ impl State<'_, '_, '_> {
     }
 
     pub fn set_yields(&mut self, region: Value, values: Vec<Value>) -> Result<(), Error> {
+        self.proof_changes.regions.insert(region);
         register_arity(&mut self.facts, self.structure, values.len())?;
         self.structure.write().yields.replace(region, values);
         Ok(())
     }
 
     pub fn set_yield(&mut self, region: Value, slot: i64, value: Value) -> Result<(), Error> {
+        self.proof_changes.regions.insert(region);
         self.structure.write().yields.redirect(region, slot, value)
     }
 
     pub fn set_reducer(&mut self, operation: Value, slot: i64, region: Value) {
+        self.proof_changes.operations.insert(operation);
         let mut graph = self.structure.write();
         let site = RegionSite::Reducer(operation, slot);
         if let Some(previous) = set_callback(&mut graph.reducers, operation, slot, region) {
@@ -1144,6 +1161,7 @@ impl State<'_, '_, '_> {
     }
 
     pub fn set_combiner(&mut self, operation: Value, slot: i64, region: Value) {
+        self.proof_changes.operations.insert(operation);
         let mut graph = self.structure.write();
         let site = RegionSite::Combiner(operation, slot);
         if let Some(previous) = set_callback(&mut graph.combiners, operation, slot, region) {
@@ -1155,6 +1173,7 @@ impl State<'_, '_, '_> {
     }
 
     pub fn set_reducers(&mut self, operation: Value, reducers: Vec<(i64, Value)>) {
+        self.proof_changes.operations.insert(operation);
         let mut graph = self.structure.write();
         if let Some(previous) = graph.reducers.remove(&operation) {
             for (slot, region) in previous {
@@ -1176,6 +1195,7 @@ impl State<'_, '_, '_> {
     }
 
     pub fn set_combiners(&mut self, operation: Value, combiners: Vec<(i64, Value)>) {
+        self.proof_changes.operations.insert(operation);
         let mut graph = self.structure.write();
         if let Some(previous) = graph.combiners.remove(&operation) {
             for (slot, region) in previous {
@@ -1197,6 +1217,7 @@ impl State<'_, '_, '_> {
     }
 
     pub fn set_control(&mut self, operation: Value, slot: i64, child: Value) {
+        self.proof_changes.operations.insert(operation);
         assert!(
             (0..2).contains(&slot),
             "invalid control region slot {slot} on {operation:?}"
@@ -1226,6 +1247,7 @@ impl State<'_, '_, '_> {
         ArgumentSite(operation, edge, slot): ArgumentSite,
         value: Value,
     ) -> Result<(), Error> {
+        self.proof_changes.operations.insert(operation);
         let mut graph = self.structure.write();
         let Some(control) = graph.controls.get_mut(&(operation, edge)) else {
             return Err(Error::BackendError(format!(
@@ -1252,6 +1274,7 @@ impl State<'_, '_, '_> {
     }
 
     pub fn set_formula(&mut self, operation: Value, kind: Formula, value: Value) -> Result<(), Error> {
+        self.proof_changes.operations.insert(operation);
         let demand = match kind {
             Formula::Extents => Some("ShapeDemand"),
             Formula::Slices => Some("SliceDemand"),
@@ -1265,10 +1288,12 @@ impl State<'_, '_, '_> {
     }
 
     pub fn remove_formula(&mut self, operation: Value, kind: Formula) {
+        self.proof_changes.operations.insert(operation);
         self.structure.write().formulas.remove(operation, kind);
     }
 
     pub fn clear_formulas(&mut self, operation: Value, retain_index: bool) {
+        self.proof_changes.operations.insert(operation);
         let mut graph = self.structure.write();
         for kind in Formula::ALL {
             if kind != Formula::Index || !retain_index {
@@ -1278,10 +1303,12 @@ impl State<'_, '_, '_> {
     }
 
     pub fn set_parallel_results(&mut self, operation: Value, results: ParallelResults) {
+        self.proof_changes.operations.insert(operation);
         self.structure.write().parallels.insert(operation, results);
     }
 
     pub fn set_result_kind(&mut self, operation: Value, clause: i64, kind: Value) -> Result<(), Error> {
+        self.proof_changes.operations.insert(operation);
         let mut graph = self.structure.write();
         let Some(kind_slot) = usize::try_from(clause)
             .ok()
@@ -1296,6 +1323,7 @@ impl State<'_, '_, '_> {
     }
 
     pub fn set_output_role(&mut self, operation: Value, slot: i64, role: Value) -> Result<(), Error> {
+        self.proof_changes.operations.insert(operation);
         let mut graph = self.structure.write();
         let Some(binding) = usize::try_from(slot)
             .ok()
@@ -1310,6 +1338,7 @@ impl State<'_, '_, '_> {
     }
 
     pub fn set_accumulator_policies(&mut self, operation: Value, policies: Vec<Option<Value>>) {
+        self.proof_changes.operations.insert(operation);
         self.structure.write().accumulator_policies.insert(operation, policies);
     }
 
@@ -1320,18 +1349,22 @@ impl State<'_, '_, '_> {
     }
 
     pub fn set_domain(&mut self, id: Value, domain: IterationDomain) {
+        self.proof_changes.domains.insert(id);
         self.structure.write().domains.insert(id, domain);
     }
 
     pub fn set_domain_extent(&mut self, id: Value, slot: usize, extent: Value) -> Result<(), Error> {
+        self.proof_changes.domains.insert(id);
         self.structure.write().domains.set_extent(id, slot, extent)
     }
 
     pub fn set_operation_domain(&mut self, operation: Value, domain: Value) {
+        self.proof_changes.operations.insert(operation);
         self.structure.write().domains.operations.insert(operation, domain);
     }
 
     pub fn clear_operation_domain(&mut self, operation: Value) {
+        self.proof_changes.operations.insert(operation);
         self.structure.write().domains.operations.remove(&operation);
     }
 
@@ -1349,10 +1382,26 @@ impl State<'_, '_, '_> {
     }
 
     pub fn add_certificate(&mut self, site: CertificateSite, certificate: Value) {
+        match site {
+            CertificateSite::Operation(op) => {
+                self.proof_changes.operations.insert(op);
+            }
+            CertificateSite::Yield(region, _) => {
+                self.proof_changes.regions.insert(region);
+            }
+        }
         self.structure.write().certificates.add(site, certificate);
     }
 
     pub fn redirect_certificate(&mut self, site: CertificateSite, old: Value, replacement: Value) {
+        match site {
+            CertificateSite::Operation(op) => {
+                self.proof_changes.operations.insert(op);
+            }
+            CertificateSite::Yield(region, _) => {
+                self.proof_changes.regions.insert(region);
+            }
+        }
         self.structure.write().certificates.redirect(site, old, replacement);
     }
 
@@ -1363,6 +1412,7 @@ impl State<'_, '_, '_> {
         kind: CollectiveInput,
         values: Vec<Value>,
     ) -> Result<(), Error> {
+        self.proof_changes.operations.insert(owner);
         register_arity(&mut self.facts, self.structure, values.len())?;
         self.structure.write().collective.replace(CollectiveSite { owner, group, kind }, values);
         Ok(())
@@ -1374,14 +1424,17 @@ impl State<'_, '_, '_> {
         field: i64,
         value: Value,
     ) -> Result<(), Error> {
+        self.proof_changes.operations.insert(site.owner);
         self.structure.write().collective.redirect(site, field, value)
     }
 
     pub fn clear_collective_inputs(&mut self, owner: Value) {
+        self.proof_changes.operations.insert(owner);
         self.structure.write().collective.remove(owner);
     }
 
     pub fn clear_bodies(&mut self, operation: Value) {
+        self.proof_changes.operations.insert(operation);
         self.set_reducers(operation, Vec::new());
         self.set_combiners(operation, Vec::new());
         let mut structure = self.structure.write();
@@ -1430,6 +1483,7 @@ impl State<'_, '_, '_> {
     }
 
     pub fn set_code(&mut self, operation: Value, code: Code) -> Result<(), Error> {
+        self.proof_changes.operations.insert(operation);
         let before = self.operand_proof(operation);
         match self.operations.entry(operation) {
             Entry::Occupied(mut entry) => entry.get_mut().code = code,
@@ -1456,6 +1510,7 @@ impl State<'_, '_, '_> {
     }
 
     pub fn remove_operation(&mut self, operation: Value) -> Result<(), Error> {
+        self.proof_changes.operations.insert(operation);
         let before = self.operand_proof(operation);
         self.operations.remove(&operation);
         self.clear_bodies(operation);

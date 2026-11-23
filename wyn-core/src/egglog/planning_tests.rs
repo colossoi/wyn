@@ -1499,7 +1499,8 @@ fn collection_shape_proofs_distinguish_extents_from_capacity() {
     let updated = query.constructor("ValueId", 3_i64).unwrap().unwrap();
     assert!(query.lookup("LogicalOuterCount", compact).unwrap().is_none());
     assert!(query.lookup("CollectionRank", updated).unwrap().is_none());
-    graph.clear_function("LiveOperation").unwrap();
+    let previous = crate::egglog::analysis::scopes::seed_fixture(&mut graph).unwrap();
+    crate::egglog::analysis::scopes::retire(&mut graph, &[previous]).unwrap();
     super::analyze(&mut graph).unwrap();
     assert!(
         Query(&graph).lookup("CollectionRank", compact).unwrap().is_none(),

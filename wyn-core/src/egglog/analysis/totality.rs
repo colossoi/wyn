@@ -6,7 +6,7 @@ use crate::op::BinaryOperator;
 use crate::{LookupMap, LookupSet};
 use egglog_engine::{RawValues, Value, Write};
 
-pub(super) fn publish_literal_shifts(graph: &mut Graph) -> Result<(), OptimizeError> {
+pub(super) fn publish_literal_shifts(graph: &mut Graph, operations: &[Value]) -> Result<(), OptimizeError> {
     let query = Query(graph);
     let mut supported = Vec::new();
     for kind in ["I32", "U32"] {
@@ -19,9 +19,9 @@ pub(super) fn publish_literal_shifts(graph: &mut Graph) -> Result<(), OptimizeEr
         supported.extend(query.constructor("ScalarInfo", element)?);
     }
     let mut total = Vec::new();
-    for (operation, code) in graph.codes() {
+    for &operation in operations {
         if !matches!(
-            code,
+            graph.code(operation)?,
             Code::Scalar(Payload::Binary(
                 BinaryOperator::ShiftLeft | BinaryOperator::ShiftRight
             ))
@@ -67,7 +67,19 @@ pub(in crate::egglog) fn refine(graph: &mut Graph) -> Result<(), OptimizeError> 
     if graph.get_size("OperationTrap") == 0 {
         return Ok(());
     }
-    publish_literal_shifts(graph)?;
+    let operations: Vec<_> = graph
+        .codes()
+        .filter(|(_, code)| {
+            matches!(
+                code,
+                Code::Scalar(Payload::Binary(
+                    BinaryOperator::ShiftLeft | BinaryOperator::ShiftRight
+                ))
+            )
+        })
+        .map(|(op, _)| op)
+        .collect();
+    publish_literal_shifts(graph, &operations)?;
     graph.parse_and_run_program(
         None,
         "(run-schedule (saturate graph-indices dataflow-dependencies) (saturate dataflow-total integer-ranges))",

@@ -12,7 +12,8 @@ mod remove_leaves;
 pub(super) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
     super::dataflow::ir::load(graph)?;
     scalar::load(graph)?;
-    super::planning::load(graph)
+    super::planning::load(graph)?;
+    analysis::scopes::load(graph)
 }
 
 pub(super) fn inline(graph: &mut Graph, all: bool) -> Result<(), OptimizeError> {
