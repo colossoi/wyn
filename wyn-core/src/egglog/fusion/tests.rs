@@ -179,6 +179,12 @@ fn cross_region_motion_moves_a_capture_chain_in_one_edit() -> Result<(), Optimiz
     })?;
     let multiply = multiply.unwrap();
     assert_ne!(query.required("OperationRegion", multiply)?, root);
+    let demand_work = |graph: &mut EGraph| -> Result<(), OptimizeError> {
+        graph.update(|mut sink| sink.add("RegionWorkDemand", root))?;
+        graph.parse_and_run_program(None, "(run-schedule (saturate graph-work))")?;
+        Ok(())
+    };
+    demand_work(&mut graph)?;
     let revision = edit::revision(&graph)?;
     assert!(super::parallel::hoist(&mut graph)?);
     assert_eq!(edit::revision(&graph)?, revision + 1);
@@ -189,7 +195,29 @@ fn cross_region_motion_moves_a_capture_chain_in_one_edit() -> Result<(), Optimiz
             && ir::code(query.0, query.required("OperationPayload", op).unwrap())
                 == Code::Scalar(Payload::Binary(BinaryOperator::Add))
     }));
-    memory::validate(&mut graph)
+    // The repaired scope and work summaries must agree with a fresh solve.
+    let facts = |graph: &EGraph| -> Result<_, OptimizeError> {
+        let mut facts = crate::LookupSet::new();
+        for table in [
+            "DefinitionRegion",
+            "RegionCapture",
+            "OperationUse",
+            "OperationDependency",
+            "RegionWork",
+        ] {
+            Query(graph).for_each(table, |row| {
+                facts.insert((table, row.to_vec()));
+                Ok(())
+            })?;
+        }
+        Ok(facts)
+    };
+    let repaired = facts(&graph)?;
+    memory::validate(&mut graph)?;
+    crate::egglog::planning::analyze(&mut graph)?;
+    demand_work(&mut graph)?;
+    assert_eq!(repaired, facts(&graph)?);
+    Ok(())
 }
 
 #[test]

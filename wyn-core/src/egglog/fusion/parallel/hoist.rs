@@ -105,7 +105,7 @@ pub(in crate::egglog::fusion) fn hoist(graph: &mut EGraph) -> Result<bool, Optim
         }
     }
     if changed {
-        body.publish(graph)?;
+        body.publish_hoists(graph)?;
     }
     Ok(changed)
 }

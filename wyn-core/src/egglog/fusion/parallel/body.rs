@@ -14,6 +14,7 @@ use wyn_graph::ReplacementForest;
 mod accumulator;
 mod branch;
 mod guard;
+mod relocation;
 use guard::Guard;
 
 fn value_name(query: Query<'_>, value: Value) -> Result<Value, OptimizeError> {
@@ -24,6 +25,7 @@ fn value_name(query: Query<'_>, value: Value) -> Result<Value, OptimizeError> {
 }
 
 pub(super) type ClauseId = (OperationId, i64);
+type RegionOrders = Vec<(Value, Vec<Value>)>;
 
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub(super) enum Site {
@@ -125,6 +127,7 @@ pub(super) struct Body {
     edited: SortedSet<OperationId>,
     moved: SortedSet<RegionId>,
     relocated: LookupSet<OperationId>,
+    reads_before_lift: SecondaryMap<OperationId, LookupSet<Value>>,
     removed: SortedSet<OperationId>,
     pruned: LookupSet<ClauseId>,
     dirty: SortedSet<RegionId>,
@@ -167,6 +170,7 @@ impl Body {
             edited: SortedSet::default(),
             moved: SortedSet::default(),
             relocated: LookupSet::new(),
+            reads_before_lift: SecondaryMap::new(),
             removed: SortedSet::default(),
             pruned: LookupSet::new(),
             dirty: SortedSet::default(),
@@ -552,7 +556,13 @@ impl Body {
         // enclosing region still observes the same reads after the hoist.
         if matches!(
             self.graph.ir.operations[owner].definition,
-            Definition::Other(Code::Parallel | Code::Branch | Code::CountedLoop | Code::WhileLoop)
+            Definition::Other(
+                Code::Parallel
+                    | Code::Branch
+                    | Code::CountedLoop
+                    | Code::WhileLoop
+                    | Code::BucketScatter { .. }
+            )
         ) && self.effects.get(operation).is_some_and(|effect| !effect.reads.is_empty())
         {
             let reads = self
@@ -562,7 +572,14 @@ impl Body {
                 .filter_map(|&op| self.effects.get(op))
                 .flat_map(|effect| effect.reads.iter().copied())
                 .collect();
-            self.effects[owner].reads = reads;
+            let previous = &mut self.effects[owner].reads;
+            if *previous != reads {
+                let old = take(previous);
+                if !self.reads_before_lift.contains_key(owner) {
+                    self.reads_before_lift.insert(owner, old);
+                }
+                *previous = reads;
+            }
         }
     }
 
@@ -948,7 +965,14 @@ impl Body {
         if graph.get_size("LivenessRequest") != 0 {
             return self.publish(graph);
         }
-        let query = Query(graph);
+        let (previous, updated) = self.orders(Query(graph))?;
+        graph.update(|mut sink| self.publish_order(&mut sink))?;
+        planning::repair_sibling_order(graph, &updated)?;
+        analysis::replace_order(graph, previous, updated)?;
+        edit::preserve_revisions(graph)
+    }
+
+    fn orders(&self, query: Query<'_>) -> Result<(RegionOrders, RegionOrders), OptimizeError> {
         let mut previous = Vec::new();
         let mut updated = Vec::new();
         for &region in &self.moved {
@@ -962,10 +986,7 @@ impl Body {
             previous.push((key, old));
             updated.push((key, order));
         }
-        graph.update(|mut sink| self.publish_order(&mut sink))?;
-        planning::repair_sibling_order(graph, &updated)?;
-        analysis::replace_order(graph, previous, updated)?;
-        edit::preserve_revisions(graph)
+        Ok((previous, updated))
     }
 
     fn publish_order(&self, sink: &mut FullState<'_, '_>) -> Result<(), egglog_engine::Error> {

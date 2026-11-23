@@ -258,7 +258,6 @@ impl UsePath {
 fn repair_use(graph: &mut EGraph, path: UsePath, name: Value, mut used: bool) -> Result<(), OptimizeError> {
     let UsePath { producer, scopes } = path;
     let mut scopes = scopes.into_iter().peekable();
-    let value = Query(graph).name(name)?;
     while let Some((region, operation)) = scopes.next() {
         let query = Query(graph);
         if query.contains("OperationUse", (operation, name))? == used {
@@ -274,9 +273,6 @@ fn repair_use(graph: &mut EGraph, path: UsePath, name: Value, mut used: bool) ->
         } else {
             false
         };
-        let output = query.sequence("Output", operation)?;
-        let flows =
-            output.into_iter().map(|output| query.value_name(output)).collect::<Result<Vec<_>, _>>()?;
         graph.update(|mut sink| {
             if used {
                 sink.add("OperationUse", (operation, name))?;
@@ -293,15 +289,6 @@ fn repair_use(graph: &mut EGraph, path: UsePath, name: Value, mut used: bool) ->
                     sink.add("OperationDependency", (operation, producer))?;
                 } else if !preserve_dependency {
                     sink.remove("OperationDependency", (operation, producer))?;
-                }
-            }
-            for output in flows.into_iter().flatten() {
-                let output = sink.add("FlowNamed", output)?;
-                let input = sink.add("FlowNamed", value)?;
-                if used {
-                    sink.add("FlowOperand", (output, input))?;
-                } else {
-                    sink.remove("FlowOperand", (output, input))?;
                 }
             }
             Ok(())

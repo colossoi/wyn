@@ -3,7 +3,7 @@ use super::cost::{self, CostModel};
 use super::dataflow::edit;
 use super::query::Query;
 use super::{analysis, memory, output_error, OptimizeError};
-use crate::PipelineTopologyPolicy;
+use crate::{LookupMap, LookupSet, PipelineTopologyPolicy};
 use egglog_engine::sort::{Boxed, Z};
 use egglog_engine::{EGraph, RawValues, Value, Write};
 
@@ -75,6 +75,7 @@ pub(super) fn analyze(graph: &mut EGraph) -> Result<(), OptimizeError> {
             "FreshArray",
             "OperationWorkDemand",
             "RegionWorkDemand",
+            "RegionWorkUser",
             "OperationWork",
             "RegionWorkPrefix",
             "RegionWork",
@@ -266,11 +267,94 @@ pub(super) fn repair_sibling_order(
         }
         Ok(())
     })?;
+    reset_order_candidates(graph)
+}
+
+fn reset_order_candidates(graph: &mut EGraph) -> Result<(), OptimizeError> {
     // A reorder can change adjacency and speculative scope for pending transforms.
     if graph.get_size("DistributionPair") != 0 || graph.get_size("ConditionalPair") != 0 {
         clear_transform_candidates(graph)?;
     }
     Ok(())
+}
+
+pub(super) struct HoistWork {
+    regions: LookupSet<Value>,
+    operations: LookupSet<Value>,
+}
+
+/// Retract affected work prefixes before the old occurrence order is replaced.
+pub(super) fn invalidate_hoist_work(
+    graph: &mut EGraph,
+    previous: &[(Value, Vec<Value>)],
+) -> Result<HoistWork, OptimizeError> {
+    let query = Query(graph);
+    let mut work = HoistWork {
+        regions: LookupSet::new(),
+        operations: LookupSet::new(),
+    };
+    let mut pending = Vec::new();
+    for &(region, _) in previous {
+        if query.contains("RegionWorkDemand", region)? {
+            pending.push(region);
+        }
+    }
+    if pending.is_empty() {
+        return Ok(work);
+    }
+    let mut consumers = LookupMap::<Value, Vec<Value>>::new();
+    query.for_each("RegionWorkUser", |row| {
+        consumers.entry(row[0]).or_default().push(row[1]);
+        Ok(())
+    })?;
+    let mut prefixes = Vec::new();
+    while let Some(region) = pending.pop() {
+        if !work.regions.insert(region) {
+            continue;
+        }
+        prefixes.extend(
+            query.vector(query.required("RegionOperations", region)?)?.into_iter().map(|op| (region, op)),
+        );
+        for &op in consumers.get(&region).into_iter().flatten() {
+            if work.operations.insert(op) {
+                let owner = query.required("OperationRegion", op)?;
+                if query.contains("RegionWorkDemand", owner)? {
+                    pending.push(owner);
+                }
+            }
+        }
+    }
+    graph.update(|mut sink| {
+        for key in prefixes {
+            sink.remove("RegionWorkPrefix", key)?;
+        }
+        for &region in &work.regions {
+            sink.remove("RegionWork", region)?;
+            sink.remove("RegionWorkDemand", region)?;
+        }
+        for &op in &work.operations {
+            sink.remove("OperationWork", op)?;
+            sink.remove("OperationWorkDemand", op)?;
+        }
+        Ok(())
+    })?;
+    Ok(work)
+}
+
+pub(super) fn restore_hoist_work(graph: &mut EGraph, work: HoistWork) -> Result<(), OptimizeError> {
+    if !work.regions.is_empty() {
+        graph.update(|mut sink| {
+            for region in work.regions {
+                sink.add("RegionWorkDemand", region)?;
+            }
+            for op in work.operations {
+                sink.add("OperationWorkDemand", op)?;
+            }
+            Ok(())
+        })?;
+        graph.parse_and_run_program(None, "(run-schedule (saturate graph-work))")?;
+    }
+    reset_order_candidates(graph)
 }
 
 pub(super) fn place(
