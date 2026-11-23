@@ -226,7 +226,6 @@ pub(super) fn remember(
             values,
             query.required("OperationIndex", (statement, 0_i64))?,
         )?,
-        Code::Use => atom(query, values, atoms[0])?,
         Code::Scalar(payload) => {
             let opcode = payload.spelling();
             let builtin = opcode

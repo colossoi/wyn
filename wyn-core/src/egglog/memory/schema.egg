@@ -178,7 +178,6 @@
 (relation AdditionPayload (InstructionPayload))
 (relation SelectPayload (InstructionPayload))
 (relation NativeIntegerOpcode (InstructionPayload))
-(relation CopyOperation (OperationKey))
 (relation ConstantOperation (OperationKey))
 (relation ProductOperation (OperationKey))
 (relation ProjectionOperation (OperationKey i64))

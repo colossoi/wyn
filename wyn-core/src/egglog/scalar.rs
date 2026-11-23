@@ -53,7 +53,7 @@ pub(super) fn run(graph: &mut EGraph, policy: ScalarOptimization) -> Result<(), 
     memory::simplify(graph, true)
 }
 
-pub(super) fn apply(graph: &mut EGraph, body: Option<BodyGraph>) -> Result<bool, OptimizeError> {
+pub(super) fn apply(graph: &mut EGraph, body: &mut Option<BodyGraph>) -> Result<bool, OptimizeError> {
     if branch::apply(graph, body)? {
         return Ok(true);
     }

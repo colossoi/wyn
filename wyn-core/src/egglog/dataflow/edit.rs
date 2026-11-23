@@ -57,7 +57,6 @@ pub(in crate::egglog) const OPERATION_CELLS: &[&str] = &[
 pub(in crate::egglog) const OPERATION_RELATIONS: &[&str] = &[
     "Operation",
     "OperationCertificate",
-    "CopyOperation",
     "MaterializedCopyOperation",
     "ViewOperation",
     "ArrayLiteralOperation",

@@ -7,7 +7,7 @@ use egglog_engine::{EGraph, Value, Write};
 use std::mem::take;
 use wyn_graph::ReplacementForest;
 
-pub(super) fn apply(graph: &mut EGraph, body: Option<BodyGraph>) -> Result<bool, OptimizeError> {
+pub(super) fn apply(graph: &mut EGraph, body: &mut Option<BodyGraph>) -> Result<bool, OptimizeError> {
     let query = Query(graph);
     let mut selected = LookupMap::<Value, Value>::new();
     query.for_each("BranchCandidate", |row| {
@@ -18,7 +18,7 @@ pub(super) fn apply(graph: &mut EGraph, body: Option<BodyGraph>) -> Result<bool,
         return Ok(false);
     }
     let _timing = timing::span("Rust constant branch splicing");
-    let mut body = match body {
+    let mut body = match body.take() {
         Some(body) => body,
         None => BodyGraph::read(query)?,
     };

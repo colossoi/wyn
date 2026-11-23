@@ -1594,7 +1594,7 @@ fn element_update_snapshots_require_no_escaping_copy() {
                     },
                 ),
                 (2, Code::Index),
-                (3, Code::Use),
+                (3, Code::Product),
             ],
             &facts,
         )

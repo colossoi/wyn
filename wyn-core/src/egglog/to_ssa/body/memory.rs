@@ -244,7 +244,6 @@ impl Body<'_, '_, '_> {
             } else {
                 self.literal(bits, &ty)?
             }],
-            Code::Use => self.operand(operands[0])?.into_iter().collect(),
             Code::Product => {
                 let values = inputs.iter().map(|&name| self.named(name)).collect::<Result<Vec<_>, _>>()?;
                 vec![self.tuple(values)?]

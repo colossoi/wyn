@@ -134,9 +134,6 @@
       ((OperationDependency operation producer)) :ruleset dataflow-dependencies)
 
 ; Forwarding publishes the same value language used by the earlier TLC passes.
-(rule ((= revision (AnalysisRevision)) (CopyOperation operation) (= (Input operation 0) (ValueNameRef input))
-       (= (Output operation 0) (ValueNameRef output)))
-      ((set (SourceAlias (FlowNamed output)) (FlowNamed input))) :ruleset dataflow-dependencies)
 (rule ((= revision (AnalysisRevision)) (ProductOperation operation) (= (Input operation slot) (ValueNameRef input))
        (= (Output operation 0) (ValueNameRef output)))
       ((SourceField (FlowNamed output) slot (FlowNamed input))) :ruleset dataflow-dependencies)

@@ -97,9 +97,6 @@ pub(super) fn simplify(graph: &mut EGraph, hoist: bool) -> Result<(), OptimizeEr
     edit::clear(graph)?;
     loop {
         analysis::ensure(graph)?;
-        if body::forward_copies(graph)? {
-            continue;
-        }
         let body = {
             let _timing = timing::span("Rust expression reuse");
             cse::publish(graph)?
@@ -168,45 +165,15 @@ fn remove_dead_values(graph: &mut EGraph) -> Result<bool, OptimizeError> {
     Ok(false)
 }
 
-fn reduce_values(graph: &mut EGraph, body: Option<body::BodyGraph>) -> Result<bool, OptimizeError> {
-    if scalar::apply(graph, body)? {
+fn reduce_values(graph: &mut EGraph, mut body: Option<body::BodyGraph>) -> Result<bool, OptimizeError> {
+    let revision = edit::revision(graph)?;
+    if scalar::apply(graph, &mut body)? {
         return Ok(true);
     }
-    let query = Query(graph);
-    let mut replacements = LookupMap::default();
-    query.for_each("ForwardCandidate", |row| {
-        replacements.entry(row[0]).or_insert(row[1]);
-        Ok(())
-    })?;
-    if !replacements.is_empty() {
-        let _timing = timing::span("egglog value forwarding");
-        let mut copies = Vec::new();
-        query.for_each("Defines", |row| {
-            if let Some(&new) = replacements.get(&row[0]) {
-                if let Some(site) = query.enode("OperationSite", row[1])? {
-                    if analysis::count(query, "OutputCount", site[0])? == 1 {
-                        copies.push((site[0], row[0], new));
-                    }
-                }
-            }
-            Ok(())
-        })?;
-        // A proven redundant partial evaluation becomes a pure copy before DCE.
-        for (operation, old, name) in copies {
-            edit::set_code(graph, operation, Code::Use)?;
-            edit::inputs(graph, operation, &[name])?;
-            replacements.remove(&old);
-        }
-        if !replacements.is_empty() {
-            edit::replace(graph, &replacements.into_iter().collect::<Vec<_>>())?;
-        }
-        if body::forward_copies(graph)? {
-            return Ok(true);
-        }
-        analysis::ensure(graph)?;
-        edit::clear(graph)?;
+    if edit::revision(graph)? != revision {
+        body = None;
     }
-    Ok(false)
+    body::forward_equivalents(graph, body)
 }
 
 fn scratch_shapes(graph: &mut EGraph) -> Result<(), OptimizeError> {

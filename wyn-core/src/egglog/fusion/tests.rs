@@ -195,7 +195,7 @@ fn cross_region_motion_moves_a_capture_chain_in_one_edit() -> Result<(), Optimiz
 #[test]
 fn moving_into_empty_regions_preserves_operation_order() {
     let mut graph = test_graph::fixture(
-        &[(1, Code::Use), (2, Code::Use)],
+        &[(1, Code::Product), (2, Code::Product)],
         r#"
         (set (OperationRegion (OperationId 1)) (RegionId 0))
         (set (OperationOrder (OperationId 1)) 0)

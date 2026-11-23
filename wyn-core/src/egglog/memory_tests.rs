@@ -1,6 +1,6 @@
 use crate::egglog::dataflow::{
     body, edit,
-    ir::{self, Code, Name},
+    ir::{self, Bounds, Code, Name},
 };
 use crate::egglog::payload::Payload;
 use crate::egglog::query::Query;
@@ -49,7 +49,9 @@ fn copy_forwarding_preserves_captures_loop_entries_and_backedges() -> Result<(),
                 let id = 1000 + i as i64;
                 let raw = sink.add("ValueId", id)?;
                 let name = Name::Value(raw);
-                let copy = ir::operation(&mut sink, id, Code::Use, &[Name::Value(source)])?;
+                let copy = ir::operation(&mut sink, id, Code::IndexValue, &[])?;
+                let index = sink.add("IndexValue", source)?;
+                sink.set("OperationIndex", (copy.0, 0_i64), index)?;
                 ir::outputs(&mut sink, copy, &[name])?;
                 sink.set("ValueType", raw, ty)?;
                 sink.set("OperationRegion", copy.0, region)?;
@@ -73,14 +75,18 @@ fn copy_forwarding_preserves_captures_loop_entries_and_backedges() -> Result<(),
         })())
     })??;
     analysis::run(&mut graph)?;
-    assert!(body::forward_copies(&mut graph)?);
+    graph.parse_and_run_program(None, "(run-schedule (saturate scalar-analysis))")?;
+    assert!(body::forward_equivalents(&mut graph, None)?);
     analysis::ensure(&mut graph)?;
     let query = Query(&graph);
     assert_eq!(query.required("EdgeArgument", (owner, 0_i64, 0_i64))?, initial);
     assert_eq!(query.sequence("Input", subtract)?, operands);
     assert!(query.contains("RegionCapture", (inner, operands[1]))?);
     assert_eq!(query.required("RegionYield", (inner, 0_i64))?, backedge);
-    assert!(query.first("CopyOperation")?.is_none());
+    for id in 1000_i64..1004 {
+        let copy = query.constructor("OperationId", id)?.unwrap();
+        assert!(!query.contains("Operation", copy)?);
+    }
     Ok(())
 }
 
@@ -773,7 +779,20 @@ fn range_lengths_clamp_negative_counts_before_shape_planning() -> Result<(), Opt
 #[test]
 fn consumed_tokens_cannot_be_reused() -> Result<(), OptimizeError> {
     let mut graph = test_graph::fixture(
-        &[(0, Code::Use), (1, Code::Use)],
+        &[
+            (
+                0,
+                Code::Accumulate {
+                    bounds: Bounds::Proven,
+                },
+            ),
+            (
+                1,
+                Code::Accumulate {
+                    bounds: Bounds::Proven,
+                },
+            ),
+        ],
         r#"
         (let info (AccumulatorInfo (vec-of (IndexConstant 4)) (vec-of (ScalarElement (I32)))))
         (set (AccumulatorType (AccumulatorId 0)) info) (set (AccumulatorType (AccumulatorId 1)) info) (set (AccumulatorType (AccumulatorId 2)) info)

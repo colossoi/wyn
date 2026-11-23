@@ -84,7 +84,7 @@ pub enum UseSite {
     Yield(RegionId, usize),
 }
 
-pub struct ForwardedCopies {
+pub struct ForwardedValues {
     pub values: LookupMap<ValueRef, ValueRef>,
     pub uses: Vec<(UseSite, ValueRef)>,
 }
@@ -93,8 +93,6 @@ pub struct ForwardedCopies {
 #[derive(Clone, Debug)]
 pub enum Definition<D> {
     Call(FunctionId),
-    /// Forwards its single operand. Evaluating this occurrence has no effect.
-    Copy,
     Other(D),
 }
 
@@ -143,18 +141,20 @@ impl<D, T, A> MemoryIr<D, T, A> {
         id
     }
 
-    /// Forward a batch of pure copies, including captures, yields and loop carries.
-    /// Returns the terminal substitutions for metadata that refers to the same values.
-    pub fn forward_copies(&mut self) -> Result<ForwardedCopies, ForwardError> {
+    /// Forward proven equivalents through captures, yields and loop carries.
+    /// A proof for a single-result occurrence must also justify removing its evaluation.
+    pub fn forward_values(
+        &mut self,
+        equivalents: impl IntoIterator<Item = (ValueRef, ValueRef)>,
+    ) -> Result<ForwardedValues, ReplacementError<ValueRef>> {
         let mut replacements = ReplacementForest::new();
         let mut removed = LookupSet::new();
-        for (id, operation) in &self.operations {
-            if matches!(operation.definition, Definition::Copy) {
-                let ([input], [_]) = (&operation.inputs[..], &operation.result_types[..]) else {
-                    return Err(ForwardError::CopySignature(id));
-                };
-                replacements.replace(ValueRef::Result(id, 0), *input)?;
-                removed.insert(id);
+        for (old, new) in equivalents {
+            replacements.replace(old, new)?;
+            if let ValueRef::Result(op, 0) = old {
+                if self.operations.get(op).is_some_and(|op| op.result_types.len() == 1) {
+                    removed.insert(op);
+                }
             }
         }
         let values = replacements.into_map();
@@ -162,7 +162,7 @@ impl<D, T, A> MemoryIr<D, T, A> {
             self.remove_operations(&removed);
         }
         let uses = self.redirect_uses(&values);
-        Ok(ForwardedCopies { values, uses })
+        Ok(ForwardedValues { values, uses })
     }
 
     /// Rewrite direct uses to their terminal replacements. The caller proves availability.
@@ -207,12 +207,4 @@ impl<D, T, A> MemoryIr<D, T, A> {
             region.operations.retain(|id| !removed.contains(id));
         }
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ForwardError {
-    #[error("copy {0:?} requires one operand and one result")]
-    CopySignature(OperationId),
-    #[error(transparent)]
-    Replacement(#[from] ReplacementError<ValueRef>),
 }

@@ -4,10 +4,10 @@ use super::{
     ir::{self, Code},
 };
 use crate::ast::Span;
-use crate::egglog::{analysis, output_error, query::Query, OptimizeError};
+use crate::egglog::{analysis, output_error, query::Query, timing, OptimizeError};
 use crate::memory_ir::{
-    BodyRole, Definition, Function, MemoryIr, Operation, OperationId, Parameter, Region, RegionEdge,
-    RegionId, UseSite, ValueRef,
+    BodyRole, Definition, ForwardedValues, Function, MemoryIr, Operation, OperationId, Parameter, Region,
+    RegionEdge, RegionId, UseSite, ValueRef,
 };
 use crate::{LookupMap, StableMap};
 use egglog_engine::sort::Boxed;
@@ -70,9 +70,6 @@ impl BodyGraph {
                 let outputs = query.sequence("Output", op)?;
                 let definition = match code {
                     Code::Call => Definition::Call(functions[&query.required("CallTarget", op)?]),
-                    Code::Use if outputs.len() == 1 && query.value_name(outputs[0])?.is_some() => {
-                        Definition::Copy
-                    }
                     code => Definition::Other(code),
                 };
                 let span = query
@@ -231,31 +228,60 @@ impl BodyGraph {
     }
 }
 
-pub(in crate::egglog) fn forward_copies(graph: &mut EGraph) -> Result<bool, OptimizeError> {
+pub(in crate::egglog) fn forward_equivalents(
+    graph: &mut EGraph,
+    body: Option<BodyGraph>,
+) -> Result<bool, OptimizeError> {
     let query = Query(graph);
-    let mut found = false;
-    query.for_each("CopyOperation", |row| {
-        if !found && query.contains("LiveOperation", row[0])? {
-            if let Some(name) = query.lookup("Output", (row[0], 0_i64))? {
-                found = query.value_name(name)?.is_some();
-            }
-        }
+    let mut replacements = LookupMap::new();
+    query.for_each("ForwardCandidate", |row| {
+        replacements.entry(row[0]).or_insert(row[1]);
         Ok(())
     })?;
-    if !found {
+    if replacements.is_empty() {
         return Ok(false);
     }
-    let _timing = crate::egglog::timing::span("Rust copy forwarding");
-    let mut body = BodyGraph::read(query)?;
-    let redirected = body.ir.forward_copies().map_err(|err| output_error(err.to_string()))?;
-    let mut removed = Vec::new();
-    for &old in redirected.values.keys() {
-        let ValueRef::Result(op, _) = old else {
-            return Err(output_error("cannot remove a parameter as a copy"));
+    let _timing = timing::span("Rust value forwarding");
+    let mut body = match body {
+        Some(body) => body,
+        None => BodyGraph::read(query)?,
+    };
+    let resolve = |name| {
+        let Some(&value) = body.refs.get(&name) else {
+            return Err(output_error("forwarded operand has no live memory definition"));
         };
-        removed.push(body.operations[op]);
+        Ok(value)
+    };
+    let equivalents = replacements
+        .into_iter()
+        .map(|(old, new)| Ok((resolve(old)?, resolve(new)?)))
+        .collect::<Result<Vec<_>, OptimizeError>>()?;
+    let redirected = body.ir.forward_values(equivalents).map_err(|err| output_error(err.to_string()))?;
+    if publish_forwarding(graph, body, redirected)? {
+        return Ok(true);
     }
+    analysis::ensure(graph)?;
+    edit::clear(graph)?;
+    Ok(false)
+}
+
+fn publish_forwarding(
+    graph: &mut EGraph,
+    body: BodyGraph,
+    redirected: ForwardedValues,
+) -> Result<bool, OptimizeError> {
+    let removed = redirected
+        .values
+        .keys()
+        .filter_map(|old| match *old {
+            ValueRef::Result(op, _) if !body.ir.operations.contains_key(op) => Some(body.operations[op]),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     body.publish_substitutions(graph, &redirected.values, redirected.uses)?;
+    if removed.is_empty() {
+        return Ok(false);
+    }
     edit::remove(graph, &removed)?;
     Ok(true)
 }

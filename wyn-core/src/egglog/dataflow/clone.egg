@@ -215,7 +215,6 @@
 (rule ((= revision (AnalysisRevision)) (CloneDomain context domain) (= value (DomainExtent domain k0)) (= replacement (CloneIndex context value))) ((set (DomainExtent (ClonedDomain context domain) k0) replacement)) :ruleset clone-edges)
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (OperationCertificate operation v0)) ((CloneNameDemand context (ValueNameRef v0))) :ruleset clone-index)
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (OperationCertificate operation v0) (= (CloneName context (ValueNameRef v0)) (ValueNameRef rv0))) ((OperationCertificate (ClonedOperation context operation) rv0)) :ruleset clone-edges)
-(rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (CopyOperation operation) ) ((CopyOperation (ClonedOperation context operation))) :ruleset clone-edges)
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (ConstantOperation operation) ) ((ConstantOperation (ClonedOperation context operation))) :ruleset clone-edges)
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (ProductOperation operation) ) ((ProductOperation (ClonedOperation context operation))) :ruleset clone-edges)
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (ProjectionOperation operation v0) ) ((ProjectionOperation (ClonedOperation context operation) v0)) :ruleset clone-edges)

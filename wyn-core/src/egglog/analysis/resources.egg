@@ -14,8 +14,6 @@
       ((ResourceRoot name (FreshResource name))) :ruleset dataflow-resources)
 (rule ((= revision (AnalysisRevision)) (AliasesInput operation output input) (= result (Output operation output)) (= source (Input operation input)))
       ((ResourceParent result source)) :ruleset dataflow-resources)
-(rule ((= revision (AnalysisRevision)) (CopyOperation operation) (= result (Output operation 0)) (= source (Input operation 0)))
-      ((ResourceParent result source)) :ruleset dataflow-resources)
 (rule ((= revision (AnalysisRevision)) (ProjectionOperation operation field) (= result (Output operation 0)) (= source (Input operation 0)))
       ((ResourceParent result source)) :ruleset dataflow-resources)
 (rule ((= revision (AnalysisRevision)) (ProductOperation operation) (= result (Output operation 0)) (= source (Input operation slot)))

@@ -58,7 +58,6 @@ pub(in crate::egglog) enum Code {
     },
     Index,
     Scratch,
-    Use,
     IndexValue,
     Call,
     Branch,
@@ -194,7 +193,6 @@ pub(in crate::egglog) fn properties(
             | Code::Project { .. }
             | Code::Length { .. }
             | Code::Index
-            | Code::Use
             | Code::IndexValue
             | Code::View
             | Code::Range
@@ -226,12 +224,6 @@ pub(in crate::egglog) fn properties(
         }
         Code::Length { axis } => {
             sink.add("LengthOperation", (operation, *axis as i64))?;
-            sink.add("DiscardableOperation", operation)?;
-            sink.add("RepeatableOperation", operation)?;
-        }
-        Code::Use => {
-            sink.add("ConsumesInput", (operation, 0_i64))?;
-            sink.add("CopyOperation", operation)?;
             sink.add("DiscardableOperation", operation)?;
             sink.add("RepeatableOperation", operation)?;
         }
