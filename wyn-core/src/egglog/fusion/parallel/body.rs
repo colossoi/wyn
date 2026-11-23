@@ -930,9 +930,6 @@ impl Body {
     /// Same-region motion preserves definitions, actual uses, ownership and effects.
     pub fn publish_sibling_order(self, graph: &mut Graph) -> Result<(), OptimizeError> {
         let _timing = timing::span("Rust sibling order publication");
-        if graph.get_size("LivenessRequest") != 0 {
-            return self.publish(graph);
-        }
         let (previous, updated) = self.orders(Query(graph))?;
         graph.update(|mut sink| self.publish_order(&mut sink))?;
         planning::repair_sibling_order(graph, &updated)?;

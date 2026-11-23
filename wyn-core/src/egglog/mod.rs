@@ -184,9 +184,9 @@ pub fn prepare_host(
         .into_iter()
         .map(|(function, _)| program.graph.function_root(function))
         .collect::<Result<Vec<_>, _>>()?;
-    analysis::liveness(&mut program.graph, &roots)?;
-    planning::epilogues(&mut program.graph)?;
-    let execution = execution::Execution::prepare(&mut program)?;
+    let live = analysis::liveness(&mut program.graph, &roots)?;
+    let speculate = planning::epilogues(&mut program.graph)?;
+    let execution = execution::Execution::prepare(&mut program, &live, speculate)?;
     Ok(HostPrepared { program, execution })
 }
 

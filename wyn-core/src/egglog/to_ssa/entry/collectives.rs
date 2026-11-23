@@ -1,6 +1,4 @@
-use super::{
-    domain_names, error, host, names_in, statement_names, Body, EntryEmission, OptimizeError, Typed,
-};
+use super::{domain_names, error, host, statement_names, Body, EntryEmission, OptimizeError, Typed};
 use crate::builtins::catalog;
 use crate::egglog::execution::Collective;
 use crate::egglog::graph::CollectiveInput;
@@ -28,7 +26,7 @@ impl EntryEmission<'_, '_, '_> {
         let mut carry_inputs = LookupSet::default();
         for clause in 0..query.0.result_count(statement) {
             if let Some(reducer) = query.0.reducer_at(statement, clause) {
-                carry_inputs.extend(names_in(query, "RegionCapture", reducer)?);
+                carry_inputs.extend(self.body.compiler.execution.captures(reducer).iter().copied());
                 for slot in 0..query.0.collective_input_count(statement, clause, CollectiveInput::Neutral) {
                     if let Some(name) = query.value_name(query.0.collective_input(
                         statement,
@@ -60,8 +58,9 @@ impl EntryEmission<'_, '_, '_> {
         inside.extend(carry_inputs.iter().copied());
         inside.extend(domain_names(query, domain)?);
         if let Some(epilogue) = epilogue {
-            inside.extend(statement_names(query, preparation)?);
-            inside.extend(names_in(query, "OperationUse", epilogue)?);
+            let execution = self.body.compiler.execution;
+            inside.extend(statement_names(execution, preparation));
+            inside.extend(execution.inputs(epilogue).iter().copied());
         }
         let count = host::guarded_index(
             query,

@@ -1,6 +1,6 @@
 use super::{builder_error, error, Body, OptimizeError, Typed};
 use crate::egglog::graph::CollectiveInput;
-use crate::egglog::payload::{read, Payload};
+use crate::egglog::payload::Payload;
 use crate::op::BinaryOperator;
 use crate::ssa::types::{AtomicOp, InstKind, PlaceId};
 use crate::types::{self, Type};
@@ -22,7 +22,8 @@ impl Body<'_, '_, '_> {
         let [name] = arrays else {
             return Ok(None);
         };
-        if !self.query().any("AtomicAccumulatorArray", |row| row[2] == *name)? {
+        let execution = self.compiler.execution;
+        if !execution.atomic_arrays.contains(name) {
             return Ok(None);
         }
         let array = self.named(*name)?;
@@ -35,17 +36,12 @@ impl Body<'_, '_, '_> {
                 .enode("IdenticalWrites", policy)?
                 .map(|_| AtomicUpdate::Native(AtomicOp::Exchange)));
         };
-        if !self
-            .query()
-            .lookup("RetrySafe", combine)?
-            .is_some_and(|safe| self.query().0.value_to_base::<bool>(safe))
-        {
+        if !execution.retry_safe.contains(&combine) {
             return Ok(None);
         }
-        let Some(opcode) = self.query().lookup("NativeBinaryReducer", combine)? else {
+        let Some(opcode) = execution.native_reducers.get(&combine) else {
             return Ok(Some(AtomicUpdate::CompareExchange(combine)));
         };
-        let opcode = read(self.query().0, opcode);
         let op = match opcode {
             Payload::Binary(BinaryOperator::Add) => AtomicOp::Add,
             Payload::Binary(BinaryOperator::BitwiseAnd) => AtomicOp::And,
@@ -71,10 +67,7 @@ impl Body<'_, '_, '_> {
                 let name =
                     query.0.collective_input(operation, clause, CollectiveInput::Contribution, field)?;
                 let token = query.fields("AccNameRef", name)?[0];
-                let capability =
-                    query.fields("TokenBindingAt", query.required("TokenCapability", token)?)?;
-                let owner = capability[0];
-                let group = query.0.value_to_base::<i64>(capability[1]);
+                let (owner, group) = self.compiler.execution.token_binding(token)?;
                 let arrays = query.0.collective_inputs(owner, group, CollectiveInput::Backing);
                 let policy = query.0.accumulator_policy(owner, group)?;
                 let combine = query.0.combiner_at(owner, group);

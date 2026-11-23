@@ -6,7 +6,8 @@ use crate::binding_layout::{
     extract_texture_resource, extract_uniform_binding,
 };
 use crate::builtins::catalog;
-use crate::egglog::execution::StepKind;
+use crate::egglog::dataflow::ir::Code;
+use crate::egglog::execution::{Execution, LaunchGrouping, StepKind};
 use crate::egglog::graph::CollectiveInput;
 use crate::egglog::graph::Formula;
 use crate::egglog::query::Query;
@@ -188,9 +189,7 @@ pub(super) fn lower(
             .max()
             .unwrap_or(0)
             .max(next_generated);
-        let lane_dependent = query
-            .lookup("LaneDependentFunction", (function,))?
-            .is_some_and(|value| query.0.value_to_base::<bool>(value));
+        let lane_dependent = compiler.execution.lane_dependent_functions.contains(&function);
         let invocation = if lane_dependent && declaration.entry_kind == EntryKind::Compute {
             let size = declaration.compute_dispatch.map_or(
                 DispatchSize::Fixed {
@@ -221,9 +220,13 @@ pub(super) fn lower(
         let mut body = Body::new(compiler, function, vec![], types::unit());
         if let [output] = declaration.outputs.as_slice() {
             if declaration.entry_kind == EntryKind::Compute {
-                if let Some((name, ty)) =
-                    packed_collection_output(body.query(), region, &output.ty, &source_body.ty)?
-                {
+                if let Some((name, ty)) = packed_collection_output(
+                    body.query(),
+                    body.compiler.execution,
+                    region,
+                    &output.ty,
+                    &source_body.ty,
+                )? {
                     body.collection_outputs.insert(name, ty);
                 }
             }
@@ -265,7 +268,7 @@ pub(super) fn lower(
         };
         emission.prepare_input_lengths()?;
         emission.restart()?;
-        let live = live_names(emission.body.query(), &[], region)?;
+        let live = live_names(&emission.body, &[], region)?;
         emission
             .statements(region, &live)
             .map_err(|failure| error(format!("entry {}: {failure}", declaration.name)))?;
@@ -619,10 +622,7 @@ pub(super) fn lower(
             && declaration.compute_dispatch.is_none()
             && !emission.pending
         {
-            let query = emission.body.query();
-            if let Some(width) = query.lookup("ParallelPublicationWidth", function)? {
-                let width = u32::try_from(query.0.value_to_base::<i64>(width))
-                    .map_err(|_| error("invalid output copy workgroup size"))?;
+            if let Some(&width) = emission.body.compiler.execution.output_copy_widths.get(&function) {
                 let mut lengths = output_values.iter().zip(&outputs).filter_map(|(value, output)| {
                     let binding = output.storage_binding()?;
                     if types::array_view_buffer(&value.ty) == Some(binding) {
@@ -951,6 +951,7 @@ pub(super) fn lower(
 
 fn packed_collection_output(
     query: Query<'_>,
+    execution: &Execution,
     region: Value,
     declared: &Type,
     lowered: &Type,
@@ -977,9 +978,7 @@ fn packed_collection_output(
     let Some(name) = query.value_name(*result)? else {
         return Ok(None);
     };
-    let proven =
-        query.lookup("ReturnOnlyCollection", name)?.is_some_and(|flag| query.0.value_to_base::<bool>(flag));
-    Ok(proven.then_some((name, ty)))
+    Ok(execution.return_only_collections.contains(&name).then_some((name, ty)))
 }
 
 fn flatten_product_output(
@@ -1065,7 +1064,7 @@ impl EntryEmission<'_, '_, '_> {
                         || value.ty.elem_type().is_some_and(TypeExt::is_array)))
         });
         if reads_results && self.body.active_dispatch.is_some() {
-            let live = live_names(self.body.query(), &[], results)?;
+            let live = live_names(&self.body, &[], results)?;
             self.flush(&live, vec![], true)?;
             values = self.restored_results(results, values.len())?;
         }
@@ -1130,7 +1129,7 @@ impl EntryEmission<'_, '_, '_> {
         }
         self.pending = true;
         self.pending_observable = true;
-        let live = live_names(self.body.query(), &[], results)?;
+        let live = live_names(&self.body, &[], results)?;
         self.flush(&live, vec![], true)?;
         values = self.restored_results(results, values.len())?;
         let mut materialized = false;
@@ -1226,7 +1225,7 @@ impl EntryEmission<'_, '_, '_> {
             let (Some(source), Some(element)) = (input.storage_binding(), input.ty.elem_type()) else {
                 continue;
             };
-            if !query.contains("HostInputLength", name)?
+            if !self.body.compiler.execution.host_input_lengths.contains(&name)
                 || matches!(
                     input.ty.array_size(),
                     Some(Type::Constructed(TypeName::Size(_), _))
@@ -1352,21 +1351,9 @@ impl EntryEmission<'_, '_, '_> {
             } else {
                 let query = self.body.query();
                 let atomic = self.body.atomic_contributions(statement)?;
-                let rank = crate::egglog::analysis::count(query, "LaunchRank", statement)?;
-                let domain = query.0.operation_domain(statement)?;
-                let columns = query.lookup("ColumnScan", statement)?;
-                let extents = if let Some(plan) = columns {
-                    vec![query.fields("ScanColumns", plan)?[1]]
-                } else {
-                    if rank < 0 {
-                        return Err(error("negative launch rank"));
-                    }
-                    (0..rank)
-                        .map(|slot| query.0.domain_extent(domain, slot))
-                        .collect::<Result<Vec<_>, _>>()?
-                };
+                let launch = self.body.compiler.execution.launch(statement)?;
                 let mut elements = Expr::Integer(1);
-                for extent in extents {
+                for &extent in &launch.extents {
                     let length = host::guarded_index(
                         query,
                         &self.body.host_values,
@@ -1378,20 +1365,15 @@ impl EntryEmission<'_, '_, '_> {
                         Box::new(Expr::Max(Box::new(length), Box::new(Expr::Integer(0)))),
                     );
                 }
-                let grouping = query.required("SelectedLaunchGrouping", (statement, atomic))?;
-                let (grouping, _) =
-                    query.application(grouping, &["SingleGroup", "ElementGroups", "WorkgroupGroups"])?;
-                let groups = match (columns.is_some(), grouping) {
-                    (false, "SingleGroup") => Expr::Integer(1),
-                    (false, "ElementGroups") => elements.clone(),
-                    (true, _) | (false, "WorkgroupGroups") => Expr::Ceiling(
+                let groups = match launch.grouping(atomic) {
+                    LaunchGrouping::Single => Expr::Integer(1),
+                    LaunchGrouping::PerElement => elements.clone(),
+                    LaunchGrouping::PerWorkgroup => Expr::Ceiling(
                         Box::new(elements.clone()),
                         Box::new(Expr::Integer(i64::from(dispatch.width.get()))),
                     ),
-                    _ => unreachable!(),
                 };
-                let minimum = query.required("LaunchMinimum", (statement, atomic, outputs.is_empty()))?;
-                let minimum = query.0.value_to_base::<i64>(minimum);
+                let minimum = launch.minimum(atomic, outputs.is_empty());
                 let groups = Expr::Max(
                     Box::new(Expr::Integer(minimum)),
                     Box::new(Expr::Min(Box::new(groups), Box::new(Expr::Integer(65_535)))),
@@ -1575,7 +1557,7 @@ impl EntryEmission<'_, '_, '_> {
             live.extend(after.iter().copied());
             let pattern = self.body.query().0.outputs(statement);
             if step.boundary {
-                let mut before = statement_names(self.body.query(), &[statement])?;
+                let mut before = statement_names(self.body.compiler.execution, &[statement]);
                 before.extend(live.iter().copied());
                 self.flush(&before, vec![], false)?;
             }
@@ -1617,8 +1599,8 @@ impl EntryEmission<'_, '_, '_> {
                 StepKind::ScalarLoop => self.cpu_loop(statement)?,
                 StepKind::Accumulator => {
                     let lane = self.body.query().0.control_region(statement, 0_i64)?;
-                    let mut needed = live_names(self.body.query(), &[], lane)?;
-                    needed.extend(names_in(self.body.query(), "OperationUse", statement)?);
+                    let mut needed = live_names(&self.body, &[], lane)?;
+                    needed.extend(self.body.compiler.execution.inputs(statement).iter().copied());
                     needed.extend(live.iter().copied());
                     self.statements(lane, &needed)?;
                     let mut values = Vec::new();
@@ -1643,26 +1625,12 @@ impl EntryEmission<'_, '_, '_> {
                     self.pending = true;
                 }
                 StepKind::Shader => {
-                    self.statement_effects(statement)?;
+                    self.pending_observable |= self.body.compiler.execution.observable.contains(&statement);
                     self.body.statement(statement)?;
                     self.pending = true;
                 }
             }
         }
-        Ok(())
-    }
-
-    fn statement_effects(&mut self, statement: Value) -> Result<(), OptimizeError> {
-        let query = self.body.query();
-        let mut memory = false;
-        for table in ["OperationRead", "OperationWrite"] {
-            query.for_each(table, |row| {
-                memory |= row[0] == statement;
-                Ok(())
-            })?;
-        }
-        let trap = query.contains("OperationTrap", statement)?;
-        self.pending_observable |= memory || trap;
         Ok(())
     }
 
@@ -1763,11 +1731,12 @@ impl EntryEmission<'_, '_, '_> {
         let pattern = self.body.query().0.outputs(expression);
         let region = self.body.query().0.control_region(expression, 0_i64)?;
         let merges = self.body.query().0.parameters(region);
-        let counted = self.body.query().contains("CountedLoopOperation", expression)?;
-        let mut before = names_in(self.body.query(), "OperationUse", expression)?;
+        let counted = matches!(self.body.query().0.code(expression)?, Code::CountedLoop);
+        let mut before: LookupSet<_> =
+            self.body.compiler.execution.inputs(expression).iter().copied().collect();
         before.extend(after.iter().copied());
         before.extend(live_names(
-            self.body.query(),
+            &self.body,
             &self.body.query().operations(region)?,
             region,
         )?);
@@ -1792,8 +1761,11 @@ impl EntryEmission<'_, '_, '_> {
                 };
                 let host_length = if self
                     .body
-                    .query()
-                    .contains("LoopPreservesOuterLength", (expression, index as i64))?
+                    .compiler
+                    .execution
+                    .storage
+                    .loop_preserves_length
+                    .contains(&(expression, index as i64))
                 {
                     self.body.host_array_length(&value).ok()
                 } else {
@@ -1872,7 +1844,7 @@ impl EntryEmission<'_, '_, '_> {
             );
         }
         self.restart()?;
-        let mut live = live_names(self.body.query(), &[], region)?;
+        let mut live = live_names(&self.body, &[], region)?;
         live.extend(after.iter().copied());
         self.statements(region, &live)?;
         let values = self.body.results(region)?;
@@ -1993,12 +1965,8 @@ impl EntryEmission<'_, '_, '_> {
         let yes = self.body.query().0.control_region(operation, 0_i64)?;
         let no = self.body.query().0.control_region(operation, 1_i64)?;
         let condition_name = self.body.query().name(self.body.query().0.input(operation, 0_i64)?)?;
-        let mut before = live_names(self.body.query(), &self.body.query().operations(yes)?, yes)?;
-        before.extend(live_names(
-            self.body.query(),
-            &self.body.query().operations(no)?,
-            no,
-        )?);
+        let mut before = live_names(&self.body, &self.body.query().operations(yes)?, yes)?;
+        before.extend(live_names(&self.body, &self.body.query().operations(no)?, no)?);
         before.insert(condition_name);
         before.extend(after.iter().copied());
         self.flush(&before, vec![], false)?;
@@ -2039,7 +2007,7 @@ impl EntryEmission<'_, '_, '_> {
             } else {
                 enabled
             });
-            let mut live = live_names(self.body.query(), &[], block)?;
+            let mut live = live_names(&self.body, &[], block)?;
             live.extend(after.iter().copied());
             self.statements(block, &live)?;
             let values = self.body.results(block)?;
@@ -2274,36 +2242,18 @@ fn joined_extent(condition: &ScalarExpr, a: &Extent, b: &Extent) -> Result<Optio
     })))
 }
 
-fn statement_names(query: Query<'_>, statements: &[Value]) -> Result<LookupSet<Value>, OptimizeError> {
-    let mut names = LookupSet::default();
-    for &statement in statements {
-        names.extend(names_in(query, "OperationUse", statement)?);
-    }
-    Ok(names)
-}
-
-fn names_in(query: Query<'_>, table: &str, value: Value) -> Result<LookupSet<Value>, OptimizeError> {
-    let mut names = LookupSet::default();
-    query.for_each(table, |row| {
-        if row[0] == value {
-            if let Some(name) = query.value_name(row[1])? {
-                names.insert(name);
-            }
-        }
-        Ok(())
-    })?;
-    Ok(names)
+fn statement_names(execution: &Execution, statements: &[Value]) -> LookupSet<Value> {
+    statements.iter().flat_map(|&statement| execution.inputs(statement).iter().copied()).collect()
 }
 
 fn domain_names(query: Query<'_>, domain: Value) -> Result<LookupSet<Value>, OptimizeError> {
     let mut names = LookupSet::default();
     for axis in super::domain_axes(query, domain)? {
-        query.for_each("IndexUse", |row| {
-            if row[0] == axis.extent {
-                names.insert(row[1]);
-            }
-            Ok(())
-        })?;
+        names.extend(crate::egglog::analysis::formula_names(
+            query,
+            Formula::Index,
+            axis.extent,
+        )?);
     }
     Ok(names)
 }
@@ -2932,11 +2882,12 @@ fn erase_buffers(ty: &Type) -> Type {
 }
 
 fn live_names(
-    query: Query<'_>,
+    body: &Body<'_, '_, '_>,
     statements: &[Value],
     results: Value,
 ) -> Result<LookupSet<Value>, OptimizeError> {
-    let mut names = statement_names(query, statements)?;
+    let query = body.query();
+    let mut names = statement_names(body.compiler.execution, statements);
     for name in query.0.yield_values(results) {
         if let Some(name) = query.value_name(name)? {
             names.insert(name);

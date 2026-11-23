@@ -23,6 +23,7 @@ pub(super) struct Graph {
     structure: Arc<SharedStructure>,
     operations: LookupMap<Value, Occurrence>,
     pub region_orders: StableMap<Value, Vec<Value>>,
+    pub loop_layout_revision: Option<i64>,
 }
 
 #[derive(Clone, Copy)]
@@ -205,6 +206,7 @@ impl Graph {
             structure: self.structure.clone(),
             operations: self.operations.clone(),
             region_orders: self.region_orders.clone(),
+            loop_layout_revision: self.loop_layout_revision,
         }
     }
 

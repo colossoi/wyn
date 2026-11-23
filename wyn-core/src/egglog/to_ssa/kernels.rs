@@ -2,7 +2,7 @@
 use super::body::{Collection, CollectionShape};
 use super::{domain_axes, error, Axis, Body, OptimizeError, Typed};
 use crate::builtins::catalog;
-use crate::egglog::execution::Dispatch;
+use crate::egglog::execution::{ColumnScan, Dispatch, KernelAlgorithm};
 use crate::egglog::graph::CollectiveInput;
 use crate::egglog::to_ssa::host;
 use crate::egglog::to_ssa::runtime_binding;
@@ -99,11 +99,11 @@ impl Body<'_, '_, '_> {
         pattern: &[Value],
         phase: Option<CollectivePhase<'_>>,
     ) -> Result<Vec<Typed>, OptimizeError> {
-        if let Some(plan) = self.query().lookup("ColumnScan", operation)? {
+        let execution = self.compiler.execution;
+        if let Some(plan) = execution.column_scan(operation) {
             return self.scan_columns(operation, pattern, plan);
         }
-        let execution = self.query().required("OperationExecution", operation)?;
-        let dispatch = if self.query().enode("DeviceKernel", execution)?.is_some() {
+        let dispatch = if execution.is_device(operation) {
             let Some(statement) = self.active_dispatch else {
                 return Err(error("device parallel region requires a dispatch entry"));
             };
@@ -111,20 +111,18 @@ impl Body<'_, '_, '_> {
         } else {
             None
         };
-        let workgroup_map = dispatch.is_some() && self.query().flag("WorkgroupMap", operation)?;
+        let workgroup = execution.workgroup(operation);
+        let workgroup_map = dispatch.is_some() && workgroup.per_map_element;
         let cooperative_width = if let Some(dispatch) = dispatch {
             Some(dispatch.width.get())
-        } else if self.query().contains("WorkgroupCollective", operation)? {
+        } else if workgroup.collective {
             let parent =
                 self.active_dispatch.ok_or_else(|| error("workgroup reduction has no dispatch"))?;
             Some(self.compiler.execution.dispatch(parent)?.width.get())
         } else {
             None
         };
-        let scan_size = self
-            .query()
-            .lookup("WorkgroupScan", operation)?
-            .map(|size| self.query().0.value_to_base::<i64>(size) as u32);
+        let scan_size = workgroup.scan_size;
         let domain = self.query().0.operation_domain(operation)?;
         let ordinal_name = self.query().0.domain_ordinal(domain)?;
         let axes = domain_axes(self.query(), domain)?;
@@ -233,7 +231,13 @@ impl Body<'_, '_, '_> {
                         Some(Type::Constructed(TypeName::Size(size), _)) => Some(*size),
                         _ => None,
                     };
-                    if !self.query().contains("ReducerPreservesOuterLength", (reducer, i as i64))? {
+                    if !self
+                        .compiler
+                        .execution
+                        .storage
+                        .reducer_preserves_length
+                        .contains(&(reducer, i as i64))
+                    {
                         return Err(error(
                             "array-valued collective has no proven fixed reducer state shape",
                         ));
@@ -340,7 +344,7 @@ impl Body<'_, '_, '_> {
                 let shape = if dispatch.is_some() {
                     let ranked = rank > 1
                         && (dimensions[1..].contains(&None)
-                            || self.query().contains("RankedLoopCollection", name)?);
+                            || self.compiler.execution.storage.ranked.contains(&name));
                     let rank = if ranked { rank } else { 1 };
                     let mut shape = Vec::new();
                     for &axis in &axes[..rank] {
@@ -356,7 +360,7 @@ impl Body<'_, '_, '_> {
                         )?;
                         shape.push((count, Expr::Max(Box::new(length), Box::new(Expr::Integer(0)))));
                     }
-                    if let Some(row) = self.query().lookup("LoopInitialRow", name)? {
+                    if let Some(&row) = self.compiler.execution.storage.initial_rows.get(&name) {
                         let row = self.named(row)?;
                         let length = self.host_array_length(&row)?;
                         let count = self.array_length(row)?;
@@ -377,9 +381,9 @@ impl Body<'_, '_, '_> {
         if contributes && !atomic_updates && matches!(phase, Some(CollectivePhase::Epilogue { .. })) {
             return Err(error("scan overwrite epilogue requires atomic storage"));
         }
-        let algorithm = self.query().required("SelectedKernelAlgorithm", (operation, atomic_updates))?;
-        let compact = self.query().enode("CompactionKernel", algorithm)?.is_some();
-        if compact || self.query().enode("OrderedKernel", algorithm)?.is_some() {
+        let algorithm = self.compiler.execution.algorithm(operation, atomic_updates)?;
+        let compact = matches!(algorithm, KernelAlgorithm::Compact);
+        if compact || matches!(algorithm, KernelAlgorithm::Ordered) {
             let mut initial = vec![Self::number(0); compacts.len()];
             initial.extend(folds.iter().flat_map(|fold| fold.neutral.clone()));
             let statements = region;
@@ -542,7 +546,7 @@ impl Body<'_, '_, '_> {
             return Ok(values);
         }
         if let Some(dispatch) = dispatch {
-            if self.query().contains("UseNativeSubgroups", operation)? {
+            if self.compiler.execution.use_subgroups(operation) {
                 self.prepare_subgroups(dispatch.width.get())?;
             }
         }
@@ -723,12 +727,11 @@ impl Body<'_, '_, '_> {
         &mut self,
         operation: Value,
         pattern: &[Value],
-        plan: Value,
+        plan: ColumnScan,
     ) -> Result<Vec<Typed>, OptimizeError> {
         let query = self.query();
-        let fields = query.fields("ScanColumns", plan)?;
-        let source = self.named(fields[0])?;
-        let map = fields[2];
+        let source = self.named(plan.source)?;
+        let map = plan.map;
         let columns = query.0.operation_domain(map)?;
         let axis = query.0.domain_axis(columns, 0_i64)?;
         let ordinal = query.0.domain_ordinal(columns)?;
@@ -751,14 +754,14 @@ impl Body<'_, '_, '_> {
         let steps = query.operations(lane)?;
         let row_count = self.array_length(source.clone())?;
         let width = self.array_length(neutral.clone())?;
-        let shape = [(rows, row_count.clone()), (fields[1], width.clone())]
+        let shape = [(rows, row_count.clone()), (plan.width, width.clone())]
             .into_iter()
             .map(|(extent, size)| {
                 host::guarded_index(self.query(), &self.host_values, extent, self.guard.as_ref())
                     .map(|count| (size, count))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        self.values.insert(fields[3], width.clone());
+        self.values.insert(plan.count, width.clone());
         let output =
             self.collection_storage(&ty, &CollectionShape::Device(shape), None, self.current()?)?;
         self.collections.insert(name, Collection::Allocated(output.clone()));
@@ -778,10 +781,12 @@ impl Body<'_, '_, '_> {
                     let inputs = [state[0].clone(), body.index(item, column.clone())?];
                     for &step in &steps {
                         let query = body.query();
-                        if let Some(slot) = query.lookup("ColumnScanLoad", (operation, step))? {
-                            let slot = query.0.value_to_base::<i64>(slot) as usize;
+                        if let Some(slot) = body.compiler.execution.column_load(operation, step) {
                             let name = query.name(query.0.output(step, 0_i64)?)?;
-                            body.values.insert(name, inputs[slot].clone());
+                            let input = inputs
+                                .get(slot)
+                                .ok_or_else(|| error("column scan input is out of bounds"))?;
+                            body.values.insert(name, input.clone());
                         } else {
                             body.statement(step)?;
                         }
@@ -1037,11 +1042,8 @@ impl Body<'_, '_, '_> {
         let coordinates = self.domain_coordinates(domain)?;
         let operations = self.query().operations(statements)?;
         let (suffix, group_loop) = if let (Some(_), Some(active)) = (&leader, self.active_dispatch) {
-            let query = self.query();
-            (
-                query.lookup("WorkgroupMapSuffix", active)?,
-                query.contains("WorkgroupLoopMap", active)?,
-            )
+            let workgroup = self.compiler.execution.workgroup(active);
+            (workgroup.map_suffix, workgroup.map_loop)
         } else {
             (None, false)
         };

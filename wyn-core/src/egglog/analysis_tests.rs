@@ -133,23 +133,21 @@ fn rewriting_defers_live_after_and_host_classification() -> Result<(), OptimizeE
     let mut graph = test_graph::import("entry main(x:i32) i32=(x+1)*x entry other(x:i32) i32=(x+2)*x")?;
     run(&mut graph)?;
     planning::analyze(&mut graph)?;
-    for table in ["FlowLive", "NameLiveAfter", "LaneDependentFunction", "HostRegion"] {
+    for table in ["FlowLive", "LaneDependentFunction", "HostRegion"] {
         assert!(
             Query(&graph).first(table)?.is_none(),
             "{table} was calculated before its consumer"
         );
     }
     let root = test_graph::root(&graph);
-    liveness(&mut graph, &[root])?;
+    let live = liveness(&mut graph, &[root])?;
     let query = Query(&graph);
     crate::egglog::test_graph::for_entries(query, |keys, _| {
         let candidate = query.0.function_root(keys[0])?;
-        assert_eq!(query.contains("LivenessRegion", candidate)?, candidate == root);
+        assert_eq!(live.contains_region(candidate), candidate == root);
         Ok(())
     })?;
-    assert!(query.first("NameLiveAfter")?.is_some());
-    liveness(&mut graph, &[root])?;
-    assert_eq!(graph.get_size("LivenessRequest"), 1);
+    assert!(!live.after(root, 0).is_empty());
     planning::place(
         &mut graph,
         crate::PipelineTopologyPolicy::AuthoredOnly,

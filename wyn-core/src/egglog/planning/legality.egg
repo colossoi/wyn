@@ -8,7 +8,6 @@
 (rule ((= element (VectorElement primitive width)) (SelectPrimitive primitive) (>= width 2) (<= width 4))
       ((SelectElement element)) :ruleset physical-legality)
 (relation SelectOutputPrefix (OperationKey i64))
-(relation CanSpeculate (OperationKey))
 (rule ((LiveOperation operation) (BranchOperation operation))
       ((SelectOutputPrefix operation 0)) :ruleset physical-legality)
 (rule ((SelectOutputPrefix operation slot) (ResultOrigin (ValueNameRef value) operation slot)
@@ -19,14 +18,6 @@
       ((SelectOutputPrefix operation (+ slot 1))) :ruleset physical-legality)
 (rule ((SelectOutputPrefix operation slot) (ResultOrigin (AccNameRef token) operation slot))
       ((SelectOutputPrefix operation (+ slot 1))) :ruleset physical-legality)
-(rule ((SelectOutputPrefix operation (wyn-output-count operation)) (= (PureOperation operation) true)
-       (BranchArm slot) (= arm (wyn-control-region operation slot)))
-      ((RegionWorkDemand arm)) :ruleset physical-legality)
-(rule ((SelectOutputPrefix operation (wyn-output-count operation)) (= (PureOperation operation) true)
-       (= yes (wyn-control-region operation 0)) (= no (wyn-control-region operation 1))
-       (= a (RegionWork yes)) (= b (RegionWork no)) (>= a (bigint 0)) (>= b (bigint 0))
-       (<= a (bigint 4)) (<= b (bigint 4)))
-      ((CanSpeculate operation)) :ruleset physical-legality)
 
 ; Reads are permitted, but retries and chunking must not repeat writes or traps.
 (function RetrySafe (RegionKey) bool :merge (and old new))

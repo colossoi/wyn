@@ -45,7 +45,6 @@ impl Body<'_, '_, '_> {
             self.set_shape(&counts, vec![length])?;
             counts
         } else {
-            let query = self.query();
             let capacity = self
                 .integer_literal(&buckets)
                 .and_then(|count| usize::try_from(count).ok())
@@ -53,9 +52,13 @@ impl Body<'_, '_, '_> {
                     Some(Type::Constructed(TypeName::Size(size), _)) => Some(*size),
                     _ => None,
                 });
-            let capacity = capacity.or(query
-                .lookup("OuterCapacity", destination_name)?
-                .and_then(|value| usize::try_from(query.0.value_to_base::<i64>(value)).ok()));
+            let capacity = capacity.or(self
+                .compiler
+                .execution
+                .storage
+                .outer_capacity
+                .get(&destination_name)
+                .and_then(|&value| usize::try_from(value).ok()));
             let Some(capacity) = capacity else {
                 return Err(error("local bucket counters require a capacity bound"));
             };

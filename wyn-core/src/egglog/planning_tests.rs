@@ -1616,11 +1616,10 @@ fn speculation_requires_native_outputs_purity_and_bounded_work() {
         .unwrap();
         let query = Query(&graph);
         let operation = query.constructor("OperationId", 0_i64).unwrap().unwrap();
-        assert_eq!(
-            query.contains("CanSpeculate", operation).unwrap(),
-            expected,
-            "{element}, pure={pure}, work={work}"
-        );
+        let can_speculate = super::speculation_arms(query, operation)
+            .unwrap()
+            .is_some_and(|arms| super::small_arms(query, arms).unwrap());
+        assert_eq!(can_speculate, expected, "{element}, pure={pure}, work={work}");
     }
 }
 

@@ -9,6 +9,9 @@ use egglog_engine::{IntoValues, RawValues, Value, Write};
 
 mod calls;
 mod formulas;
+mod liveness;
+
+pub(super) use liveness::{liveness, Liveness};
 
 pub(in crate::egglog) use formulas::formula_names;
 mod signatures;
@@ -38,21 +41,8 @@ pub(super) fn invalidate(graph: &mut Graph) -> Result<(), OptimizeError> {
         "PlanningRevision",
         "ValuePrimitive",
         "ConstantValue",
-        "LivenessRequest",
-        "LivenessRegion",
-        "LivenessOperation",
-        "LivenessName",
         "InlineCall",
         "RecursiveFunction",
-        "NameOrdinal",
-        "NameLiveAfter",
-        "FlowNext",
-        "FlowLive",
-        "FlowLiveOut",
-        "FlowExecution",
-        "FlowLiveAfter",
-        "FlowUse",
-        "FlowKilled",
         "FlowEdge",
         "FlowParameter",
         "FlowArgument",
@@ -643,54 +633,6 @@ pub(super) fn available_before(
         };
         operation = owner;
     }
-}
-
-/// Compute live-after values for the requested function roots.
-pub(super) fn liveness(graph: &mut Graph, roots: &[Value]) -> Result<(), OptimizeError> {
-    ensure(graph)?;
-    let query = Query(graph);
-    let mut pending = Vec::new();
-    for &root in roots {
-        if !query.contains("LivenessRequest", root)? {
-            pending.push(root);
-        }
-    }
-    if pending.is_empty() {
-        return Ok(());
-    }
-    let _timing = timing::span("egglog execution liveness");
-    graph.update(|mut sink| {
-        for root in pending {
-            sink.add("LivenessRequest", root)?;
-        }
-        Ok(())
-    })?;
-    graph.parse_and_run_program(None, "(run-schedule (saturate dataflow-live-index))")?;
-    let query = Query(graph);
-    let mut next = 0_i64;
-    query.for_function("NameOrdinal", |_, ordinal| {
-        next = next.max(graph.value_to_base::<i64>(ordinal) + 1);
-        Ok(())
-    })?;
-    let mut names = Vec::new();
-    query.for_each("LivenessName", |row| {
-        if query.lookup("NameOrdinal", row[0])?.is_none() {
-            names.push(row[0]);
-        }
-        Ok(())
-    })?;
-    graph.update(|mut sink| {
-        for name in names {
-            sink.set("NameOrdinal", name, next)?;
-            next += 1;
-        }
-        Ok(())
-    })?;
-    graph.parse_and_run_program(
-        None,
-        "(run-schedule (saturate dataflow-live-seeds) (saturate flow-live dataflow-live) (saturate dataflow-resources))",
-    )?;
-    Ok(())
 }
 
 /// Check the selected graph, including captures and simultaneous loop edges.

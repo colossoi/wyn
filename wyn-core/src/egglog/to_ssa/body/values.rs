@@ -27,9 +27,7 @@ impl Body<'_, '_, '_> {
                     .ok_or_else(|| error("logical root path missing"))?;
                 let path = self.query().constructor("FieldPath", (root, i as i64))?;
                 let component = if let (Some(initial), Some(path)) = (initial, path) {
-                    self.query()
-                        .row("ProductComponent", |row| row[0] == initial && row[1] == path)?
-                        .map(|row| row[2])
+                    self.compiler.execution.storage.component(initial, path)?
                 } else {
                     None
                 };
@@ -39,16 +37,9 @@ impl Body<'_, '_, '_> {
             return self.op(OpTag::Tuple, values, ty);
         }
         if value.ty.array_variant().is_some_and(types::is_array_variant_view) {
-            let exact = if let Some(initial) = initial {
-                self.query()
-                    .lookup("LogicalOuterCount", initial)?
-                    .map(|count| self.query().lookup("StaticIndex", count))
-                    .transpose()?
-                    .flatten()
-                    .and_then(|size| usize::try_from(self.query().0.value_to_base::<i64>(size)).ok())
-            } else {
-                None
-            };
+            let exact = initial
+                .and_then(|value| self.compiler.execution.storage.static_count.get(&value))
+                .and_then(|&size| usize::try_from(size).ok());
             let size = exact.or_else(|| match value.ty.array_size() {
                 Some(Type::Constructed(TypeName::Size(size), _)) => Some(*size),
                 _ => match self.host_array_length(&value) {

@@ -230,7 +230,7 @@ impl Body<'_, '_, '_> {
         let inputs = operands.iter().map(|&name| query.name(name)).collect::<Result<Vec<_>, _>>()?;
         let code = query.0.code(statement)?;
         if matches!(code, Code::Parallel)
-            && query.enode("DeviceKernel", query.required("OperationExecution", statement)?)?.is_some()
+            && self.compiler.execution.is_device(statement)
             && self.active_dispatch != Some(statement)
         {
             return Err(error("device parallel region requires a dispatch entry"));
@@ -257,7 +257,7 @@ impl Body<'_, '_, '_> {
                 if source.ty.array_variant().is_some_and(types::is_array_variant_composite) {
                     if let [binding] = pattern.as_slice() {
                         if let Some((output, _)) = runtime_binding(self.query(), *binding)? {
-                            if self.query().contains("CanSnapshotCopy", output)? {
+                            if self.compiler.execution.can_snapshot(output) {
                                 let value = self.snapshot(source)?;
                                 return self.bind(&pattern, vec![value]);
                             }
@@ -274,14 +274,9 @@ impl Body<'_, '_, '_> {
                 let Some(element) = source.ty.elem_type().cloned() else {
                     return Err(error("copy source has no element"));
                 };
-                let known_count = self
-                    .query()
-                    .lookup("LogicalOuterCount", inputs[0])?
-                    .map(|count| self.query().lookup("StaticIndex", count))
-                    .transpose()?
-                    .flatten();
-                let count = if let Some(count) = known_count {
-                    self.literal(self.query().0.value_to_base::<i64>(count), &types::i32())?
+                let known_count = self.compiler.execution.storage.static_count.get(&inputs[0]);
+                let count = if let Some(&count) = known_count {
+                    self.literal(count, &types::i32())?
                 } else {
                     self.array_length(source.clone())?
                 };
@@ -308,9 +303,13 @@ impl Body<'_, '_, '_> {
                             Some(Type::Constructed(TypeName::Size(size), _)) => Some(*size),
                             _ => None,
                         });
-                    let capacity = capacity.or(self.query().lookup("OuterCapacity", inputs[0])?.and_then(
-                        |value| usize::try_from(self.query().0.value_to_base::<i64>(value)).ok(),
-                    ));
+                    let capacity = capacity.or(self
+                        .compiler
+                        .execution
+                        .storage
+                        .outer_capacity
+                        .get(&inputs[0])
+                        .and_then(|&value| usize::try_from(value).ok()));
                     let Some(capacity) = capacity else {
                         return Err(error("local copy needs a capacity bound"));
                     };
@@ -476,7 +475,7 @@ impl Body<'_, '_, '_> {
                     .flatten()
                     .map(|(_, ty)| ty)
                     .collect::<Vec<_>>();
-                if self.query().contains("CanSpeculate", statement)? {
+                if self.compiler.execution.speculation.contains(&statement) {
                     let a = self.block(yes)?;
                     let b = self.block(no)?;
                     if a.len() != types.len() || b.len() != types.len() {
@@ -518,9 +517,7 @@ impl Body<'_, '_, '_> {
                             return Err(error("loop carry has no runtime value"));
                         };
                         let mut value = self.canonical_value(value, &ty)?;
-                        if self.query().any("FixedLoopState", |row| {
-                            row[0] == statement && self.query().0.value_to_base::<i64>(row[1]) == slot
-                        })? {
+                        if self.compiler.execution.storage.fixed_loop.contains(&(statement, slot)) {
                             value = self.fixed_loop_state(value, self.query().value_name(argument)?)?;
                         }
                         params.push(name);
@@ -548,7 +545,7 @@ impl Body<'_, '_, '_> {
                             body.block(region)
                         },
                     )?
-                } else if self.query().contains("WorkgroupLoop", statement)? {
+                } else if self.compiler.execution.workgroup(statement).uniform_loop {
                     let condition = self.query().loop_parameter(statement)?;
                     self.workgroup_while(region, condition, &params, initial)?
                 } else {
@@ -592,7 +589,7 @@ impl Body<'_, '_, '_> {
             }
             Code::WithAcc => {
                 let region = self.query().0.control_region(statement, 0_i64)?;
-                if self.query().contains("WorkgroupAccumulator", statement)? {
+                if self.compiler.execution.workgroup(statement).accumulator {
                     let values = self.workgroup_accumulator(statement, region)?;
                     let values = self.scope_outputs(&pattern, values)?;
                     return self.bind(&pattern, values);
@@ -812,10 +809,7 @@ impl Body<'_, '_, '_> {
             let storage = if let Some(storage) = self.reuse_storage(name, &ty)? {
                 storage
             } else {
-                let capacity = self
-                    .query()
-                    .lookup("OuterCapacity", name)?
-                    .map(|value| self.query().0.value_to_base::<i64>(value));
+                let capacity = self.compiler.execution.storage.outer_capacity.get(&name).copied();
                 self.collection_storage(&ty, &shape, capacity, block)?
             };
             self.collections.insert(name, Collection::Allocated(storage));
@@ -843,14 +837,7 @@ impl Body<'_, '_, '_> {
         output: Value,
         ty: &Type,
     ) -> Result<Option<Typed>, OptimizeError> {
-        let mut candidates = Vec::new();
-        self.query().for_each("CanReuse", |row| {
-            if row[0] == output {
-                candidates.push(row[1]);
-            }
-            Ok(())
-        })?;
-        for input in candidates {
+        for &input in self.compiler.execution.reuse_candidates(output) {
             let Some(array) = self.values.get(&input).cloned() else {
                 continue;
             };
@@ -1116,9 +1103,7 @@ impl Body<'_, '_, '_> {
         let query = self.query();
         let operands = query.0.inputs(operation);
         let token = query.fields("AccNameRef", operands[0])?[0];
-        let capability = query.fields("TokenBindingAt", query.required("TokenCapability", token)?)?;
-        let owner = capability[0];
-        let group = query.0.value_to_base::<i64>(capability[1]);
+        let (owner, group) = self.compiler.execution.token_binding(token)?;
         let arrays = query.0.collective_inputs(owner, group, CollectiveInput::Backing);
         let policy = query.0.accumulator_policy(owner, group)?;
         let combine = query.0.combiner_at(owner, group);

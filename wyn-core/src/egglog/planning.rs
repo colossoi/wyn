@@ -10,6 +10,7 @@ use egglog_engine::{RawValues, Value, Write};
 
 mod conditional;
 mod distribution;
+mod epilogue;
 mod layout;
 
 pub(super) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
@@ -126,7 +127,7 @@ fn clear_candidates(graph: &mut Graph) -> Result<(), OptimizeError> {
         "ReuseLegal",
         "ReuseSnapshot",
         "EpiloguePair",
-        "EpiloguePath",
+        "EpilogueCandidate",
         "EpilogueReuse",
         "EpilogueConsumer",
         "EpilogueScratch",
@@ -135,7 +136,6 @@ fn clear_candidates(graph: &mut Graph) -> Result<(), OptimizeError> {
         "PointwiseSource",
         "EpilogueDomainPrefix",
         "EpilogueClauses",
-        "EpilogueHasScan",
         "PointwiseLoadPrefix",
         "PointwiseLoad",
         "PointwiseSafeOperation",
@@ -155,7 +155,6 @@ fn clear_candidates(graph: &mut Graph) -> Result<(), OptimizeError> {
         "RequiresSnapshot",
         "CanReuse",
         "SelectOutputPrefix",
-        "CanSpeculate",
         "RetrySafe",
         "AtomicAccumulatorArray",
         "ReducerState",
@@ -421,6 +420,10 @@ pub(super) fn place(
 }
 
 fn loop_layout(graph: &mut Graph) -> Result<(), OptimizeError> {
+    let revision = edit::revision(graph)?;
+    if graph.loop_layout_revision == Some(revision) {
+        return Ok(());
+    }
     for table in [
         "LoopStateBytes",
         "LoopFieldType",
@@ -430,6 +433,7 @@ fn loop_layout(graph: &mut Graph) -> Result<(), OptimizeError> {
         graph.clear_function(table)?;
     }
     graph.parse_and_run_program(None, "(run-schedule (saturate graph-loop-layout))")?;
+    graph.loop_layout_revision = Some(revision);
     Ok(())
 }
 
@@ -468,12 +472,77 @@ pub(super) fn load_execution(graph: &mut Graph) -> Result<(), OptimizeError> {
     Ok(())
 }
 
-pub(super) fn epilogues(graph: &mut Graph) -> Result<(), OptimizeError> {
+fn speculation_arms(query: Query<'_>, operation: Value) -> Result<Option<[Value; 2]>, OptimizeError> {
+    if !query.contains("SelectOutputPrefix", (operation, query.0.output_count(operation)))?
+        || !query.flag("PureOperation", operation)?
+    {
+        return Ok(None);
+    }
+    Ok(Some([
+        query.0.control_region(operation, 0)?,
+        query.0.control_region(operation, 1)?,
+    ]))
+}
+
+fn small_arms(query: Query<'_>, arms: [Value; 2]) -> Result<bool, OptimizeError> {
+    for arm in arms {
+        let Some(work) = query.lookup("RegionWork", arm)? else {
+            return Ok(false);
+        };
+        if !u8::try_from(&*query.0.value_to_base::<Z>(work)).is_ok_and(|size| size <= 4) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+pub(super) fn epilogues(graph: &mut Graph) -> Result<LookupSet<Value>, OptimizeError> {
+    let _timing = super::timing::span("egglog reuse and epilogue proofs");
     analyze(graph)?;
+    let setup = super::timing::span("physical proof inputs");
     clear_candidates(graph)?;
     loop_layout(graph)?;
     load_execution(graph)?;
-    graph.parse_and_run_program(None, "(run-schedule (saturate entry-invocations physical-legality graph-work) (saturate execution-features) (saturate execution-atomics))")?;
+    epilogue::seed(graph)?;
+    drop(setup);
+    let legality = super::timing::span("egglog physical legality");
+    graph.parse_and_run_program(
+        None,
+        "(run-schedule (saturate entry-invocations physical-legality))",
+    )?;
+    drop(legality);
+    let speculation = super::timing::span("branch speculation planning");
+    let query = Query(graph);
+    let mut candidates = Vec::new();
+    query.for_each("BranchOperation", |row| {
+        if let Some(arms) = speculation_arms(query, row[0])? {
+            candidates.push((row[0], arms));
+        }
+        Ok(())
+    })?;
+    graph.update(|mut sink| {
+        for &(_, arms) in &candidates {
+            for arm in arms {
+                sink.add("RegionWorkDemand", arm)?;
+            }
+        }
+        Ok(())
+    })?;
+    graph.parse_and_run_program(None, "(run-schedule (saturate graph-work))")?;
+    let mut speculate = LookupSet::new();
+    for (operation, arms) in candidates {
+        if small_arms(Query(graph), arms)? {
+            speculate.insert(operation);
+        }
+    }
+    drop(speculation);
+    let features = super::timing::span("egglog dispatch prerequisites");
+    graph.parse_and_run_program(
+        None,
+        "(run-schedule (saturate execution-features) (saturate execution-atomics))",
+    )?;
+    drop(features);
+    let _reuse = super::timing::span("egglog reuse eligibility");
     graph.parse_and_run_program(None, "(run-schedule (saturate reuse-reads epilogue-index) (saturate dataflow-effects) (saturate reuse-legality epilogue-legality) (saturate reuse-select epilogue-select))")?;
     let query = Query(graph);
     query.for_each("LiveOperation", |row| {
@@ -484,7 +553,8 @@ pub(super) fn epilogues(graph: &mut Graph) -> Result<(), OptimizeError> {
             }
         }
         Ok(())
-    })
+    })?;
+    Ok(speculate)
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 //! Freeze dispatch recipes and storage choices after the final graph rewrites.
+use super::analysis::Liveness;
 use super::bindings::Bindings;
 use super::cost::{CollectiveWork, CostModel};
 use super::dataflow::ir::Code;
@@ -22,7 +23,96 @@ pub(super) struct Execution {
     pub collectives: LookupMap<Value, Collective>,
     pub regions: LookupMap<Value, Vec<Step>>,
     pub host_shapes: LookupSet<Value>,
+    inputs: LookupMap<Value, Vec<Value>>,
+    captures: LookupMap<Value, Vec<Value>>,
+    launches: LookupMap<Value, Launch>,
+    columns: LookupMap<Value, ColumnScan>,
+    column_loads: LookupMap<(Value, Value), usize>,
+    algorithms: LookupMap<(Value, bool), KernelAlgorithm>,
+    device: LookupSet<Value>,
+    workgroups: LookupMap<Value, Workgroup>,
+    subgroups: LookupSet<Value>,
     pub reducer_states: LookupMap<(Value, i64, usize), Type>,
+    reuse: LookupMap<Value, Vec<Value>>,
+    snapshots: LookupSet<Value>,
+    pub atomic_arrays: LookupSet<Value>,
+    pub retry_safe: LookupSet<Value>,
+    pub native_reducers: LookupMap<Value, super::payload::Payload>,
+    pub observable: LookupSet<Value>,
+    tokens: LookupMap<Value, (Value, i64)>,
+    pub speculation: LookupSet<Value>,
+    pub lane_dependent_functions: LookupSet<Value>,
+    pub storage: StorageShapes,
+    pub return_only_collections: LookupSet<Value>,
+    pub host_input_lengths: LookupSet<Value>,
+    pub output_copy_widths: LookupMap<Value, u32>,
+}
+
+#[derive(Default)]
+pub(super) struct StorageShapes {
+    pub outer_capacity: LookupMap<Value, i64>,
+    pub static_count: LookupMap<Value, i64>,
+    pub ranked: LookupSet<Value>,
+    pub initial_rows: LookupMap<Value, Value>,
+    pub fixed_loop: LookupSet<(Value, i64)>,
+    pub loop_preserves_length: LookupSet<(Value, i64)>,
+    pub reducer_preserves_length: LookupSet<(Value, i64)>,
+    components: LookupMap<(Value, Value), Option<Value>>,
+}
+
+impl StorageShapes {
+    fn read(query: Query<'_>) -> Result<Self, OptimizeError> {
+        let mut shapes = Self::default();
+        query.for_function("OuterCapacity", |keys, value| {
+            shapes.outer_capacity.insert(keys[0], query.0.value_to_base::<i64>(value));
+            Ok(())
+        })?;
+        query.for_function("LogicalOuterCount", |keys, term| {
+            if let Some(value) = query.lookup("StaticIndex", term)? {
+                shapes.static_count.insert(keys[0], query.0.value_to_base::<i64>(value));
+            }
+            Ok(())
+        })?;
+        shapes.ranked = relation_keys(query, "RankedLoopCollection", 0)?;
+        query.for_function("LoopInitialRow", |keys, initial| {
+            shapes.initial_rows.insert(keys[0], initial);
+            Ok(())
+        })?;
+        for (table, set) in [
+            ("FixedLoopState", &mut shapes.fixed_loop),
+            ("LoopPreservesOuterLength", &mut shapes.loop_preserves_length),
+            (
+                "ReducerPreservesOuterLength",
+                &mut shapes.reducer_preserves_length,
+            ),
+        ] {
+            query.for_each(table, |row| {
+                set.insert((row[0], query.0.value_to_base::<i64>(row[1])));
+                Ok(())
+            })?;
+        }
+        query.for_each("ProductComponent", |row| {
+            shapes
+                .components
+                .entry((row[0], row[1]))
+                .and_modify(|value| {
+                    if *value != Some(row[2]) {
+                        *value = None;
+                    }
+                })
+                .or_insert(Some(row[2]));
+            Ok(())
+        })?;
+        Ok(shapes)
+    }
+
+    pub fn component(&self, initial: Value, path: Value) -> Result<Option<Value>, OptimizeError> {
+        match self.components.get(&(initial, path)) {
+            Some(None) => Err(error("ambiguous ProductComponent")),
+            Some(Some(value)) => Ok(Some(*value)),
+            None => Ok(None),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -33,10 +123,112 @@ pub(super) struct Dispatch {
     pub grid: Option<(u32, u32, u32)>,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum LaunchGrouping {
+    Single,
+    PerElement,
+    PerWorkgroup,
+}
+
+pub(super) struct Launch {
+    pub extents: Vec<Value>,
+    grouping: [LaunchGrouping; 2],
+    minimum: [[i64; 2]; 2],
+}
+
+impl Launch {
+    fn read(
+        query: Query<'_>,
+        operation: Value,
+        columns: Option<ColumnScan>,
+    ) -> Result<Self, OptimizeError> {
+        let extents = if let Some(columns) = columns {
+            vec![columns.width]
+        } else {
+            let rank = super::analysis::count(query, "LaunchRank", operation)?;
+            if rank < 0 {
+                return Err(error("negative launch rank"));
+            }
+            let domain = query.0.operation_domain(operation)?;
+            (0..rank).map(|slot| query.0.domain_extent(domain, slot)).collect::<Result<_, _>>()?
+        };
+        let mut grouping = [LaunchGrouping::Single; 2];
+        let mut minimum = [[0; 2]; 2];
+        for atomic in [false, true] {
+            let value = query.required("SelectedLaunchGrouping", (operation, atomic))?;
+            let (kind, _) =
+                query.application(value, &["SingleGroup", "ElementGroups", "WorkgroupGroups"])?;
+            grouping[usize::from(atomic)] = match kind {
+                _ if columns.is_some() => LaunchGrouping::PerWorkgroup,
+                "SingleGroup" => LaunchGrouping::Single,
+                "ElementGroups" => LaunchGrouping::PerElement,
+                "WorkgroupGroups" => LaunchGrouping::PerWorkgroup,
+                _ => unreachable!(),
+            };
+            for empty in [false, true] {
+                let value = query.required("LaunchMinimum", (operation, atomic, empty))?;
+                minimum[usize::from(atomic)][usize::from(empty)] = query.0.value_to_base::<i64>(value);
+            }
+        }
+        Ok(Self {
+            extents,
+            grouping,
+            minimum,
+        })
+    }
+
+    pub fn grouping(&self, atomic: bool) -> LaunchGrouping {
+        self.grouping[usize::from(atomic)]
+    }
+
+    pub fn minimum(&self, atomic: bool, empty: bool) -> i64 {
+        self.minimum[usize::from(atomic)][usize::from(empty)]
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ColumnScan {
+    pub source: Value,
+    pub width: Value,
+    pub map: Value,
+    pub count: Value,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum KernelAlgorithm {
+    Parallel,
+    Compact,
+    Ordered,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(super) struct Workgroup {
+    pub per_map_element: bool,
+    pub collective: bool,
+    pub scan_size: Option<u32>,
+    pub map_suffix: Option<Value>,
+    pub map_loop: bool,
+    pub uniform_loop: bool,
+    pub accumulator: bool,
+}
+
 impl Execution {
-    pub fn prepare(program: &mut Program<'_, InterfacesPrepared>) -> Result<Self, OptimizeError> {
+    pub fn prepare(
+        program: &mut Program<'_, InterfacesPrepared>,
+        live: &Liveness,
+        speculate: LookupSet<Value>,
+    ) -> Result<Self, OptimizeError> {
+        let _timing = super::timing::span("physical execution planning");
+        let selection = super::timing::span("Rust dispatch selection");
         let mut execution = Self::select(&mut program.graph)?;
+        let loop_scans = execution.workgroup_loop_scans(Query(&program.graph))?;
+        drop(selection);
+        let features = super::timing::span("egglog dispatch policies");
         program.graph.update(|mut sink| {
+            for (outer, loop_op, body, scan, size) in loop_scans {
+                sink.add("WorkgroupLoopScan", (outer, loop_op, body, scan, size))?;
+                sink.set("WorkgroupLoopSafe", outer, true)?;
+            }
             for &operation in execution.dispatches.keys() {
                 sink.add("EmittedDispatch", operation)?;
             }
@@ -65,6 +257,8 @@ impl Execution {
             None,
             "(run-schedule (saturate execution-policy) (saturate execution-select))",
         )?;
+        drop(features);
+        let _freeze = super::timing::span("Rust execution plan readout");
         let query = Query(&program.graph);
         query.for_function("WorkgroupMapWidth", |keys, width| {
             let dispatch = execution
@@ -78,6 +272,9 @@ impl Execution {
             dispatch.local_size = (dispatch.width.get(), 1, 1);
             Ok(())
         })?;
+        execution.freeze_kernels(query)?;
+        execution.storage = StorageShapes::read(query)?;
+        execution.lane_dependent_functions = true_keys(query, "LaneDependentFunction")?;
         execution.plan_states(query)?;
         for (&operation, dispatch) in &execution.dispatches {
             if let Some(collective) = collective(
@@ -90,8 +287,229 @@ impl Execution {
                 execution.collectives.insert(operation, collective);
             }
         }
-        execution.plan_regions(program)?;
+        query.for_each("CanReuse", |row| {
+            execution.reuse.entry(row[0]).or_default().push(row[1]);
+            Ok(())
+        })?;
+        execution.snapshots = relation_keys(query, "CanSnapshotCopy", 0)?;
+        execution.atomic_arrays = relation_keys(query, "AtomicAccumulatorArray", 2)?;
+        execution.retry_safe = true_keys(query, "RetrySafe")?;
+        query.for_function("NativeBinaryReducer", |keys, payload| {
+            execution.native_reducers.insert(keys[0], super::payload::read(query.0, payload));
+            Ok(())
+        })?;
+        query.for_function("TokenCapability", |keys, value| {
+            let binding = query.fields("TokenBindingAt", value)?;
+            execution.tokens.insert(keys[0], (binding[0], query.0.value_to_base::<i64>(binding[1])));
+            Ok(())
+        })?;
+        for relation in ["OperationRead", "OperationWrite", "OperationTrap"] {
+            query.for_each(relation, |row| {
+                execution.observable.insert(row[0]);
+                Ok(())
+            })?;
+        }
+        execution.speculation = speculate;
+        execution.return_only_collections = true_keys(query, "ReturnOnlyCollection")?;
+        execution.host_input_lengths = relation_keys(query, "HostInputLength", 0)?;
+        query.for_function("ParallelPublicationWidth", |keys, width| {
+            let width = u32::try_from(query.0.value_to_base::<i64>(width))
+                .map_err(|_| error("invalid output copy workgroup size"))?;
+            execution.output_copy_widths.insert(keys[0], width);
+            Ok(())
+        })?;
+        for (table, names) in [
+            ("OperationUse", &mut execution.inputs),
+            ("RegionCapture", &mut execution.captures),
+        ] {
+            query.for_each(table, |row| {
+                if let Some(name) = query.value_name(row[1])? {
+                    names.entry(row[0]).or_default().push(name);
+                }
+                Ok(())
+            })?;
+        }
+        execution.plan_regions(program, live)?;
         Ok(execution)
+    }
+
+    // Follow actual bodies to find the while loops and scans that share a workgroup.
+    fn workgroup_loop_scans(
+        &self,
+        query: Query<'_>,
+    ) -> Result<Vec<(Value, Value, Value, Value, i64)>, OptimizeError> {
+        let graph = query.0;
+        let mut candidates = Vec::new();
+        for (&outer, dispatch) in &self.dispatches {
+            if dispatch.groups.is_some()
+                || graph.result_count(outer) != 1
+                || query.enode("Collected", graph.result_kind(outer, 0)?)?.is_none()
+                || graph.domain_rank(graph.operation_domain(outer)?)? != 1
+            {
+                continue;
+            }
+            let lane = graph.control_region(outer, 0)?;
+            for &loop_op in graph.region_order(lane)? {
+                if !matches!(graph.code(loop_op)?, Code::WhileLoop) {
+                    continue;
+                }
+                let body = graph.control_region(loop_op, 0)?;
+                for &scan in graph.region_order(body)? {
+                    if !matches!(graph.code(scan)?, Code::Parallel)
+                        || query
+                            .enode("InvocationLocal", query.required("OperationExecution", scan)?)?
+                            .is_none()
+                    {
+                        continue;
+                    }
+                    let domain = graph.operation_domain(scan)?;
+                    if graph.domain_rank(domain)? != 1 {
+                        continue;
+                    }
+                    let Some(size) = query.lookup("StaticIndex", graph.domain_extent(domain, 0)?)? else {
+                        continue;
+                    };
+                    let size = graph.value_to_base::<i64>(size);
+                    if size <= 0 {
+                        continue;
+                    }
+                    for slot in 0..graph.output_count(scan) {
+                        if query.enode("PrefixOutput", graph.output_role(scan, slot)?)?.is_some() {
+                            candidates.push((outer, loop_op, body, scan, size));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(candidates)
+    }
+
+    fn freeze_kernels(&mut self, query: Query<'_>) -> Result<(), OptimizeError> {
+        query.for_function("OperationExecution", |keys, value| {
+            if query.enode("DeviceKernel", value)?.is_some() {
+                self.device.insert(keys[0]);
+            }
+            Ok(())
+        })?;
+        query.for_function("ColumnScan", |keys, value| {
+            let fields = query.fields("ScanColumns", value)?;
+            self.columns.insert(
+                keys[0],
+                ColumnScan {
+                    source: fields[0],
+                    width: fields[1],
+                    map: fields[2],
+                    count: fields[3],
+                },
+            );
+            Ok(())
+        })?;
+        query.for_function("ColumnScanLoad", |keys, value| {
+            let slot = usize::try_from(query.0.value_to_base::<i64>(value))
+                .map_err(|_| error("invalid column scan input"))?;
+            self.column_loads.insert((keys[0], keys[1]), slot);
+            Ok(())
+        })?;
+        for (&operation, dispatch) in &self.dispatches {
+            if dispatch.groups.is_none() {
+                self.launches.insert(
+                    operation,
+                    Launch::read(query, operation, self.columns.get(&operation).copied())?,
+                );
+            }
+        }
+        query.for_function("SelectedKernelAlgorithm", |keys, value| {
+            let (kind, _) =
+                query.application(value, &["ParallelKernel", "CompactionKernel", "OrderedKernel"])?;
+            let algorithm = match kind {
+                "ParallelKernel" => KernelAlgorithm::Parallel,
+                "CompactionKernel" => KernelAlgorithm::Compact,
+                "OrderedKernel" => KernelAlgorithm::Ordered,
+                _ => unreachable!(),
+            };
+            self.algorithms.insert((keys[0], query.0.value_to_base::<bool>(keys[1])), algorithm);
+            Ok(())
+        })?;
+        self.subgroups = relation_keys(query, "UseNativeSubgroups", 0)?;
+        query.for_function("WorkgroupMap", |keys, flag| {
+            if query.0.value_to_base::<bool>(flag) {
+                self.workgroups.entry(keys[0]).or_default().per_map_element = true;
+            }
+            Ok(())
+        })?;
+        for (table, flag) in [
+            (
+                "WorkgroupCollective",
+                (|plan: &mut Workgroup| &mut plan.collective) as fn(&mut Workgroup) -> &mut bool,
+            ),
+            ("WorkgroupLoopMap", |plan| &mut plan.map_loop),
+            ("WorkgroupLoop", |plan| &mut plan.uniform_loop),
+            ("WorkgroupAccumulator", |plan| &mut plan.accumulator),
+        ] {
+            query.for_each(table, |row| {
+                *flag(self.workgroups.entry(row[0]).or_default()) = true;
+                Ok(())
+            })?;
+        }
+        query.for_function("WorkgroupScan", |keys, width| {
+            let width = u32::try_from(query.0.value_to_base::<i64>(width))
+                .map_err(|_| error("invalid workgroup scan size"))?;
+            self.workgroups.entry(keys[0]).or_default().scan_size = Some(width);
+            Ok(())
+        })?;
+        query.for_function("WorkgroupMapSuffix", |keys, suffix| {
+            self.workgroups.entry(keys[0]).or_default().map_suffix = Some(suffix);
+            Ok(())
+        })
+    }
+
+    pub fn launch(&self, operation: Value) -> Result<&Launch, OptimizeError> {
+        self.launches.get(&operation).ok_or_else(|| error("automatic launch plan missing"))
+    }
+
+    pub fn column_scan(&self, operation: Value) -> Option<ColumnScan> {
+        self.columns.get(&operation).copied()
+    }
+
+    pub fn column_load(&self, scan: Value, step: Value) -> Option<usize> {
+        self.column_loads.get(&(scan, step)).copied()
+    }
+
+    pub fn algorithm(&self, operation: Value, atomic: bool) -> Result<KernelAlgorithm, OptimizeError> {
+        self.algorithms.get(&(operation, atomic)).copied().ok_or_else(|| error("kernel algorithm missing"))
+    }
+
+    pub fn is_device(&self, operation: Value) -> bool {
+        self.device.contains(&operation)
+    }
+
+    pub fn workgroup(&self, operation: Value) -> Workgroup {
+        self.workgroups.get(&operation).copied().unwrap_or_default()
+    }
+
+    pub fn use_subgroups(&self, operation: Value) -> bool {
+        self.subgroups.contains(&operation)
+    }
+
+    pub fn inputs(&self, operation: Value) -> &[Value] {
+        self.inputs.get(&operation).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn captures(&self, region: Value) -> &[Value] {
+        self.captures.get(&region).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn reuse_candidates(&self, value: Value) -> &[Value] {
+        self.reuse.get(&value).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn can_snapshot(&self, value: Value) -> bool {
+        self.snapshots.contains(&value)
+    }
+
+    pub fn token_binding(&self, token: Value) -> Result<(Value, i64), OptimizeError> {
+        self.tokens.get(&token).copied().ok_or_else(|| error("accumulator capability has no backing"))
     }
 
     pub fn select(graph: &mut Graph) -> Result<Self, OptimizeError> {
@@ -247,6 +665,30 @@ fn triple(query: Query<'_>, vector: Value) -> Result<[Value; 3], OptimizeError> 
     query.vector(vector)?.try_into().map_err(|_| error("dispatch requires three dimensions"))
 }
 
+fn relation_keys(
+    query: Query<'_>,
+    relation: &str,
+    column: usize,
+) -> Result<LookupSet<Value>, OptimizeError> {
+    let mut values = LookupSet::new();
+    query.for_each(relation, |row| {
+        values.insert(row[column]);
+        Ok(())
+    })?;
+    Ok(values)
+}
+
+fn true_keys(query: Query<'_>, function: &str) -> Result<LookupSet<Value>, OptimizeError> {
+    let mut values = LookupSet::new();
+    query.for_function(function, |keys, flag| {
+        if query.0.value_to_base::<bool>(flag) {
+            values.insert(keys[0]);
+        }
+        Ok(())
+    })?;
+    Ok(values)
+}
+
 fn constant(query: Query<'_>, index: Value) -> Result<Option<u32>, OptimizeError> {
     let value = if let Some(fields) = query.enode("IndexConstant", index)? {
         Some(fields[0])
@@ -382,24 +824,28 @@ pub(super) struct Epilogue {
 #[derive(Clone, Copy)]
 struct RegionPlanning<'a> {
     query: Query<'a>,
-    live_after: &'a LookupMap<Value, LookupSet<Value>>,
+    live: &'a Liveness,
+    outer_sources: &'a LookupMap<Value, Vec<Value>>,
 }
 
 impl Execution {
-    fn plan_regions(&mut self, program: &Program<'_, InterfacesPrepared>) -> Result<(), OptimizeError> {
+    fn plan_regions(
+        &mut self,
+        program: &Program<'_, InterfacesPrepared>,
+        live: &Liveness,
+    ) -> Result<(), OptimizeError> {
         let query = Query(&program.graph);
         let generated =
             query.0.value_to_base::<bool>(query.required("GeneratedDispatches", RawValues(Vec::new()))?);
-        let mut live_after = LookupMap::<_, LookupSet<_>>::default();
-        query.for_each("NameLiveAfter", |row| {
-            if let Some(name) = query.value_name(row[1])? {
-                live_after.entry(row[0]).or_default().insert(name);
-            }
+        let mut outer_sources = LookupMap::<_, Vec<_>>::default();
+        query.for_each("OuterShapeSource", |row| {
+            outer_sources.entry(row[0]).or_default().push(row[1]);
             Ok(())
         })?;
         let planning = RegionPlanning {
             query,
-            live_after: &live_after,
+            live,
+            outer_sources: &outer_sources,
         };
         let roots = program.graph.entries();
         let declarations = program
@@ -677,34 +1123,41 @@ impl Execution {
                         } else {
                             false
                         };
-                        let inherited = query.any("OuterShapeSource", |row| {
-                            row[0] == name && self.host_shapes.contains(&row[1])
-                        })?;
+                        let inherited = planning.outer_sources.get(&name).is_some_and(|sources| {
+                            sources.iter().any(|source| self.host_shapes.contains(source))
+                        });
                         if known || inherited || host_values.contains_key(&name) {
                             self.host_shapes.insert(name);
                         }
                     }
                 }
             }
-            let live = planning.live_after.get(&operations[i]).cloned().unwrap_or_default();
+            let live = if boundary
+                || matches!(
+                    kind,
+                    StepKind::Dispatch { .. } | StepKind::Branch | StepKind::Loop | StepKind::Accumulator
+                ) {
+                planning.live.after(region, i)
+            } else {
+                LookupSet::default()
+            };
             let mut cpu_captures = Vec::new();
             if let StepKind::Dispatch { epilogue, .. } = &kind {
                 let mut lanes = vec![query.0.control_region(operation, 0_i64)?];
                 if let Some(epilogue) = epilogue {
                     lanes.push(query.0.control_region(epilogue.operation, 0_i64)?);
                 }
-                query.for_each("RegionCapture", |row| {
-                    if lanes.contains(&row[0]) {
-                        if let Some(name) = query.value_name(row[1])? {
-                            if let Some(value) = host_values.get(&name) {
-                                if host::cpu_available(value) && matches!(value, ScalarExpr::Apply { op, .. } if !op.starts_with("to-")) {
-                                    cpu_captures.push(name);
-                                }
+                for lane in lanes {
+                    for &name in self.captures(lane) {
+                        if let Some(value) = host_values.get(&name) {
+                            if host::cpu_available(value)
+                                && matches!(value, ScalarExpr::Apply { op, .. } if !op.starts_with("to-"))
+                            {
+                                cpu_captures.push(name);
                             }
                         }
                     }
-                    Ok(())
-                })?;
+                }
             }
             steps.push(Step {
                 operation,

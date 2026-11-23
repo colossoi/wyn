@@ -11,7 +11,6 @@
 (constructor ClonedRegion (OperationKey RegionKey) RegionKey)
 (constructor FlowNamed (ValueName) SourceValue)
 (constructor FlowAccumulator (AccName) SourceValue)
-(constructor OperationEvaluation (OperationKey) SourceValue)
 
 (datatype PrimType
   (I8) (I16) (I32) (I64) (U8) (U16) (U32) (U64)

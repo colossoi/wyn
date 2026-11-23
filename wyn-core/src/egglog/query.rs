@@ -176,6 +176,7 @@ impl Query<'_> {
         Ok(first)
     }
 
+    #[cfg(test)]
     pub fn any(&self, name: &str, matches: impl Fn(&[Value]) -> bool) -> Result<bool, OptimizeError> {
         let mut found = false;
         self.for_each(name, |row| {

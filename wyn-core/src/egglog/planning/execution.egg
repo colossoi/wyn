@@ -146,17 +146,6 @@
 
 ; The enclosing lane region executes one coordinate per workgroup. The while
 ; body is group-wide, but callbacks of its scans still execute per lane.
-(rule ((EmittedDispatch outer) (= (OperationExecution outer) (DeviceKernel (AutomaticGrid)))
-       (= (wyn-domain-rank (wyn-iteration-domain outer)) 1)
-       (= (wyn-result-count outer) 1) (CollectedClause outer 0)
-       (= parent (wyn-control-region outer 0)) (= parent (wyn-region-of loop))
-       (WhileLoopOperation loop) (= body (wyn-control-region loop 0))
-       (= body (wyn-region-of scan)) (= (OperationExecution scan) (InvocationLocal))
-       (ResultOrigin output scan slot) (= (wyn-output-role scan slot) (PrefixOutput))
-       (= domain (wyn-iteration-domain scan)) (= (wyn-domain-rank domain) 1)
-       (= size (StaticIndex (wyn-domain-extent domain 0))) (> size 0))
-      ((WorkgroupLoopScan outer loop body scan size)
-       (set (WorkgroupLoopSafe outer) true)) :ruleset execution-features)
 (rule ((WorkgroupLoopScan outer loop body scan size) (InvocationDependent outer))
       ((set (WorkgroupLoopSafe outer) false)) :ruleset execution-features)
 (rule ((WorkgroupLoopScan outer loop body scan size) (= (KernelPredicated outer) true))

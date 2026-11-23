@@ -111,14 +111,14 @@ fn operations_share_connectivity_without_sharing_occurrences_or_payloads() {
     assert_eq!(add_code, Code::Scalar(Payload::Binary(BinaryOperator::Add)));
     assert_eq!(sub_code, Code::Scalar(Payload::Binary(BinaryOperator::Subtract)));
     crate::egglog::analysis::run(&mut graph).unwrap();
-    assert!(Query(&graph).first("NameLiveAfter").unwrap().is_none());
     let root = test_graph::root(&graph);
-    crate::egglog::analysis::liveness(&mut graph, &[root]).unwrap();
+    let live = crate::egglog::analysis::liveness(&mut graph, &[root]).unwrap();
     let query = Query(&graph);
     let input = query.0.input(add.0, 0_i64).unwrap();
     assert!(query.contains("AvailableAt", (add.0, input)).unwrap());
-    assert!(query.contains("NameLiveAfter", (add.0, input)).unwrap());
-    assert!(!query.contains("NameLiveAfter", (sub.0, input)).unwrap());
+    let name = query.name(input).unwrap();
+    assert!(live.after(root, 0).contains(&name));
+    assert!(!live.after(root, 1).contains(&name));
     let output = query.0.output(add.0, 0_i64).unwrap();
     graph.update(|mut sink| sink.set_input(sub.0, 0_i64, output)).unwrap();
     crate::egglog::analysis::run(&mut graph).unwrap();
