@@ -567,6 +567,12 @@ fn sibling_motion_moves_a_preparation_chain_in_one_edit() -> Result<(), Optimize
     assert_eq!(edit::revision(&graph)?, revision + 1);
     let after = arithmetic_positions(Query(&graph))?;
     assert!(after.iter().zip(before).all(|(after, before)| *after < before));
+    let query = Query(&graph);
+    let order = query.operations(root)?;
+    assert_eq!(query.vector(query.required("RegionOperations", root)?)?, order);
+    for pair in order.windows(2) {
+        assert!(query.contains("NextOperation", (pair[0], pair[1]))?);
+    }
     memory::validate(&mut graph)
 }
 

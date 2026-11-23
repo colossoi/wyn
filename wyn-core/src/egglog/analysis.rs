@@ -234,6 +234,14 @@ fn publish_order(graph: &mut EGraph) -> Result<(), OptimizeError> {
         updated.push((region, body));
     }
     removed.extend(previous);
+    replace_order(graph, removed, updated)
+}
+
+pub(super) fn replace_order(
+    graph: &mut EGraph,
+    removed: Vec<(Value, Vec<Value>)>,
+    updated: Vec<(Value, Vec<Value>)>,
+) -> Result<(), OptimizeError> {
     if removed.is_empty() && updated.is_empty() {
         return Ok(());
     }
@@ -274,6 +282,38 @@ fn publish_order(graph: &mut EGraph) -> Result<(), OptimizeError> {
         Ok(())
     })?;
     Ok(())
+}
+
+/// Test a prospective use against the current lexical order.
+pub(super) fn available_before(
+    query: Query<'_>,
+    mut operation: Value,
+    name: Value,
+) -> Result<bool, OptimizeError> {
+    let Some(site) = query.lookup("Defines", name)? else {
+        return Ok(false);
+    };
+    let (kind, fields) = query.application(site, &["OperationSite", "ParameterSite"])?;
+    let producer = (kind == "OperationSite").then_some(fields[0]);
+    let definition = if let Some(producer) = producer {
+        query.required("OperationRegion", producer)?
+    } else {
+        fields[0]
+    };
+    loop {
+        let region = query.required("OperationRegion", operation)?;
+        if region == definition {
+            return if let Some(producer) = producer {
+                Ok(count(query, "OperationOrder", producer)? < count(query, "OperationOrder", operation)?)
+            } else {
+                Ok(true)
+            };
+        }
+        let Some(owner) = query.lookup("RegionOwnedBy", region)? else {
+            return Ok(false);
+        };
+        operation = owner;
+    }
 }
 
 /// Compute live-after values for the requested function roots.

@@ -102,6 +102,29 @@ pub(in crate::egglog) fn changed(graph: &mut EGraph) -> Result<(), OptimizeError
     Ok(())
 }
 
+/// Advance the graph revision after an edit has repaired its affected facts.
+pub(in crate::egglog) fn preserve_revisions(graph: &mut EGraph) -> Result<(), OptimizeError> {
+    let query = Query(graph);
+    let previous = graph.base_to_value(revision(graph)?);
+    let key = || RawValues(Vec::new());
+    let mut current = Vec::new();
+    for table in ["DataflowRevision", "PlanningRevision"] {
+        if query.lookup(table, key())? == Some(previous) {
+            current.push(table);
+        }
+    }
+    changed(graph)?;
+    let revision = revision(graph)?;
+    graph.update(|mut sink| {
+        for table in current {
+            sink.remove(table, key())?;
+            sink.set(table, key(), revision)?;
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
 pub(in crate::egglog) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
     graph.parse_and_run_program(Some("graph edits".into()), include_str!("edits.egg"))?;
     graph.parse_and_run_program(Some("graph cloning".into()), include_str!("clone.egg"))?;

@@ -6,7 +6,7 @@ use crate::egglog::dataflow::{
 use crate::egglog::{output_error, query::Query, timing, OptimizeError};
 use crate::{types, LookupSet};
 use egglog_engine::sort::VecContainer;
-use egglog_engine::{Core, EGraph, RawValues, Value, Write};
+use egglog_engine::{Core, EGraph, Value, Write};
 
 pub(in crate::egglog) fn forward_lengths(
     graph: &mut EGraph,
@@ -45,7 +45,7 @@ pub(in crate::egglog) fn forward_lengths(
         }
     }
     if changed {
-        preserve_revisions(graph)?;
+        edit::preserve_revisions(graph)?;
     }
     Ok(changed)
 }
@@ -79,30 +79,8 @@ pub(in crate::egglog) fn materialize_scratch(
         changed |= rewrite(graph, operation, Code::Scratch, Code::Uninitialized, Some(count))?;
     }
     if changed {
-        preserve_revisions(graph)?;
+        edit::preserve_revisions(graph)?;
     }
-    Ok(())
-}
-
-pub(super) fn preserve_revisions(graph: &mut EGraph) -> Result<(), OptimizeError> {
-    let query = Query(graph);
-    let revision = graph.base_to_value(edit::revision(graph)?);
-    let key = || RawValues(Vec::new());
-    let mut current = Vec::new();
-    for table in ["DataflowRevision", "PlanningRevision"] {
-        if query.lookup(table, key())? == Some(revision) {
-            current.push(table);
-        }
-    }
-    edit::changed(graph)?;
-    let revision = edit::revision(graph)?;
-    graph.update(|mut sink| {
-        for table in current {
-            sink.remove(table, key())?;
-            sink.set(table, key(), revision)?;
-        }
-        Ok(())
-    })?;
     Ok(())
 }
 

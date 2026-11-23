@@ -4,7 +4,8 @@ use super::dataflow::edit;
 use super::query::Query;
 use super::{analysis, memory, output_error, OptimizeError};
 use crate::PipelineTopologyPolicy;
-use egglog_engine::{EGraph, RawValues, Write};
+use egglog_engine::sort::{Boxed, Z};
+use egglog_engine::{EGraph, RawValues, Value, Write};
 
 mod conditional;
 mod distribution;
@@ -148,6 +149,26 @@ fn clear_candidates(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "KernelPreparationCandidate",
         "KernelPreparation",
         "SelectedExecution",
+        "ScanEpilogue",
+        "NativeAddition",
+        "RequiresSnapshot",
+        "CanReuse",
+        "SelectOutputPrefix",
+        "CanSpeculate",
+        "RetrySafe",
+        "AtomicAccumulatorArray",
+        "ReducerState",
+        "LoopComponentPreserved",
+        "LoopHasArrayComponents",
+    ] {
+        graph.clear_function(table)?;
+    }
+    clear_transform_candidates(graph)?;
+    analysis::advance(graph)
+}
+
+pub(super) fn clear_transform_candidates(graph: &mut EGraph) -> Result<(), OptimizeError> {
+    for table in [
         "DistributionPair",
         "DistributionReturnPrefix",
         "DistributionPrefixAt",
@@ -176,21 +197,80 @@ fn clear_candidates(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "ConditionalTypePrefix",
         "ConditionalSafe",
         "FactorConditional",
-        "ScanEpilogue",
-        "NativeAddition",
-        "RequiresSnapshot",
-        "CanReuse",
-        "SelectOutputPrefix",
-        "CanSpeculate",
-        "RetrySafe",
-        "AtomicAccumulatorArray",
-        "ReducerState",
-        "LoopComponentPreserved",
-        "LoopHasArrayComponents",
     ] {
         graph.clear_function(table)?;
     }
-    analysis::advance(graph)
+    let key = || RawValues(Vec::new());
+    let revision = analysis::count(Query(graph), "TransformRevision", key())?;
+    graph.update(|mut sink| {
+        sink.remove("TransformRevision", key())?;
+        sink.set("TransformRevision", key(), revision + 1)
+    })?;
+    Ok(())
+}
+
+fn resolve_transform_availability(graph: &mut EGraph) -> Result<(), OptimizeError> {
+    let query = Query(graph);
+    let mut transforms = Vec::new();
+    query.for_each("TransformRequirement", |row| {
+        transforms.push((row[0], row[1], analysis::available_before(query, row[0], row[1])?));
+        Ok(())
+    })?;
+    let mut rows = Vec::new();
+    query.for_each("RowWidthInput", |row| {
+        if analysis::available_before(query, row[0], row[2])? {
+            rows.push((row[0], row[1], row[2]));
+        }
+        Ok(())
+    })?;
+    graph.update(|mut sink| {
+        for (operation, name, available) in transforms {
+            sink.set("TransformAvailable", (operation, name), available)?;
+        }
+        for key in rows {
+            sink.set("RowWidthInputReady", key, true)?;
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+pub(super) fn repair_sibling_order(
+    graph: &mut EGraph,
+    updated: &[(Value, Vec<Value>)],
+) -> Result<(), OptimizeError> {
+    let query = Query(graph);
+    let mut removed = Vec::new();
+    let mut prefixes = Vec::new();
+    for (region, body) in updated {
+        if !query.contains("RegionWorkDemand", *region)? {
+            continue;
+        }
+        let mut prefix: Option<Z> = Some(Boxed(0.into()));
+        for &operation in body {
+            let key = (*region, operation);
+            removed.push(key);
+            if let Some(current) = prefix.take() {
+                let next = query.lookup("OperationWork", operation)?;
+                prefix = next.map(|work| Boxed(&*current + &*graph.value_to_base::<Z>(work)));
+                prefixes.push((key, current));
+            }
+        }
+    }
+    graph.update(|mut sink| {
+        for key in removed {
+            sink.remove("RegionWorkPrefix", key)?;
+        }
+        for (key, work) in prefixes {
+            sink.set("RegionWorkPrefix", key, work)?;
+        }
+        Ok(())
+    })?;
+    // A reorder can change adjacency and speculative scope for pending transforms.
+    if graph.get_size("DistributionPair") != 0 || graph.get_size("ConditionalPair") != 0 {
+        clear_transform_candidates(graph)?;
+    }
+    Ok(())
 }
 
 pub(super) fn place(
@@ -220,9 +300,12 @@ pub(super) fn place(
         }
         graph.parse_and_run_program(
             None,
+            "(run-schedule (saturate distribution-index) (saturate transform-availability))",
+        )?;
+        resolve_transform_availability(graph)?;
+        graph.parse_and_run_program(
+            None,
             "(run-schedule
-            (saturate distribution-index)
-            (saturate transform-availability dataflow-scopes)
             (saturate dataflow-effects)
             (saturate distribution-prefix)
             (run row-width-legality)
@@ -331,11 +414,11 @@ mod tests;
 mod order_tests;
 
 pub(super) fn factor_conditionals(graph: &mut EGraph) -> Result<bool, OptimizeError> {
+    graph.parse_and_run_program(None, "(run-schedule (saturate conditional-index))")?;
+    resolve_transform_availability(graph)?;
     graph.parse_and_run_program(
         None,
         "(run-schedule
-        (saturate conditional-index)
-        (saturate transform-availability dataflow-scopes)
         (saturate dataflow-effects)
         (saturate conditional-legality)
         (saturate conditional-select))",

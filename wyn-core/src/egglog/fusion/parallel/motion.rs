@@ -114,13 +114,23 @@ impl Motion {
             // when an independent preparation can move across it.
             let start = body.positions[anchor].1;
             let end = body.positions[moving].1;
-            if body.tree_uses(moving).iter().any(|&(_, name)| {
-                let ValueRef::Result(producer, _) = body.graph.refs[&name] else {
-                    return false;
-                };
-                let (owner, order) = body.positions[producer];
-                owner == region && (start..end).contains(&order)
-            }) {
+            let mut blocked = false;
+            for (_, name) in body.tree_uses(moving) {
+                // A capability can be defined before both occurrences and
+                // consumed between them. Keep its occurrence order intact.
+                if Query(graph).enode("AccNameRef", name)?.is_some() {
+                    blocked = true;
+                    break;
+                }
+                if let ValueRef::Result(producer, _) = body.graph.refs[&name] {
+                    let (owner, order) = body.positions[producer];
+                    if owner == region && (start..end).contains(&order) {
+                        blocked = true;
+                        break;
+                    }
+                }
+            }
+            if blocked {
                 continue;
             }
             let no_effects = Effects::default();

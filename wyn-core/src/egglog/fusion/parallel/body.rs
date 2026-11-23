@@ -3,7 +3,7 @@ use super::Domain;
 use crate::egglog::analysis::count;
 use crate::egglog::dataflow::{body::BodyGraph, cse, edit, ir::Code};
 use crate::egglog::query::Query;
-use crate::egglog::{output_error, timing, OptimizeError};
+use crate::egglog::{analysis, output_error, planning, timing, OptimizeError};
 use crate::memory_ir::{BodyRole, Definition, OperationId, RegionId, UseSite, ValueRef};
 use crate::{LookupMap, LookupSet, SortedSet};
 use egglog_engine::{EGraph, FullState, RawValues, Value, Write};
@@ -940,6 +940,32 @@ impl Body {
             graph,
             &self.removed.into_iter().map(|op| self.graph.operations[op]).collect::<Vec<_>>(),
         )
+    }
+
+    /// Same-region motion preserves definitions, actual uses, ownership and effects.
+    pub fn publish_sibling_order(self, graph: &mut EGraph) -> Result<(), OptimizeError> {
+        let _timing = timing::span("Rust sibling order publication");
+        if graph.get_size("LivenessRequest") != 0 {
+            return self.publish(graph);
+        }
+        let query = Query(graph);
+        let mut previous = Vec::new();
+        let mut updated = Vec::new();
+        for &region in &self.moved {
+            let key = self.graph.regions[region];
+            let old = query.vector(query.required("RegionOperations", key)?)?;
+            let order = self.graph.ir.regions[region]
+                .operations
+                .iter()
+                .map(|&op| self.graph.operations[op])
+                .collect::<Vec<_>>();
+            previous.push((key, old));
+            updated.push((key, order));
+        }
+        graph.update(|mut sink| self.publish_order(&mut sink))?;
+        planning::repair_sibling_order(graph, &updated)?;
+        analysis::replace_order(graph, previous, updated)?;
+        edit::preserve_revisions(graph)
     }
 
     fn publish_order(&self, sink: &mut FullState<'_, '_>) -> Result<(), egglog_engine::Error> {

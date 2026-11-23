@@ -332,7 +332,7 @@ pub(super) fn move_siblings(graph: &mut EGraph) -> Result<bool, OptimizeError> {
         }
     }
     if changed {
-        body.publish(graph)?;
+        body.publish_sibling_order(graph)?;
     }
     Ok(changed)
 }

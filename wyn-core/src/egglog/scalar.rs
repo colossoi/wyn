@@ -86,7 +86,7 @@ pub(super) fn apply(graph: &mut EGraph, body: &mut Option<BodyGraph>) -> Result<
         }
     }
     if scoped {
-        leaf::preserve_revisions(graph)?;
+        edit::preserve_revisions(graph)?;
     }
     if structural.is_empty() {
         return Ok(false);
