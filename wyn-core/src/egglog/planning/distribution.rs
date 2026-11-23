@@ -71,32 +71,27 @@ pub(super) fn lift_row_length(graph: &mut Graph) -> Result<bool, OptimizeError> 
     Ok(true)
 }
 
-pub(super) fn canonicalize(graph: &mut Graph) -> Result<bool, OptimizeError> {
+/// A solved extent is a bound witness for the same symbolic term.
+pub(super) fn prove_static_domains(graph: &mut Graph) -> Result<(), OptimizeError> {
     let query = Query(graph);
-    let mut replacements = Vec::new();
-    {
-        let structure = graph.structure().read();
-        for (&index, sites) in &structure.domains.extent_uses {
-            if query.enode("IndexConstant", index)?.is_none() {
-                if let Some(n) = query.lookup("StaticIndex", index)? {
-                    let n = graph.value_to_base::<i64>(n);
-                    replacements.extend(sites.iter().map(|&(domain, slot)| (domain, slot, n)));
-                }
+    let mut bounds = Vec::new();
+    for &index in graph.structure().read().domains.extent_uses.keys() {
+        if let Some(count) = query.lookup("StaticIndex", index)? {
+            if !query.contains("ConstantBound", (index, count))? {
+                bounds.push((index, count));
             }
         }
     }
-    if replacements.is_empty() {
-        return Ok(false);
+    if bounds.is_empty() {
+        return Ok(());
     }
     graph.update(|mut sink| {
-        for (domain, slot, n) in replacements {
-            let value = sink.add("IndexConstant", n)?;
-            sink.set_domain_extent(domain, slot, value)?;
+        for bound in bounds {
+            sink.add("ConstantBound", bound)?;
         }
         Ok(())
     })?;
-    edit::changed(graph)?;
-    Ok(true)
+    super::super::analysis::totality::refine(graph)
 }
 
 pub(super) fn apply(graph: &mut Graph, outer: Value, inner: Value) -> Result<(), OptimizeError> {

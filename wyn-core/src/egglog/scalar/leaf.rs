@@ -279,7 +279,7 @@ impl UsePath {
                 }
                 return Ok(Some(Self { scopes }));
             }
-            let Some(parent) = query.lookup("RegionOwnedBy", region)? else {
+            let Some(parent) = query.0.region_owner(region) else {
                 return Ok(None);
             };
             op = parent;

@@ -15,13 +15,38 @@ pub(super) fn apply(
     let mut regions = LookupSet::new();
     let mut uses = Vec::new();
     for &key in dead {
-        if !matches!(graph.code(key)?, Code::Scalar(_) | Code::Constant { .. })
-            || graph.output_count(key) != 1
-            || query.lookup("ValuePrimitive", graph.output(key, 0)?)?.is_none()
+        let code = graph.code(key)?;
+        if !matches!(
+            code,
+            Code::Scalar(_)
+                | Code::Constant { .. }
+                | Code::Product
+                | Code::Project { .. }
+                | Code::IndexValue
+        ) || graph.output_count(key) != 1
             || !query.flag("PureOperation", key)?
             || query.contains("LaneDependentOperation", key)?
         {
             return Ok(false);
+        }
+        let output = graph.output(key, 0)?;
+        if query.lookup("ValuePrimitive", output)?.is_none()
+            || matches!(code, Code::Product | Code::Project { .. } | Code::IndexValue)
+        {
+            let Some(name) = query.value_name(output)? else {
+                return Ok(false);
+            };
+            let Some(info) = query.lookup("ValueType", name)? else {
+                return Ok(false);
+            };
+            let scalar = if let Some(logical) = query.enode("LogicalValue", info)? {
+                query.enode("ElementValue", logical[0])?.is_some()
+            } else {
+                query.enode("ScalarInfo", info)?.is_some()
+            };
+            if !scalar || query.constructor("IndexValue", name)?.is_some() {
+                return Ok(false);
+            }
         }
         regions.insert(graph.operation_region(key)?);
         uses.push((key, use_sites(query, key)?));
@@ -67,6 +92,7 @@ pub(super) fn apply(
             }
             for table in [
                 "ConstantValue",
+                "ProjectionAlias",
                 "IntegerLower",
                 "IntegerUpper",
                 "TrackedI32",

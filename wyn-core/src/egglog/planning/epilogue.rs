@@ -92,7 +92,7 @@ fn consumers(
                 continue;
             };
             while region != parent {
-                let Some(owner) = query.lookup("RegionOwnedBy", region)? else {
+                let Some(owner) = query.0.region_owner(region) else {
                     break;
                 };
                 let Some(enclosing) = structure.operations.get(&owner).and_then(|position| position.region)

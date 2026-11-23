@@ -32,23 +32,16 @@ impl Reachability {
         let mut owners = LookupMap::new();
         let mut multiple_owners = false;
         let positions = graph.structure().read();
-        let mut record = |operation, child| {
-            multiple_owners |= owners.insert(child, operation).is_some_and(|old| old != operation);
-            if graph.has_operation(operation) {
-                if let Some(parent) =
-                    positions.operations.get(&operation).and_then(|position| position.region)
-                {
-                    regions.entry(parent).or_default().children.push(child);
-                }
-            }
-        };
-        for (&(operation, _), edge) in &positions.controls {
-            record(operation, edge.region);
-        }
-        for callbacks in [&positions.reducers, &positions.combiners] {
-            for (&operation, bodies) in callbacks {
-                for &(_, child) in bodies {
-                    record(operation, child);
+        for (&child, sites) in &positions.region_uses {
+            for &site in sites {
+                let operation = site.operation();
+                multiple_owners |= owners.insert(child, operation).is_some_and(|old| old != operation);
+                if graph.has_operation(operation) {
+                    if let Some(parent) =
+                        positions.operations.get(&operation).and_then(|position| position.region)
+                    {
+                        regions.entry(parent).or_default().children.push(child);
+                    }
                 }
             }
         }
@@ -214,7 +207,11 @@ pub(super) fn publish(graph: &mut Graph) -> Result<(), OptimizeError> {
         }
     }
     drop(positions);
+    let changed = std::mem::take(&mut graph.dirty_owners);
     graph.update(|mut sink| {
+        for &region in &changed {
+            sink.remove("RegionOwnedBy", region)?;
+        }
         for call in callees {
             sink.add("CallBody", call)?;
         }
@@ -228,8 +225,10 @@ pub(super) fn publish(graph: &mut Graph) -> Result<(), OptimizeError> {
         if reach.multiple_owners {
             sink.add("InvalidDataflow", "executable region has more than one owner")?;
         }
-        for (child, operation) in reach.owners {
-            sink.set("RegionOwnedBy", child, operation)?;
+        for region in changed {
+            if let Some(&operation) = reach.owners.get(&region) {
+                sink.set("RegionOwnedBy", region, operation)?;
+            }
         }
         for caller in reach.live {
             sink.add("LiveFunction", caller)?;

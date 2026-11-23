@@ -343,9 +343,7 @@ pub(super) fn place(
     loop {
         analysis::ensure(graph)?;
         analyze(graph)?;
-        if distribution::canonicalize(graph)? {
-            continue;
-        }
+        distribution::prove_static_domains(graph)?;
         graph.parse_and_run_program(
             None,
             "(run-schedule (saturate distribution-index) (saturate transform-availability))",

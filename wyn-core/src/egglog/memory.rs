@@ -85,6 +85,7 @@ pub(super) fn simplify(graph: &mut Graph, hoist: bool) -> Result<(), OptimizeErr
         super::planning::analyze(graph)?;
         if scalar::forward_lengths(graph, "ForwardLength")? {
             graph.parse_and_run_program(None, "(run-schedule (saturate scalar-analysis))")?;
+            analysis::totality::refine(graph)?;
         }
         if reduce_values(graph)? {
             continue;

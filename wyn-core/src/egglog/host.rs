@@ -14,6 +14,9 @@ pub(super) fn index(
     values: &Bindings<Value, ScalarExpr>,
     expression: Value,
 ) -> Result<Expr, OptimizeError> {
+    if let Some(value) = query.lookup("StaticIndex", expression)? {
+        return Ok(Expr::Integer(query.0.value_to_base::<i64>(value)));
+    }
     let (kind, args) = query.application(
         expression,
         &[
@@ -81,6 +84,9 @@ pub(super) fn scalar_index(
     values: &Bindings<Value, ScalarExpr>,
     expression: Value,
 ) -> Result<Option<ScalarExpr>, OptimizeError> {
+    if let Some(value) = query.lookup("StaticIndex", expression)? {
+        return Ok(i32::try_from(query.0.value_to_base::<i64>(value)).ok().map(ScalarExpr::I32));
+    }
     let (kind, args) = query.application(
         expression,
         &[

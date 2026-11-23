@@ -56,7 +56,7 @@ impl Needed {
                 continue;
             }
             let region = query.0.operation_region(op)?;
-            pending.extend(query.lookup("RegionOwnedBy", region)?);
+            pending.extend(query.0.region_owner(region));
             names.extend(needed.use_sites(op));
             for child in query.0.attached_regions(op) {
                 names.extend(query.0.yield_values(child));

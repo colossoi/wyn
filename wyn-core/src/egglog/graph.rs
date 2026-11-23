@@ -24,6 +24,7 @@ pub(super) struct Graph {
     operations: LookupMap<Value, Occurrence>,
     pub region_orders: StableMap<Value, Vec<Value>>,
     pub dirty_orders: LookupSet<Value>,
+    pub dirty_owners: LookupSet<Value>,
     pub loop_layout_revision: Option<i64>,
 }
 
@@ -49,6 +50,7 @@ pub(super) struct ExecutableStructure {
     pub entries: StableMap<Value, i64>,
     pub targets: StableMap<Value, Value>,
     pub controls: LookupMap<(Value, i64), ControlEdge>,
+    pub region_uses: LookupMap<Value, LookupSet<RegionSite>>,
     pub reducers: LookupMap<Value, Vec<(i64, Value)>>,
     pub combiners: LookupMap<Value, Vec<(i64, Value)>>,
     pub argument_uses: LookupMap<Value, LookupSet<ArgumentSite>>,
@@ -153,6 +155,23 @@ pub(super) enum Origin {
     Parameter(Value, usize),
 }
 
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+pub(super) enum RegionSite {
+    Control(Value, i64),
+    Reducer(Value, i64),
+    Combiner(Value, i64),
+}
+
+impl RegionSite {
+    pub fn operation(self) -> Value {
+        match self {
+            Self::Control(operation, _) | Self::Reducer(operation, _) | Self::Combiner(operation, _) => {
+                operation
+            }
+        }
+    }
+}
+
 impl ExecutableStructure {
     fn replace_outputs(&mut self, operation: Value, names: Vec<Value>) {
         if let Some(removed) = self.outputs.remove(&operation) {
@@ -208,6 +227,7 @@ impl Graph {
             operations: self.operations.clone(),
             region_orders: self.region_orders.clone(),
             dirty_orders: self.dirty_orders.clone(),
+            dirty_owners: self.dirty_owners.clone(),
             loop_layout_revision: self.loop_layout_revision,
         }
     }
@@ -846,6 +866,13 @@ impl Graph {
         Ok(region)
     }
 
+    pub fn region_owner(&self, region: Value) -> Option<Value> {
+        let graph = self.structure.read();
+        let owners = graph.region_uses.get(&region)?;
+        let owner = owners.iter().next()?.operation();
+        owners.iter().all(|site| site.operation() == owner).then_some(owner)
+    }
+
     pub fn attached_regions(&self, operation: Value) -> Vec<Value> {
         let structure = self.structure.read();
         let mut regions: Vec<_> = [0, 1]
@@ -909,11 +936,13 @@ impl Graph {
         let operations = &mut self.operations;
         let structure = &self.structure;
         let dirty_orders = &mut self.dirty_orders;
+        let dirty_owners = &mut self.dirty_owners;
         self.facts.update(|facts| {
             f(State {
                 facts,
                 operations,
                 dirty_orders,
+                dirty_owners,
                 structure,
             })
         })
@@ -946,6 +975,7 @@ pub(super) struct State<'a, 'db, 'operations> {
     facts: FullState<'a, 'db>,
     operations: &'operations mut LookupMap<Value, Occurrence>,
     dirty_orders: &'operations mut LookupSet<Value>,
+    dirty_owners: &'operations mut LookupSet<Value>,
     structure: &'operations SharedStructure,
 }
 
@@ -1101,28 +1131,66 @@ impl State<'_, '_, '_> {
     }
 
     pub fn set_reducer(&mut self, operation: Value, slot: i64, region: Value) {
-        set_callback(&mut self.structure.write().reducers, operation, slot, region);
+        let mut graph = self.structure.write();
+        let site = RegionSite::Reducer(operation, slot);
+        if let Some(previous) = set_callback(&mut graph.reducers, operation, slot, region) {
+            remove_use(&mut graph.region_uses, site, previous);
+            self.dirty_owners.insert(previous);
+        }
+        graph.region_uses.entry(region).or_default().insert(site);
+        self.dirty_owners.insert(region);
     }
 
     pub fn set_combiner(&mut self, operation: Value, slot: i64, region: Value) {
-        set_callback(&mut self.structure.write().combiners, operation, slot, region);
+        let mut graph = self.structure.write();
+        let site = RegionSite::Combiner(operation, slot);
+        if let Some(previous) = set_callback(&mut graph.combiners, operation, slot, region) {
+            remove_use(&mut graph.region_uses, site, previous);
+            self.dirty_owners.insert(previous);
+        }
+        graph.region_uses.entry(region).or_default().insert(site);
+        self.dirty_owners.insert(region);
     }
 
     pub fn set_reducers(&mut self, operation: Value, reducers: Vec<(i64, Value)>) {
-        let mut structure = self.structure.write();
-        if reducers.is_empty() {
-            structure.reducers.remove(&operation);
-        } else {
-            structure.reducers.insert(operation, reducers);
+        let mut graph = self.structure.write();
+        if let Some(previous) = graph.reducers.remove(&operation) {
+            for (slot, region) in previous {
+                remove_use(
+                    &mut graph.region_uses,
+                    RegionSite::Reducer(operation, slot),
+                    region,
+                );
+                self.dirty_owners.insert(region);
+            }
+        }
+        if !reducers.is_empty() {
+            for &(slot, region) in &reducers {
+                graph.region_uses.entry(region).or_default().insert(RegionSite::Reducer(operation, slot));
+                self.dirty_owners.insert(region);
+            }
+            graph.reducers.insert(operation, reducers);
         }
     }
 
     pub fn set_combiners(&mut self, operation: Value, combiners: Vec<(i64, Value)>) {
-        let mut structure = self.structure.write();
-        if combiners.is_empty() {
-            structure.combiners.remove(&operation);
-        } else {
-            structure.combiners.insert(operation, combiners);
+        let mut graph = self.structure.write();
+        if let Some(previous) = graph.combiners.remove(&operation) {
+            for (slot, region) in previous {
+                remove_use(
+                    &mut graph.region_uses,
+                    RegionSite::Combiner(operation, slot),
+                    region,
+                );
+                self.dirty_owners.insert(region);
+            }
+        }
+        if !combiners.is_empty() {
+            for &(slot, region) in &combiners {
+                graph.region_uses.entry(region).or_default().insert(RegionSite::Combiner(operation, slot));
+                self.dirty_owners.insert(region);
+            }
+            graph.combiners.insert(operation, combiners);
         }
     }
 
@@ -1131,15 +1199,24 @@ impl State<'_, '_, '_> {
             (0..2).contains(&slot),
             "invalid control region slot {slot} on {operation:?}"
         );
-        match self.structure.write().controls.entry((operation, slot)) {
-            Entry::Occupied(mut edge) => edge.get_mut().region = child,
+        let mut graph = self.structure.write();
+        let site = RegionSite::Control(operation, slot);
+        let previous = match graph.controls.entry((operation, slot)) {
+            Entry::Occupied(mut edge) => Some(std::mem::replace(&mut edge.get_mut().region, child)),
             Entry::Vacant(edge) => {
                 edge.insert(ControlEdge {
                     region: child,
                     arguments: Vec::new(),
                 });
+                None
             }
+        };
+        if let Some(previous) = previous {
+            remove_use(&mut graph.region_uses, site, previous);
+            self.dirty_owners.insert(previous);
         }
+        graph.region_uses.entry(child).or_default().insert(site);
+        self.dirty_owners.insert(child);
     }
 
     pub fn set_argument(
@@ -1303,11 +1380,17 @@ impl State<'_, '_, '_> {
     }
 
     pub fn clear_bodies(&mut self, operation: Value) {
+        self.set_reducers(operation, Vec::new());
+        self.set_combiners(operation, Vec::new());
         let mut structure = self.structure.write();
-        structure.reducers.remove(&operation);
-        structure.combiners.remove(&operation);
         for slot in 0..2 {
             if let Some(edge) = structure.controls.remove(&(operation, slot)) {
+                remove_use(
+                    &mut structure.region_uses,
+                    RegionSite::Control(operation, slot),
+                    edge.region,
+                );
+                self.dirty_owners.insert(edge.region);
                 for (index, value) in edge.arguments.into_iter().enumerate() {
                     remove_use(
                         &mut structure.argument_uses,
@@ -1629,12 +1712,13 @@ fn set_callback(
     operation: Value,
     slot: i64,
     region: Value,
-) {
+) -> Option<Value> {
     let attached = callbacks.entry(operation).or_default();
     if let Some((_, previous)) = attached.iter_mut().find(|(index, _)| *index == slot) {
-        *previous = region;
+        Some(std::mem::replace(previous, region))
     } else {
         attached.push((slot, region));
+        None
     }
 }
 

@@ -82,6 +82,9 @@ pub(super) fn apply(graph: &mut Graph) -> Result<bool, OptimizeError> {
     }
     if scoped {
         edit::preserve_revisions(graph)?;
+        if structural.is_empty() {
+            super::analysis::totality::refine(graph)?;
+        }
     }
     if structural.is_empty() {
         return Ok(false);

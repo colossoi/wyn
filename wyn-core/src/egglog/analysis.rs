@@ -16,7 +16,7 @@ pub(super) use liveness::{liveness, Liveness};
 
 pub(in crate::egglog) use formulas::formula_names;
 mod signatures;
-mod totality;
+pub(super) mod totality;
 
 pub(super) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
     graph.parse_and_run_program(
@@ -65,7 +65,6 @@ pub(super) fn invalidate(graph: &mut Graph) -> Result<(), OptimizeError> {
         "ReducerWidthInputs",
         "DefinitionRegion",
         "RootFunction",
-        "RegionOwnedBy",
         "LiveFunction",
         "LiveRegion",
         "LiveOperation",
@@ -555,7 +554,7 @@ pub(super) fn available_before(
                 Ok(true)
             };
         }
-        let Some(owner) = query.lookup("RegionOwnedBy", region)? else {
+        let Some(owner) = query.0.region_owner(region) else {
             return Ok(false);
         };
         operation = owner;
@@ -580,7 +579,7 @@ fn available_at_boundary(
         }
         _ => {}
     }
-    let Some(owner) = query.lookup("RegionOwnedBy", region)? else {
+    let Some(owner) = query.0.region_owner(region) else {
         return Ok(false);
     };
     available_before(query, owner, name)
