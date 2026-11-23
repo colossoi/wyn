@@ -1,5 +1,3 @@
-(function AnalysisRevision () i64 :no-merge)
-(set (AnalysisRevision) 0)
 (function DataflowRevision () i64 :no-merge)
 (function PlanningRevision () i64 :no-merge)
 (ruleset graph-structure)

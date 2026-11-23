@@ -174,7 +174,6 @@ pub(super) fn prepare(graph: &mut Graph, reach: &Reachability) -> Result<Refresh
     let refresh = scopes.refresh(graph, reach, changes)?;
     graph.proof_scopes = scopes;
 
-    super::advance_revision(graph, "AnalysisRevision")?;
     graph.update(|mut sink| {
         sink.remove("DataflowRevision", RawValues(vec![]))?;
         sink.remove("PlanningRevision", RawValues(vec![]))?;

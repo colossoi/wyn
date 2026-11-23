@@ -39,11 +39,11 @@ fn planning_metadata_survives_candidate_resets_and_tracks_edits() -> Result<(), 
         revision
     );
 
-    let epoch = Query(&graph).required("AnalysisRevision", RawValues(Vec::new()))?;
+    let epoch = Query(&graph).required("DataflowRevision", RawValues(Vec::new()))?;
     graph.update(|mut sink| sink.add("IntegerBoundsDemand", output))?;
     planning::analyze(&mut graph)?;
     assert_eq!(
-        Query(&graph).required("AnalysisRevision", RawValues(Vec::new()))?,
+        Query(&graph).required("DataflowRevision", RawValues(Vec::new()))?,
         epoch
     );
     assert_eq!(Query(&graph).required("IntegerUpper", output)?, constant);
@@ -88,10 +88,10 @@ fn dataflow_requests_reuse_the_same_graph_revision() -> Result<(), OptimizeError
     let operation = query.operations(root)?[0];
     let inputs = query.0.inputs(operation);
     ensure(&mut graph)?;
-    let revision = Query(&graph).required("AnalysisRevision", RawValues(Vec::new()))?;
+    let revision = Query(&graph).required("DataflowRevision", RawValues(Vec::new()))?;
     ensure(&mut graph)?;
     assert_eq!(
-        Query(&graph).required("AnalysisRevision", RawValues(Vec::new()))?,
+        Query(&graph).required("DataflowRevision", RawValues(Vec::new()))?,
         revision
     );
     assert!(Query(&graph).contains("OperationUse", (operation, inputs[0]))?);

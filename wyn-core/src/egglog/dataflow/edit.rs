@@ -34,6 +34,7 @@ pub(in crate::egglog) fn preserve_revisions(graph: &mut Graph) -> Result<(), Opt
             current.push(table);
         }
     }
+    let repaired = current.contains(&"DataflowRevision");
     changed(graph)?;
     let revision = revision(graph)?;
     graph.update(|mut sink| {
@@ -43,6 +44,9 @@ pub(in crate::egglog) fn preserve_revisions(graph: &mut Graph) -> Result<(), Opt
         }
         Ok(())
     })?;
+    if repaired {
+        graph.proof_changes = Default::default();
+    }
     Ok(())
 }
 
