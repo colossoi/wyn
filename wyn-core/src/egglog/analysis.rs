@@ -14,7 +14,7 @@ mod projections;
 
 pub(super) use liveness::{liveness, Liveness};
 
-pub(in crate::egglog) use formulas::{formula_names, seed_substitution};
+pub(in crate::egglog) use formulas::formula_names;
 mod signatures;
 mod totality;
 
@@ -85,8 +85,6 @@ pub(super) fn invalidate(graph: &mut Graph) -> Result<(), OptimizeError> {
         "SameRowShape",
         "RowExtent",
         "IrregularResult",
-        "ShapeDemand",
-        "SliceDemand",
         "TotalIndex",
         "ArrayOuterBound",
         "ArrayRowWidth",
@@ -278,7 +276,7 @@ pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeEr
         }
         Ok(())
     })?;
-    formulas::publish(graph, false)?;
+    formulas::publish(graph)?;
     publish_collective_uses(graph)
 }
 

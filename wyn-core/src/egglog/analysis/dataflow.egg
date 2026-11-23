@@ -8,7 +8,7 @@
 
 
 ; Index, shape, and slice facts follow immutable terms across graph edits.
-(rule ((= revision (AnalysisRevision)) (= (AccumulatorType token) (AccumulatorInfo shape elements)))
+(rule ((= (AccumulatorType token) (AccumulatorInfo shape elements)))
       ((ShapeDemand shape)) :ruleset graph-indices)
 (rule ((= index (IndexValue name))) ((IndexUse index name)) :ruleset graph-indices)
 (rule ((= index (IndexAdd a b))) ((IndexChild index a) (IndexChild index b)) :ruleset graph-indices)

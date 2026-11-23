@@ -24,7 +24,6 @@ pub(super) fn inline(graph: &mut Graph, all: bool) -> Result<(), OptimizeError> 
     let calls = analysis::calls::Reachability::read(graph)?.inlines(graph, all)?;
     drop(selection);
     if !calls.is_empty() {
-        analysis::seed_substitution(graph)?;
         for (call, callee) in calls {
             inline_call(graph, call, callee)?;
         }
@@ -58,6 +57,9 @@ pub(super) fn simplify(graph: &mut Graph, hoist: bool) -> Result<(), OptimizeErr
     });
     edit::clear(graph)?;
     loop {
+        if !analysis::current(graph)? {
+            forward::before_analysis(graph)?;
+        }
         analysis::ensure(graph)?;
         {
             let _timing = timing::span("Rust expression reuse");

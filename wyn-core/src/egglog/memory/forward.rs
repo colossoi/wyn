@@ -1,11 +1,30 @@
 //! Apply scalar-only substitutions without discarding unaffected proofs.
 use super::remove_leaves;
-use crate::egglog::dataflow::{edit, ir::Code};
+use crate::egglog::dataflow::{cse, edit, ir::Code};
 use crate::egglog::graph::{Graph, Origin};
 use crate::egglog::scalar::ScalarInputs;
 use crate::egglog::{analysis, output_error, query::Query, timing, OptimizeError};
 use crate::{LookupMap, LookupSet};
 use egglog_engine::{Value, Write};
+
+/// Resolve structural identities before creating dataflow and effect proofs.
+pub(super) fn before_analysis(graph: &mut Graph) -> Result<(), OptimizeError> {
+    let _timing = timing::span("Rust structural value forwarding");
+    let reach = analysis::calls::Reachability::read(graph)?;
+    let replacements: Vec<_> = cse::find(Query(graph), reach.roots(graph))?.into_iter().collect();
+    if replacements.is_empty() {
+        return Ok(());
+    }
+    let mut removed = Vec::new();
+    for &(old, _) in &replacements {
+        let Some(Origin::Result(operation, 0)) = graph.origin(old) else {
+            return Err(output_error("forwarded expression has no defining operation"));
+        };
+        removed.push(operation);
+    }
+    edit::replace(graph, &replacements)?;
+    edit::remove(graph, &removed)
+}
 
 pub(super) fn run(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let query = Query(graph);

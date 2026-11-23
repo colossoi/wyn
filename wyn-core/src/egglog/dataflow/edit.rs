@@ -125,6 +125,11 @@ pub(in crate::egglog) fn remove_without_revision(
     graph: &mut Graph,
     operations: &[Value],
 ) -> Result<(), OptimizeError> {
+    if let [operation] = operations {
+        if graph.has_operation(*operation) && graph.code(*operation)? == Code::Call {
+            return remove_call(graph, *operation);
+        }
+    }
     let operations: LookupSet<_> = operations.iter().copied().collect();
     let query = Query(graph);
     let mut rows = Vec::new();
@@ -152,6 +157,33 @@ pub(in crate::egglog) fn remove_without_revision(
             sink.remove_operation(operation)?;
         }
         Ok(())
+    })?;
+    Ok(())
+}
+
+/// Calls have direct signature cells and a call class. Their effects are derived
+/// from the callee, so removing one does not require scanning operation tables.
+fn remove_call(graph: &mut Graph, operation: Value) -> Result<(), OptimizeError> {
+    let inputs = graph.input_count(operation);
+    let outputs = graph.output_count(operation);
+    graph.update(|mut sink| {
+        for table in [
+            "InstructionWork",
+            "LiteralBits",
+            "OperationWidth",
+            "OperationExecution",
+            "ScalarPayload",
+        ] {
+            sink.remove(table, operation)?;
+        }
+        for slot in 0..inputs {
+            sink.remove("InputDiet", (operation, slot))?;
+        }
+        for slot in 0..outputs {
+            sink.remove("CallReturnType", (operation, slot))?;
+        }
+        sink.remove("CallOperation", operation)?;
+        sink.remove_operation(operation)
     })?;
     Ok(())
 }
@@ -524,11 +556,8 @@ pub(in crate::egglog) fn clone_region(
         "CloneMember",
         "CloneOperation",
         "CloneLocal",
-        "CloneNameDemand",
-        "CloneSubstitute",
-        "CloneIsLocal",
-        "CloneIsSubstituted",
         "CloneName",
+        "CloneHasIndexName",
         "CloneIndexDemand",
         "CloneIndex",
         "CloneShapeDemand",
@@ -611,6 +640,17 @@ pub(in crate::egglog) fn clone_region(
             }
         }
     }
+    let argument_bindings: LookupMap<_, _> =
+        parameters.into_iter().zip(arguments.iter().copied()).collect();
+    let mut definitions = Vec::new();
+    for &name in &result_names {
+        if argument_bindings.contains_key(&name) {
+            continue;
+        }
+        let (kind, raw) = query.application(name, &["ValueNameRef", "AccNameRef"])?;
+        let info = if kind == "ValueNameRef" { query.lookup("ValueType", raw[0])? } else { None };
+        definitions.push((name, kind, raw[0], info));
+    }
     graph.update(|mut sink| {
         for &domain in domains.keys() {
             sink.add("ClonedDomain", (context, domain))?;
@@ -626,21 +666,33 @@ pub(in crate::egglog) fn clone_region(
 
             sink.add("CloneOperation", (context, operation))?;
         }
-        for (parameter, &argument) in parameters.into_iter().zip(arguments) {
-            sink.set("CloneSubstitute", (context, parameter), argument)?;
+        for (&parameter, &argument) in &argument_bindings {
+            sink.set("CloneName", (context, parameter), argument)?;
         }
-        for argument in argument_names {
-            sink.add("CloneNameDemand", (context, argument))?;
+        for name in argument_names {
+            if !result_names.contains(&name) {
+                sink.set("CloneName", (context, name), name)?;
+            }
         }
-        for result in result_names {
-            sink.add("CloneNameDemand", (context, result))?;
-            sink.add("CloneLocal", (context, result))?;
+        for (name, kind, raw, info) in definitions {
+            let replacement = if kind == "ValueNameRef" {
+                let value = sink.add("ClonedValue", (context, raw))?;
+                if let Some(ty) = info {
+                    sink.set("ValueType", value, ty)?;
+                }
+                value
+            } else {
+                sink.add("CloneLocal", (context, name))?;
+                sink.add("ClonedAccumulator", (context, raw))?
+            };
+            let replacement = sink.add(kind, replacement)?;
+            sink.set("CloneName", (context, name), replacement)?;
         }
         Ok(())
     })?;
     graph.parse_and_run_program(
         None,
-        "(run-schedule (saturate clone-index) (saturate clone-names) (saturate clone-edges))",
+        "(run-schedule (saturate clone-index) (saturate clone-edges))",
     )?;
     let query = Query(graph);
     let mut clone_domains = Vec::new();

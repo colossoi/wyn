@@ -6,6 +6,7 @@ use crate::egglog::{query::Query, OptimizeError};
 use crate::memory_ir::{Definition, OperationId, RegionId, ValueRef};
 use crate::LookupMap;
 use egglog_engine::{Value, Write};
+use std::borrow::Cow;
 use std::hash::Hash;
 
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -124,11 +125,21 @@ impl Reuse<ValueRef> {
 }
 
 impl Reuse<Value> {
-    fn execution_region(&mut self, query: Query<'_>, region: Value) -> Result<(), OptimizeError> {
+    fn execution_region(
+        &mut self,
+        query: Query<'_>,
+        region: Value,
+        products: &mut LookupMap<Value, Vec<Value>>,
+    ) -> Result<(), OptimizeError> {
         let mut definitions = Vec::new();
-        for &operation in query.0.region_order(region)? {
+        let graph = query.0;
+        let operations = match graph.region_orders.get(&region) {
+            Some(ordered) if !graph.dirty_orders.contains(&region) => Cow::Borrowed(ordered.as_slice()),
+            _ => Cow::Owned(query.operations(region)?),
+        };
+        for &operation in operations.iter() {
             for child in query.0.attached_regions(operation) {
-                self.execution_region(query, child)?;
+                self.execution_region(query, child, products)?;
             }
             let code = query.0.code(operation)?;
             if !code.has_expression_identity()
@@ -141,29 +152,59 @@ impl Reuse<Value> {
             if query.value_name(output)?.is_none() {
                 continue;
             }
+            let operands = graph.inputs(operation);
+            let ty = crate::egglog::analysis::typed(query, output)?;
+            if let (Code::Project { index }, [input]) = (&code, operands.as_slice()) {
+                let product = self.replacements.get(input).copied().unwrap_or(*input);
+                if let Some(field) = products.get(&product).and_then(|fields| fields.get(*index)) {
+                    if query.value_name(*field)?.is_some()
+                        && crate::egglog::analysis::typed(query, *field)? == ty
+                    {
+                        self.replacements.insert(output, *field);
+                        continue;
+                    }
+                }
+            }
             let expression = Expression {
                 code,
-                operands: query.0.inputs(operation),
-                index: query.0.formula_at(operation, Formula::Index),
-                ty: crate::egglog::analysis::typed(query, output)?,
+                operands,
+                index: graph.formula_at(operation, Formula::Index),
+                ty,
             };
-            definitions.extend(self.observe(expression, output, true));
+            if let Some(expression) = self.observe(expression, output, true) {
+                if expression.code == Code::Product {
+                    products.insert(output, expression.operands.clone());
+                }
+                definitions.push((output, expression));
+            }
         }
-        for expression in definitions {
+        for (output, expression) in definitions {
+            if expression.code == Code::Product {
+                products.remove(&output);
+            }
             self.visible.remove(&expression);
         }
         Ok(())
     }
 }
 
+pub(in crate::egglog) fn find(
+    query: Query<'_>,
+    roots: Vec<Value>,
+) -> Result<LookupMap<Value, Value>, OptimizeError> {
+    let mut reuse = Reuse::<Value>::default();
+    let mut products = LookupMap::new();
+    for region in roots {
+        reuse.execution_region(query, region, &mut products)?;
+    }
+    Ok(reuse.replacements)
+}
+
 pub(in crate::egglog) fn publish(graph: &mut Graph) -> Result<(), OptimizeError> {
     let query = Query(graph);
-    let mut reuse = Reuse::<Value>::default();
-    for region in query.live_roots()? {
-        reuse.execution_region(query, region)?;
-    }
+    let replacements = find(query, query.live_roots()?)?;
     graph.update(|mut sink| {
-        for (old, new) in reuse.replacements {
+        for (old, new) in replacements {
             sink.add("ForwardCandidate", (old, new))?;
         }
         Ok(())

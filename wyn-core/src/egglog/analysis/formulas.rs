@@ -4,61 +4,41 @@ use crate::egglog::{query::Query, OptimizeError};
 use crate::LookupSet;
 use egglog_engine::{Value, Write};
 
-pub(in crate::egglog) fn seed_substitution(graph: &mut Graph) -> Result<(), OptimizeError> {
-    publish(graph, true)
-}
-
-pub(super) fn publish(graph: &mut Graph, for_inlining: bool) -> Result<(), OptimizeError> {
+pub(super) fn publish(graph: &mut Graph) -> Result<(), OptimizeError> {
     let query = Query(graph);
-    let mut demands = LookupSet::new();
     let mut uses = Vec::new();
     let mut dimensions = Vec::new();
     let mut lane_axes = Vec::new();
     {
         let structure = graph.structure().read();
-        if !for_inlining {
-            for (&operation, domain) in &structure.domains.operations {
-                if let Some(domain) = structure.domains.values.get(domain) {
-                    for dimension in &domain.dimensions {
-                        if let Some(extent) = dimension.extent {
-                            if let (Some(lane), Some(axis)) =
-                                (structure.controls.get(&(operation, 0)), dimension.coordinate)
-                            {
-                                lane_axes.push((lane.region, axis, extent));
-                            }
-                            uses.extend(
-                                formula_names(query, Formula::Index, extent)?
-                                    .into_iter()
-                                    .map(|name| (operation, name)),
-                            );
+        for (&operation, domain) in &structure.domains.operations {
+            if let Some(domain) = structure.domains.values.get(domain) {
+                for dimension in &domain.dimensions {
+                    if let Some(extent) = dimension.extent {
+                        if let (Some(lane), Some(axis)) =
+                            (structure.controls.get(&(operation, 0)), dimension.coordinate)
+                        {
+                            lane_axes.push((lane.region, axis, extent));
                         }
+                        uses.extend(
+                            formula_names(query, Formula::Index, extent)?
+                                .into_iter()
+                                .map(|name| (operation, name)),
+                        );
                     }
                 }
             }
-            for (&domain, layout) in &structure.domains.values {
-                dimensions.extend((0..layout.dimensions.len()).map(|slot| (domain, slot as i64)));
-            }
+        }
+        for (&domain, layout) in &structure.domains.values {
+            dimensions.extend((0..layout.dimensions.len()).map(|slot| (domain, slot as i64)));
         }
         for (&kind, formulas) in &structure.formulas.by_kind {
             for (&operation, &formula) in formulas {
-                match kind {
-                    Formula::Extents => {
-                        demands.insert(("ShapeDemand", formula));
-                    }
-                    Formula::Slices => {
-                        demands.insert(("SliceDemand", formula));
-                    }
-                    _ => {}
-                }
-                if !for_inlining {
-                    uses.extend(
-                        formula_names(query, kind, formula)?.into_iter().map(|name| (operation, name)),
-                    );
-                }
+                uses.extend(formula_names(query, kind, formula)?.into_iter().map(|name| (operation, name)));
             }
         }
     }
-    if demands.is_empty() && uses.is_empty() && dimensions.is_empty() {
+    if uses.is_empty() && dimensions.is_empty() {
         return Ok(());
     }
     graph.update(|mut sink| {
@@ -67,9 +47,6 @@ pub(super) fn publish(graph: &mut Graph, for_inlining: bool) -> Result<(), Optim
         }
         for axis in dimensions {
             sink.add("IterationAxis", axis)?;
-        }
-        for (demand, term) in demands {
-            sink.add(demand, term)?;
         }
         for (operation, name) in uses {
             let name = sink.add("ValueNameRef", name)?;

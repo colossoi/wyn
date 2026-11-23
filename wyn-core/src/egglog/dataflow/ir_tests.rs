@@ -10,24 +10,35 @@ use egglog_engine::{RawValues, Write};
 
 #[test]
 fn cloned_parameters_preserve_the_callers_value_type() {
-    let mut graph = Graph::default();
-    load(&mut graph).unwrap();
+    let mut graph = test_graph::fixture(
+        &[],
+        r#"
+        (let context (OperationId 0)) (let body (RegionId 0))
+        (let parameter (ValueId 1)) (let argument (ValueId 2))
+        (let scalar (ElementValue (ScalarElement (I32))))
+        (let declared-array (ArrayType (ValueArray) (vec-of (UnspecifiedExtent)) scalar))
+        (let actual-array (ArrayType (ValueArray) (vec-of (FixedExtent 10)) scalar))
+        (set (ValueType parameter) (LogicalValue declared-array))
+        (set (ValueType argument) (LogicalValue actual-array))
+        (set (FixtureParameter body 0) (ValueNameRef parameter))
+        (set (ParameterDiet body 0) (Observe))
+        (set (FixtureYield body 0) (ValueNameRef parameter))
+        (set (RegionReturnType body 0) (LogicalReturn declared-array))
+        (let argument-ref (ValueNameRef argument))
+        "#,
+    )
+    .unwrap();
+    let query = Query(&graph);
+    let body = query.constructor("RegionId", 0_i64).unwrap().unwrap();
+    let context = query.constructor("OperationId", 0_i64).unwrap().unwrap();
+    let argument = query.constructor("ValueId", 2_i64).unwrap().unwrap();
+    let argument_ref = query.constructor("ValueNameRef", argument).unwrap().unwrap();
+    let cloned = super::super::edit::clone_region(&mut graph, context, body, &[argument_ref]).unwrap();
+    assert_eq!(graph.yield_at(cloned, 0), Some(argument_ref));
     graph
         .parse_and_run_program(
             None,
-            r#"
-        (let context (OperationId 0))
-        (let parameter (ValueId 1)) (let argument (ValueId 2))
-        (let scalar (ElementValue (ScalarElement (I32))))
-        (let declared (LogicalValue (ArrayType (ValueArray) (vec-of (UnspecifiedExtent)) scalar)))
-        (let actual (LogicalValue (ArrayType (ValueArray) (vec-of (FixedExtent 10)) scalar)))
-        (set (ValueType parameter) declared) (set (ValueType argument) actual)
-        (CloneLocal context (ValueNameRef parameter))
-        (CloneNameDemand context (ValueNameRef parameter))
-        (set (CloneSubstitute context (ValueNameRef parameter)) (ValueNameRef argument))
-        (run-schedule (saturate clone-index) (saturate clone-names) (saturate clone-edges))
-        (check (= (ValueType argument) actual))
-    "#,
+            "(check (= (ValueType argument) (LogicalValue actual-array)))",
         )
         .unwrap();
 }

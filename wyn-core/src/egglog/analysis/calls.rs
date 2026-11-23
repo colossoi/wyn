@@ -103,6 +103,10 @@ impl Reachability {
         })
     }
 
+    pub fn roots(&self, graph: &Graph) -> Vec<Value> {
+        self.live.iter().filter_map(|&function| graph.root_of(function)).collect()
+    }
+
     /// Select calls in callee-first order so a clone contains all selected callee edits.
     pub fn inlines(&self, graph: &Graph, all: bool) -> Result<Vec<(Value, Value)>, OptimizeError> {
         let query = Query(graph);
