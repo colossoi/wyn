@@ -20,6 +20,8 @@ new_key_type! {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Function {
     Defined(RegionId),
+    /// A defined callee whose body is outside the current projection.
+    Unloaded,
     External,
 }
 

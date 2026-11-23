@@ -145,11 +145,12 @@ pub(super) struct Body {
 impl Body {
     pub fn read(
         query: Query<'_>,
+        candidates: impl IntoIterator<Item = Value>,
         domains: LookupMap<Value, Domain>,
         barriers: LookupSet<Value>,
     ) -> Result<Self, OptimizeError> {
         let _timing = timing::span("Rust parallel fusion graph import");
-        let graph = BodyGraph::read(query)?;
+        let graph = BodyGraph::read(query, candidates)?;
         let mut body = Self {
             regions: graph.regions.iter().map(|(key, &region)| (region, key)).collect(),
             domains: domains

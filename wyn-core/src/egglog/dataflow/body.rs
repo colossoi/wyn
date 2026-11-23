@@ -7,7 +7,7 @@ use crate::memory_ir::{
     BodyRole, Definition, Function, MemoryIr, Operation, OperationId, Parameter, Region, RegionEdge,
     RegionId, UseSite, ValueRef,
 };
-use crate::{LookupMap, StableMap};
+use crate::{LookupMap, LookupSet, StableMap};
 use egglog_engine::Value;
 use slotmap::SecondaryMap;
 
@@ -21,7 +21,11 @@ pub(in crate::egglog) struct BodyGraph {
 }
 
 impl BodyGraph {
-    pub fn read(query: Query<'_>) -> Result<Self, OptimizeError> {
+    /// Import each affected function with its nested bodies and lexical captures.
+    pub fn read(
+        query: Query<'_>,
+        candidates: impl IntoIterator<Item = Value>,
+    ) -> Result<Self, OptimizeError> {
         let mut ir = MemoryIr::default();
         let mut regions = SecondaryMap::new();
         let mut region_ids = StableMap::new();
@@ -29,29 +33,42 @@ impl BodyGraph {
         let mut operation_ids = LookupMap::new();
         let mut names = LookupMap::new();
         let mut refs = LookupMap::new();
-        let mut add_region = |region| {
+        let mut ancestors = LookupSet::new();
+        let mut pending = Vec::new();
+        for mut region in candidates {
+            while ancestors.insert(region) {
+                let Some(owner) = query.0.region_owner(region) else {
+                    pending.push(region);
+                    break;
+                };
+                region = query.0.operation_region(owner)?;
+            }
+        }
+        pending.reverse();
+        while let Some(region) = pending.pop() {
+            if region_ids.contains_key(&region) {
+                continue;
+            }
             let id = ir.regions.insert(Region::default());
             regions.insert(id, region);
             region_ids.insert(region, id);
-        };
-        query.for_each("LiveRegion", |row| {
-            add_region(row[0]);
-            Ok(())
-        })?;
+            for &operation in query.0.region_order(region)?.iter().rev() {
+                pending.extend(query.0.attached_regions(operation).into_iter().rev());
+            }
+        }
         let mut functions = LookupMap::new();
-        query.for_each("LiveFunction", |row| {
-            let function = if let Some(key) = query.0.root_of(row[0]) {
-                Function::Defined(region_ids[&key])
-            } else {
-                Function::External
+        let structure = query.0.structure().read();
+        for (&function, root) in &structure.roots {
+            let Some(&region) = region_ids.get(root) else {
+                continue;
             };
-            let id = ir.functions.insert(function);
-            if query.0.entry_order(row[0]).is_some() {
+            let id = ir.functions.insert(Function::Defined(region));
+            if structure.entries.contains_key(&function) {
                 ir.entries.push(id);
             }
-            functions.insert(row[0], id);
-            Ok(())
-        })?;
+            functions.insert(function, id);
+        }
+        drop(structure);
         for (&region, &id) in &region_ids {
             for (index, name) in query.0.parameters(region).into_iter().enumerate() {
                 let value = ValueRef::Parameter(id, index);
@@ -66,7 +83,18 @@ impl BodyGraph {
                 let code = query.0.code(op)?;
                 let outputs = query.0.outputs(op);
                 let definition = match code {
-                    Code::Call => Definition::Call(functions[&query.0.call_target(op)?]),
+                    Code::Call => {
+                        let target = query.0.call_target(op)?;
+                        let id = *functions.entry(target).or_insert_with(|| {
+                            let function = if query.0.is_external(target) {
+                                Function::External
+                            } else {
+                                Function::Unloaded
+                            };
+                            ir.functions.insert(function)
+                        });
+                        Definition::Call(id)
+                    }
                     code => Definition::Other(code),
                 };
                 let span = query.0.span(op).unwrap_or_else(Span::generated);
@@ -187,3 +215,7 @@ impl BodyGraph {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "body_tests.rs"]
+mod tests;

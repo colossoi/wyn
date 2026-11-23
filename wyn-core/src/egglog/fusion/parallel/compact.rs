@@ -68,7 +68,7 @@ pub(in crate::egglog::fusion) fn compact(graph: &mut Graph) -> Result<bool, Opti
     if regions.is_empty() {
         return Ok(false);
     }
-    let mut body = Body::read(query, domains, barriers(query)?)?;
+    let mut body = Body::read(query, regions.iter().copied(), domains, barriers(query)?)?;
     let mut pending: VecDeque<_> = regions.into_iter().map(|region| body.regions[&region]).collect();
     let mut queued: LookupSet<_> = pending.iter().copied().collect();
     let mut changed = false;

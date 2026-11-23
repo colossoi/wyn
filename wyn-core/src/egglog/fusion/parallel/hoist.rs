@@ -50,8 +50,9 @@ pub(in crate::egglog::fusion) fn hoist(graph: &mut Graph) -> Result<bool, Optimi
         return Ok(false);
     }
 
-    let mut body = Body::read(query, domains(query)?, LookupSet::new())?;
-    let mut queued: LookupSet<_> = initial.values().map(|region| body.regions[region]).collect();
+    let regions: SortedSet<_> = initial.into_values().collect();
+    let mut body = Body::read(query, regions.iter().copied(), domains(query)?, LookupSet::new())?;
+    let mut queued: LookupSet<_> = regions.iter().map(|region| body.regions[region]).collect();
     let ordered: SortedSet<_> = queued.iter().copied().collect();
     let mut pending: VecDeque<_> = ordered.into_iter().collect();
     let mut changed = false;

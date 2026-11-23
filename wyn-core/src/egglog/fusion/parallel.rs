@@ -279,7 +279,7 @@ pub(super) fn run(graph: &mut Graph) -> Result<bool, OptimizeError> {
     if regions.is_empty() {
         return Ok(false);
     }
-    let mut body = Body::read(query, domains, barriers)?;
+    let mut body = Body::read(query, regions.iter().copied(), domains, barriers)?;
     let mut pending: VecDeque<_> = regions.into_iter().map(|region| body.regions[&region]).collect();
     let mut queued: LookupSet<_> = pending.iter().copied().collect();
     let mut changed = false;
@@ -321,7 +321,7 @@ pub(super) fn move_siblings(graph: &mut Graph) -> Result<bool, OptimizeError> {
     if regions.is_empty() {
         return Ok(false);
     }
-    let mut body = Body::read(query, LookupMap::new(), LookupSet::new())?;
+    let mut body = Body::read(query, regions.iter().copied(), LookupMap::new(), LookupSet::new())?;
     let mut changed = false;
     for region in regions {
         let id = body.regions[&region];

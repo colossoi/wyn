@@ -44,7 +44,7 @@ pub(in crate::egglog::fusion) fn run(graph: &mut Graph) -> Result<bool, Optimize
     if regions.is_empty() {
         return Ok(false);
     }
-    let mut body = Body::read(query, domains(query)?, barriers(query)?)?;
+    let mut body = Body::read(query, regions.iter().copied(), domains(query)?, barriers(query)?)?;
     body.pinned.extend(pinned.iter().filter_map(|key| body.graph.operation_ids.get(key).copied()));
     let mut pending: SortedSet<_> = regions.into_iter().map(|region| body.regions[&region]).collect();
     let mut changed = false;

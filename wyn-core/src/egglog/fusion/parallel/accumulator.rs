@@ -55,7 +55,7 @@ pub(in crate::egglog::fusion) fn run(graph: &mut Graph, sinking: bool) -> Result
             groups.insert(op);
         }
     }
-    let mut body = Body::read(query, domains(query)?, barriers(query)?)?;
+    let mut body = Body::read(query, regions.iter().copied(), domains(query)?, barriers(query)?)?;
     body.pinned.extend(blocked.iter().filter_map(|op| body.graph.operation_ids.get(op).copied()));
     let pending = regions.iter().map(|region| body.regions[region]).collect();
     let changed = apply(graph, &mut body, pending, &groups, sinking)?;

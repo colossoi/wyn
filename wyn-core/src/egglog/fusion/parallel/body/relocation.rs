@@ -146,8 +146,12 @@ impl Body {
         let mut conflicts = Vec::new();
         if !self.reads_before_lift.is_empty() {
             Query(graph).for_each("OperationsConflict", |row| {
-                let a = self.graph.operation_ids[&row[0]];
-                let b = self.graph.operation_ids[&row[1]];
+                let (Some(&a), Some(&b)) = (
+                    self.graph.operation_ids.get(&row[0]),
+                    self.graph.operation_ids.get(&row[1]),
+                ) else {
+                    return Ok(());
+                };
                 let left = &self.effects[a];
                 let right = &self.effects[b];
                 if (self.reads_before_lift.contains_key(a) || self.reads_before_lift.contains_key(b))
