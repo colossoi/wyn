@@ -105,6 +105,7 @@ pub(super) fn publish_proof_operands(
         }
     }
     let mut direct_uses = Vec::new();
+    let mut product_fields = Vec::new();
     let mut literal_elements = Vec::new();
     let mut ranges = Vec::new();
     let mut operation_guards = Vec::new();
@@ -120,6 +121,18 @@ pub(super) fn publish_proof_operands(
         for &operation in &operations {
             let inputs = structure.inputs.values.get(&operation).map_or(&[][..], Vec::as_slice);
             direct_uses.extend(inputs.iter().map(|&input| (operation, input)));
+            if query.contains("ProductOperation", operation)? {
+                if let Some(&output) = structure.outputs.get(&operation).and_then(|outputs| outputs.first())
+                {
+                    if let Some(product) = query.value_name(output)? {
+                        for (slot, &name) in inputs.iter().enumerate() {
+                            if let Some(field) = query.value_name(name)? {
+                                product_fields.push((product, slot as i64, field));
+                            }
+                        }
+                    }
+                }
+            }
             if query.contains("ArrayLiteralOperation", operation)? {
                 literal_elements.extend(
                     inputs.iter().enumerate().map(|(slot, &input)| (operation, slot as i64, input)),
@@ -178,6 +191,9 @@ pub(super) fn publish_proof_operands(
         }
         for site in direct_uses {
             sink.add("DirectOperationUse", site)?;
+        }
+        for field in product_fields {
+            sink.add("ProductField", field)?;
         }
         for element in literal_elements {
             sink.add("ArrayLiteralOperand", element)?;

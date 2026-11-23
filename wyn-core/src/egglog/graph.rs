@@ -980,6 +980,10 @@ pub(super) struct State<'a, 'db, 'operations> {
 enum OperandProof {
     Binary(Value, Value),
     Index(Value, Value),
+    Projection {
+        slot: i64,
+        source: Value,
+    },
     Length {
         axis: i64,
         array: Value,
@@ -1046,7 +1050,10 @@ impl State<'_, '_, '_> {
 
     fn operand_proof(&self, operation: Value) -> Option<OperandProof> {
         let code = &self.operations.get(&operation)?.code;
-        if !matches!(code, Code::Scalar(_) | Code::Index | Code::Length { .. }) {
+        if !matches!(
+            code,
+            Code::Scalar(_) | Code::Index | Code::Length { .. } | Code::Project { .. }
+        ) {
             return None;
         }
         let graph = self.structure.read();
@@ -1054,6 +1061,10 @@ impl State<'_, '_, '_> {
         match (code, inputs.as_slice()) {
             (Code::Scalar(_), [left, right]) => Some(OperandProof::Binary(*left, *right)),
             (Code::Index, [array, index]) => Some(OperandProof::Index(*array, *index)),
+            (Code::Project { index }, [source]) => Some(OperandProof::Projection {
+                slot: *index as i64,
+                source: *source,
+            }),
             (Code::Length { axis }, [array, ..]) => Some(OperandProof::Length {
                 axis: *axis as i64,
                 array: *array,
@@ -1079,6 +1090,9 @@ impl State<'_, '_, '_> {
             Some(OperandProof::Index(array, index)) => {
                 self.remove("IndexOperands", (operation, array, index))?
             }
+            Some(OperandProof::Projection { slot, source }) => {
+                self.remove("ProjectionOperand", (operation, slot, source))?
+            }
             Some(OperandProof::Length { axis, array, result }) => {
                 self.remove("LengthMeasure", (operation, axis, array, result))?
             }
@@ -1090,6 +1104,9 @@ impl State<'_, '_, '_> {
             }
             Some(OperandProof::Index(array, index)) => {
                 self.add("IndexOperands", (operation, array, index))?;
+            }
+            Some(OperandProof::Projection { slot, source }) => {
+                self.add("ProjectionOperand", (operation, slot, source))?;
             }
             Some(OperandProof::Length { axis, array, result }) => {
                 self.add("LengthMeasure", (operation, axis, array, result))?;
