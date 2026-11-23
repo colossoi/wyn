@@ -10,7 +10,7 @@ use egglog_engine::{Value, Write};
 /// Resolve structural identities before creating dataflow and effect proofs.
 pub(super) fn before_analysis(graph: &mut Graph, roots: Vec<Value>) -> Result<(), OptimizeError> {
     let _timing = timing::span("Rust structural value forwarding");
-    let replacements: Vec<_> = cse::find(Query(graph), roots)?.into_iter().collect();
+    let replacements: Vec<_> = cse::find(graph, roots)?.into_iter().collect();
     if replacements.is_empty() {
         return Ok(());
     }

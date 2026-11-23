@@ -25,6 +25,7 @@ pub(super) struct Graph {
     pub region_orders: StableMap<Value, Vec<Value>>,
     pub dirty_orders: LookupSet<Value>,
     pub dirty_owners: LookupSet<Value>,
+    pub clean_expression_roots: LookupSet<Value>,
     pub(crate) proof_scopes: super::analysis::scopes::Scopes,
     pub(crate) proof_changes: super::analysis::scopes::Changes,
 }
@@ -229,6 +230,7 @@ impl Graph {
             region_orders: self.region_orders.clone(),
             dirty_orders: self.dirty_orders.clone(),
             dirty_owners: self.dirty_owners.clone(),
+            clean_expression_roots: self.clean_expression_roots.clone(),
             proof_scopes: self.proof_scopes.clone(),
             proof_changes: self.proof_changes.clone(),
         }

@@ -1,6 +1,8 @@
 //! Apply selected edits to keyed graph cells without reconstructing a program.
+use super::cse;
 use super::ir::{self, Code};
 use super::properties;
+use crate::egglog::analysis::scopes::Changes;
 use crate::egglog::graph::{Formula, Graph};
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, output_error, OptimizeError};
@@ -48,9 +50,15 @@ pub(in crate::egglog) fn preserve_revisions(graph: &mut Graph) -> Result<(), Opt
         Ok(())
     })?;
     if repaired {
-        graph.proof_changes = Default::default();
+        take_changes(graph);
     }
     Ok(())
+}
+
+/// Invalidate the lexical reuse cache before consuming the executable edits.
+pub(in crate::egglog) fn take_changes(graph: &mut Graph) -> Changes {
+    cse::invalidate(graph);
+    std::mem::take(&mut graph.proof_changes)
 }
 
 /// Reorder existing siblings while retaining proofs about definitions and effects.

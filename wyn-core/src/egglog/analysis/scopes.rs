@@ -1,6 +1,7 @@
 //! Retain proof subjects by function and propagate invalidation through actual calls.
 use super::calls::Reachability;
 use super::{Graph, OptimizeError, Query};
+use crate::egglog::dataflow::edit;
 use crate::{LookupMap, LookupSet};
 use egglog_engine::Value;
 use wyn_graph::{for_each_reachable, WalkOrder};
@@ -169,7 +170,7 @@ impl Subjects {
 pub(super) fn prepare(graph: &mut Graph, reach: &Reachability) -> Result<Refresh, OptimizeError> {
     use egglog_engine::{RawValues, Write};
     let _timing = super::timing::span("egglog dirty scope proof repair");
-    let changes = std::mem::take(&mut graph.proof_changes);
+    let changes = edit::take_changes(graph);
     let mut scopes = std::mem::take(&mut graph.proof_scopes);
     let refresh = scopes.refresh(graph, reach, changes)?;
     graph.proof_scopes = scopes;

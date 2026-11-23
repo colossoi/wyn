@@ -4,7 +4,7 @@ use crate::egglog::graph::Formula;
 use crate::egglog::graph::Graph;
 use crate::egglog::{query::Query, OptimizeError};
 use crate::memory_ir::{Definition, OperationId, RegionId, ValueRef};
-use crate::LookupMap;
+use crate::{LookupMap, LookupSet};
 use egglog_engine::{Value, Write};
 use std::borrow::Cow;
 use std::hash::Hash;
@@ -188,21 +188,53 @@ impl Reuse<Value> {
     }
 }
 
+/// Forget completed searches in the lexical roots touched by the edit journal.
+pub(in crate::egglog) fn invalidate(graph: &mut Graph) {
+    if graph.clean_expression_roots.is_empty() {
+        return;
+    }
+    let changes = &graph.proof_changes;
+    let mut regions = changes.regions.clone();
+    regions.extend(&graph.dirty_orders);
+    {
+        let structure = graph.structure().read();
+        regions.extend(changes.operations.iter().filter_map(|op| structure.operations.get(op)?.region));
+    }
+    let mut visited = LookupSet::new();
+    for mut region in regions {
+        while visited.insert(region) {
+            graph.clean_expression_roots.remove(&region);
+            let Some(parent) = graph.region_owner(region).and_then(|op| graph.region_of(op)) else {
+                break;
+            };
+            region = parent;
+        }
+    }
+}
+
 pub(in crate::egglog) fn find(
-    query: Query<'_>,
+    graph: &mut Graph,
     roots: Vec<Value>,
 ) -> Result<LookupMap<Value, Value>, OptimizeError> {
+    invalidate(graph);
     let mut reuse = Reuse::<Value>::default();
     let mut products = LookupMap::new();
     for region in roots {
-        reuse.execution_region(query, region, &mut products)?;
+        if graph.clean_expression_roots.contains(&region) {
+            continue;
+        }
+        let previous = reuse.replacements.len();
+        reuse.execution_region(Query(graph), region, &mut products)?;
+        if reuse.replacements.len() == previous {
+            graph.clean_expression_roots.insert(region);
+        }
     }
     Ok(reuse.replacements)
 }
 
 pub(in crate::egglog) fn publish(graph: &mut Graph) -> Result<(), OptimizeError> {
-    let query = Query(graph);
-    let replacements = find(query, query.live_roots()?)?;
+    let roots = Query(graph).live_roots()?;
+    let replacements = find(graph, roots)?;
     graph.update(|mut sink| {
         for (old, new) in replacements {
             sink.add("ForwardCandidate", (old, new))?;
