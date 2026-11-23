@@ -108,7 +108,7 @@ pub(super) fn visit(
         Code::Product => ("ProductOperation", Keys::Operation),
         Code::Project { index } => ("ProjectionOperation", Keys::Slot(*index as i64)),
         Code::Length { axis } => ("LengthOperation", Keys::Slot(*axis as i64)),
-        Code::Index => ("IndexOperation", Keys::Operation),
+        Code::Index | Code::TraversalInput => ("IndexOperation", Keys::Operation),
         Code::IndexValue => ("IndexCalculationOperation", Keys::Operation),
         Code::Scratch => ("ScratchAllocation", Keys::Operation),
         Code::Call => ("CallOperation", Keys::Operation),

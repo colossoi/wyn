@@ -55,6 +55,8 @@ pub(in crate::egglog) enum Code {
         axis: usize,
     },
     Index,
+    /// Reads a declared traversal input at the lane coordinate.
+    TraversalInput,
     Scratch,
     IndexValue,
     Call,
@@ -145,6 +147,7 @@ pub(in crate::egglog) fn properties(
             | Code::Project { .. }
             | Code::Length { .. }
             | Code::Index
+            | Code::TraversalInput
             | Code::IndexValue
             | Code::View
             | Code::Range
@@ -179,7 +182,7 @@ pub(in crate::egglog) fn properties(
             sink.add("DiscardableOperation", operation)?;
             sink.add("RepeatableOperation", operation)?;
         }
-        Code::Index => {
+        Code::Index | Code::TraversalInput => {
             sink.add("IndexOperation", operation)?;
             sink.add("ReadsInput", (operation, 0_i64))?;
             sink.add("OrderedOperation", operation)?;

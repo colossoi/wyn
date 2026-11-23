@@ -1,8 +1,8 @@
-//! Find possible scan consumers from their actual loads and enclosing traversal.
+//! Find scan epilogue candidates through declared traversal inputs.
 use crate::egglog::dataflow::ir::Code;
 use crate::egglog::graph::Graph;
 use crate::egglog::{query::Query, OptimizeError};
-use crate::LookupSet;
+use crate::LookupMap;
 use egglog_engine::{Value, Write};
 
 pub(super) fn seed(graph: &mut Graph) -> Result<(), OptimizeError> {
@@ -39,16 +39,14 @@ pub(super) fn seed(graph: &mut Graph) -> Result<(), OptimizeError> {
                 continue;
             }
             let extent = graph.domain_extent(domain, 0)?;
-            let candidates = consumers(query, region, outputs)?;
+            let mut candidates = consumers(query, region, outputs)?;
             if candidates.is_empty() {
                 continue;
             }
             for &next in &operations[position + 1..] {
-                if candidates.contains(&next) {
+                if let Some(loads) = candidates.remove(&next) {
                     let domain = graph.operation_domain(next)?;
-                    if graph.domain_rank(domain)? == 1 {
-                        pairs.push((first, next, extent == graph.domain_extent(domain, 0)?));
-                    }
+                    pairs.push((first, next, extent == graph.domain_extent(domain, 0)?, loads));
                 }
                 if !query.contains("DiscardableOperation", next)?
                     || !query.contains("RepeatableOperation", next)?
@@ -60,8 +58,11 @@ pub(super) fn seed(graph: &mut Graph) -> Result<(), OptimizeError> {
         }
     }
     graph.update(|mut sink| {
-        for (first, next, same_extent) in pairs {
+        for (first, next, same_extent, loads) in pairs {
             sink.add("EpilogueCandidate", (first, next))?;
+            for load in loads {
+                sink.add("EpilogueInputLoad", (first, next, load))?;
+            }
             if same_extent {
                 sink.add("EpilogueDomainPrefix", (first, next, 1_i64))?;
             }
@@ -75,15 +76,15 @@ fn consumers(
     query: Query<'_>,
     parent: Value,
     outputs: Vec<Value>,
-) -> Result<LookupSet<Value>, OptimizeError> {
+) -> Result<LookupMap<Value, Vec<Value>>, OptimizeError> {
     let graph = query.0;
     let structure = graph.structure().read();
-    let mut candidates = LookupSet::new();
+    let mut candidates = LookupMap::<_, Vec<_>>::new();
     for output in outputs {
         for &(load, slot) in structure.inputs.uses.get(&output).into_iter().flatten() {
             if slot != 0
-                || !query.contains("IndexOperation", load)?
                 || !query.contains("LiveOperation", load)?
+                || graph.code(load)? != Code::TraversalInput
             {
                 continue;
             }
@@ -103,7 +104,13 @@ fn consumers(
                     if matches!(graph.code(owner)?, Code::Parallel)
                         && structure.controls.get(&(owner, 0)).is_some_and(|edge| edge.region == region)
                     {
-                        candidates.insert(owner);
+                        let domain = graph.operation_domain(owner)?;
+                        if graph.domain_rank(domain)? == 1 && graph.input_count(load) == 2 {
+                            let axis = graph.domain_axis(domain, 0)?;
+                            if query.constructor("ValueNameRef", axis)? == graph.input_at(load, 1) {
+                                candidates.entry(owner).or_default().push(load);
+                            }
+                        }
                     }
                     break;
                 }

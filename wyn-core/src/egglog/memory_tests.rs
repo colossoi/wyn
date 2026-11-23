@@ -506,55 +506,6 @@ fn fusion_forwards_pointwise_reads_and_retains_both_results() -> Result<(), Opti
 }
 
 #[test]
-fn fusion_proves_a_computed_index_selects_the_produced_lane() -> Result<(), OptimizeError> {
-    let mut graph = fusion_case(true)?;
-    let query = Query(&graph);
-    let root = test_graph::root(&graph);
-    let maps = query
-        .operations(root)?
-        .into_iter()
-        .filter(|&operation| query.contains("ParallelOperation", operation).unwrap())
-        .collect::<Vec<_>>();
-    let lane = query.0.control_region(maps[1], 0_i64)?;
-    let load = query
-        .operations(lane)?
-        .into_iter()
-        .find(|&operation| query.contains("IndexOperation", operation).unwrap())
-        .unwrap();
-    let axis = query.name(query.0.input(load, 1_i64)?)?;
-    let ty = query.required("ValueType", axis)?;
-    graph.update(|mut sink| {
-        Ok((|| -> Result<(), OptimizeError> {
-            let mut left = axis;
-            for (id, operator) in [(1000_i64, BinaryOperator::Add), (1001, BinaryOperator::Subtract)] {
-                let result = sink.add("ValueId", id)?;
-                let operation = ir::operation(
-                    &mut sink,
-                    id,
-                    Code::Scalar(Payload::Binary(operator)),
-                    &[Name::Value(left), Name::Value(axis)],
-                )?;
-                ir::outputs(&mut sink, operation, &[Name::Value(result)])?;
-                sink.set("ValueType", result, ty)?;
-                sink.set_region(operation.0, lane);
-                sink.set_order(operation.0, id - 1002);
-                left = result;
-            }
-            let index = sink.add("ValueNameRef", left)?;
-            sink.set_input(load, 1_i64, index)?;
-            Ok(())
-        })())
-    })??;
-    crate::egglog::fusion::run(&mut graph)?;
-    super::validate(&mut graph)?;
-    let query = Query(&graph);
-    assert!(query.contains("LiveOperation", maps[0])?);
-    assert!(!query.contains("LiveOperation", maps[1])?);
-    assert!(!query.contains("LiveOperation", load)?);
-    Ok(())
-}
-
-#[test]
 fn fusion_keeps_the_reducer_with_its_result() -> Result<(), OptimizeError> {
     let mut graph = test_graph::import(
         "entry main(xs:[8]i32) ([8]i32,i32) =

@@ -848,6 +848,10 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
         self.operation(Code::Index, &[Name::Value(source), Name::Value(index)])
     }
 
+    fn traversal_input(&mut self, source: Value, index: Value) -> Result<OperationId, OptimizeError> {
+        self.operation(Code::TraversalInput, &[Name::Value(source), Name::Value(index)])
+    }
+
     fn row_type(ty: &Type) -> Result<Type, OptimizeError> {
         if let Type::Constructed(name @ (TypeName::Tuple(_) | TypeName::Record(_)), fields) =
             strip_existentials(ty)
@@ -1023,13 +1027,12 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                     return Err(output_error("zip has no inputs"));
                 };
                 let (domain, index) = self.iteration(first, scope)?;
-                let position = index.name;
                 let mut inner = Scope::default();
                 let mut fields = Vec::new();
                 let mut types = Vec::new();
                 for source in values {
                     let row_type = Self::row_type(&source.ty)?;
-                    let expression = self.index_operation(source.name, position)?;
+                    let expression = self.traversal_input(source.name, index.name)?;
                     let value = Self::leaf(self.emit(expression, &row_type, &mut inner)?)?;
                     fields.push(value.name);
                     types.push(row_type);
@@ -1204,11 +1207,10 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                     return Err(output_error("map has no inputs"));
                 };
                 let (domain, index) = self.iteration(first, scope)?;
-                let position = index.name;
                 let mut inner = Scope::default();
                 let mut arguments = Vec::new();
                 for input in inputs {
-                    let expression = self.index_operation(input.name, position)?;
+                    let expression = self.traversal_input(input.name, index.name)?;
                     arguments.push(self.emit(expression, &Self::row_type(&input.ty)?, &mut inner)?);
                 }
                 let value = self.apply_callback(lam, arguments, &mut inner)?;
@@ -1221,9 +1223,8 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                 let neutral = self.atom(ne, scope)?;
                 let combine = self.callback(op, scope)?;
                 let (domain, index) = self.iteration(&input, scope)?;
-                let position = index.name;
                 let mut inner = Scope::default();
-                let expression = self.index_operation(input.name, position)?;
+                let expression = self.traversal_input(input.name, index.name)?;
                 let value = self.emit(expression, &Self::row_type(&input.ty)?, &mut inner)?;
                 let result = self.result(&value)?;
                 let kind = self.unit(if matches!(operator, SoacOp::Scan { .. }) {
@@ -1243,9 +1244,8 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
             SoacOp::Filter { pred, input } => {
                 let input = Self::leaf(self.array(input, scope)?)?;
                 let (domain, index) = self.iteration(&input, scope)?;
-                let position = index.name;
                 let mut inner = Scope::default();
-                let expression = self.index_operation(input.name, position)?;
+                let expression = self.traversal_input(input.name, index.name)?;
                 let value = self.emit(expression, &Self::row_type(&input.ty)?, &mut inner)?;
                 let condition = Self::leaf(self.apply_callback(pred, vec![value.clone()], &mut inner)?)?;
                 let condition = condition.name;
@@ -1476,11 +1476,10 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
             return Err(output_error("scatter has no input"));
         };
         let (domain, index) = self.iteration(first, scope)?;
-        let position = index.name;
         let mut lane = Scope::default();
         let mut arguments = Vec::new();
         for source in sources {
-            let expression = self.index_operation(source.name, position)?;
+            let expression = self.traversal_input(source.name, index.name)?;
             arguments.push(self.emit(expression, &Self::row_type(&source.ty)?, &mut lane)?);
         }
         let contribution = Self::leaf(self.apply_callback(callback, arguments, &mut lane)?)?;
@@ -1530,9 +1529,9 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
         let (domain, index) = self.iteration(&indices, scope)?;
         let position = index.name;
         let mut lane = Scope::default();
-        let expression = self.index_operation(indices.name, position)?;
+        let expression = self.traversal_input(indices.name, position)?;
         let index = Self::leaf(self.emit(expression, &Self::row_type(&indices.ty)?, &mut lane)?)?;
-        let expression = self.index_operation(values.name, position)?;
+        let expression = self.traversal_input(values.name, position)?;
         let value = Self::leaf(self.emit(expression, &Self::row_type(&values.ty)?, &mut lane)?)?;
         let value = value.name;
         let token = self.accumulate(token, info, index.name, value, &mut lane)?;

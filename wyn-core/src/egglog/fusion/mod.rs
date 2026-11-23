@@ -73,14 +73,14 @@ fn collected_map(query: Query<'_>, operation: Value) -> Result<Option<MapLevel>,
         return Ok(None);
     }
     let axis = query.0.domain_axis(domain, 0_i64)?;
+    let Some(axis) = query.constructor("ValueNameRef", axis)? else {
+        return Err(super::output_error("axis name missing"));
+    };
     let mut found = None;
     for candidate in query.operations(region)? {
-        if query.contains("IndexOperation", candidate)?
+        if query.0.code(candidate)? == Code::TraversalInput
             && query.0.input_count(candidate) == 2
-            && query.0.input(candidate, 1_i64)?
-                == query
-                    .constructor("ValueNameRef", axis)?
-                    .ok_or_else(|| super::output_error("axis name missing"))?
+            && query.0.input(candidate, 1_i64)? == axis
         {
             found = Some(candidate);
             break;

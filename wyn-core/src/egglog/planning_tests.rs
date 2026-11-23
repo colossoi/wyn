@@ -36,7 +36,7 @@ fn whole_row_fusion_preserves_conflicting_callback_effects() {
                 (2, Code::Scalar(crate::egglog::payload::Payload::Unit)),
                 (3, Code::Parallel),
                 (4, Code::Scalar(crate::egglog::payload::Payload::Vector)),
-                (5, Code::Index),
+                (5, Code::TraversalInput),
             ],
             &facts,
         )
@@ -1315,11 +1315,12 @@ fn calibrated_costs_select_among_the_same_legal_map_executions() {
 fn scan_epilogues_require_pointwise_reads_and_completed_captures() {
     use crate::egglog::payload::Payload;
     use crate::op::BinaryOperator;
-    for (index, bias, opcode, expected) in [
-        (11, 1001, BinaryOperator::Add, true),
-        (1000, 1001, BinaryOperator::Add, false),
-        (11, 3, BinaryOperator::Add, true),
-        (11, 1000, BinaryOperator::Divide, false),
+    for (index, bias, opcode, input, expected) in [
+        (11, 1001, BinaryOperator::Add, Code::TraversalInput, true),
+        (1000, 1001, BinaryOperator::Add, Code::TraversalInput, false),
+        (11, 3, BinaryOperator::Add, Code::TraversalInput, true),
+        (11, 1000, BinaryOperator::Divide, Code::TraversalInput, false),
+        (11, 1001, BinaryOperator::Add, Code::Index, false),
     ] {
         let facts = include_str!("tests/scan_epilogue.egg")
             .replace("INDEX", &format!("(ValueNameRef (ValueId {index}))"))
@@ -1349,9 +1350,9 @@ fn scan_epilogues_require_pointwise_reads_and_completed_captures() {
                     },
                 ),
                 (0, Code::Parallel),
-                (1, Code::Index),
+                (1, Code::TraversalInput),
                 (3, Code::Parallel),
-                (4, Code::Index),
+                (4, input.clone()),
                 (5, Code::Scalar(Payload::Binary(opcode))),
                 (20, Code::Scalar(Payload::Binary(BinaryOperator::Add))),
             ],
@@ -1363,7 +1364,7 @@ fn scan_epilogues_require_pointwise_reads_and_completed_captures() {
         assert_eq!(
             Query(&graph).first("ScanEpilogue").unwrap().is_some(),
             expected,
-            "index={index} bias={bias} opcode={opcode:?}"
+            "index={index} bias={bias} opcode={opcode:?} input={input:?}"
         );
     }
 }

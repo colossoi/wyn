@@ -1160,7 +1160,11 @@ impl State<'_, '_, '_> {
         let code = &self.operations.get(&operation)?.code;
         if !matches!(
             code,
-            Code::Scalar(_) | Code::Index | Code::Length { .. } | Code::Project { .. }
+            Code::Scalar(_)
+                | Code::Index
+                | Code::TraversalInput
+                | Code::Length { .. }
+                | Code::Project { .. }
         ) {
             return None;
         }
@@ -1168,7 +1172,9 @@ impl State<'_, '_, '_> {
         let inputs = graph.inputs.values.get(&operation)?;
         match (code, inputs.as_slice()) {
             (Code::Scalar(_), [left, right]) => Some(OperandProof::Binary(*left, *right)),
-            (Code::Index, [array, index]) => Some(OperandProof::Index(*array, *index)),
+            (Code::Index | Code::TraversalInput, [array, index]) => {
+                Some(OperandProof::Index(*array, *index))
+            }
             (Code::Project { index }, [source]) => Some(OperandProof::Projection {
                 slot: *index as i64,
                 source: *source,

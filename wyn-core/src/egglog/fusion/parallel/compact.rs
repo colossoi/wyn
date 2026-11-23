@@ -1,8 +1,6 @@
 //! Stream pointwise consumers over packed outputs on the current region graph.
 use super::body::{ClauseId, ClauseKind};
-use super::{
-    barriers, domains, effects_conflict, fuse_region, pointwise_index, Body, Code, Effects, Query, Site,
-};
+use super::{barriers, domains, effects_conflict, fuse_region, Body, Code, Effects, Query, Site};
 use crate::egglog::graph::Graph;
 use crate::egglog::{output_error, planning, timing, OptimizeError};
 use crate::memory_ir::{OperationId, RegionId, UseSite, ValueRef};
@@ -197,7 +195,6 @@ fn legal(
         .flatten();
     let ordinal = ordinal.map(|name| body.resolve(name));
     let mut loads = Vec::new();
-    let mut index_ops = LookupSet::new();
     for (site, name) in body.tree_uses(second) {
         let Some(&value) = body.graph.refs.get(&name) else {
             return Ok(None);
@@ -218,7 +215,7 @@ fn legal(
                     || (result.kind == ClauseKind::Compacted
                         && result.predicate == body.clause(producer).predicate);
                 if !same_stream
-                    || !body.is_code(load, &Code::Index)
+                    || !body.is_code(load, &Code::TraversalInput)
                     || !body.inside(body.positions[load].0, lane)
                 {
                     return Ok(None);
@@ -226,10 +223,9 @@ fn legal(
                 let [_, index] = inputs[..] else {
                     return Ok(None);
                 };
-                let Some(proof) = pointwise_index(query, body, index, axis)? else {
+                if body.graph.names[&index] != axis {
                     return Ok(None);
-                };
-                index_ops.extend(proof);
+                }
                 loads.push((load, forwarded));
                 continue;
             }
@@ -243,20 +239,17 @@ fn legal(
             return Ok(None);
         }
     }
-    let pointwise: LookupSet<_> = loads.iter().map(|&(load, _)| load).collect();
-    let indices = std::iter::once(axis)
-        .chain(ordinal)
-        .chain(index_ops.iter().map(|&op| body.graph.names[&ValueRef::Result(op, 0)]));
+    let forwarded: LookupSet<_> = loads.iter().map(|&(load, _)| load).collect();
     if loads.is_empty()
-        || indices.flat_map(|name| body.users(name)).any(|site| {
-            !matches!(site, Site::Operand(UseSite::Input(op, slot))
-            if index_ops.contains(&op) || (slot == 1 && pointwise.contains(&op)))
-        })
+        || std::iter::once(axis)
+            .chain(ordinal)
+            .flat_map(|name| body.users(name))
+            .any(|site| !matches!(site, Site::Operand(UseSite::Input(op, 1)) if forwarded.contains(&op)))
     {
         return Ok(None);
     }
     match body.clause(consumer).kind {
-        ClauseKind::Collected if !safe_region(query, body, lane, &pointwise)? => return Ok(None),
+        ClauseKind::Collected if !safe_region(query, body, lane, &forwarded)? => return Ok(None),
         ClauseKind::Folded if !maskable(graph, body, second, consumer)? => return Ok(None),
         _ => {}
     }

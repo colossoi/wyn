@@ -1,11 +1,9 @@
 //! Keep parallel candidate discovery, splices and cleanup on the same Rust graph.
 use super::super::dataflow::ir::Code;
-use super::super::payload::Payload;
 use super::super::query::Query;
 use super::super::{analysis, timing, OptimizeError};
 use crate::egglog::graph::Graph;
 use crate::memory_ir::{OperationId, RegionId, UseSite, ValueRef};
-use crate::op::BinaryOperator;
 use crate::{LookupMap, LookupSet};
 use egglog_engine::{RawValues, Value, Write};
 use std::collections::VecDeque;
@@ -25,7 +23,6 @@ pub(super) use compact::compact;
 pub(super) use hoist::hoist;
 pub(super) use motion::run as move_siblings;
 
-#[derive(Clone)]
 struct Domain {
     execution: Value,
     extents: Vec<(Value, Option<Value>)>,
@@ -313,7 +310,6 @@ fn legal(
 ) -> Result<Option<Vec<(OperationId, Value)>>, OptimizeError> {
     let first_lane = body.lane(first)?;
     let second_lane = body.lane(second)?;
-    let domain = body.domains[second].clone();
     let region = body.positions[first].0;
     let second_regions = body.subregions(second);
     let mut loads = Vec::new();
@@ -330,20 +326,18 @@ fn legal(
         let Site::Operand(UseSite::Input(load, 0)) = site else {
             return Ok(None);
         };
-        if !body.is_code(load, &Code::Index) || !body.inside(body.positions[load].0, second_lane) {
+        if !body.is_code(load, &Code::TraversalInput) || !body.inside(body.positions[load].0, second_lane) {
             return Ok(None);
         }
         let Some(value) = body.forwarded_value(first, slot) else {
             return Ok(None);
         };
+        let domain = &body.domains[second];
         let indices = &body.graph.ir.operations[load].inputs[1..];
-        if indices.len() != domain.extents.len() || indices.len() != domain.axes.len() {
+        if indices.len() != domain.extents.len()
+            || indices.iter().map(|index| body.graph.names[index]).ne(domain.axes.iter().copied())
+        {
             return Ok(None);
-        }
-        for (&index, &axis) in indices.iter().zip(&domain.axes) {
-            if pointwise_index(Query(graph), body, index, axis)?.is_none() {
-                return Ok(None);
-            }
         }
         loads.push((load, value));
     }
@@ -445,48 +439,4 @@ fn effects_conflict(
     })?;
     graph.parse_and_run_program(None, "(run-schedule (run parallel-effects))")?;
     Query(graph).contains("ParallelEffectConflict", RawValues(vec![]))
-}
-
-fn pointwise_index(
-    query: Query<'_>,
-    body: &Body,
-    index: ValueRef,
-    axis: Value,
-) -> Result<Option<Vec<OperationId>>, OptimizeError> {
-    let name = body.graph.names[&index];
-    if name == axis {
-        return Ok(Some(Vec::new()));
-    }
-    let ValueRef::Result(sub, 0) = index else {
-        return Ok(None);
-    };
-    let [ValueRef::Result(add, 0), delta] = &body.graph.ir.operations[sub].inputs[..] else {
-        return Ok(None);
-    };
-    if !body.is_code(sub, &Code::Scalar(Payload::Binary(BinaryOperator::Subtract)))
-        || !body.is_code(*add, &Code::Scalar(Payload::Binary(BinaryOperator::Add)))
-    {
-        return Ok(None);
-    }
-    let [a, b] = &body.graph.ir.operations[*add].inputs[..] else {
-        return Ok(None);
-    };
-    let Some(width) = query.lookup("ValuePrimitive", name)? else {
-        return Ok(None);
-    };
-    if !query.contains("IntegerScalar", width)? {
-        return Ok(None);
-    }
-    let sum = body.graph.names[&ValueRef::Result(*add, 0)];
-    let (a, b, delta) = (body.graph.names[a], body.graph.names[b], body.graph.names[delta]);
-    if (a, b) != (axis, delta) && (a, b) != (delta, axis) {
-        return Ok(None);
-    }
-    for operand in [axis, a, b, delta, sum] {
-        if query.lookup("ValuePrimitive", operand)? != Some(width) {
-            return Ok(None);
-        }
-    }
-    // Addition and subtraction cancel in one wrapping integer type.
-    Ok(Some(vec![*add, sub]))
 }

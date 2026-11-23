@@ -353,7 +353,7 @@ impl Body<'_, '_, '_> {
                     vec![dimension]
                 }
             }
-            Code::Index => {
+            Code::Index | Code::TraversalInput => {
                 let mut array = self.named(inputs[0])?;
                 for &name in &inputs[1..] {
                     let index = self.named(name)?;

@@ -148,7 +148,10 @@ fn arrays_stay_read_only(query: Query<'_>, body: &Body, op: OperationId) -> Resu
             if matches!(user.definition, Definition::Other(Code::Length { .. })) {
                 continue;
             }
-            if !matches!(user.definition, Definition::Other(Code::Index)) {
+            if !matches!(
+                user.definition,
+                Definition::Other(Code::Index | Code::TraversalInput)
+            ) {
                 return Ok(false);
             }
             if query.enode("ScalarInfo", user.result_types[0])?.is_none() {
