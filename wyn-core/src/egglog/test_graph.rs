@@ -2,7 +2,9 @@
 use super::dataflow::ir::{self, Code};
 use super::query::Query;
 use super::{from_tlc, memory, OptimizeError};
-use crate::egglog::graph::{CollectiveInput, Formula, Graph, OutputBinding, ParallelResults};
+use crate::egglog::graph::{
+    CollectiveInput, Dimension, Formula, Graph, IterationDomain, OutputBinding, ParallelResults,
+};
 use egglog_engine::{Value, Write};
 
 pub(super) fn fixture(codes: &[(i64, Code)], facts: &str) -> Result<Graph, OptimizeError> {
@@ -12,7 +14,7 @@ pub(super) fn fixture(codes: &[(i64, Code)], facts: &str) -> Result<Graph, Optim
         Ok((|| -> Result<(), OptimizeError> {
             for (id, code) in codes {
                 let operation = sink.add("OperationId", *id)?;
-                sink.add("Operation", operation)?;
+
                 ir::properties(&mut sink, operation, code.clone())?;
             }
             Ok(())
@@ -28,7 +30,17 @@ pub(super) fn import(source: &str) -> Result<Graph, OptimizeError> {
 }
 
 pub(super) fn entry(graph: &Graph) -> Value {
-    Query(graph).first("EntryOrder").unwrap().unwrap()[0]
+    graph.entries()[0].0
+}
+
+pub(super) fn for_entries(
+    query: Query<'_>,
+    mut visit: impl FnMut(&[Value], Value) -> Result<(), OptimizeError>,
+) -> Result<(), OptimizeError> {
+    for (function, order) in query.0.entries() {
+        visit(&[function], query.0.base_to_value(order))?;
+    }
+    Ok(())
 }
 
 pub(super) fn root(graph: &Graph) -> Value {
@@ -40,6 +52,8 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
         "FixtureRegion",
         "FixtureOrder",
         "FixtureFunctionRoot",
+        "FixtureEntryOrder",
+        "FixtureExternal",
         "FixtureCallTarget",
         "FixtureControlRegion",
         "FixtureInput",
@@ -55,6 +69,11 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
         "FixtureResultNeutral",
         "FixtureResultPredicate",
         "FixtureAccumulatorArray",
+        "FixtureOperationDomain",
+        "FixtureDomainRank",
+        "FixtureDomainAxis",
+        "FixtureDomainOrdinal",
+        "FixtureDomainExtent",
         "FixtureResultKindOf",
         "FixtureResultCount",
         "FixtureOutputClause",
@@ -74,6 +93,8 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
             (function FixtureRegion (OperationKey) RegionKey :no-merge)
             (function FixtureOrder (OperationKey) i64 :no-merge)
             (function FixtureFunctionRoot (FunctionName) RegionKey :no-merge)
+            (function FixtureEntryOrder (FunctionName) i64 :no-merge)
+            (relation FixtureExternal (FunctionName))
             (function FixtureCallTarget (OperationKey) FunctionName :no-merge)
             (function FixtureControlRegion (OperationKey i64) RegionKey :no-merge)
             (function FixtureInput (OperationKey i64) Name :no-merge)
@@ -89,6 +110,11 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
             (function FixtureResultNeutral (OperationKey i64 i64) Name :no-merge)
             (function FixtureResultPredicate (OperationKey i64) ValueName :no-merge)
             (function FixtureAccumulatorArray (OperationKey i64 i64) ValueName :no-merge)
+            (function FixtureOperationDomain (OperationKey) Domain :no-merge)
+            (function FixtureDomainRank (Domain) i64 :no-merge)
+            (function FixtureDomainAxis (Domain i64) ValueName :no-merge)
+            (function FixtureDomainOrdinal (Domain) ValueName :no-merge)
+            (function FixtureDomainExtent (Domain i64) IndexExp :no-merge)
             (function FixtureResultKindOf (OperationKey i64) ResultKind :no-merge)
             (function FixtureResultCount (OperationKey) i64 :no-merge)
             (function FixtureOutputClause (OperationKey i64) i64 :no-merge)
@@ -113,6 +139,16 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
         Ok(())
     })?;
     let mut roots = Vec::new();
+    let mut entries = Vec::new();
+    let mut externals = Vec::new();
+    query.for_function("FixtureEntryOrder", |key, order| {
+        entries.push((key[0], graph.value_to_base::<i64>(order)));
+        Ok(())
+    })?;
+    query.for_each("FixtureExternal", |row| {
+        externals.push(row[0]);
+        Ok(())
+    })?;
     let mut targets = Vec::new();
     query.for_function("FixtureFunctionRoot", |key, region| {
         roots.push((key[0], region));
@@ -231,7 +267,44 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
         groups[group] = Some(policy);
         Ok(())
     })?;
+    let mut op_domains = Vec::new();
+    let mut domains = crate::LookupMap::<Value, IterationDomain>::new();
+    query.for_function("FixtureOperationDomain", |keys, domain| {
+        op_domains.push((keys[0], domain));
+        Ok(())
+    })?;
+    query.for_function("FixtureDomainRank", |keys, rank| {
+        domains
+            .entry(keys[0])
+            .or_default()
+            .dimensions
+            .resize(graph.value_to_base::<i64>(rank) as usize, Dimension::default());
+        Ok(())
+    })?;
+    query.for_function("FixtureDomainOrdinal", |keys, ordinal| {
+        domains.entry(keys[0]).or_default().ordinal = Some(ordinal);
+        Ok(())
+    })?;
+    for table in ["FixtureDomainAxis", "FixtureDomainExtent"] {
+        query.for_function(table, |keys, value| {
+            let slot = graph.value_to_base::<i64>(keys[1]) as usize;
+            let dimensions = &mut domains.entry(keys[0]).or_default().dimensions;
+            dimensions.resize(dimensions.len().max(slot + 1), Dimension::default());
+            if table == "FixtureDomainAxis" {
+                dimensions[slot].coordinate = Some(value);
+            } else {
+                dimensions[slot].extent = Some(value);
+            }
+            Ok(())
+        })?;
+    }
     graph.update(|mut sink| {
+        for (op, domain) in op_domains {
+            sink.set_operation_domain(op, domain);
+        }
+        for (id, domain) in domains {
+            sink.set_domain(id, domain);
+        }
         for (op, results) in descriptors {
             sink.set_parallel_results(op, results);
         }
@@ -261,7 +334,6 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
             sink.set("RegionOwnedBy", region, op)?;
         }
         for (region, mut names) in parameters {
-            sink.add("Region", region)?;
             names.sort_unstable_by_key(|&(slot, _)| slot);
             assert!(names.iter().enumerate().all(|(i, &(slot, _))| i as i64 == slot));
             for &(slot, name) in &names {
@@ -300,6 +372,12 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
         for (operation, slot, child) in controls {
             sink.set_control(operation, slot, child);
             sink.set("RegionOwnedBy", child, operation)?;
+        }
+        for (function, order) in entries {
+            sink.set_entry(function, order);
+        }
+        for function in externals {
+            sink.set_external(function);
         }
         for (function, region) in roots {
             sink.set_function_root(function, region);

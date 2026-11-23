@@ -6,7 +6,7 @@ use crate::LookupSet;
 use egglog_engine::Value;
 
 pub(super) fn function(query: Query<'_>, function: Value) -> Result<(), OptimizeError> {
-    if query.contains("External", function)? {
+    if query.0.is_external(function) {
         return Ok(());
     }
     let root = query.0.function_root(function)?;
@@ -21,7 +21,7 @@ pub(super) fn function(query: Query<'_>, function: Value) -> Result<(), Optimize
             name,
             query.required("FunctionResultType", (function, slot))?,
         )?;
-        if query.lookup("EntryOrder", function)?.is_some() && query.enode("AccNameRef", name)?.is_some() {
+        if query.0.entry_order(function).is_some() && query.enode("AccNameRef", name)?.is_some() {
             return Err(output_error(
                 "entry result cannot expose an accumulator capability",
             ));
@@ -33,7 +33,7 @@ pub(super) fn function(query: Query<'_>, function: Value) -> Result<(), Optimize
 pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), OptimizeError> {
     if query.contains("CallOperation", operation)? {
         let target = query.0.call_target(operation)?;
-        let external = query.contains("External", target)?;
+        let external = query.0.is_external(target);
         let root = if external { None } else { Some(query.0.function_root(target)?) };
         for slot in 0..query.0.input_count(operation) {
             let argument = query.0.input(operation, slot)?;
@@ -88,19 +88,19 @@ pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), Optimi
         boolean(query, condition)?;
     }
     if query.contains("ParallelOperation", operation)? {
-        let domain = query.required("OperationDomain", operation)?;
-        let rank = count(query, "DomainRank", domain)?;
+        let domain = query.0.operation_domain(operation)?;
+        let rank = query.0.domain_rank(domain)?;
         let lane = query.0.control_region(operation, 0_i64)?;
         if query.0.parameter_count(lane) != rank + 1 {
             return Err(output_error("parallel parameters differ from its domain"));
         }
         let ordinal = query.name(query.0.parameter(lane, 0_i64)?)?;
-        if query.required("DomainOrdinal", domain)? != ordinal {
+        if query.0.domain_ordinal(domain)? != ordinal {
             return Err(output_error("parallel ordinal is not its lane parameter"));
         }
         for slot in 0..rank {
             let axis = query.name(query.0.parameter(lane, slot + 1)?)?;
-            if query.required("DomainAxis", (domain, slot))? != axis {
+            if query.0.domain_axis(domain, slot)? != axis {
                 return Err(output_error("parallel coordinate is not its lane parameter"));
             }
         }

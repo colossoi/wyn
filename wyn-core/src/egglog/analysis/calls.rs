@@ -122,18 +122,10 @@ pub(super) fn publish(graph: &mut Graph, for_inlining: bool) -> Result<(), Optim
     }
     let function_roots: Vec<_> =
         positions.roots.iter().map(|(&function, &root)| (function, root)).collect();
+    let functions: Vec<_> = positions.roots.keys().copied().collect();
+    let mut roots: Vec<_> = positions.entries.keys().copied().collect();
     drop(positions);
     let call_graph = CallGraph { calls };
-    let mut functions = Vec::new();
-    query.for_each("Function", |row| {
-        functions.push(row[0]);
-        Ok(())
-    })?;
-    let mut roots = Vec::new();
-    query.for_function("EntryOrder", |keys, _| {
-        roots.push(keys[0]);
-        Ok(())
-    })?;
     if query.flag("RetainAllFunctions", RawValues(Vec::new()))? {
         roots.extend_from_slice(&functions);
     }

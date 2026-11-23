@@ -8,8 +8,33 @@ pub(super) fn publish(graph: &mut Graph, for_inlining: bool) -> Result<(), Optim
     let query = Query(graph);
     let mut demands = LookupSet::new();
     let mut uses = Vec::new();
+    let mut dimensions = Vec::new();
+    let mut lane_axes = Vec::new();
     {
         let structure = graph.structure().read();
+        if !for_inlining {
+            for (&operation, domain) in &structure.domains.operations {
+                if let Some(domain) = structure.domains.values.get(domain) {
+                    for dimension in &domain.dimensions {
+                        if let Some(extent) = dimension.extent {
+                            if let (Some(lane), Some(axis)) =
+                                (structure.controls.get(&(operation, 0)), dimension.coordinate)
+                            {
+                                lane_axes.push((lane.region, axis, extent));
+                            }
+                            uses.extend(
+                                formula_names(query, Formula::Index, extent)?
+                                    .into_iter()
+                                    .map(|name| (operation, name)),
+                            );
+                        }
+                    }
+                }
+            }
+            for (&domain, layout) in &structure.domains.values {
+                dimensions.extend((0..layout.dimensions.len()).map(|slot| (domain, slot as i64)));
+            }
+        }
         for (&kind, formulas) in &structure.formulas.by_kind {
             for (&operation, &formula) in formulas {
                 match kind {
@@ -29,10 +54,16 @@ pub(super) fn publish(graph: &mut Graph, for_inlining: bool) -> Result<(), Optim
             }
         }
     }
-    if demands.is_empty() && uses.is_empty() {
+    if demands.is_empty() && uses.is_empty() && dimensions.is_empty() {
         return Ok(());
     }
     graph.update(|mut sink| {
+        for axis in lane_axes {
+            sink.add("LaneAxisExtent", axis)?;
+        }
+        for axis in dimensions {
+            sink.add("IterationAxis", axis)?;
+        }
         for (demand, term) in demands {
             sink.add(demand, term)?;
         }

@@ -44,10 +44,10 @@ fn domains(query: Query<'_>) -> Result<LookupMap<Value, Domain>, OptimizeError> 
     query.for_each("ParallelOperation", |row| {
         let op = row[0];
         if let Some(execution) = query.lookup("OperationExecution", op)? {
-            let domain = query.required("OperationDomain", op)?;
-            let rank = query.0.value_to_base(query.required("DomainRank", domain)?);
+            let domain = query.0.operation_domain(op)?;
             let extents = query
-                .indexed("DomainExtent", &[domain], rank)?
+                .0
+                .domain_extents(domain)?
                 .into_iter()
                 .map(|extent| (extent, bounds.get(&extent).copied()))
                 .collect::<Vec<_>>();
@@ -58,7 +58,7 @@ fn domains(query: Query<'_>) -> Result<LookupMap<Value, Domain>, OptimizeError> 
             let next_group = groups.len();
             let group = *groups.entry((execution, key)).or_insert(next_group);
             let mut axes = Vec::new();
-            for axis in query.indexed("DomainAxis", &[domain], rank)? {
+            for axis in query.0.domain_axes(domain)? {
                 if let Some(name) = query.constructor("ValueNameRef", axis)? {
                     axes.push(name);
                 }

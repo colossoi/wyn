@@ -68,11 +68,11 @@ fn collected_map(query: Query<'_>, operation: Value) -> Result<Option<MapLevel>,
         return Ok(None);
     }
     let region = query.0.control_region(operation, 0_i64)?;
-    let domain = query.required("OperationDomain", operation)?;
-    if analysis::count(query, "DomainRank", domain)? != 1 {
+    let domain = query.0.operation_domain(operation)?;
+    if query.0.domain_rank(domain)? != 1 {
         return Ok(None);
     }
-    let axis = query.required("DomainAxis", (domain, 0_i64))?;
+    let axis = query.0.domain_axis(domain, 0_i64)?;
     let mut found = None;
     for candidate in query.operations(region)? {
         if query.contains("IndexOperation", candidate)?

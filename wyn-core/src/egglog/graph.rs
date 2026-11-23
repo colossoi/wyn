@@ -36,6 +36,8 @@ pub(super) struct ExecutableStructure {
     pub operations: LookupMap<Value, Position>,
     pub by_region: LookupMap<Value, LookupSet<Value>>,
     pub roots: StableMap<Value, Value>,
+    pub externals: LookupSet<Value>,
+    pub entries: StableMap<Value, i64>,
     pub targets: StableMap<Value, Value>,
     pub controls: LookupMap<(Value, i64), ControlEdge>,
     pub reducers: LookupMap<Value, Vec<(i64, Value)>>,
@@ -48,6 +50,7 @@ pub(super) struct ExecutableStructure {
     pub parallels: LookupMap<Value, ParallelResults>,
     pub accumulator_policies: LookupMap<Value, Vec<Option<Value>>>,
     pub formulas: OperationFormulas,
+    pub domains: Domains,
     pub parameters: LookupMap<Value, Vec<Value>>,
     arities: LookupSet<usize>,
 }
@@ -72,6 +75,64 @@ impl OutputBinding {
             field: Some(field),
             role: Some(role),
         }
+    }
+}
+
+#[derive(Clone, Default)]
+pub(super) struct IterationDomain {
+    pub ordinal: Option<Value>,
+    pub dimensions: Vec<Dimension>,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(super) struct Dimension {
+    pub coordinate: Option<Value>,
+    pub extent: Option<Value>,
+}
+
+impl Dimension {
+    pub fn new(coordinate: Value, extent: Value) -> Self {
+        Self {
+            coordinate: Some(coordinate),
+            extent: Some(extent),
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct Domains {
+    pub operations: LookupMap<Value, Value>,
+    pub values: LookupMap<Value, IterationDomain>,
+    pub extent_uses: LookupMap<Value, LookupSet<(Value, usize)>>,
+}
+
+impl Domains {
+    fn insert(&mut self, id: Value, domain: IterationDomain) {
+        if let Some(old) = self.values.remove(&id) {
+            for (slot, dimension) in old.dimensions.into_iter().enumerate() {
+                if let Some(extent) = dimension.extent {
+                    remove_use(&mut self.extent_uses, (id, slot), extent);
+                }
+            }
+        }
+        for (slot, dimension) in domain.dimensions.iter().enumerate() {
+            if let Some(extent) = dimension.extent {
+                self.extent_uses.entry(extent).or_default().insert((id, slot));
+            }
+        }
+        self.values.insert(id, domain);
+    }
+
+    fn set_extent(&mut self, id: Value, slot: usize, index: Value) -> Result<(), Error> {
+        let Some(dimension) = self.values.get_mut(&id).and_then(|domain| domain.dimensions.get_mut(slot))
+        else {
+            return Err(Error::BackendError(format!("missing axis {slot} on {id:?}")));
+        };
+        if let Some(old) = dimension.extent.replace(index) {
+            remove_use(&mut self.extent_uses, (id, slot), old);
+        }
+        self.extent_uses.entry(index).or_default().insert((id, slot));
+        Ok(())
     }
 }
 
@@ -126,6 +187,8 @@ impl Graph {
         let function = sort("FunctionName")?;
         let name = sort("Name")?;
         let value_name = sort("ValueName")?;
+        let domain = sort("Domain")?;
+        let index_expression = sort("IndexExp")?;
         let result_kind = sort("ResultKind")?;
         let result_role = sort("ResultRole")?;
         let acc_policy = sort("AccPolicy")?;
@@ -151,6 +214,21 @@ impl Graph {
             (Field::Region, vec![operation.clone()], region.clone()),
             (Field::Order, vec![operation.clone()], I64Sort.to_arcsort()),
             (Field::FunctionRoot, vec![function.clone()], region.clone()),
+            (Field::External, vec![function.clone()], BoolSort.to_arcsort()),
+            (Field::Entry, vec![function.clone()], BoolSort.to_arcsort()),
+            (Field::IterationDomain, vec![operation.clone()], domain.clone()),
+            (Field::DomainRank, vec![domain.clone()], index.clone()),
+            (
+                Field::DomainAxis,
+                vec![domain.clone(), index.clone()],
+                value_name.clone(),
+            ),
+            (Field::DomainOrdinal, vec![domain.clone()], value_name.clone()),
+            (
+                Field::DomainExtent,
+                vec![domain.clone(), index.clone()],
+                index_expression.clone(),
+            ),
             (
                 Field::ResultKind,
                 vec![operation.clone(), index.clone()],
@@ -279,6 +357,7 @@ impl Graph {
         &self.structure
     }
 
+    #[cfg(test)]
     pub fn function_roots(&self) -> impl Iterator<Item = (Value, Value)> {
         self.structure
             .read()
@@ -287,6 +366,18 @@ impl Graph {
             .map(|(&function, &region)| (function, region))
             .collect::<Vec<_>>()
             .into_iter()
+    }
+
+    pub fn entries(&self) -> Vec<(Value, i64)> {
+        self.structure.read().entries.iter().map(|(&function, &order)| (function, order)).collect()
+    }
+
+    pub fn entry_order(&self, function: Value) -> Option<i64> {
+        self.structure.read().entries.get(&function).copied()
+    }
+
+    pub fn is_external(&self, function: Value) -> bool {
+        self.structure.read().externals.contains(&function)
     }
 
     pub fn root_of(&self, function: Value) -> Option<Value> {
@@ -451,6 +542,95 @@ impl Graph {
                 "missing accumulator policy on {operation:?}, group {group}"
             ))
         })
+    }
+
+    pub fn operation_domain_at(&self, operation: Value) -> Option<Value> {
+        self.structure.read().domains.operations.get(&operation).copied()
+    }
+
+    pub fn operation_domain(&self, operation: Value) -> Result<Value, OptimizeError> {
+        self.operation_domain_at(operation)
+            .ok_or_else(|| output_error(format!("missing iteration domain on {operation:?}")))
+    }
+
+    pub fn iteration_domain(&self, id: Value) -> Result<IterationDomain, OptimizeError> {
+        self.structure
+            .read()
+            .domains
+            .values
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| output_error(format!("missing iteration domain {id:?}")))
+    }
+
+    pub fn domain_rank(&self, id: Value) -> Result<i64, OptimizeError> {
+        self.structure
+            .read()
+            .domains
+            .values
+            .get(&id)
+            .map(|domain| domain.dimensions.len() as i64)
+            .ok_or_else(|| output_error(format!("missing iteration domain {id:?}")))
+    }
+
+    pub fn domain_ordinal_at(&self, id: Value) -> Option<Value> {
+        self.structure.read().domains.values.get(&id).and_then(|domain| domain.ordinal)
+    }
+
+    pub fn domain_axes(&self, id: Value) -> Result<Vec<Value>, OptimizeError> {
+        let graph = self.structure.read();
+        let Some(domain) = graph.domains.values.get(&id) else {
+            return Err(output_error(format!("missing iteration domain {id:?}")));
+        };
+        domain
+            .dimensions
+            .iter()
+            .map(|dimension| {
+                dimension
+                    .coordinate
+                    .ok_or_else(|| output_error("iteration domain has an unbound coordinate"))
+            })
+            .collect()
+    }
+
+    pub fn domain_extents(&self, id: Value) -> Result<Vec<Value>, OptimizeError> {
+        let graph = self.structure.read();
+        let Some(domain) = graph.domains.values.get(&id) else {
+            return Err(output_error(format!("missing iteration domain {id:?}")));
+        };
+        domain
+            .dimensions
+            .iter()
+            .map(|dimension| {
+                dimension.extent.ok_or_else(|| output_error("iteration domain has an unbound extent"))
+            })
+            .collect()
+    }
+
+    pub fn domain_ordinal(&self, id: Value) -> Result<Value, OptimizeError> {
+        self.structure
+            .read()
+            .domains
+            .values
+            .get(&id)
+            .and_then(|domain| domain.ordinal)
+            .ok_or_else(|| output_error(format!("missing ordinal on {id:?}")))
+    }
+
+    pub fn domain_axis(&self, id: Value, slot: i64) -> Result<Value, OptimizeError> {
+        let graph = self.structure.read();
+        usize::try_from(slot)
+            .ok()
+            .and_then(|slot| graph.domains.values.get(&id)?.dimensions.get(slot)?.coordinate)
+            .ok_or_else(|| output_error(format!("missing coordinate {slot} on {id:?}")))
+    }
+
+    pub fn domain_extent(&self, id: Value, slot: i64) -> Result<Value, OptimizeError> {
+        let graph = self.structure.read();
+        usize::try_from(slot)
+            .ok()
+            .and_then(|slot| graph.domains.values.get(&id)?.dimensions.get(slot)?.extent)
+            .ok_or_else(|| output_error(format!("missing extent {slot} on {id:?}")))
     }
 
     pub fn collective_groups(&self, owner: Value) -> StableMap<(i64, CollectiveInput), Vec<Value>> {
@@ -902,6 +1082,35 @@ impl State<'_, '_, '_> {
         structure.accumulator_policies.remove(&operation);
     }
 
+    pub fn set_domain(&mut self, id: Value, domain: IterationDomain) {
+        self.structure.write().domains.insert(id, domain);
+    }
+
+    pub fn set_domain_extent(&mut self, id: Value, slot: usize, extent: Value) -> Result<(), Error> {
+        self.structure.write().domains.set_extent(id, slot, extent)
+    }
+
+    pub fn set_operation_domain(&mut self, operation: Value, domain: Value) {
+        self.structure.write().domains.operations.insert(operation, domain);
+    }
+
+    pub fn clear_operation_domain(&mut self, operation: Value) {
+        self.structure.write().domains.operations.remove(&operation);
+    }
+
+    pub fn set_entry(&mut self, function: Value, order: i64) {
+        self.structure.write().entries.insert(function, order);
+    }
+
+    #[cfg(test)]
+    pub fn remove_entry(&mut self, function: Value) {
+        self.structure.write().entries.shift_remove(&function);
+    }
+
+    pub fn set_external(&mut self, function: Value) {
+        self.structure.write().externals.insert(function);
+    }
+
     pub fn set_collective_inputs(
         &mut self,
         owner: Value,
@@ -984,6 +1193,7 @@ impl State<'_, '_, '_> {
         self.operations.remove(&operation);
         self.clear_bodies(operation);
         self.clear_formulas(operation, false);
+        self.clear_operation_domain(operation);
         self.clear_collective_layouts(operation);
         let mut structure = self.structure.write();
         structure.targets.shift_remove(&operation);

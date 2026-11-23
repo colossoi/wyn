@@ -2,7 +2,7 @@
 use super::dataflow::edit;
 use super::query::Query;
 use super::{output_error, timing, OptimizeError};
-use crate::egglog::graph::{CollectiveInput, Graph};
+use crate::egglog::graph::{callback_at, CollectiveInput, Graph};
 use crate::{LookupMap, StableMap};
 use egglog_engine::sort::S;
 use egglog_engine::{IntoValues, RawValues, Value, Write};
@@ -64,6 +64,9 @@ pub(super) fn invalidate(graph: &mut Graph) -> Result<(), OptimizeError> {
         "CollectiveLaneUse",
         "FoldSeedUse",
         "PackedClause",
+        "IterationAxis",
+        "LaneAxisExtent",
+        "ReductionBoundOperands",
         "CollectedClause",
         "CompactedClause",
         "ContributedClause",
@@ -335,6 +338,7 @@ pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeEr
 pub(super) fn publish_collective_uses(graph: &mut Graph) -> Result<(), OptimizeError> {
     let query = Query(graph);
     let mut classes = Vec::new();
+    let mut reduction_bounds = Vec::new();
     let mut collective_uses = Vec::new();
     {
         let structure = graph.structure().read();
@@ -346,6 +350,40 @@ pub(super) fn publish_collective_uses(graph: &mut Graph) -> Result<(), OptimizeE
                 classes.push((operation, clause as i64, class, arguments.first().copied()));
             }
         }
+        for (&operation, results) in &structure.parallels {
+            let domain = structure
+                .domains
+                .operations
+                .get(&operation)
+                .and_then(|id| structure.domains.values.get(id));
+            let Some([axis]) = domain.map(|domain| domain.dimensions.as_slice()) else {
+                continue;
+            };
+            let Some(extent) = axis.extent else { continue };
+            for (&output, binding) in
+                structure.outputs.get(&operation).into_iter().flatten().zip(&results.bindings)
+            {
+                let (Some(clause), Some(role)) = (binding.clause, binding.role) else {
+                    continue;
+                };
+                if query.enode("TotalOutput", role)?.is_none() {
+                    continue;
+                }
+                let Some(reducer) = callback_at(&structure.reducers, operation, clause) else {
+                    continue;
+                };
+                let [neutral] = structure.collective.get(operation, clause, CollectiveInput::Neutral)
+                else {
+                    continue;
+                };
+                let Some(&value) =
+                    structure.collective.get(operation, clause, CollectiveInput::Contribution).first()
+                else {
+                    continue;
+                };
+                reduction_bounds.push((output, reducer, extent, *neutral, value));
+            }
+        }
         for (&operation, groups) in &structure.collective.groups {
             let scope = structure.controls.get(&(operation, 0)).map(|edge| edge.region);
             for (&(group, kind), names) in groups {
@@ -354,6 +392,9 @@ pub(super) fn publish_collective_uses(graph: &mut Graph) -> Result<(), OptimizeE
         }
     }
     graph.update(|mut sink| {
+        for bound in reduction_bounds {
+            sink.add("ReductionBoundOperands", bound)?;
+        }
         for (operation, clause, class, fold) in classes {
             match class {
                 "Collected" => {
@@ -641,7 +682,7 @@ pub(super) fn validate(graph: &Graph) -> Result<(), OptimizeError> {
         }
         if query.contains("CallOperation", operation)? {
             let target = query.0.call_target(operation)?;
-            let expected = if query.contains("External", target)? {
+            let expected = if query.0.is_external(target) {
                 count(query, "ExternalParameterCount", target)?
             } else {
                 query.0.parameter_count(query.0.function_root(target)?)

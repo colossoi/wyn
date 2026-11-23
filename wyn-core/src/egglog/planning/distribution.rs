@@ -1,11 +1,64 @@
 //! Apply an admitted domain composition to keyed cells and coordinate proofs.
+use crate::egglog::cost::CostModel;
 use crate::egglog::dataflow::edit;
 use crate::egglog::dataflow::ir::{self, Code, Name, OperationId, Parameter, RegionId};
+use crate::egglog::graph::Dimension;
 use crate::egglog::graph::Formula;
 use crate::egglog::graph::Graph;
 use crate::egglog::query::Query;
-use crate::egglog::{analysis, OptimizeError};
+use crate::egglog::OptimizeError;
 use egglog_engine::{Value, Write};
+
+/// Rank only the pairs that passed the structural and legality rules.
+pub(super) fn select_cost(graph: &mut Graph, costs: CostModel) -> Result<(), OptimizeError> {
+    let query = Query(graph);
+    let mut selected = Vec::new();
+    query.for_each("ReadyDistribution", |row| {
+        let (outer, inner) = (row[0], row[1]);
+        let (Some(coordinates), Some(elements)) =
+            (estimated_extent(query, outer)?, estimated_extent(query, inner)?)
+        else {
+            return Ok(());
+        };
+        let prefix = graph.region_order(graph.control_region(outer, 0_i64)?)?.len().saturating_sub(1);
+        let work = graph.region_order(graph.control_region(inner, 0_i64)?)?.len();
+        if costs.prefer_distribution(
+            coordinates,
+            prefix as u64,
+            work as u64,
+            elements,
+            query.flag("DistributionHasFold", inner)?,
+        ) {
+            selected.push((outer, inner));
+        }
+        Ok(())
+    })?;
+    graph.update(|mut sink| {
+        for candidate in selected {
+            sink.add("DistributeNest", candidate)?;
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+fn estimated_extent(query: Query<'_>, operation: Value) -> Result<Option<u64>, OptimizeError> {
+    let domain = query.0.iteration_domain(query.0.operation_domain(operation)?)?;
+    if domain.dimensions.is_empty() {
+        return Ok(None);
+    }
+    let mut size = Some(1_u64);
+    for dimension in domain.dimensions {
+        let Some(extent) = dimension.extent else {
+            return Ok(None);
+        };
+        let count = query
+            .lookup("StaticIndex", extent)?
+            .map_or(1024, |value| query.0.value_to_base::<i64>(value).max(0)) as u64;
+        size = if count == 0 { Some(0) } else { size.and_then(|size| size.checked_mul(count)) };
+    }
+    Ok(size)
+}
 
 pub(super) fn lift_row_length(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let Some(candidate) = Query(graph).first("LiftUniformRowLength")? else {
@@ -21,22 +74,24 @@ pub(super) fn lift_row_length(graph: &mut Graph) -> Result<bool, OptimizeError> 
 pub(super) fn canonicalize(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let query = Query(graph);
     let mut replacements = Vec::new();
-    query.for_function("DomainExtent", |keys, index| {
-        if query.enode("IndexConstant", index)?.is_none() {
-            if let Some(n) = query.lookup("StaticIndex", index)? {
-                replacements.push((keys[0], keys[1], query.0.value_to_base::<i64>(n)));
+    {
+        let structure = graph.structure().read();
+        for (&index, sites) in &structure.domains.extent_uses {
+            if query.enode("IndexConstant", index)?.is_none() {
+                if let Some(n) = query.lookup("StaticIndex", index)? {
+                    let n = graph.value_to_base::<i64>(n);
+                    replacements.extend(sites.iter().map(|&(domain, slot)| (domain, slot, n)));
+                }
             }
         }
-        Ok(())
-    })?;
+    }
     if replacements.is_empty() {
         return Ok(false);
     }
     graph.update(|mut sink| {
         for (domain, slot, n) in replacements {
             let value = sink.add("IndexConstant", n)?;
-            sink.remove("DomainExtent", (domain, slot))?;
-            sink.set("DomainExtent", (domain, slot), value)?;
+            sink.set_domain_extent(domain, slot, value)?;
         }
         Ok(())
     })?;
@@ -46,26 +101,27 @@ pub(super) fn canonicalize(graph: &mut Graph) -> Result<bool, OptimizeError> {
 
 pub(super) fn apply(graph: &mut Graph, outer: Value, inner: Value) -> Result<(), OptimizeError> {
     let query = Query(graph);
-    let domain = query.required("OperationDomain", outer)?;
-    let inner_domain = query.required("OperationDomain", inner)?;
+    let domain = query.0.operation_domain(outer)?;
+    let inner_domain = query.0.operation_domain(inner)?;
     let body = query.0.control_region(outer, 0_i64)?;
     let inner_body = query.0.control_region(inner, 0_i64)?;
-    let rank = analysis::count(query, "DomainRank", domain)?;
-    let inner_rank = analysis::count(query, "DomainRank", inner_domain)?;
-    let flat = query.required("DomainOrdinal", domain)?;
-    let inner_flat = query.required("DomainOrdinal", inner_domain)?;
+    let rank = query.0.domain_rank(domain)?;
+    let inner_rank = query.0.domain_rank(inner_domain)?;
+    let mut layout = graph.iteration_domain(domain)?;
+    let flat = query.0.domain_ordinal(domain)?;
+    let inner_flat = query.0.domain_ordinal(inner_domain)?;
     let mut axes = Vec::new();
     let mut inner_axes = Vec::new();
     for slot in 0..rank {
         axes.push((
-            query.required("DomainAxis", (domain, slot))?,
-            query.required("DomainExtent", (domain, slot))?,
+            query.0.domain_axis(domain, slot)?,
+            query.0.domain_extent(domain, slot)?,
         ));
     }
     for slot in 0..inner_rank {
         inner_axes.push((
-            query.required("DomainAxis", (inner_domain, slot))?,
-            query.required("DomainExtent", (inner_domain, slot))?,
+            query.0.domain_axis(inner_domain, slot)?,
+            query.0.domain_extent(inner_domain, slot)?,
         ));
     }
     let mut parameters = Vec::new();
@@ -115,14 +171,9 @@ pub(super) fn apply(graph: &mut Graph, outer: Value, inner: Value) -> Result<(),
             }
             let ordinal = sink.add("DerivedValue", (inner, 40_i64, 0_i64))?;
             sink.set("ValueType", ordinal, info)?;
-            sink.remove("DomainOrdinal", domain)?;
-            sink.set("DomainOrdinal", domain, ordinal)?;
-            sink.remove("DomainRank", domain)?;
-            sink.set("DomainRank", domain, rank + inner_rank)?;
-            for (slot, &(axis, extent)) in inner_axes.iter().enumerate() {
-                sink.set("DomainAxis", (domain, rank + slot as i64), axis)?;
-                sink.set("DomainExtent", (domain, rank + slot as i64), extent)?;
-            }
+            layout.ordinal = Some(ordinal);
+            layout.dimensions.extend(inner_axes.iter().map(|&(axis, extent)| Dimension::new(axis, extent)));
+            sink.set_domain(domain, layout);
             for slot in 0..=rank {
                 sink.remove("ParameterDiet", (body, slot))?;
             }

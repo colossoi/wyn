@@ -5,8 +5,8 @@
 (let array (ArrayType (ValueArray) (vec-of (UnspecifiedExtent)) (ElementValue (ScalarElement (I32)))))
 (let storage (ArrayType (StorageArray) (vec-of (UnspecifiedExtent)) (ElementValue (ScalarElement (I32)))))
 (delete (InlineAll)) (set (InlineAll) true)
-(Function (FunctionId 0 "main")) (Function (FunctionId 1 "forward")) (Function (FunctionId 2 "identity"))
-(set (EntryOrder (FunctionId 0 "main")) 0)
+
+(set (FixtureEntryOrder (FunctionId 0 "main")) 0)
 (set (FixtureFunctionRoot (FunctionId 0 "main")) (RegionId 0))
 (set (FixtureFunctionRoot (FunctionId 1 "forward")) (RegionId 1))
 (set (FixtureFunctionRoot (FunctionId 2 "identity")) (RegionId 2))
@@ -17,9 +17,9 @@
 (set (FunctionResultType (FunctionId 0 "main") 1) (LogicalReturn storage))
 (set (FunctionResultType (FunctionId 1 "forward") 0) returns)
 (set (FunctionResultType (FunctionId 2 "identity") 0) returns)
-(Region (RegionId 0)) (FlowScope (RegionId 0))
-(Region (RegionId 1)) (FlowScope (RegionId 1))
-(Region (RegionId 2)) (FlowScope (RegionId 2))
+ (FlowScope (RegionId 0))
+ (FlowScope (RegionId 1))
+ (FlowScope (RegionId 2))
 
 
 

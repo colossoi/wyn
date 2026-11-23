@@ -4,7 +4,7 @@ use crate::egglog::graph::{ArgumentSite, Graph};
 use crate::egglog::graph::{CollectiveInput, Formula, ParallelResults};
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, output_error, OptimizeError};
-use crate::{LookupSet, StableMap};
+use crate::{LookupMap, LookupSet, StableMap};
 use egglog_engine::{RawValues, Value, Write};
 use wyn_graph::ReplacementForest;
 
@@ -12,7 +12,6 @@ pub(in crate::egglog) const OPERATION_CELLS: &[&str] = &[
     "InstructionWork",
     "LiteralBits",
     "InputDiet",
-    "OperationDomain",
     "OperationWidth",
     "OperationExecution",
     "CallReturnType",
@@ -20,7 +19,6 @@ pub(in crate::egglog) const OPERATION_CELLS: &[&str] = &[
 ];
 
 pub(in crate::egglog) const OPERATION_RELATIONS: &[&str] = &[
-    "Operation",
     "OperationCertificate",
     "MaterializedCopyOperation",
     "ViewOperation",
@@ -261,6 +259,7 @@ fn replace_attributes_with_seeded_values(graph: &mut Graph) -> Result<(), Optimi
     )?;
     let query = Query(graph);
     let mut formulas = Vec::new();
+    let mut extents = Vec::new();
     {
         let structure = graph.structure().read();
         for (table, kinds) in [
@@ -268,14 +267,21 @@ fn replace_attributes_with_seeded_values(graph: &mut Graph) -> Result<(), Optimi
             ("RewrittenShape", &[Formula::Extents][..]),
             ("RewrittenSlices", &[Formula::Slices][..]),
         ] {
-            if !kinds
-                .iter()
-                .any(|kind| structure.formulas.by_kind.get(kind).is_some_and(|terms| !terms.is_empty()))
+            let domain_extents = table == "RewrittenIndex" && !structure.domains.extent_uses.is_empty();
+            if !domain_extents
+                && !kinds
+                    .iter()
+                    .any(|kind| structure.formulas.by_kind.get(kind).is_some_and(|terms| !terms.is_empty()))
             {
                 continue;
             }
             query.for_function(table, |keys, replacement| {
                 if keys[0] != replacement {
+                    if table == "RewrittenIndex" {
+                        if let Some(sites) = structure.domains.extent_uses.get(&keys[0]) {
+                            extents.extend(sites.iter().map(|&(domain, slot)| (domain, slot, replacement)));
+                        }
+                    }
                     for &kind in kinds {
                         if let Some(sites) = structure.formulas.sites.get(&(kind, keys[0])) {
                             formulas.extend(sites.iter().map(|&op| (op, kind, replacement)));
@@ -286,8 +292,11 @@ fn replace_attributes_with_seeded_values(graph: &mut Graph) -> Result<(), Optimi
             })?;
         }
     }
-    if !formulas.is_empty() {
+    if !formulas.is_empty() || !extents.is_empty() {
         graph.update(|mut sink| {
+            for (domain, slot, extent) in extents {
+                sink.set_domain_extent(domain, slot, extent)?;
+            }
             for (op, kind, replacement) in formulas {
                 sink.set_formula(op, kind, replacement)?;
             }
@@ -397,7 +406,7 @@ pub(in crate::egglog) fn set_code(
 ) -> Result<(), OptimizeError> {
     // Operation classes and access properties describe the payload, so replace them together.
     let mut rows = Vec::new();
-    for &table in &OPERATION_RELATIONS[2..] {
+    for &table in &OPERATION_RELATIONS[1..] {
         Query(graph).for_each(table, |row| {
             if row[0] == operation {
                 rows.push((table, row.to_vec()));
@@ -421,6 +430,7 @@ pub(in crate::egglog) fn set_code(
         sink.clear_collective_inputs(operation);
         sink.clear_collective_layouts(operation);
         sink.clear_formulas(operation, matches!(code, Code::IndexValue));
+        sink.clear_operation_domain(operation);
         for (table, row) in rows {
             sink.remove(table, RawValues(row))?;
         }
@@ -444,9 +454,13 @@ fn collective_name(query: Query<'_>, kind: CollectiveInput, value: Value) -> Res
     if !kind.uses_raw_name() {
         return Ok(value);
     }
+    name_reference(query, value)
+}
+
+fn name_reference(query: Query<'_>, value: Value) -> Result<Value, OptimizeError> {
     query
         .constructor("ValueNameRef", value)?
-        .ok_or_else(|| output_error("collective operand has no value identity"))
+        .ok_or_else(|| output_error("operand has no value identity"))
 }
 
 struct ClonedOperation {
@@ -464,6 +478,7 @@ struct ClonedOperation {
     formulas: Vec<(Formula, Value)>,
     results: Option<ParallelResults>,
     policies: Vec<Option<Value>>,
+    domain: Option<Value>,
 }
 
 /// Copy a selected region using fresh graph identities, substituting its entry edge.
@@ -494,7 +509,6 @@ pub(in crate::egglog) fn clone_region(
         "CloneSlices",
         "CloneDimDemand",
         "CloneDim",
-        "CloneDomain",
         "CloneAccInfo",
         "CloneAccInfoDemand",
         "CloneReturnDemand",
@@ -513,6 +527,7 @@ pub(in crate::egglog) fn clone_region(
     let mut argument_names = LookupSet::new();
     let mut result_names = LookupSet::new();
     let mut formula_demands = LookupSet::new();
+    let mut domains = LookupMap::new();
     while let Some(region) = pending.pop() {
         if members.insert(region) {
             result_names.extend(graph.parameters(region));
@@ -529,6 +544,22 @@ pub(in crate::egglog) fn clone_region(
                 for (slot, _) in graph.controls(operation) {
                     argument_names.extend(graph.arguments(operation, slot));
                 }
+                if let Some(domain) = graph.operation_domain_at(operation) {
+                    if !domains.contains_key(&domain) {
+                        let layout = graph.iteration_domain(domain)?;
+                        for name in layout
+                            .ordinal
+                            .into_iter()
+                            .chain(layout.dimensions.iter().filter_map(|dimension| dimension.coordinate))
+                        {
+                            argument_names.insert(name_reference(query, name)?);
+                        }
+                        for extent in layout.dimensions.iter().filter_map(|dimension| dimension.extent) {
+                            formula_demands.insert(("CloneIndexDemand", extent));
+                        }
+                        domains.insert(domain, layout);
+                    }
+                }
                 for (kind, value) in graph.formulas(operation) {
                     let demand = match kind {
                         Formula::Index | Formula::LoopCount => "CloneIndexDemand",
@@ -543,6 +574,9 @@ pub(in crate::egglog) fn clone_region(
         }
     }
     graph.update(|mut sink| {
+        for &domain in domains.keys() {
+            sink.add("ClonedDomain", (context, domain))?;
+        }
         for (demand, value) in formula_demands {
             sink.add(demand, (context, value))?;
         }
@@ -550,8 +584,8 @@ pub(in crate::egglog) fn clone_region(
             sink.add("CloneMember", (context, region))?;
         }
         for operation in operations {
-            let cloned = sink.add("ClonedOperation", (context, operation))?;
-            sink.add("Operation", cloned)?;
+            sink.add("ClonedOperation", (context, operation))?;
+
             sink.add("CloneOperation", (context, operation))?;
         }
         for (parameter, &argument) in parameters.into_iter().zip(arguments) {
@@ -571,6 +605,25 @@ pub(in crate::egglog) fn clone_region(
         "(run-schedule (saturate clone-index) (saturate clone-names) (saturate clone-edges))",
     )?;
     let query = Query(graph);
+    let mut clone_domains = Vec::new();
+    let clone_name = |name: Value| -> Result<Value, OptimizeError> {
+        let name = name_reference(query, name)?;
+        query.name(query.required("CloneName", (context, name))?)
+    };
+    for (domain, mut layout) in domains {
+        let cloned = query
+            .constructor("ClonedDomain", (context, domain))?
+            .ok_or_else(|| output_error("cloned domain has no identity"))?;
+        layout.ordinal = layout.ordinal.map(clone_name).transpose()?;
+        for dimension in &mut layout.dimensions {
+            dimension.coordinate = dimension.coordinate.map(clone_name).transpose()?;
+            dimension.extent = dimension
+                .extent
+                .map(|extent| query.required("CloneIndex", (context, extent)))
+                .transpose()?;
+        }
+        clone_domains.push((cloned, layout));
+    }
     let mut cloned_yields = Vec::new();
     for region in members {
         let new_region = query
@@ -669,6 +722,14 @@ pub(in crate::egglog) fn clone_region(
                 formulas,
                 results: graph.parallel_results_at(row[1]),
                 policies: graph.accumulator_policies(row[1]),
+                domain: graph
+                    .operation_domain_at(row[1])
+                    .map(|domain| {
+                        query
+                            .constructor("ClonedDomain", (context, domain))?
+                            .ok_or_else(|| output_error("cloned operation has no domain"))
+                    })
+                    .transpose()?,
             });
         }
         Ok(())
@@ -677,12 +738,18 @@ pub(in crate::egglog) fn clone_region(
         graph.copy_occurrence(operation.source, operation.key)?;
     }
     graph.update(|mut sink| {
+        for (id, layout) in clone_domains {
+            sink.set_domain(id, layout);
+        }
         for (region, parameters, values) in cloned_yields {
             sink.set_parameters(region, parameters)?;
             sink.set_yields(region, values)?;
         }
         for operation in operations {
             let key = operation.key;
+            if let Some(domain) = operation.domain {
+                sink.set_operation_domain(key, domain);
+            }
             if let Some(results) = operation.results {
                 sink.set_parallel_results(key, results);
             }

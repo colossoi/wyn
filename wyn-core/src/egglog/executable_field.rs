@@ -10,6 +10,8 @@ pub(super) enum Field {
     Region,
     Order,
     FunctionRoot,
+    External,
+    Entry,
     CallTarget,
     ControlRegion,
     Reducer,
@@ -20,6 +22,11 @@ pub(super) enum Field {
     Output,
     OutputCount,
     Formula(Formula),
+    IterationDomain,
+    DomainRank,
+    DomainAxis,
+    DomainOrdinal,
+    DomainExtent,
     ResultKind,
     ResultCount,
     OutputClause,
@@ -52,6 +59,8 @@ impl Primitive for ExecutableField {
             Field::Region => "wyn-region-of",
             Field::Order => "wyn-operation-position",
             Field::FunctionRoot => "wyn-function-root",
+            Field::External => "wyn-external",
+            Field::Entry => "wyn-entry",
             Field::CallTarget => "wyn-call-target",
             Field::ControlRegion => "wyn-control-region",
             Field::Reducer => "wyn-reducer",
@@ -62,6 +71,11 @@ impl Primitive for ExecutableField {
             Field::Output => "wyn-output",
             Field::OutputCount => "wyn-output-count",
             Field::Formula(kind) => kind.access(),
+            Field::IterationDomain => "wyn-iteration-domain",
+            Field::DomainRank => "wyn-domain-rank",
+            Field::DomainAxis => "wyn-domain-axis",
+            Field::DomainOrdinal => "wyn-domain-ordinal",
+            Field::DomainExtent => "wyn-domain-extent",
             Field::ResultKind => "wyn-result-kind",
             Field::ResultCount => "wyn-result-count",
             Field::OutputClause => "wyn-output-clause",
@@ -105,6 +119,8 @@ impl PurePrim for ExecutableField {
             Field::Region => graph.operations.get(&key)?.region,
             Field::Order => graph.operations.get(&key)?.order.map(|order| state.base_to_value(order)),
             Field::FunctionRoot => graph.roots.get(&key).copied(),
+            Field::External => Some(state.base_to_value(graph.externals.contains(&key))),
+            Field::Entry => Some(state.base_to_value(graph.entries.contains_key(&key))),
             Field::CallTarget => graph.targets.get(&key).copied(),
             Field::Reducer => callback_at(&graph.reducers, key, state.value_to_base(args[1])),
             Field::Combiner => callback_at(&graph.combiners, key, state.value_to_base(args[1])),
@@ -139,6 +155,20 @@ impl PurePrim for ExecutableField {
                 Some(state.base_to_value(count))
             }
             Field::Formula(kind) => graph.formulas.get(key, kind),
+            Field::IterationDomain => graph.domains.operations.get(&key).copied(),
+            Field::DomainRank => {
+                Some(state.base_to_value(graph.domains.values.get(&key)?.dimensions.len() as i64))
+            }
+            Field::DomainOrdinal => graph.domains.values.get(&key)?.ordinal,
+            Field::DomainAxis | Field::DomainExtent => {
+                let slot = usize::try_from(state.value_to_base::<i64>(args[1])).ok()?;
+                let dimension = graph.domains.values.get(&key)?.dimensions.get(slot)?;
+                if matches!(self.field, Field::DomainAxis) {
+                    dimension.coordinate
+                } else {
+                    dimension.extent
+                }
+            }
             Field::ResultCount => Some(state.base_to_value(graph.parallels.get(&key)?.kinds.len() as i64)),
             Field::AccumulatorGroupCount => {
                 Some(state.base_to_value(graph.accumulator_policies.get(&key)?.len() as i64))

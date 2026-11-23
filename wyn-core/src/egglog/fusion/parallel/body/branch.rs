@@ -86,7 +86,7 @@ impl Body {
                 for (slot, value) in [inner, Name::Value(fallback_name)].into_iter().enumerate() {
                     let slot = slot as i64;
                     let arm = sink.add("DerivedRegion", (key, 94_i64, slot))?;
-                    sink.add("Region", arm)?;
+
                     sink.add("FlowScope", arm)?;
                     ir::parameters(&mut sink, WireRegionId(arm), &[])?;
                     ir::yields(&mut sink, WireRegionId(arm), &[value])?;

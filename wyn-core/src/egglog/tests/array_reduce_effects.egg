@@ -44,7 +44,7 @@
 
 (set (FixtureOutput (OperationId 5) 0) (ValueNameRef (ValueId 5)))
 (set (ValueType (ValueId 5)) (LogicalValue row))
-(Region (RegionId 0)) (FlowScope (RegionId 0))
+ (FlowScope (RegionId 0))
 
 
 (set (FixtureParameter (RegionId 0) 0) (ValueNameRef (ValueId 200)))
@@ -52,7 +52,7 @@
 (set (ParameterDiet (RegionId 0) 0) (Observe))
 (set (FixtureYield (RegionId 0) 0) (ValueNameRef (ValueId 3)))
 (set (RegionReturnType (RegionId 0) 0) (LogicalReturn row))
-(Region (RegionId 1)) (FlowScope (RegionId 1))
+ (FlowScope (RegionId 1))
 
 
 (set (FixtureParameter (RegionId 1) 0) (ValueNameRef (ValueId 110)))
@@ -61,7 +61,7 @@
 (set (FixtureParameter (RegionId 1) 1) (ValueNameRef (ValueId 10)))
 (set (ValueType (ValueId 10)) scalar)
 (set (ParameterDiet (RegionId 1) 1) (Observe))
-(Region (RegionId 2)) (FlowScope (RegionId 2))
+ (FlowScope (RegionId 2))
 
 
 (set (FixtureParameter (RegionId 2) 0) (ValueNameRef (ValueId 111)))
@@ -70,7 +70,7 @@
 (set (FixtureParameter (RegionId 2) 1) (ValueNameRef (ValueId 11)))
 (set (ValueType (ValueId 11)) scalar)
 (set (ParameterDiet (RegionId 2) 1) (Observe))
-(Region (RegionId 10)) (FlowScope (RegionId 10))
+ (FlowScope (RegionId 10))
 
 
 (set (FixtureParameter (RegionId 10) 0) (ValueNameRef (ValueId 20)))
@@ -83,11 +83,11 @@
 (set (RegionReturnType (RegionId 10) 0) (LogicalReturn row))
 (set (FixtureControlRegion (OperationId 1) 0) (RegionId 1))
 (set (OperationExecution (OperationId 1)) (Unscheduled))
-(set (OperationDomain (OperationId 1)) (DomainId 1))
-(set (DomainRank (DomainId 1)) 1)
-(set (DomainOrdinal (DomainId 1)) (ValueId 110))
-(set (DomainAxis (DomainId 1) 0) (ValueId 10))
-(set (DomainExtent (DomainId 1) 0) (IndexConstant 4))
+(set (FixtureOperationDomain (OperationId 1)) (DomainId 1))
+(set (FixtureDomainRank (DomainId 1)) 1)
+(set (FixtureDomainOrdinal (DomainId 1)) (ValueId 110))
+(set (FixtureDomainAxis (DomainId 1) 0) (ValueId 10))
+(set (FixtureDomainExtent (DomainId 1) 0) (IndexConstant 4))
 (set (FixtureResultCount (OperationId 1)) 1)
 (set (FixtureResultKindOf (OperationId 1) 0) (Collected))
 (set (FixtureResultValue (OperationId 1) 0 0) (ValueNameRef (ValueId 0)))
@@ -96,11 +96,11 @@
 (set (FixtureOutputRole (OperationId 1) 0) (CollectedOutput))
 (set (FixtureControlRegion (OperationId 3) 0) (RegionId 2))
 (set (OperationExecution (OperationId 3)) (Unscheduled))
-(set (OperationDomain (OperationId 3)) (DomainId 3))
-(set (DomainRank (DomainId 3)) 1)
-(set (DomainOrdinal (DomainId 3)) (ValueId 111))
-(set (DomainAxis (DomainId 3) 0) (ValueId 11))
-(set (DomainExtent (DomainId 3) 0) (IndexConstant 4))
+(set (FixtureOperationDomain (OperationId 3)) (DomainId 3))
+(set (FixtureDomainRank (DomainId 3)) 1)
+(set (FixtureDomainOrdinal (DomainId 3)) (ValueId 111))
+(set (FixtureDomainAxis (DomainId 3) 0) (ValueId 11))
+(set (FixtureDomainExtent (DomainId 3) 0) (IndexConstant 4))
 (set (FixtureResultCount (OperationId 3)) 1)
 (set (FixtureResultKindOf (OperationId 3) 0) (Folded (Total)))
 (set (FixtureResultValue (OperationId 3) 0 0) (ValueNameRef (ValueId 5)))
@@ -111,10 +111,10 @@
 (set (FixtureResultNeutral (OperationId 3) 0 0) (ValueNameRef (ValueId 1000)))
 (delete (FixtureResultNeutral (OperationId 3) 0 0))
 (set (FixtureResultNeutral (OperationId 3) 0 0) (ValueNameRef (ValueId 0)))
-(let function (FunctionId 0 "fixture")) (Function function)
+(let function (FunctionId 0 "fixture"))
 (set (FixtureFunctionRoot function) (RegionId 0))
 (set (FunctionResultCount function) 1)
-(set (EntryOrder function) 0)
+(set (FixtureEntryOrder function) 0)
 (set (InvocationEntry function) false)
 (set (EntryGrid function) (AutomaticGrid))
 (set (FunctionResultType function 0) (LogicalReturn row))

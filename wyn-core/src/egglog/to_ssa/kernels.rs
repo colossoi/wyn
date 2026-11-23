@@ -125,8 +125,8 @@ impl Body<'_, '_, '_> {
             .query()
             .lookup("WorkgroupScan", operation)?
             .map(|size| self.query().0.value_to_base::<i64>(size) as u32);
-        let domain = self.query().required("OperationDomain", operation)?;
-        let ordinal_name = self.query().required("DomainOrdinal", domain)?;
+        let domain = self.query().0.operation_domain(operation)?;
+        let ordinal_name = self.query().0.domain_ordinal(domain)?;
         let axes = domain_axes(self.query(), domain)?;
         let region = self.query().0.control_region(operation, 0_i64)?;
         let mut collects = Vec::new();
@@ -729,13 +729,13 @@ impl Body<'_, '_, '_> {
         let fields = query.fields("ScanColumns", plan)?;
         let source = self.named(fields[0])?;
         let map = fields[2];
-        let columns = query.required("OperationDomain", map)?;
-        let axis = query.required("DomainAxis", (columns, 0_i64))?;
-        let ordinal = query.required("DomainOrdinal", columns)?;
+        let columns = query.0.operation_domain(map)?;
+        let axis = query.0.domain_axis(columns, 0_i64)?;
+        let ordinal = query.0.domain_ordinal(columns)?;
         let lane = query.0.control_region(map, 0_i64)?;
         let result = query.0.collective_input(map, 0_i64, CollectiveInput::Contribution, 0_i64)?;
-        let domain = query.required("OperationDomain", operation)?;
-        let rows = query.required("DomainExtent", (domain, 0_i64))?;
+        let domain = query.0.operation_domain(operation)?;
+        let rows = query.0.domain_extent(domain, 0_i64)?;
         let neutral = self.named(query.name(query.0.collective_input(
             operation,
             0_i64,
@@ -1411,7 +1411,7 @@ impl Body<'_, '_, '_> {
         width: u32,
     ) -> Result<Typed, OptimizeError> {
         let axes = domain_axes(self.query(), domain)?;
-        let ordinal_name = self.query().required("DomainOrdinal", domain)?;
+        let ordinal_name = self.query().0.domain_ordinal(domain)?;
         let axis = axes[0];
         let count = self.index_expression(axis.extent)?;
         let lane = self.local_id()?;

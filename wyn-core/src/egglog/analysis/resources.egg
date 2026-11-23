@@ -4,7 +4,7 @@
 (rule ((= revision (AnalysisRevision)) (= (ValueType value) (LogicalValue (ArrayType (ValueArray) extents element))))
       ((ArrayValue value)) :ruleset dataflow-resources)
 ; Accumulator capabilities inherit their arrays' roots; they are not external inputs.
-(rule ((Region region) (= revision (AnalysisRevision)) (FormalOrigin (ValueNameRef value) region slot))
+(rule ((= revision (AnalysisRevision)) (FormalOrigin (ValueNameRef value) region slot))
       ((ResourceAnchor (ValueNameRef value))) :ruleset dataflow-resources)
 (rule ((= revision (AnalysisRevision)) (CallOperation operation) (ResultOrigin name operation slot))
       ((ResourceAnchor name)) :ruleset dataflow-resources)
@@ -88,7 +88,7 @@
       ((set (OperationTotal operation) true)) :ruleset dataflow-total)
 (rule ((= revision (AnalysisRevision)) (OrderedOperation operation) (= (OperationTotal operation) false))
       ((OperationTrap operation)) :ruleset dataflow-effects)
-(rule ((= revision (AnalysisRevision)) (CallOperation operation) (= target (wyn-call-target operation)) (External target))
+(rule ((= revision (AnalysisRevision)) (CallOperation operation) (= target (wyn-call-target operation)) (= (wyn-external target) true))
       ((OperationTrap operation) (OperationRead operation (ExternalMemory))
        (OperationWrite operation (ExternalMemory))) :ruleset dataflow-effects)
 (rule ((= revision (AnalysisRevision)) (= region (wyn-region-of operation)) (OperationRead operation root))

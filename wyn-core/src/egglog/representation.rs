@@ -1,5 +1,4 @@
 //! Runtime types derived from logical values before physical planning.
-use super::analysis::count;
 use super::query::Query;
 use super::{output_error as error, OptimizeError};
 use crate::ssa::layout::storage_value_type;
@@ -204,11 +203,11 @@ pub(super) struct Axis {
 }
 
 pub(super) fn domain_axes(query: Query<'_>, domain: Value) -> Result<Vec<Axis>, OptimizeError> {
-    (0..count(query, "DomainRank", domain)?)
+    (0..query.0.domain_rank(domain)?)
         .map(|slot| {
             Ok(Axis {
-                name: query.required("DomainAxis", (domain, slot))?,
-                extent: query.required("DomainExtent", (domain, slot))?,
+                name: query.0.domain_axis(domain, slot)?,
+                extent: query.0.domain_extent(domain, slot)?,
             })
         })
         .collect()

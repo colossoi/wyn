@@ -8,7 +8,7 @@ use egglog_engine::Value;
 
 fn function_body(graph: &Graph) -> Vec<Value> {
     let query = Query(graph);
-    let entry = query.first("EntryOrder").unwrap().unwrap()[0];
+    let entry = query.0.entries()[0].0;
     query.operations(query.0.function_root(entry).unwrap()).unwrap()
 }
 

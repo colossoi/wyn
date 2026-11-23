@@ -180,7 +180,6 @@ pub(super) fn clear_transform_candidates(graph: &mut Graph) -> Result<(), Optimi
         "DistributionLaneDependent",
         "DistributionSafe",
         "DistributionHasFold",
-        "EstimatedDomain",
         "DistributeNest",
         "ReadyDistribution",
         "RectangularRows",
@@ -399,6 +398,7 @@ pub(super) fn place(
             memory::simplify(graph, true)?;
             continue;
         }
+        distribution::select_cost(graph, costs)?;
         let Some(candidate) = Query(graph).first("DistributeNest")? else {
             if layout::fuse(graph)? {
                 continue;

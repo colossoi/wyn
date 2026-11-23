@@ -188,9 +188,10 @@ fn legal(
         return Ok(None);
     };
     let axis = body.resolve(axis);
-    let domain = query.required("OperationDomain", body.graph.operations[second])?;
+    let domain = query.0.operation_domain(body.graph.operations[second])?;
     let ordinal = query
-        .lookup("DomainOrdinal", domain)?
+        .0
+        .domain_ordinal_at(domain)
         .map(|name| query.constructor("ValueNameRef", name))
         .transpose()?
         .flatten();

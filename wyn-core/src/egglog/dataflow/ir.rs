@@ -123,7 +123,7 @@ pub(in crate::egglog) fn operation_at(
     inputs: &[Name],
 ) -> Result<OperationId, OptimizeError> {
     let operation = operation.0;
-    sink.add("Operation", operation)?;
+
     if matches!(code, Code::ArrayLiteral) {
         sink.set("InstructionWork", operation, inputs.len() as i64)?;
     }
@@ -269,7 +269,7 @@ pub(in crate::egglog) fn region(
     operations: &[OperationId],
 ) -> Result<RegionId, OptimizeError> {
     let region = sink.add("RegionId", id)?;
-    sink.add("Region", region)?;
+
     sink.add("FlowScope", region)?;
     for (position, operation) in operations.iter().enumerate() {
         sink.set_region(operation.0, region);

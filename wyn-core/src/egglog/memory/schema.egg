@@ -57,10 +57,6 @@
 (datatype ResourceAccess (ReadResource i64) (WriteResource i64))
 
 (datatype Domain (DomainId i64) (ClonedDomain OperationKey Domain))
-(function DomainRank (Domain) i64 :no-merge)
-(function DomainOrdinal (Domain) ValueName :no-merge)
-(function DomainAxis (Domain i64) ValueName :no-merge)
-(function DomainExtent (Domain i64) IndexExp :no-merge)
 (datatype Grid (AutomaticGrid) (Grid3D Shape Shape))
 (datatype Execution (Unscheduled) (DeviceKernel Grid) (InvocationLocal))
 (datatype FoldKind
@@ -73,8 +69,6 @@
 ; Operand and region-edge cells supply the current planning rules.
 (function GraphEditRevision () i64 :no-merge)
 (set (GraphEditRevision) 0)
-(relation Operation (OperationKey))
-(relation Region (RegionKey))
 (relation AritySlot (i64 i64))
 (relation BranchArm (i64))
 (BranchArm 0)
@@ -92,7 +86,6 @@
 (relation YieldCertificate (RegionKey i64 ValueName))
 
 (datatype ArrayLayout (TransposeAxes) (FlattenAxes))
-(function OperationDomain (OperationKey) Domain :no-merge)
 (function OperationWidth (OperationKey) i64 :no-merge)
 (function OperationExecution (OperationKey) Execution :no-merge)
 ; Compacted values and packed scan prefixes share the lane predicate.
@@ -101,8 +94,6 @@
 
 (function RetainAllFunctions () bool :merge (or old new))
 (set (RetainAllFunctions) false)
-(relation Function (FunctionName))
-(relation External (FunctionName))
 (function ExternalParameterName (FunctionName i64) ValueName :no-merge)
 (function ExternalParameterType (FunctionName i64) ValueInfo :no-merge)
 (function ExternalParameterDiet (FunctionName i64) Diet :no-merge)
@@ -112,7 +103,6 @@
 (function FunctionBehavior (FunctionName) CallBehavior :no-merge)
 (function FunctionResourceAccess (FunctionName i64) ResourceAccess :no-merge)
 (function CallReturnType (OperationKey i64) ReturnInfo :no-merge)
-(function EntryOrder (FunctionName) i64 :no-merge)
 (function InvocationEntry (FunctionName) bool :merge (or old new))
 (function EntryGrid (FunctionName) Grid :no-merge)
 (function GeneratedDispatches () bool :no-merge)

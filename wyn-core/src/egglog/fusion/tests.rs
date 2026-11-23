@@ -226,7 +226,7 @@ fn moving_into_empty_regions_preserves_operation_order() {
         (set (FixtureOrder (OperationId 1)) 0)
         (set (FixtureRegion (OperationId 2)) (RegionId 0))
         (set (FixtureOrder (OperationId 2)) 1)
-        (Region (RegionId 1))
+        (FlowScope (RegionId 1))
     "#,
     )
     .unwrap();
@@ -286,8 +286,8 @@ fn merging_matching_branches_preserves_certificates_and_path_order() -> Result<(
     let query = Query(&graph);
     assert_eq!(query.0.output_count(first), 2);
     assert!(query.contains("OperationCertificate", (first, condition))?);
-    assert!(!query.contains("Operation", second)?);
-    assert!(query.contains("Operation", dependent)?);
+    assert!(!query.0.has_operation(second));
+    assert!(query.0.has_operation(dependent));
     for (arm, _, slot, operations) in arms {
         assert_eq!(query.operations(arm)?, operations);
         assert!(query.contains("YieldCertificate", (arm, slot, condition))?);
@@ -384,7 +384,7 @@ fn guarded_compaction_streams_a_map_into_a_reduce_in_one_batch() -> Result<(), O
     };
     let query = Query(&graph);
     let mut roots = Vec::new();
-    query.for_function("EntryOrder", |keys, order| {
+    crate::egglog::test_graph::for_entries(query, |keys, order| {
         roots.push((
             query.0.value_to_base::<i64>(order),
             query.0.function_root(keys[0])?,
@@ -515,7 +515,7 @@ fn one_fusion_publication_contracts_independent_bodies_and_pointwise_chains() ->
     memory::simplify(&mut graph, false)?;
     let query = Query(&graph);
     let mut roots = Vec::new();
-    query.for_function("EntryOrder", |keys, order| {
+    crate::egglog::test_graph::for_entries(query, |keys, order| {
         roots.push((
             query.0.value_to_base::<i64>(order),
             query.0.function_root(keys[0])?,
@@ -608,7 +608,7 @@ fn free_names_preserve_large_shared_fanout() {
     let mut program = from_tlc(&tlc).unwrap();
     analysis::run(&mut program.graph).unwrap();
     let query = Query(&program.graph);
-    let entry = query.first("EntryOrder").unwrap().unwrap()[0];
+    let entry = query.0.entries()[0].0;
     let root = query.0.function_root(entry).unwrap();
     let input = query.0.parameter(root, 0_i64).unwrap();
     let mut uses = 0;
@@ -704,7 +704,7 @@ fn accumulator_sinking_batches_independent_producers() -> Result<(), OptimizeErr
     memory::simplify(&mut graph, false)?;
     let query = Query(&graph);
     let mut regions = Vec::new();
-    query.for_function("EntryOrder", |key, _| {
+    crate::egglog::test_graph::for_entries(query, |key, _| {
         regions.push(query.0.function_root(key[0])?);
         Ok(())
     })?;

@@ -24,7 +24,7 @@ impl EntryEmission<'_, '_, '_> {
     ) -> Result<(), OptimizeError> {
         let query = self.body.query();
         let dispatch = *self.body.compiler.execution.dispatch(statement)?;
-        let domain = query.required("OperationDomain", statement)?;
+        let domain = query.0.operation_domain(statement)?;
         let mut carry_inputs = LookupSet::default();
         for clause in 0..query.0.result_count(statement) {
             if let Some(reducer) = query.0.reducer_at(statement, clause) {

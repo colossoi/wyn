@@ -195,18 +195,17 @@ fn check_entries<Stage>(
 ) {
     let query = Query(&program.graph);
     let mut seen = vec![false; count];
-    query
-        .for_function("EntryOrder", |keys, _| {
-            let fields = query.fields("FunctionId", keys[0])?;
-            let name = program.graph.value_to_base::<S>(fields[1]);
-            if let Some(index) = name.as_str().strip_prefix("case_") {
-                let index: usize = index.parse().unwrap();
-                seen[index] = true;
-                check(index, &program.graph, keys[0]);
-            }
-            Ok(())
-        })
-        .unwrap();
+    crate::egglog::test_graph::for_entries(query, |keys, _| {
+        let fields = query.fields("FunctionId", keys[0])?;
+        let name = program.graph.value_to_base::<S>(fields[1]);
+        if let Some(index) = name.as_str().strip_prefix("case_") {
+            let index: usize = index.parse().unwrap();
+            seen[index] = true;
+            check(index, &program.graph, keys[0]);
+        }
+        Ok(())
+    })
+    .unwrap();
     assert!(seen.into_iter().all(|present| present));
 }
 
@@ -842,8 +841,8 @@ fn nested_domains_retain_distinct_axes_and_capture_origins() {
             let [outer] = top_level(graph, function, "Parallel")[..] else {
                 panic!("one outer map");
             };
-            let domain = query.required("OperationDomain", outer).unwrap();
-            let outer_index = query.required("DomainAxis", (domain, 0_i64)).unwrap();
+            let domain = query.0.operation_domain(outer).unwrap();
+            let outer_index = query.0.domain_axis(domain, 0_i64).unwrap();
             let body = query.0.control_region(outer, 0_i64).unwrap();
             let inner = query
                 .operations(body)
@@ -851,8 +850,8 @@ fn nested_domains_retain_distinct_axes_and_capture_origins() {
                 .into_iter()
                 .find(|&operation| code_is(query, operation, "Parallel"))
                 .expect("the inner map retains its captured outer value");
-            let domain = query.required("OperationDomain", inner).unwrap();
-            let inner_index = query.required("DomainAxis", (domain, 0_i64)).unwrap();
+            let domain = query.0.operation_domain(inner).unwrap();
+            let inner_index = query.0.domain_axis(domain, 0_i64).unwrap();
             assert_ne!(outer_index, inner_index, "nested axes need distinct binders");
             let lane = query.0.control_region(inner, 0_i64).unwrap();
             let mut captures = false;
@@ -1381,24 +1380,14 @@ fn code_is(query: Query<'_>, operation: Value, kind: &str) -> bool {
     )
 }
 fn rank(query: Query<'_>, operation: Value) -> usize {
-    analysis::count(
-        query,
-        "DomainRank",
-        query.required("OperationDomain", operation).unwrap(),
-    )
-    .unwrap() as usize
+    query.0.domain_rank(query.0.operation_domain(operation).unwrap()).unwrap() as usize
 }
 fn sizes(query: Query<'_>, operation: Value) -> Vec<i64> {
-    let domain = query.required("OperationDomain", operation).unwrap();
+    let domain = query.0.operation_domain(operation).unwrap();
     (0..rank(query, operation) as i64)
         .map(|slot| {
             query.0.value_to_base::<i64>(
-                query
-                    .required(
-                        "StaticIndex",
-                        query.required("DomainExtent", (domain, slot)).unwrap(),
-                    )
-                    .unwrap(),
+                query.required("StaticIndex", query.0.domain_extent(domain, slot).unwrap()).unwrap(),
             )
         })
         .collect()
@@ -1467,10 +1456,10 @@ fn collection_shape_proofs_distinguish_extents_from_capacity() {
         (set (FixtureOperationShape (OperationId 1)) (vec-of (IndexConstant 2)))
         (set (FixtureOutput (OperationId 1) 0) (ValueNameRef (ValueId 30)))
         (LiveOperation (OperationId 0))
-        (set (OperationDomain (OperationId 0)) (DomainId 0))
-        (set (DomainRank (DomainId 0)) 2)
-        (set (DomainExtent (DomainId 0) 0) (IndexConstant 8))
-        (set (DomainExtent (DomainId 0) 1) (IndexConstant 4))
+        (set (FixtureOperationDomain (OperationId 0)) (DomainId 0))
+        (set (FixtureDomainRank (DomainId 0)) 2)
+        (set (FixtureDomainExtent (DomainId 0) 0) (IndexConstant 8))
+        (set (FixtureDomainExtent (DomainId 0) 1) (IndexConstant 4))
         (set (FixtureOutput (OperationId 0) 0) (ValueNameRef (ValueId 0)))
         (set (FixtureOutputRole (OperationId 0) 0) (CollectedOutput))
         (set (FixtureOutputClause (OperationId 0) 0) 0)
@@ -1524,9 +1513,9 @@ fn collected_shape_does_not_require_unrelated_result_constructors() {
         &[(0, Code::Parallel)],
         r#"
         (LiveOperation (OperationId 0))
-        (set (OperationDomain (OperationId 0)) (DomainId 0))
-        (set (DomainRank (DomainId 0)) 2)
-        (set (DomainExtent (DomainId 0) 1) (IndexConstant 3))
+        (set (FixtureOperationDomain (OperationId 0)) (DomainId 0))
+        (set (FixtureDomainRank (DomainId 0)) 2)
+        (set (FixtureDomainExtent (DomainId 0) 1) (IndexConstant 3))
         (set (FixtureOutput (OperationId 0) 0) (ValueNameRef (ValueId 0)))
         (set (FixtureOutputRole (OperationId 0) 0) (CollectedOutput))
         (run-schedule (saturate graph-sizes))
@@ -1769,7 +1758,7 @@ fn kernel_policies_distinguish_compaction_atomics_and_native_scans() {
             &format!(
                 r#"
             (LiveOperation (OperationId 0))
-            (set (OperationDomain (OperationId 0)) (DomainId 0)) (set (DomainRank (DomainId 0)) {rank})
+            (set (FixtureOperationDomain (OperationId 0)) (DomainId 0)) (set (FixtureDomainRank (DomainId 0)) {rank})
             (set (FixtureResultCount (OperationId 0)) 1) (set (FixtureResultKindOf (OperationId 0) 0) {kind})
             (set (FixtureResultValue (OperationId 0) 0 0) (AccNameRef (AccumulatorId 0)))
             (set (TokenCapability (AccumulatorId 0)) (TokenBindingAt (OperationId 1) 0))
@@ -1867,7 +1856,7 @@ fn retained_call_work_composes_and_unknown_work_stays_unknown() {
             "(set (FixtureFunctionRoot leaf) (RegionId 2)) (set (RecursiveFunction leaf) true)",
             None,
         ),
-        ("(External leaf)", None),
+        ("(FixtureExternal leaf)", None),
     ] {
         let facts = format!(
             r#"
@@ -1880,6 +1869,7 @@ fn retained_call_work_composes_and_unknown_work_stays_unknown() {
             (set (FixtureRegion (OperationId 2)) (RegionId 2))
             (FirstOperation (RegionId 1) (OperationId 1)) (LastOperation (RegionId 1) (OperationId 1))
             (FirstOperation (RegionId 2) (OperationId 2)) (LastOperation (RegionId 2) (OperationId 2))
+            (LiveOperation (OperationId 0)) (LiveOperation (OperationId 1)) (LiveOperation (OperationId 2))
             (OperationWorkDemand (OperationId 0))
             "#,
         );

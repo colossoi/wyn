@@ -56,7 +56,7 @@ impl BodyGraph {
                 Function::External
             };
             let id = ir.functions.insert(function);
-            if query.lookup("EntryOrder", row[0])?.is_some() {
+            if query.0.entry_order(row[0]).is_some() {
                 ir.entries.push(id);
             }
             functions.insert(row[0], id);

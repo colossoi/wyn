@@ -80,7 +80,7 @@ fn copy_forwarding_preserves_captures_loop_entries_and_backedges() -> Result<(),
     assert_eq!(query.0.yield_value(inner, 0_i64)?, backedge);
     for id in 1000_i64..1004 {
         let copy = query.constructor("OperationId", id)?.unwrap();
-        assert!(!query.contains("Operation", copy)?);
+        assert!(!query.0.has_operation(copy));
     }
     Ok(())
 }
@@ -186,7 +186,7 @@ fn nested_calls_mark_only_the_reachable_cycle_recursive() -> Result<(), Optimize
         (set (FixtureRegion (OperationId 2)) (RegionId 11))
         (delete (FixtureRegion (OperationId 1)))
         (set (FixtureRegion (OperationId 1)) (RegionId 2))
-        (Function (FunctionId 3 "unused"))
+        (set (FixtureFunctionRoot (FunctionId 3 "unused")) (RegionId 12))
     "#,
     )?;
     analysis::structure(&mut graph, false)?;
@@ -436,7 +436,7 @@ fn applied_rewrites_do_not_replay_when_another_pass_revisits_the_same_body() -> 
     let revision = edit::revision(&graph)?;
     graph.parse_and_run_program(None, "(run-schedule (saturate graph-candidates graph-apply))")?;
     assert_eq!(edit::revision(&graph)?, revision);
-    let operation = Query(&graph).first("Operation")?.unwrap()[0];
+    let operation = graph.codes().next().unwrap().0;
     assert!(!Query(&graph).contains("DirectOperationUse", (operation, x))?);
     assert!(!Query(&graph).contains("DirectOperationUse", (operation, y))?);
     Ok(())
@@ -448,8 +448,8 @@ fn reduction_combiner_cannot_capture_a_lane_index() -> Result<(), OptimizeError>
     analysis::run(&mut graph)?;
     let query = Query(&graph);
     let parallel = query.first("ParallelOperation")?.unwrap()[0];
-    let domain = query.required("OperationDomain", parallel)?;
-    let index = query.required("DomainAxis", (domain, 0_i64))?;
+    let domain = query.0.operation_domain(parallel)?;
+    let index = query.0.domain_axis(domain, 0_i64)?;
     let reducer = query.0.reducer(parallel, 0_i64)?;
     graph.update(|mut sink| {
         let value = sink.add("ValueNameRef", index)?;
@@ -682,7 +682,7 @@ fn consumption_follows_product_components_and_excludes_shape_witnesses() -> Resu
     graph.parse_and_run_program(
         None,
         r#"
-        (check (External function) (= (ExternalParameterCount function) 1)
+        (check (= (wyn-external function) true) (= (ExternalParameterCount function) 1)
             (= (ExternalParameterDiet function 0) (ProductDiet (vec-of (Consume) (Observe)))))
         (check (CallOperation operation) (= (wyn-input-count operation) 1)
             (= (InputDiet operation 0) (ProductDiet (vec-of (Consume) (Observe)))))
@@ -776,7 +776,7 @@ fn consumed_tokens_cannot_be_reused() -> Result<(), OptimizeError> {
         r#"
         (let info (AccumulatorInfo (vec-of (IndexConstant 4)) (vec-of (ScalarElement (I32)))))
         (set (AccumulatorType (AccumulatorId 0)) info) (set (AccumulatorType (AccumulatorId 1)) info) (set (AccumulatorType (AccumulatorId 2)) info)
-        (Region (RegionId 0)) (FlowScope (RegionId 0))
+         (FlowScope (RegionId 0))
         (set (FixtureParameter (RegionId 0) 0) (AccNameRef (AccumulatorId 0)))
         (set (ParameterDiet (RegionId 0) 0) (Consume))
         (set (FixtureInput (OperationId 0) 0) (AccNameRef (AccumulatorId 0)))
@@ -785,8 +785,8 @@ fn consumed_tokens_cannot_be_reused() -> Result<(), OptimizeError> {
         (set (FixtureOutput (OperationId 1) 0) (AccNameRef (AccumulatorId 2)))
         (set (FixtureRegion (OperationId 0)) (RegionId 0)) (set (FixtureOrder (OperationId 0)) 0)
         (set (FixtureRegion (OperationId 1)) (RegionId 0)) (set (FixtureOrder (OperationId 1)) 1)
-        (Function (FunctionId 0 "invalid")) (set (FixtureFunctionRoot (FunctionId 0 "invalid")) (RegionId 0))
-        (set (FunctionResultCount (FunctionId 0 "invalid")) 0) (set (EntryOrder (FunctionId 0 "invalid")) 0)
+         (set (FixtureFunctionRoot (FunctionId 0 "invalid")) (RegionId 0))
+        (set (FunctionResultCount (FunctionId 0 "invalid")) 0) (set (FixtureEntryOrder (FunctionId 0 "invalid")) 0)
     "#,
     )?;
     let error = super::validate(&mut graph).expect_err("consumed capability reuse");
@@ -804,7 +804,6 @@ fn validation_checks_live_functions_and_ignores_retired_programs() -> Result<(),
         let name = sink.add("ValueNameRef", missing)?;
         let dead = sink.add("FunctionId", (999_i64, "dead"))?;
         let dead_root = sink.add("RegionId", 999_i64)?;
-        sink.add("Function", dead)?;
         sink.set_function_root(dead, dead_root);
         sink.set_yields(dead_root, vec![name])?;
         Ok(())
@@ -822,7 +821,7 @@ fn validation_checks_live_functions_and_ignores_retired_programs() -> Result<(),
     graph.update(|mut sink| {
         sink.remove("ParameterDiet", (root, 1_i64))?;
         sink.set_parameters(root, vec![original])?;
-        sink.remove("EntryOrder", function)?;
+        sink.remove_entry(function);
         Ok(())
     })?;
     super::validate(&mut graph)?;
@@ -932,7 +931,7 @@ fn local_rewrites_batch_functions_without_combining_competing_edits() -> Result<
     super::simplify(&mut graph, false)?;
     let query = Query(&graph);
     let mut entries = 0;
-    query.for_function("EntryOrder", |_, _| {
+    crate::egglog::test_graph::for_entries(query, |_, _| {
         entries += 1;
         Ok(())
     })?;

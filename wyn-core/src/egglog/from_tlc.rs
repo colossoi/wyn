@@ -8,6 +8,7 @@ use crate::builtins::{by_id, catalog, BuiltinId, Purity};
 use crate::egglog::graph::CollectiveInput;
 use crate::egglog::graph::Formula;
 use crate::egglog::graph::{ArgumentSite, Graph, State};
+use crate::egglog::graph::{Dimension, IterationDomain};
 use crate::egglog::graph::{OutputBinding, ParallelResults};
 use crate::op::BinaryOperator;
 use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
@@ -577,7 +578,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
             self.sink.set("FunctionResultCount", name, 1_i64)?;
             self.sink.set("FunctionResultType", (name, 0_i64), result)?;
             if matches!(&body.kind, TermKind::Extern(_)) {
-                self.sink.add("External", name)?;
+                self.sink.set_external(name);
                 self.sink.set("ExternalParameterCount", name, params.len() as i64)?;
                 let behavior = self.unit("MayTrapCall")?;
                 self.sink.set("FunctionBehavior", name, behavior)?;
@@ -596,13 +597,13 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                 };
                 let value = self.visit(body, &mut scope)?;
                 let body = self.finish(scope, &value)?;
-                self.sink.add("Function", name)?;
+
                 self.sink.set_function_root(name, body.0);
             }
             self.bindings.restore(checkpoint);
             if let DefMeta::EntryPoint(entry) = &definition.meta {
                 let id = self.symbols.intern(&definition.name);
-                self.sink.set("EntryOrder", name, id)?;
+                self.sink.set_entry(name, id);
                 if entry.declaration.entry_kind != crate::interface::EntryKind::Compute {
                     self.sink.set("InvocationEntry", name, true)?;
                 }
@@ -830,15 +831,20 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
         let ordinal = self.scalar(&types::i32())?;
         let id = self.domains.next_id();
         let domain = self.node("DomainId", id)?;
-        self.sink.set("DomainRank", domain, extents.len() as i64)?;
-        self.sink.set("DomainOrdinal", domain, ordinal.name)?;
-        let mut axes = Vec::new();
-        for (slot, &extent) in extents.iter().enumerate() {
+        let mut dimensions = Vec::with_capacity(extents.len());
+        let mut axes = Vec::with_capacity(extents.len());
+        for &extent in extents {
             let index = self.scalar(&types::i32())?;
-            self.sink.set("DomainAxis", (domain, slot as i64), index.name)?;
-            self.sink.set("DomainExtent", (domain, slot as i64), extent)?;
+            dimensions.push(Dimension::new(index.name, extent));
             axes.push(index);
         }
+        self.sink.set_domain(
+            domain,
+            IterationDomain {
+                ordinal: Some(ordinal.name),
+                dimensions,
+            },
+        );
         let observe = self.unit("Observe")?;
         let parameters = std::iter::once(&ordinal)
             .chain(&axes)
@@ -866,7 +872,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
         inner.parameters = domain.parameters;
         let body = self.finish_region(inner, &[], &[])?;
         let operation = self.operation(Code::Parallel, &[])?;
-        self.sink.set("OperationDomain", operation.0, domain.key)?;
+        self.sink.set_operation_domain(operation.0, domain.key);
         self.sink.set_control(operation.0, 0_i64, body.0);
         let execution = self.unit("Unscheduled")?;
         self.sink.set("OperationExecution", operation.0, execution)?;

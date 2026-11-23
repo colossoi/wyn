@@ -71,6 +71,37 @@ impl CostModel {
         local < dispatch
     }
 
+    pub(super) fn prefer_distribution(
+        self,
+        coordinates: u64,
+        serial: u64,
+        parallel: u64,
+        elements: u64,
+        fold: bool,
+    ) -> bool {
+        let (coordinates, serial, parallel, elements) = (
+            coordinates as f64,
+            serial as f64,
+            parallel as f64,
+            elements as f64,
+        );
+        let lanes = f64::from(self.resident_workgroups) * 32.0;
+        let cost = |width: f64| {
+            let occupancy = (coordinates * width / lanes).clamp(1.0 / lanes, 1.0);
+            (coordinates * (serial * width + parallel * elements) / (self.compute_ops_per_ns * occupancy))
+                .max(coordinates * elements * 4.0 / (self.memory_bytes_per_ns * occupancy))
+        };
+        let barriers = if fold {
+            elements.clamp(1.0, 128.0).log2()
+                * 2.0
+                * self.barrier_ns
+                * (coordinates / f64::from(self.resident_workgroups)).ceil()
+        } else {
+            0.0
+        };
+        cost(elements.max(1.0)) + barriers <= cost(1.0)
+    }
+
     /// Estimate a map coordinate's repeated prefix and its remaining parallel leaf.
     pub(super) fn mapping(
         self,
@@ -154,7 +185,6 @@ impl CostModel {
 
 pub(super) fn register_width(graph: &mut EGraph, costs: CostModel) {
     graph.add_pure_primitive(Width(costs), None);
-    graph.add_pure_primitive(Distribute(costs), None);
 }
 
 #[derive(Clone)]
@@ -190,46 +220,6 @@ impl PurePrim for Width {
                 .then_with(|| a.cmp(&b))
         })?;
         Some(state.base_to_value(i64::from(width)))
-    }
-}
-
-#[derive(Clone)]
-struct Distribute(CostModel);
-impl Primitive for Distribute {
-    fn name(&self) -> &str {
-        "wyn-distribute"
-    }
-    fn get_type_constraints(&self, span: &Span) -> Box<dyn TypeConstraint> {
-        let mut sorts = vec![BigIntSort.to_arcsort(); 4];
-        sorts.extend([BoolSort.to_arcsort(), BoolSort.to_arcsort()]);
-        SimpleTypeConstraint::new(self.name(), sorts, span.clone()).into_box()
-    }
-}
-impl PurePrim for Distribute {
-    fn apply<'a, 'db>(&self, state: PureState<'a, 'db>, args: &[Value]) -> Option<Value> {
-        let &[coordinates, serial, parallel, elements, fold] = args else {
-            unreachable!("invalid distribution cost arity");
-        };
-        let number = |value| u64::try_from(&*state.value_to_base::<Z>(value)).ok();
-        let coordinates = number(coordinates)? as f64;
-        let serial = number(serial)? as f64;
-        let parallel = number(parallel)? as f64;
-        let elements = number(elements)? as f64;
-        let lanes = f64::from(self.0.resident_workgroups) * 32.0;
-        let cost = |width: f64| {
-            let occupancy = (coordinates * width / lanes).clamp(1.0 / lanes, 1.0);
-            (coordinates * (serial * width + parallel * elements) / (self.0.compute_ops_per_ns * occupancy))
-                .max(coordinates * elements * 4.0 / (self.0.memory_bytes_per_ns * occupancy))
-        };
-        let barriers = if state.value_to_base::<bool>(fold) {
-            elements.clamp(1.0, 128.0).log2()
-                * 2.0
-                * self.0.barrier_ns
-                * (coordinates / f64::from(self.0.resident_workgroups)).ceil()
-        } else {
-            0.0
-        };
-        Some(state.base_to_value(cost(elements.max(1.0)) + barriers <= cost(1.0)))
     }
 }
 

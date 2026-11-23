@@ -138,7 +138,7 @@ fn selected_grid_dimensions_are_positive() {
             (let name (FunctionId 0 "grid"))
             (let grid (Grid3D (vec-of (IndexConstant 2) (IndexConstant 3) (IndexConstant 4))
                 (vec-of (IndexConstant {x}) (IndexConstant 1) (IndexConstant 1))))
-            (set (FixtureFunctionRoot name) (RegionId 0)) (set (EntryOrder name) 0)
+            (set (FixtureFunctionRoot name) (RegionId 0)) (set (FixtureEntryOrder name) 0)
             (set (FixtureRegion (OperationId 0)) (RegionId 0)) (set (FixtureOrder (OperationId 0)) 0)
             (set (OperationExecution (OperationId 0)) (DeviceKernel grid)) (set (OperationWidth (OperationId 0)) {x})
         "#)).unwrap();

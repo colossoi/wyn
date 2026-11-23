@@ -26,23 +26,10 @@ pub(super) fn lower(
     execution: &Execution,
     target: CodegenTarget,
 ) -> Result<Elaborated, OptimizeError> {
-    let query = Query(&program.graph);
-    let definitions = query.0.function_roots().collect();
-    let mut externals = LookupMap::default();
-    query.for_each("External", |row| {
-        externals.insert(row[0], row[0]);
-        Ok(())
-    })?;
-    let mut entries = Vec::new();
-    query.for_function("EntryOrder", |keys, order| {
-        entries.push((query.0.value_to_base::<i64>(order), keys[0]));
-        Ok(())
-    })?;
-    entries.sort_by_key(|&(order, _)| order);
+    let mut entries = program.graph.entries();
+    entries.sort_by_key(|&(_, order)| order);
     let mut compiler = Compiler {
         program,
-        definitions,
-        externals,
         execution,
         functions: Vec::new(),
         callable_ids: LookupMap::default(),
@@ -50,15 +37,13 @@ pub(super) fn lower(
     };
     entry::lower(
         &mut compiler,
-        entries.into_iter().map(|(_, function)| function).collect(),
+        entries.into_iter().map(|(function, _)| function).collect(),
         target,
     )
 }
 
 pub(super) struct Compiler<'a, 'source> {
     pub program: &'a Program<'source, InterfacesPrepared>,
-    pub definitions: LookupMap<Value, Value>,
-    externals: LookupMap<Value, Value>,
     pub functions: Vec<Function>,
     pub execution: &'a Execution,
     callable_ids: LookupMap<Value, (FunctionId, Vec<Type>, Type)>,
@@ -71,8 +56,8 @@ impl Compiler<'_, '_> {
             return Ok(selected.clone());
         }
         let query = Query(&self.program.graph);
-        let root = self.definitions.get(&name).copied();
-        let external = self.externals.contains_key(&name);
+        let root = query.0.root_of(name);
+        let external = query.0.is_external(name);
         if root.is_none() && !external {
             return Err(error("unknown graph function"));
         }

@@ -1,5 +1,4 @@
 //! Freeze dispatch recipes and storage choices after the final graph rewrites.
-use super::analysis::count;
 use super::bindings::Bindings;
 use super::cost::{CollectiveWork, CostModel};
 use super::dataflow::ir::Code;
@@ -99,9 +98,9 @@ impl Execution {
         graph.parse_and_run_program(None, "(run-schedule (saturate reducer-state))")?;
         let query = Query(graph);
         let mut execution = Self::default();
-        query.for_function("EntryOrder", |keys, _| {
-            execution.region(query, query.0.function_root(keys[0])?)
-        })?;
+        for (function, _) in graph.entries() {
+            execution.region(query, graph.function_root(function)?)?;
+        }
         Ok(execution)
     }
 
@@ -125,8 +124,8 @@ impl Execution {
                     return Err(error("invalid workgroup size"));
                 };
                 let (groups, local_size, grid) = if query.enode("AutomaticGrid", grid[0])?.is_some() {
-                    let domain = query.required("OperationDomain", operation)?;
-                    if count(query, "DomainRank", domain)? == 0 {
+                    let domain = query.0.operation_domain(operation)?;
+                    if query.0.domain_rank(domain)? == 0 {
                         return Err(error("automatic dispatch requires an iteration axis"));
                     }
                     (None, (width.get(), 1, 1), None)
@@ -193,8 +192,8 @@ pub(super) fn width(query: Query<'_>, operation: Value, selected: Value) -> Resu
         };
         return Ok(width);
     }
-    let domain = query.required("OperationDomain", operation)?;
-    let rank = count(query, "DomainRank", domain)?;
+    let domain = query.0.operation_domain(operation)?;
+    let rank = query.0.domain_rank(domain)?;
     if rank == 0 {
         return Err(error("automatic dispatch requires an iteration axis"));
     }
@@ -232,7 +231,7 @@ pub(super) fn width(query: Query<'_>, operation: Value, selected: Value) -> Resu
         && state_bytes > 0
         && query.0.value_to_base::<bool>(query.required("SubgroupsEnabled", RawValues(Vec::new()))?)
     {
-        let extent = query.required("DomainExtent", (domain, rank - 1))?;
+        let extent = query.0.domain_extent(domain, rank - 1)?;
         if let Some(size) = query.lookup("StaticIndex", extent)? {
             if let Ok(size) = u32::try_from(query.0.value_to_base::<i64>(size).max(0)) {
                 if let Some(size) = size.checked_next_power_of_two() {
@@ -283,7 +282,7 @@ fn collective(
     costs: CostModel,
     states: &LookupMap<(Value, i64, usize), Type>,
 ) -> Result<Option<Collective>, OptimizeError> {
-    let domain = query.required("OperationDomain", operation)?;
+    let domain = query.0.operation_domain(operation)?;
     let axes = representation::domain_axes(query, domain)?;
 
     if axes.len() != 1 || dispatch.groups.is_some() {
@@ -402,11 +401,7 @@ impl Execution {
             query,
             live_after: &live_after,
         };
-        let mut roots = Vec::new();
-        query.for_function("EntryOrder", |keys, order| {
-            roots.push((keys[0], query.0.value_to_base::<i64>(order)));
-            Ok(())
-        })?;
+        let roots = program.graph.entries();
         let declarations = program
             .source
             .defs
@@ -500,12 +495,12 @@ impl Execution {
                 };
                 let epilogue = if let Some(end) = epilogue_index {
                     let packed = query.0.has_collective_inputs(operation, CollectiveInput::Predicate);
-                    let domain = query.required("OperationDomain", operation)?;
+                    let domain = query.0.operation_domain(operation)?;
                     Some(Epilogue {
                         operation: operations[end],
                         preparation: operations[i + 1..end].to_vec(),
                         cooperative: !packed,
-                        capacity: query.required("DomainExtent", (domain, 0_i64))?,
+                        capacity: query.0.domain_extent(domain, 0_i64)?,
                     })
                 } else {
                     None
@@ -743,12 +738,10 @@ impl Execution {
                 return Ok(false);
             }
         }
-        let domain = query.required("OperationDomain", operation)?;
+        let domain = query.0.operation_domain(operation)?;
         let mut sizes = Vec::new();
-        for slot in 0..count(query, "DomainRank", domain)? {
-            if let Some(size) =
-                host::scalar_index(query, values, query.required("DomainExtent", (domain, slot))?)?
-            {
+        for slot in 0..query.0.domain_rank(domain)? {
+            if let Some(size) = host::scalar_index(query, values, query.0.domain_extent(domain, slot)?)? {
                 sizes.push(size);
             }
         }

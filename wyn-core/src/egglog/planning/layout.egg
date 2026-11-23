@@ -21,7 +21,7 @@
        (ResultOrigin (ValueNameRef source) producer 0) (= parent (wyn-region-of producer))
        (= parent (wyn-region-of layout))
        (< (wyn-operation-position producer) (wyn-operation-position layout))
-       (ParallelOperation producer) (= (DomainRank (OperationDomain producer)) 2)
+       (ParallelOperation producer) (= (wyn-domain-rank (wyn-iteration-domain producer)) 2)
        (= (wyn-result-count producer) 1) (= (wyn-contribution-count producer 0) 1)
        (= (wyn-output-count producer) 1) (CollectedClause producer 0))
       ((LayoutProducer producer layout read source) (set (LayoutLegal layout) true)) :ruleset layout-fusion)
@@ -41,7 +41,7 @@
       ((set (LayoutLegal layout) false)) :ruleset layout-fusion)
 ; Distributed map bodies use the coordinate parameters in place of the ordinal.
 (relation LayoutOrdinal (OperationKey Name))
-(rule ((LayoutProducer producer layout read source) (= ordinal (DomainOrdinal (OperationDomain producer))))
+(rule ((LayoutProducer producer layout read source) (= ordinal (wyn-domain-ordinal (wyn-iteration-domain producer))))
       ((LayoutOrdinal layout (ValueNameRef ordinal))) :ruleset layout-fusion)
 (rule ((LayoutOrdinal layout name) (DirectOperationUse operation name))
       ((set (LayoutLegal layout) false)) :ruleset layout-fusion)

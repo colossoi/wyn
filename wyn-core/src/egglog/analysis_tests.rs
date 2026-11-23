@@ -108,7 +108,7 @@ fn region_order_refreshes_the_changed_body() -> Result<(), OptimizeError> {
     ensure(&mut graph)?;
     let query = Query(&graph);
     let mut roots = Vec::new();
-    query.for_function("EntryOrder", |keys, order| {
+    crate::egglog::test_graph::for_entries(query, |keys, order| {
         roots.push((graph.value_to_base::<i64>(order), query.0.function_root(keys[0])?));
         Ok(())
     })?;
@@ -142,7 +142,7 @@ fn rewriting_defers_live_after_and_host_classification() -> Result<(), OptimizeE
     let root = test_graph::root(&graph);
     liveness(&mut graph, &[root])?;
     let query = Query(&graph);
-    query.for_function("EntryOrder", |keys, _| {
+    crate::egglog::test_graph::for_entries(query, |keys, _| {
         let candidate = query.0.function_root(keys[0])?;
         assert_eq!(query.contains("LivenessRegion", candidate)?, candidate == root);
         Ok(())
@@ -390,10 +390,9 @@ fn bounded_work_counts_every_loop_iteration() {
                 parameters(&mut sink, root, &[])?;
                 yields(&mut sink, root, &[])?;
                 let function = sink.add("FunctionId", (0_i64, "work"))?;
-                sink.add("Function", function)?;
                 sink.set_function_root(function, root.0);
                 sink.set("FunctionResultCount", function, 0_i64)?;
-                sink.set("EntryOrder", function, 0_i64)?;
+                sink.set_entry(function, 0_i64);
                 Ok(())
             })())
         })

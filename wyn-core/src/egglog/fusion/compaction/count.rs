@@ -1,5 +1,4 @@
 //! Replace compacted arrays that are observed only through their outer length.
-use crate::egglog::analysis::count;
 use crate::egglog::dataflow::{
     edit,
     ir::{self, Code, Name, OperationId, Parameter, RegionId},
@@ -34,7 +33,7 @@ pub(in crate::egglog::fusion) fn run(graph: &mut Graph) -> Result<bool, Optimize
         for (&op, results) in &structure.parallels {
             if !query.contains("LiveOperation", op)?
                 || !results.kinds.contains(&Some(compacted))
-                || count(query, "DomainRank", query.required("OperationDomain", op)?)? != 1
+                || query.0.domain_rank(query.0.operation_domain(op)?)? != 1
             {
                 continue;
             }
@@ -240,7 +239,7 @@ fn make_count(
     sink.add("RepeatableOperation", id)?;
     ir::outputs(sink, add, &[Name::Value(sum)])?;
     let reducer = sink.add("DerivedRegion", (context, 92_i64, 0_i64))?;
-    sink.add("Region", reducer)?;
+
     sink.add("FlowScope", reducer)?;
     ir::parameters(
         sink,

@@ -254,7 +254,6 @@ impl Body {
                         ir::operation_at(&mut sink, WireOperationId(id), Code::Branch, &[predicate])?;
                     ir::outputs(&mut sink, branch, &guard.outputs)?;
                     for (slot, (region, yields)) in arms.into_iter().enumerate() {
-                        sink.add("Region", region)?;
                         sink.add("FlowScope", region)?;
                         ir::parameters(&mut sink, WireRegionId(region), &[])?;
                         ir::yields(&mut sink, WireRegionId(region), &yields)?;

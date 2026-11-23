@@ -99,7 +99,7 @@ fn shared_helpers_keep_separate_entry_and_loop_parameters() -> Result<(), Optimi
         functions += 1;
         Ok(())
     })?;
-    query.for_function("EntryOrder", |_, _| {
+    crate::egglog::test_graph::for_entries(query, |_, _| {
         entries += 1;
         Ok(())
     })?;
@@ -114,7 +114,7 @@ fn shared_helpers_keep_separate_entry_and_loop_parameters() -> Result<(), Optimi
 #[test]
 fn unrelated_syntax_does_not_add_evaluation_dependencies() -> Result<(), OptimizeError> {
     let mut graph = optimized("entry main(x:i32) i32=x")?;
-    let entry = Query(&graph).first("EntryOrder")?.unwrap()[0];
+    let entry = graph.entries()[0].0;
     let root = Query(&graph).0.function_root(entry)?;
     let before = Query(&graph).0.yield_values(root);
     graph.update(|mut sink| {
@@ -140,11 +140,10 @@ fn function_pruning_keeps_called_helpers_and_removes_substituted_callbacks() -> 
     let tlc = crate::compile_thru_tlc("def helper(x:i32) i32=x+1 entry main(x:i32) i32=helper(x)").unwrap();
     let (mut graph, _) = from_tlc::import(&tlc)?;
     // Keep an uncalled function in the graph, independent of TLC's own pruning.
-    let helper = Query(&graph).first("Function")?.unwrap()[0];
+    let helper = graph.function_roots().next().unwrap().0;
     let root = Query(&graph).0.function_root(helper)?;
     graph.update(|mut sink| {
         let dead = sink.add("FunctionId", (999_i64, "substituted_callback"))?;
-        sink.add("Function", dead)?;
         sink.set_function_root(dead, root);
         sink.set("FunctionResultCount", dead, 1_i64)?;
         Ok(())

@@ -3,25 +3,12 @@ use super::OptimizeError;
 use crate::egglog::graph::Graph;
 use egglog_engine::ast::FunctionSubtype;
 use egglog_engine::sort::VecContainer;
-use egglog_engine::{IntoValues, RawValues, Read, Value};
+use egglog_engine::{IntoValues, Read, Value};
 
 #[derive(Clone, Copy)]
 pub(super) struct Query<'a>(pub &'a Graph);
 
 impl Query<'_> {
-    pub fn indexed(&self, table: &str, keys: &[Value], count: i64) -> Result<Vec<Value>, OptimizeError> {
-        if count < 0 {
-            return Err(super::output_error(format!("negative {table} count")));
-        }
-        (0..count)
-            .map(|slot| {
-                let mut keys = keys.to_vec();
-                keys.push(self.0.base_to_value(slot));
-                self.required(table, RawValues(keys))
-            })
-            .collect()
-    }
-
     pub fn operations(&self, region: Value) -> Result<Vec<Value>, OptimizeError> {
         let mut operations = Vec::new();
         let positions = self.0.structure().read();

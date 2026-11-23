@@ -65,8 +65,10 @@ pub(super) fn lower(
     let mut next_generated = compiler.program.source.global_context.auto_storage_binding_ids.peek_id();
     for root in roots {
         let query = super::Query(&compiler.program.graph);
-        let order = query.required("EntryOrder", root)?;
-        let symbol = *compiler.program.symbols.resolve(query.0.value_to_base::<i64>(order));
+        let Some(order) = query.0.entry_order(root) else {
+            return Err(error("missing entry order"));
+        };
+        let symbol = *compiler.program.symbols.resolve(order);
         let Some(source) = compiler.program.source.defs.iter().find(|definition| definition.name == symbol)
         else {
             return Err(error("entry source metadata missing"));
@@ -77,9 +79,7 @@ pub(super) fn lower(
         let declaration = &metadata.declaration;
         let (source_body, parameters) = extract_lambda_params_ref(&source.body);
         let function = root;
-        let Some(&region) = compiler.definitions.get(&function) else {
-            return Err(error("entry graph function missing"));
-        };
+        let region = query.0.function_root(function)?;
         let params = query.0.parameters(region);
         let mut pc_offset = 0u32;
         let mut parameter_inputs = Vec::new();
@@ -1353,12 +1353,17 @@ impl EntryEmission<'_, '_, '_> {
                 let query = self.body.query();
                 let atomic = self.body.atomic_contributions(statement)?;
                 let rank = crate::egglog::analysis::count(query, "LaunchRank", statement)?;
-                let domain = query.required("OperationDomain", statement)?;
+                let domain = query.0.operation_domain(statement)?;
                 let columns = query.lookup("ColumnScan", statement)?;
                 let extents = if let Some(plan) = columns {
                     vec![query.fields("ScanColumns", plan)?[1]]
                 } else {
-                    query.indexed("DomainExtent", &[domain], rank)?
+                    if rank < 0 {
+                        return Err(error("negative launch rank"));
+                    }
+                    (0..rank)
+                        .map(|slot| query.0.domain_extent(domain, slot))
+                        .collect::<Result<Vec<_>, _>>()?
                 };
                 let mut elements = Expr::Integer(1);
                 for extent in extents {
@@ -1591,9 +1596,8 @@ impl EntryEmission<'_, '_, '_> {
                         self.body.statement(statement)?;
                         if let Some(epilogue) = epilogue {
                             self.body.statements(&epilogue.preparation)?;
-                            let domain =
-                                self.body.query().required("OperationDomain", epilogue.operation)?;
-                            let extent = self.body.query().required("DomainExtent", (domain, 0_i64))?;
+                            let domain = self.body.query().0.operation_domain(epilogue.operation)?;
+                            let extent = self.body.query().0.domain_extent(domain, 0_i64)?;
                             let count = self.body.index_expression(extent)?;
                             self.scan_epilogue(
                                 epilogue.operation,

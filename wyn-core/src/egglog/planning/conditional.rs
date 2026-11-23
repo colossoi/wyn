@@ -47,7 +47,7 @@ pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> 
     }
     let parent = query.0.operation_region(branch)?;
     let order = query.0.operation_order(branch)?;
-    let domain = query.required("OperationDomain", yes)?;
+    let domain = query.0.operation_domain(yes)?;
     let execution = query.required("OperationExecution", yes)?;
     let width = query.lookup("OperationWidth", yes)?;
     let mut arm_operations = Vec::new();
@@ -72,7 +72,7 @@ pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> 
     graph.update(|mut sink| {
         Ok((|| -> Result<(), OptimizeError> {
             let lane = sink.add("DerivedRegion", (branch, 61_i64, 0_i64))?;
-            sink.add("Region", lane)?;
+
             sink.add("FlowScope", lane)?;
             ir::parameters(&mut sink, RegionId(lane), &parameters)?;
             ir::yields(&mut sink, RegionId(lane), &[])?;
@@ -112,7 +112,7 @@ pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> 
             sink.set_region(parallel.0, parent);
             sink.set_order(parallel.0, order);
             sink.set_control(parallel.0, 0_i64, lane);
-            sink.set("OperationDomain", parallel.0, domain)?;
+            sink.set_operation_domain(parallel.0, domain);
             sink.set("OperationExecution", parallel.0, execution)?;
             if let Some(width) = width {
                 sink.set("OperationWidth", parallel.0, width)?;

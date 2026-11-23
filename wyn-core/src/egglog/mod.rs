@@ -8,7 +8,6 @@
 //! SSA emission instantiates the recipes with concrete bindings and operands;
 //! physical eligibility and kernel policies remain queryable in egglog.
 use self::dataflow::edit;
-use self::query::Query;
 use crate::egglog::graph::Graph;
 use crate::ssa::stage::Elaborated;
 use crate::tlc::stage::OwnershipApplied;
@@ -179,12 +178,12 @@ pub fn prepare_host(
     mut program: Program<'_, InterfacesPrepared>,
 ) -> Result<HostPrepared<'_>, OptimizeError> {
     let _timing = timing::span("egglog host preparation");
-    let query = Query(&program.graph);
-    let mut roots = Vec::new();
-    query.for_function("EntryOrder", |keys, _| {
-        roots.push(query.0.function_root(keys[0])?);
-        Ok(())
-    })?;
+    let roots = program
+        .graph
+        .entries()
+        .into_iter()
+        .map(|(function, _)| program.graph.function_root(function))
+        .collect::<Result<Vec<_>, _>>()?;
     analysis::liveness(&mut program.graph, &roots)?;
     planning::epilogues(&mut program.graph)?;
     let execution = execution::Execution::prepare(&mut program)?;
