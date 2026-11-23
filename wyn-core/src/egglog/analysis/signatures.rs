@@ -181,7 +181,7 @@ pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), Optimi
 pub(super) fn region(query: Query<'_>, region: Value) -> Result<(), OptimizeError> {
     let mut orders = LookupSet::default();
     for operation in query.operations(region)? {
-        let order = query.0.value_to_base::<i64>(query.required("OperationOrder", operation)?);
+        let order = query.0.operation_order(operation)?;
         if !orders.insert(order) {
             return Err(output_error("two operation occurrences share an execution order"));
         }

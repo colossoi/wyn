@@ -6,7 +6,7 @@ use crate::egglog::{from_tlc, fuse};
 fn rewrites_stay_with_their_program_revision() {
     let source = compile_thru_tlc("entry main(xs:[8]i32) [8]i32=map(|x|x*2,map(|x|x+1,xs))").unwrap();
     let program = from_tlc(&source).unwrap();
-    let mut original = program.graph.clone();
+    let mut original = from_tlc(&source).unwrap().graph;
     crate::egglog::memory::validate(&mut original).unwrap();
     let root = crate::egglog::dataflow::edit::revision(&original).unwrap();
     let fused = fuse(program).unwrap();

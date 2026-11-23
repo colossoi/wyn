@@ -29,15 +29,38 @@ impl Query<'_> {
 
     pub fn operations(&self, region: Value) -> Result<Vec<Value>, OptimizeError> {
         let mut operations = Vec::new();
-        self.for_function("OperationRegion", |keys, owner| {
-            if owner == region && self.contains("Operation", keys[0])? {
-                let order = self.required("OperationOrder", keys[0])?;
-                operations.push((self.0.value_to_base::<i64>(order), keys[0]));
+        let positions = self.0.positions().read();
+        for &operation in positions.by_region.get(&region).into_iter().flatten() {
+            if self.contains("Operation", operation)? {
+                let Some(order) = positions.operations[&operation].order else {
+                    return Err(super::output_error("operation in a region has no position"));
+                };
+                operations.push((order, operation));
             }
-            Ok(())
-        })?;
+        }
         operations.sort_by_key(|&(order, _)| order);
         Ok(operations.into_iter().map(|(_, operation)| operation).collect())
+    }
+
+    pub fn attached_regions(&self, operation: Value) -> Result<Vec<Value>, OptimizeError> {
+        let mut regions = Vec::new();
+        let mut edge = 0_i64;
+        while let Some(region) = self.lookup("ControlRegion", (operation, edge))? {
+            regions.push(region);
+            edge += 1;
+        }
+        for (table, count) in [
+            ("ResultReducer", "ResultCount"),
+            ("AccumulatorCombiner", "AccumulatorGroupCount"),
+        ] {
+            let Some(count) = self.lookup(count, operation)? else {
+                continue;
+            };
+            for slot in 0..self.0.value_to_base::<i64>(count) {
+                regions.extend(self.lookup(table, (operation, slot))?);
+            }
+        }
+        Ok(regions)
     }
 
     pub fn name(&self, name: Value) -> Result<Value, OptimizeError> {

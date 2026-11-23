@@ -24,7 +24,7 @@
 (rule ((= revision (AnalysisRevision)) (Function function) (= (FunctionResultType function slot) (LogicalReturn ty)))
       ((set (InlineRequired function) true)) :ruleset graph-inline-required)
 (rule ((= revision (AnalysisRevision)) (Function function) (= root (FunctionRoot function))
-       (FlowScopeAncestor root region) (= region (OperationRegion operation)) (ParallelOperation operation))
+       (FlowScopeAncestor root region) (= region (wyn-region-of operation)) (ParallelOperation operation))
       ((InlineParallel function)) :ruleset graph-inline-required)
 ; A nonrecursive callee with parallel work will expose that work in its caller.
 (rule ((= revision (AnalysisRevision)) (InlineCall caller operation callee)

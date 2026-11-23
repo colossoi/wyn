@@ -25,7 +25,7 @@ pub(in crate::egglog::fusion) fn hoist(graph: &mut Graph) -> Result<bool, Optimi
         let op = key[0];
         if query.0.value_to_base::<bool>(flag) && !query.contains("InvocationDependent", op)? {
             movable.insert(op);
-            let source = query.required("OperationRegion", op)?;
+            let source = query.0.operation_region(op)?;
             if let Some(&owner) = parents.get(&source) {
                 if !query.contains("AccumulatorOperation", owner)? {
                     initial.insert(op, source);

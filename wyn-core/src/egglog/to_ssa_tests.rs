@@ -139,7 +139,7 @@ fn selected_grid_dimensions_are_positive() {
             (let grid (Grid3D (vec-of (IndexConstant 2) (IndexConstant 3) (IndexConstant 4))
                 (vec-of (IndexConstant {x}) (IndexConstant 1) (IndexConstant 1))))
             (set (FunctionRoot name) (RegionId 0)) (set (EntryOrder name) 0)
-            (set (OperationRegion (OperationId 0)) (RegionId 0)) (set (OperationOrder (OperationId 0)) 0)
+            (set (FixtureRegion (OperationId 0)) (RegionId 0)) (set (FixtureOrder (OperationId 0)) 0)
             (set (OperationExecution (OperationId 0)) (DeviceKernel grid)) (set (OperationWidth (OperationId 0)) {x})
         "#)).unwrap();
         let result = Execution::select(&mut graph);

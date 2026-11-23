@@ -227,19 +227,16 @@ impl UsePath {
         };
         let (kind, fields) = query.application(site, &["OperationSite", "ParameterSite"])?;
         let producer = (kind == "OperationSite").then_some(fields[0]);
-        let definition = if let Some(producer) = producer {
-            query.required("OperationRegion", producer)?
-        } else {
-            fields[0]
-        };
+        let definition =
+            if let Some(producer) = producer { query.0.operation_region(producer)? } else { fields[0] };
         let mut scopes = Vec::new();
         loop {
-            let region = query.required("OperationRegion", op)?;
+            let region = query.0.operation_region(op)?;
             scopes.push((region, op));
             if region == definition {
                 if let Some(producer) = producer {
-                    let before = query.0.value_to_base::<i64>(query.required("OperationOrder", producer)?);
-                    let after = query.0.value_to_base::<i64>(query.required("OperationOrder", op)?);
+                    let before = query.0.operation_order(producer)?;
+                    let after = query.0.operation_order(op)?;
                     if before >= after {
                         return Ok(None);
                     }

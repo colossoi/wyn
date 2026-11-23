@@ -9,8 +9,6 @@ use egglog_engine::{RawValues, Value, Write};
 pub(in crate::egglog) const OPERATION_CELLS: &[&str] = &[
     "InstructionWork",
     "LiteralBits",
-    "OperationRegion",
-    "OperationOrder",
     "Input",
     "InputCount",
     "InputDiet",
@@ -256,7 +254,7 @@ pub(in crate::egglog) fn splice(
     inserted: &[Value],
 ) -> Result<(), OptimizeError> {
     let query = Query(graph);
-    let region = query.required("OperationRegion", at)?;
+    let region = query.0.operation_region(at)?;
     let mut order = query.operations(region)?;
     let Some(position) = order.iter().position(|&operation| operation == at) else {
         return Err(output_error("splice point is outside its region"));
@@ -266,8 +264,8 @@ pub(in crate::egglog) fn splice(
     let mut edits = Vec::new();
     for (index, operation) in order.into_iter().enumerate() {
         let index = index as i64;
-        let move_region = query.required("OperationRegion", operation)? != region;
-        let set_order = query.required("OperationOrder", operation)? != graph.base_to_value(index);
+        let move_region = query.0.operation_region(operation)? != region;
+        let set_order = query.0.operation_order(operation)? != index;
         if move_region || set_order {
             edits.push((operation, index, move_region, set_order));
         }
@@ -275,12 +273,10 @@ pub(in crate::egglog) fn splice(
     graph.update(|mut sink| {
         for (operation, index, move_region, set_order) in edits {
             if move_region {
-                sink.remove("OperationRegion", operation)?;
-                sink.set("OperationRegion", operation, region)?;
+                sink.set_region(operation, region);
             }
             if set_order {
-                sink.remove("OperationOrder", operation)?;
-                sink.set("OperationOrder", operation, index)?;
+                sink.set_order(operation, index);
             }
         }
         Ok(())
@@ -293,7 +289,7 @@ pub(in crate::egglog) fn move_before(
     operation: Value,
     before: Value,
 ) -> Result<(), OptimizeError> {
-    let destination = Query(graph).required("OperationRegion", before)?;
+    let destination = graph.operation_region(before)?;
     move_into(graph, operation, destination, Some(before))
 }
 
@@ -317,10 +313,8 @@ pub(in crate::egglog) fn move_into(
     order.insert(position, operation);
     graph.update(|mut sink| {
         for (slot, item) in order.into_iter().enumerate() {
-            sink.remove("OperationRegion", item)?;
-            sink.remove("OperationOrder", item)?;
-            sink.set("OperationRegion", item, destination)?;
-            sink.set("OperationOrder", item, slot as i64)?;
+            sink.set_region(item, destination);
+            sink.set_order(item, slot as i64);
         }
         Ok(())
     })?;
@@ -349,8 +343,6 @@ pub(in crate::egglog) fn set_code(
             "InstructionWork",
             "LiteralBits",
             "ScalarPayload",
-            "OperationRegion",
-            "OperationOrder",
             "Input",
             "InputCount",
             "Output",
@@ -394,7 +386,6 @@ pub(in crate::egglog) fn clone_region(
     arguments: &[Value],
 ) -> Result<Value, OptimizeError> {
     for table in [
-        "CloneRequest",
         "CloneMember",
         "CloneOperation",
         "CloneLocal",
@@ -427,8 +418,27 @@ pub(in crate::egglog) fn clone_region(
     if parameters.len() != arguments.len() {
         return Err(output_error("region entry edge has the wrong argument count"));
     }
+    let query = Query(graph);
+    let mut pending = vec![region];
+    let mut members = LookupSet::new();
+    let mut operations = Vec::new();
+    while let Some(region) = pending.pop() {
+        if members.insert(region) {
+            for operation in query.operations(region)? {
+                pending.extend(query.attached_regions(operation)?);
+                operations.push(operation);
+            }
+        }
+    }
     graph.update(|mut sink| {
-        sink.add("CloneRequest", (context, region))?;
+        for region in members {
+            sink.add("CloneMember", (context, region))?;
+        }
+        for operation in operations {
+            let cloned = sink.add("ClonedOperation", (context, operation))?;
+            sink.add("Operation", cloned)?;
+            sink.add("CloneOperation", (context, operation))?;
+        }
         for (parameter, &argument) in parameters.into_iter().zip(arguments) {
             sink.set("CloneSubstitute", (context, parameter), argument)?;
         }
@@ -445,13 +455,24 @@ pub(in crate::egglog) fn clone_region(
             let Some(copy) = query.constructor("ClonedOperation", (context, row[1]))? else {
                 return Err(output_error("cloned operation has no identity"));
             };
-            operations.push((row[1], copy));
+            let region = query.0.operation_region(row[1])?;
+            let Some(region) = query.constructor("ClonedRegion", (context, region))? else {
+                return Err(output_error("cloned operation has no region"));
+            };
+            operations.push((row[1], copy, region, query.0.operation_order(row[1])?));
         }
         Ok(())
     })?;
-    for (original, copy) in operations {
+    for &(original, copy, _, _) in &operations {
         graph.copy_occurrence(original, copy)?;
     }
+    graph.update(|mut sink| {
+        for (_, operation, region, order) in operations {
+            sink.set_region(operation, region);
+            sink.set_order(operation, order);
+        }
+        Ok(())
+    })?;
     let Some(region) = Query(graph).constructor("ClonedRegion", (context, region))? else {
         return Err(output_error("selected region was not cloned"));
     };

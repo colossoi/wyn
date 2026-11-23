@@ -106,7 +106,7 @@ pub(in crate::egglog::fusion) fn run(graph: &mut Graph) -> Result<bool, Optimize
         let Some(&(_, output)) = candidate.lengths.first() else {
             continue;
         };
-        let region = query.required("OperationRegion", operation)?;
+        let region = query.0.operation_region(operation)?;
         let lane = query.required("ControlRegion", (operation, 0_i64))?;
         for region in [region, lane] {
             if !orders.contains_key(&region) {
@@ -147,10 +147,9 @@ pub(in crate::egglog::fusion) fn run(graph: &mut Graph) -> Result<bool, Optimize
                 for operation in operations {
                     for item in before.remove(&operation).into_iter().flatten().chain([operation]) {
                         if generated.contains(&item) {
-                            sink.set("OperationRegion", item, region)?;
+                            sink.set_region(item, region);
                         }
-                        sink.remove("OperationOrder", item)?;
-                        sink.set("OperationOrder", item, order)?;
+                        sink.set_order(item, order);
                         order += 1;
                     }
                 }
@@ -252,8 +251,8 @@ fn make_count(
     )?;
     ir::yields(sink, RegionId(reducer), &[Name::Value(sum)])?;
     sink.set("RegionReturnType", (reducer, 0_i64), returns)?;
-    sink.set("OperationRegion", id, reducer)?;
-    sink.set("OperationOrder", id, 0_i64)?;
+    sink.set_region(id, reducer);
+    sink.set_order(id, 0_i64);
     let kind = sink.add("Total", RawValues(Vec::new()))?;
     let kind = sink.add("Folded", kind)?;
     sink.remove("ResultKindOf", (operation, clause))?;

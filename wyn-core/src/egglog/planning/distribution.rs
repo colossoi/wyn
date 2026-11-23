@@ -4,7 +4,7 @@ use crate::egglog::dataflow::ir::{self, Code, Name, OperationId, Parameter, Regi
 use crate::egglog::graph::Graph;
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, OptimizeError};
-use egglog_engine::{Core, RawValues, Value, Write};
+use egglog_engine::{RawValues, Value, Write};
 
 pub(super) fn lift_row_length(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let Some(candidate) = Query(graph).first("LiftUniformRowLength")? else {
@@ -85,14 +85,14 @@ pub(super) fn apply(graph: &mut Graph, outer: Value, inner: Value) -> Result<(),
         .operations(body)?
         .into_iter()
         .filter(|&operation| operation != inner)
-        .map(|operation| Ok((operation, query.required("OperationOrder", operation)?)))
+        .map(|operation| Ok((operation, query.0.operation_order(operation)?)))
         .collect::<Result<Vec<_>, OptimizeError>>()?;
     let nested = query
         .operations(inner_body)?
         .into_iter()
-        .map(|operation| Ok((operation, query.required("OperationOrder", operation)?)))
+        .map(|operation| Ok((operation, query.0.operation_order(operation)?)))
         .collect::<Result<Vec<_>, OptimizeError>>()?;
-    let base = query.0.value_to_base::<i64>(query.required("OperationOrder", inner)?) + 2;
+    let base = query.0.operation_order(inner)? + 2;
     let result_count = analysis::count(query, "ResultCount", inner)?;
     let mut removed = Vec::new();
     let mut copied = Vec::new();
@@ -166,16 +166,14 @@ pub(super) fn apply(graph: &mut Graph, outer: Value, inner: Value) -> Result<(),
                     index = sink.add("IndexAdd", (scaled, coordinate))?;
                 }
                 sink.set("OperationIndex", (operation.0, 0_i64), index)?;
-                sink.set("OperationRegion", operation.0, body)?;
-                sink.set("OperationOrder", operation.0, slot as i64)?;
+                sink.set_region(operation.0, body);
+                sink.set_order(operation.0, slot as i64);
             }
             for (offset, operations) in [(2_i64, prefix), (base, nested)] {
                 for (operation, order) in operations {
-                    let order = sink.value_to_base::<i64>(order) + offset;
-                    sink.remove("OperationRegion", operation)?;
-                    sink.remove("OperationOrder", operation)?;
-                    sink.set("OperationRegion", operation, body)?;
-                    sink.set("OperationOrder", operation, order)?;
+                    let order = order + offset;
+                    sink.set_region(operation, body);
+                    sink.set_order(operation, order);
                 }
             }
             for value in certificates {

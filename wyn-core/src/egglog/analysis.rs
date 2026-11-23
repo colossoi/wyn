@@ -206,9 +206,9 @@ fn publish_order(graph: &mut Graph) -> Result<(), OptimizeError> {
     })?;
     query.for_each("LiveOperation", |row| {
         let operation = row[0];
-        let region = query.required("OperationRegion", operation)?;
-        let order = query.required("OperationOrder", operation)?;
-        operations.entry(region).or_default().push((graph.value_to_base(order), operation));
+        let region = query.0.operation_region(operation)?;
+        let order = query.0.operation_order(operation)?;
+        operations.entry(region).or_default().push((order, operation));
         Ok(())
     })?;
     // Region order depends only on the occurrences in that region.
@@ -304,16 +304,13 @@ pub(super) fn available_before(
     };
     let (kind, fields) = query.application(site, &["OperationSite", "ParameterSite"])?;
     let producer = (kind == "OperationSite").then_some(fields[0]);
-    let definition = if let Some(producer) = producer {
-        query.required("OperationRegion", producer)?
-    } else {
-        fields[0]
-    };
+    let definition =
+        if let Some(producer) = producer { query.0.operation_region(producer)? } else { fields[0] };
     loop {
-        let region = query.required("OperationRegion", operation)?;
+        let region = query.0.operation_region(operation)?;
         if region == definition {
             return if let Some(producer) = producer {
-                Ok(count(query, "OperationOrder", producer)? < count(query, "OperationOrder", operation)?)
+                Ok(query.0.operation_order(producer)? < query.0.operation_order(operation)?)
             } else {
                 Ok(true)
             };
@@ -386,8 +383,8 @@ pub(super) fn validate(graph: &Graph) -> Result<(), OptimizeError> {
     query.for_each("LiveOperation", |row| {
         let operation = row[0];
         graph.code(operation)?;
-        query.required("OperationRegion", operation)?;
-        query.required("OperationOrder", operation)?;
+        query.0.operation_region(operation)?;
+        query.0.operation_order(operation)?;
         for table in ["Input", "Output"] {
             let count = count(query, &format!("{table}Count"), operation)?;
             for slot in 0..count {
@@ -443,7 +440,7 @@ pub(super) fn validate(graph: &Graph) -> Result<(), OptimizeError> {
                 row[1],
                 row[0],
                 query.0.code(row[0])?,
-                query.required("OperationRegion", row[0])?
+                query.0.operation_region(row[0])?
             )));
         }
         Ok(())

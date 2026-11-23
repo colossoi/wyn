@@ -11,11 +11,12 @@ use wyn_graph::{for_each_reachable, WalkOrder};
 struct RegionCalls {
     children: Vec<Value>,
     sites: Vec<CallSite<Value, Value>>,
+    operations: Vec<Value>,
 }
 
 fn attached_region(query: Query<'_>, operation: Value) -> Result<Option<Value>, OptimizeError> {
     if query.contains("Operation", operation)? {
-        return query.lookup("OperationRegion", operation);
+        return Ok(query.0.region_of(operation));
     }
     Ok(None)
 }
@@ -38,8 +39,21 @@ pub(super) fn publish(graph: &mut Graph) -> Result<(), OptimizeError> {
         }
         Ok(())
     })?;
+    {
+        let positions = graph.positions().read();
+        for (&region, operations) in &positions.by_region {
+            let body = regions.entry(region).or_default();
+            for &operation in operations {
+                if query.contains("Operation", operation)? {
+                    body.operations.push(operation);
+                }
+            }
+        }
+    }
+    let mut reached = LookupMap::<Value, Vec<Value>>::new();
     let mut calls = StableMap::new();
     query.for_function("FunctionRoot", |keys, root| {
+        let bodies = reached.entry(keys[0]).or_default();
         let sites = calls.entry(keys[0]).or_insert_with(Vec::new);
         for_each_reachable(
             [root],
@@ -50,6 +64,7 @@ pub(super) fn publish(graph: &mut Graph) -> Result<(), OptimizeError> {
                 }
             },
             |region| {
+                bodies.push(region);
                 if let Some(body) = regions.get(&region) {
                     sites.extend_from_slice(&body.sites);
                 }
@@ -78,6 +93,14 @@ pub(super) fn publish(graph: &mut Graph) -> Result<(), OptimizeError> {
         }
         for caller in live {
             sink.add("LiveFunction", caller)?;
+            for &region in reached.get(&caller).into_iter().flatten() {
+                sink.add("LiveRegion", region)?;
+                if let Some(body) = regions.get(&region) {
+                    for &operation in &body.operations {
+                        sink.add("LiveOperation", operation)?;
+                    }
+                }
+            }
             if let Some(sites) = call_graph.calls.get(&caller) {
                 for site in sites {
                     sink.add("InlineCall", (caller, site.operation, site.callee))?;

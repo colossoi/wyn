@@ -57,12 +57,11 @@ fn change_lane_index(
                 insert(add, &[index, one])?
             };
             for (slot, key) in inserted.iter().enumerate() {
-                sink.set("OperationRegion", *key, lane)?;
-                sink.set("OperationOrder", *key, (position + slot) as i64)?;
+                sink.set_region(*key, lane);
+                sink.set_order(*key, (position + slot) as i64);
             }
             for (slot, key) in operations[position..].iter().enumerate() {
-                sink.remove("OperationOrder", *key)?;
-                sink.set("OperationOrder", *key, (position + inserted.len() + slot) as i64)?;
+                sink.set_order(*key, (position + inserted.len() + slot) as i64);
             }
             sink.remove("Input", (load, 1_i64))?;
             let new_index = new_index.fact(&mut sink)?;
@@ -91,7 +90,7 @@ fn branch_sinking_moves_single_arm_producers_and_shares_overlapping_demands() ->
     let mut loops = Vec::new();
     query.for_each("CountedLoopOperation", |row| {
         if query.contains("LiveOperation", row[0])? {
-            loops.push((row[0], query.required("OperationRegion", row[0])?));
+            loops.push((row[0], query.0.operation_region(row[0])?));
         }
         Ok(())
     })?;
@@ -102,7 +101,7 @@ fn branch_sinking_moves_single_arm_producers_and_shares_overlapping_demands() ->
     assert_eq!(query.required("DataflowRevision", RawValues(vec![]))?, analyzed);
     let mut moved = 0;
     for (op, parent) in loops {
-        let region = query.required("OperationRegion", op)?;
+        let region = query.0.operation_region(op)?;
         if region != parent {
             assert!(query.row("ControlRegion", |row| row[2] == region)?.is_some());
             moved += 1;
@@ -144,14 +143,14 @@ fn motion_preserves_array_storage_inside_repeated_regions() -> Result<(), Optimi
         let root = test_graph::root(&graph);
         let query = Query(&graph);
         let allocation = query.first(allocation_kind)?.unwrap()[0];
-        let owner = query.required("OperationRegion", allocation)?;
+        let owner = query.0.operation_region(allocation)?;
         assert_ne!(owner, root);
         if allocation_kind == "ScratchAllocation" {
             assert!(query.row("ResultReducer", |row| row[2] == owner)?.is_some());
         }
         super::parallel::hoist(&mut graph)?;
         assert_eq!(
-            Query(&graph).required("OperationRegion", allocation)?,
+            graph.operation_region(allocation)?,
             if lifted { root } else { owner },
             "{allocation_kind} in {program}"
         );
@@ -177,7 +176,7 @@ fn cross_region_motion_moves_a_capture_chain_in_one_edit() -> Result<(), Optimiz
         Ok(())
     })?;
     let multiply = multiply.unwrap();
-    assert_ne!(query.required("OperationRegion", multiply)?, root);
+    assert_ne!(query.0.operation_region(multiply)?, root);
     let demand_work = |graph: &mut Graph| -> Result<(), OptimizeError> {
         graph.update(|mut sink| sink.add("RegionWorkDemand", root))?;
         graph.parse_and_run_program(None, "(run-schedule (saturate graph-work))")?;
@@ -188,7 +187,7 @@ fn cross_region_motion_moves_a_capture_chain_in_one_edit() -> Result<(), Optimiz
     assert!(super::parallel::hoist(&mut graph)?);
     assert_eq!(edit::revision(&graph)?, revision + 1);
     let query = Query(&graph);
-    assert_eq!(query.required("OperationRegion", multiply)?, root);
+    assert_eq!(query.0.operation_region(multiply)?, root);
     assert!(query.operations(root)?.into_iter().any(|op| {
         query.lookup("Input", (op, 0_i64)).unwrap() == query.lookup("Output", (multiply, 0_i64)).unwrap()
             && query.0.code(op).unwrap() == Code::Scalar(Payload::Binary(BinaryOperator::Add))
@@ -217,10 +216,10 @@ fn moving_into_empty_regions_preserves_operation_order() {
     let mut graph = test_graph::fixture(
         &[(1, Code::Product), (2, Code::Product)],
         r#"
-        (set (OperationRegion (OperationId 1)) (RegionId 0))
-        (set (OperationOrder (OperationId 1)) 0)
-        (set (OperationRegion (OperationId 2)) (RegionId 0))
-        (set (OperationOrder (OperationId 2)) 1)
+        (set (FixtureRegion (OperationId 1)) (RegionId 0))
+        (set (FixtureOrder (OperationId 1)) 0)
+        (set (FixtureRegion (OperationId 2)) (RegionId 0))
+        (set (FixtureOrder (OperationId 2)) 1)
         (Region (RegionId 1))
     "#,
     )
@@ -437,7 +436,7 @@ fn compact_consumers_preserve_an_unrelated_scan_and_guard_partial_callbacks() {
             query.for_each("LiveOperation", |row| {
                 if query.0.code(row[0])?
                     == Code::Scalar(Payload::Binary(BinaryOperator::Divide)) {
-                    let region = query.required("OperationRegion", row[0])?;
+                    let region = query.0.operation_region(row[0])?;
                     let owner = query.row("RegionOwnedBy", |row| row[0] == region)?.unwrap()[1];
                     assert!(query.contains("BranchOperation", owner)?);
                     guarded += 1;

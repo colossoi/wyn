@@ -2,12 +2,12 @@
 use super::Domain;
 use crate::egglog::analysis::count;
 use crate::egglog::dataflow::{body::BodyGraph, cse, edit, ir::Code};
-use crate::egglog::graph::Graph;
+use crate::egglog::graph::{Graph, State};
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, output_error, planning, timing, OptimizeError};
 use crate::memory_ir::{BodyRole, Definition, OperationId, RegionId, UseSite, ValueRef};
 use crate::{LookupMap, LookupSet, SortedSet};
-use egglog_engine::{FullState, RawValues, Value, Write};
+use egglog_engine::{RawValues, Value, Write};
 use slotmap::SecondaryMap;
 use std::mem::take;
 use wyn_graph::ReplacementForest;
@@ -990,7 +990,7 @@ impl Body {
         Ok((previous, updated))
     }
 
-    fn publish_order(&self, sink: &mut FullState<'_, '_>) -> Result<(), egglog_engine::Error> {
+    fn publish_order(&self, sink: &mut State<'_, '_, '_>) -> Result<(), egglog_engine::Error> {
         for &region in &self.moved {
             let Some(body) = self.graph.ir.regions.get(region) else {
                 continue;
@@ -998,11 +998,9 @@ impl Body {
             for (order, &op) in body.operations.iter().enumerate() {
                 let key = self.graph.operations[op];
                 if self.relocated.contains(&op) {
-                    sink.remove("OperationRegion", key)?;
-                    sink.set("OperationRegion", key, self.graph.regions[region])?;
+                    sink.set_region(key, self.graph.regions[region]);
                 }
-                sink.remove("OperationOrder", key)?;
-                sink.set("OperationOrder", key, order as i64)?;
+                sink.set_order(key, order as i64);
             }
         }
         Ok(())

@@ -19,7 +19,7 @@ impl Body {
             .relocated
             .iter()
             .map(|&op| {
-                let region = query.required("OperationRegion", self.graph.operations[op])?;
+                let region = query.0.operation_region(self.graph.operations[op])?;
                 Ok((op, self.regions[&region]))
             })
             .collect::<Result<LookupMap<_, _>, OptimizeError>>()?;

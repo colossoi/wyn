@@ -12,24 +12,24 @@ use crate::tlc::{
 };
 use crate::{Interner, LookupMap, LookupSet, StableMap, SymbolId};
 pub(crate) use egglog_engine::Value;
-use egglog_engine::{Error, FullState, RawValues, Write};
+use egglog_engine::{EGraph, Error, FullState, RawValues, Write};
 use std::cell::RefCell;
 use std::hash::Hash;
 
 thread_local! {
-    static FLOW_TEMPLATE: RefCell<Option<Graph>> = const { RefCell::new(None) };
+    static FLOW_TEMPLATE: RefCell<Option<EGraph>> = const { RefCell::new(None) };
 }
 
 fn flow_graph() -> Result<Graph, Error> {
     FLOW_TEMPLATE.with(|template| {
         let mut template = template.borrow_mut();
         if let Some(graph) = template.as_ref() {
-            return Ok(graph.clone());
+            return Ok(Graph::from_facts(graph.clone()));
         }
-        let mut graph = Graph::default();
+        let mut graph = EGraph::default();
         graph.parse_and_run_program(Some("dataflow".into()), include_str!("flow.egg"))?;
         *template = Some(graph.clone());
-        Ok(graph)
+        Ok(Graph::from_facts(graph))
     })
 }
 

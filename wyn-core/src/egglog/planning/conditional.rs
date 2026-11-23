@@ -44,8 +44,8 @@ pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> 
         };
         returns.push((info, kind, fields[0]));
     }
-    let parent = query.required("OperationRegion", branch)?;
-    let order = query.required("OperationOrder", branch)?;
+    let parent = query.0.operation_region(branch)?;
+    let order = query.0.operation_order(branch)?;
     let domain = query.required("OperationDomain", yes)?;
     let execution = query.required("OperationExecution", yes)?;
     let width = query.lookup("OperationWidth", yes)?;
@@ -77,10 +77,8 @@ pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> 
             ir::yields(&mut sink, RegionId(lane), &[])?;
             for (arm, operations) in arm_operations {
                 for (slot, operation) in operations.into_iter().enumerate() {
-                    sink.remove("OperationRegion", operation)?;
-                    sink.set("OperationRegion", operation, arm)?;
-                    sink.remove("OperationOrder", operation)?;
-                    sink.set("OperationOrder", operation, slot as i64)?;
+                    sink.set_region(operation, arm);
+                    sink.set_order(operation, slot as i64);
                 }
             }
             for arm in [a, b] {
@@ -111,15 +109,13 @@ pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> 
             sink.set("ControlRegion", (branch, 0_i64), a)?;
             sink.remove("ControlRegion", (branch, 1_i64))?;
             sink.set("ControlRegion", (branch, 1_i64), b)?;
-            sink.remove("OperationRegion", branch)?;
-            sink.set("OperationRegion", branch, lane)?;
-            sink.remove("OperationOrder", branch)?;
-            sink.set("OperationOrder", branch, 0_i64)?;
+            sink.set_region(branch, lane);
+            sink.set_order(branch, 0_i64);
             let parallel = sink.add("DerivedOperation", (branch, 61_i64, 0_i64))?;
             let parallel = ir::operation_at(&mut sink, OperationId(parallel), Code::Parallel, &[])?;
             ir::outputs(&mut sink, parallel, &outputs)?;
-            sink.set("OperationRegion", parallel.0, parent)?;
-            sink.set("OperationOrder", parallel.0, order)?;
+            sink.set_region(parallel.0, parent);
+            sink.set_order(parallel.0, order);
             sink.set("ControlRegion", (parallel.0, 0_i64), lane)?;
             let role = sink.add("LaneRegion", RawValues(Vec::new()))?;
             sink.set("ControlRole", (parallel.0, 0_i64), role)?;

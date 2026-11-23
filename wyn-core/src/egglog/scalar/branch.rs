@@ -4,7 +4,7 @@ use crate::egglog::graph::Graph;
 use crate::egglog::{output_error, query::Query, timing, OptimizeError};
 use crate::memory_ir::{Function, ValueRef};
 use crate::LookupMap;
-use egglog_engine::{Value, Write};
+use egglog_engine::Value;
 use std::mem::take;
 use wyn_graph::ReplacementForest;
 
@@ -92,10 +92,8 @@ pub(super) fn apply(graph: &mut Graph, body: &mut Option<BodyGraph>) -> Result<b
         for region in changed {
             for (order, &op) in body.ir.regions[region].operations.iter().enumerate() {
                 let key = body.operations[op];
-                sink.remove("OperationRegion", key)?;
-                sink.set("OperationRegion", key, body.regions[region])?;
-                sink.remove("OperationOrder", key)?;
-                sink.set("OperationOrder", key, order as i64)?;
+                sink.set_region(key, body.regions[region]);
+                sink.set_order(key, order as i64);
             }
         }
         Ok(())

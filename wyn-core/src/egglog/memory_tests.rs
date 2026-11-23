@@ -52,8 +52,8 @@ fn copy_forwarding_preserves_captures_loop_entries_and_backedges() -> Result<(),
                 sink.set("OperationIndex", (copy.0, 0_i64), index)?;
                 ir::outputs(&mut sink, copy, &[name])?;
                 sink.set("ValueType", raw, ty)?;
-                sink.set("OperationRegion", copy.0, region)?;
-                sink.set("OperationOrder", copy.0, order)?;
+                sink.set_region(copy.0, region);
+                sink.set_order(copy.0, order);
             }
             let mut alias = |id| {
                 let raw = sink.add("ValueId", id)?;
@@ -142,12 +142,12 @@ fn inlining_exposes_parallel_work_through_scalar_helpers_before_copying_them() -
         ],
         include_str!("tests/inline_arguments.egg"),
     )?;
-    graph.parse_and_run_program(
-        None,
+    test_graph::facts_with_positions(
+        &mut graph,
         r#"
         (delete (InlineAll)) (set (InlineAll) false)
-        (set (OperationRegion (OperationId 6)) (RegionId 2))
-        (set (OperationOrder (OperationId 6)) 0)
+        (set (FixtureRegion (OperationId 6)) (RegionId 2))
+        (set (FixtureOrder (OperationId 6)) 0)
         (set (InputCount (OperationId 6)) 0)
         (set (OutputCount (OperationId 6)) 0)
         "#,
@@ -179,17 +179,17 @@ fn nested_calls_mark_only_the_reachable_cycle_recursive() -> Result<(), Optimize
         ],
         include_str!("tests/inline_arguments.egg"),
     )?;
-    graph.parse_and_run_program(
-        None,
+    test_graph::facts_with_positions(
+        &mut graph,
         r#"
         (set (ResultReducer (OperationId 5) 0) (RegionId 10))
-        (set (OperationRegion (OperationId 6)) (RegionId 10))
+        (set (FixtureRegion (OperationId 6)) (RegionId 10))
         (set (CallTarget (OperationId 6)) (FunctionId 2 "identity"))
         (set (AccumulatorCombiner (OperationId 6) 0) (RegionId 11))
-        (delete (OperationRegion (OperationId 2)))
-        (set (OperationRegion (OperationId 2)) (RegionId 11))
-        (delete (OperationRegion (OperationId 1)))
-        (set (OperationRegion (OperationId 1)) (RegionId 2))
+        (delete (FixtureRegion (OperationId 2)))
+        (set (FixtureRegion (OperationId 2)) (RegionId 11))
+        (delete (FixtureRegion (OperationId 1)))
+        (set (FixtureRegion (OperationId 1)) (RegionId 2))
         (Function (FunctionId 3 "unused"))
     "#,
     )?;
@@ -294,7 +294,7 @@ fn structural_cloning_follows_nested_regions_without_analysis() -> Result<(), Op
         query.constructor("ClonedRegion", (branch, original_arm))?.unwrap()
     );
     let copied_view = query.constructor("ClonedOperation", (branch, view))?.unwrap();
-    assert_eq!(query.required("OperationRegion", copied_view)?, copied_arm);
+    assert_eq!(query.0.operation_region(copied_view)?, copied_arm);
     assert_ne!(query.required("OperationSlices", copied_view)?, slices);
     assert!(query.first("FlowLive")?.is_none());
     let results = query.sequence("RegionYield", cloned_root)?;
@@ -541,8 +541,8 @@ fn fusion_proves_a_computed_index_selects_the_produced_lane() -> Result<(), Opti
                 )?;
                 ir::outputs(&mut sink, operation, &[Name::Value(result)])?;
                 sink.set("ValueType", result, ty)?;
-                sink.set("OperationRegion", operation.0, lane)?;
-                sink.set("OperationOrder", operation.0, id - 1002)?;
+                sink.set_region(operation.0, lane);
+                sink.set_order(operation.0, id - 1002);
                 left = result;
             }
             let index = sink.add("ValueNameRef", left)?;
@@ -716,7 +716,7 @@ fn read_only_indexing_keeps_its_guard_without_a_domain_bounds_proof() -> Result<
         let mut guarded = 0;
         query.for_each("LiveOperation", |row| {
             if query.contains("IndexOperation", row[0])? && query.contains("OperationTrap", row[0])? {
-                assert_ne!(query.required("OperationRegion", row[0])?, root);
+                assert_ne!(query.0.operation_region(row[0])?, root);
                 guarded += 1;
             }
             Ok(())
@@ -795,8 +795,8 @@ fn consumed_tokens_cannot_be_reused() -> Result<(), OptimizeError> {
         (set (OutputCount (OperationId 0)) 1) (set (Output (OperationId 0) 0) (AccNameRef (AccumulatorId 1)))
         (set (InputCount (OperationId 1)) 1) (set (Input (OperationId 1) 0) (AccNameRef (AccumulatorId 0)))
         (set (OutputCount (OperationId 1)) 1) (set (Output (OperationId 1) 0) (AccNameRef (AccumulatorId 2)))
-        (set (OperationRegion (OperationId 0)) (RegionId 0)) (set (OperationOrder (OperationId 0)) 0)
-        (set (OperationRegion (OperationId 1)) (RegionId 0)) (set (OperationOrder (OperationId 1)) 1)
+        (set (FixtureRegion (OperationId 0)) (RegionId 0)) (set (FixtureOrder (OperationId 0)) 0)
+        (set (FixtureRegion (OperationId 1)) (RegionId 0)) (set (FixtureOrder (OperationId 1)) 1)
         (Function (FunctionId 0 "invalid")) (set (FunctionRoot (FunctionId 0 "invalid")) (RegionId 0))
         (set (FunctionResultCount (FunctionId 0 "invalid")) 0) (set (EntryOrder (FunctionId 0 "invalid")) 0)
     "#,

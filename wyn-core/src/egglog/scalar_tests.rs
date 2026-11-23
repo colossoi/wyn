@@ -68,7 +68,7 @@ fn partial_and_effectful_operands_keep_their_evaluation_guards() -> Result<(), O
         let division = code == Code::Scalar(Payload::Binary(BinaryOperator::Divide));
         let call = matches!(code, Code::Call);
         if division || call {
-            let region = query.required("OperationRegion", row[0])?;
+            let region = query.0.operation_region(row[0])?;
             assert!(
                 query.row("RegionOwnedBy", |row| row[0] == region)?.is_some(),
                 "partial evaluation escaped its branch"

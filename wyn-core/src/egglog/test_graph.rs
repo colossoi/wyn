@@ -18,7 +18,7 @@ pub(super) fn fixture(codes: &[(i64, Code)], facts: &str) -> Result<Graph, Optim
             Ok(())
         })())
     })??;
-    graph.parse_and_run_program(None, facts)?;
+    facts_with_positions(&mut graph, facts)?;
     Ok(graph)
 }
 
@@ -33,4 +33,44 @@ pub(super) fn entry(graph: &Graph) -> Value {
 
 pub(super) fn root(graph: &Graph) -> Value {
     Query(graph).required("FunctionRoot", entry(graph)).unwrap()
+}
+
+pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(), OptimizeError> {
+    if !facts.contains("FixtureRegion") && !facts.contains("FixtureOrder") {
+        graph.parse_and_run_program(None, facts)?;
+        return Ok(());
+    }
+    if !graph.get_function_names().iter().any(|name| name == "FixtureRegion") {
+        graph.parse_and_run_program(
+            None,
+            "
+            (function FixtureRegion (OperationKey) RegionKey :no-merge)
+            (function FixtureOrder (OperationKey) i64 :no-merge)
+        ",
+        )?;
+    }
+    graph.parse_and_run_program(None, facts)?;
+    let mut regions = Vec::new();
+    let mut orders = Vec::new();
+    let query = Query(graph);
+    query.for_function("FixtureRegion", |key, region| {
+        regions.push((key[0], region));
+        Ok(())
+    })?;
+    query.for_function("FixtureOrder", |key, order| {
+        orders.push((key[0], graph.value_to_base::<i64>(order)));
+        Ok(())
+    })?;
+    graph.update(|mut sink| {
+        for (operation, region) in regions {
+            sink.set_region(operation, region);
+        }
+        for (operation, order) in orders {
+            sink.set_order(operation, order);
+        }
+        Ok(())
+    })?;
+    graph.clear_function("FixtureRegion")?;
+    graph.clear_function("FixtureOrder")?;
+    Ok(())
 }

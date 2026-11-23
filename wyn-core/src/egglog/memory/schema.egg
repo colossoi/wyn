@@ -73,7 +73,7 @@
 (datatype ResultRole (CollectedOutput) (CompactedOutput) (PrefixOutput) (TotalOutput) (UpdatedOutput))
 (datatype AccPolicy (DisjointWrites) (IdenticalWrites) (CombineWrites) (FetchAddWrites))
 
-; These keyed cells are the sole authority for executable connectivity.
+; Operand and region-edge cells supply the current planning rules.
 (function GraphEditRevision () i64 :no-merge)
 (set (GraphEditRevision) 0)
 (relation Operation (OperationKey))
@@ -81,8 +81,6 @@
 (function InstructionWork (OperationKey) i64 :no-merge)
 (relation OperationWorkDemand (OperationKey))
 (function OperationWork (OperationKey) BigInt :no-merge)
-(function OperationRegion (OperationKey) RegionKey :no-merge)
-(function OperationOrder (OperationKey) i64 :no-merge)
 (function Input (OperationKey i64) Name :no-merge)
 (function InputCount (OperationKey) i64 :no-merge)
 (function InputDiet (OperationKey i64) Diet :no-merge)

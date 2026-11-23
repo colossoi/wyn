@@ -28,6 +28,7 @@ mod host;
 mod memory;
 mod payload;
 mod planning;
+mod position_field;
 mod query;
 mod representation;
 mod scalar;

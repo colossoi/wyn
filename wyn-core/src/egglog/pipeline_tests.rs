@@ -55,9 +55,8 @@ fn host_preparation_preserves_the_authoritative_memory_program() {
 fn scalar_policy_controls_optional_templates() {
     let tlc =
         crate::compile_thru_tlc("def helper(x:i32) i32=x+1 entry main(x:i32) i32=helper(x)*2").unwrap();
-    let program = super::fuse(super::from_tlc(&tlc).unwrap()).unwrap();
     for policy in [super::ScalarOptimization::Basic, super::ScalarOptimization::Full] {
-        let mut scalars = program.graph.clone();
+        let mut scalars = super::fuse(super::from_tlc(&tlc).unwrap()).unwrap().graph;
         super::scalar::run(&mut scalars, policy).unwrap();
         let query = Query(&scalars);
         let mut calls = 0;

@@ -2043,7 +2043,7 @@ impl EntryEmission<'_, '_, '_> {
         let Some(condition) = host::atom(self.body.query(), &self.body.host_values, condition_name)? else {
             return Err(error("branch condition has no host value"));
         };
-        let can_select = self.body.query().required("OperationRegion", operation)?
+        let can_select = self.body.query().0.operation_region(operation)?
             == self.body.query().required("FunctionRoot", self.body.function)?;
         let first_stage = self.stages.len();
         let incoming = self.saved.clone();

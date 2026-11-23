@@ -62,7 +62,7 @@ pub(super) fn apply(
     }
     for &op in dead {
         let operation = body.operations[op];
-        let region = Query(graph).required("OperationRegion", operation)?;
+        let region = graph.operation_region(operation)?;
         let output = body.names[&ValueRef::Result(op, 0)];
         let names = needed.use_sites(op).map(|value| body.names[&value]);
         graph.update(|mut sink| {

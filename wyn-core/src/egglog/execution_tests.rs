@@ -8,21 +8,20 @@ fn graph(grid: &str, rank: i64) -> Graph {
     let mut graph = Graph::default();
     memory::load(&mut graph).unwrap();
     graph.update(|mut sink| Ok(ir::operation(&mut sink, 0, Code::Parallel, &[]))).unwrap().unwrap();
-    graph
-        .parse_and_run_program(
-            None,
-            &format!(
-                r#"
+    crate::egglog::test_graph::facts_with_positions(
+        &mut graph,
+        &format!(
+            r#"
         (let name (FunctionId 0 "main"))
         (set (FunctionRoot name) (RegionId 0)) (set (EntryOrder name) 0)
-        (set (OperationRegion (OperationId 0)) (RegionId 0)) (set (OperationOrder (OperationId 0)) 0)
+        (set (FixtureRegion (OperationId 0)) (RegionId 0)) (set (FixtureOrder (OperationId 0)) 0)
         (set (OperationExecution (OperationId 0)) (DeviceKernel {grid}))
         (set (OperationWidth (OperationId 0)) 128)
         (set (OperationDomain (OperationId 0)) (DomainId 0)) (set (DomainRank (DomainId 0)) {rank})
     "#
-            ),
-        )
-        .unwrap();
+        ),
+    )
+    .unwrap();
     graph
 }
 

@@ -58,7 +58,7 @@ fn every_collective_callback_must_be_available_before_distribution() {
         let mut facts = include_str!("tests/collective_distribution.egg").to_owned();
         for (prefix, base) in [("FIRST", 20), ("SECOND", 30)] {
             let capture = if blocked == Some(base) {
-                format!("(set (InputCount (OperationId {})) 2) (set (Input (OperationId {}) 0) (ValueNameRef (ValueId {}))) (set (Input (OperationId {}) 1) (ValueNameRef (ValueId 10))) (set (OutputCount (OperationId {})) 1) (set (Output (OperationId {}) 0) (ValueNameRef (ValueId {}))) (set (ValueType (ValueId {})) scalar) (set (OperationRegion (OperationId {})) (RegionId {})) (set (OperationOrder (OperationId {})) 1) (DiscardableOperation (OperationId {})) (RepeatableOperation (OperationId {}))",base+1,base+1,base+2,base+1,base+1,base+1,base+3,base+3,base+1,base,base+1,base+1,base+1)
+                format!("(set (InputCount (OperationId {})) 2) (set (Input (OperationId {}) 0) (ValueNameRef (ValueId {}))) (set (Input (OperationId {}) 1) (ValueNameRef (ValueId 10))) (set (OutputCount (OperationId {})) 1) (set (Output (OperationId {}) 0) (ValueNameRef (ValueId {}))) (set (ValueType (ValueId {})) scalar) (set (FixtureRegion (OperationId {})) (RegionId {})) (set (FixtureOrder (OperationId {})) 1) (DiscardableOperation (OperationId {})) (RepeatableOperation (OperationId {}))",base+1,base+1,base+2,base+1,base+1,base+1,base+3,base+3,base+1,base,base+1,base+1,base+1)
             } else {
                 String::new()
             };
@@ -267,7 +267,7 @@ fn top_level(graph: &Graph, function: Value, constructor: &str) -> Vec<Value> {
 }
 
 fn dispatches(graph: &Graph, function: Value) -> Vec<super::super::execution::Dispatch> {
-    let mut graph = graph.clone();
+    let mut graph = graph.proof_snapshot();
     let execution = super::super::execution::Execution::select(&mut graph).unwrap();
     let query = Query(&graph);
     fn collect(
@@ -416,7 +416,8 @@ fn dependent_or_partial_regions_stay_inside_parallel_callbacks() {
                     within(graph, function).into_iter().any(|operation| code_is(
                         query, operation, "Parallel"
                     ) && query
-                        .required("OperationRegion", operation)
+                        .0
+                        .operation_region(operation)
                         .unwrap()
                         == body),
                     "case {index}: the dependent or partial computation stays nested"
@@ -565,7 +566,7 @@ fn loop_capacity_obligations_use_the_length_preservation_proof() {
 }
 
 fn local_capacities(graph: &Graph) -> Vec<i64> {
-    let mut graph = graph.clone();
+    let mut graph = graph.proof_snapshot();
     super::analyze(&mut graph).unwrap();
     let query = Query(&graph);
     let mut capacities = Vec::new();
@@ -962,7 +963,7 @@ fn rectangular_candidates_retain_expensive_but_legal_recomputation() {
     ];
     for i in 1_i64..=80 {
         codes.push((i, Code::Scalar(Payload::Binary(BinaryOperator::Multiply))));
-        prefix.push_str(&format!("(set (InputCount (OperationId {i})) 2) (set (Input (OperationId {i}) 0) (ValueNameRef (ValueId {}))) (set (Input (OperationId {i}) 1) (ValueNameRef (ValueId 1000))) (set (OutputCount (OperationId {i})) 1) (set (Output (OperationId {i}) 0) (ValueNameRef (ValueId {i}))) (set (ValueType (ValueId {i})) scalar) (set (OperationRegion (OperationId {i})) (RegionId 1)) (set (OperationOrder (OperationId {i})) {}) (RepeatableOperation (OperationId {i})) (DiscardableOperation (OperationId {i}))",i-1,i-1));
+        prefix.push_str(&format!("(set (InputCount (OperationId {i})) 2) (set (Input (OperationId {i}) 0) (ValueNameRef (ValueId {}))) (set (Input (OperationId {i}) 1) (ValueNameRef (ValueId 1000))) (set (OutputCount (OperationId {i})) 1) (set (Output (OperationId {i}) 0) (ValueNameRef (ValueId {i}))) (set (ValueType (ValueId {i})) scalar) (set (FixtureRegion (OperationId {i})) (RegionId 1)) (set (FixtureOrder (OperationId {i})) {}) (RepeatableOperation (OperationId {i})) (DiscardableOperation (OperationId {i}))",i-1,i-1));
     }
     let mut graph = test_graph::fixture(
         &codes,
@@ -1269,9 +1270,8 @@ fn fusion_compares_logical_shapes_of_independent_inputs() {
 #[test]
 fn update_handles_and_reservation_results_cannot_escape_their_scope() {
     let tlc = compile_thru_tlc("entry main(dest:*[2]i32) [2]i32=scatter(dest,[0,1],[7,9])").unwrap();
-    let program = fuse(from_tlc(&tlc).unwrap()).unwrap();
     for slot in [0_i64, 1] {
-        let mut graph = program.graph.clone();
+        let mut graph = fuse(from_tlc(&tlc).unwrap()).unwrap().graph;
         let query = Query(&graph);
         let mut operation = None;
         query
@@ -1440,10 +1440,7 @@ fn within(graph: &Graph, function: Value) -> Vec<Value> {
     let mut operations = Vec::new();
     query
         .for_each("LiveOperation", |row| {
-            if query.contains(
-                "FlowScopeAncestor",
-                (root, query.required("OperationRegion", row[0])?),
-            )? {
+            if query.contains("FlowScopeAncestor", (root, query.0.operation_region(row[0])?))? {
                 operations.push(row[0]);
             }
             Ok(())
@@ -1893,8 +1890,8 @@ fn retained_call_work_composes_and_unknown_work_stays_unknown() {
             {callee}
             (set (CallTarget (OperationId 0)) middle)
             (set (CallTarget (OperationId 1)) leaf)
-            (set (OperationRegion (OperationId 1)) (RegionId 1))
-            (set (OperationRegion (OperationId 2)) (RegionId 2))
+            (set (FixtureRegion (OperationId 1)) (RegionId 1))
+            (set (FixtureRegion (OperationId 2)) (RegionId 2))
             (FirstOperation (RegionId 1) (OperationId 1)) (LastOperation (RegionId 1) (OperationId 1))
             (FirstOperation (RegionId 2) (OperationId 2)) (LastOperation (RegionId 2) (OperationId 2))
             (OperationWorkDemand (OperationId 0))

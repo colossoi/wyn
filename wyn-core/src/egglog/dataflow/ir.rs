@@ -97,6 +97,7 @@ impl Code {
 pub(in crate::egglog) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
     register(graph)?;
     graph.parse_and_run_program(Some("shared dataflow".into()), include_str!("../flow.egg"))?;
+    graph.register_positions()?;
     graph.parse_and_run_program(Some("flat dataflow".into()), include_str!("../memory/schema.egg"))?;
     publish_properties(graph)?;
     crate::egglog::analysis::load(graph)?;
@@ -277,8 +278,8 @@ pub(in crate::egglog) fn region(
     sink.add("Region", region)?;
     sink.add("FlowScope", region)?;
     for (position, operation) in operations.iter().enumerate() {
-        sink.set("OperationRegion", operation.0, region)?;
-        sink.set("OperationOrder", operation.0, position as i64)?;
+        sink.set_region(operation.0, region);
+        sink.set_order(operation.0, position as i64);
     }
     Ok(RegionId(region))
 }

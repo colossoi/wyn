@@ -316,7 +316,7 @@ pub(super) fn invalidate_region_work(
         prefixes.extend(query.0.region_order(region)?.iter().map(|&op| (region, op)));
         for &op in consumers.get(&region).into_iter().flatten() {
             if work.operations.insert(op) {
-                let owner = query.required("OperationRegion", op)?;
+                let owner = query.0.operation_region(op)?;
                 if query.contains("RegionWorkDemand", owner)? {
                     pending.push(owner);
                 }
