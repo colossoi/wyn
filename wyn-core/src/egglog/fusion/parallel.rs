@@ -311,7 +311,7 @@ pub(super) fn move_siblings(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let motion = Motion::read(query)?;
     let mut regions = Vec::new();
     for (&region, operations) in &graph.region_orders {
-        for (before, index) in motion.candidates(operations, |op| op) {
+        for (before, index) in motion.candidates(operations, 0, |op| op) {
             if !analysis::uses_output_of(query, operations[index], operations[before])? {
                 regions.push(region);
                 break;
@@ -325,9 +325,7 @@ pub(super) fn move_siblings(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let mut changed = false;
     for region in regions {
         let id = body.regions[&region];
-        while motion.step(graph, &mut body, id)? {
-            changed = true;
-        }
+        changed |= motion.run(graph, &mut body, id)?;
     }
     if changed {
         body.publish_sibling_order(graph)?;

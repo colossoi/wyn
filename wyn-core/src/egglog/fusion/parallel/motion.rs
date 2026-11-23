@@ -58,9 +58,10 @@ impl Motion {
     pub fn candidates<'a, K: Copy + 'a>(
         &'a self,
         operations: &'a [K],
+        start: usize,
         key: impl Fn(K) -> Value + Copy + 'a,
     ) -> impl Iterator<Item = (usize, usize)> + 'a {
-        operations.iter().enumerate().flat_map(move |(before, &anchor)| {
+        operations.iter().enumerate().skip(start).flat_map(move |(before, &anchor)| {
             let first = key(anchor);
             let tail = &operations[before + 1..];
             tail.iter()
@@ -75,15 +76,32 @@ impl Motion {
         })
     }
 
-    pub fn step(
+    pub fn run(&self, graph: &mut Graph, body: &mut Body, region: RegionId) -> Result<bool, OptimizeError> {
+        let mut start = 0;
+        let mut changed = false;
+        while let Some(before) = self.step(graph, body, region, start)? {
+            changed = true;
+            // An earlier anchor's scan stops at the preceding non-preparation,
+            // unless that operation is the anchor's first candidate. The last
+            // candidate can also inspect its immediate follower.
+            start = body.graph.ir.regions[region].operations[..before]
+                .iter()
+                .rposition(|&op| !self.preparation.contains(&body.graph.operations[op]))
+                .map_or(0, |position| position.saturating_sub(1));
+        }
+        Ok(changed)
+    }
+
+    fn step(
         &self,
         graph: &mut Graph,
         body: &mut Body,
         region: RegionId,
-    ) -> Result<bool, OptimizeError> {
+        start: usize,
+    ) -> Result<Option<usize>, OptimizeError> {
         let operations = &body.graph.ir.regions[region].operations;
         let mut selected = None;
-        for (before, index) in self.candidates(operations, |op| body.graph.operations[op]) {
+        for (before, index) in self.candidates(operations, start, |op| body.graph.operations[op]) {
             let (anchor, moving) = (operations[before], operations[index]);
             let first = body.graph.operations[anchor];
             let next = body.graph.operations[moving];
@@ -151,9 +169,9 @@ impl Motion {
             }
         }
         let Some((before, index)) = selected else {
-            return Ok(false);
+            return Ok(None);
         };
         body.move_within(region, before, index);
-        Ok(true)
+        Ok(Some(before))
     }
 }
