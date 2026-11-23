@@ -1,8 +1,8 @@
 //! Import the live body graph and publish changes to its direct operands.
-use super::{edit, ir::Code};
+use super::ir::Code;
 use crate::ast::Span;
-use crate::egglog::graph::{ArgumentSite, Graph, Origin};
-use crate::egglog::{analysis, output_error, query::Query, timing, OptimizeError};
+use crate::egglog::graph::{ArgumentSite, Graph};
+use crate::egglog::{analysis, output_error, query::Query, OptimizeError};
 use crate::memory_ir::{
     BodyRole, Definition, Function, MemoryIr, Operation, OperationId, Parameter, Region, RegionEdge,
     RegionId, UseSite, ValueRef,
@@ -186,40 +186,4 @@ impl BodyGraph {
         })?;
         Ok(())
     }
-}
-
-pub(in crate::egglog) fn forward_equivalents(graph: &mut Graph) -> Result<bool, OptimizeError> {
-    let query = Query(graph);
-    let mut candidates = LookupMap::new();
-    query.for_each("ForwardCandidate", |row| {
-        candidates.entry(row[0]).or_insert(row[1]);
-        Ok(())
-    })?;
-    if candidates.is_empty() {
-        return Ok(false);
-    }
-    let _timing = timing::span("Rust value forwarding");
-    let mut removed = Vec::new();
-    let replacements: Vec<_> = candidates.into_iter().filter(|(old, new)| old != new).collect();
-    for &(old, new) in &replacements {
-        let Some(origin) = query.live_origin(old)? else {
-            return Err(output_error("forwarded operand has no live memory definition"));
-        };
-        if query.live_origin(new)?.is_none() {
-            return Err(output_error("forwarding target has no live memory definition"));
-        }
-        if let Origin::Result(operation, 0) = origin {
-            if graph.output_count(operation) == 1 {
-                removed.push(operation);
-            }
-        }
-    }
-    edit::replace(graph, &replacements)?;
-    if !removed.is_empty() {
-        edit::remove(graph, &removed)?;
-        return Ok(true);
-    }
-    analysis::ensure(graph)?;
-    edit::clear(graph)?;
-    Ok(false)
 }

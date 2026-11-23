@@ -207,7 +207,7 @@ pub(super) fn region(query: Query<'_>, region: Value) -> Result<(), OptimizeErro
                         let Some(name) = query.constructor("ValueNameRef", row[1])? else {
                             return Err(output_error("accumulator shape has no value identity"));
                         };
-                        if !query.contains("AvailableIn", (region, name))? {
+                        if !super::available_at_boundary(query, region, name, false)? {
                             return Err(output_error(
                                 "accumulator parameter shape is unavailable at entry",
                             ));

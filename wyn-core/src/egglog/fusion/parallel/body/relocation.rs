@@ -112,14 +112,10 @@ impl Body {
                 sink.remove("FlowScopeAncestor", key)?;
             }
             for (key, used) in uses {
-                for table in ["OperationUse", "AvailabilityDemand", "AvailableAt"] {
-                    update(&mut sink, table, key, used)?;
-                }
+                update(&mut sink, "OperationUse", key, used)?;
             }
             for (region, name, used) in captures {
-                for table in ["RegionCapture", "EntryDemand", "AvailableIn"] {
-                    update(&mut sink, table, (region, name), used)?;
-                }
+                update(&mut sink, "RegionCapture", (region, name), used)?;
             }
             Ok(())
         })?;

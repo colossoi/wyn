@@ -183,6 +183,82 @@ fn index_operands(query: Query<'_>, index: Option<Value>) -> Result<LookupSet<Va
         .collect()
 }
 
+/// A replacement of ordinary scalar operands whose lexical uses can be repaired in place.
+pub(in crate::egglog) struct ScalarInputs {
+    operation: Value,
+    before: Vec<Value>,
+    after: Vec<Value>,
+    uses: Vec<(Value, UsePath, bool)>,
+}
+
+impl ScalarInputs {
+    pub fn read(
+        query: Query<'_>,
+        operation: Value,
+        updates: Vec<(usize, Value)>,
+    ) -> Result<Option<Self>, OptimizeError> {
+        let before = query.0.inputs(operation);
+        let mut after = before.clone();
+        for (slot, value) in updates {
+            let Some(input) = after.get_mut(slot) else {
+                return Ok(None);
+            };
+            *input = value;
+        }
+        let before_names: LookupSet<Value> = before.iter().copied().collect();
+        let after_names: LookupSet<Value> = after.iter().copied().collect();
+        let mut uses = Vec::new();
+        for (a, b, used) in [
+            (&before_names, &after_names, false),
+            (&after_names, &before_names, true),
+        ] {
+            for &name in a.difference(b) {
+                if !used && query.contains("OperationAttributeUse", (operation, name))? {
+                    return Ok(None);
+                }
+                let Some(path) = UsePath::read(query, operation, name)? else {
+                    return Ok(None);
+                };
+                uses.push((name, path, used));
+            }
+        }
+        Ok(Some(Self {
+            operation,
+            before,
+            after,
+            uses,
+        }))
+    }
+
+    pub fn apply(self, graph: &mut Graph) -> Result<(), OptimizeError> {
+        let Self {
+            operation,
+            before,
+            after,
+            uses,
+        } = self;
+        graph.update(|mut sink| {
+            if let ([a, b], [x, y]) = (before.as_slice(), after.as_slice()) {
+                sink.remove("BinaryOperands", (operation, *a, *b))?;
+                sink.add("BinaryOperands", (operation, *x, *y))?;
+            }
+            sink.set_inputs(operation, after)?;
+            for &(name, _, used) in &uses {
+                if used {
+                    sink.add("DirectOperationUse", (operation, name))?;
+                } else {
+                    sink.remove("DirectOperationUse", (operation, name))?;
+                }
+            }
+            Ok(())
+        })?;
+        for (name, path, used) in uses {
+            repair_use(graph, path, name, used)?;
+        }
+        Ok(())
+    }
+}
+
 struct UsePath {
     scopes: Vec<(Value, Value)>,
 }
@@ -229,18 +305,10 @@ fn repair_use(graph: &mut Graph, path: UsePath, name: Value, mut used: bool) -> 
         let enclosing = scopes.peek().map(|&(_, op)| op);
         graph.update(|mut sink| {
             if used {
-                sink.add("OperationUse", (operation, name))?;
-                sink.add("AvailabilityDemand", (operation, name))?;
-                sink.add("AvailableAt", (operation, name))?;
-                if enclosing.is_some() {
-                    sink.add("AvailableIn", (region, name))?;
-                }
+                sink.add("OperationUse", (operation, name)).map(|_| ())
             } else {
-                for table in ["OperationUse", "AvailabilityDemand", "AvailableAt"] {
-                    sink.remove(table, (operation, name))?;
-                }
+                sink.remove("OperationUse", (operation, name))
             }
-            Ok(())
         })?;
         let Some(parent) = enclosing else { break };
 
@@ -260,14 +328,11 @@ fn repair_use(graph: &mut Graph, path: UsePath, name: Value, mut used: bool) -> 
             return Ok(());
         }
         graph.update(|mut sink| {
-            for table in ["RegionCapture", "EntryDemand", "AvailableIn"] {
-                if captured {
-                    sink.add(table, (region, name))?;
-                } else {
-                    sink.remove(table, (region, name))?;
-                }
+            if captured {
+                sink.add("RegionCapture", (region, name)).map(|_| ())
+            } else {
+                sink.remove("RegionCapture", (region, name))
             }
-            Ok(())
         })?;
         let query = Query(graph);
         used = captured

@@ -932,7 +932,7 @@ impl Body {
         let _timing = timing::span("Rust sibling order publication");
         let (previous, updated) = self.orders(Query(graph))?;
         graph.update(|mut sink| self.publish_order(&mut sink))?;
-        planning::repair_sibling_order(graph, &updated)?;
+        planning::reset_order_candidates(graph)?;
         analysis::replace_order(graph, previous, updated)?;
         edit::preserve_revisions(graph)
     }

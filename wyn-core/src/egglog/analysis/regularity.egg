@@ -28,7 +28,7 @@
 (rule ((VaryingShape map source) (PreservesInputShape operation output input)
        (= (wyn-input operation input) (ValueNameRef source)) (ResultOrigin (ValueNameRef array) operation output))
       ((VaryingShape map array)) :ruleset regularity)
-(rule ((VaryingShape map source) (= (SourceAlias (FlowNamed array)) (FlowNamed source)))
+(rule ((VaryingShape map source) (= (ProjectionAlias (ValueNameRef array)) (ValueNameRef source)))
       ((VaryingShape map array)) :ruleset regularity)
 (rule ((VaryingShape map field) (ProductField product slot field)) ((VaryingShape map product)) :ruleset regularity)
 (rule ((VaryingShape map row) (= (wyn-yield body slot) (ValueNameRef row)) (BranchArm edge) (= operation (RegionOwnedBy body)) (= body (wyn-control-region operation edge)) (ResultOrigin (ValueNameRef array) operation slot))

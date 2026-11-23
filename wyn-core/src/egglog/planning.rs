@@ -5,13 +5,14 @@ use super::query::Query;
 use super::{analysis, memory, output_error, OptimizeError};
 use crate::egglog::graph::Graph;
 use crate::{LookupMap, LookupSet, PipelineTopologyPolicy};
-use egglog_engine::sort::{Boxed, Z};
+use egglog_engine::sort::Z;
 use egglog_engine::{RawValues, Value, Write};
 
 mod conditional;
 mod distribution;
 mod epilogue;
 mod layout;
+pub(super) mod work;
 
 pub(super) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
     graph.parse_and_run_program(
@@ -44,8 +45,7 @@ pub(super) fn analyze(graph: &mut Graph) -> Result<(), OptimizeError> {
     analysis::ensure(graph)?;
     let _timing = super::timing::span("egglog graph metadata");
     let revision = edit::revision(graph)?;
-    let current = Query(graph).lookup("PlanningRevision", RawValues(Vec::new()))?
-        == Some(graph.base_to_value(revision));
+    let current = metadata_current(graph, revision)?;
     if !current {
         let _invalidation = super::timing::span("egglog metadata invalidation");
         for table in [
@@ -78,9 +78,7 @@ pub(super) fn analyze(graph: &mut Graph) -> Result<(), OptimizeError> {
             "RegionWorkDemand",
             "RegionWorkUser",
             "OperationWork",
-            "RegionWorkPrefix",
             "RegionWork",
-            "DomainWork",
             "KnownIndex",
             "BinaryReducer",
             "NativeBinaryReducer",
@@ -109,6 +107,11 @@ pub(super) fn analyze(graph: &mut Graph) -> Result<(), OptimizeError> {
         })?;
     }
     Ok(())
+}
+
+fn metadata_current(graph: &Graph, revision: i64) -> Result<bool, OptimizeError> {
+    Ok(Query(graph).lookup("PlanningRevision", RawValues(Vec::new()))?
+        == Some(graph.base_to_value(revision)))
 }
 
 /// Selection depends on phase policy as well as the executable graph.
@@ -234,41 +237,7 @@ fn resolve_transform_availability(graph: &mut Graph) -> Result<(), OptimizeError
     Ok(())
 }
 
-pub(super) fn repair_sibling_order(
-    graph: &mut Graph,
-    updated: &[(Value, Vec<Value>)],
-) -> Result<(), OptimizeError> {
-    let query = Query(graph);
-    let mut removed = Vec::new();
-    let mut prefixes = Vec::new();
-    for (region, body) in updated {
-        if !query.contains("RegionWorkDemand", *region)? {
-            continue;
-        }
-        let mut prefix: Option<Z> = Some(Boxed(0.into()));
-        for &operation in body {
-            let key = (*region, operation);
-            removed.push(key);
-            if let Some(current) = prefix.take() {
-                let next = query.lookup("OperationWork", operation)?;
-                prefix = next.map(|work| Boxed(&*current + &*graph.value_to_base::<Z>(work)));
-                prefixes.push((key, current));
-            }
-        }
-    }
-    graph.update(|mut sink| {
-        for key in removed {
-            sink.remove("RegionWorkPrefix", key)?;
-        }
-        for (key, work) in prefixes {
-            sink.set("RegionWorkPrefix", key, work)?;
-        }
-        Ok(())
-    })?;
-    reset_order_candidates(graph)
-}
-
-fn reset_order_candidates(graph: &mut Graph) -> Result<(), OptimizeError> {
+pub(super) fn reset_order_candidates(graph: &mut Graph) -> Result<(), OptimizeError> {
     // A reorder can change adjacency and speculative scope for pending transforms.
     if graph.get_size("DistributionPair") != 0 || graph.get_size("ConditionalPair") != 0 {
         clear_transform_candidates(graph)?;
@@ -281,7 +250,7 @@ pub(super) struct ChangedRegionWork {
     operations: LookupSet<Value>,
 }
 
-/// Retract affected work prefixes before the old occurrence order is replaced.
+/// Retract work summaries for changed regions and their consumers.
 pub(super) fn invalidate_region_work(
     graph: &mut Graph,
     previous: &[(Value, Vec<Value>)],
@@ -291,6 +260,10 @@ pub(super) fn invalidate_region_work(
         regions: LookupSet::new(),
         operations: LookupSet::new(),
     };
+    // The stored work may already belong to an invalidated planning revision.
+    if !metadata_current(graph, edit::revision(graph)?)? {
+        return Ok(work);
+    }
     let mut pending = Vec::new();
     for &(region, _) in previous {
         if query.contains("RegionWorkDemand", region)? {
@@ -305,12 +278,10 @@ pub(super) fn invalidate_region_work(
         consumers.entry(row[0]).or_default().push(row[1]);
         Ok(())
     })?;
-    let mut prefixes = Vec::new();
     while let Some(region) = pending.pop() {
         if !work.regions.insert(region) {
             continue;
         }
-        prefixes.extend(query.0.region_order(region)?.iter().map(|&op| (region, op)));
         for &op in consumers.get(&region).into_iter().flatten() {
             if work.operations.insert(op) {
                 let owner = query.0.operation_region(op)?;
@@ -321,9 +292,6 @@ pub(super) fn invalidate_region_work(
         }
     }
     graph.update(|mut sink| {
-        for key in prefixes {
-            sink.remove("RegionWorkPrefix", key)?;
-        }
         for &region in &work.regions {
             sink.remove("RegionWork", region)?;
             sink.remove("RegionWorkDemand", region)?;
@@ -348,7 +316,7 @@ pub(super) fn restore_region_work(graph: &mut Graph, work: ChangedRegionWork) ->
             }
             Ok(())
         })?;
-        graph.parse_and_run_program(None, "(run-schedule (saturate graph-work))")?;
+        work::solve(graph)?;
     }
     reset_order_candidates(graph)
 }
@@ -414,8 +382,10 @@ pub(super) fn place(
     loop_layout(graph)?;
     graph.parse_and_run_program(
         None,
-        "(run-schedule (saturate entry-invocations graph-placement) (saturate graph-loop-select graph-work) (saturate graph-host))",
+        "(run-schedule (saturate entry-invocations graph-placement) (saturate graph-loop-select))",
     )?;
+    work::solve(graph)?;
+    graph.parse_and_run_program(None, "(run-schedule (saturate graph-loop-select graph-host))")?;
     Ok(())
 }
 
@@ -528,7 +498,7 @@ pub(super) fn epilogues(graph: &mut Graph) -> Result<LookupSet<Value>, OptimizeE
         }
         Ok(())
     })?;
-    graph.parse_and_run_program(None, "(run-schedule (saturate graph-work))")?;
+    work::solve(graph)?;
     let mut speculate = LookupSet::new();
     for (operation, arms) in candidates {
         if small_arms(Query(graph), arms)? {

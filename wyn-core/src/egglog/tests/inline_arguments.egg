@@ -4,7 +4,6 @@
 (let returns (ReturnScalar (ScalarElement (I32))))
 (let array (ArrayType (ValueArray) (vec-of (UnspecifiedExtent)) (ElementValue (ScalarElement (I32)))))
 (let storage (ArrayType (StorageArray) (vec-of (UnspecifiedExtent)) (ElementValue (ScalarElement (I32)))))
-(delete (InlineAll)) (set (InlineAll) true)
 
 (set (FixtureEntryOrder (FunctionId 0 "main")) 0)
 (set (FixtureFunctionRoot (FunctionId 0 "main")) (RegionId 0))

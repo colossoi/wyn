@@ -206,7 +206,9 @@ pub(in crate::egglog) fn replace_attributes(
     replace_attributes_with_seeded_values(graph)
 }
 
-fn resolve_replacements(replacements: &[(Value, Value)]) -> Result<Vec<(Value, Value)>, OptimizeError> {
+pub(in crate::egglog) fn resolve_replacements(
+    replacements: &[(Value, Value)],
+) -> Result<Vec<(Value, Value)>, OptimizeError> {
     let mut forest = ReplacementForest::new();
     for &(old, new) in replacements {
         if old != new {

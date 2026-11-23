@@ -236,8 +236,9 @@ impl Execution {
         })?;
         program.graph.parse_and_run_program(
             None,
-            "(run-schedule (saturate execution-features graph-work) (saturate execution-atomics))",
+            "(run-schedule (saturate execution-features) (saturate execution-atomics))",
         )?;
+        super::planning::work::solve(&mut program.graph)?;
         let mut workgroup_bytes = LookupMap::<_, i64>::default();
         Query(&program.graph).for_each("WorkgroupStorageRequest", |row| {
             let bytes = i64::try_from(&*program.graph.value_to_base::<Z>(row[3])).unwrap_or(i64::MAX);

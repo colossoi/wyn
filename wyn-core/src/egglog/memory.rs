@@ -1,13 +1,12 @@
 //! Pass orchestration over the authoritative graph.
-use super::dataflow::{body, cse, edit, ir::Code};
+use super::dataflow::{cse, edit, ir::Code};
 use super::query::Query;
 use super::{analysis, scalar, timing, OptimizeError};
 use crate::egglog::graph::Graph;
-use crate::LookupMap;
 use egglog_engine::Value;
-use wyn_graph::dfs_postorder;
 
 mod demand;
+mod forward;
 mod remove_leaves;
 
 pub(super) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
@@ -16,63 +15,18 @@ pub(super) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
     super::planning::load(graph)
 }
 
-pub(super) fn inline(graph: &mut Graph) -> Result<(), OptimizeError> {
+pub(super) fn inline(graph: &mut Graph, all: bool) -> Result<(), OptimizeError> {
     let _timing = timing::span("egglog helper inlining");
-    let selection = timing::span("egglog inline selection");
+    let selection = timing::span("Rust inline selection");
     if graph.structure().read().targets.is_empty() {
         return Ok(());
     }
-    // Full scalar optimization already has the live call sites and SCCs from
-    // fusion. Selecting inlines does not invalidate those proofs.
-    let inline_all = Query(graph).flag("InlineAll", egglog_engine::RawValues(Vec::new()))?;
-    if !inline_all || !analysis::current(graph)? {
-        analysis::structure(graph, true)?;
-    }
-    graph.parse_and_run_program(
-        None,
-        "(run-schedule (saturate graph-inline-required) (saturate graph-inline))",
-    )?;
-    let mut roots = Vec::new();
-    let mut calls = LookupMap::<Value, Vec<(Value, Value)>>::default();
-    Query(graph).for_each("InlineCandidate", |row| {
-        let [caller, call, callee] = [row[0], row[1], row[2]];
-        calls
-            .entry(caller)
-            .or_insert_with(|| {
-                roots.push(caller);
-                Vec::new()
-            })
-            .push((call, callee));
-        Ok(())
-    })?;
-    for table in [
-        "InlineCall",
-        "InlineParallel",
-        "InlineRequired",
-        "InlineCandidate",
-    ] {
-        graph.clear_function(table)?;
-    }
-    if calls.is_empty() {
-        return Ok(());
-    }
-    // Selected targets are nonrecursive. Preparing their bodies first ensures
-    // that copying a callee cannot introduce more selected calls.
-    let order = dfs_postorder(
-        roots,
-        |_| false,
-        |region, dependencies| {
-            if let Some(sites) = calls.get(&region) {
-                dependencies.extend(sites.iter().map(|&(_, callee)| callee));
-            }
-        },
-    );
+    let calls = analysis::calls::Reachability::read(graph)?.inlines(graph, all)?;
     drop(selection);
-    for caller in order {
-        if let Some(sites) = calls.remove(&caller) {
-            for (call, callee) in sites {
-                inline_call(graph, call, callee)?;
-            }
+    if !calls.is_empty() {
+        analysis::seed_substitution(graph)?;
+        for (call, callee) in calls {
+            inline_call(graph, call, callee)?;
         }
     }
     Ok(())
@@ -174,7 +128,7 @@ fn reduce_values(graph: &mut Graph) -> Result<bool, OptimizeError> {
     if scalar::apply(graph)? {
         return Ok(true);
     }
-    body::forward_equivalents(graph)
+    forward::run(graph)
 }
 
 fn scratch_shapes(graph: &mut Graph) -> Result<(), OptimizeError> {

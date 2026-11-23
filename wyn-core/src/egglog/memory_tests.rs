@@ -1,5 +1,5 @@
 use crate::egglog::dataflow::{
-    body, edit,
+    edit,
     ir::{self, Bounds, Code, Name},
 };
 use crate::egglog::graph::Formula;
@@ -71,7 +71,7 @@ fn copy_forwarding_preserves_captures_loop_entries_and_backedges() -> Result<(),
     })??;
     analysis::run(&mut graph)?;
     graph.parse_and_run_program(None, "(run-schedule (saturate scalar-analysis))")?;
-    assert!(body::forward_equivalents(&mut graph)?);
+    assert!(super::forward::run(&mut graph)?);
     analysis::ensure(&mut graph)?;
     let query = Query(&graph);
     assert_eq!(query.0.argument(owner, 0_i64, 0_i64)?, initial);
@@ -89,7 +89,7 @@ fn copy_forwarding_preserves_captures_loop_entries_and_backedges() -> Result<(),
 fn inlining_does_not_run_scalar_candidate_discovery() -> Result<(), OptimizeError> {
     let mut graph = test_graph::import("entry main(x:i32) i32=x+x")?;
     assert!(Query(&graph).first("ScalarPayload")?.is_some());
-    super::inline(&mut graph)?;
+    super::inline(&mut graph, true)?;
     assert!(Query(&graph).first("ForwardCandidate")?.is_none());
     Ok(())
 }
@@ -104,7 +104,7 @@ fn inlining_preserves_dependent_calls_and_shape_arguments() -> Result<(), Optimi
         calls.push((4, Code::Range));
         calls.push((5, Code::Uninitialized));
         let mut graph = test_graph::fixture(&calls, include_str!("tests/inline_arguments.egg"))?;
-        super::inline(&mut graph)?;
+        super::inline(&mut graph, true)?;
         assert!(
             Query(&graph).first("FlowLive")?.is_none(),
             "inlining must not run liveness"
@@ -142,14 +142,13 @@ fn inlining_exposes_parallel_work_through_scalar_helpers_before_copying_them() -
     test_graph::facts_with_positions(
         &mut graph,
         r#"
-        (delete (InlineAll)) (set (InlineAll) false)
         (set (FixtureRegion (OperationId 6)) (RegionId 2))
         (set (FixtureOrder (OperationId 6)) 0)
 
         "#,
     )?;
-    super::inline(&mut graph)?;
-    analysis::structure(&mut graph, false)?;
+    super::inline(&mut graph, false)?;
+    analysis::structure(&mut graph)?;
     graph.parse_and_run_program(
         None,
         r#"
@@ -189,12 +188,19 @@ fn nested_calls_mark_only_the_reachable_cycle_recursive() -> Result<(), Optimize
         (set (FixtureFunctionRoot (FunctionId 3 "unused")) (RegionId 12))
     "#,
     )?;
-    analysis::structure(&mut graph, false)?;
+    let query = Query(&graph);
+    let main = query.constructor("FunctionId", (0_i64, "main"))?.unwrap();
+    let reachability = analysis::calls::Reachability::read(&graph)?;
+    let sites = &reachability.calls.calls[&main];
+    for (operation, function) in [(6_i64, (2_i64, "identity")), (2_i64, (1_i64, "forward"))] {
+        let operation = query.constructor("OperationId", operation)?.unwrap();
+        let callee = query.constructor("FunctionId", function)?.unwrap();
+        assert!(sites.iter().any(|site| site.operation == operation && site.callee == callee));
+    }
+    analysis::structure(&mut graph)?;
     graph.parse_and_run_program(
         None,
         r#"
-        (check (InlineCall (FunctionId 0 "main") (OperationId 6) (FunctionId 2 "identity")))
-        (check (InlineCall (FunctionId 0 "main") (OperationId 2) (FunctionId 1 "forward")))
         (check (= (RecursiveFunction (FunctionId 0 "main")) false))
         (check (= (RecursiveFunction (FunctionId 1 "forward")) true))
         (check (= (RecursiveFunction (FunctionId 2 "identity")) true))
@@ -202,7 +208,7 @@ fn nested_calls_mark_only_the_reachable_cycle_recursive() -> Result<(), Optimize
         (set (RetainAllFunctions) true)
     "#,
     )?;
-    analysis::structure(&mut graph, false)?;
+    analysis::structure(&mut graph)?;
     graph.parse_and_run_program(None, r#"(check (LiveFunction (FunctionId 3 "unused")))"#)?;
     Ok(())
 }
@@ -226,7 +232,7 @@ fn inline_all_leaves_recursive_calls_intact() -> Result<(), OptimizeError> {
         "#,
     )?;
     let revision = edit::revision(&graph)?;
-    super::inline(&mut graph)?;
+    super::inline(&mut graph, true)?;
     assert_eq!(edit::revision(&graph)?, revision);
     Ok(())
 }

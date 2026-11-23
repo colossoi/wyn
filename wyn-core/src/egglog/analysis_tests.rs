@@ -398,13 +398,13 @@ fn bounded_work_counts_every_loop_iteration() {
         .unwrap();
     run(&mut graph).unwrap();
     planning::analyze(&mut graph).unwrap();
+    let operation = Query(&graph).constructor("OperationId", 1_i64).unwrap().unwrap();
+    assert!(Query(&graph).lookup("OperationWork", operation).unwrap().is_none());
+    planning::work::demand_operation(&mut graph, operation).unwrap();
     graph
         .parse_and_run_program(
             None,
             r#"
-            (fail (check (= wanted (OperationWork operation))))
-            (OperationWorkDemand (OperationId 1))
-            (run-schedule (saturate graph-work))
             (check (= (OperationWork (OperationId 1)) (bigint 40)))
             (check (= (RegionWork (RegionId 0)) (bigint 1)))
             (fail (check (= unused (RegionWork (RegionId 1)))))

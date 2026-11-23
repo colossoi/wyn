@@ -1866,8 +1866,8 @@ fn retained_call_work_composes_and_unknown_work_stays_unknown() {
             (set (FixtureCallTarget (OperationId 1)) leaf)
             (set (FixtureRegion (OperationId 1)) (RegionId 1))
             (set (FixtureRegion (OperationId 2)) (RegionId 2))
-            (FirstOperation (RegionId 1) (OperationId 1)) (LastOperation (RegionId 1) (OperationId 1))
-            (FirstOperation (RegionId 2) (OperationId 2)) (LastOperation (RegionId 2) (OperationId 2))
+            (set (FixtureOrder (OperationId 1)) 0)
+            (set (FixtureOrder (OperationId 2)) 0)
             (LiveOperation (OperationId 0)) (LiveOperation (OperationId 1)) (LiveOperation (OperationId 2))
             (OperationWorkDemand (OperationId 0))
             "#,
@@ -1888,7 +1888,7 @@ fn retained_call_work_composes_and_unknown_work_stays_unknown() {
         )
         .unwrap();
         let operation = Query(&graph).first("OperationWorkDemand").unwrap().unwrap()[0];
-        graph.parse_and_run_program(None, "(run-schedule (saturate graph-work))").unwrap();
+        super::work::solve(&mut graph).unwrap();
         let query = Query(&graph);
         let work = query
             .lookup("OperationWork", operation)

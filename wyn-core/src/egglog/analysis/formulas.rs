@@ -4,6 +4,10 @@ use crate::egglog::{query::Query, OptimizeError};
 use crate::LookupSet;
 use egglog_engine::{Value, Write};
 
+pub(in crate::egglog) fn seed_substitution(graph: &mut Graph) -> Result<(), OptimizeError> {
+    publish(graph, true)
+}
+
 pub(super) fn publish(graph: &mut Graph, for_inlining: bool) -> Result<(), OptimizeError> {
     let query = Query(graph);
     let mut demands = LookupSet::new();

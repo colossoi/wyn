@@ -23,6 +23,7 @@ pub(super) struct Graph {
     structure: Arc<SharedStructure>,
     operations: LookupMap<Value, Occurrence>,
     pub region_orders: StableMap<Value, Vec<Value>>,
+    pub dirty_orders: LookupSet<Value>,
     pub loop_layout_revision: Option<i64>,
 }
 
@@ -206,6 +207,7 @@ impl Graph {
             structure: self.structure.clone(),
             operations: self.operations.clone(),
             region_orders: self.region_orders.clone(),
+            dirty_orders: self.dirty_orders.clone(),
             loop_layout_revision: self.loop_layout_revision,
         }
     }
@@ -906,10 +908,12 @@ impl Graph {
     pub fn update<R>(&mut self, f: impl FnOnce(State<'_, '_, '_>) -> Result<R, Error>) -> Result<R, Error> {
         let operations = &mut self.operations;
         let structure = &self.structure;
+        let dirty_orders = &mut self.dirty_orders;
         self.facts.update(|facts| {
             f(State {
                 facts,
                 operations,
+                dirty_orders,
                 structure,
             })
         })
@@ -941,6 +945,7 @@ impl DerefMut for Graph {
 pub(super) struct State<'a, 'db, 'operations> {
     facts: FullState<'a, 'db>,
     operations: &'operations mut LookupMap<Value, Occurrence>,
+    dirty_orders: &'operations mut LookupSet<Value>,
     structure: &'operations SharedStructure,
 }
 
@@ -1252,12 +1257,20 @@ impl State<'_, '_, '_> {
             if let Some(operations) = structure.by_region.get_mut(&previous) {
                 operations.remove(&operation);
             }
+            self.dirty_orders.insert(previous);
         }
         structure.by_region.entry(region).or_default().insert(operation);
+        self.dirty_orders.insert(region);
     }
 
     pub fn set_order(&mut self, operation: Value, order: i64) {
-        self.structure.write().operations.entry(operation).or_default().order = Some(order);
+        let mut structure = self.structure.write();
+        let position = structure.operations.entry(operation).or_default();
+        if position.order.replace(order) != Some(order) {
+            if let Some(region) = position.region {
+                self.dirty_orders.insert(region);
+            }
+        }
     }
 
     pub fn set_code(&mut self, operation: Value, code: Code) {
@@ -1265,6 +1278,11 @@ impl State<'_, '_, '_> {
             Entry::Occupied(mut entry) => entry.get_mut().code = code,
             Entry::Vacant(entry) => {
                 entry.insert(Occurrence { code, span: None });
+                if let Some(region) =
+                    self.structure.read().operations.get(&operation).and_then(|position| position.region)
+                {
+                    self.dirty_orders.insert(region);
+                }
             }
         }
     }
@@ -1295,6 +1313,7 @@ impl State<'_, '_, '_> {
             if let Some(operations) = structure.by_region.get_mut(&region) {
                 operations.remove(&operation);
             }
+            self.dirty_orders.insert(region);
         }
     }
 }

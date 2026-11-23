@@ -4,29 +4,8 @@
 (rule ((= revision (AnalysisRevision)) (= (RegionOwnedBy child) operation) (= parent (wyn-region-of operation)))
       ((FlowScopeParent child parent)) :ruleset graph-structure)
 (rule ((= revision (AnalysisRevision)) (LiveRegion child) (FlowScopeParent child parent) (FlowScopeAncestor child parent))
-      ((InvalidDataflow "cyclic execution-region nesting")) :ruleset dataflow-scopes)
+      ((InvalidDataflow "cyclic execution-region nesting")) :ruleset graph-structure)
 
-
-(rule ((= revision (AnalysisRevision)) (AvailabilityDemand operation name) (= region (wyn-region-of operation)) (AvailableIn region name))
-      ((AvailableAt operation name)) :ruleset dataflow-scopes)
-(rule ((= revision (AnalysisRevision)) (AvailabilityDemand operation name) (ResultOrigin name producer slot)
-       (= region (wyn-region-of operation)) (= region (wyn-region-of producer))
-       (= before (wyn-operation-position producer)) (= after (wyn-operation-position operation))
-       (< before after))
-      ((AvailableAt operation name)) :ruleset dataflow-scopes)
-(rule ((= revision (AnalysisRevision)) (EntryDemand child name) (= (RegionOwnedBy child) operation) (AvailableAt operation name))
-      ((AvailableIn child name)) :ruleset dataflow-scopes)
-(rule ((= revision (AnalysisRevision)) (AvailabilityDemand operation name) (= region (wyn-region-of operation))
-       (DefinitionRegion name owner) (!= owner region))
-      ((EntryDemand region name)) :ruleset dataflow-scopes)
-(rule ((= revision (AnalysisRevision)) (EntryDemand child name) (= (RegionOwnedBy child) operation))
-      ((AvailabilityDemand operation name)) :ruleset dataflow-scopes)
-(rule ((= revision (AnalysisRevision)) (EndDemand region name) (AvailableIn region name))
-      ((AvailableEnd region name)) :ruleset dataflow-scopes)
-(rule ((= revision (AnalysisRevision)) (EndDemand region name) (DefinitionRegion name region))
-      ((AvailableEnd region name)) :ruleset dataflow-scopes)
-(rule ((= revision (AnalysisRevision)) (EndDemand region name) (DefinitionRegion name owner) (!= owner region))
-      ((EntryDemand region name)) :ruleset dataflow-scopes)
 
 ; Index, shape, and slice facts follow immutable terms across graph edits.
 (rule ((= revision (AnalysisRevision)) (= (AccumulatorType token) (AccumulatorInfo shape elements)))
@@ -60,7 +39,6 @@
 (rule ((= (SliceAt slices slot) (Slice a b c)) (IndexUse b name)) ((SliceUse slices name)) :ruleset dataflow-dependencies)
 (rule ((= (SliceAt slices slot) (Slice a b c)) (IndexUse c name)) ((SliceUse slices name)) :ruleset dataflow-dependencies)
 
-(rule ((= revision (AnalysisRevision)) (OperationUse operation name)) ((AvailabilityDemand operation name)) :ruleset dataflow-dependencies)
 (rule ((CollectiveScopeUse region name)) ((EndDemand region name)) :ruleset dataflow-dependencies)
 (rule ((FoldSeedUse operation name)) ((DirectOperationUse operation name)) :ruleset dataflow-dependencies)
 (rule ((AccumulatorBackingUse operation group slot array))
@@ -79,16 +57,6 @@
       ((RegionCapture region name)) :ruleset dataflow-dependencies)
 (rule ((CollectiveScopeUse region name) (DefinitionRegion name owner) (!= region owner))
       ((RegionCapture region name)) :ruleset dataflow-dependencies)
-
-; Forwarding publishes the same value language used by the earlier TLC passes.
-(rule ((= revision (AnalysisRevision)) (ProductOperation operation)
-       (= arity (wyn-input-count operation)) (AritySlot arity slot) (DirectOperationUse operation (ValueNameRef input)) (= (wyn-input operation slot) (ValueNameRef input))
-       (ResultOrigin (ValueNameRef output) operation 0))
-      ((SourceField (FlowNamed output) slot (FlowNamed input))) :ruleset dataflow-dependencies)
-(rule ((= revision (AnalysisRevision)) (ProjectionOperation operation slot) (DirectOperationUse operation (ValueNameRef input)) (= (wyn-input operation 0) (ValueNameRef input))
-       (ResultOrigin (ValueNameRef output) operation 0))
-      ((SourceSelect (FlowNamed output) (FlowNamed input) slot)) :ruleset dataflow-dependencies)
-
 
 (rule ((= revision (AnalysisRevision)) (= (ValueType array) (LogicalValue (ArrayType ownership extents element)))
        (> (vec-length extents) 0) (= (vec-get extents 0) (FixedExtent n)))
@@ -118,7 +86,7 @@
 (rule ((= revision (AnalysisRevision)) (LoopValueCarry loop slot carry initial next)
        (ArrayOuterBound initial bound) (ArrayOuterBound next bound))
       ((ArrayOuterBound carry bound) (LoopMatchesOuterBound loop slot)) :ruleset dataflow-dependencies)
-(rule ((= revision (AnalysisRevision)) (= (SourceAlias (FlowNamed array)) (FlowNamed source)) (ArrayOuterBound source bound))
+(rule ((= revision (AnalysisRevision)) (= (ProjectionAlias (ValueNameRef array)) (ValueNameRef source)) (ArrayOuterBound source bound))
       ((ArrayOuterBound array bound)) :ruleset dataflow-dependencies)
 (rule ((= revision (AnalysisRevision)) (RangeOperation operation) (ResultOrigin (ValueNameRef array) operation 0)
        (= count (wyn-index-expression operation)))
@@ -182,7 +150,7 @@
 (rule ((= revision (AnalysisRevision)) (FormalOrigin (AccNameRef token) region slot)
        (= (AccumulatorType token) (AccumulatorInfo shape elements)) (ShapeUse shape name)
        (DefinitionRegion (ValueNameRef name) definition) (!= region definition))
-      ((EntryDemand region (ValueNameRef name)) (RegionCapture region (ValueNameRef name))
+      ((RegionCapture region (ValueNameRef name))
        (RegionAttributeUse region (ValueNameRef name))) :ruleset dataflow-dependencies)
 
 (rule ((= revision (AnalysisRevision)) (DirectOperationUse operation name))

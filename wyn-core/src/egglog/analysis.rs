@@ -3,17 +3,18 @@ use super::dataflow::edit;
 use super::query::Query;
 use super::{output_error, timing, OptimizeError};
 use crate::egglog::graph::{callback_at, CollectiveInput, Graph, Origin};
-use crate::{LookupSet, StableMap};
+use crate::LookupSet;
 use egglog_engine::sort::S;
 use egglog_engine::{IntoValues, RawValues, Value, Write};
 
-mod calls;
+pub(super) mod calls;
 mod formulas;
 mod liveness;
+mod projections;
 
 pub(super) use liveness::{liveness, Liveness};
 
-pub(in crate::egglog) use formulas::formula_names;
+pub(in crate::egglog) use formulas::{formula_names, seed_substitution};
 mod signatures;
 
 pub(super) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
@@ -39,13 +40,8 @@ pub(super) fn invalidate(graph: &mut Graph) -> Result<(), OptimizeError> {
     for table in [
         "DataflowRevision",
         "PlanningRevision",
-        "ValuePrimitive",
         "ConstantValue",
-        "InlineCall",
         "RecursiveFunction",
-        "FlowEdge",
-        "FlowParameter",
-        "FlowArgument",
         "ResultOrigin",
         "FormalOrigin",
         "ReducerBody",
@@ -71,14 +67,10 @@ pub(super) fn invalidate(graph: &mut Graph) -> Result<(), OptimizeError> {
         "LiveFunction",
         "LiveRegion",
         "LiveOperation",
-        "AvailableIn",
-        "AvailableAt",
-        "AvailableEnd",
-        "AvailabilityDemand",
-        "EntryDemand",
         "EndDemand",
         "BranchResult",
         "BinaryOperands",
+        "ProjectionAlias",
         "IndexOperands",
         "LengthMeasure",
         "RegionAttributeUse",
@@ -101,8 +93,6 @@ pub(super) fn invalidate(graph: &mut Graph) -> Result<(), OptimizeError> {
         "ArrayRowWidth",
         "LoopMatchesOuterBound",
         "ConstantBound",
-        "StorageValue",
-        "ArrayValue",
         "ResourceDemand",
         "ResourceParent",
         "ResourceAnchor",
@@ -134,22 +124,6 @@ pub(super) fn invalidate(graph: &mut Graph) -> Result<(), OptimizeError> {
         "AccumulatorParameter",
         "FlowScopeParent",
         "FlowScopeAncestor",
-        "SourceAlias",
-        "SourceField",
-        "SourceSelect",
-        "SourceProjection",
-        "SourceForwardField",
-        "SourceSelectResolved",
-        "FlowOperand",
-        "FlowFrom",
-        "FlowRead",
-        "FlowScopeRequirement",
-        "FlowInputAt",
-        "FlowStructuralInput",
-        "FlowEvaluationRead",
-        "FlowEffect",
-        "FlowReach",
-        "FlowDemand",
     ] {
         graph.clear_function(table)?;
     }
@@ -167,15 +141,11 @@ pub(super) fn advance(graph: &mut Graph) -> Result<(), OptimizeError> {
 }
 
 /// Refresh lexical ownership, reachable calls, and recursion without solving dataflow.
-pub(super) fn structure(graph: &mut Graph, for_inlining: bool) -> Result<(), OptimizeError> {
+pub(super) fn structure(graph: &mut Graph) -> Result<(), OptimizeError> {
     let _timing = timing::span("egglog graph structure");
     invalidate(graph)?;
-    calls::publish(graph, for_inlining)?;
-    if for_inlining {
-        formulas::publish(graph, true)?;
-    } else {
-        publish_proof_operands(graph)?;
-    }
+    calls::publish(graph)?;
+    publish_proof_operands(graph)?;
     graph.parse_and_run_program(None, "(run-schedule (saturate graph-structure flow-scopes))")?;
     Ok(())
 }
@@ -305,7 +275,6 @@ pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeEr
                 }
                 Origin::Parameter(region, slot) => {
                     sink.add("FormalOrigin", (name, region, slot as i64))?;
-                    sink.add("AvailableIn", (region, name))?;
                 }
             }
         }
@@ -472,14 +441,11 @@ pub(super) fn publish_collective_uses(graph: &mut Graph) -> Result<(), OptimizeE
 
 pub(super) fn run(graph: &mut Graph) -> Result<(), OptimizeError> {
     let _timing = timing::span("egglog graph analysis");
-    structure(graph, false)?;
+    structure(graph)?;
+    projections::publish(graph)?;
     graph.parse_and_run_program(
         None,
-        "(run-schedule
-          (saturate graph-indices dataflow-scopes flow-scopes)
-          (saturate graph-indices dataflow-dependencies dataflow-scopes flow-scopes)
-          (saturate flow-forward dataflow-dependencies dataflow-scopes)
-          (saturate flow-projections source-summary))",
+        "(run-schedule (saturate graph-indices dataflow-dependencies))",
     )?;
     graph.parse_and_run_program(
         None,
@@ -512,36 +478,33 @@ pub(super) fn ensure(graph: &mut Graph) -> Result<(), OptimizeError> {
 
 fn publish_order(graph: &mut Graph) -> Result<(), OptimizeError> {
     let query = Query(graph);
-    let mut operations = StableMap::<Value, Vec<(i64, Value)>>::default();
-    query.for_each("LiveRegion", |row| {
-        operations.entry(row[0]).or_default();
-        Ok(())
-    })?;
-    query.for_each("LiveOperation", |row| {
-        let operation = row[0];
-        let region = query.0.operation_region(operation)?;
-        let order = query.0.operation_order(operation)?;
-        operations.entry(region).or_default().push((order, operation));
-        Ok(())
-    })?;
-    // Region order depends only on the occurrences in that region.
-    let mut previous = graph.region_orders.clone();
+    let mut live = LookupSet::new();
     let mut removed = Vec::new();
     let mut updated = Vec::new();
-    for (region, mut body) in operations {
-        body.sort_by_key(|&(order, _)| order);
-        let body = body.into_iter().map(|(_, operation)| operation).collect::<Vec<_>>();
-        let old = previous.swap_remove(&region);
-        if old.as_ref() == Some(&body) {
-            continue;
+    query.for_each("LiveRegion", |row| {
+        let region = row[0];
+        live.insert(region);
+        let old = graph.region_orders.get(&region);
+        if old.is_some() && !graph.dirty_orders.contains(&region) {
+            return Ok(());
         }
-        if let Some(old) = old {
-            removed.push((region, old));
+        let current = query.operations(region)?;
+        if old != Some(&current) {
+            if let Some(old) = old {
+                removed.push((region, old.clone()));
+            }
+            updated.push((region, current));
         }
-        updated.push((region, body));
+        Ok(())
+    })?;
+    for (&region, body) in &graph.region_orders {
+        if !live.contains(&region) {
+            removed.push((region, body.clone()));
+        }
     }
-    removed.extend(previous);
-    replace_order(graph, removed, updated)
+    replace_order(graph, removed, updated)?;
+    graph.dirty_orders.clear();
+    Ok(())
 }
 
 pub(super) fn replace_order(
@@ -586,8 +549,12 @@ pub(super) fn replace_order(
     })?;
     for (region, _) in removed {
         graph.region_orders.swap_remove(&region);
+        graph.dirty_orders.remove(&region);
     }
-    graph.region_orders.extend(updated);
+    for (region, body) in updated {
+        graph.region_orders.insert(region, body);
+        graph.dirty_orders.remove(&region);
+    }
     Ok(())
 }
 
@@ -635,6 +602,30 @@ pub(super) fn available_before(
     }
 }
 
+/// A local formal is available at both boundaries. A local result is
+/// available at exit. A captured definition must dominate the owning operation.
+fn available_at_boundary(
+    query: Query<'_>,
+    region: Value,
+    name: Value,
+    exit: bool,
+) -> Result<bool, OptimizeError> {
+    let Some(origin) = query.live_origin(name)? else {
+        return Ok(false);
+    };
+    match origin {
+        Origin::Parameter(owner, _) if owner == region => return Ok(true),
+        Origin::Result(operation, _) if query.0.operation_region(operation)? == region => {
+            return Ok(exit);
+        }
+        _ => {}
+    }
+    let Some(owner) = query.lookup("RegionOwnedBy", region)? else {
+        return Ok(false);
+    };
+    available_before(query, owner, name)
+}
+
 /// Check the selected graph, including captures and simultaneous loop edges.
 pub(super) fn validate(graph: &Graph) -> Result<(), OptimizeError> {
     if !cfg!(debug_assertions) {
@@ -680,7 +671,7 @@ pub(super) fn validate(graph: &Graph) -> Result<(), OptimizeError> {
         Ok(())
     })?;
     query.for_each("OperationUse", |row| {
-        if query.contains("LiveOperation", row[0])? && !query.contains("AvailableAt", (row[0], row[1]))? {
+        if query.contains("LiveOperation", row[0])? && !available_before(query, row[0], row[1])? {
             return Err(output_error(format!(
                 "operand {:?} is unavailable at {:?} ({:?}) in {:?}",
                 row[1],
@@ -701,14 +692,14 @@ pub(super) fn validate(graph: &Graph) -> Result<(), OptimizeError> {
         for slot in 0..query.0.yield_count(region) {
             let name = query.0.yield_value(region, slot)?;
             typed(query, name)?;
-            if !query.contains("AvailableEnd", (region, name))? {
+            if !available_at_boundary(query, region, name, true)? {
                 return Err(output_error("region yields a value outside its execution scope"));
             }
         }
         Ok(())
     })?;
     query.for_each("EndDemand", |row| {
-        if query.contains("LiveRegion", row[0])? && !query.contains("AvailableEnd", (row[0], row[1]))? {
+        if query.contains("LiveRegion", row[0])? && !available_at_boundary(query, row[0], row[1], true)? {
             return Err(output_error(
                 "collective result is unavailable in its lane region",
             ));

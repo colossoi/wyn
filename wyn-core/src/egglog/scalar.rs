@@ -4,7 +4,6 @@ use super::query::Query;
 use super::{memory, output_error, OptimizeError, ScalarOptimization};
 use crate::egglog::graph::Graph;
 use egglog_engine::sort::S;
-use egglog_engine::Write;
 
 mod branch;
 mod fold;
@@ -44,11 +43,7 @@ pub(super) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
 pub(super) fn run(graph: &mut Graph, policy: ScalarOptimization) -> Result<(), OptimizeError> {
     let _timing = super::timing::span("egglog scalar optimization");
     if policy == ScalarOptimization::Full {
-        graph.update(|mut sink| {
-            sink.remove("InlineAll", egglog_engine::RawValues(Vec::new()))?;
-            sink.set("InlineAll", egglog_engine::RawValues(Vec::new()), true)
-        })?;
-        memory::inline(graph)?;
+        memory::inline(graph, true)?;
     }
     memory::simplify(graph, true)
 }
@@ -99,7 +94,7 @@ pub(super) fn apply(graph: &mut Graph) -> Result<bool, OptimizeError> {
     Ok(true)
 }
 
-pub(super) use leaf::{forward_lengths, materialize_scratch, remove_use};
+pub(super) use leaf::{forward_lengths, materialize_scratch, remove_use, ScalarInputs};
 
 #[cfg(test)]
 #[path = "scalar_tests.rs"]

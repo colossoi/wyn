@@ -185,7 +185,7 @@ fn cross_region_motion_moves_a_capture_chain_in_one_edit() -> Result<(), Optimiz
     assert_ne!(query.0.operation_region(multiply)?, root);
     let demand_work = |graph: &mut Graph| -> Result<(), OptimizeError> {
         graph.update(|mut sink| sink.add("RegionWorkDemand", root))?;
-        graph.parse_and_run_program(None, "(run-schedule (saturate graph-work))")?;
+        crate::egglog::planning::work::solve(graph)?;
         Ok(())
     };
     demand_work(&mut graph)?;

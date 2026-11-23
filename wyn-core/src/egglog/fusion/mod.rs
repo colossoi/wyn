@@ -182,7 +182,7 @@ fn fuse_ranked_bucket(graph: &mut Graph) -> Result<bool, OptimizeError> {
             let mut available = true;
             query.for_each("OperationUse", |use_| {
                 if use_[0] == operation && !hoisted_outputs.contains(&use_[1]) {
-                    available &= query.contains("AvailableAt", (anchor, use_[1]))?;
+                    available &= analysis::available_before(query, anchor, use_[1])?;
                 }
                 Ok(())
             })?;
@@ -193,7 +193,7 @@ fn fuse_ranked_bucket(graph: &mut Graph) -> Result<bool, OptimizeError> {
         }
         for level in &levels {
             if !hoisted_outputs.contains(&level.source)
-                && !query.contains("AvailableAt", (anchor, level.source))?
+                && !analysis::available_before(query, anchor, level.source)?
             {
                 return Ok(());
             }

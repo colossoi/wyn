@@ -1,7 +1,7 @@
 ; Alias roots are demanded by real accesses, not materialized for every value.
-(rule ((= revision (AnalysisRevision)) (= (ValueType value) (LogicalValue (ArrayType (StorageArray) extents element))))
+(rule ((= (ValueType value) (LogicalValue (ArrayType (StorageArray) extents element))))
       ((StorageValue value) (ArrayValue value)) :ruleset dataflow-resources)
-(rule ((= revision (AnalysisRevision)) (= (ValueType value) (LogicalValue (ArrayType (ValueArray) extents element))))
+(rule ((= (ValueType value) (LogicalValue (ArrayType (ValueArray) extents element))))
       ((ArrayValue value)) :ruleset dataflow-resources)
 ; Accumulator capabilities inherit their arrays' roots; they are not external inputs.
 (rule ((= revision (AnalysisRevision)) (FormalOrigin (ValueNameRef value) region slot))
@@ -19,7 +19,7 @@
 (rule ((= revision (AnalysisRevision)) (ProductOperation operation)
        (= arity (wyn-input-count operation)) (AritySlot arity slot) (ResultOrigin result operation 0) (= source (wyn-input operation slot)))
       ((ResourceParent result source)) :ruleset dataflow-resources)
-(rule ((= revision (AnalysisRevision)) (= (SourceAlias (FlowNamed result)) (FlowNamed source)))
+(rule ((= revision (AnalysisRevision)) (= (ProjectionAlias (ValueNameRef result)) (ValueNameRef source)))
       ((ResourceParent (ValueNameRef result) (ValueNameRef source))) :ruleset dataflow-resources)
 (rule ((= revision (AnalysisRevision)) (IndexOperation operation) (ResultOrigin result operation 0) (= source (wyn-input operation 0)))
       ((ResourceParent result source)) :ruleset dataflow-resources)
@@ -154,7 +154,7 @@
 (rule ((= revision (AnalysisRevision)) (ConsumedToken operation token) (= region (wyn-region-of operation))
        (= (RegionOwnedBy region) owner) (DefinitionRegion (AccNameRef token) definition) (!= definition region))
       ((ConsumedToken owner token)) :ruleset dataflow-resources)
-(rule ((= revision (AnalysisRevision)) (AvailabilityDemand operation (AccNameRef token))
+(rule ((= revision (AnalysisRevision)) (OperationUse operation (AccNameRef token))
        (ConsumedToken consumer token) (= region (wyn-region-of consumer)) (= region (wyn-region-of operation))
        (= before (wyn-operation-position consumer)) (= after (wyn-operation-position operation)) (< before after))
       ((TokenUnavailableAt operation token) (InvalidDataflow "accumulator capability was already consumed")) :ruleset dataflow-resources)

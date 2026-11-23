@@ -64,7 +64,7 @@ pub fn from_tlc(source: &OwnershipApplied) -> Result<Program<'_, Imported>, Opti
 
 /// Simplify regions and fuse parallel statements in the common IR.
 pub fn fuse(mut program: Program<'_, Imported>) -> Result<Program<'_, Fused>, OptimizeError> {
-    memory::inline(&mut program.graph)?;
+    memory::inline(&mut program.graph, false)?;
     memory::simplify(&mut program.graph, false)?;
     planning::analyze(&mut program.graph)?;
     program.graph.parse_and_run_program(

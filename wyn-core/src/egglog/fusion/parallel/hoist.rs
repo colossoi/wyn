@@ -5,7 +5,7 @@ use crate::egglog::{timing, OptimizeError};
 use crate::memory_ir::{BodyRole, Definition, OperationId, UseSite, ValueRef};
 use crate::{LookupMap, LookupSet, SortedSet};
 use egglog_engine::sort::Z;
-use egglog_engine::{Value, Write};
+use egglog_engine::Value;
 use std::collections::VecDeque;
 
 pub(in crate::egglog::fusion) fn hoist(graph: &mut Graph) -> Result<bool, OptimizeError> {
@@ -119,8 +119,7 @@ pub(super) fn cheap(graph: &mut Graph, operation: Value) -> Result<bool, Optimiz
     // Compound work is the estimate for the input to this pass. Seed only
     // candidates that have passed scope and repeated-storage checks.
     if !query.contains("OperationWorkDemand", operation)? {
-        graph.update(|mut sink| sink.add("OperationWorkDemand", operation))?;
-        graph.parse_and_run_program(None, "(run-schedule (saturate graph-work))")?;
+        crate::egglog::planning::work::demand_operation(graph, operation)?;
     }
     Ok(Query(graph)
         .lookup("OperationWork", operation)?
