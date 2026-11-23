@@ -1,14 +1,19 @@
 //! Delete unused scalar leaves without rebuilding proofs about surviving values.
-use super::{analysis, demand::Needed, edit, scalar, timing, OptimizeError, Query};
+use super::{analysis, edit, scalar, timing, OptimizeError, Query};
 use crate::egglog::dataflow::ir::Code;
 use crate::egglog::graph::Graph;
 use crate::egglog::planning;
 use crate::LookupSet;
 use egglog_engine::{Value, Write};
 
-pub(super) fn apply(graph: &mut Graph, needed: &Needed, dead: &[Value]) -> Result<bool, OptimizeError> {
+pub(super) fn apply(
+    graph: &mut Graph,
+    dead: &[Value],
+    use_sites: impl Fn(Query<'_>, Value) -> Result<Vec<Value>, OptimizeError>,
+) -> Result<bool, OptimizeError> {
     let query = Query(graph);
     let mut regions = LookupSet::new();
+    let mut uses = Vec::new();
     for &key in dead {
         if !matches!(graph.code(key)?, Code::Scalar(_) | Code::Constant { .. })
             || graph.output_count(key) != 1
@@ -19,6 +24,7 @@ pub(super) fn apply(graph: &mut Graph, needed: &Needed, dead: &[Value]) -> Resul
             return Ok(false);
         }
         regions.insert(graph.operation_region(key)?);
+        uses.push((key, use_sites(query, key)?));
     }
     let _timing = timing::span("Rust unused leaf publication");
     let removed: LookupSet<_> = dead.iter().copied().collect();
@@ -35,15 +41,14 @@ pub(super) fn apply(graph: &mut Graph, needed: &Needed, dead: &[Value]) -> Resul
     let work = planning::invalidate_region_work(graph, &previous)?;
     // Dead leaves can use one another. Keep all definitions until their last
     // lexical use has been retracted.
-    for &operation in dead {
-        for value in needed.use_sites(operation) {
-            scalar::remove_use(graph, operation, value)?;
+    for (operation, names) in &uses {
+        for &value in names {
+            scalar::remove_use(graph, *operation, value)?;
         }
     }
-    for &operation in dead {
+    for (operation, names) in uses {
         let region = graph.operation_region(operation)?;
         let output = graph.output(operation, 0)?;
-        let names = needed.use_sites(operation);
         graph.update(|mut sink| {
             for name in names {
                 sink.remove("DirectOperationUse", (operation, name))?;

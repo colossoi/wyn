@@ -167,7 +167,7 @@ fn clear_candidates(graph: &mut Graph) -> Result<(), OptimizeError> {
         graph.clear_function(table)?;
     }
     clear_transform_candidates(graph)?;
-    analysis::advance(graph)
+    analysis::advance_revision(graph, "PlanningChoiceRevision")
 }
 
 pub(super) fn clear_transform_candidates(graph: &mut Graph) -> Result<(), OptimizeError> {

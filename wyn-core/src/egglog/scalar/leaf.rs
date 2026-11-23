@@ -186,7 +186,6 @@ fn index_operands(query: Query<'_>, index: Option<Value>) -> Result<LookupSet<Va
 /// A replacement of ordinary scalar operands whose lexical uses can be repaired in place.
 pub(in crate::egglog) struct ScalarInputs {
     operation: Value,
-    before: Vec<Value>,
     after: Vec<Value>,
     uses: Vec<(Value, UsePath, bool)>,
 }
@@ -224,7 +223,6 @@ impl ScalarInputs {
         }
         Ok(Some(Self {
             operation,
-            before,
             after,
             uses,
         }))
@@ -233,15 +231,10 @@ impl ScalarInputs {
     pub fn apply(self, graph: &mut Graph) -> Result<(), OptimizeError> {
         let Self {
             operation,
-            before,
             after,
             uses,
         } = self;
         graph.update(|mut sink| {
-            if let ([a, b], [x, y]) = (before.as_slice(), after.as_slice()) {
-                sink.remove("BinaryOperands", (operation, *a, *b))?;
-                sink.add("BinaryOperands", (operation, *x, *y))?;
-            }
             sink.set_inputs(operation, after)?;
             for &(name, _, used) in &uses {
                 if used {

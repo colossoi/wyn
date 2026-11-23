@@ -16,6 +16,7 @@ pub(super) use liveness::{liveness, Liveness};
 
 pub(in crate::egglog) use formulas::{formula_names, seed_substitution};
 mod signatures;
+mod totality;
 
 pub(super) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
     graph.parse_and_run_program(
@@ -42,6 +43,7 @@ pub(super) fn invalidate(graph: &mut Graph) -> Result<(), OptimizeError> {
         "PlanningRevision",
         "ConstantValue",
         "RecursiveFunction",
+        "CallBody",
         "ResultOrigin",
         "FormalOrigin",
         "ReducerBody",
@@ -69,10 +71,7 @@ pub(super) fn invalidate(graph: &mut Graph) -> Result<(), OptimizeError> {
         "LiveOperation",
         "EndDemand",
         "BranchResult",
-        "BinaryOperands",
         "ProjectionAlias",
-        "IndexOperands",
-        "LengthMeasure",
         "RegionAttributeUse",
         "RegionCapture",
         "DirectOperationUse",
@@ -127,15 +126,15 @@ pub(super) fn invalidate(graph: &mut Graph) -> Result<(), OptimizeError> {
     ] {
         graph.clear_function(table)?;
     }
-    advance(graph)
+    advance_revision(graph, "AnalysisRevision")
 }
 
 /// Reseed rules after clearing derived tables while keeping valid graph facts.
-pub(super) fn advance(graph: &mut Graph) -> Result<(), OptimizeError> {
-    let revision = count(Query(graph), "AnalysisRevision", RawValues(Vec::new()))?;
+pub(super) fn advance_revision(graph: &mut Graph, table: &str) -> Result<(), OptimizeError> {
+    let revision = count(Query(graph), table, RawValues(Vec::new()))?;
     graph.update(|mut sink| {
-        sink.remove("AnalysisRevision", RawValues(Vec::new()))?;
-        sink.set("AnalysisRevision", RawValues(Vec::new()), revision + 1)
+        sink.remove(table, RawValues(Vec::new()))?;
+        sink.set(table, RawValues(Vec::new()), revision + 1)
     })?;
     Ok(())
 }
@@ -214,9 +213,6 @@ pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeEr
     let mut operation_guards = Vec::new();
     let mut yield_guards = Vec::new();
     let mut end_demands = Vec::new();
-    let mut binary = Vec::new();
-    let mut indices = Vec::new();
-    let mut lengths = Vec::new();
     {
         let structure = graph.structure().read();
         for (&operation, names) in &structure.certificates.operations {
@@ -235,32 +231,6 @@ pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeEr
         for (&region, yields) in &structure.yields.values {
             end_demands.extend(yields.iter().map(|&value| (region, value)));
         }
-        query.for_function("ScalarPayload", |keys, _| {
-            if let Some([left, right]) = structure.inputs.values.get(&keys[0]).map(Vec::as_slice) {
-                binary.push((keys[0], *left, *right));
-            }
-            Ok(())
-        })?;
-        query.for_each("IndexOperation", |row| {
-            if let Some([array, index]) = structure.inputs.values.get(&row[0]).map(Vec::as_slice) {
-                if let (Some(array), Some(index)) = (query.value_name(*array)?, query.value_name(*index)?) {
-                    indices.push((row[0], array, index));
-                }
-            }
-            Ok(())
-        })?;
-        query.for_each("LengthOperation", |row| {
-            let Some(array) = structure.inputs.values.get(&row[0]).and_then(|inputs| inputs.first()) else {
-                return Ok(());
-            };
-            let Some(length) = query.0.output_at(row[0], 0_i64) else {
-                return Ok(());
-            };
-            if let (Some(array), Some(length)) = (query.value_name(*array)?, query.value_name(length)?) {
-                lengths.push((row[0], row[1], array, length));
-            }
-            Ok(())
-        })?;
     }
     graph.update(|mut sink| {
         let mut defined = LookupSet::new();
@@ -305,15 +275,6 @@ pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeEr
         }
         for branch in branches {
             sink.add("BranchResult", branch)?;
-        }
-        for operands in binary {
-            sink.add("BinaryOperands", operands)?;
-        }
-        for operands in indices {
-            sink.add("IndexOperands", operands)?;
-        }
-        for length in lengths {
-            sink.add("LengthMeasure", length)?;
         }
         Ok(())
     })?;
@@ -443,6 +404,7 @@ pub(super) fn run(graph: &mut Graph) -> Result<(), OptimizeError> {
     let _timing = timing::span("egglog graph analysis");
     structure(graph)?;
     projections::publish(graph)?;
+    totality::publish_literal_shifts(graph)?;
     graph.parse_and_run_program(
         None,
         "(run-schedule (saturate graph-indices dataflow-dependencies))",

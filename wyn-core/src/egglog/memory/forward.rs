@@ -1,10 +1,10 @@
 //! Apply scalar-only substitutions without discarding unaffected proofs.
-use super::{demand::Needed, remove_leaves};
+use super::remove_leaves;
 use crate::egglog::dataflow::{edit, ir::Code};
 use crate::egglog::graph::{Graph, Origin};
 use crate::egglog::scalar::ScalarInputs;
 use crate::egglog::{analysis, output_error, query::Query, timing, OptimizeError};
-use crate::LookupMap;
+use crate::{LookupMap, LookupSet};
 use egglog_engine::{Value, Write};
 
 pub(super) fn run(graph: &mut Graph) -> Result<bool, OptimizeError> {
@@ -50,8 +50,7 @@ pub(super) fn run(graph: &mut Graph) -> Result<bool, OptimizeError> {
                 }
                 Ok(())
             })?;
-            let needed = Needed::read(Query(graph))?;
-            if !remove_leaves::apply(graph, &needed, &removed)? {
+            if !remove_leaves::apply(graph, &removed, scalar_uses)? {
                 return Err(output_error(
                     "scalar forwarding changed whether its definitions could be removed",
                 ));
@@ -97,6 +96,11 @@ fn scalar_inputs(
         {
             return Ok(None);
         }
+        for &operand in structure.inputs.values.get(&producer).into_iter().flatten() {
+            if query.enode("AccNameRef", operand)?.is_some() {
+                return Ok(None);
+            }
+        }
         for &(user, slot) in structure.inputs.uses.get(&old).into_iter().flatten() {
             if !matches!(graph.code(user)?, Code::Scalar(_))
                 || !query.contains("LiveOperation", user)?
@@ -119,4 +123,15 @@ fn scalar_inputs(
         inputs.push(change);
     }
     Ok(Some(inputs))
+}
+
+fn scalar_uses(query: Query<'_>, operation: Value) -> Result<Vec<Value>, OptimizeError> {
+    let mut uses: LookupSet<_> = query.0.inputs(operation).into_iter().collect();
+    for certificate in query.0.operation_certificates(operation) {
+        let Some(name) = query.constructor("ValueNameRef", certificate)? else {
+            return Err(output_error("scalar certificate has no name"));
+        };
+        uses.insert(name);
+    }
+    Ok(uses.into_iter().collect())
 }

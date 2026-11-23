@@ -949,6 +949,17 @@ pub(super) struct State<'a, 'db, 'operations> {
     structure: &'operations SharedStructure,
 }
 
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum OperandProof {
+    Binary(Value, Value),
+    Index(Value, Value),
+    Length {
+        axis: i64,
+        array: Value,
+        result: Value,
+    },
+}
+
 impl State<'_, '_, '_> {
     pub fn set_function_root(&mut self, function: Value, region: Value) {
         self.structure.write().roots.insert(function, region);
@@ -964,9 +975,9 @@ impl State<'_, '_, '_> {
 
     pub fn set_outputs(&mut self, operation: Value, names: Vec<Value>) -> Result<(), Error> {
         register_arity(&mut self.facts, self.structure, names.len())?;
-        let mut graph = self.structure.write();
-        graph.replace_outputs(operation, names);
-        Ok(())
+        let before = self.operand_proof(operation);
+        self.structure.write().replace_outputs(operation, names);
+        self.refresh_operand_proof(operation, before)
     }
 
     pub fn set_output(&mut self, operation: Value, slot: i64, name: Value) -> Result<(), Error> {
@@ -975,6 +986,7 @@ impl State<'_, '_, '_> {
                 "negative result {slot} on {operation:?}"
             )));
         };
+        let before = self.operand_proof(operation);
         let mut graph = self.structure.write();
         let Some(target) = graph.outputs.get_mut(&operation).and_then(|names| names.get_mut(index)) else {
             return Err(Error::BackendError(format!(
@@ -987,17 +999,76 @@ impl State<'_, '_, '_> {
             graph.definitions.remove(&old);
         }
         graph.definitions.insert(name, site);
+        drop(graph);
+        self.refresh_operand_proof(operation, before)
+    }
+
+    fn operand_proof(&self, operation: Value) -> Option<OperandProof> {
+        let code = &self.operations.get(&operation)?.code;
+        if !matches!(code, Code::Scalar(_) | Code::Index | Code::Length { .. }) {
+            return None;
+        }
+        let graph = self.structure.read();
+        let inputs = graph.inputs.values.get(&operation)?;
+        match (code, inputs.as_slice()) {
+            (Code::Scalar(_), [left, right]) => Some(OperandProof::Binary(*left, *right)),
+            (Code::Index, [array, index]) => Some(OperandProof::Index(*array, *index)),
+            (Code::Length { axis }, [array, ..]) => Some(OperandProof::Length {
+                axis: *axis as i64,
+                array: *array,
+                result: *graph.outputs.get(&operation)?.first()?,
+            }),
+            _ => None,
+        }
+    }
+
+    fn refresh_operand_proof(
+        &mut self,
+        operation: Value,
+        before: Option<OperandProof>,
+    ) -> Result<(), Error> {
+        let after = self.operand_proof(operation);
+        if before == after {
+            return Ok(());
+        }
+        match before {
+            Some(OperandProof::Binary(left, right)) => {
+                self.remove("BinaryOperands", (operation, left, right))?
+            }
+            Some(OperandProof::Index(array, index)) => {
+                self.remove("IndexOperands", (operation, array, index))?
+            }
+            Some(OperandProof::Length { axis, array, result }) => {
+                self.remove("LengthMeasure", (operation, axis, array, result))?
+            }
+            None => {}
+        }
+        match after {
+            Some(OperandProof::Binary(left, right)) => {
+                self.add("BinaryOperands", (operation, left, right))?;
+            }
+            Some(OperandProof::Index(array, index)) => {
+                self.add("IndexOperands", (operation, array, index))?;
+            }
+            Some(OperandProof::Length { axis, array, result }) => {
+                self.add("LengthMeasure", (operation, axis, array, result))?;
+            }
+            None => {}
+        }
         Ok(())
     }
 
     pub fn set_inputs(&mut self, operation: Value, inputs: Vec<Value>) -> Result<(), Error> {
         register_arity(&mut self.facts, self.structure, inputs.len())?;
+        let before = self.operand_proof(operation);
         self.structure.write().inputs.replace(operation, inputs);
-        Ok(())
+        self.refresh_operand_proof(operation, before)
     }
 
     pub fn set_input(&mut self, operation: Value, slot: i64, input: Value) -> Result<(), Error> {
-        self.structure.write().inputs.redirect(operation, slot, input)
+        let before = self.operand_proof(operation);
+        self.structure.write().inputs.redirect(operation, slot, input)?;
+        self.refresh_operand_proof(operation, before)
     }
 
     pub fn set_parameters(&mut self, region: Value, names: Vec<Value>) -> Result<(), Error> {
@@ -1273,7 +1344,8 @@ impl State<'_, '_, '_> {
         }
     }
 
-    pub fn set_code(&mut self, operation: Value, code: Code) {
+    pub fn set_code(&mut self, operation: Value, code: Code) -> Result<(), Error> {
+        let before = self.operand_proof(operation);
         match self.operations.entry(operation) {
             Entry::Occupied(mut entry) => entry.get_mut().code = code,
             Entry::Vacant(entry) => {
@@ -1285,6 +1357,7 @@ impl State<'_, '_, '_> {
                 }
             }
         }
+        self.refresh_operand_proof(operation, before)
     }
 
     pub fn set_span(&mut self, operation: Value, span: Span) -> Result<(), OptimizeError> {
@@ -1297,7 +1370,8 @@ impl State<'_, '_, '_> {
         Ok(())
     }
 
-    pub fn remove_operation(&mut self, operation: Value) {
+    pub fn remove_operation(&mut self, operation: Value) -> Result<(), Error> {
+        let before = self.operand_proof(operation);
         self.operations.remove(&operation);
         self.clear_bodies(operation);
         self.clear_formulas(operation, false);
@@ -1315,6 +1389,8 @@ impl State<'_, '_, '_> {
             }
             self.dirty_orders.insert(region);
         }
+        drop(structure);
+        self.refresh_operand_proof(operation, before)
     }
 }
 

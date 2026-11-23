@@ -102,6 +102,9 @@ pub(in crate::egglog) fn clear(graph: &mut Graph) -> Result<(), OptimizeError> {
         "RewrittenAccumulatorInfo",
         "RewrittenIndex",
         "IndexReplacement",
+        "ChangedShape",
+        "ChangedSlices",
+        "SliceReplacement",
         "RewrittenShape",
         "RewrittenShapePrefix",
         "RewrittenSlice",
@@ -110,7 +113,7 @@ pub(in crate::egglog) fn clear(graph: &mut Graph) -> Result<(), OptimizeError> {
     ] {
         graph.clear_function(table)?;
     }
-    analysis::advance(graph)
+    analysis::advance_revision(graph, "RewriteRevision")
 }
 
 pub(in crate::egglog) fn remove(graph: &mut Graph, operations: &[Value]) -> Result<(), OptimizeError> {
@@ -146,7 +149,7 @@ pub(in crate::egglog) fn remove_without_revision(
             sink.remove(table, RawValues(keys))?;
         }
         for operation in operations {
-            sink.remove_operation(operation);
+            sink.remove_operation(operation)?;
         }
         Ok(())
     })?;
@@ -222,6 +225,7 @@ fn seed_replacements(graph: &mut Graph, replacements: &[(Value, Value)]) -> Resu
     clear(graph)?;
     let mut collective = Vec::new();
     let mut certificates = Vec::new();
+    let mut indices = Vec::new();
     {
         let query = Query(graph);
         let structure = graph.structure().read();
@@ -237,6 +241,9 @@ fn seed_replacements(graph: &mut Graph, replacements: &[(Value, Value)]) -> Resu
             let Some(raw_old) = query.value_name(old)? else {
                 continue;
             };
+            if query.constructor("IndexValue", raw_old)?.is_some() {
+                indices.push((old, new));
+            }
             let raw_inputs = structure.collective.uses.get(&raw_old);
             let guards = structure.certificates.uses.get(&raw_old);
             if raw_inputs.is_none() && guards.is_none() {
@@ -265,7 +272,7 @@ fn seed_replacements(graph: &mut Graph, replacements: &[(Value, Value)]) -> Resu
         for (site, field, value) in collective {
             sink.redirect_collective_input(site, field, value)?;
         }
-        for &(old, new) in replacements {
+        for (old, new) in indices {
             sink.set("ValueReplacement", old, new)?;
         }
         Ok(())
@@ -274,6 +281,9 @@ fn seed_replacements(graph: &mut Graph, replacements: &[(Value, Value)]) -> Resu
 }
 
 fn replace_attributes_with_seeded_values(graph: &mut Graph) -> Result<(), OptimizeError> {
+    if graph.get_size("ValueReplacement") == 0 {
+        return changed(graph);
+    }
     graph.parse_and_run_program(
         None,
         "(run-schedule (saturate graph-indices graph-substitution-index) (saturate graph-substitution))",

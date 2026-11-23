@@ -111,7 +111,9 @@ fn remove_dead_values(graph: &mut Graph) -> Result<bool, OptimizeError> {
     })?;
     if !dead.is_empty() {
         let _timing = timing::span("Rust dead operation removal");
-        if !remove_leaves::apply(graph, &needed, &dead)? {
+        if !remove_leaves::apply(graph, &dead, |_, operation| {
+            Ok(needed.use_sites(operation).collect())
+        })? {
             edit::remove(graph, &dead)?;
         }
         return Ok(true);

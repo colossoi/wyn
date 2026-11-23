@@ -249,7 +249,7 @@ pub(in crate::egglog) fn properties(
             sink.add("AliasesInput", (operation, 0_i64, 0_i64))?;
         }
     }
-    sink.set_code(operation, code);
+    sink.set_code(operation, code)?;
     Ok(())
 }
 

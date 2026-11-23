@@ -201,8 +201,19 @@ pub(super) fn publish(graph: &mut Graph) -> Result<(), OptimizeError> {
         }
     }
     let roots: Vec<_> = positions.roots.iter().map(|(&function, &root)| (function, root)).collect();
+    let mut callees = Vec::new();
+    for caller in &reach.live {
+        for site in reach.calls.calls.get(caller).into_iter().flatten() {
+            if let Some(&region) = positions.roots.get(&site.callee) {
+                callees.push((site.operation, region));
+            }
+        }
+    }
     drop(positions);
     graph.update(|mut sink| {
+        for call in callees {
+            sink.add("CallBody", call)?;
+        }
         for carry in loop_carries {
             sink.add("LoopValueCarry", carry)?;
         }

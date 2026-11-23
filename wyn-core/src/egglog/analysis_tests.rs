@@ -284,9 +284,8 @@ fn logical_values_and_storage_reads_have_distinct_effects() {
 fn reducer_width_requires_agreement_and_a_length_preserving_combiner() -> Result<(), OptimizeError> {
     for (item_width, preserves, expected) in [(4, true, true), (3, true, false), (4, false, false)] {
         let result_bound = if preserves { "(IndexValue length)" } else { "(IndexConstant 3)" };
-        let mut graph = fusion::new_graph()?;
-        super::super::test_graph::facts_with_positions(
-            &mut graph,
+        let mut graph = test_graph::fixture(
+            &[(1, Code::Length { axis: 0 })],
             &format!(
                 r#"
             (let fold (OperationId 0)) (let reducer (RegionId 0))
@@ -301,7 +300,6 @@ fn reducer_width_requires_agreement_and_a_length_preserving_combiner() -> Result
             (set (FixtureParameter reducer 0) (ValueNameRef left))
             (set (FixtureParameter reducer 1) (ValueNameRef right))
             (set (FixtureYield reducer 0) (ValueNameRef result))
-            (LengthOperation measure 0)
             (set (FixtureInput measure 0) (ValueNameRef left))
             (set (FixtureOutput measure 0) (ValueNameRef length))
             (ArrayOuterBound neutral (IndexConstant 4))
