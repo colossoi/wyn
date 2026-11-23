@@ -3,6 +3,7 @@ use crate::ast::Span;
 use crate::egglog::dataflow::ir::{
     self, Code, Name, OperationId as WireOperationId, RegionId as WireRegionId,
 };
+use crate::egglog::graph::CertificateSite;
 use crate::egglog::graph::Graph;
 use crate::egglog::payload::Payload;
 use crate::egglog::{output_error, query::Query, OptimizeError};
@@ -270,13 +271,14 @@ impl Body {
             }
         }
         let mut yields = Vec::new();
-        query.for_each("YieldCertificate", |row| {
-            if let Some(&(destination, base)) = destinations.get(&row[0]) {
-                let slot = graph.value_to_base::<i64>(row[1]) + base as i64;
-                yields.push((destination, slot, row[2]));
-            }
-            Ok(())
-        })?;
+        for (&source, &(destination, base)) in &destinations {
+            yields.extend(
+                graph
+                    .yield_certificates(source)
+                    .into_iter()
+                    .map(|(slot, name)| (destination, slot + base as i64, name)),
+            );
+        }
         graph.update(|mut sink| {
             for (op, names) in outputs {
                 sink.set_outputs(op, names)?;
@@ -288,11 +290,11 @@ impl Body {
                 sink.remove(table, RawValues(keys.clone()))?;
                 sink.set(table, RawValues(keys), value)?;
             }
-            for certificate in certificates {
-                sink.add("OperationCertificate", certificate)?;
+            for (operation, certificate) in certificates {
+                sink.add_certificate(CertificateSite::Operation(operation), certificate);
             }
-            for certificate in yields {
-                sink.add("YieldCertificate", certificate)?;
+            for (region, slot, certificate) in yields {
+                sink.add_certificate(CertificateSite::Yield(region, slot), certificate);
             }
             Ok(())
         })?;

@@ -337,8 +337,6 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
             names.sort_unstable_by_key(|&(slot, _)| slot);
             assert!(names.iter().enumerate().all(|(i, &(slot, _))| i as i64 == slot));
             for &(slot, name) in &names {
-                let site = sink.add("ParameterSite", (region, slot))?;
-                sink.set("Defines", name, site)?;
                 sink.add("FormalOrigin", (name, region, slot))?;
             }
             sink.set_parameters(region, names.into_iter().map(|(_, name)| name).collect())?;
@@ -347,8 +345,6 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
             values.sort_unstable_by_key(|&(slot, _)| slot);
             assert!(values.iter().enumerate().all(|(i, &(slot, _))| i as i64 == slot));
             for &(slot, value) in &values {
-                let site = sink.add("OperationSite", (operation, slot))?;
-                sink.set("Defines", value, site)?;
                 sink.add("ResultOrigin", (value, operation, slot))?;
             }
             sink.set_outputs(operation, values.into_iter().map(|(_, value)| value).collect())?;
@@ -377,7 +373,7 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
             sink.set_entry(function, order);
         }
         for function in externals {
-            sink.set_external(function);
+            sink.set_external(function, Vec::new());
         }
         for (function, region) in roots {
             sink.set_function_root(function, region);

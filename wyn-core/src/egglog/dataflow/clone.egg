@@ -133,8 +133,6 @@
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (= value (ScalarPayload operation)) ) ((set (ScalarPayload (ClonedOperation context operation)) value)) :ruleset clone-edges)
 (rule ((= revision (AnalysisRevision)) (CloneMember context region) (= value (ParameterDiet region k0)) ) ((set (ParameterDiet (ClonedRegion context region) k0) value)) :ruleset clone-edges)
 (rule ((= revision (AnalysisRevision)) (CloneMember context region) (= value (RegionReturnType region k0)) (= replacement (CloneReturn context value))) ((set (RegionReturnType (ClonedRegion context region) k0) replacement)) :ruleset clone-edges)
-(rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (OperationCertificate operation v0)) ((CloneNameDemand context (ValueNameRef v0))) :ruleset clone-index)
-(rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (OperationCertificate operation v0) (= (CloneName context (ValueNameRef v0)) (ValueNameRef rv0))) ((OperationCertificate (ClonedOperation context operation) rv0)) :ruleset clone-edges)
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (ConstantOperation operation) ) ((ConstantOperation (ClonedOperation context operation))) :ruleset clone-edges)
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (ProductOperation operation) ) ((ProductOperation (ClonedOperation context operation))) :ruleset clone-edges)
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (ProjectionOperation operation v0) ) ((ProjectionOperation (ClonedOperation context operation) v0)) :ruleset clone-edges)
@@ -159,12 +157,6 @@
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (ProvenTotalOperation operation) ) ((ProvenTotalOperation (ClonedOperation context operation))) :ruleset clone-edges)
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (= bits (LiteralBits operation)))
       ((set (LiteralBits (ClonedOperation context operation)) bits)) :ruleset clone-edges)
-(rule ((= revision (AnalysisRevision)) (CloneMember context region) (YieldCertificate region slot value))
-      ((CloneNameDemand context (ValueNameRef value))) :ruleset clone-index)
-(rule ((= revision (AnalysisRevision)) (CloneMember context region) (YieldCertificate region slot value)
-       (= (CloneName context (ValueNameRef value)) (ValueNameRef replacement)))
-      ((YieldCertificate (ClonedRegion context region) slot replacement)) :ruleset clone-edges)
-
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (= work (InstructionWork operation)))
       ((set (InstructionWork (ClonedOperation context operation)) work)) :ruleset clone-edges)
 

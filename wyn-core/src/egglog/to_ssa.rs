@@ -74,13 +74,11 @@ impl Compiler<'_, '_> {
                 Ok::<_, OptimizeError>(out)
             })?
         } else {
-            let count = super::analysis::count(query, "ExternalParameterCount", name)?;
-            (0..count)
-                .map(|slot| {
-                    let parameter = query.required("ExternalParameterName", (name, slot))?;
-                    let info = query.required("ExternalParameterType", (name, slot))?;
-                    Ok((parameter, value_type(query, info)?))
-                })
+            query
+                .0
+                .external_parameters(name)?
+                .into_iter()
+                .map(|parameter| Ok((parameter.name, value_type(query, parameter.info)?)))
                 .collect::<Result<Vec<_>, OptimizeError>>()?
         };
         let count = super::analysis::count(query, "FunctionResultCount", name)?;

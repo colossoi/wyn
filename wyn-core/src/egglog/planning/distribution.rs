@@ -2,9 +2,9 @@
 use crate::egglog::cost::CostModel;
 use crate::egglog::dataflow::edit;
 use crate::egglog::dataflow::ir::{self, Code, Name, OperationId, Parameter, RegionId};
-use crate::egglog::graph::Dimension;
 use crate::egglog::graph::Formula;
 use crate::egglog::graph::Graph;
+use crate::egglog::graph::{CertificateSite, Dimension};
 use crate::egglog::query::Query;
 use crate::egglog::OptimizeError;
 use egglog_engine::{Value, Write};
@@ -153,13 +153,7 @@ pub(super) fn apply(graph: &mut Graph, outer: Value, inner: Value) -> Result<(),
     let results = graph.parallel_results(inner)?;
     let reducers = graph.reducers(inner);
     let contributions = graph.collective_groups(inner);
-    let mut certificates = Vec::new();
-    query.for_each("OperationCertificate", |row| {
-        if row[0] == inner {
-            certificates.push(row[1]);
-        }
-        Ok(())
-    })?;
+    let certificates = graph.operation_certificates(inner);
     // Only identities and small immutable coordinate metadata cross this edit boundary.
     graph.update(|mut sink| {
         Ok((|| -> Result<(), OptimizeError> {
@@ -209,7 +203,7 @@ pub(super) fn apply(graph: &mut Graph, outer: Value, inner: Value) -> Result<(),
                 }
             }
             for value in certificates {
-                sink.add("OperationCertificate", (outer, value))?;
+                sink.add_certificate(CertificateSite::Operation(outer), value);
             }
             Ok(())
         })())

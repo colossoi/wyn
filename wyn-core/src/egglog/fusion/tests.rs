@@ -274,9 +274,12 @@ fn merging_matching_branches_preserves_certificates_and_path_order() -> Result<(
         arms.push((a, b, offset, operations));
     }
     graph.update(|mut sink| {
-        sink.add("OperationCertificate", (second, condition))?;
+        sink.add_certificate(
+            crate::egglog::graph::CertificateSite::Operation(second),
+            condition,
+        );
         for &(_, arm, _, _) in &arms {
-            sink.add("YieldCertificate", (arm, 0_i64, condition))?;
+            sink.add_certificate(crate::egglog::graph::CertificateSite::Yield(arm, 0), condition);
         }
         Ok(())
     })?;
@@ -285,12 +288,12 @@ fn merging_matching_branches_preserves_certificates_and_path_order() -> Result<(
     assert_eq!(edit::revision(&graph)?, revision + 1);
     let query = Query(&graph);
     assert_eq!(query.0.output_count(first), 2);
-    assert!(query.contains("OperationCertificate", (first, condition))?);
+    assert!(query.0.has_certificate(first, condition));
     assert!(!query.0.has_operation(second));
     assert!(query.0.has_operation(dependent));
     for (arm, _, slot, operations) in arms {
         assert_eq!(query.operations(arm)?, operations);
-        assert!(query.contains("YieldCertificate", (arm, slot, condition))?);
+        assert!(query.0.yield_certificates(arm).contains(&(slot, condition)));
     }
     memory::validate(&mut graph)
 }

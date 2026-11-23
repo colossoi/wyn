@@ -19,8 +19,15 @@ pub(super) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
 pub(super) fn inline(graph: &mut Graph) -> Result<(), OptimizeError> {
     let _timing = timing::span("egglog helper inlining");
     let selection = timing::span("egglog inline selection");
-    edit::clear(graph)?;
-    analysis::structure(graph, true)?;
+    if graph.structure().read().targets.is_empty() {
+        return Ok(());
+    }
+    // Full scalar optimization already has the live call sites and SCCs from
+    // fusion. Selecting inlines does not invalidate those proofs.
+    let inline_all = Query(graph).flag("InlineAll", egglog_engine::RawValues(Vec::new()))?;
+    if !inline_all || !analysis::current(graph)? {
+        analysis::structure(graph, true)?;
+    }
     graph.parse_and_run_program(
         None,
         "(run-schedule (saturate graph-inline-required) (saturate graph-inline))",
@@ -96,13 +103,11 @@ pub(super) fn simplify(graph: &mut Graph, hoist: bool) -> Result<(), OptimizeErr
         "egglog reducing simplification"
     });
     edit::clear(graph)?;
-    let mut body = None;
     loop {
         analysis::ensure(graph)?;
         {
             let _timing = timing::span("Rust expression reuse");
-            let current = body::BodyGraph::get_or_read(&mut body, Query(graph))?;
-            cse::publish(graph, current)?;
+            cse::publish(graph)?;
         }
         {
             let _timing = timing::span("egglog scalar candidates");
@@ -111,11 +116,11 @@ pub(super) fn simplify(graph: &mut Graph, hoist: bool) -> Result<(), OptimizeErr
                 "(run-schedule (saturate graph-candidates scalar-analysis))",
             )?;
         }
-        if reduce_values(graph, &mut body)? {
+        if reduce_values(graph)? {
             continue;
         }
 
-        if remove_dead_values(graph, &mut body)? {
+        if remove_dead_values(graph)? {
             continue;
         }
 
@@ -123,63 +128,53 @@ pub(super) fn simplify(graph: &mut Graph, hoist: bool) -> Result<(), OptimizeErr
         let before_planning = edit::revision(graph)?;
         super::planning::analyze(graph)?;
         if scalar::forward_lengths(graph, "ForwardLength")? {
-            body = None;
             graph.parse_and_run_program(None, "(run-schedule (saturate scalar-analysis))")?;
         }
-        if reduce_values(graph, &mut body)? {
+        if reduce_values(graph)? {
             continue;
         }
         scratch_shapes(graph)?;
         if edit::revision(graph)? != before_planning {
-            body = None;
             continue;
         }
         if hoist && (super::planning::factor_conditionals(graph)? || super::fusion::hoist(graph)?) {
-            body = None;
             continue;
         }
         return Ok(());
     }
 }
 
-fn remove_dead_values(
-    graph: &mut Graph,
-    body: &mut Option<body::BodyGraph>,
-) -> Result<bool, OptimizeError> {
+fn remove_dead_values(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let _timing = timing::span("Rust dead operation selection");
     let query = Query(graph);
-    let current = body::BodyGraph::get_or_read(body, query)?;
-    let needed = demand::Needed::read(query, current)?;
-    let dead =
-        current.ir.operations.keys().filter(|op| !needed.operations.contains(op)).collect::<Vec<_>>();
+    let needed = demand::Needed::read(query)?;
+    let mut dead = Vec::new();
+    query.for_each("LiveOperation", |row| {
+        if !needed.operations.contains(&row[0]) {
+            dead.push(row[0]);
+        }
+        Ok(())
+    })?;
     if !dead.is_empty() {
         let _timing = timing::span("Rust dead operation removal");
-        if !remove_leaves::apply(graph, current, &needed, &dead)? {
-            let keys = dead.iter().map(|&op| current.operations[op]).collect::<Vec<_>>();
-            edit::remove(graph, &keys)?;
-            *body = None;
+        if !remove_leaves::apply(graph, &needed, &dead)? {
+            edit::remove(graph, &dead)?;
         }
         return Ok(true);
     }
-    if let Some((operation, clause)) = demand::dead_clause(query, |name| needed.uses(current, name))? {
+    if let Some((operation, clause)) = demand::dead_clause(query, |name| needed.names.contains(&name))? {
         let _timing = timing::span("egglog dead result removal");
         edit::remove_clause(graph, operation, clause)?;
-        *body = None;
         return Ok(true);
     }
     Ok(false)
 }
 
-fn reduce_values(graph: &mut Graph, body: &mut Option<body::BodyGraph>) -> Result<bool, OptimizeError> {
-    let revision = edit::revision(graph)?;
-    if scalar::apply(graph, body)? {
-        *body = None;
+fn reduce_values(graph: &mut Graph) -> Result<bool, OptimizeError> {
+    if scalar::apply(graph)? {
         return Ok(true);
     }
-    if edit::revision(graph)? != revision {
-        *body = None;
-    }
-    body::forward_equivalents(graph, body)
+    body::forward_equivalents(graph)
 }
 
 fn scratch_shapes(graph: &mut Graph) -> Result<(), OptimizeError> {

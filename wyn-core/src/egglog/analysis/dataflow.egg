@@ -90,12 +90,6 @@
       ((SourceSelect (FlowNamed output) (FlowNamed input) slot)) :ruleset dataflow-dependencies)
 
 
-(rule ((= revision (AnalysisRevision)) (OperationCertificate operation name))
-      ((DirectOperationUse operation (ValueNameRef name))) :ruleset dataflow-dependencies)
-(rule ((= revision (AnalysisRevision)) (YieldCertificate region slot name))
-      ((EndDemand region (ValueNameRef name)) (RegionAttributeUse region (ValueNameRef name))) :ruleset dataflow-dependencies)
-
-; Exact outer bounds survive scalar folding and domain composition.
 (rule ((= revision (AnalysisRevision)) (= (ValueType array) (LogicalValue (ArrayType ownership extents element)))
        (> (vec-length extents) 0) (= (vec-get extents 0) (FixedExtent n)))
       ((ArrayOuterBound array (IndexConstant n))) :ruleset dataflow-dependencies)

@@ -21,8 +21,6 @@
 (function NameOrdinal (Name) i64 :no-merge)
 (relation NameLiveAfter (OperationKey Name))
 
-(datatype DefinitionSite (ParameterSite RegionKey i64) (OperationSite OperationKey i64))
-(function Defines (Name) DefinitionSite :merge old)
 (relation ResultOrigin (Name OperationKey i64))
 (relation FormalOrigin (Name RegionKey i64))
 (relation ReducerBody (OperationKey i64 RegionKey))
@@ -31,6 +29,8 @@
 (relation FoldSeedUse (OperationKey Name))
 (relation PackedClause (OperationKey i64))
 (relation IterationAxis (Domain i64))
+(relation OperationGuardRequirement (OperationKey ValueName))
+(relation YieldGuardRequirement (RegionKey ValueName))
 (relation LaneAxisExtent (RegionKey ValueName IndexExp))
 (relation ReductionBoundOperands (Name RegionKey IndexExp Name Name))
 (relation CollectedClause (OperationKey i64))

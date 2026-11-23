@@ -235,7 +235,7 @@
        (= rank (CollectionRank value)) (= domain (wyn-iteration-domain operation))
        (IterationAxis domain axis) (= extent (wyn-domain-extent domain axis)) (< axis rank))
       ((set (CollectionExtent value axis) extent)) :ruleset graph-sizes)
-(rule ((= revision (ShapeRevision)) (LengthOperation operation axis) (> axis 0)
+(rule ((= revision (ShapeRevision)) (LiveOperation operation) (LengthOperation operation axis) (> axis 0)
        (DirectOperationUse operation (ValueNameRef source)) (= (wyn-input operation 0) (ValueNameRef source)) (= extent (CollectionExtent source axis)))
       ((ForwardLength operation extent)) :ruleset graph-sizes)
 (rule ((= revision (ShapeRevision)) (= rank (CollectionRank value))

@@ -33,24 +33,32 @@ pub(super) fn function(query: Query<'_>, function: Value) -> Result<(), Optimize
 pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), OptimizeError> {
     if query.contains("CallOperation", operation)? {
         let target = query.0.call_target(operation)?;
-        let external = query.0.is_external(target);
-        let root = if external { None } else { Some(query.0.function_root(target)?) };
-        for slot in 0..query.0.input_count(operation) {
-            let argument = query.0.input(operation, slot)?;
-            let expected = if let Some(root) = root {
-                typed(query, query.0.parameter(root, slot)?)?
-            } else {
-                query.required("ExternalParameterType", (target, slot))?
-            };
+        let parameters = if query.0.is_external(target) {
+            query.0.external_parameters(target)?.into_iter().map(|param| (param.info, param.diet)).collect()
+        } else {
+            let root = query.0.function_root(target)?;
+            query
+                .0
+                .parameters(root)
+                .into_iter()
+                .enumerate()
+                .map(|(slot, name)| {
+                    Ok((
+                        typed(query, name)?,
+                        query.required("ParameterDiet", (root, slot as i64))?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, OptimizeError>>()?
+        };
+        let arguments = query.0.inputs(operation);
+        if arguments.len() != parameters.len() {
+            return Err(output_error("call argument count differs from its signature"));
+        }
+        for (slot, (argument, (expected, diet))) in arguments.into_iter().zip(parameters).enumerate() {
             if !compatible(query, typed(query, argument)?, expected)? {
                 return Err(output_error("call argument type differs from its signature"));
             }
-            let expected_diet = if let Some(root) = root {
-                query.required("ParameterDiet", (root, slot))?
-            } else {
-                query.required("ExternalParameterDiet", (target, slot))?
-            };
-            if query.required("InputDiet", (operation, slot))? != expected_diet {
+            if query.required("InputDiet", (operation, slot as i64))? != diet {
                 return Err(output_error("call argument diet differs from its signature"));
             }
         }

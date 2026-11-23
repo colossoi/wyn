@@ -71,7 +71,7 @@ fn copy_forwarding_preserves_captures_loop_entries_and_backedges() -> Result<(),
     })??;
     analysis::run(&mut graph)?;
     graph.parse_and_run_program(None, "(run-schedule (saturate scalar-analysis))")?;
-    assert!(body::forward_equivalents(&mut graph, &mut None)?);
+    assert!(body::forward_equivalents(&mut graph)?);
     analysis::ensure(&mut graph)?;
     let query = Query(&graph);
     assert_eq!(query.0.argument(owner, 0_i64, 0_i64)?, initial);
@@ -679,11 +679,14 @@ fn consumption_follows_product_components_and_excludes_shape_witnesses() -> Resu
     "#,
     )?;
     super::validate(&mut graph)?;
+    let query = Query(&graph);
+    let [call] = query.first("CallOperation")?.unwrap().try_into().unwrap();
+    let parameters = graph.external_parameters(graph.call_target(call)?)?;
+    assert_eq!(parameters.len(), 1);
+    assert_eq!(parameters[0].diet, query.required("InputDiet", (call, 0_i64))?);
     graph.parse_and_run_program(
         None,
         r#"
-        (check (= (wyn-external function) true) (= (ExternalParameterCount function) 1)
-            (= (ExternalParameterDiet function 0) (ProductDiet (vec-of (Consume) (Observe)))))
         (check (CallOperation operation) (= (wyn-input-count operation) 1)
             (= (InputDiet operation 0) (ProductDiet (vec-of (Consume) (Observe)))))
     "#,

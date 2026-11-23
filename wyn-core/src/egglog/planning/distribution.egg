@@ -51,7 +51,7 @@
       ((TransformRequirement outer name)) :ruleset distribution-index)
 (rule ((= revision (TransformRevision)) (DistributionPair outer inner) (FoldSeedUse inner name))
       ((TransformRequirement outer name)) :ruleset distribution-index)
-(rule ((= revision (TransformRevision)) (DistributionPair outer inner) (OperationCertificate inner value))
+(rule ((= revision (TransformRevision)) (DistributionPair outer inner) (OperationGuardRequirement inner value))
       ((TransformRequirement outer (ValueNameRef value))) :ruleset distribution-index)
 (rule ((= revision (TransformRevision)) (DistributionPair outer inner) (= (TransformAvailable outer name) false))
       ((set (DistributionSafe outer inner) false)) :ruleset distribution-legality)

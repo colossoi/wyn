@@ -1,6 +1,7 @@
 //! Factor admitted map arms by reparenting their regions around one branch occurrence.
 use crate::egglog::dataflow::edit;
 use crate::egglog::dataflow::ir::{self, Code, Name, OperationId, Parameter, RegionId};
+use crate::egglog::graph::CertificateSite;
 use crate::egglog::graph::Graph;
 use crate::egglog::graph::{CollectiveInput, OutputBinding, ParallelResults};
 use crate::egglog::query::Query;
@@ -60,15 +61,8 @@ pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> 
             arm_operations.push((lane, operations));
         }
     }
-    let mut certificates = Vec::new();
-    query.for_each("OperationCertificate", |row| {
-        if [branch, yes, no].contains(&row[0]) {
-            certificates.push(row[1]);
-        }
-        Ok(())
-    })?;
-    let outputs =
-        outputs.into_iter().map(|name| query.name(name).map(Name::Value)).collect::<Result<Vec<_>, _>>()?;
+    let mut certificates = graph.operation_certificates(yes);
+    certificates.extend(graph.operation_certificates(no));
     graph.update(|mut sink| {
         Ok((|| -> Result<(), OptimizeError> {
             let lane = sink.add("DerivedRegion", (branch, 61_i64, 0_i64))?;
@@ -108,7 +102,7 @@ pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> 
             sink.set_order(branch, 0_i64);
             let parallel = sink.add("DerivedOperation", (branch, 61_i64, 0_i64))?;
             let parallel = ir::operation_at(&mut sink, OperationId(parallel), Code::Parallel, &[])?;
-            ir::outputs(&mut sink, parallel, &outputs)?;
+            sink.set_outputs(parallel.0, outputs)?;
             sink.set_region(parallel.0, parent);
             sink.set_order(parallel.0, order);
             sink.set_control(parallel.0, 0_i64, lane);
@@ -132,7 +126,7 @@ pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> 
             );
             sink.set_collective_inputs(parallel.0, 0, CollectiveInput::Contribution, values)?;
             for value in certificates {
-                sink.add("OperationCertificate", (parallel.0, value))?;
+                sink.add_certificate(CertificateSite::Operation(parallel.0), value);
             }
             Ok(())
         })())

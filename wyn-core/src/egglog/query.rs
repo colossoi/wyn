@@ -1,6 +1,6 @@
 //! Borrowed access to native tables. No facts are retained outside the egraph.
 use super::OptimizeError;
-use crate::egglog::graph::Graph;
+use crate::egglog::graph::{Graph, Origin};
 use egglog_engine::ast::FunctionSubtype;
 use egglog_engine::sort::VecContainer;
 use egglog_engine::{IntoValues, Read, Value};
@@ -9,6 +9,26 @@ use egglog_engine::{IntoValues, Read, Value};
 pub(super) struct Query<'a>(pub &'a Graph);
 
 impl Query<'_> {
+    pub fn live_origin(&self, name: Value) -> Result<Option<Origin>, OptimizeError> {
+        let Some(origin) = self.0.origin(name) else {
+            return Ok(None);
+        };
+        let (table, key) = match origin {
+            Origin::Result(operation, _) => ("LiveOperation", operation),
+            Origin::Parameter(region, _) => ("LiveRegion", region),
+        };
+        Ok(self.contains(table, key)?.then_some(origin))
+    }
+
+    pub fn live_roots(&self) -> Result<Vec<Value>, OptimizeError> {
+        let mut roots = Vec::new();
+        self.for_each("LiveFunction", |row| {
+            roots.extend(self.0.root_of(row[0]));
+            Ok(())
+        })?;
+        Ok(roots)
+    }
+
     pub fn operations(&self, region: Value) -> Result<Vec<Value>, OptimizeError> {
         let mut operations = Vec::new();
         let positions = self.0.structure().read();

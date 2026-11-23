@@ -97,10 +97,10 @@ fn collected_map(query: Query<'_>, operation: Value) -> Result<Option<MapLevel>,
 }
 
 fn output_producer(query: Query<'_>, name: Value) -> Result<Option<Value>, OptimizeError> {
-    let Some(site) = query.lookup("Defines", name)? else {
-        return Ok(None);
-    };
-    Ok(query.enode("OperationSite", site)?.map(|fields| fields[0]))
+    Ok(match query.live_origin(name)? {
+        Some(crate::egglog::graph::Origin::Result(operation, _)) => Some(operation),
+        _ => None,
+    })
 }
 
 fn fuse_ranked_bucket(graph: &mut Graph) -> Result<bool, OptimizeError> {

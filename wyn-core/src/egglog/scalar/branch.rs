@@ -1,14 +1,12 @@
-//! Splice proven branch arms on the memory graph before publishing its changed edges.
-use crate::egglog::dataflow::{body::BodyGraph, edit};
+//! Splice proven branch arms into their enclosing Rust regions.
+use crate::egglog::dataflow::edit;
 use crate::egglog::graph::Graph;
 use crate::egglog::{output_error, query::Query, timing, OptimizeError};
-use crate::memory_ir::{Function, ValueRef};
 use crate::LookupMap;
 use egglog_engine::Value;
-use std::mem::take;
 use wyn_graph::ReplacementForest;
 
-pub(super) fn apply(graph: &mut Graph, body: &mut Option<BodyGraph>) -> Result<bool, OptimizeError> {
+pub(super) fn apply(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let query = Query(graph);
     let mut selected = LookupMap::<Value, Value>::new();
     query.for_each("BranchCandidate", |row| {
@@ -19,81 +17,55 @@ pub(super) fn apply(graph: &mut Graph, body: &mut Option<BodyGraph>) -> Result<b
         return Ok(false);
     }
     let _timing = timing::span("Rust constant branch splicing");
-    let mut body = match body.take() {
-        Some(body) => body,
-        None => BodyGraph::read(query)?,
-    };
-    let mut pending = body
-        .ir
-        .functions
-        .values()
-        .filter_map(|function| match function {
-            Function::Defined(root) => Some(*root),
-            Function::External => None,
-        })
-        .collect::<Vec<_>>();
+    let mut pending = query.live_roots()?;
     let mut replacements = ReplacementForest::new();
     let mut removed = Vec::new();
     let mut changed = Vec::new();
     while let Some(region) = pending.pop() {
-        let mut operations = take(&mut body.ir.regions[region].operations);
+        let mut operations = query.0.region_order(region)?.to_vec();
         operations.reverse();
         let mut remaining = Vec::with_capacity(operations.len());
         let mut spliced = false;
-        while let Some(op) = operations.pop() {
-            let key = body.operations[op];
-            let operation = &body.ir.operations[op];
-            let Some(&chosen) = selected.get(&key) else {
-                pending.extend(operation.bodies.iter().map(|edge| edge.region));
-                remaining.push(op);
+        while let Some(operation) = operations.pop() {
+            let Some(&chosen) = selected.get(&operation) else {
+                pending.extend(graph.attached_regions(operation));
+                remaining.push(operation);
                 continue;
             };
-            let Some(arm) = operation.bodies.iter().find(|edge| body.regions[edge.region] == chosen) else {
+            let Some((edge, _)) = graph.controls(operation).find(|&(_, arm)| arm == chosen) else {
                 return Err(output_error("constant branch proof names a foreign arm"));
             };
-            let arm_region = arm.region;
-            let chosen = &mut body.ir.regions[arm_region];
-            if operation.result_types.len() != chosen.yields.len()
-                || arm.arguments.len() != chosen.parameters.len()
-            {
+            let arguments = graph.arguments(operation, edge);
+            let params = graph.parameters(chosen);
+            let outputs = graph.outputs(operation);
+            let yields = graph.yield_values(chosen);
+            if arguments.len() != params.len() || outputs.len() != yields.len() {
                 return Err(output_error(
                     "constant branch has an inconsistent region signature",
                 ));
             }
-            for (slot, &argument) in arm.arguments.iter().enumerate() {
-                replacements
-                    .replace(ValueRef::Parameter(arm_region, slot), argument)
-                    .map_err(|error| output_error(error.to_string()))?;
-            }
-            for (slot, &value) in chosen.yields.iter().enumerate() {
-                replacements
-                    .replace(ValueRef::Result(op, slot), value)
-                    .map_err(|error| output_error(error.to_string()))?;
+            for (old, new) in params.into_iter().zip(arguments).chain(outputs.into_iter().zip(yields)) {
+                replacements.replace(old, new).map_err(|error| output_error(error.to_string()))?;
             }
             // A nested branch in the selected arm now occupies this block.
-            // The other arm is unreachable and contributes no edits.
-            operations.extend(take(&mut chosen.operations).into_iter().rev());
-            removed.push(key);
-            body.ir.operations.remove(op);
+            operations.extend(query.0.region_order(chosen)?.iter().rev().copied());
+            removed.push(operation);
             spliced = true;
         }
-        body.ir.regions[region].operations = remaining;
         if spliced {
-            changed.push(region);
+            changed.push((region, remaining));
         }
     }
     if removed.is_empty() {
         return Ok(false);
     }
-    let replacements = replacements.into_map();
-    let uses = body.ir.redirect_uses(&replacements);
-    body.publish_substitutions(graph, &replacements, uses)?;
+    let replacements: Vec<_> = replacements.into_map().into_iter().collect();
+    edit::replace(graph, &replacements)?;
     graph.update(|mut sink| {
-        for region in changed {
-            for (order, &op) in body.ir.regions[region].operations.iter().enumerate() {
-                let key = body.operations[op];
-                sink.set_region(key, body.regions[region]);
-                sink.set_order(key, order as i64);
+        for (region, operations) in changed {
+            for (order, operation) in operations.into_iter().enumerate() {
+                sink.set_region(operation, region);
+                sink.set_order(operation, order as i64);
             }
         }
         Ok(())

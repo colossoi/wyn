@@ -4,7 +4,7 @@ use crate::egglog::dataflow::{
     ir::{self, Code},
 };
 use crate::egglog::graph::Formula;
-use crate::egglog::graph::Graph;
+use crate::egglog::graph::{Graph, Origin};
 use crate::egglog::{output_error, query::Query, timing, OptimizeError};
 use crate::{types, LookupSet};
 use egglog_engine::sort::VecContainer;
@@ -16,7 +16,9 @@ pub(in crate::egglog) fn forward_lengths(
 ) -> Result<bool, OptimizeError> {
     let mut candidates = Vec::new();
     Query(graph).for_each(candidates_table, |row| {
-        candidates.push((row[0], row[1]));
+        if Query(graph).contains("LiveOperation", row[0])? {
+            candidates.push((row[0], row[1]));
+        }
         Ok(())
     })?;
     if candidates.is_empty() {
@@ -103,7 +105,7 @@ fn rewrite(
     removed.extend(old_attributes.iter().copied());
     let mut changes = Vec::new();
     for name in removed.difference(&new_attributes).copied() {
-        if !query.contains("OperationCertificate", (operation, query.name(name)?))? {
+        if !graph.has_certificate(operation, query.name(name)?) {
             let Some(path) = UsePath::read(query, operation, name)? else {
                 return Ok(false);
             };
@@ -187,13 +189,13 @@ struct UsePath {
 
 impl UsePath {
     fn read(query: Query<'_>, mut op: Value, name: Value) -> Result<Option<Self>, OptimizeError> {
-        let Some(site) = query.lookup("Defines", name)? else {
+        let Some(origin) = query.live_origin(name)? else {
             return Ok(None);
         };
-        let (kind, fields) = query.application(site, &["OperationSite", "ParameterSite"])?;
-        let producer = (kind == "OperationSite").then_some(fields[0]);
-        let definition =
-            if let Some(producer) = producer { query.0.operation_region(producer)? } else { fields[0] };
+        let (definition, producer) = match origin {
+            Origin::Result(operation, _) => (query.0.operation_region(operation)?, Some(operation)),
+            Origin::Parameter(region, _) => (region, None),
+        };
         let mut scopes = Vec::new();
         loop {
             let region = query.0.operation_region(op)?;

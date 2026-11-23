@@ -1,7 +1,7 @@
 //! Apply selected edits to keyed graph cells without reconstructing a program.
 use super::ir::{self, Code};
 use crate::egglog::graph::{ArgumentSite, Graph};
-use crate::egglog::graph::{CollectiveInput, Formula, ParallelResults};
+use crate::egglog::graph::{CertificateSite, CollectiveInput, Formula, ParallelResults};
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, output_error, OptimizeError};
 use crate::{LookupMap, LookupSet, StableMap};
@@ -19,7 +19,6 @@ pub(in crate::egglog) const OPERATION_CELLS: &[&str] = &[
 ];
 
 pub(in crate::egglog) const OPERATION_RELATIONS: &[&str] = &[
-    "OperationCertificate",
     "MaterializedCopyOperation",
     "ViewOperation",
     "ArrayLiteralOperation",
@@ -158,18 +157,16 @@ pub(in crate::egglog) fn replace(
     graph: &mut Graph,
     replacements: &[(Value, Value)],
 ) -> Result<(), OptimizeError> {
-    let mut resolved = ReplacementForest::new();
-    for &(old, new) in replacements {
-        if old != new {
-            resolved.replace(old, new).map_err(|error| output_error(error.to_string()))?;
-        }
+    let replacements = resolve_replacements(replacements)?;
+    if replacements.is_empty() {
+        return Ok(());
     }
     let mut arguments = Vec::new();
     let mut operands = Vec::new();
     let mut yields = Vec::new();
     {
         let graph = graph.structure().read();
-        for (old, new) in resolved.into_map() {
+        for &(old, new) in &replacements {
             if let Some(sites) = graph.argument_uses.get(&old) {
                 arguments.extend(sites.iter().map(|&site| (site, new)));
             }
@@ -181,7 +178,7 @@ pub(in crate::egglog) fn replace(
             }
         }
     }
-    seed_replacements(graph, replacements)?;
+    seed_replacements(graph, &replacements)?;
     graph.update(|mut sink| {
         for (region, slot, value) in yields {
             sink.set_yield(region, slot, value)?;
@@ -201,23 +198,32 @@ pub(in crate::egglog) fn replace_attributes(
     graph: &mut Graph,
     replacements: &[(Value, Value)],
 ) -> Result<(), OptimizeError> {
-    seed_replacements(graph, replacements)?;
+    let replacements = resolve_replacements(replacements)?;
+    if replacements.is_empty() {
+        return Ok(());
+    }
+    seed_replacements(graph, &replacements)?;
     replace_attributes_with_seeded_values(graph)
 }
 
-fn seed_replacements(graph: &mut Graph, replacements: &[(Value, Value)]) -> Result<(), OptimizeError> {
-    clear(graph)?;
+fn resolve_replacements(replacements: &[(Value, Value)]) -> Result<Vec<(Value, Value)>, OptimizeError> {
     let mut forest = ReplacementForest::new();
     for &(old, new) in replacements {
         if old != new {
             forest.replace(old, new).map_err(|error| output_error(error.to_string()))?;
         }
     }
+    Ok(forest.into_map().into_iter().collect())
+}
+
+fn seed_replacements(graph: &mut Graph, replacements: &[(Value, Value)]) -> Result<(), OptimizeError> {
+    clear(graph)?;
     let mut collective = Vec::new();
+    let mut certificates = Vec::new();
     {
         let query = Query(graph);
         let structure = graph.structure().read();
-        for (old, new) in forest.into_map() {
+        for &(old, new) in replacements {
             if let Some(sites) = structure.collective.uses.get(&old) {
                 collective.extend(
                     sites
@@ -226,21 +232,34 @@ fn seed_replacements(graph: &mut Graph, replacements: &[(Value, Value)]) -> Resu
                         .map(|&(site, field)| (site, field, new)),
                 );
             }
-            if let Some(raw_old) = query.value_name(old)? {
-                if let Some(sites) = structure.collective.uses.get(&raw_old) {
-                    if let Some(raw_new) = query.value_name(new)? {
-                        collective.extend(
-                            sites
-                                .iter()
-                                .filter(|(site, _)| site.kind.uses_raw_name())
-                                .map(|&(site, field)| (site, field, raw_new)),
-                        );
-                    }
-                }
+            let Some(raw_old) = query.value_name(old)? else {
+                continue;
+            };
+            let raw_inputs = structure.collective.uses.get(&raw_old);
+            let guards = structure.certificates.uses.get(&raw_old);
+            if raw_inputs.is_none() && guards.is_none() {
+                continue;
+            }
+            let Some(raw_new) = query.value_name(new)? else {
+                continue;
+            };
+            if let Some(sites) = raw_inputs {
+                collective.extend(
+                    sites
+                        .iter()
+                        .filter(|(site, _)| site.kind.uses_raw_name())
+                        .map(|&(site, field)| (site, field, raw_new)),
+                );
+            }
+            if let Some(sites) = guards {
+                certificates.extend(sites.iter().map(|&site| (site, raw_old, raw_new)));
             }
         }
     }
     graph.update(|mut sink| {
+        for (site, old, replacement) in certificates {
+            sink.redirect_certificate(site, old, replacement);
+        }
         for (site, field, value) in collective {
             sink.redirect_collective_input(site, field, value)?;
         }
@@ -406,7 +425,7 @@ pub(in crate::egglog) fn set_code(
 ) -> Result<(), OptimizeError> {
     // Operation classes and access properties describe the payload, so replace them together.
     let mut rows = Vec::new();
-    for &table in &OPERATION_RELATIONS[1..] {
+    for &table in OPERATION_RELATIONS {
         Query(graph).for_each(table, |row| {
             if row[0] == operation {
                 rows.push((table, row.to_vec()));
@@ -479,6 +498,7 @@ struct ClonedOperation {
     results: Option<ParallelResults>,
     policies: Vec<Option<Value>>,
     domain: Option<Value>,
+    certificates: Vec<Value>,
 }
 
 /// Copy a selected region using fresh graph identities, substituting its entry edge.
@@ -532,9 +552,15 @@ pub(in crate::egglog) fn clone_region(
         if members.insert(region) {
             result_names.extend(graph.parameters(region));
             argument_names.extend(graph.yield_values(region));
+            for (_, certificate) in graph.yield_certificates(region) {
+                argument_names.insert(name_reference(query, certificate)?);
+            }
             for operation in query.operations(region)? {
                 pending.extend(graph.attached_regions(operation));
                 argument_names.extend(graph.inputs(operation));
+                for certificate in graph.operation_certificates(operation) {
+                    argument_names.insert(name_reference(query, certificate)?);
+                }
                 for ((_, kind), values) in graph.collective_groups(operation) {
                     for value in values {
                         argument_names.insert(collective_name(query, kind, value)?);
@@ -625,21 +651,32 @@ pub(in crate::egglog) fn clone_region(
         clone_domains.push((cloned, layout));
     }
     let mut cloned_yields = Vec::new();
-    for region in members {
+    for member in members {
         let new_region = query
-            .constructor("ClonedRegion", (context, region))?
+            .constructor("ClonedRegion", (context, member))?
             .ok_or_else(|| output_error("cloned region has no identity"))?;
         let values = graph
-            .yield_values(region)
+            .yield_values(member)
             .into_iter()
             .map(|name| query.required("CloneName", (context, name)))
             .collect::<Result<Vec<_>, _>>()?;
-        let parameters = graph
-            .parameters(region)
+        // The entry formals were already replaced by caller values. Only
+        // nested regions introduce parameter definitions in the clone.
+        let parameters = if member == region {
+            Vec::new()
+        } else {
+            graph
+                .parameters(member)
+                .into_iter()
+                .map(|name| query.required("CloneName", (context, name)))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let certificates = graph
+            .yield_certificates(member)
             .into_iter()
-            .map(|name| query.required("CloneName", (context, name)))
-            .collect::<Result<Vec<_>, _>>()?;
-        cloned_yields.push((new_region, parameters, values));
+            .map(|(slot, certificate)| Ok((slot, clone_name(certificate)?)))
+            .collect::<Result<Vec<_>, OptimizeError>>()?;
+        cloned_yields.push((new_region, parameters, values, certificates));
     }
     let mut operations = Vec::new();
     query.for_each("CloneOperation", |row| {
@@ -722,6 +759,11 @@ pub(in crate::egglog) fn clone_region(
                 formulas,
                 results: graph.parallel_results_at(row[1]),
                 policies: graph.accumulator_policies(row[1]),
+                certificates: graph
+                    .operation_certificates(row[1])
+                    .into_iter()
+                    .map(clone_name)
+                    .collect::<Result<Vec<_>, _>>()?,
                 domain: graph
                     .operation_domain_at(row[1])
                     .map(|domain| {
@@ -741,12 +783,18 @@ pub(in crate::egglog) fn clone_region(
         for (id, layout) in clone_domains {
             sink.set_domain(id, layout);
         }
-        for (region, parameters, values) in cloned_yields {
+        for (region, parameters, values, certificates) in cloned_yields {
             sink.set_parameters(region, parameters)?;
             sink.set_yields(region, values)?;
+            for (slot, certificate) in certificates {
+                sink.add_certificate(CertificateSite::Yield(region, slot), certificate);
+            }
         }
         for operation in operations {
             let key = operation.key;
+            for certificate in operation.certificates {
+                sink.add_certificate(CertificateSite::Operation(key), certificate);
+            }
             if let Some(domain) = operation.domain {
                 sink.set_operation_domain(key, domain);
             }

@@ -25,6 +25,13 @@ pub(super) struct Graph {
     pub region_orders: StableMap<Value, Vec<Value>>,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct ExternalParameter {
+    pub name: Value,
+    pub info: Value,
+    pub diet: Value,
+}
+
 #[derive(Clone, Copy, Default)]
 pub(super) struct Position {
     pub region: Option<Value>,
@@ -36,7 +43,7 @@ pub(super) struct ExecutableStructure {
     pub operations: LookupMap<Value, Position>,
     pub by_region: LookupMap<Value, LookupSet<Value>>,
     pub roots: StableMap<Value, Value>,
-    pub externals: LookupSet<Value>,
+    pub externals: LookupMap<Value, Vec<ExternalParameter>>,
     pub entries: StableMap<Value, i64>,
     pub targets: StableMap<Value, Value>,
     pub controls: LookupMap<(Value, i64), ControlEdge>,
@@ -45,8 +52,10 @@ pub(super) struct ExecutableStructure {
     pub argument_uses: LookupMap<Value, LookupSet<ArgumentSite>>,
     pub inputs: ValueLists,
     pub outputs: LookupMap<Value, Vec<Value>>,
+    definitions: LookupMap<Value, Origin>,
     pub yields: ValueLists,
     pub collective: CollectiveEdges,
+    pub certificates: Certificates,
     pub parallels: LookupMap<Value, ParallelResults>,
     pub accumulator_policies: LookupMap<Value, Vec<Option<Value>>>,
     pub formulas: OperationFormulas,
@@ -133,6 +142,30 @@ impl Domains {
         }
         self.extent_uses.entry(index).or_default().insert((id, slot));
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Origin {
+    Result(Value, usize),
+    Parameter(Value, usize),
+}
+
+impl ExecutableStructure {
+    fn replace_outputs(&mut self, operation: Value, names: Vec<Value>) {
+        if let Some(removed) = self.outputs.remove(&operation) {
+            for (slot, name) in removed.into_iter().enumerate() {
+                if self.definitions.get(&name).copied() == Some(Origin::Result(operation, slot)) {
+                    self.definitions.remove(&name);
+                }
+            }
+        }
+        if !names.is_empty() {
+            for (slot, &name) in names.iter().enumerate() {
+                self.definitions.insert(name, Origin::Result(operation, slot));
+            }
+            self.outputs.insert(operation, names);
+        }
     }
 }
 
@@ -376,8 +409,17 @@ impl Graph {
         self.structure.read().entries.get(&function).copied()
     }
 
+    pub fn external_parameters(&self, function: Value) -> Result<Vec<ExternalParameter>, OptimizeError> {
+        self.structure
+            .read()
+            .externals
+            .get(&function)
+            .cloned()
+            .ok_or_else(|| output_error("missing external function signature"))
+    }
+
     pub fn is_external(&self, function: Value) -> bool {
-        self.structure.read().externals.contains(&function)
+        self.structure.read().externals.contains_key(&function)
     }
 
     pub fn root_of(&self, function: Value) -> Option<Value> {
@@ -436,6 +478,10 @@ impl Graph {
             .get(&(operation, edge))
             .map(|edge| edge.arguments.clone())
             .unwrap_or_default()
+    }
+
+    pub fn origin(&self, name: Value) -> Option<Origin> {
+        self.structure.read().definitions.get(&name).copied()
     }
 
     pub fn outputs(&self, operation: Value) -> Vec<Value> {
@@ -631,6 +677,31 @@ impl Graph {
             .ok()
             .and_then(|slot| graph.domains.values.get(&id)?.dimensions.get(slot)?.extent)
             .ok_or_else(|| output_error(format!("missing extent {slot} on {id:?}")))
+    }
+
+    pub fn operation_certificates(&self, operation: Value) -> Vec<Value> {
+        self.structure
+            .read()
+            .certificates
+            .operations
+            .get(&operation)
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect()
+    }
+
+    pub fn has_certificate(&self, operation: Value, certificate: Value) -> bool {
+        self.structure
+            .read()
+            .certificates
+            .operations
+            .get(&operation)
+            .is_some_and(|proofs| proofs.contains(&certificate))
+    }
+
+    pub fn yield_certificates(&self, region: Value) -> Vec<(i64, Value)> {
+        self.structure.read().certificates.yields.get(&region).into_iter().flatten().copied().collect()
     }
 
     pub fn collective_groups(&self, owner: Value) -> StableMap<(i64, CollectiveInput), Vec<Value>> {
@@ -887,11 +958,7 @@ impl State<'_, '_, '_> {
     pub fn set_outputs(&mut self, operation: Value, names: Vec<Value>) -> Result<(), Error> {
         register_arity(&mut self.facts, self.structure, names.len())?;
         let mut graph = self.structure.write();
-        if names.is_empty() {
-            graph.outputs.remove(&operation);
-        } else {
-            graph.outputs.insert(operation, names);
-        }
+        graph.replace_outputs(operation, names);
         Ok(())
     }
 
@@ -907,7 +974,12 @@ impl State<'_, '_, '_> {
                 "missing result {slot} on {operation:?}"
             )));
         };
-        *target = name;
+        let old = std::mem::replace(target, name);
+        let site = Origin::Result(operation, index);
+        if graph.definitions.get(&old).copied() == Some(site) {
+            graph.definitions.remove(&old);
+        }
+        graph.definitions.insert(name, site);
         Ok(())
     }
 
@@ -924,9 +996,17 @@ impl State<'_, '_, '_> {
     pub fn set_parameters(&mut self, region: Value, names: Vec<Value>) -> Result<(), Error> {
         register_arity(&mut self.facts, self.structure, names.len())?;
         let mut graph = self.structure.write();
-        if names.is_empty() {
-            graph.parameters.remove(&region);
-        } else {
+        if let Some(removed) = graph.parameters.remove(&region) {
+            for (slot, name) in removed.into_iter().enumerate() {
+                if graph.definitions.get(&name).copied() == Some(Origin::Parameter(region, slot)) {
+                    graph.definitions.remove(&name);
+                }
+            }
+        }
+        if !names.is_empty() {
+            for (slot, &name) in names.iter().enumerate() {
+                graph.definitions.insert(name, Origin::Parameter(region, slot));
+            }
             graph.parameters.insert(region, names);
         }
         Ok(())
@@ -1107,8 +1187,16 @@ impl State<'_, '_, '_> {
         self.structure.write().entries.shift_remove(&function);
     }
 
-    pub fn set_external(&mut self, function: Value) {
-        self.structure.write().externals.insert(function);
+    pub fn set_external(&mut self, function: Value, parameters: Vec<ExternalParameter>) {
+        self.structure.write().externals.insert(function, parameters);
+    }
+
+    pub fn add_certificate(&mut self, site: CertificateSite, certificate: Value) {
+        self.structure.write().certificates.add(site, certificate);
+    }
+
+    pub fn redirect_certificate(&mut self, site: CertificateSite, old: Value, replacement: Value) {
+        self.structure.write().certificates.redirect(site, old, replacement);
     }
 
     pub fn set_collective_inputs(
@@ -1198,8 +1286,9 @@ impl State<'_, '_, '_> {
         let mut structure = self.structure.write();
         structure.targets.shift_remove(&operation);
         structure.inputs.replace(operation, Vec::new());
-        structure.outputs.remove(&operation);
+        structure.replace_outputs(operation, Vec::new());
         structure.collective.remove(operation);
+        structure.certificates.remove_operation(operation);
         if let Some(region) = structure.operations.remove(&operation).and_then(|position| position.region) {
             if let Some(operations) = structure.by_region.get_mut(&region) {
                 operations.remove(&operation);
@@ -1261,6 +1350,50 @@ impl OperationFormulas {
     fn remove(&mut self, op: Value, kind: Formula) {
         if let Some(previous) = self.by_kind.get_mut(&kind).and_then(|values| values.remove(&op)) {
             remove_use(&mut self.sites, op, (kind, previous));
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) enum CertificateSite {
+    Operation(Value),
+    Yield(Value, i64),
+}
+
+#[derive(Default)]
+pub(super) struct Certificates {
+    pub operations: LookupMap<Value, LookupSet<Value>>,
+    pub yields: LookupMap<Value, LookupSet<(i64, Value)>>,
+    pub uses: LookupMap<Value, LookupSet<CertificateSite>>,
+}
+
+impl Certificates {
+    fn add(&mut self, site: CertificateSite, value: Value) {
+        match site {
+            CertificateSite::Operation(owner) => {
+                self.operations.entry(owner).or_default().insert(value);
+            }
+            CertificateSite::Yield(region, slot) => {
+                self.yields.entry(region).or_default().insert((slot, value));
+            }
+        }
+        self.uses.entry(value).or_default().insert(site);
+    }
+
+    fn redirect(&mut self, site: CertificateSite, old: Value, replacement: Value) {
+        match site {
+            CertificateSite::Operation(op) => remove_use(&mut self.operations, old, op),
+            CertificateSite::Yield(region, slot) => remove_use(&mut self.yields, (slot, old), region),
+        }
+        remove_use(&mut self.uses, site, old);
+        self.add(site, replacement);
+    }
+
+    fn remove_operation(&mut self, operation: Value) {
+        if let Some(values) = self.operations.remove(&operation) {
+            for value in values {
+                remove_use(&mut self.uses, CertificateSite::Operation(operation), value);
+            }
         }
     }
 }

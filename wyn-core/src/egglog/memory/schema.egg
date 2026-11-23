@@ -79,11 +79,9 @@
 (function InputDiet (OperationKey i64) Diet :no-merge)
 (function ValueType (ValueName) ValueInfo :no-merge)
 (function AccumulatorType (AccName) AccInfo :no-merge)
-(relation OperationCertificate (OperationKey ValueName))
 
 (function ParameterDiet (RegionKey i64) Diet :no-merge)
 (function RegionReturnType (RegionKey i64) ReturnInfo :no-merge)
-(relation YieldCertificate (RegionKey i64 ValueName))
 
 (datatype ArrayLayout (TransposeAxes) (FlattenAxes))
 (function OperationWidth (OperationKey) i64 :no-merge)
@@ -94,10 +92,6 @@
 
 (function RetainAllFunctions () bool :merge (or old new))
 (set (RetainAllFunctions) false)
-(function ExternalParameterName (FunctionName i64) ValueName :no-merge)
-(function ExternalParameterType (FunctionName i64) ValueInfo :no-merge)
-(function ExternalParameterDiet (FunctionName i64) Diet :no-merge)
-(function ExternalParameterCount (FunctionName) i64 :no-merge)
 (function FunctionResultType (FunctionName i64) ReturnInfo :no-merge)
 (function FunctionResultCount (FunctionName) i64 :no-merge)
 (function FunctionBehavior (FunctionName) CallBehavior :no-merge)

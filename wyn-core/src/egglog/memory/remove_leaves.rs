@@ -1,70 +1,49 @@
 //! Delete unused scalar leaves without rebuilding proofs about surviving values.
-use super::{analysis, body::BodyGraph, demand::Needed, edit, scalar, timing, OptimizeError, Query};
+use super::{analysis, demand::Needed, edit, scalar, timing, OptimizeError, Query};
 use crate::egglog::dataflow::ir::Code;
 use crate::egglog::graph::Graph;
 use crate::egglog::planning;
-use crate::memory_ir::{Definition, OperationId, ValueRef};
 use crate::LookupSet;
-use egglog_engine::Write;
+use egglog_engine::{Value, Write};
 
-pub(super) fn apply(
-    graph: &mut Graph,
-    body: &mut BodyGraph,
-    needed: &Needed,
-    dead: &[OperationId],
-) -> Result<bool, OptimizeError> {
+pub(super) fn apply(graph: &mut Graph, needed: &Needed, dead: &[Value]) -> Result<bool, OptimizeError> {
     let query = Query(graph);
-    let keys = dead.iter().map(|&op| body.operations[op]).collect::<Vec<_>>();
-    for &op in dead {
-        let operation = &body.ir.operations[op];
-        let key = body.operations[op];
-        if !matches!(
-            operation.definition,
-            Definition::Other(Code::Scalar(_) | Code::Constant { .. })
-        ) || operation.result_types.len() != 1
-            || query.lookup("ValuePrimitive", body.names[&ValueRef::Result(op, 0)])?.is_none()
+    let mut regions = LookupSet::new();
+    for &key in dead {
+        if !matches!(graph.code(key)?, Code::Scalar(_) | Code::Constant { .. })
+            || graph.output_count(key) != 1
+            || query.lookup("ValuePrimitive", graph.output(key, 0)?)?.is_none()
             || !query.flag("PureOperation", key)?
             || query.contains("LaneDependentOperation", key)?
         {
             return Ok(false);
         }
+        regions.insert(graph.operation_region(key)?);
     }
-
     let _timing = timing::span("Rust unused leaf publication");
     let removed: LookupSet<_> = dead.iter().copied().collect();
     let mut previous = Vec::new();
-    for (region, block) in &body.ir.regions {
-        if block.operations.iter().any(|op| removed.contains(op)) {
-            previous.push((
-                body.regions[region],
-                block.operations.iter().map(|&op| body.operations[op]).collect(),
-            ));
-        }
+    let mut updated = Vec::new();
+    for region in regions {
+        let operations = graph.region_order(region)?;
+        previous.push((region, operations.to_vec()));
+        updated.push((
+            region,
+            operations.iter().copied().filter(|op| !removed.contains(op)).collect(),
+        ));
     }
     let work = planning::invalidate_region_work(graph, &previous)?;
-    let mut updated = Vec::new();
-    for (region, block) in &mut body.ir.regions {
-        let count = block.operations.len();
-        block.operations.retain(|op| !removed.contains(op));
-        if block.operations.len() != count {
-            updated.push((
-                body.regions[region],
-                block.operations.iter().map(|&op| body.operations[op]).collect(),
-            ));
-        }
-    }
     // Dead leaves can use one another. Keep all definitions until their last
     // lexical use has been retracted.
-    for &op in dead {
-        for value in needed.use_sites(op) {
-            scalar::remove_use(graph, body.operations[op], body.names[&value])?;
+    for &operation in dead {
+        for value in needed.use_sites(operation) {
+            scalar::remove_use(graph, operation, value)?;
         }
     }
-    for &op in dead {
-        let operation = body.operations[op];
+    for &operation in dead {
         let region = graph.operation_region(operation)?;
-        let output = body.names[&ValueRef::Result(op, 0)];
-        let names = needed.use_sites(op).map(|value| body.names[&value]);
+        let output = graph.output(operation, 0)?;
+        let names = needed.use_sites(operation);
         graph.update(|mut sink| {
             for name in names {
                 sink.remove("DirectOperationUse", (operation, name))?;
@@ -82,7 +61,6 @@ pub(super) fn apply(
                 sink.remove(table, operation)?;
             }
             for table in [
-                "Defines",
                 "ConstantValue",
                 "IntegerLower",
                 "IntegerUpper",
@@ -95,15 +73,7 @@ pub(super) fn apply(
             sink.remove("DefinitionRegion", (output, region))
         })?;
     }
-    for &op in dead {
-        let result = ValueRef::Result(op, 0);
-        body.operation_ids.remove(&body.operations[op]);
-        body.refs.remove(&body.names[&result]);
-        body.operations.remove(op);
-        body.names.remove(&result);
-        body.ir.operations.remove(op);
-    }
-    edit::remove_without_revision(graph, &keys)?;
+    edit::remove_without_revision(graph, dead)?;
     analysis::replace_order(graph, previous, updated)?;
     planning::restore_region_work(graph, work)?;
     edit::preserve_revisions(graph)?;

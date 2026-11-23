@@ -1,5 +1,5 @@
 //! Scalar rewriting uses the same statements, scopes, and effects as memory.
-use super::dataflow::{body::BodyGraph, edit, ir::Code};
+use super::dataflow::{edit, ir::Code};
 use super::query::Query;
 use super::{memory, output_error, OptimizeError, ScalarOptimization};
 use crate::egglog::graph::Graph;
@@ -53,8 +53,8 @@ pub(super) fn run(graph: &mut Graph, policy: ScalarOptimization) -> Result<(), O
     memory::simplify(graph, true)
 }
 
-pub(super) fn apply(graph: &mut Graph, body: &mut Option<BodyGraph>) -> Result<bool, OptimizeError> {
-    if branch::apply(graph, body)? {
+pub(super) fn apply(graph: &mut Graph) -> Result<bool, OptimizeError> {
+    if branch::apply(graph)? {
         return Ok(true);
     }
     let query = Query(graph);

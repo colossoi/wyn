@@ -578,18 +578,20 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
             self.sink.set("FunctionResultCount", name, 1_i64)?;
             self.sink.set("FunctionResultType", (name, 0_i64), result)?;
             if matches!(&body.kind, TermKind::Extern(_)) {
-                self.sink.set_external(name);
-                self.sink.set("ExternalParameterCount", name, params.len() as i64)?;
-                let behavior = self.unit("MayTrapCall")?;
-                self.sink.set("FunctionBehavior", name, behavior)?;
-                for (index, parameter) in params.iter().enumerate() {
-                    let Name::Value(parameter_name) = parameter.name else {
+                let mut parameters = Vec::with_capacity(params.len());
+                for parameter in params {
+                    let Name::Value(name) = parameter.name else {
                         return Err(output_error("external parameter is an accumulator capability"));
                     };
-                    self.sink.set("ExternalParameterName", (name, index as i64), parameter_name)?;
-                    self.sink.set("ExternalParameterType", (name, index as i64), parameter.info)?;
-                    self.sink.set("ExternalParameterDiet", (name, index as i64), parameter.diet)?;
+                    parameters.push(super::graph::ExternalParameter {
+                        name,
+                        info: parameter.info,
+                        diet: parameter.diet,
+                    });
                 }
+                self.sink.set_external(name, parameters);
+                let behavior = self.unit("MayTrapCall")?;
+                self.sink.set("FunctionBehavior", name, behavior)?;
             } else {
                 let mut scope = Scope {
                     parameters: params,

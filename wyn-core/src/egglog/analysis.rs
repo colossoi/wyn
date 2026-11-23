@@ -2,8 +2,8 @@
 use super::dataflow::edit;
 use super::query::Query;
 use super::{output_error, timing, OptimizeError};
-use crate::egglog::graph::{callback_at, CollectiveInput, Graph};
-use crate::{LookupMap, StableMap};
+use crate::egglog::graph::{callback_at, CollectiveInput, Graph, Origin};
+use crate::{LookupSet, StableMap};
 use egglog_engine::sort::S;
 use egglog_engine::{IntoValues, RawValues, Value, Write};
 
@@ -56,7 +56,6 @@ pub(super) fn invalidate(graph: &mut Graph) -> Result<(), OptimizeError> {
         "FlowEdge",
         "FlowParameter",
         "FlowArgument",
-        "Defines",
         "ResultOrigin",
         "FormalOrigin",
         "ReducerBody",
@@ -65,6 +64,8 @@ pub(super) fn invalidate(graph: &mut Graph) -> Result<(), OptimizeError> {
         "FoldSeedUse",
         "PackedClause",
         "IterationAxis",
+        "OperationGuardRequirement",
+        "YieldGuardRequirement",
         "LaneAxisExtent",
         "ReductionBoundOperands",
         "CollectedClause",
@@ -198,7 +199,7 @@ pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeEr
         query.for_each("LiveRegion", |row| {
             let region = row[0];
             for (slot, &name) in structure.parameters.get(&region).into_iter().flatten().enumerate() {
-                definitions.push(("ParameterSite", region, slot as i64, name, region));
+                definitions.push((name, Origin::Parameter(region, slot), region));
             }
             Ok(())
         })?;
@@ -209,7 +210,7 @@ pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeEr
                 return Ok(());
             };
             for (slot, &name) in structure.outputs.get(&operation).into_iter().flatten().enumerate() {
-                definitions.push(("OperationSite", operation, slot as i64, name, region));
+                definitions.push((name, Origin::Result(operation, slot), region));
             }
             Ok(())
         })?;
@@ -250,12 +251,24 @@ pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeEr
         Ok(())
     })?;
     let mut direct_uses = Vec::new();
+    let mut operation_guards = Vec::new();
+    let mut yield_guards = Vec::new();
     let mut end_demands = Vec::new();
     let mut binary = Vec::new();
     let mut indices = Vec::new();
     let mut lengths = Vec::new();
     {
         let structure = graph.structure().read();
+        for (&operation, names) in &structure.certificates.operations {
+            let parallel = matches!(
+                graph.code(operation)?,
+                crate::egglog::dataflow::ir::Code::Parallel
+            );
+            operation_guards.extend(names.iter().map(|&name| (operation, name, parallel)));
+        }
+        for (&region, values) in &structure.certificates.yields {
+            yield_guards.extend(values.iter().map(|&(_, value)| (region, value)));
+        }
         for (&operation, inputs) in &structure.inputs.values {
             direct_uses.extend(inputs.iter().map(|&input| (operation, input)));
         }
@@ -290,19 +303,34 @@ pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeEr
         })?;
     }
     graph.update(|mut sink| {
-        let mut sites = LookupMap::new();
-        for (kind, key, slot, name, region) in definitions {
-            let site = sink.add(kind, (key, slot))?;
-            if sites.insert(name, site).is_some_and(|previous| site != previous) {
+        let mut defined = LookupSet::new();
+        for (name, origin, region) in definitions {
+            if !defined.insert(name) {
                 sink.add("InvalidDataflow", "value has more than one definition")?;
             }
-            sink.set("Defines", name, site)?;
-            let origin = if kind == "ParameterSite" { "FormalOrigin" } else { "ResultOrigin" };
-            sink.add(origin, (name, key, slot))?;
             sink.add("DefinitionRegion", (name, region))?;
-            if kind == "ParameterSite" {
-                sink.add("AvailableIn", (region, name))?;
+            match origin {
+                Origin::Result(operation, slot) => {
+                    sink.add("ResultOrigin", (name, operation, slot as i64))?;
+                }
+                Origin::Parameter(region, slot) => {
+                    sink.add("FormalOrigin", (name, region, slot as i64))?;
+                    sink.add("AvailableIn", (region, name))?;
+                }
             }
+        }
+        for (operation, certificate, parallel) in operation_guards {
+            let name = sink.add("ValueNameRef", certificate)?;
+            sink.add("DirectOperationUse", (operation, name))?;
+            if parallel {
+                sink.add("OperationGuardRequirement", (operation, certificate))?;
+            }
+        }
+        for (region, certificate) in yield_guards {
+            let name = sink.add("ValueNameRef", certificate)?;
+            sink.add("EndDemand", (region, name))?;
+            sink.add("RegionAttributeUse", (region, name))?;
+            sink.add("YieldGuardRequirement", (region, certificate))?;
         }
         for site in direct_uses {
             sink.add("DirectOperationUse", site)?;
@@ -478,12 +506,15 @@ pub(super) fn run(graph: &mut Graph) -> Result<(), OptimizeError> {
     Ok(())
 }
 
-/// Reuse body-dependent proofs until the canonical graph is edited.
-pub(super) fn ensure(graph: &mut Graph) -> Result<(), OptimizeError> {
+pub(super) fn current(graph: &Graph) -> Result<bool, OptimizeError> {
     let revision = edit::revision(graph)?;
-    if Query(graph).lookup("DataflowRevision", RawValues(Vec::new()))?
-        == Some(graph.base_to_value(revision))
-    {
+    Ok(Query(graph).lookup("DataflowRevision", RawValues(Vec::new()))?
+        == Some(graph.base_to_value(revision)))
+}
+
+/// Reuse body-dependent proofs until the executable graph is edited.
+pub(super) fn ensure(graph: &mut Graph) -> Result<(), OptimizeError> {
+    if current(graph)? {
         return Ok(());
     }
     run(graph)
@@ -591,13 +622,13 @@ pub(super) fn available_before(
     mut operation: Value,
     name: Value,
 ) -> Result<bool, OptimizeError> {
-    let Some(site) = query.lookup("Defines", name)? else {
+    let Some(origin) = query.live_origin(name)? else {
         return Ok(false);
     };
-    let (kind, fields) = query.application(site, &["OperationSite", "ParameterSite"])?;
-    let producer = (kind == "OperationSite").then_some(fields[0]);
-    let definition =
-        if let Some(producer) = producer { query.0.operation_region(producer)? } else { fields[0] };
+    let (definition, producer) = match origin {
+        Origin::Result(operation, _) => (query.0.operation_region(operation)?, Some(operation)),
+        Origin::Parameter(region, _) => (region, None),
+    };
     loop {
         let region = query.0.operation_region(operation)?;
         if region == definition {
@@ -679,17 +710,6 @@ pub(super) fn validate(graph: &Graph) -> Result<(), OptimizeError> {
         query.0.operation_order(operation)?;
         for value in graph.inputs(operation).into_iter().chain(query.0.outputs(operation)) {
             typed(query, value)?;
-        }
-        if query.contains("CallOperation", operation)? {
-            let target = query.0.call_target(operation)?;
-            let expected = if query.0.is_external(target) {
-                count(query, "ExternalParameterCount", target)?
-            } else {
-                query.0.parameter_count(query.0.function_root(target)?)
-            };
-            if query.0.input_count(operation) != expected {
-                return Err(output_error("call argument count differs from its signature"));
-            }
         }
         signatures::operation(query, operation)?;
         if query.contains("CountedLoopOperation", operation)?

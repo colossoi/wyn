@@ -1,11 +1,11 @@
 //! Import the live body graph and publish changes to its direct operands.
 use super::{edit, ir::Code};
 use crate::ast::Span;
-use crate::egglog::graph::{ArgumentSite, Graph};
+use crate::egglog::graph::{ArgumentSite, Graph, Origin};
 use crate::egglog::{analysis, output_error, query::Query, timing, OptimizeError};
 use crate::memory_ir::{
-    BodyRole, Definition, ForwardedValues, Function, MemoryIr, Operation, OperationId, Parameter, Region,
-    RegionEdge, RegionId, UseSite, ValueRef,
+    BodyRole, Definition, Function, MemoryIr, Operation, OperationId, Parameter, Region, RegionEdge,
+    RegionId, UseSite, ValueRef,
 };
 use crate::{LookupMap, StableMap};
 use egglog_engine::Value;
@@ -21,16 +21,6 @@ pub(in crate::egglog) struct BodyGraph {
 }
 
 impl BodyGraph {
-    pub fn get_or_read<'a>(
-        slot: &'a mut Option<Self>,
-        query: Query<'_>,
-    ) -> Result<&'a mut Self, OptimizeError> {
-        match slot {
-            Some(body) => Ok(body),
-            slot @ None => Ok(slot.insert(Self::read(query)?)),
-        }
-    }
-
     pub fn read(query: Query<'_>) -> Result<Self, OptimizeError> {
         let mut ir = MemoryIr::default();
         let mut regions = SecondaryMap::new();
@@ -155,26 +145,6 @@ impl BodyGraph {
         })
     }
 
-    pub fn publish_substitutions(
-        &self,
-        graph: &mut Graph,
-        values: &LookupMap<ValueRef, ValueRef>,
-        uses: Vec<(UseSite, ValueRef)>,
-    ) -> Result<(), OptimizeError> {
-        let names: Vec<_> = values
-            .iter()
-            .filter_map(|(old, new)| {
-                let (old, new) = (self.names[old], self.names[new]);
-                (old != new).then_some((old, new))
-            })
-            .collect();
-        self.publish_edges(graph, uses)?;
-        if !names.is_empty() {
-            edit::replace_attributes(graph, &names)?;
-        }
-        Ok(())
-    }
-
     pub fn publish_edges(
         &self,
         graph: &mut Graph,
@@ -218,60 +188,38 @@ impl BodyGraph {
     }
 }
 
-pub(in crate::egglog) fn forward_equivalents(
-    graph: &mut Graph,
-    body: &mut Option<BodyGraph>,
-) -> Result<bool, OptimizeError> {
+pub(in crate::egglog) fn forward_equivalents(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let query = Query(graph);
-    let mut replacements = LookupMap::new();
+    let mut candidates = LookupMap::new();
     query.for_each("ForwardCandidate", |row| {
-        replacements.entry(row[0]).or_insert(row[1]);
+        candidates.entry(row[0]).or_insert(row[1]);
         Ok(())
     })?;
-    if replacements.is_empty() {
+    if candidates.is_empty() {
         return Ok(false);
     }
     let _timing = timing::span("Rust value forwarding");
-    let mut body = match body.take() {
-        Some(body) => body,
-        None => BodyGraph::read(query)?,
-    };
-    let resolve = |name| {
-        let Some(&value) = body.refs.get(&name) else {
+    let mut removed = Vec::new();
+    let replacements: Vec<_> = candidates.into_iter().filter(|(old, new)| old != new).collect();
+    for &(old, new) in &replacements {
+        let Some(origin) = query.live_origin(old)? else {
             return Err(output_error("forwarded operand has no live memory definition"));
         };
-        Ok(value)
-    };
-    let equivalents = replacements
-        .into_iter()
-        .map(|(old, new)| Ok((resolve(old)?, resolve(new)?)))
-        .collect::<Result<Vec<_>, OptimizeError>>()?;
-    let redirected = body.ir.forward_values(equivalents).map_err(|err| output_error(err.to_string()))?;
-    if publish_forwarding(graph, body, redirected)? {
+        if query.live_origin(new)?.is_none() {
+            return Err(output_error("forwarding target has no live memory definition"));
+        }
+        if let Origin::Result(operation, 0) = origin {
+            if graph.output_count(operation) == 1 {
+                removed.push(operation);
+            }
+        }
+    }
+    edit::replace(graph, &replacements)?;
+    if !removed.is_empty() {
+        edit::remove(graph, &removed)?;
         return Ok(true);
     }
     analysis::ensure(graph)?;
     edit::clear(graph)?;
     Ok(false)
-}
-
-fn publish_forwarding(
-    graph: &mut Graph,
-    body: BodyGraph,
-    redirected: ForwardedValues,
-) -> Result<bool, OptimizeError> {
-    let removed = redirected
-        .values
-        .keys()
-        .filter_map(|old| match *old {
-            ValueRef::Result(op, _) if !body.ir.operations.contains_key(op) => Some(body.operations[op]),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    body.publish_substitutions(graph, &redirected.values, redirected.uses)?;
-    if removed.is_empty() {
-        return Ok(false);
-    }
-    edit::remove(graph, &removed)?;
-    Ok(true)
 }

@@ -80,11 +80,6 @@
       ((set (RewrittenSlicesPrefix slices (+ slot 1)) (vec-push prefix value))) :ruleset graph-substitution)
 (rule ((= revision (AnalysisRevision)) (= slices (RewrittenSlicesPrefix source (vec-length source))))
       ((set (RewrittenSlices source) slices)) :ruleset graph-substitution)
-(rule ((= revision (AnalysisRevision)) (OperationCertificate operation old) (= (ValueReplacement (ValueNameRef old)) (ValueNameRef replacement)) (!= old replacement))
-      ((delete (OperationCertificate operation old)) (OperationCertificate operation replacement)) :ruleset graph-apply)
-(rule ((= revision (AnalysisRevision)) (YieldCertificate region slot old) (= (ValueReplacement (ValueNameRef old)) (ValueNameRef replacement)) (!= old replacement))
-      ((delete (YieldCertificate region slot old)) (YieldCertificate region slot replacement)) :ruleset graph-apply)
-
 (rule ((= revision (AnalysisRevision)) (RootFunction function-root function) (= (FunctionResultType function slot) (ReturnAccumulator info)))
       ((set (InlineRequired function) true)) :ruleset graph-inline-required)
 

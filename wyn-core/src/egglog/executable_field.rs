@@ -119,7 +119,7 @@ impl PurePrim for ExecutableField {
             Field::Region => graph.operations.get(&key)?.region,
             Field::Order => graph.operations.get(&key)?.order.map(|order| state.base_to_value(order)),
             Field::FunctionRoot => graph.roots.get(&key).copied(),
-            Field::External => Some(state.base_to_value(graph.externals.contains(&key))),
+            Field::External => Some(state.base_to_value(graph.externals.contains_key(&key))),
             Field::Entry => Some(state.base_to_value(graph.entries.contains_key(&key))),
             Field::CallTarget => graph.targets.get(&key).copied(),
             Field::Reducer => callback_at(&graph.reducers, key, state.value_to_base(args[1])),

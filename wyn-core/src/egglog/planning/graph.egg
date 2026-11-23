@@ -76,7 +76,7 @@
       ((FreshArray value) (set (LogicalOuterCount value) count)) :ruleset graph-sizes)
 (rule ((= revision (ShapeRevision)) (= count (LogicalOuterCount value)) (= n (StaticIndex count)))
       ((set (OuterCapacity value) (max 0 n))) :ruleset graph-sizes)
-(rule ((= revision (ShapeRevision)) (LengthOperation operation 0) (= (wyn-input operation 0) (ValueNameRef source))
+(rule ((= revision (ShapeRevision)) (LiveOperation operation) (LengthOperation operation 0) (= (wyn-input operation 0) (ValueNameRef source))
        (= count (LogicalOuterCount source)))
       ((ForwardLength operation count)) :ruleset graph-sizes)
 (rule ((= revision (ShapeRevision)) (LoopPreservesOuterLength operation slot)

@@ -1,13 +1,14 @@
 //! Structural state owned by a parallel fusion pass until it publishes its edits.
 use super::Domain;
 use crate::egglog::dataflow::{body::BodyGraph, cse, edit, ir::Code};
+use crate::egglog::graph::CertificateSite;
 use crate::egglog::graph::{CollectiveInput, ParallelResults};
 use crate::egglog::graph::{Graph, State};
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, output_error, planning, timing, OptimizeError};
 use crate::memory_ir::{BodyRole, Definition, OperationId, RegionId, UseSite, ValueRef};
 use crate::{LookupMap, LookupSet, SortedSet};
-use egglog_engine::{RawValues, Value, Write};
+use egglog_engine::{RawValues, Value};
 use slotmap::SecondaryMap;
 use std::mem::take;
 use wyn_graph::ReplacementForest;
@@ -205,21 +206,18 @@ impl Body {
                 }
             }
         }
-        for (table, kind) in [
-            (
-                "OperationAttributeUse",
-                Site::Attribute as fn(OperationId) -> Site,
-            ),
-            ("OperationCertificate", Site::Certificate),
-        ] {
-            query.for_each(table, |row| {
-                if let Some(&op) = body.graph.operation_ids.get(&row[0]) {
-                    let name =
-                        if table == "OperationCertificate" { value_name(query, row[1])? } else { row[1] };
-                    body.uses.add(kind(op), name);
+        query.for_each("OperationAttributeUse", |row| {
+            if let Some(&op) = body.graph.operation_ids.get(&row[0]) {
+                body.uses.add(Site::Attribute(op), row[1]);
+            }
+            Ok(())
+        })?;
+        for (&operation, names) in &query.0.structure().read().certificates.operations {
+            if let Some(&op) = body.graph.operation_ids.get(&operation) {
+                for &value in names {
+                    body.uses.add(Site::Certificate(op), value_name(query, value)?);
                 }
-                Ok(())
-            })?;
+            }
         }
         query.for_each("RegionAttributeUse", |row| {
             if let Some(&region) = body.regions.get(&row[0]) {
@@ -911,8 +909,8 @@ impl Body {
                 sink.set_collective_inputs(op, group, kind, values)?;
             }
             self.publish_order(&mut sink)?;
-            for certificate in certificates {
-                sink.add("OperationCertificate", certificate)?;
+            for (operation, certificate) in certificates {
+                sink.add_certificate(CertificateSite::Operation(operation), certificate);
             }
             Ok(())
         })?;
