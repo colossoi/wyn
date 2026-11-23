@@ -157,18 +157,8 @@ pub(super) fn remember(
     let atoms = operands.iter().map(|&name| query.name(name)).collect::<Result<Vec<_>, _>>()?;
     if matches!(code, Code::Branch) {
         let condition = atom(query, values, atoms[0])?;
-        let yes = results(
-            query,
-            function,
-            values,
-            query.required("ControlRegion", (statement, 0_i64))?,
-        )?;
-        let no = results(
-            query,
-            function,
-            values,
-            query.required("ControlRegion", (statement, 1_i64))?,
-        )?;
+        let yes = results(query, function, values, query.0.control_region(statement, 0_i64)?)?;
+        let no = results(query, function, values, query.0.control_region(statement, 1_i64)?)?;
         if pattern.len() != yes.len() || pattern.len() != no.len() {
             return Err(error("host branch result arity mismatch"));
         }
@@ -566,7 +556,7 @@ fn scalar_body(
                 query,
                 function,
                 &values,
-                query.required("ControlRegion", (statement, 0_i64))?,
+                query.0.control_region(statement, 0_i64)?,
                 serial,
                 calls,
             )?
@@ -577,7 +567,7 @@ fn scalar_body(
                 query,
                 function,
                 &values,
-                query.required("ControlRegion", (statement, 1_i64))?,
+                query.0.control_region(statement, 1_i64)?,
                 serial,
                 calls,
             )?
@@ -641,7 +631,7 @@ fn scalar_loop(
     let name = local(serial);
     let state = ScalarExpr::Local(name.clone());
     let counted = query.contains("CountedLoopOperation", loop_)?;
-    let region = query.required("ControlRegion", (loop_, 0_i64))?;
+    let region = query.0.control_region(loop_, 0_i64)?;
     let offset = usize::from(counted);
     let mut values: Bindings<_, _> =
         outer.iter().map(|(&name, value)| (name, value.clone())).collect::<crate::StableMap<_, _>>().into();
@@ -652,7 +642,7 @@ fn scalar_loop(
         let Some(binding) = query.value_name(parameter)? else {
             return Ok(None);
         };
-        let argument = query.required("EdgeArgument", (loop_, 0_i64, i as i64))?;
+        let argument = query.0.argument(loop_, 0_i64, i as i64)?;
         let Some(value) = operand(query, outer, argument)? else {
             return Ok(None);
         };
@@ -722,8 +712,8 @@ fn scalar_call(
     serial: &mut usize,
     calls: &mut Vec<Value>,
 ) -> Result<Option<ScalarExpr>, OptimizeError> {
-    let callee = query.required("CallTarget", call)?;
-    let Some(root) = query.lookup("FunctionRoot", callee)? else {
+    let callee = query.0.call_target(call)?;
+    let Some(root) = query.0.root_of(callee) else {
         return Ok(None);
     };
     if calls.contains(&callee) {

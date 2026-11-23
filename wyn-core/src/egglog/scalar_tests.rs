@@ -115,7 +115,7 @@ fn shared_helpers_keep_separate_entry_and_loop_parameters() -> Result<(), Optimi
 fn unrelated_syntax_does_not_add_evaluation_dependencies() -> Result<(), OptimizeError> {
     let mut graph = optimized("entry main(x:i32) i32=x")?;
     let entry = Query(&graph).first("EntryOrder")?.unwrap()[0];
-    let root = Query(&graph).required("FunctionRoot", entry)?;
+    let root = Query(&graph).0.function_root(entry)?;
     let before = Query(&graph).sequence("RegionYield", root)?;
     graph.update(|mut sink| {
         Ok((|| -> Result<(), OptimizeError> {
@@ -141,11 +141,11 @@ fn function_pruning_keeps_called_helpers_and_removes_substituted_callbacks() -> 
     let (mut graph, _) = from_tlc::import(&tlc)?;
     // Keep an uncalled function in the graph, independent of TLC's own pruning.
     let helper = Query(&graph).first("Function")?.unwrap()[0];
-    let root = Query(&graph).required("FunctionRoot", helper)?;
+    let root = Query(&graph).0.function_root(helper)?;
     graph.update(|mut sink| {
         let dead = sink.add("FunctionId", (999_i64, "substituted_callback"))?;
         sink.add("Function", dead)?;
-        sink.set("FunctionRoot", dead, root)?;
+        sink.set_function_root(dead, root);
         sink.set("FunctionResultCount", dead, 1_i64)?;
         Ok(())
     })?;

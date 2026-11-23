@@ -1,9 +1,10 @@
 //! Resolve direct calls through attached control, reducer and combiner regions.
+use crate::egglog::dataflow::ir::Code;
 use crate::egglog::graph::Graph;
 use crate::egglog::query::Query;
 use crate::egglog::OptimizeError;
 use crate::memory_ir::call_graph::{CallGraph, CallSite};
-use crate::{LookupMap, StableMap};
+use crate::{LookupMap, LookupSet, StableMap};
 use egglog_engine::{RawValues, Value, Write};
 use wyn_graph::{for_each_reachable, WalkOrder};
 
@@ -14,47 +15,75 @@ struct RegionCalls {
     operations: Vec<Value>,
 }
 
-fn attached_region(query: Query<'_>, operation: Value) -> Result<Option<Value>, OptimizeError> {
-    if query.contains("Operation", operation)? {
-        return Ok(query.0.region_of(operation));
-    }
-    Ok(None)
-}
-
-pub(super) fn publish(graph: &mut Graph) -> Result<(), OptimizeError> {
+pub(super) fn publish(graph: &mut Graph, for_inlining: bool) -> Result<(), OptimizeError> {
     let query = Query(graph);
     let mut regions = LookupMap::<Value, RegionCalls>::new();
-    for table in ["ControlRegion", "ResultReducer", "AccumulatorCombiner"] {
-        query.for_function(table, |keys, child| {
-            if let Some(parent) = attached_region(query, keys[0])? {
+    let mut owners = LookupMap::new();
+    let mut multiple_owners = false;
+    let mut loop_carries = Vec::new();
+    let positions = graph.structure().read();
+    let mut record = |operation, child| {
+        multiple_owners |= owners.insert(child, operation).is_some_and(|old| old != operation);
+        if graph.has_operation(operation) {
+            if let Some(parent) = positions.operations.get(&operation).and_then(|position| position.region)
+            {
                 regions.entry(parent).or_default().children.push(child);
             }
+        }
+    };
+    for (&(operation, slot), edge) in &positions.controls {
+        record(operation, edge.region);
+        if slot != 0 {
+            continue;
+        }
+        for (slot, &initial) in edge.arguments.iter().enumerate() {
+            let slot = slot as i64;
+            let Some(parameter) = query.lookup("RegionParameter", (edge.region, slot))? else {
+                continue;
+            };
+            let Some(next) = query.lookup("RegionYield", (edge.region, slot))? else {
+                continue;
+            };
+            if let (Some(parameter), Some(initial), Some(next)) = (
+                query.value_name(parameter)?,
+                query.value_name(initial)?,
+                query.value_name(next)?,
+            ) {
+                loop_carries.push((operation, slot, parameter, initial, next));
+            }
+        }
+    }
+    for table in ["ResultReducer", "AccumulatorCombiner"] {
+        query.for_function(table, |keys, child| {
+            record(keys[0], child);
             Ok(())
         })?;
     }
-    query.for_function("CallTarget", |keys, callee| {
-        let operation = keys[0];
-        if let Some(region) = attached_region(query, operation)? {
+    for (&operation, &callee) in &positions.targets {
+        if let Some(region) = positions.operations.get(&operation).and_then(|position| position.region) {
             regions.entry(region).or_default().sites.push(CallSite { operation, callee });
         }
-        Ok(())
-    })?;
-    {
-        let positions = graph.positions().read();
-        for (&region, operations) in &positions.by_region {
-            let body = regions.entry(region).or_default();
-            for &operation in operations {
-                if query.contains("Operation", operation)? {
-                    body.operations.push(operation);
-                }
-            }
-        }
+    }
+    for (&region, operations) in &positions.by_region {
+        let body = regions.entry(region).or_default();
+        body.operations
+            .extend(operations.iter().copied().filter(|&operation| graph.has_operation(operation)));
     }
     let mut reached = LookupMap::<Value, Vec<Value>>::new();
     let mut calls = StableMap::new();
-    query.for_function("FunctionRoot", |keys, root| {
-        let bodies = reached.entry(keys[0]).or_default();
-        let sites = calls.entry(keys[0]).or_insert_with(Vec::new);
+    let mut parallel_regions = LookupSet::new();
+    if for_inlining {
+        parallel_regions.extend(
+            graph
+                .codes()
+                .filter(|(_, code)| matches!(code, Code::Parallel))
+                .filter_map(|(op, _)| positions.operations.get(&op)?.region),
+        );
+    }
+    let mut parallel_functions = Vec::new();
+    for (&function, &root) in &positions.roots {
+        let bodies = reached.entry(function).or_default();
+        let sites = calls.entry(function).or_insert_with(Vec::new);
         for_each_reachable(
             [root],
             WalkOrder::DepthFirst,
@@ -70,8 +99,13 @@ pub(super) fn publish(graph: &mut Graph) -> Result<(), OptimizeError> {
                 }
             },
         );
-        Ok(())
-    })?;
+        if bodies.iter().any(|region| parallel_regions.contains(region)) {
+            parallel_functions.push(function);
+        }
+    }
+    let function_roots: Vec<_> =
+        positions.roots.iter().map(|(&function, &root)| (function, root)).collect();
+    drop(positions);
     let call_graph = CallGraph { calls };
     let mut functions = Vec::new();
     query.for_each("Function", |row| {
@@ -88,8 +122,23 @@ pub(super) fn publish(graph: &mut Graph) -> Result<(), OptimizeError> {
     }
     let (live, recursive) = call_graph.analyze(roots);
     graph.update(|mut sink| {
+        for carry in loop_carries {
+            sink.add("LoopValueCarry", carry)?;
+        }
+        for function in parallel_functions {
+            sink.add("InlineParallel", function)?;
+        }
         for function in functions {
             sink.set("RecursiveFunction", function, recursive.contains(&function))?;
+        }
+        for &(function, region) in &function_roots {
+            sink.add("RootFunction", (region, function))?;
+        }
+        if multiple_owners {
+            sink.add("InvalidDataflow", "executable region has more than one owner")?;
+        }
+        for (child, operation) in owners {
+            sink.set("RegionOwnedBy", child, operation)?;
         }
         for caller in live {
             sink.add("LiveFunction", caller)?;

@@ -109,10 +109,7 @@ fn region_order_refreshes_the_changed_body() -> Result<(), OptimizeError> {
     let query = Query(&graph);
     let mut roots = Vec::new();
     query.for_function("EntryOrder", |keys, order| {
-        roots.push((
-            graph.value_to_base::<i64>(order),
-            query.required("FunctionRoot", keys[0])?,
-        ));
+        roots.push((graph.value_to_base::<i64>(order), query.0.function_root(keys[0])?));
         Ok(())
     })?;
     roots.sort_by_key(|&(order, _)| order);
@@ -146,7 +143,7 @@ fn rewriting_defers_live_after_and_host_classification() -> Result<(), OptimizeE
     liveness(&mut graph, &[root])?;
     let query = Query(&graph);
     query.for_function("EntryOrder", |keys, _| {
-        let candidate = query.required("FunctionRoot", keys[0])?;
+        let candidate = query.0.function_root(keys[0])?;
         assert_eq!(query.contains("LivenessRegion", candidate)?, candidate == root);
         Ok(())
     })?;
@@ -379,9 +376,7 @@ fn bounded_work_counts_every_loop_iteration() {
                 yields(&mut sink, body, &[])?;
                 let loop_ = operation(&mut sink, 1, Code::CountedLoop, &[])?;
                 outputs(&mut sink, loop_, &[])?;
-                sink.set("ControlRegion", (loop_.0, 0_i64), body.0)?;
-                let role = sink.add("LoopRegion", RawValues(Vec::new()))?;
-                sink.set("ControlRole", (loop_.0, 0_i64), role)?;
+                sink.set_control(loop_.0, 0_i64, body.0);
                 sink.set("LoopIndex", loop_.0, index)?;
                 for (table, n) in [("LoopStart", 0_i64), ("LoopCount", 40_i64), ("LoopStep", 1_i64)] {
                     let value = sink.add("IndexConstant", n)?;
@@ -392,7 +387,7 @@ fn bounded_work_counts_every_loop_iteration() {
                 yields(&mut sink, root, &[])?;
                 let function = sink.add("FunctionId", (0_i64, "work"))?;
                 sink.add("Function", function)?;
-                sink.set("FunctionRoot", function, root.0)?;
+                sink.set_function_root(function, root.0);
                 sink.set("FunctionResultCount", function, 0_i64)?;
                 sink.set("EntryOrder", function, 0_i64)?;
                 Ok(())

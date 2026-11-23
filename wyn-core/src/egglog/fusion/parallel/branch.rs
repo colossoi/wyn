@@ -37,7 +37,7 @@ pub(in crate::egglog::fusion) fn run(graph: &mut Graph) -> Result<bool, Optimize
             if pinned.contains(&op) {
                 producer = false;
             } else {
-                producer |= query.lookup("ControlRegion", (op, 0_i64))?.is_some();
+                producer |= query.0.control_at(op, 0_i64).is_some();
             }
         }
     }

@@ -127,7 +127,7 @@ impl Body<'_, '_, '_> {
         let domain = self.query().required("OperationDomain", operation)?;
         let ordinal_name = self.query().required("DomainOrdinal", domain)?;
         let axes = domain_axes(self.query(), domain)?;
-        let region = self.query().required("ControlRegion", (operation, 0_i64))?;
+        let region = self.query().0.control_region(operation, 0_i64)?;
         let mut collects = Vec::new();
         let mut compacts = Vec::new();
         let mut contributes = false;
@@ -740,7 +740,7 @@ impl Body<'_, '_, '_> {
         let columns = query.required("OperationDomain", map)?;
         let axis = query.required("DomainAxis", (columns, 0_i64))?;
         let ordinal = query.required("DomainOrdinal", columns)?;
-        let lane = query.required("ControlRegion", (map, 0_i64))?;
+        let lane = query.0.control_region(map, 0_i64)?;
         let result = query.required("ResultValue", (map, 0_i64, 0_i64))?;
         let domain = query.required("OperationDomain", operation)?;
         let rows = query.required("DomainExtent", (domain, 0_i64))?;

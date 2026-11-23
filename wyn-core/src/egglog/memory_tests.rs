@@ -2,7 +2,7 @@ use crate::egglog::dataflow::{
     body, edit,
     ir::{self, Bounds, Code, Name},
 };
-use crate::egglog::graph::Graph;
+use crate::egglog::graph::{ArgumentSite, Graph};
 use crate::egglog::payload::Payload;
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, planning, test_graph, OptimizeError};
@@ -17,13 +17,13 @@ fn copy_forwarding_preserves_captures_loop_entries_and_backedges() -> Result<(),
     let query = Query(&graph);
     let root = test_graph::root(&graph);
     let owner = query.first("CountedLoopOperation")?.unwrap()[0];
-    let inner = query.required("ControlRegion", (owner, 0_i64))?;
+    let inner = query.0.control_region(owner, 0_i64)?;
     let subtract = query
         .operations(inner)?
         .into_iter()
         .find(|&op| query.0.code(op).unwrap() == Code::Scalar(Payload::Binary(BinaryOperator::Subtract)))
         .expect("loop body has a subtraction");
-    let initial = query.required("EdgeArgument", (owner, 0_i64, 0_i64))?;
+    let initial = query.0.argument(owner, 0_i64, 0_i64)?;
     let operands = query.sequence("Input", subtract)?;
     let backedge = query.required("RegionYield", (inner, 0_i64))?;
     let ty = query.required("ValueType", query.name(initial)?)?;
@@ -61,8 +61,7 @@ fn copy_forwarding_preserves_captures_loop_entries_and_backedges() -> Result<(),
             };
             let (start, left, end) = (alias(1000_i64)?, alias(1001_i64)?, alias(1002_i64)?);
             let capture = alias(1003_i64)?;
-            sink.remove("EdgeArgument", (owner, 0_i64, 0_i64))?;
-            sink.set("EdgeArgument", (owner, 0_i64, 0_i64), start)?;
+            sink.set_argument(ArgumentSite(owner, 0, 0), start)?;
             sink.remove("Input", (subtract, 0_i64))?;
             sink.set("Input", (subtract, 0_i64), left)?;
             sink.remove("Input", (subtract, 1_i64))?;
@@ -77,7 +76,7 @@ fn copy_forwarding_preserves_captures_loop_entries_and_backedges() -> Result<(),
     assert!(body::forward_equivalents(&mut graph, &mut None)?);
     analysis::ensure(&mut graph)?;
     let query = Query(&graph);
-    assert_eq!(query.required("EdgeArgument", (owner, 0_i64, 0_i64))?, initial);
+    assert_eq!(query.0.argument(owner, 0_i64, 0_i64)?, initial);
     assert_eq!(query.sequence("Input", subtract)?, operands);
     assert!(query.contains("RegionCapture", (inner, operands[1]))?);
     assert_eq!(query.required("RegionYield", (inner, 0_i64))?, backedge);
@@ -153,7 +152,7 @@ fn inlining_exposes_parallel_work_through_scalar_helpers_before_copying_them() -
         "#,
     )?;
     super::inline(&mut graph)?;
-    analysis::structure(&mut graph)?;
+    analysis::structure(&mut graph, false)?;
     graph.parse_and_run_program(
         None,
         r#"
@@ -184,7 +183,7 @@ fn nested_calls_mark_only_the_reachable_cycle_recursive() -> Result<(), Optimize
         r#"
         (set (ResultReducer (OperationId 5) 0) (RegionId 10))
         (set (FixtureRegion (OperationId 6)) (RegionId 10))
-        (set (CallTarget (OperationId 6)) (FunctionId 2 "identity"))
+        (set (FixtureCallTarget (OperationId 6)) (FunctionId 2 "identity"))
         (set (AccumulatorCombiner (OperationId 6) 0) (RegionId 11))
         (delete (FixtureRegion (OperationId 2)))
         (set (FixtureRegion (OperationId 2)) (RegionId 11))
@@ -193,7 +192,7 @@ fn nested_calls_mark_only_the_reachable_cycle_recursive() -> Result<(), Optimize
         (Function (FunctionId 3 "unused"))
     "#,
     )?;
-    analysis::structure(&mut graph)?;
+    analysis::structure(&mut graph, false)?;
     graph.parse_and_run_program(
         None,
         r#"
@@ -206,7 +205,7 @@ fn nested_calls_mark_only_the_reachable_cycle_recursive() -> Result<(), Optimize
         (set (RetainAllFunctions) true)
     "#,
     )?;
-    analysis::structure(&mut graph)?;
+    analysis::structure(&mut graph, false)?;
     graph.parse_and_run_program(None, r#"(check (LiveFunction (FunctionId 3 "unused")))"#)?;
     Ok(())
 }
@@ -223,11 +222,10 @@ fn inline_all_leaves_recursive_calls_intact() -> Result<(), OptimizeError> {
         ],
         include_str!("tests/inline_arguments.egg"),
     )?;
-    graph.parse_and_run_program(
-        None,
+    test_graph::facts_with_positions(
+        &mut graph,
         r#"
-        (delete (CallTarget (OperationId 3)))
-        (set (CallTarget (OperationId 3)) (FunctionId 1 "forward"))
+        (set (FixtureCallTarget (OperationId 3)) (FunctionId 1 "forward"))
         "#,
     )?;
     let revision = edit::revision(&graph)?;
@@ -287,8 +285,8 @@ fn structural_cloning_follows_nested_regions_without_analysis() -> Result<(), Op
     let cloned_root = edit::clone_region(&mut graph, branch, root, &arguments)?;
     let query = Query(&graph);
     let copied_branch = query.constructor("ClonedOperation", (branch, branch))?.unwrap();
-    let original_arm = query.required("ControlRegion", (branch, 0_i64))?;
-    let copied_arm = query.required("ControlRegion", (copied_branch, 0_i64))?;
+    let original_arm = query.0.control_region(branch, 0_i64)?;
+    let copied_arm = query.0.control_region(copied_branch, 0_i64)?;
     assert_eq!(
         copied_arm,
         query.constructor("ClonedRegion", (branch, original_arm))?.unwrap()
@@ -520,7 +518,7 @@ fn fusion_proves_a_computed_index_selects_the_produced_lane() -> Result<(), Opti
         .into_iter()
         .filter(|&operation| query.contains("ParallelOperation", operation).unwrap())
         .collect::<Vec<_>>();
-    let lane = query.required("ControlRegion", (maps[1], 0_i64))?;
+    let lane = query.0.control_region(maps[1], 0_i64)?;
     let load = query
         .operations(lane)?
         .into_iter()
@@ -797,7 +795,7 @@ fn consumed_tokens_cannot_be_reused() -> Result<(), OptimizeError> {
         (set (OutputCount (OperationId 1)) 1) (set (Output (OperationId 1) 0) (AccNameRef (AccumulatorId 2)))
         (set (FixtureRegion (OperationId 0)) (RegionId 0)) (set (FixtureOrder (OperationId 0)) 0)
         (set (FixtureRegion (OperationId 1)) (RegionId 0)) (set (FixtureOrder (OperationId 1)) 1)
-        (Function (FunctionId 0 "invalid")) (set (FunctionRoot (FunctionId 0 "invalid")) (RegionId 0))
+        (Function (FunctionId 0 "invalid")) (set (FixtureFunctionRoot (FunctionId 0 "invalid")) (RegionId 0))
         (set (FunctionResultCount (FunctionId 0 "invalid")) 0) (set (EntryOrder (FunctionId 0 "invalid")) 0)
     "#,
     )?;
@@ -819,7 +817,7 @@ fn validation_checks_live_functions_and_ignores_retired_programs() -> Result<(),
         let dead = sink.add("FunctionId", (999_i64, "dead"))?;
         let dead_root = sink.add("RegionId", 999_i64)?;
         sink.add("Function", dead)?;
-        sink.set("FunctionRoot", dead, dead_root)?;
+        sink.set_function_root(dead, dead_root);
         sink.set("RegionYield", (dead_root, 0_i64), name)?;
         Ok(())
     })?;

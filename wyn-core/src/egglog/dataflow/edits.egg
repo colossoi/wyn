@@ -18,14 +18,11 @@
       ((set (InlineRequired function) false)) :ruleset graph-inline-required)
 (rule ((= revision (AnalysisRevision)) (Function function) (= (InlineAll) true))
       ((set (InlineRequired function) true)) :ruleset graph-inline-required)
-(rule ((= revision (AnalysisRevision)) (Function function) (= root (FunctionRoot function))
+(rule ((= revision (AnalysisRevision)) (Function function) (= root (wyn-function-root function))
        (= (RegionParameter root slot) (ValueNameRef value)) (= (ValueType value) (LogicalValue ty)))
       ((set (InlineRequired function) true)) :ruleset graph-inline-required)
 (rule ((= revision (AnalysisRevision)) (Function function) (= (FunctionResultType function slot) (LogicalReturn ty)))
       ((set (InlineRequired function) true)) :ruleset graph-inline-required)
-(rule ((= revision (AnalysisRevision)) (Function function) (= root (FunctionRoot function))
-       (FlowScopeAncestor root region) (= region (wyn-region-of operation)) (ParallelOperation operation))
-      ((InlineParallel function)) :ruleset graph-inline-required)
 ; A nonrecursive callee with parallel work will expose that work in its caller.
 (rule ((= revision (AnalysisRevision)) (InlineCall caller operation callee)
        (= (RecursiveFunction callee) false) (InlineParallel callee))
@@ -34,7 +31,7 @@
       ((set (InlineRequired function) true)) :ruleset graph-inline-required)
 (rule ((= revision (AnalysisRevision)) (InlineCall caller operation callee)
        (= (RecursiveFunction callee) false) (= (InlineRequired callee) true)
-       (= caller-root (FunctionRoot caller)) (= callee-root (FunctionRoot callee)))
+       (= caller-root (wyn-function-root caller)) (= callee-root (wyn-function-root callee)))
       ((InlineCandidate caller-root operation callee-root)) :ruleset graph-inline)
 
 ; The shared forwarding analysis resolves copies and product projections.
@@ -89,8 +86,6 @@
       ((set (RewrittenSlices source) slices)) :ruleset graph-substitution)
 (rule ((= revision (AnalysisRevision)) (= old (Input operation slot)) (= replacement (ValueReplacement old)) (!= old replacement))
       ((delete (Input operation slot)) (set (Input operation slot) replacement)) :ruleset graph-operands)
-(rule ((= revision (AnalysisRevision)) (= old (EdgeArgument operation edge slot)) (= replacement (ValueReplacement old)) (!= old replacement))
-      ((delete (EdgeArgument operation edge slot)) (set (EdgeArgument operation edge slot) replacement)) :ruleset graph-operands)
 (rule ((= revision (AnalysisRevision)) (= old (RegionYield region slot)) (= replacement (ValueReplacement old)) (!= old replacement))
       ((delete (RegionYield region slot)) (set (RegionYield region slot) replacement)) :ruleset graph-operands)
 (rule ((= revision (AnalysisRevision)) (= old (ResultNeutral operation clause slot)) (= replacement (ValueReplacement old)) (!= old replacement))
@@ -120,7 +115,7 @@
 (rule ((= revision (AnalysisRevision)) (YieldCertificate region slot old) (= (ValueReplacement (ValueNameRef old)) (ValueNameRef replacement)) (!= old replacement))
       ((delete (YieldCertificate region slot old)) (YieldCertificate region slot replacement)) :ruleset graph-apply)
 
-(rule ((= revision (AnalysisRevision)) (Function function) (= root (FunctionRoot function))
+(rule ((= revision (AnalysisRevision)) (Function function) (= root (wyn-function-root function))
        (= (RegionParameter root slot) (AccNameRef token)))
       ((set (InlineRequired function) true)) :ruleset graph-inline-required)
 (rule ((= revision (AnalysisRevision)) (Function function) (= (FunctionResultType function slot) (ReturnAccumulator info)))

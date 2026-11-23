@@ -27,7 +27,7 @@ pub(super) fn fuse(graph: &mut Graph) -> Result<bool, OptimizeError> {
         return Ok(false);
     };
     let (producer, read) = (candidate[0], candidate[2]);
-    let lane = query.required("ControlRegion", (producer, 0_i64))?;
+    let lane = query.0.control_region(producer, 0_i64)?;
     let result = query.required("ResultValue", (producer, 0_i64, 0_i64))?;
     let replaced = query.required("Output", (read, 0_i64))?;
     let row = query.required("Input", (read, 1_i64))?;

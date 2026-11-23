@@ -29,9 +29,9 @@ impl Query<'_> {
 
     pub fn operations(&self, region: Value) -> Result<Vec<Value>, OptimizeError> {
         let mut operations = Vec::new();
-        let positions = self.0.positions().read();
+        let positions = self.0.structure().read();
         for &operation in positions.by_region.get(&region).into_iter().flatten() {
-            if self.contains("Operation", operation)? {
+            if self.0.has_operation(operation) {
                 let Some(order) = positions.operations[&operation].order else {
                     return Err(super::output_error("operation in a region has no position"));
                 };
@@ -43,12 +43,7 @@ impl Query<'_> {
     }
 
     pub fn attached_regions(&self, operation: Value) -> Result<Vec<Value>, OptimizeError> {
-        let mut regions = Vec::new();
-        let mut edge = 0_i64;
-        while let Some(region) = self.lookup("ControlRegion", (operation, edge))? {
-            regions.push(region);
-            edge += 1;
-        }
+        let mut regions: Vec<_> = self.0.controls(operation).map(|(_, child)| child).collect();
         for (table, count) in [
             ("ResultReducer", "ResultCount"),
             ("AccumulatorCombiner", "AccumulatorGroupCount"),

@@ -63,7 +63,6 @@ pub(super) fn analyze(graph: &mut Graph) -> Result<(), OptimizeError> {
             "ProductComponent",
             "ComponentLengthWitness",
             "ProjectionPath",
-            "LoopValueCarry",
             "LoopArrayComponent",
             "LoopPreservesComponentLength",
             "ArrayElementRange",

@@ -464,8 +464,8 @@ impl Body<'_, '_, '_> {
             }
             Code::Branch => {
                 let condition = self.named(inputs[0])?;
-                let yes = self.query().required("ControlRegion", (statement, 0_i64))?;
-                let no = self.query().required("ControlRegion", (statement, 1_i64))?;
+                let yes = self.query().0.control_region(statement, 0_i64)?;
+                let no = self.query().0.control_region(statement, 1_i64)?;
                 let types = pattern
                     .iter()
                     .map(|&name| runtime_binding(self.query(), name))
@@ -505,13 +505,13 @@ impl Body<'_, '_, '_> {
                 self.unpack(result)?
             }
             Code::CountedLoop | Code::WhileLoop => {
-                let region = self.query().required("ControlRegion", (statement, 0_i64))?;
+                let region = self.query().0.control_region(statement, 0_i64)?;
                 let mut params = Vec::new();
                 let mut initial = Vec::new();
                 for slot in 0..crate::egglog::analysis::count(self.query(), "OutputCount", statement)? {
                     let parameter = self.query().required("RegionParameter", (region, slot))?;
                     if let Some((name, ty)) = runtime_binding(self.query(), parameter)? {
-                        let argument = self.query().required("EdgeArgument", (statement, 0_i64, slot))?;
+                        let argument = self.query().0.argument(statement, 0_i64, slot)?;
                         let Some(value) = self.operand(argument)? else {
                             return Err(error("loop carry has no runtime value"));
                         };
@@ -574,7 +574,7 @@ impl Body<'_, '_, '_> {
                         args.push(value);
                     }
                 }
-                let target = self.query().required("CallTarget", statement)?;
+                let target = self.query().0.call_target(statement)?;
                 let (id, parameters, ty) = self.compiler.function(target)?;
                 if args.len() != parameters.len() {
                     return Err(error("shader call arity differs from its declared signature"));
@@ -592,7 +592,7 @@ impl Body<'_, '_, '_> {
                 }
             }
             Code::WithAcc => {
-                let region = self.query().required("ControlRegion", (statement, 0_i64))?;
+                let region = self.query().0.control_region(statement, 0_i64)?;
                 if self.query().contains("WorkgroupAccumulator", statement)? {
                     let values = self.workgroup_accumulator(statement, region)?;
                     let values = self.scope_outputs(&pattern, values)?;

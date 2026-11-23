@@ -9,7 +9,7 @@ use egglog_engine::Value;
 fn function_body(graph: &Graph) -> Vec<Value> {
     let query = Query(graph);
     let entry = query.first("EntryOrder").unwrap().unwrap()[0];
-    query.operations(query.required("FunctionRoot", entry).unwrap()).unwrap()
+    query.operations(query.0.function_root(entry).unwrap()).unwrap()
 }
 
 #[test]
@@ -141,7 +141,7 @@ fn scatter_reads_include_branch_dependencies_without_turning_them_into_operand_u
     for statement in body {
         if query.contains("BranchOperation", statement).unwrap() {
             for edge in 0_i64..2 {
-                let arm = query.required("ControlRegion", (statement, edge)).unwrap();
+                let arm = query.0.control_region(statement, edge).unwrap();
                 assert!(query.any("RegionCapture", |row| row[0] == arm).unwrap());
                 branch_reads += 1;
             }

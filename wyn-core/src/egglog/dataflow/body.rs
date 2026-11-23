@@ -1,7 +1,7 @@
 //! Import the live body graph and publish changes to its direct operands.
 use super::{edit, ir::Code};
 use crate::ast::Span;
-use crate::egglog::graph::Graph;
+use crate::egglog::graph::{ArgumentSite, Graph};
 use crate::egglog::{analysis, output_error, query::Query, timing, OptimizeError};
 use crate::memory_ir::{
     BodyRole, Definition, ForwardedValues, Function, MemoryIr, Operation, OperationId, Parameter, Region,
@@ -50,7 +50,7 @@ impl BodyGraph {
         })?;
         let mut functions = LookupMap::new();
         query.for_each("LiveFunction", |row| {
-            let function = if let Some(key) = query.lookup("FunctionRoot", row[0])? {
+            let function = if let Some(key) = query.0.root_of(row[0]) {
                 Function::Defined(region_ids[&key])
             } else {
                 Function::External
@@ -76,7 +76,7 @@ impl BodyGraph {
                 let code = query.0.code(op)?;
                 let outputs = query.sequence("Output", op)?;
                 let definition = match code {
-                    Code::Call => Definition::Call(functions[&query.required("CallTarget", op)?]),
+                    Code::Call => Definition::Call(functions[&query.0.call_target(op)?]),
                     code => Definition::Other(code),
                 };
                 let span = query.0.span(op).unwrap_or_else(Span::generated);
@@ -121,19 +121,19 @@ impl BodyGraph {
                 .map(resolve)
                 .collect::<Result<_, _>>()?;
         }
-        let mut arguments = LookupMap::<(Value, Value), Vec<(i64, ValueRef)>>::new();
-        query.for_function("EdgeArgument", |keys, name| {
-            if operation_ids.contains_key(&keys[0]) {
-                arguments
-                    .entry((keys[0], keys[1]))
-                    .or_default()
-                    .push((query.0.value_to_base(keys[2]), resolve(name)?));
+        for (op, &key) in &operations {
+            for (slot, child) in query.0.controls(key) {
+                let incoming =
+                    query.0.arguments(key, slot).into_iter().map(resolve).collect::<Result<_, _>>()?;
+                ir.operations[op].bodies.push(RegionEdge {
+                    role: BodyRole::Control(slot as usize),
+                    region: region_ids[&child],
+                    arguments: incoming,
+                });
             }
-            Ok(())
-        })?;
+        }
         for (table, role) in [
-            ("ControlRegion", BodyRole::Control as fn(usize) -> BodyRole),
-            ("ResultReducer", BodyRole::Reducer),
+            ("ResultReducer", BodyRole::Reducer as fn(usize) -> BodyRole),
             ("AccumulatorCombiner", BodyRole::Combiner),
         ] {
             query.for_function(table, |keys, child| {
@@ -142,22 +142,10 @@ impl BodyGraph {
                 };
                 let index = usize::try_from(query.0.value_to_base::<i64>(keys[1]))
                     .map_err(|_| output_error("negative region index"))?;
-                let role = role(index);
-                let mut incoming = Vec::new();
-                if let BodyRole::Control(_) = role {
-                    let mut args = arguments.remove(&(keys[0], keys[1])).unwrap_or_default();
-                    args.sort_unstable_by_key(|&(index, _)| index);
-                    for (expected, (slot, name)) in args.into_iter().enumerate() {
-                        if slot != expected as i64 {
-                            return Err(output_error("missing region argument"));
-                        }
-                        incoming.push(name);
-                    }
-                }
                 ir.operations[op].bodies.push(RegionEdge {
-                    role,
+                    role: role(index),
                     region: region_ids[&child],
-                    arguments: incoming,
+                    arguments: Vec::new(),
                 });
                 Ok(())
             })?;
@@ -198,6 +186,7 @@ impl BodyGraph {
         edits: Vec<(UseSite, ValueRef)>,
     ) -> Result<(), OptimizeError> {
         let mut rows = Vec::with_capacity(edits.len());
+        let mut arguments = Vec::new();
         for (site, value) in edits {
             let (table, keys) = match site {
                 UseSite::Input(op, i) => {
@@ -207,14 +196,13 @@ impl BodyGraph {
                     "RegionYield",
                     vec![self.regions[region], graph.base_to_value(i as i64)],
                 ),
-                UseSite::Argument(op, BodyRole::Control(edge), i) => (
-                    "EdgeArgument",
-                    vec![
-                        self.operations[op],
-                        graph.base_to_value(edge as i64),
-                        graph.base_to_value(i as i64),
-                    ],
-                ),
+                UseSite::Argument(op, BodyRole::Control(edge), i) => {
+                    arguments.push((
+                        ArgumentSite(self.operations[op], edge as i64, i),
+                        self.names[&value],
+                    ));
+                    continue;
+                }
                 UseSite::Argument(_, _, _) => {
                     return Err(output_error("combiner arguments use collective metadata"))
                 }
@@ -222,6 +210,9 @@ impl BodyGraph {
             rows.push((table, keys, self.names[&value]));
         }
         graph.update(|mut sink| {
+            for (site, value) in arguments {
+                sink.set_argument(site, value)?;
+            }
             for (table, keys, value) in rows {
                 sink.remove(table, RawValues(keys.clone()))?;
                 sink.set(table, RawValues(keys), value)?;

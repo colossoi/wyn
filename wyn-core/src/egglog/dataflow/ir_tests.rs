@@ -89,7 +89,7 @@ fn operations_share_connectivity_without_sharing_occurrences_or_payloads() {
                 sink.set("RegionReturnType", (body.0, 1_i64), returns)?;
                 let function = sink.add("FunctionId", (0_i64, "example"))?;
                 sink.add("Function", function)?;
-                sink.set("FunctionRoot", function, body.0)?;
+                sink.set_function_root(function, body.0);
                 sink.set("FunctionResultCount", function, 2_i64)?;
                 sink.set("FunctionResultType", (function, 0_i64), returns)?;
                 sink.set("FunctionResultType", (function, 1_i64), returns)?;

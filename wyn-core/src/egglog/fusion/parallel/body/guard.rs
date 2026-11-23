@@ -260,10 +260,7 @@ impl Body {
                         for (field, &returns) in guard.returns.iter().enumerate() {
                             sink.set("RegionReturnType", (region, field as i64), returns)?;
                         }
-                        let role = if slot == 0 { "ThenRegion" } else { "ElseRegion" };
-                        let role = sink.add(role, RawValues(vec![]))?;
-                        sink.set("ControlRegion", (id, slot as i64), region)?;
-                        sink.set("ControlRole", (id, slot as i64), role)?;
+                        sink.set_control(id, slot as i64, region);
                     }
                 }
                 let compacted = sink.add("Compacted", RawValues(vec![]))?;

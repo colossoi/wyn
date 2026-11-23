@@ -27,11 +27,7 @@ pub(super) fn lower(
     target: CodegenTarget,
 ) -> Result<Elaborated, OptimizeError> {
     let query = Query(&program.graph);
-    let mut definitions = LookupMap::default();
-    query.for_function("FunctionRoot", |keys, root| {
-        definitions.insert(keys[0], root);
-        Ok(())
-    })?;
+    let definitions = query.0.function_roots().collect();
     let mut externals = LookupMap::default();
     query.for_each("External", |row| {
         externals.insert(row[0], row[0]);

@@ -32,11 +32,18 @@ pub(super) fn entry(graph: &Graph) -> Value {
 }
 
 pub(super) fn root(graph: &Graph) -> Value {
-    Query(graph).required("FunctionRoot", entry(graph)).unwrap()
+    Query(graph).0.function_root(entry(graph)).unwrap()
 }
 
 pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(), OptimizeError> {
-    if !facts.contains("FixtureRegion") && !facts.contains("FixtureOrder") {
+    let fields = [
+        "FixtureRegion",
+        "FixtureOrder",
+        "FixtureFunctionRoot",
+        "FixtureCallTarget",
+        "FixtureControlRegion",
+    ];
+    if !fields.iter().any(|field| facts.contains(field)) {
         graph.parse_and_run_program(None, facts)?;
         return Ok(());
     }
@@ -46,10 +53,14 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
             "
             (function FixtureRegion (OperationKey) RegionKey :no-merge)
             (function FixtureOrder (OperationKey) i64 :no-merge)
+            (function FixtureFunctionRoot (FunctionName) RegionKey :no-merge)
+            (function FixtureCallTarget (OperationKey) FunctionName :no-merge)
+            (function FixtureControlRegion (OperationKey i64) RegionKey :no-merge)
         ",
         )?;
     }
-    graph.parse_and_run_program(None, facts)?;
+    let (setup, checks) = facts.split_once("(run-schedule").unwrap_or((facts, ""));
+    graph.parse_and_run_program(None, setup)?;
     let mut regions = Vec::new();
     let mut orders = Vec::new();
     let query = Query(graph);
@@ -61,7 +72,33 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
         orders.push((key[0], graph.value_to_base::<i64>(order)));
         Ok(())
     })?;
+    let mut roots = Vec::new();
+    let mut targets = Vec::new();
+    query.for_function("FixtureFunctionRoot", |key, region| {
+        roots.push((key[0], region));
+        Ok(())
+    })?;
+    query.for_function("FixtureCallTarget", |key, function| {
+        targets.push((key[0], function));
+        Ok(())
+    })?;
+    let mut controls = Vec::new();
+    query.for_function("FixtureControlRegion", |keys, child| {
+        controls.push((keys[0], graph.value_to_base::<i64>(keys[1]), child));
+        Ok(())
+    })?;
     graph.update(|mut sink| {
+        for (operation, slot, child) in controls {
+            sink.set_control(operation, slot, child);
+            sink.set("RegionOwnedBy", child, operation)?;
+        }
+        for (function, region) in roots {
+            sink.set_function_root(function, region);
+            sink.add("RootFunction", (region, function))?;
+        }
+        for (operation, function) in targets {
+            sink.set_call_target(operation, function);
+        }
         for (operation, region) in regions {
             sink.set_region(operation, region);
         }
@@ -70,7 +107,11 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
         }
         Ok(())
     })?;
-    graph.clear_function("FixtureRegion")?;
-    graph.clear_function("FixtureOrder")?;
+    for field in fields {
+        graph.clear_function(field)?;
+    }
+    if !checks.is_empty() {
+        graph.parse_and_run_program(None, &format!("(run-schedule{checks}"))?;
+    }
     Ok(())
 }

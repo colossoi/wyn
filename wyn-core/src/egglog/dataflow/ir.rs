@@ -97,8 +97,8 @@ impl Code {
 pub(in crate::egglog) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
     register(graph)?;
     graph.parse_and_run_program(Some("shared dataflow".into()), include_str!("../flow.egg"))?;
-    graph.register_positions()?;
     graph.parse_and_run_program(Some("flat dataflow".into()), include_str!("../memory/schema.egg"))?;
+    graph.register_fields()?;
     publish_properties(graph)?;
     crate::egglog::analysis::load(graph)?;
     super::edit::load(graph)?;

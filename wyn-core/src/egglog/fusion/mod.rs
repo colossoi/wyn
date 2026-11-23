@@ -66,7 +66,7 @@ fn collected_map(query: Query<'_>, operation: Value) -> Result<Option<MapLevel>,
     {
         return Ok(None);
     }
-    let region = query.required("ControlRegion", (operation, 0_i64))?;
+    let region = query.0.control_region(operation, 0_i64)?;
     let domain = query.required("OperationDomain", operation)?;
     if analysis::count(query, "DomainRank", domain)? != 1 {
         return Ok(None);
@@ -210,7 +210,7 @@ fn fuse_ranked_bucket(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let outer = &levels[0];
     let inner = &levels[levels.len() - 1];
     let query = Query(graph);
-    let callback = query.required("ControlRegion", (bucket, 0_i64))?;
+    let callback = query.0.control_region(bucket, 0_i64)?;
     let old_parameter = query.required("RegionParameter", (callback, 0_i64))?;
     edit::replace(graph, &[(old_parameter, inner.result)])?;
     for operation in hoisted {

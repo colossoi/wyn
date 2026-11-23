@@ -92,12 +92,7 @@ impl Body {
                     ir::parameters(&mut sink, WireRegionId(arm), &[])?;
                     ir::yields(&mut sink, WireRegionId(arm), &[value])?;
                     sink.set("RegionReturnType", (arm, 0_i64), return_type)?;
-                    let role = sink.add(
-                        if slot == 0 { "ThenRegion" } else { "ElseRegion" },
-                        RawValues(vec![]),
-                    )?;
-                    sink.set("ControlRegion", (guard, slot), arm)?;
-                    sink.set("ControlRole", (guard, slot), role)?;
+                    sink.set_control(guard, slot, arm);
                     arms.push(arm);
                 }
                 Ok((guard, arms, predicate.fact(&mut sink)?, inner_name, steps))

@@ -88,6 +88,7 @@
 (relation ArrayOuterBound (ValueName IndexExp))
 (relation ArrayRowWidth (ValueName i64))
 (relation LoopMatchesOuterBound (OperationKey i64))
+(relation LoopValueCarry (OperationKey i64 ValueName ValueName ValueName))
 (relation ConstantBound (IndexExp i64))
 (function MovableOperation (OperationKey) bool :merge (and old new))
 (relation InvocationDependent (OperationKey))

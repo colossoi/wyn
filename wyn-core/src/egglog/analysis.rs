@@ -114,8 +114,7 @@ pub(super) fn invalidate(graph: &mut Graph) -> Result<(), OptimizeError> {
         "MovableOperation",
         "InvocationDependent",
         "InvocationRegion",
-        "LoopInitial",
-        "LoopBackedge",
+        "LoopValueCarry",
         "AccumulatorParameter",
         "FlowScopeParent",
         "FlowScopeAncestor",
@@ -152,17 +151,17 @@ pub(super) fn advance(graph: &mut Graph) -> Result<(), OptimizeError> {
 }
 
 /// Refresh lexical ownership, reachable calls, and recursion without solving dataflow.
-pub(super) fn structure(graph: &mut Graph) -> Result<(), OptimizeError> {
+pub(super) fn structure(graph: &mut Graph, for_inlining: bool) -> Result<(), OptimizeError> {
     let _timing = timing::span("egglog graph structure");
     invalidate(graph)?;
-    calls::publish(graph)?;
+    calls::publish(graph, for_inlining)?;
     graph.parse_and_run_program(None, "(run-schedule (saturate graph-structure flow-scopes))")?;
     Ok(())
 }
 
 pub(super) fn run(graph: &mut Graph) -> Result<(), OptimizeError> {
     let _timing = timing::span("egglog graph analysis");
-    structure(graph)?;
+    structure(graph, false)?;
     graph.parse_and_run_program(
         None,
         "(run-schedule
@@ -392,15 +391,11 @@ pub(super) fn validate(graph: &Graph) -> Result<(), OptimizeError> {
             }
         }
         if query.contains("CallOperation", operation)? {
-            let target = query.required("CallTarget", operation)?;
+            let target = query.0.call_target(operation)?;
             let expected = if query.contains("External", target)? {
                 count(query, "ExternalParameterCount", target)?
             } else {
-                count(
-                    query,
-                    "RegionParameterCount",
-                    query.required("FunctionRoot", target)?,
-                )?
+                count(query, "RegionParameterCount", query.0.function_root(target)?)?
             };
             if count(query, "InputCount", operation)? != expected {
                 return Err(output_error("call argument count differs from its signature"));
@@ -410,7 +405,7 @@ pub(super) fn validate(graph: &Graph) -> Result<(), OptimizeError> {
         if query.contains("CountedLoopOperation", operation)?
             || query.contains("WhileLoopOperation", operation)?
         {
-            let body = query.required("ControlRegion", (operation, 0_i64))?;
+            let body = query.0.control_region(operation, 0_i64)?;
             let results = count(query, "OutputCount", operation)?;
             let induction = i64::from(query.contains("CountedLoopOperation", operation)?);
             if count(query, "RegionParameterCount", body)? != results + induction
@@ -419,7 +414,7 @@ pub(super) fn validate(graph: &Graph) -> Result<(), OptimizeError> {
                 return Err(output_error("loop carry signature is inconsistent"));
             }
             for slot in 0..results {
-                let initial = query.required("EdgeArgument", (operation, 0_i64, slot))?;
+                let initial = query.0.argument(operation, 0_i64, slot)?;
                 let parameter = query.required("RegionParameter", (body, slot))?;
                 let backedge = query.required("RegionYield", (body, slot))?;
                 let result = query.required("Output", (operation, slot))?;

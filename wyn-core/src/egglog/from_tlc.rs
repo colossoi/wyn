@@ -5,7 +5,7 @@ use super::payload::Payload;
 use super::{fusion, output_error, OptimizeError};
 use crate::ast::Span;
 use crate::builtins::{by_id, catalog, BuiltinId, Purity};
-use crate::egglog::graph::{Graph, State};
+use crate::egglog::graph::{ArgumentSite, Graph, State};
 use crate::op::BinaryOperator;
 use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
 use crate::tlc::stage::OwnershipApplied;
@@ -594,7 +594,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                 let value = self.visit(body, &mut scope)?;
                 let body = self.finish(scope, &value)?;
                 self.sink.add("Function", name)?;
-                self.sink.set("FunctionRoot", name, body.0)?;
+                self.sink.set_function_root(name, body.0);
             }
             self.bindings.restore(checkpoint);
             if let DefMeta::EntryPoint(entry) = &definition.meta {
@@ -641,7 +641,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
             diets.push(self.diet(&definition.param_diets.get(i).cloned().unwrap_or_default())?);
         }
         let operation = self.operation(Code::Call, &inputs)?;
-        self.sink.set("CallTarget", operation.0, name)?;
+        self.sink.set_call_target(operation.0, name);
         for (index, &diet) in diets.iter().enumerate() {
             self.sink.set("InputDiet", (operation.0, index as i64), diet)?;
         }
@@ -749,12 +749,8 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                 let yes = self.finish(left, &yes)?;
                 let no = self.finish(right, &no)?;
                 let expression = self.operation(Code::Branch, &[Name::Value(condition)])?;
-                self.sink.set("ControlRegion", (expression.0, 0_i64), yes.0)?;
-                self.sink.set("ControlRegion", (expression.0, 1_i64), no.0)?;
-                let then_role = self.unit("ThenRegion")?;
-                let else_role = self.unit("ElseRegion")?;
-                self.sink.set("ControlRole", (expression.0, 0_i64), then_role)?;
-                self.sink.set("ControlRole", (expression.0, 1_i64), else_role)?;
+                self.sink.set_control(expression.0, 0_i64, yes.0);
+                self.sink.set_control(expression.0, 1_i64, no.0);
                 self.emit(expression, &term.ty, scope)
             }
             TermKind::ArrayExpr(array) => self.array(array, scope),
@@ -868,9 +864,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
         let body = self.finish_region(inner, &[], &[])?;
         let operation = self.operation(Code::Parallel, &[])?;
         self.sink.set("OperationDomain", operation.0, domain.key)?;
-        self.sink.set("ControlRegion", (operation.0, 0_i64), body.0)?;
-        let role = self.unit("LaneRegion")?;
-        self.sink.set("ControlRole", (operation.0, 0_i64), role)?;
+        self.sink.set_control(operation.0, 0_i64, body.0);
         let execution = self.unit("Unscheduled")?;
         self.sink.set("OperationExecution", operation.0, execution)?;
         self.sink.set("ResultCount", operation.0, clauses.len() as i64)?;
@@ -1226,9 +1220,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                     },
                     &inputs,
                 )?;
-                self.sink.set("ControlRegion", (expression.0, 0_i64), callback.0)?;
-                let role = self.unit("LaneRegion")?;
-                self.sink.set("ControlRole", (expression.0, 0_i64), role)?;
+                self.sink.set_control(expression.0, 0_i64, callback.0);
                 self.emit(expression, ty, scope)
             }
         }
@@ -1287,9 +1279,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
         self.statement(pattern.clone(), parallel, &mut body)?;
         let body = self.finish_region(body, &pattern, &returns)?;
         let operation = self.operation(Code::WithAcc, &[])?;
-        self.sink.set("ControlRegion", (operation.0, 0_i64), body.0)?;
-        let role = self.unit("AccumulatorRegion")?;
-        self.sink.set("ControlRole", (operation.0, 0_i64), role)?;
+        self.sink.set_control(operation.0, 0_i64, body.0);
         self.sink.set("AccumulatorGroupCount", operation.0, inputs.len() as i64)?;
         for (group, input) in inputs.into_iter().enumerate() {
             let group = group as i64;
@@ -1627,12 +1617,10 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
         }
         let body = self.finish_region(inner, &results, &returns)?;
         let operation = self.operation(form, &[])?;
-        self.sink.set("ControlRegion", (operation.0, 0_i64), body.0)?;
-        let role = self.unit("LoopRegion")?;
-        self.sink.set("ControlRole", (operation.0, 0_i64), role)?;
+        self.sink.set_control(operation.0, 0_i64, body.0);
         for (index, initial) in initial_values.iter().enumerate() {
             let name = self.binding(initial).fact(&mut self.sink)?;
-            self.sink.set("EdgeArgument", (operation.0, 0_i64, index as i64), name)?;
+            self.sink.set_argument(ArgumentSite(operation.0, 0, index), name)?;
         }
         if let Some((index, count)) = induction {
             self.sink.set("LoopIndex", operation.0, index.name)?;

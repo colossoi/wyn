@@ -16,7 +16,7 @@ fn change_lane_index(
     commute: bool,
 ) -> Result<(), OptimizeError> {
     let query = Query(graph);
-    let lane = query.required("ControlRegion", (traversal, 0_i64))?;
+    let lane = query.0.control_region(traversal, 0_i64)?;
     let operations = query.operations(lane)?;
     let position = operations.iter().position(|&op| query.contains("IndexOperation", op).unwrap()).unwrap();
     let load = operations[position];
@@ -103,7 +103,7 @@ fn branch_sinking_moves_single_arm_producers_and_shares_overlapping_demands() ->
     for (op, parent) in loops {
         let region = query.0.operation_region(op)?;
         if region != parent {
-            assert!(query.row("ControlRegion", |row| row[2] == region)?.is_some());
+            assert!(query.0.structure().read().controls.values().any(|edge| edge.region == region));
             moved += 1;
         }
     }
@@ -261,8 +261,8 @@ fn merging_matching_branches_preserves_certificates_and_path_order() -> Result<(
     let condition = query.name(query.required("Input", (first, 0_i64))?)?;
     let mut arms = Vec::new();
     for edge in [0_i64, 1] {
-        let a = query.required("ControlRegion", (first, edge))?;
-        let b = query.required("ControlRegion", (second, edge))?;
+        let a = query.0.control_region(first, edge)?;
+        let b = query.0.control_region(second, edge)?;
         let offset = analysis::count(query, "RegionYieldCount", a)?;
         let operations = [query.operations(a)?, query.operations(b)?].concat();
         arms.push((a, b, offset, operations));
@@ -383,7 +383,7 @@ fn guarded_compaction_streams_a_map_into_a_reduce_in_one_batch() -> Result<(), O
     query.for_function("EntryOrder", |keys, order| {
         roots.push((
             query.0.value_to_base::<i64>(order),
-            query.required("FunctionRoot", keys[0])?,
+            query.0.function_root(keys[0])?,
         ));
         Ok(())
     })?;
@@ -516,7 +516,7 @@ fn one_fusion_publication_contracts_independent_bodies_and_pointwise_chains() ->
     query.for_function("EntryOrder", |keys, order| {
         roots.push((
             query.0.value_to_base::<i64>(order),
-            query.required("FunctionRoot", keys[0])?,
+            query.0.function_root(keys[0])?,
         ));
         Ok(())
     })?;
@@ -607,7 +607,7 @@ fn free_names_preserve_large_shared_fanout() {
     analysis::run(&mut program.graph).unwrap();
     let query = Query(&program.graph);
     let entry = query.first("EntryOrder").unwrap().unwrap()[0];
-    let root = query.required("FunctionRoot", entry).unwrap();
+    let root = query.0.function_root(entry).unwrap();
     let input = query.required("RegionParameter", (root, 0_i64)).unwrap();
     let mut uses = 0;
     query
@@ -703,7 +703,7 @@ fn accumulator_sinking_batches_independent_producers() -> Result<(), OptimizeErr
     let query = Query(&graph);
     let mut regions = Vec::new();
     query.for_function("EntryOrder", |key, _| {
-        regions.push(query.required("FunctionRoot", key[0])?);
+        regions.push(query.0.function_root(key[0])?);
         Ok(())
     })?;
     let analyzed = query.required("DataflowRevision", RawValues(vec![]))?;
@@ -715,7 +715,7 @@ fn accumulator_sinking_batches_independent_producers() -> Result<(), OptimizeErr
         assert!(operations.iter().all(|&op| !query.contains("ParallelOperation", op).unwrap()));
         let acc =
             operations.into_iter().find(|&op| query.contains("AccumulatorOperation", op).unwrap()).unwrap();
-        let body = query.required("ControlRegion", (acc, 0_i64))?;
+        let body = query.0.control_region(acc, 0_i64)?;
         let traversals = query
             .operations(body)?
             .into_iter()

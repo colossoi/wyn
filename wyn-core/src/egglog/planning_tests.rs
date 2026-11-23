@@ -257,7 +257,7 @@ fn fused_cases(sources: &[impl AsRef<str>], check: impl Fn(usize, &Graph, Value)
 
 fn top_level(graph: &Graph, function: Value, constructor: &str) -> Vec<Value> {
     let query = Query(graph);
-    let root = query.required("FunctionRoot", function).unwrap();
+    let root = query.0.function_root(function).unwrap();
     query
         .operations(root)
         .unwrap()
@@ -290,7 +290,7 @@ fn dispatches(graph: &Graph, function: Value) -> Vec<super::super::execution::Di
     collect(
         query,
         &execution,
-        query.required("FunctionRoot", function).unwrap(),
+        query.0.function_root(function).unwrap(),
         &mut stages,
     );
     stages
@@ -400,7 +400,7 @@ fn dependent_or_partial_regions_stay_inside_parallel_callbacks() {
         ],
         |index, graph, function| {
             let query = Query(graph);
-            let root = query.required("FunctionRoot", function).unwrap();
+            let root = query.0.function_root(function).unwrap();
             let result = query.required("RegionYield", (root, 0_i64)).unwrap();
             let mut checked = false;
             for outer in top_level(graph, function, "Parallel") {
@@ -411,7 +411,7 @@ fn dependent_or_partial_regions_stay_inside_parallel_callbacks() {
                     );
                     continue;
                 }
-                let body = query.required("ControlRegion", (outer, 0_i64)).unwrap();
+                let body = query.0.control_region(outer, 0_i64).unwrap();
                 assert!(
                     within(graph, function).into_iter().any(|operation| code_is(
                         query, operation, "Parallel"
@@ -537,8 +537,7 @@ fn shrinking_loop_does_not_inherit_its_initial_extent() {
             assert_eq!(loops.len(), 1);
             let operation = loops[0];
             assert!(!query.contains("LoopPreservesOuterLength", (operation, 0_i64)).unwrap());
-            let initial =
-                query.name(query.required("EdgeArgument", (operation, 0_i64, 0_i64)).unwrap()).unwrap();
+            let initial = query.name(query.0.argument(operation, 0_i64, 0_i64).unwrap()).unwrap();
             let output = query.name(query.required("Output", (operation, 0_i64)).unwrap()).unwrap();
             assert!(array_extents(query, query.required("ValueType", output).unwrap()).is_some());
             assert!(!query.contains("OuterShapeSource", (output, initial)).unwrap());
@@ -851,7 +850,7 @@ fn nested_domains_retain_distinct_axes_and_capture_origins() {
             };
             let domain = query.required("OperationDomain", outer).unwrap();
             let outer_index = query.required("DomainAxis", (domain, 0_i64)).unwrap();
-            let body = query.required("ControlRegion", (outer, 0_i64)).unwrap();
+            let body = query.0.control_region(outer, 0_i64).unwrap();
             let inner = query
                 .operations(body)
                 .unwrap()
@@ -861,7 +860,7 @@ fn nested_domains_retain_distinct_axes_and_capture_origins() {
             let domain = query.required("OperationDomain", inner).unwrap();
             let inner_index = query.required("DomainAxis", (domain, 0_i64)).unwrap();
             assert_ne!(outer_index, inner_index, "nested axes need distinct binders");
-            let lane = query.required("ControlRegion", (inner, 0_i64)).unwrap();
+            let lane = query.0.control_region(inner, 0_i64).unwrap();
             let mut captures = false;
             query
                 .for_each("RegionCapture", |row| {
@@ -983,7 +982,7 @@ fn rectangular_candidates_retain_expensive_but_legal_recomputation() {
     query
         .for_each("DistributionPair", |row| {
             assert!(query.flag("DistributionSafe", (row[0], row[1]))?);
-            let body = query.required("ControlRegion", (row[0], 0_i64))?;
+            let body = query.0.control_region(row[0], 0_i64)?;
             assert_eq!(
                 analysis::count(query, "RegionOperationCount", body)? - 1,
                 80,
@@ -1091,7 +1090,7 @@ fn rectangular_runtime_dimensions_must_be_uniform_across_outer_coordinates() {
     ];
     planned_cases(&sources, |index, graph, function| {
         let query = Query(graph);
-        let root = query.required("FunctionRoot", function).unwrap();
+        let root = query.0.function_root(function).unwrap();
         let output = query.required("RegionYield", (root, 0_i64)).unwrap();
         let ranks = top_level(graph, function, "Parallel")
             .into_iter()
@@ -1222,7 +1221,7 @@ fn loop_placement_accounts_for_iteration_work_before_storage() {
     ] {
         placed_cases(&[source], |_, graph, function| {
             let query=Query(graph);let loops=within(graph,function).into_iter().filter(|&operation|code_is(query,operation,"Loop")).collect::<Vec<_>>();
-            assert_eq!(loops.len(),1,"{source}");let operation=loops[0];let body=query.required("ControlRegion",(operation,0_i64)).unwrap();
+            assert_eq!(loops.len(),1,"{source}");let operation=loops[0];let body=query.0.control_region(operation, 0_i64).unwrap();
             assert_eq!(query.flag("HostRegion",body).unwrap(),dispatched,"{source}");assert_eq!(query.flag("LocalLoop",operation).unwrap(),!dispatched,"{source}");
             let reductions=top_level(graph,function,"Parallel").into_iter().map(|operation|folds(query,operation).len()).sum::<usize>();
             assert_eq!(reductions,hoisted_reductions,"the invariant reduction must execute once before the local loop: {source}");
@@ -1245,7 +1244,7 @@ fn nested_loop_work_uses_constant_trip_counts() {
                 .filter(|&operation| query.contains("WhileLoopOperation", operation).unwrap())
                 .collect::<Vec<_>>();
             assert_eq!(loops.len(), 1);
-            let body = query.required("ControlRegion", (loops[0], 0_i64)).unwrap();
+            let body = query.0.control_region(loops[0], 0_i64).unwrap();
             assert_eq!(query.flag("HostRegion", body).unwrap(), dispatched, "{source}");
         });
     }
@@ -1436,7 +1435,7 @@ fn folds(query: Query<'_>, operation: Value) -> Vec<Value> {
 }
 fn within(graph: &Graph, function: Value) -> Vec<Value> {
     let query = Query(graph);
-    let root = query.required("FunctionRoot", function).unwrap();
+    let root = query.0.function_root(function).unwrap();
     let mut operations = Vec::new();
     query
         .for_each("LiveOperation", |row| {
@@ -1629,8 +1628,8 @@ fn speculation_requires_native_outputs_purity_and_bounded_work() {
             (set (OutputCount (OperationId 0)) 1)
             (set (Output (OperationId 0) 0) (ValueNameRef (ValueId 0)))
             (set (ValueType (ValueId 0)) (ScalarInfo {element}))
-            (set (ControlRegion (OperationId 0) 0) (RegionId 0))
-            (set (ControlRegion (OperationId 0) 1) (RegionId 1))
+            (set (FixtureControlRegion (OperationId 0) 0) (RegionId 0))
+            (set (FixtureControlRegion (OperationId 0) 1) (RegionId 1))
             (set (RegionWork (RegionId 0)) (bigint {work}))
             (set (RegionWork (RegionId 1)) (bigint 0))
             (run-schedule (saturate physical-legality))
@@ -1874,11 +1873,11 @@ fn fixed_loop_states_require_every_array_component_to_preserve_length() {
 fn retained_call_work_composes_and_unknown_work_stays_unknown() {
     for (callee, expected) in [
         (
-            "(set (FunctionRoot leaf) (RegionId 2)) (set (RecursiveFunction leaf) false)",
+            "(set (FixtureFunctionRoot leaf) (RegionId 2)) (set (RecursiveFunction leaf) false)",
             Some(3),
         ),
         (
-            "(set (FunctionRoot leaf) (RegionId 2)) (set (RecursiveFunction leaf) true)",
+            "(set (FixtureFunctionRoot leaf) (RegionId 2)) (set (RecursiveFunction leaf) true)",
             None,
         ),
         ("(External leaf)", None),
@@ -1886,10 +1885,10 @@ fn retained_call_work_composes_and_unknown_work_stays_unknown() {
         let facts = format!(
             r#"
             (let middle (FunctionId 1 "middle")) (let leaf (FunctionId 2 "leaf"))
-            (set (FunctionRoot middle) (RegionId 1)) (set (RecursiveFunction middle) false)
+            (set (FixtureFunctionRoot middle) (RegionId 1)) (set (RecursiveFunction middle) false)
             {callee}
-            (set (CallTarget (OperationId 0)) middle)
-            (set (CallTarget (OperationId 1)) leaf)
+            (set (FixtureCallTarget (OperationId 0)) middle)
+            (set (FixtureCallTarget (OperationId 1)) leaf)
             (set (FixtureRegion (OperationId 1)) (RegionId 1))
             (set (FixtureRegion (OperationId 2)) (RegionId 2))
             (FirstOperation (RegionId 1) (OperationId 1)) (LastOperation (RegionId 1) (OperationId 1))

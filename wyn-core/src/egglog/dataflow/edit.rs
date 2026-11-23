@@ -1,10 +1,11 @@
 //! Apply selected edits to keyed graph cells without reconstructing a program.
 use super::ir::{self, Code};
-use crate::egglog::graph::Graph;
+use crate::egglog::graph::{ArgumentSite, Graph};
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, output_error, OptimizeError};
 use crate::{LookupMap, LookupSet};
 use egglog_engine::{RawValues, Value, Write};
+use wyn_graph::ReplacementForest;
 
 pub(in crate::egglog) const OPERATION_CELLS: &[&str] = &[
     "InstructionWork",
@@ -14,9 +15,6 @@ pub(in crate::egglog) const OPERATION_CELLS: &[&str] = &[
     "InputDiet",
     "Output",
     "OutputCount",
-    "ControlRegion",
-    "ControlRole",
-    "EdgeArgument",
     "LoopIndex",
     "LoopStart",
     "LoopCount",
@@ -46,7 +44,6 @@ pub(in crate::egglog) const OPERATION_CELLS: &[&str] = &[
     "AccumulatorArrayCount",
     "AccumulatorArray",
     "AccumulatorCombiner",
-    "CallTarget",
     "CallReturnType",
     "ScalarPayload",
 ];
@@ -192,8 +189,27 @@ pub(in crate::egglog) fn replace(
     graph: &mut Graph,
     replacements: &[(Value, Value)],
 ) -> Result<(), OptimizeError> {
+    let mut resolved = ReplacementForest::new();
+    for &(old, new) in replacements {
+        resolved.replace(old, new).map_err(|_| output_error("cyclic operand replacement"))?;
+    }
+    let mut arguments = Vec::new();
+    {
+        let graph = graph.structure().read();
+        for (old, new) in resolved.into_map() {
+            if let Some(sites) = graph.argument_uses.get(&old) {
+                arguments.extend(sites.iter().map(|&site| (site, new)));
+            }
+        }
+    }
     seed_replacements(graph, replacements)?;
     graph.parse_and_run_program(None, "(run-schedule (saturate graph-operands))")?;
+    graph.update(|mut sink| {
+        for (site, value) in arguments {
+            sink.set_argument(site, value)?;
+        }
+        Ok(())
+    })?;
     replace_attributes_with_seeded_values(graph)
 }
 
@@ -367,6 +383,8 @@ pub(in crate::egglog) fn set_code(
         for (table, keys) in obsolete {
             sink.remove(table, RawValues(keys))?;
         }
+        sink.clear_control(operation);
+        sink.remove_call_target(operation);
         sink.remove("ScalarPayload", operation)?;
         sink.remove("InstructionWork", operation)?;
         sink.remove("LiteralBits", operation)?;
@@ -422,10 +440,14 @@ pub(in crate::egglog) fn clone_region(
     let mut pending = vec![region];
     let mut members = LookupSet::new();
     let mut operations = Vec::new();
+    let mut argument_names = LookupSet::new();
     while let Some(region) = pending.pop() {
         if members.insert(region) {
             for operation in query.operations(region)? {
                 pending.extend(query.attached_regions(operation)?);
+                for (slot, _) in graph.controls(operation) {
+                    argument_names.extend(graph.arguments(operation, slot));
+                }
                 operations.push(operation);
             }
         }
@@ -441,6 +463,9 @@ pub(in crate::egglog) fn clone_region(
         }
         for (parameter, &argument) in parameters.into_iter().zip(arguments) {
             sink.set("CloneSubstitute", (context, parameter), argument)?;
+        }
+        for argument in argument_names {
+            sink.add("CloneNameDemand", (context, argument))?;
         }
         Ok(())
     })?;
@@ -459,17 +484,52 @@ pub(in crate::egglog) fn clone_region(
             let Some(region) = query.constructor("ClonedRegion", (context, region))? else {
                 return Err(output_error("cloned operation has no region"));
             };
-            operations.push((row[1], copy, region, query.0.operation_order(row[1])?));
+            let target = if matches!(graph.code(row[1])?, Code::Call) {
+                Some(graph.call_target(row[1])?)
+            } else {
+                None
+            };
+            let controls = graph
+                .controls(row[1])
+                .map(|(slot, child)| {
+                    let clone = query
+                        .constructor("ClonedRegion", (context, child))?
+                        .ok_or_else(|| output_error("cloned control has no region"))?;
+                    let arguments = graph
+                        .arguments(row[1], slot)
+                        .into_iter()
+                        .map(|name| query.required("CloneName", (context, name)))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok((slot, clone, arguments))
+                })
+                .collect::<Result<Vec<_>, OptimizeError>>()?;
+            operations.push((
+                row[1],
+                copy,
+                region,
+                query.0.operation_order(row[1])?,
+                target,
+                controls,
+            ));
         }
         Ok(())
     })?;
-    for &(original, copy, _, _) in &operations {
+    for &(original, copy, _, _, _, _) in &operations {
         graph.copy_occurrence(original, copy)?;
     }
     graph.update(|mut sink| {
-        for (_, operation, region, order) in operations {
+        for (_, operation, region, order, target, controls) in operations {
+            for (slot, child, arguments) in controls {
+                sink.set_control(operation, slot, child);
+                for (index, name) in arguments.into_iter().enumerate() {
+                    sink.set_argument(ArgumentSite(operation, slot, index), name)?;
+                }
+            }
             sink.set_region(operation, region);
             sink.set_order(operation, order);
+            if let Some(target) = target {
+                sink.set_call_target(operation, target);
+            }
         }
         Ok(())
     })?;

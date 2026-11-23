@@ -20,7 +20,7 @@ pub(super) fn inline(graph: &mut Graph) -> Result<(), OptimizeError> {
     let _timing = timing::span("egglog helper inlining");
     let selection = timing::span("egglog inline selection");
     edit::clear(graph)?;
-    analysis::structure(graph)?;
+    analysis::structure(graph, true)?;
     graph.parse_and_run_program(
         None,
         "(run-schedule (saturate graph-inline-required) (saturate graph-inline))",

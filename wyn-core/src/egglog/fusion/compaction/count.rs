@@ -107,7 +107,7 @@ pub(in crate::egglog::fusion) fn run(graph: &mut Graph) -> Result<bool, Optimize
             continue;
         };
         let region = query.0.operation_region(operation)?;
-        let lane = query.required("ControlRegion", (operation, 0_i64))?;
+        let lane = query.0.control_region(operation, 0_i64)?;
         for region in [region, lane] {
             if !orders.contains_key(&region) {
                 orders.insert(region, query.0.region_order(region)?.to_vec());

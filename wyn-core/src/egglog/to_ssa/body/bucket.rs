@@ -19,7 +19,7 @@ impl Body<'_, '_, '_> {
             .map(|name| self.query().name(name))
             .collect::<Result<Vec<_>, _>>()?;
         let destination_name = names[0];
-        let callback = self.query().required("ControlRegion", (operation, 0_i64))?;
+        let callback = self.query().0.control_region(operation, 0_i64)?;
         let mut destination = self.named(destination_name)?;
         if destination.ty.array_variant().is_some_and(types::is_array_variant_composite) {
             let source = self.snapshot(destination)?;

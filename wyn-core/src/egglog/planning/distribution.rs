@@ -47,8 +47,8 @@ pub(super) fn apply(graph: &mut Graph, outer: Value, inner: Value) -> Result<(),
     let query = Query(graph);
     let domain = query.required("OperationDomain", outer)?;
     let inner_domain = query.required("OperationDomain", inner)?;
-    let body = query.required("ControlRegion", (outer, 0_i64))?;
-    let inner_body = query.required("ControlRegion", (inner, 0_i64))?;
+    let body = query.0.control_region(outer, 0_i64)?;
+    let inner_body = query.0.control_region(inner, 0_i64)?;
     let rank = analysis::count(query, "DomainRank", domain)?;
     let inner_rank = analysis::count(query, "DomainRank", inner_domain)?;
     let flat = query.required("DomainOrdinal", domain)?;

@@ -13,7 +13,7 @@ fn graph(grid: &str, rank: i64) -> Graph {
         &format!(
             r#"
         (let name (FunctionId 0 "main"))
-        (set (FunctionRoot name) (RegionId 0)) (set (EntryOrder name) 0)
+        (set (FixtureFunctionRoot name) (RegionId 0)) (set (EntryOrder name) 0)
         (set (FixtureRegion (OperationId 0)) (RegionId 0)) (set (FixtureOrder (OperationId 0)) 0)
         (set (OperationExecution (OperationId 0)) (DeviceKernel {grid}))
         (set (OperationWidth (OperationId 0)) 128)
@@ -36,7 +36,7 @@ fn emitted_dispatches_reference_the_authoritative_statements() {
     let kernel = query.fields("DeviceKernel", selected).unwrap();
     assert!(query.enode("AutomaticGrid", kernel[0]).unwrap().is_some());
     let function = query.first("EntryOrder").unwrap().unwrap()[0];
-    let root = query.required("FunctionRoot", function).unwrap();
+    let root = query.0.function_root(function).unwrap();
     assert_eq!(query.operations(root).unwrap(), stages);
     let dispatch = execution.dispatch(stages[0]).unwrap();
     assert_eq!(dispatch.local_size, (128, 1, 1));

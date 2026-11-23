@@ -8,7 +8,7 @@ pub(super) fn function(query: Query<'_>, function: Value) -> Result<(), Optimize
     if query.contains("External", function)? {
         return Ok(());
     }
-    let root = query.required("FunctionRoot", function)?;
+    let root = query.0.function_root(function)?;
     let results = count(query, "FunctionResultCount", function)?;
     if count(query, "RegionYieldCount", root)? != results {
         return Err(output_error("function result count differs from its signature"));
@@ -31,9 +31,9 @@ pub(super) fn function(query: Query<'_>, function: Value) -> Result<(), Optimize
 
 pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), OptimizeError> {
     if query.contains("CallOperation", operation)? {
-        let target = query.required("CallTarget", operation)?;
+        let target = query.0.call_target(operation)?;
         let external = query.contains("External", target)?;
-        let root = if external { None } else { Some(query.required("FunctionRoot", target)?) };
+        let root = if external { None } else { Some(query.0.function_root(target)?) };
         for slot in 0..count(query, "InputCount", operation)? {
             let argument = query.required("Input", (operation, slot))?;
             let expected = if let Some(root) = root {
@@ -69,7 +69,7 @@ pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), Optimi
     if query.contains("BranchOperation", operation)? {
         boolean(query, query.required("Input", (operation, 0_i64))?)?;
         for edge in 0_i64..2 {
-            let child = query.required("ControlRegion", (operation, edge))?;
+            let child = query.0.control_region(operation, edge)?;
             if count(query, "RegionYieldCount", child)? != count(query, "OutputCount", operation)? {
                 return Err(output_error("branch result count differs from its signature"));
             }
@@ -89,7 +89,7 @@ pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), Optimi
     if query.contains("ParallelOperation", operation)? {
         let domain = query.required("OperationDomain", operation)?;
         let rank = count(query, "DomainRank", domain)?;
-        let lane = query.required("ControlRegion", (operation, 0_i64))?;
+        let lane = query.0.control_region(operation, 0_i64)?;
         if count(query, "RegionParameterCount", lane)? != rank + 1 {
             return Err(output_error("parallel parameters differ from its domain"));
         }
@@ -154,7 +154,7 @@ pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), Optimi
         }
     }
     if query.contains("AccumulatorOperation", operation)? {
-        let body = query.required("ControlRegion", (operation, 0_i64))?;
+        let body = query.0.control_region(operation, 0_i64)?;
         let groups = count(query, "AccumulatorGroupCount", operation)?;
         if count(query, "RegionParameterCount", body)? < groups
             || count(query, "RegionYieldCount", body)? < groups

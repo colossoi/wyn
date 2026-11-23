@@ -323,7 +323,7 @@ pub(in crate::egglog) fn remove_use(
 
 fn child_captures(query: Query<'_>, parent: Value, name: Value) -> Result<bool, OptimizeError> {
     let mut slot = 0_i64;
-    while let Some(region) = query.lookup("ControlRegion", (parent, slot))? {
+    while let Some(region) = query.0.control_at(parent, slot) {
         if query.contains("RegionCapture", (region, name))? {
             return Ok(true);
         }

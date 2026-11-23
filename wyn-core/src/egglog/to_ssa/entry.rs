@@ -1610,7 +1610,7 @@ impl EntryEmission<'_, '_, '_> {
                 StepKind::Loop => self.loop_body(statement, &live)?,
                 StepKind::ScalarLoop => self.cpu_loop(statement)?,
                 StepKind::Accumulator => {
-                    let lane = self.body.query().required("ControlRegion", (statement, 0_i64))?;
+                    let lane = self.body.query().0.control_region(statement, 0_i64)?;
                     let mut needed = live_names(self.body.query(), &[], lane)?;
                     needed.extend(names_in(self.body.query(), "OperationUse", statement)?);
                     needed.extend(live.iter().copied());
@@ -1755,7 +1755,7 @@ impl EntryEmission<'_, '_, '_> {
 
     fn loop_body(&mut self, expression: Value, after: &LookupSet<Value>) -> Result<(), OptimizeError> {
         let pattern = self.body.query().sequence("Output", expression)?;
-        let region = self.body.query().required("ControlRegion", (expression, 0_i64))?;
+        let region = self.body.query().0.control_region(expression, 0_i64)?;
         let merges = self.body.query().sequence("RegionParameter", region)?;
         let counted = self.body.query().contains("CountedLoopOperation", expression)?;
         let mut before = names_in(self.body.query(), "OperationUse", expression)?;
@@ -1776,7 +1776,7 @@ impl EntryEmission<'_, '_, '_> {
         let mut carried_values = Vec::new();
         for (index, (merge, output)) in merges.into_iter().zip(&pattern).enumerate() {
             let parameter = merge;
-            let argument = self.body.query().required("EdgeArgument", (expression, 0_i64, index as i64))?;
+            let argument = self.body.query().0.argument(expression, 0_i64, index as i64)?;
             if let Some((name, ty)) = super::runtime_binding(self.body.query(), parameter)? {
                 let Some(value) = self.body.operand(argument)? else {
                     return Err(error("loop initial value missing"));
@@ -2027,8 +2027,8 @@ impl EntryEmission<'_, '_, '_> {
 
     fn branch(&mut self, operation: Value, after: &LookupSet<Value>) -> Result<(), OptimizeError> {
         let pattern = self.body.query().sequence("Output", operation)?;
-        let yes = self.body.query().required("ControlRegion", (operation, 0_i64))?;
-        let no = self.body.query().required("ControlRegion", (operation, 1_i64))?;
+        let yes = self.body.query().0.control_region(operation, 0_i64)?;
+        let no = self.body.query().0.control_region(operation, 1_i64)?;
         let condition_name =
             self.body.query().name(self.body.query().required("Input", (operation, 0_i64))?)?;
         let mut before = live_names(self.body.query(), &self.body.query().operations(yes)?, yes)?;
@@ -2044,7 +2044,7 @@ impl EntryEmission<'_, '_, '_> {
             return Err(error("branch condition has no host value"));
         };
         let can_select = self.body.query().0.operation_region(operation)?
-            == self.body.query().required("FunctionRoot", self.body.function)?;
+            == self.body.query().0.function_root(self.body.function)?;
         let first_stage = self.stages.len();
         let incoming = self.saved.clone();
         let incoming_host = self

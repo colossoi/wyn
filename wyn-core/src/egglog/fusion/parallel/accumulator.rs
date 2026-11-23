@@ -33,7 +33,7 @@ pub(in crate::egglog::fusion) fn run(graph: &mut Graph, sinking: bool) -> Result
                 if blocked.contains(&operation) {
                     producer = false;
                 } else if !accumulators.contains(&operation) {
-                    producer |= query.lookup("ControlRegion", (operation, 0_i64))?.is_some();
+                    producer |= query.0.control_at(operation, 0_i64).is_some();
                 }
             }
             relevant
@@ -49,7 +49,7 @@ pub(in crate::egglog::fusion) fn run(graph: &mut Graph, sinking: bool) -> Result
     }
     let mut groups = LookupSet::new();
     for op in accumulators {
-        let region = query.required("ControlRegion", (op, 0_i64))?;
+        let region = query.0.control_region(op, 0_i64)?;
         let count_groups = count(query, "AccumulatorGroupCount", op)?;
         if count(query, "RegionParameterCount", region)? == count_groups
             && count(query, "RegionYieldCount", region)? == count_groups

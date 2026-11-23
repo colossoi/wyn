@@ -8,8 +8,8 @@ use egglog_engine::{RawValues, Value, Write};
 
 pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> Result<(), OptimizeError> {
     let query = Query(graph);
-    let a = query.required("ControlRegion", (yes, 0_i64))?;
-    let b = query.required("ControlRegion", (no, 0_i64))?;
+    let a = query.0.control_region(yes, 0_i64)?;
+    let b = query.0.control_region(no, 0_i64)?;
     let yes_params = query.sequence("RegionParameter", a)?;
     let no_params = query.sequence("RegionParameter", b)?;
     edit::replace(graph, &no_params.into_iter().zip(yes_params).collect::<Vec<_>>())?;
@@ -51,7 +51,7 @@ pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> 
     let width = query.lookup("OperationWidth", yes)?;
     let mut arm_operations = Vec::new();
     for (slot, (map, lane)) in [(yes, a), (no, b)].into_iter().enumerate() {
-        let arm = query.required("ControlRegion", (branch, slot as i64))?;
+        let arm = query.0.control_region(branch, slot as i64)?;
         let mut operations = query.operations(arm)?;
         operations.retain(|&operation| operation != map);
         if !operations.is_empty() {
@@ -105,10 +105,8 @@ pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> 
                 sink.remove("Output", (branch, slot as i64))?;
             }
             ir::outputs(&mut sink, OperationId(branch), &bindings)?;
-            sink.remove("ControlRegion", (branch, 0_i64))?;
-            sink.set("ControlRegion", (branch, 0_i64), a)?;
-            sink.remove("ControlRegion", (branch, 1_i64))?;
-            sink.set("ControlRegion", (branch, 1_i64), b)?;
+            sink.set_control(branch, 0_i64, a);
+            sink.set_control(branch, 1_i64, b);
             sink.set_region(branch, lane);
             sink.set_order(branch, 0_i64);
             let parallel = sink.add("DerivedOperation", (branch, 61_i64, 0_i64))?;
@@ -116,9 +114,7 @@ pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> 
             ir::outputs(&mut sink, parallel, &outputs)?;
             sink.set_region(parallel.0, parent);
             sink.set_order(parallel.0, order);
-            sink.set("ControlRegion", (parallel.0, 0_i64), lane)?;
-            let role = sink.add("LaneRegion", RawValues(Vec::new()))?;
-            sink.set("ControlRole", (parallel.0, 0_i64), role)?;
+            sink.set_control(parallel.0, 0_i64, lane);
             sink.set("OperationDomain", parallel.0, domain)?;
             sink.set("OperationExecution", parallel.0, execution)?;
             if let Some(width) = width {

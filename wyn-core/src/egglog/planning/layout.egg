@@ -10,7 +10,7 @@
        (= (ResultCount layout) 1) (= (ResultValueCount layout 0) 1)
        (= value (ResultValue layout 0 0)) (= (Defines value) (OperationSite read 0))
        (IndexOperation read) (= (InputCount read) 3) (ProvenTotalOperation read)
-       (= (wyn-region-of read) (ControlRegion layout 0))
+       (= (wyn-region-of read) (wyn-control-region layout 0))
        (= (Input read 0) (ValueNameRef source)))
       ((LayoutRead layout read source)) :ruleset layout-fusion)
 ; A composed domain can supply the extents without reading the original collection.

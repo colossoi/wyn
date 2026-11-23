@@ -99,7 +99,7 @@ impl Execution {
         let query = Query(graph);
         let mut execution = Self::default();
         query.for_function("EntryOrder", |keys, _| {
-            execution.region(query, query.required("FunctionRoot", keys[0])?)
+            execution.region(query, query.0.function_root(keys[0])?)
         })?;
         Ok(execution)
     }
@@ -300,7 +300,7 @@ fn collective(
         return Ok(None);
     }
     let mut work = CollectiveWork {
-        map_ops: region_work(query, query.required("ControlRegion", (operation, 0_i64))?)?,
+        map_ops: region_work(query, query.0.control_region(operation, 0_i64)?)?,
         scan: query.flag("ChunkScan", operation)?,
         ..Default::default()
     };
@@ -420,7 +420,7 @@ impl Execution {
             })
             .collect::<LookupMap<_, _>>();
         for (function, order) in roots {
-            let root = query.required("FunctionRoot", function)?;
+            let root = query.0.function_root(function)?;
             let Some(&declarations) = declarations.get(program.symbols.resolve(order)) else {
                 return Err(error("entry source metadata missing"));
             };
@@ -539,10 +539,7 @@ impl Execution {
                 let interface = if matches!(code, Code::Branch) {
                     pattern.clone()
                 } else {
-                    query.sequence(
-                        "RegionParameter",
-                        query.required("ControlRegion", (operation, 0_i64))?,
-                    )?
+                    query.sequence("RegionParameter", query.0.control_region(operation, 0_i64)?)?
                 };
                 let buffer_result = generated
                     && interface.iter().try_fold(false, |any, &binding| {
@@ -596,7 +593,7 @@ impl Execution {
                     StepKind::Shader
                 }
             } else if matches!(code, Code::WithAcc) {
-                let child = query.required("ControlRegion", (operation, 0_i64))?;
+                let child = query.0.control_region(operation, 0_i64)?;
                 boundary |= query.contains("AtomicInitialization", operation)?;
                 let values = host_values
                     .iter()
@@ -707,9 +704,9 @@ impl Execution {
             let live = planning.live_after.get(&operations[i]).cloned().unwrap_or_default();
             let mut cpu_captures = Vec::new();
             if let StepKind::Dispatch { epilogue, .. } = &kind {
-                let mut lanes = vec![query.required("ControlRegion", (operation, 0_i64))?];
+                let mut lanes = vec![query.0.control_region(operation, 0_i64)?];
                 if let Some(epilogue) = epilogue {
-                    lanes.push(query.required("ControlRegion", (epilogue.operation, 0_i64))?);
+                    lanes.push(query.0.control_region(epilogue.operation, 0_i64)?);
                 }
                 query.for_each("RegionCapture", |row| {
                     if lanes.contains(&row[0]) {
@@ -770,15 +767,7 @@ impl Execution {
 }
 
 pub(super) fn control_regions(query: Query<'_>, operation: Value) -> Result<Vec<Value>, OptimizeError> {
-    let mut children = Vec::new();
-    query.for_function("ControlRegion", |keys, child| {
-        if keys[0] == operation {
-            children.push((query.0.value_to_base::<i64>(keys[1]), child));
-        }
-        Ok(())
-    })?;
-    children.sort_by_key(|&(slot, _)| slot);
-    Ok(children.into_iter().map(|(_, child)| child).collect())
+    Ok(query.0.controls(operation).map(|(_, child)| child).collect())
 }
 
 fn contains_array_descriptor(ty: &Type) -> bool {

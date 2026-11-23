@@ -20,6 +20,7 @@ mod analysis;
 mod bindings;
 pub mod cost;
 pub(crate) mod dataflow;
+mod executable_field;
 mod execution;
 mod from_tlc;
 mod fusion;
@@ -28,7 +29,6 @@ mod host;
 mod memory;
 mod payload;
 mod planning;
-mod position_field;
 mod query;
 mod representation;
 mod scalar;
@@ -182,7 +182,7 @@ pub fn prepare_host(
     let query = Query(&program.graph);
     let mut roots = Vec::new();
     query.for_function("EntryOrder", |keys, _| {
-        roots.push(query.required("FunctionRoot", keys[0])?);
+        roots.push(query.0.function_root(keys[0])?);
         Ok(())
     })?;
     analysis::liveness(&mut program.graph, &roots)?;
