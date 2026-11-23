@@ -56,25 +56,28 @@ pub(super) fn run(graph: &mut Graph) -> Result<bool, OptimizeError> {
             }
         }
     }
-    if removed.len() == replacements.len() {
-        if let Some(inputs) = scalar_inputs(query, &replacements, &removed)? {
-            let _timing = timing::span("Rust local scalar forwarding");
-            for input in inputs {
-                input.apply(graph)?;
-            }
-            graph.update(|mut sink| {
-                for edge in pending {
-                    sink.remove("ForwardCandidate", edge)?;
-                }
-                Ok(())
-            })?;
-            if !remove_leaves::apply(graph, &removed, scalar_uses)? {
-                return Err(output_error(
-                    "scalar forwarding changed whether its definitions could be removed",
-                ));
-            }
-            return Ok(true);
+    let local_inputs = if removed.len() == replacements.len() {
+        scalar_inputs(query, &replacements, &removed)?
+    } else {
+        None
+    };
+    graph.update(|mut sink| {
+        for edge in pending {
+            sink.remove("ForwardCandidate", edge)?;
         }
+        Ok(())
+    })?;
+    if let Some(inputs) = local_inputs {
+        let _timing = timing::span("Rust local scalar forwarding");
+        for input in inputs {
+            input.apply(graph)?;
+        }
+        if !remove_leaves::apply(graph, &removed, scalar_uses)? {
+            return Err(output_error(
+                "scalar forwarding changed whether its definitions could be removed",
+            ));
+        }
+        return Ok(true);
     }
     edit::replace(graph, &replacements)?;
     if !removed.is_empty() {
@@ -82,7 +85,6 @@ pub(super) fn run(graph: &mut Graph) -> Result<bool, OptimizeError> {
         return Ok(true);
     }
     analysis::ensure(graph)?;
-    edit::clear(graph)?;
     Ok(false)
 }
 

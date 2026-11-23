@@ -10,7 +10,7 @@ use crate::types;
 use egglog_engine::{RawValues, Write};
 
 #[test]
-fn planning_metadata_survives_candidate_resets_and_tracks_edits() -> Result<(), OptimizeError> {
+fn planning_metadata_survives_repeated_requests_and_tracks_edits() -> Result<(), OptimizeError> {
     let mut graph = test_graph::import("entry main(x:i32) i32=x+7")?;
     let operation = Query(&graph).first("ConstantOperation")?.unwrap()[0];
     // Introduce the identity after import so frontend folding cannot erase the candidate.
@@ -29,10 +29,8 @@ fn planning_metadata_survives_candidate_resets_and_tracks_edits() -> Result<(), 
     let revision = query.required("PlanningRevision", RawValues(Vec::new()))?;
     let constant = query.required("ConstantValue", output)?;
 
-    edit::clear(&mut graph)?;
-    assert!(Query(&graph).first("ForwardCandidate")?.is_none());
-    assert_eq!(Query(&graph).required("ConstantValue", output)?, constant);
     planning::analyze(&mut graph)?;
+    assert_eq!(Query(&graph).required("ConstantValue", output)?, constant);
     assert_eq!(Query(&graph).first("ForwardCandidate")?, Some(candidate));
     assert_eq!(
         Query(&graph).required("PlanningRevision", RawValues(Vec::new()))?,

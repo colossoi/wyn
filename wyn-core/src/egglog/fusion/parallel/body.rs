@@ -5,7 +5,7 @@ use crate::egglog::graph::CertificateSite;
 use crate::egglog::graph::{CollectiveInput, ParallelResults};
 use crate::egglog::graph::{Graph, State};
 use crate::egglog::query::Query;
-use crate::egglog::{analysis, output_error, planning, timing, OptimizeError};
+use crate::egglog::{analysis, output_error, timing, OptimizeError};
 use crate::memory_ir::{BodyRole, Definition, OperationId, RegionId, UseSite, ValueRef};
 use crate::{LookupMap, LookupSet, SortedSet};
 use egglog_engine::{RawValues, Value};
@@ -932,7 +932,6 @@ impl Body {
         let _timing = timing::span("Rust sibling order publication");
         let (previous, updated) = self.orders(Query(graph))?;
         graph.update(|mut sink| self.publish_order(&mut sink))?;
-        planning::reset_order_candidates(graph)?;
         analysis::replace_order(graph, previous, updated)?;
         edit::preserve_revisions(graph)
     }

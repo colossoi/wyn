@@ -7,19 +7,9 @@ pub(super) fn fuse(graph: &mut Graph) -> Result<bool, OptimizeError> {
     if !graph.has_formulas(Formula::Layout) {
         return Ok(false);
     }
-    for table in [
-        "LayoutRead",
-        "ForwardLayoutExtent",
-        "LayoutProducer",
-        "LayoutLegal",
-        "LayoutOrdinal",
-        "FuseLayout",
-    ] {
-        graph.clear_function(table)?;
-    }
     graph.parse_and_run_program(
         None,
-        "(run-schedule (saturate layout-fusion) (run layout-fusion-select))",
+        "(run-schedule (saturate transform-inputs layout-fusion) (run layout-fusion-select))",
     )?;
     if scalar::forward_lengths(graph, "ForwardLayoutExtent")? {
         return Ok(true);

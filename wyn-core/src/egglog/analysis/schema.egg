@@ -46,7 +46,12 @@
 (relation DirectOperationUse (OperationKey Name))
 (relation OperationAttributeUse (OperationKey Name))
 (relation OperationUse (OperationKey Name))
-(relation InvalidDataflow (String))
+(datatype DataflowErrorSite
+  (InvalidAtOperation OperationKey)
+  (InvalidAtRegion RegionKey)
+  (InvalidAtName Name)
+  (InvalidRegionOwners))
+(relation InvalidDataflow (DataflowErrorSite String))
 
 (relation IndexChild (IndexExp IndexExp))
 (relation IndexUse (IndexExp ValueName))

@@ -35,6 +35,9 @@ pub(in crate::egglog) fn preserve_revisions(graph: &mut Graph) -> Result<(), Opt
         }
     }
     let repaired = current.contains(&"DataflowRevision");
+    if repaired {
+        analysis::scopes::repair_transforms(graph, [])?;
+    }
     changed(graph)?;
     let revision = revision(graph)?;
     graph.update(|mut sink| {
@@ -55,12 +58,9 @@ pub(in crate::egglog) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
     Ok(())
 }
 
-pub(in crate::egglog) fn clear(graph: &mut Graph) -> Result<(), OptimizeError> {
+fn clear_substitution(graph: &mut Graph) -> Result<(), OptimizeError> {
     for table in [
-        "ForwardCandidate",
         "ValueReplacement",
-        "FoldedConstant",
-        "BranchCandidate",
         "RewrittenAccumulatorInfo",
         "RewrittenIndex",
         "IndexReplacement",
@@ -75,7 +75,7 @@ pub(in crate::egglog) fn clear(graph: &mut Graph) -> Result<(), OptimizeError> {
     ] {
         graph.clear_function(table)?;
     }
-    analysis::advance_revision(graph, "RewriteRevision")
+    Ok(())
 }
 
 pub(in crate::egglog) fn remove(graph: &mut Graph, operations: &[Value]) -> Result<(), OptimizeError> {
@@ -175,7 +175,6 @@ pub(in crate::egglog) fn resolve_replacements(
 }
 
 fn seed_replacements(graph: &mut Graph, replacements: &[(Value, Value)]) -> Result<(), OptimizeError> {
-    clear(graph)?;
     let mut collective = Vec::new();
     let mut certificates = Vec::new();
     let mut indices = Vec::new();
@@ -288,6 +287,7 @@ fn replace_attributes_with_seeded_values(graph: &mut Graph) -> Result<(), Optimi
         })?;
     }
     graph.parse_and_run_program(None, "(run-schedule (saturate graph-apply))")?;
+    clear_substitution(graph)?;
     changed(graph)?;
     Ok(())
 }

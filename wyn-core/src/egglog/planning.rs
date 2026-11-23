@@ -40,15 +40,12 @@ pub(super) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
     Ok(())
 }
 
-/// Retain graph metadata across candidate resets, while solving newly added demands.
+/// Keep valid graph metadata and solve newly added demands.
 pub(super) fn analyze(graph: &mut Graph) -> Result<(), OptimizeError> {
     analysis::ensure(graph)?;
     let _timing = super::timing::span("egglog graph metadata");
     let revision = edit::revision(graph)?;
     let current = metadata_current(graph, revision)?;
-    if !current {
-        clear_candidates(graph)?;
-    }
     graph.parse_and_run_program(
         None,
         "(run-schedule (saturate scalar-analysis graph-sizes integer-ranges type-sizes))",
@@ -67,108 +64,18 @@ fn metadata_current(graph: &Graph, revision: i64) -> Result<bool, OptimizeError>
         == Some(graph.base_to_value(revision)))
 }
 
-/// Selection depends on phase policy as well as the executable graph.
-fn clear_candidates(graph: &mut Graph) -> Result<(), OptimizeError> {
-    for table in [
-        "ConsumedScalarArray",
-        "ReuseCandidate",
-        "ReuseDomainInput",
-        "SnapshotCopy",
-        "SnapshotUpdate",
-        "SnapshotUseSafe",
-        "SnapshotCopySafe",
-        "CanSnapshotCopy",
-        "ReuseClauses",
-        "ReuseReadSafe",
-        "ReuseLegal",
-        "ReuseSnapshot",
-        "EpiloguePair",
-        "EpilogueCandidate",
-        "EpilogueReuse",
-        "EpilogueConsumer",
-        "EpilogueScratch",
-        "EpilogueOverwrite",
-        "PointwisePair",
-        "PointwiseSource",
-        "EpilogueDomainPrefix",
-        "EpilogueClauses",
-        "PointwiseLoadPrefix",
-        "PointwiseLoad",
-        "PointwiseSafeOperation",
-        "PointwiseRegionPrefix",
-        "PointwiseSafeRegion",
-        "PointwiseHandledUse",
-        "EpilogueRequiresCompletedTotal",
-        "PointwiseLegal",
-        "LocalLoop",
-        "LaneDependentFunction",
-        "HostRegion",
-        "KernelPreparationCandidate",
-        "KernelPreparation",
-        "SelectedExecution",
-        "ScanEpilogue",
-        "NativeAddition",
-        "RequiresSnapshot",
-        "CanReuse",
-        "SelectOutputPrefix",
-        "RetrySafe",
-        "AtomicAccumulatorArray",
-        "ReducerState",
-        "LoopComponentPreserved",
-        "LoopHasArrayComponents",
-    ] {
-        graph.clear_function(table)?;
-    }
-    clear_transform_candidates(graph)?;
-    analysis::advance_revision(graph, "PlanningChoiceRevision")
-}
-
-pub(super) fn clear_transform_candidates(graph: &mut Graph) -> Result<(), OptimizeError> {
-    for table in [
-        "DistributionPair",
-        "DistributionReturnPrefix",
-        "DistributionPrefixAt",
-        "DistributionPrefixComplete",
-        "DistributionPrefixOperation",
-        "TransformRequirement",
-        "TransformAvailable",
-        "DistributionLaneDependent",
-        "DistributionSafe",
-        "DistributionHasFold",
-        "DistributeNest",
-        "ReadyDistribution",
-        "RectangularRows",
-        "RowWidthLoop",
-        "RowWidthLength",
-        "RowWidthPreparation",
-        "RowWidthInput",
-        "RowWidthInputReady",
-        "RowWidthLegal",
-        "LiftUniformRowLength",
-        "ConditionalPair",
-        "ConditionalPrefix",
-        "ConditionalDomainPrefix",
-        "ConditionalReturnPrefix",
-        "ConditionalTypePrefix",
-        "ConditionalSafe",
-        "FactorConditional",
-    ] {
-        graph.clear_function(table)?;
-    }
-    let key = || RawValues(Vec::new());
-    let revision = analysis::count(Query(graph), "TransformRevision", key())?;
-    graph.update(|mut sink| {
-        sink.remove("TransformRevision", key())?;
-        sink.set("TransformRevision", key(), revision + 1)
-    })?;
-    Ok(())
-}
-
 fn resolve_transform_availability(graph: &mut Graph) -> Result<(), OptimizeError> {
     let query = Query(graph);
     let mut transforms = Vec::new();
     query.for_each("TransformRequirement", |row| {
-        transforms.push((row[0], row[1], analysis::available_before(query, row[0], row[1])?));
+        let (operation, name) = (row[0], row[1]);
+        if query.lookup("TransformAvailable", (operation, name))?.is_none() {
+            transforms.push((
+                operation,
+                name,
+                analysis::available_before(query, operation, name)?,
+            ));
+        }
         Ok(())
     })?;
     let mut rows = Vec::new();
@@ -187,14 +94,6 @@ fn resolve_transform_availability(graph: &mut Graph) -> Result<(), OptimizeError
         }
         Ok(())
     })?;
-    Ok(())
-}
-
-pub(super) fn reset_order_candidates(graph: &mut Graph) -> Result<(), OptimizeError> {
-    // A reorder can change adjacency and speculative scope for pending transforms.
-    if graph.get_size("DistributionPair") != 0 || graph.get_size("ConditionalPair") != 0 {
-        clear_transform_candidates(graph)?;
-    }
     Ok(())
 }
 
@@ -271,7 +170,7 @@ pub(super) fn restore_region_work(graph: &mut Graph, work: ChangedRegionWork) ->
         })?;
         work::solve(graph)?;
     }
-    reset_order_candidates(graph)
+    Ok(())
 }
 
 pub(super) fn place(
@@ -292,14 +191,13 @@ pub(super) fn place(
             topology == PipelineTopologyPolicy::AllowGenerated,
         )
     })?;
-    clear_candidates(graph)?;
     loop {
         analysis::ensure(graph)?;
         analyze(graph)?;
         distribution::prove_static_domains(graph)?;
         graph.parse_and_run_program(
             None,
-            "(run-schedule (saturate distribution-index) (saturate transform-availability))",
+            "(run-schedule (saturate transform-inputs distribution-index) (saturate transform-availability))",
         )?;
         resolve_transform_availability(graph)?;
         graph.parse_and_run_program(
@@ -341,20 +239,7 @@ pub(super) fn place(
 }
 
 fn loop_layout(graph: &mut Graph) -> Result<(), OptimizeError> {
-    let revision = edit::revision(graph)?;
-    if graph.loop_layout_revision == Some(revision) {
-        return Ok(());
-    }
-    for table in [
-        "LoopStateBytes",
-        "LoopFieldType",
-        "LoopFieldBytes",
-        "LoopProductBytes",
-    ] {
-        graph.clear_function(table)?;
-    }
     graph.parse_and_run_program(None, "(run-schedule (saturate graph-loop-layout))")?;
-    graph.loop_layout_revision = Some(revision);
     Ok(())
 }
 
@@ -421,7 +306,6 @@ pub(super) fn epilogues(graph: &mut Graph) -> Result<LookupSet<Value>, OptimizeE
     let _timing = super::timing::span("egglog reuse and epilogue proofs");
     analyze(graph)?;
     let setup = super::timing::span("physical proof inputs");
-    clear_candidates(graph)?;
     loop_layout(graph)?;
     load_execution(graph)?;
     epilogue::seed(graph)?;
@@ -487,7 +371,10 @@ mod tests;
 mod order_tests;
 
 pub(super) fn factor_conditionals(graph: &mut Graph) -> Result<bool, OptimizeError> {
-    graph.parse_and_run_program(None, "(run-schedule (saturate conditional-index))")?;
+    graph.parse_and_run_program(
+        None,
+        "(run-schedule (saturate transform-inputs conditional-index))",
+    )?;
     resolve_transform_availability(graph)?;
     graph.parse_and_run_program(
         None,

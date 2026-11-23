@@ -4,7 +4,7 @@
 (rule ((LiveRegion child) (= (RegionOwnedBy child) operation) (= parent (wyn-region-of operation)))
       ((FlowScopeParent child parent)) :ruleset graph-structure)
 (rule ((LiveRegion child) (FlowScopeParent child parent) (FlowScopeAncestor child parent))
-      ((InvalidDataflow "cyclic execution-region nesting")) :ruleset graph-structure)
+      ((InvalidDataflow (InvalidAtRegion child) "cyclic execution-region nesting")) :ruleset graph-structure)
 
 
 ; Index, shape, and slice facts follow immutable terms across graph edits.

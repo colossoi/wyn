@@ -37,20 +37,9 @@ pub(super) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
     Ok(())
 }
 
-/// Reseed rules after clearing derived tables while keeping valid graph facts.
-pub(super) fn advance_revision(graph: &mut Graph, table: &str) -> Result<(), OptimizeError> {
-    let revision = count(Query(graph), table, RawValues(Vec::new()))?;
-    graph.update(|mut sink| {
-        sink.remove(table, RawValues(Vec::new()))?;
-        sink.set(table, RawValues(Vec::new()), revision + 1)
-    })?;
-    Ok(())
-}
-
 /// Refresh lexical ownership, reachable calls, and recursion without solving dataflow.
 pub(super) fn structure(graph: &mut Graph) -> Result<Vec<Value>, OptimizeError> {
     let _timing = timing::span("egglog graph structure");
-    edit::clear(graph)?;
     let reach = calls::Reachability::read(graph)?;
     let refresh = scopes::prepare(graph, &reach)?;
     calls::publish(graph, &reach, &refresh.solve)?;
@@ -161,7 +150,8 @@ pub(super) fn publish_proof_operands(
         let mut defined = LookupSet::new();
         for (name, origin, region) in definitions {
             if !defined.insert(name) {
-                sink.add("InvalidDataflow", "value has more than one definition")?;
+                let site = sink.add("InvalidAtName", name)?;
+                sink.add("InvalidDataflow", (site, "value has more than one definition"))?;
             }
             sink.add("DefinitionRegion", (name, region))?;
             match origin {
@@ -539,7 +529,7 @@ pub(super) fn validate(graph: &Graph) -> Result<(), OptimizeError> {
     }
     let query = Query(graph);
     query.for_each("InvalidDataflow", |row| {
-        Err(output_error(graph.value_to_base::<S>(row[0]).to_string()))
+        Err(output_error(graph.value_to_base::<S>(row[1]).to_string()))
     })?;
     query.for_each("LiveFunction", |row| signatures::function(query, row[0]))?;
     query.for_each("LiveOperation", |row| {

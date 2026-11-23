@@ -148,10 +148,10 @@
 (rule ((OperationUse operation (AccNameRef token))
        (ConsumedToken consumer token) (= region (wyn-region-of consumer)) (= region (wyn-region-of operation))
        (= before (wyn-operation-position consumer)) (= after (wyn-operation-position operation)) (< before after))
-      ((TokenUnavailableAt operation token) (InvalidDataflow "accumulator capability was already consumed")) :ruleset dataflow-resources)
+      ((TokenUnavailableAt operation token) (InvalidDataflow (InvalidAtOperation operation) "accumulator capability was already consumed")) :ruleset dataflow-resources)
 (rule ((EndDemand region (AccNameRef token)) (ConsumedToken consumer token)
        (= region (wyn-region-of consumer)))
-      ((InvalidDataflow "region yields a consumed accumulator capability")) :ruleset dataflow-resources)
+      ((InvalidDataflow (InvalidAtRegion region) "region yields a consumed accumulator capability")) :ruleset dataflow-resources)
 
 (rule ((CallOperation operation) (= target (wyn-call-target operation)) (= (RecursiveFunction target) true))
       ((OperationTrap operation)) :ruleset dataflow-effects)

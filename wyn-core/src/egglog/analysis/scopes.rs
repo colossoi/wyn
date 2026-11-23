@@ -179,7 +179,6 @@ pub(super) fn prepare(graph: &mut Graph, reach: &Reachability) -> Result<Refresh
         sink.remove("PlanningRevision", RawValues(vec![]))?;
         Ok(())
     })?;
-    graph.clear_function("InvalidDataflow")?;
     retire(graph, &refresh.retire)?;
     if wyn_base::timing::enabled() {
         let operations = refresh.solve.iter().map(|scope| scope.operations.len()).sum::<usize>();
@@ -190,6 +189,60 @@ pub(super) fn prepare(graph: &mut Graph, reach: &Reachability) -> Result<Refresh
         );
     }
     Ok(refresh)
+}
+
+/// A locally repaired edit can still change the legality of a transform.
+pub(in crate::egglog) fn repair_transforms(
+    graph: &mut Graph,
+    additional_operations: impl IntoIterator<Item = Value>,
+) -> Result<(), OptimizeError> {
+    use egglog_engine::Write;
+    if ["DistributionPair", "ConditionalPair", "LayoutRead"]
+        .into_iter()
+        .all(|table| graph.get_size(table) == 0)
+    {
+        return Ok(());
+    }
+    let scope = &graph.proof_scopes;
+    let changes = &graph.proof_changes;
+    let mut functions = LookupSet::new();
+    for &region in &changes.regions {
+        functions.extend(scope.owners.get(&region).copied());
+    }
+    for operation in changes.operations.iter().copied().chain(additional_operations) {
+        if let Ok(region) = graph.operation_region(operation) {
+            functions.extend(scope.owners.get(&region).copied());
+        }
+    }
+    let query = Query(graph);
+    let mut operations = Vec::new();
+    let mut roots = Vec::new();
+    for function in functions {
+        for &operation in scope.members.get(&function).into_iter().flat_map(|scope| &scope.operations) {
+            operations.push(operation);
+            if query.contains("TransformOperation", operation)? {
+                roots.push(operation);
+            }
+        }
+    }
+    if roots.is_empty() {
+        return Ok(());
+    }
+    graph.update(|mut sink| {
+        for operation in operations {
+            sink.add("RetiredOperation", operation)?;
+        }
+        Ok(())
+    })?;
+    graph.parse_and_run_program(None, "(run-schedule (run retire-transforms))")?;
+    graph.clear_function("RetiredOperation")?;
+    graph.update(|mut sink| {
+        for operation in roots {
+            sink.add("TransformOperation", operation)?;
+        }
+        Ok(())
+    })?;
+    Ok(())
 }
 
 pub(in crate::egglog) fn retire(graph: &mut Graph, scopes: &[Subjects]) -> Result<(), OptimizeError> {
@@ -204,9 +257,9 @@ pub(in crate::egglog) fn retire(graph: &mut Graph, scopes: &[Subjects]) -> Resul
         Ok(())
     })?;
     graph.parse_and_run_program(
-            None,
-            "(run-schedule (saturate graph-indices) (run retire-indices) (run retire-analysis) (run retire-shape))",
-        )?;
+        None,
+        "(run-schedule (saturate graph-indices) (run retire-indices) (run retire-analysis) (run retire-shape) (run retire-transforms))",
+    )?;
     for table in [
         "RetiredOperation",
         "RetiredRegion",

@@ -56,7 +56,6 @@ pub(super) fn simplify(graph: &mut Graph, hoist: bool) -> Result<(), OptimizeErr
     } else {
         "egglog reducing simplification"
     });
-    edit::clear(graph)?;
     loop {
         let current = analysis::current(graph)?;
         if !current {

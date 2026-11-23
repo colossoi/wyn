@@ -172,7 +172,7 @@ pub(in crate::egglog) fn refine(graph: &mut Graph) -> Result<(), OptimizeError> 
         })?;
         graph.parse_and_run_program(None, "(run-schedule (saturate dataflow-effects))")?;
     }
-    super::super::planning::reset_order_candidates(graph)
+    super::scopes::repair_transforms(graph, operations)
 }
 
 fn still_traps(

@@ -1640,8 +1640,8 @@ fn retry_safety_allows_reads_but_rejects_writes_and_traps() {
     "#,
     )
     .unwrap();
-    graph.clear_function("LiveRegion").unwrap();
-    super::analyze(&mut graph).unwrap();
+    let previous = analysis::scopes::seed_fixture(&mut graph).unwrap();
+    analysis::scopes::retire(&mut graph, &[previous]).unwrap();
     let query = Query(&graph);
     let region = query.constructor("RegionId", 0_i64).unwrap().unwrap();
     assert!(

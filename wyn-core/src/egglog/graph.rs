@@ -27,7 +27,6 @@ pub(super) struct Graph {
     pub dirty_owners: LookupSet<Value>,
     pub(crate) proof_scopes: super::analysis::scopes::Scopes,
     pub(crate) proof_changes: super::analysis::scopes::Changes,
-    pub loop_layout_revision: Option<i64>,
 }
 
 #[derive(Clone, Copy)]
@@ -232,7 +231,6 @@ impl Graph {
             dirty_owners: self.dirty_owners.clone(),
             proof_scopes: self.proof_scopes.clone(),
             proof_changes: self.proof_changes.clone(),
-            loop_layout_revision: self.loop_layout_revision,
         }
     }
 
@@ -1467,9 +1465,11 @@ impl State<'_, '_, '_> {
                 operations.remove(&operation);
             }
             self.dirty_orders.insert(previous);
+            self.proof_changes.regions.insert(previous);
         }
         structure.by_region.entry(region).or_default().insert(operation);
         self.dirty_orders.insert(region);
+        self.proof_changes.regions.insert(region);
     }
 
     pub fn set_order(&mut self, operation: Value, order: i64) {
@@ -1478,6 +1478,7 @@ impl State<'_, '_, '_> {
         if position.order.replace(order) != Some(order) {
             if let Some(region) = position.region {
                 self.dirty_orders.insert(region);
+                self.proof_changes.regions.insert(region);
             }
         }
     }
@@ -1528,6 +1529,7 @@ impl State<'_, '_, '_> {
                 operations.remove(&operation);
             }
             self.dirty_orders.insert(region);
+            self.proof_changes.regions.insert(region);
         }
         drop(structure);
         self.refresh_operand_proof(operation, before)

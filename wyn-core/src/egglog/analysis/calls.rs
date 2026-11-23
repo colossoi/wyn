@@ -220,8 +220,12 @@ pub(super) fn publish(
             sink.set("RecursiveFunction", function, reach.recursive.contains(&function))?;
             sink.add("RootFunction", (region, function))?;
         }
+        let site = sink.add("InvalidRegionOwners", RawValues(vec![]))?;
+        let invalid_owners = (site, "executable region has more than one owner");
         if reach.multiple_owners {
-            sink.add("InvalidDataflow", "executable region has more than one owner")?;
+            sink.add("InvalidDataflow", invalid_owners)?;
+        } else {
+            sink.remove("InvalidDataflow", invalid_owners)?;
         }
         for region in changed {
             if let Some(&operation) = reach.owners.get(&region) {

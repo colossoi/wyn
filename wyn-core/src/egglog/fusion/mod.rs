@@ -35,7 +35,7 @@ pub(super) fn run(graph: &mut Graph) -> Result<(), OptimizeError> {
         crate::egglog::planning::analyze(graph)?;
         let fused = parallel::run(graph)?;
         if fused {
-            // Ranked scatter and the remaining legacy readers consume the published tables.
+            // Ranked scatter needs current shape and effect proofs after a splice.
             crate::egglog::planning::analyze(graph)?;
         }
         if (fused || !parallel::accumulators(graph, false)?)
