@@ -340,6 +340,7 @@
 (rule ((= bytes (LoopStateBytes loop slot)) (< slot (wyn-output-count loop)) (LoopValueCarry loop slot carried initial next)
        (= (ValueType carried) (LogicalValue type)))
       ((LoopFieldType loop slot (RootPath) type)) :ruleset graph-loop-layout)
+(rule ((LoopFieldType loop slot path type)) ((LogicalSizeDemand type)) :ruleset graph-loop-layout)
 (rule ((LoopFieldType loop slot path type) (= size (LogicalBytes type)))
       ((set (LoopFieldBytes loop slot path) size)) :ruleset graph-loop-layout)
 (rule ((LoopFieldType loop slot path (ArrayType ownership extents element))

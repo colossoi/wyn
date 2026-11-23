@@ -163,7 +163,13 @@ fn loop_and_reducer_metadata_is_computed_by_its_consumers() -> Result<(), Optimi
         test_graph::import("entry main(xs:[]i32,n:i32) i32=loop x=reduce((+),0i32,xs) for i<n do x+i")?;
     run(&mut graph)?;
     planning::analyze(&mut graph)?;
-    for table in ["LoopStateBytes", "ReducerState", "NativeAddition"] {
+    for table in [
+        "ElementBytes",
+        "LogicalBytes",
+        "LoopStateBytes",
+        "ReducerState",
+        "NativeAddition",
+    ] {
         assert!(
             Query(&graph).first(table)?.is_none(),
             "{table} was computed before use"
@@ -222,6 +228,7 @@ fn immutable_term_facts_survive_an_analysis_refresh() -> Result<(), OptimizeErro
         (set (FixtureOperationSlices (OperationId 1)) (vec-of (At index)))
         (let shape (FixtureOperationShape (OperationId 1)))
         (let slices (FixtureOperationSlices (OperationId 1)))
+        (ElementSizeDemand element)
         (run-schedule (saturate graph-indices dataflow-dependencies type-sizes))
         "#,
     )?;

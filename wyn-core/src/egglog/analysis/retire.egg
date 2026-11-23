@@ -189,6 +189,8 @@
       ((delete (ConditionalReturnPrefix a0 a1))) :ruleset retire-transforms)
 (rule ((RetiredOperation a0) (ConditionalTypePrefix a0 a1))
       ((delete (ConditionalTypePrefix a0 a1))) :ruleset retire-transforms)
+(rule ((RetiredOperation branch) (ConditionalMatchedType branch slot info))
+      ((delete (ConditionalMatchedType branch slot info))) :ruleset retire-transforms)
 (rule ((RetiredOperation a0) (= out (ConditionalSafe a0)))
       ((delete (ConditionalSafe a0))) :ruleset retire-transforms)
 (rule ((RetiredOperation a0) (FactorConditional a0 a1 a2))

@@ -48,13 +48,36 @@ pub(super) fn analyze(graph: &mut Graph) -> Result<(), OptimizeError> {
     let current = metadata_current(graph, revision)?;
     graph.parse_and_run_program(
         None,
-        "(run-schedule (saturate scalar-analysis graph-sizes integer-ranges type-sizes))",
+        "(run-schedule (saturate scalar-analysis graph-sizes integer-ranges))",
     )?;
     if !current {
         graph.update(|mut sink| {
             sink.remove("PlanningRevision", RawValues(Vec::new()))?;
             sink.set("PlanningRevision", RawValues(Vec::new()), revision)
         })?;
+    }
+    Ok(())
+}
+
+pub(in crate::egglog) fn demand_element_sizes(
+    graph: &mut Graph,
+    elements: &[Value],
+) -> Result<(), OptimizeError> {
+    let query = Query(graph);
+    let mut new = Vec::new();
+    for &element in elements {
+        if !query.contains("ElementSizeDemand", element)? {
+            new.push(element);
+        }
+    }
+    if !new.is_empty() {
+        graph.update(|mut sink| {
+            for element in new {
+                sink.add("ElementSizeDemand", element)?;
+            }
+            Ok(())
+        })?;
+        graph.parse_and_run_program(None, "(run-schedule (saturate type-sizes))")?;
     }
     Ok(())
 }
@@ -239,7 +262,7 @@ pub(super) fn place(
 }
 
 fn loop_layout(graph: &mut Graph) -> Result<(), OptimizeError> {
-    graph.parse_and_run_program(None, "(run-schedule (saturate graph-loop-layout))")?;
+    graph.parse_and_run_program(None, "(run-schedule (saturate graph-loop-layout type-sizes))")?;
     Ok(())
 }
 
@@ -373,7 +396,7 @@ mod order_tests;
 pub(super) fn factor_conditionals(graph: &mut Graph) -> Result<bool, OptimizeError> {
     graph.parse_and_run_program(
         None,
-        "(run-schedule (saturate transform-inputs conditional-index))",
+        "(run-schedule (saturate transform-inputs conditional-index type-sizes))",
     )?;
     resolve_transform_availability(graph)?;
     graph.parse_and_run_program(

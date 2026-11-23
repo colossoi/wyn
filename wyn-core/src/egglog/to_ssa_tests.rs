@@ -217,16 +217,22 @@ fn lowered_for_target(
     target: CodegenTarget,
 ) -> crate::ssa::stage::Elaborated {
     let tlc = compile_thru_tlc(source).unwrap();
+    finish_for_test(interfaces_for_policy(&tlc, policy), target).unwrap()
+}
+
+fn interfaces_for_policy(
+    tlc: &crate::tlc::stage::OwnershipApplied,
+    policy: crate::egglog::ScalarOptimization,
+) -> crate::egglog::Program<'_, crate::egglog::InterfacesPrepared> {
     let program = schedule(
         place(
-            crate::egglog::optimize_with_policy(fuse(from_tlc(&tlc).unwrap()).unwrap(), policy).unwrap(),
+            crate::egglog::optimize_with_policy(fuse(from_tlc(tlc).unwrap()).unwrap(), policy).unwrap(),
             PipelineTopologyPolicy::AllowGenerated,
         )
         .unwrap(),
     )
     .unwrap();
-    let program = crate::egglog::prepare_interfaces(program).unwrap();
-    finish_for_test(program, target).unwrap()
+    crate::egglog::prepare_interfaces(program).unwrap()
 }
 
 #[test]
@@ -331,9 +337,29 @@ fn in_place_results_keep_the_host_input_binding_and_upload_role() {
 
 #[test]
 fn fused_outputs_reuse_distinct_consumed_inputs() {
-    let output = pipeline(
+    use crate::egglog::execution::StorageReuse;
+    use crate::egglog::{prepare_host, to_ssa, ScalarOptimization};
+    let tlc = compile_thru_tlc(
         "entry main(xs:*[4]i32,ys:*[4]i32) ([4]i32,[4]i32) = (map(|x:i32|x+1,ys),map(|x:i32|x*2,xs))",
+    )
+    .unwrap();
+    let prepared = prepare_host(interfaces_for_policy(&tlc, ScalarOptimization::Basic)).unwrap();
+    let query = super::Query(&prepared.program.graph);
+    let mut planned = crate::LookupSet::new();
+    query
+        .for_each("CanReuse", |row| {
+            if let Some(StorageReuse::Input { binding, .. }) = prepared.execution.storage_reuse(row[0]) {
+                planned.insert(*binding);
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        planned.len(),
+        2,
+        "both input backings must be assigned before SSA"
     );
+    let output = to_ssa(prepared, CodegenTarget::Wgsl).unwrap().global_context.pipeline;
     let mut bindings = output.source_results.iter().map(|result| result.binding).collect::<Vec<_>>();
     bindings.sort();
     assert_eq!(bindings, [0, 1], "each consumed buffer serves exactly one output");

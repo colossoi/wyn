@@ -69,7 +69,7 @@ pub fn fuse(mut program: Program<'_, Imported>) -> Result<Program<'_, Fused>, Op
     planning::analyze(&mut program.graph)?;
     program.graph.parse_and_run_program(
         None,
-        "(run-schedule (saturate regularity-index) (saturate regularity))",
+        "(run-schedule (saturate regularity-index type-sizes) (saturate regularity))",
     )?;
     if query::Query(&program.graph).first("IrregularResult")?.is_some() {
         return Err(output_error(

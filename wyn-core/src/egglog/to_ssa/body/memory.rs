@@ -2,6 +2,7 @@
 use super::{builder_error, error, Body, Collection, CollectionShape, OptimizeError, Typed, Value};
 use crate::builtins::catalog;
 use crate::egglog::dataflow::ir::{Bounds, Code};
+use crate::egglog::execution::StorageReuse;
 use crate::egglog::graph::CollectiveInput;
 use crate::egglog::graph::Formula;
 use crate::egglog::payload::Payload;
@@ -837,20 +838,42 @@ impl Body<'_, '_, '_> {
         output: Value,
         ty: &Type,
     ) -> Result<Option<Typed>, OptimizeError> {
-        for &input in self.compiler.execution.reuse_candidates(output) {
-            let Some(array) = self.values.get(&input).cloned() else {
-                continue;
-            };
-            let Some(binding) = types::array_view_buffer(&array.ty) else {
-                continue;
-            };
-            if array.ty.elem_type().map(storage_value_type) == ty.elem_type().map(storage_value_type)
-                && self.reused_buffers.insert(binding)
-            {
-                return Ok(Some(array));
+        let element = ty.elem_type().map(storage_value_type);
+        match self.compiler.execution.storage_reuse(output) {
+            Some(StorageReuse::Input { name, binding }) => {
+                let Some(array) = self.values.get(name).cloned() else {
+                    return Err(error("planned input backing is unavailable"));
+                };
+                if types::array_view_buffer(&array.ty) != Some(*binding)
+                    || array.ty.elem_type().map(storage_value_type) != element
+                {
+                    return Err(error(
+                        "planned input backing has a different storage type or binding",
+                    ));
+                }
+                if !self.reused_buffers.insert(*binding) {
+                    return Err(error("planned input backing was already claimed"));
+                }
+                Ok(Some(array))
             }
+            Some(StorageReuse::Candidates(candidates)) => {
+                for input in candidates {
+                    let Some(array) = self.values.get(input).cloned() else {
+                        continue;
+                    };
+                    let Some(binding) = types::array_view_buffer(&array.ty) else {
+                        continue;
+                    };
+                    if array.ty.elem_type().map(storage_value_type) == element
+                        && self.reused_buffers.insert(binding)
+                    {
+                        return Ok(Some(array));
+                    }
+                }
+                Ok(None)
+            }
+            Some(StorageReuse::Fresh) | None => Ok(None),
         }
-        Ok(None)
     }
 
     fn write_array_value(

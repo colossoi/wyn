@@ -4,7 +4,7 @@ use super::{
     barriers, domains, effects_conflict, fuse_region, pointwise_index, Body, Code, Effects, Query, Site,
 };
 use crate::egglog::graph::Graph;
-use crate::egglog::{output_error, timing, OptimizeError};
+use crate::egglog::{output_error, planning, timing, OptimizeError};
 use crate::memory_ir::{OperationId, RegionId, UseSite, ValueRef};
 use crate::{LookupMap, LookupSet};
 use egglog_engine::sort::Z;
@@ -257,7 +257,7 @@ fn legal(
     }
     match body.clause(consumer).kind {
         ClauseKind::Collected if !safe_region(query, body, lane, &pointwise)? => return Ok(None),
-        ClauseKind::Folded if !maskable(query, body, second, consumer)? => return Ok(None),
+        ClauseKind::Folded if !maskable(graph, body, second, consumer)? => return Ok(None),
         _ => {}
     }
     let empty = Effects::default();
@@ -298,11 +298,12 @@ fn safe_region(
 }
 
 fn maskable(
-    query: Query<'_>,
+    graph: &mut Graph,
     body: &Body,
     operation: OperationId,
     clause: ClauseId,
 ) -> Result<bool, OptimizeError> {
+    let query = Query(graph);
     let result = body.clause(clause);
     if result.values.len() != result.neutral.len() {
         return Ok(false);
@@ -310,6 +311,7 @@ fn maskable(
     let Some(reducer) = body.reducer(operation, clause) else {
         return Ok(false);
     };
+    let mut elements = Vec::new();
     for (slot, &name) in result.values.iter().enumerate() {
         let Some(state) = body.graph.ir.regions[reducer].parameters.get(slot) else {
             return Ok(false);
@@ -324,7 +326,12 @@ fn maskable(
         let Some(element) = query.enode("ScalarInfo", ty)? else {
             return Ok(false);
         };
-        if !query.lookup("ElementBytes", element[0])?.is_some_and(|bytes| {
+        elements.push(element[0]);
+    }
+    planning::demand_element_sizes(graph, &elements)?;
+    let query = Query(graph);
+    for element in elements {
+        if !query.lookup("ElementBytes", element)?.is_some_and(|bytes| {
             u64::try_from(&*query.0.value_to_base::<Z>(bytes)).is_ok_and(|bytes| bytes > 0)
         }) {
             return Ok(false);

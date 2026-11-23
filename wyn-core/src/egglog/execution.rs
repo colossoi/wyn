@@ -6,13 +6,14 @@ use super::dataflow::ir::Code;
 use super::host;
 use super::query::Query;
 use super::{output_error as error, representation, InterfacesPrepared, OptimizeError, Program};
+use crate::binding_layout::extract_storage_binding;
 use crate::egglog::graph::CollectiveInput;
 use crate::egglog::graph::Graph;
 use crate::host::ScalarExpr;
 use crate::ssa::layout::{storage_elem_stride, storage_value_type};
 use crate::tlc::DefMeta;
 use crate::types::{self, Type, TypeExt, TypeName};
-use crate::{LookupMap, LookupSet, StableMap};
+use crate::{BindingRef, LookupMap, LookupSet, StableMap};
 use egglog_engine::sort::Z;
 use egglog_engine::{RawValues, Value, Write};
 use std::num::NonZeroU32;
@@ -33,7 +34,7 @@ pub(super) struct Execution {
     workgroups: LookupMap<Value, Workgroup>,
     subgroups: LookupSet<Value>,
     pub reducer_states: LookupMap<(Value, i64, usize), Type>,
-    reuse: LookupMap<Value, Vec<Value>>,
+    reuse: LookupMap<Value, StorageReuse>,
     snapshots: LookupSet<Value>,
     pub atomic_arrays: LookupSet<Value>,
     pub retry_safe: LookupSet<Value>,
@@ -46,6 +47,15 @@ pub(super) struct Execution {
     pub return_only_collections: LookupSet<Value>,
     pub host_input_lengths: LookupSet<Value>,
     pub output_copy_widths: LookupMap<Value, u32>,
+}
+
+pub(super) enum StorageReuse {
+    Fresh,
+    Input {
+        name: Value,
+        binding: BindingRef,
+    },
+    Candidates(Vec<Value>),
 }
 
 #[derive(Default)]
@@ -288,10 +298,15 @@ impl Execution {
                 execution.collectives.insert(operation, collective);
             }
         }
+        let mut reuse = LookupMap::<_, Vec<_>>::new();
         query.for_each("CanReuse", |row| {
-            execution.reuse.entry(row[0]).or_default().push(row[1]);
+            reuse.entry(row[0]).or_default().push(row[1]);
             Ok(())
         })?;
+        execution.reuse = reuse
+            .into_iter()
+            .map(|(output, candidates)| (output, StorageReuse::Candidates(candidates)))
+            .collect();
         execution.snapshots = relation_keys(query, "CanSnapshotCopy", 0)?;
         execution.atomic_arrays = relation_keys(query, "AtomicAccumulatorArray", 2)?;
         execution.retry_safe = true_keys(query, "RetrySafe")?;
@@ -501,8 +516,8 @@ impl Execution {
         self.captures.get(&region).map_or(&[], Vec::as_slice)
     }
 
-    pub fn reuse_candidates(&self, value: Value) -> &[Value] {
-        self.reuse.get(&value).map_or(&[], Vec::as_slice)
+    pub fn storage_reuse(&self, value: Value) -> Option<&StorageReuse> {
+        self.reuse.get(&value)
     }
 
     pub fn can_snapshot(&self, value: Value) -> bool {
@@ -854,15 +869,17 @@ impl Execution {
             .defs
             .iter()
             .filter_map(|definition| match &definition.meta {
-                DefMeta::EntryPoint(entry) => Some((definition.name, &entry.declaration.params)),
+                DefMeta::EntryPoint(entry) => Some((definition.name, entry)),
                 _ => None,
             })
             .collect::<LookupMap<_, _>>();
         for (function, order) in roots {
             let root = query.0.function_root(function)?;
-            let Some(&declarations) = declarations.get(program.symbols.resolve(order)) else {
+            let Some(&entry) = declarations.get(program.symbols.resolve(order)) else {
                 return Err(error("entry source metadata missing"));
             };
+            let declarations = &entry.declaration.params;
+            let mut input_backings = LookupMap::new();
             let mut host_values = Bindings::default();
             for (i, parameter) in query.0.parameters(root).into_iter().enumerate() {
                 if let Some((name, ty)) = representation::runtime_binding(query, parameter)? {
@@ -871,6 +888,18 @@ impl Execution {
                     }
                     if ty.is_array() {
                         self.host_shapes.insert(name);
+                        if let Some(element) = ty.elem_type() {
+                            let binding = entry
+                                .data
+                                .param_bindings
+                                .get(i)
+                                .and_then(Option::as_ref)
+                                .map(|binding| binding.first_buffer().0)
+                                .or_else(|| declarations.get(i).and_then(extract_storage_binding));
+                            if let Some(binding) = binding {
+                                input_backings.insert(name, (binding, storage_value_type(element)));
+                            }
+                        }
                     }
                 }
             }
@@ -885,6 +914,60 @@ impl Execution {
                 generated && !invocation,
                 host_values,
             )?;
+            self.assign_input_backings(query, root, &input_backings)?;
+        }
+        Ok(())
+    }
+
+    fn assign_input_backings(
+        &mut self,
+        query: Query<'_>,
+        root: Value,
+        inputs: &LookupMap<Value, (BindingRef, Type)>,
+    ) -> Result<(), OptimizeError> {
+        if self.reuse.is_empty() || inputs.is_empty() {
+            return Ok(());
+        }
+        let backings: LookupSet<_> = inputs.values().map(|(binding, _)| *binding).collect();
+        if backings.len() != inputs.len() {
+            return Ok(());
+        }
+        let mut claimed = LookupSet::new();
+        for step in self.regions.get(&root).into_iter().flatten() {
+            let operation = step.operation;
+            let dense_dispatch = matches!(step.kind, StepKind::Dispatch { epilogue: None, .. })
+                && !self.collectives.contains_key(&operation);
+            if !dense_dispatch && query.0.code(operation)? != Code::Copy {
+                continue;
+            }
+            for output in query.0.outputs(operation) {
+                let Some(output_name) = query.value_name(output)? else {
+                    continue;
+                };
+                let Some(choice) = self.reuse.get_mut(&output_name) else {
+                    continue;
+                };
+                let StorageReuse::Candidates(candidates) = choice else {
+                    continue;
+                };
+                if !candidates.iter().all(|input| inputs.contains_key(input)) {
+                    continue;
+                }
+                let Some((_, ty)) = representation::runtime_binding(query, output)? else {
+                    continue;
+                };
+                let Some(element) = ty.elem_type().map(storage_value_type) else {
+                    continue;
+                };
+                let backing = candidates.iter().find_map(|&name| {
+                    let (binding, input_element) = inputs.get(&name)?;
+                    (&element == input_element && claimed.insert(*binding)).then_some(StorageReuse::Input {
+                        name,
+                        binding: *binding,
+                    })
+                });
+                *choice = backing.unwrap_or(StorageReuse::Fresh);
+            }
         }
         Ok(())
     }
