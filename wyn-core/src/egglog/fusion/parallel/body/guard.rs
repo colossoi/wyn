@@ -268,8 +268,7 @@ impl Body {
                 let packed = sink.add("CompactedOutput", RawValues(vec![]))?;
                 for (key, slot, clause, predicate) in clauses {
                     if clause.kind == ClauseKind::Compacted {
-                        sink.remove("ResultKindOf", (key, slot))?;
-                        sink.set("ResultKindOf", (key, slot), compacted)?;
+                        sink.set_result_kind(key, slot, compacted)?;
                     }
                     if let Some(predicate) = predicate {
                         sink.set_collective_inputs(key, slot, CollectiveInput::Predicate, vec![predicate])?;
@@ -282,9 +281,7 @@ impl Body {
                     )?;
                 }
                 for &(op, slot) in &self.packed_outputs {
-                    let key = (self.graph.operations[op], slot);
-                    sink.remove("OutputRole", key)?;
-                    sink.set("OutputRole", key, packed)?;
+                    sink.set_output_role(self.graph.operations[op], slot, packed)?;
                 }
                 Ok(())
             })())

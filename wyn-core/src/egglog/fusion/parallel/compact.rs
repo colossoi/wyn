@@ -17,26 +17,25 @@ pub(in crate::egglog::fusion) fn compact(graph: &mut Graph) -> Result<bool, Opti
     let Some(compacted) = query.constructor("Compacted", RawValues(vec![]))? else {
         return Ok(false);
     };
-    let mut packed = LookupSet::new();
-    query.for_function("ResultKindOf", |key, kind| {
-        if kind == compacted {
-            packed.insert((key[0], key[1]));
+    let mut producers = LookupMap::new();
+    {
+        let structure = graph.structure().read();
+        for (&op, results) in &structure.parallels {
+            for (&output, binding) in
+                structure.outputs.get(&op).into_iter().flatten().zip(&results.bindings)
+            {
+                let Some(clause) = binding.clause.and_then(|slot| usize::try_from(slot).ok()) else {
+                    continue;
+                };
+                if results.kinds.get(clause).copied().flatten() == Some(compacted) {
+                    producers.insert(output, op);
+                }
+            }
         }
-        Ok(())
-    })?;
-    if packed.is_empty() {
+    }
+    if producers.is_empty() {
         return Ok(false);
     }
-    let mut producers = LookupMap::new();
-    query.for_function("OutputClause", |key, clause| {
-        if packed.contains(&(key[0], clause)) {
-            producers.insert(
-                query.0.output(key[0], query.0.value_to_base::<i64>(key[1]))?,
-                key[0],
-            );
-        }
-        Ok(())
-    })?;
     let mut lengths = LookupMap::<Value, Vec<Value>>::new();
     query.for_each("CountLength", |row| {
         if let Some(name) = query.constructor("ValueNameRef", row[1])? {

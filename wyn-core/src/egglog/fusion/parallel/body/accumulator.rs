@@ -1,7 +1,7 @@
 use super::{Body, Effects, Site};
 use crate::egglog::graph::CollectiveInput;
 use crate::egglog::graph::Graph;
-use crate::egglog::{analysis::count, output_error, query::Query, OptimizeError};
+use crate::egglog::{output_error, OptimizeError};
 use crate::memory_ir::{BodyRole, OperationId, RegionId, ValueRef};
 use crate::LookupSet;
 use egglog_engine::{RawValues, Write};
@@ -89,12 +89,12 @@ impl Body {
         if self.accumulator_origins.is_empty() {
             return Ok(());
         }
-        let query = Query(graph);
         let index = |slot: usize| graph.base_to_value(slot as i64);
         let mut rows = Vec::new();
         let mut parameters = Vec::new();
         let mut callbacks = Vec::new();
         let mut backings = Vec::new();
+        let mut policies = Vec::new();
         for (op, origins) in &self.accumulator_origins {
             let key = self.graph.operations[op];
             let region = self.lane(op)?;
@@ -102,21 +102,21 @@ impl Body {
             let body = &self.graph.ir.regions[region];
             let mut base = 0;
             let mut combiners = Vec::new();
+            let mut combined_policies = Vec::new();
             for &origin in origins {
                 let origin = self.graph.operations[origin];
-                let size = count(query, "AccumulatorGroupCount", origin)?;
-                for slot in 0..size {
-                    let group = index(base + slot as usize);
-                    if let Some(combine) = query.0.combiner_at(origin, slot) {
+                let groups = graph.accumulator_policies(origin);
+                let size = groups.len();
+                for (slot, policy) in groups.into_iter().enumerate() {
+                    let slot = slot as i64;
+                    if let Some(combine) = graph.combiner_at(origin, slot) {
                         combiners.push((base as i64 + slot, combine));
                     }
-                    if let Some(value) = query.lookup("AccumulatorPolicy", (origin, slot))? {
-                        rows.push(("AccumulatorPolicy", vec![key, group], value));
-                    }
+                    combined_policies.push(policy);
                     let arrays = graph.collective_inputs(origin, slot, CollectiveInput::Backing);
                     backings.push((key, base as i64 + slot, arrays));
                 }
-                base += size as usize;
+                base += size;
             }
             let mut names = Vec::with_capacity(body.parameters.len());
             for (slot, parameter) in body.parameters.iter().enumerate() {
@@ -125,9 +125,12 @@ impl Body {
             }
             parameters.push((wire_region, names));
             callbacks.push((key, combiners));
-            rows.push(("AccumulatorGroupCount", vec![key], index(base)));
+            policies.push((key, combined_policies));
         }
         graph.update(|mut sink| {
+            for (key, policies) in policies {
+                sink.set_accumulator_policies(key, policies);
+            }
             for (key, group, arrays) in backings {
                 sink.set_collective_inputs(key, group, CollectiveInput::Backing, arrays)?;
             }

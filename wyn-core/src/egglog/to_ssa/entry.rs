@@ -1618,11 +1618,7 @@ impl EntryEmission<'_, '_, '_> {
                     needed.extend(live.iter().copied());
                     self.statements(lane, &needed)?;
                     let mut values = Vec::new();
-                    for group in 0..crate::egglog::analysis::count(
-                        self.body.query(),
-                        "AccumulatorGroupCount",
-                        statement,
-                    )? {
+                    for group in 0..self.body.query().0.accumulator_group_count(statement) {
                         for slot in 0..self.body.query().0.collective_input_count(
                             statement,
                             group,

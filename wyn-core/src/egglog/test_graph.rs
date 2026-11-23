@@ -2,7 +2,7 @@
 use super::dataflow::ir::{self, Code};
 use super::query::Query;
 use super::{from_tlc, memory, OptimizeError};
-use crate::egglog::graph::{CollectiveInput, Formula, Graph};
+use crate::egglog::graph::{CollectiveInput, Formula, Graph, OutputBinding, ParallelResults};
 use egglog_engine::{Value, Write};
 
 pub(super) fn fixture(codes: &[(i64, Code)], facts: &str) -> Result<Graph, OptimizeError> {
@@ -55,6 +55,13 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
         "FixtureResultNeutral",
         "FixtureResultPredicate",
         "FixtureAccumulatorArray",
+        "FixtureResultKindOf",
+        "FixtureResultCount",
+        "FixtureOutputClause",
+        "FixtureOutputField",
+        "FixtureOutputRole",
+        "FixtureAccumulatorPolicy",
+        "FixtureAccumulatorGroupCount",
     ];
     if !fields.iter().any(|field| facts.contains(field)) {
         graph.parse_and_run_program(None, facts)?;
@@ -82,6 +89,13 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
             (function FixtureResultNeutral (OperationKey i64 i64) Name :no-merge)
             (function FixtureResultPredicate (OperationKey i64) ValueName :no-merge)
             (function FixtureAccumulatorArray (OperationKey i64 i64) ValueName :no-merge)
+            (function FixtureResultKindOf (OperationKey i64) ResultKind :no-merge)
+            (function FixtureResultCount (OperationKey) i64 :no-merge)
+            (function FixtureOutputClause (OperationKey i64) i64 :no-merge)
+            (function FixtureOutputField (OperationKey i64) i64 :no-merge)
+            (function FixtureOutputRole (OperationKey i64) ResultRole :no-merge)
+            (function FixtureAccumulatorPolicy (OperationKey i64) AccPolicy :no-merge)
+            (function FixtureAccumulatorGroupCount (OperationKey) i64 :no-merge)
         ",
         )?;
     }
@@ -175,7 +189,55 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
             Ok(())
         })?;
     }
+    let mut descriptors = crate::LookupMap::<Value, ParallelResults>::new();
+    let mut policies = crate::LookupMap::<Value, Vec<Option<Value>>>::new();
+    query.for_function("FixtureResultCount", |keys, count| {
+        descriptors
+            .entry(keys[0])
+            .or_default()
+            .kinds
+            .resize(graph.value_to_base::<i64>(count) as usize, None);
+        Ok(())
+    })?;
+    query.for_function("FixtureResultKindOf", |keys, kind| {
+        let clause = graph.value_to_base::<i64>(keys[1]) as usize;
+        let kinds = &mut descriptors.entry(keys[0]).or_default().kinds;
+        kinds.resize(kinds.len().max(clause + 1), None);
+        kinds[clause] = Some(kind);
+        Ok(())
+    })?;
+    for table in ["FixtureOutputClause", "FixtureOutputField", "FixtureOutputRole"] {
+        query.for_function(table, |keys, value| {
+            let slot = graph.value_to_base::<i64>(keys[1]) as usize;
+            let bindings = &mut descriptors.entry(keys[0]).or_default().bindings;
+            bindings.resize(bindings.len().max(slot + 1), OutputBinding::default());
+            let binding = &mut bindings[slot];
+            match table {
+                "FixtureOutputClause" => binding.clause = Some(graph.value_to_base(value)),
+                "FixtureOutputField" => binding.field = Some(graph.value_to_base(value)),
+                _ => binding.role = Some(value),
+            }
+            Ok(())
+        })?;
+    }
+    query.for_function("FixtureAccumulatorGroupCount", |keys, count| {
+        policies.entry(keys[0]).or_default().resize(graph.value_to_base::<i64>(count) as usize, None);
+        Ok(())
+    })?;
+    query.for_function("FixtureAccumulatorPolicy", |keys, policy| {
+        let group = graph.value_to_base::<i64>(keys[1]) as usize;
+        let groups = policies.entry(keys[0]).or_default();
+        groups.resize(groups.len().max(group + 1), None);
+        groups[group] = Some(policy);
+        Ok(())
+    })?;
     graph.update(|mut sink| {
+        for (op, results) in descriptors {
+            sink.set_parallel_results(op, results);
+        }
+        for (op, policies) in policies {
+            sink.set_accumulator_policies(op, policies);
+        }
         for (op, kind, formula) in formulas {
             sink.set_formula(op, kind, formula)?;
         }

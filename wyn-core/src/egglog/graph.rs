@@ -45,9 +45,34 @@ pub(super) struct ExecutableStructure {
     pub outputs: LookupMap<Value, Vec<Value>>,
     pub yields: ValueLists,
     pub collective: CollectiveEdges,
+    pub parallels: LookupMap<Value, ParallelResults>,
+    pub accumulator_policies: LookupMap<Value, Vec<Option<Value>>>,
     pub formulas: OperationFormulas,
     pub parameters: LookupMap<Value, Vec<Value>>,
     arities: LookupSet<usize>,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct ParallelResults {
+    pub kinds: Vec<Option<Value>>,
+    pub bindings: Vec<OutputBinding>,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(super) struct OutputBinding {
+    pub clause: Option<i64>,
+    pub field: Option<i64>,
+    pub role: Option<Value>,
+}
+
+impl OutputBinding {
+    pub fn new(clause: i64, field: i64, role: Value) -> Self {
+        Self {
+            clause: Some(clause),
+            field: Some(field),
+            role: Some(role),
+        }
+    }
 }
 
 pub(super) struct ControlEdge {
@@ -101,6 +126,9 @@ impl Graph {
         let function = sort("FunctionName")?;
         let name = sort("Name")?;
         let value_name = sort("ValueName")?;
+        let result_kind = sort("ResultKind")?;
+        let result_role = sort("ResultRole")?;
+        let acc_policy = sort("AccPolicy")?;
         let index = I64Sort.to_arcsort();
         for (kind, output) in [
             (Formula::Index, sort("IndexExp")?),
@@ -123,6 +151,37 @@ impl Graph {
             (Field::Region, vec![operation.clone()], region.clone()),
             (Field::Order, vec![operation.clone()], I64Sort.to_arcsort()),
             (Field::FunctionRoot, vec![function.clone()], region.clone()),
+            (
+                Field::ResultKind,
+                vec![operation.clone(), index.clone()],
+                result_kind.clone(),
+            ),
+            (Field::ResultCount, vec![operation.clone()], index.clone()),
+            (
+                Field::OutputClause,
+                vec![operation.clone(), index.clone()],
+                index.clone(),
+            ),
+            (
+                Field::OutputField,
+                vec![operation.clone(), index.clone()],
+                index.clone(),
+            ),
+            (
+                Field::OutputRole,
+                vec![operation.clone(), index.clone()],
+                result_role.clone(),
+            ),
+            (
+                Field::AccumulatorPolicy,
+                vec![operation.clone(), index.clone()],
+                acc_policy.clone(),
+            ),
+            (
+                Field::AccumulatorGroupCount,
+                vec![operation.clone()],
+                index.clone(),
+            ),
             (
                 Field::Collective(CollectiveInput::Contribution),
                 vec![operation.clone(), index.clone(), index.clone()],
@@ -311,6 +370,87 @@ impl Graph {
     pub fn formula(&self, operation: Value, kind: Formula) -> Result<Value, OptimizeError> {
         self.formula_at(operation, kind)
             .ok_or_else(|| output_error(format!("missing {kind:?} on {operation:?}")))
+    }
+
+    pub fn parallel_results_at(&self, operation: Value) -> Option<ParallelResults> {
+        self.structure.read().parallels.get(&operation).cloned()
+    }
+
+    pub fn parallel_results(&self, operation: Value) -> Result<ParallelResults, OptimizeError> {
+        self.parallel_results_at(operation)
+            .ok_or_else(|| output_error(format!("missing collective result clauses on {operation:?}")))
+    }
+
+    pub fn result_count(&self, operation: Value) -> i64 {
+        self.structure.read().parallels.get(&operation).map_or(0, |results| results.kinds.len() as i64)
+    }
+
+    pub fn result_kind(&self, operation: Value, clause: i64) -> Result<Value, OptimizeError> {
+        let graph = self.structure.read();
+        let kind = usize::try_from(clause)
+            .ok()
+            .and_then(|clause| graph.parallels.get(&operation)?.kinds.get(clause).copied().flatten());
+        kind.ok_or_else(|| output_error(format!("missing result kind on {operation:?}, clause {clause}")))
+    }
+
+    pub fn output_binding(&self, operation: Value, slot: i64) -> Result<OutputBinding, OptimizeError> {
+        let graph = self.structure.read();
+        let binding = usize::try_from(slot)
+            .ok()
+            .and_then(|slot| graph.parallels.get(&operation)?.bindings.get(slot).copied());
+        binding.ok_or_else(|| {
+            output_error(format!(
+                "missing collective output binding on {operation:?}, slot {slot}"
+            ))
+        })
+    }
+
+    pub fn output_role(&self, operation: Value, slot: i64) -> Result<Value, OptimizeError> {
+        self.output_binding(operation, slot)?.role.ok_or_else(|| {
+            output_error(format!(
+                "missing collective output role on {operation:?}, slot {slot}"
+            ))
+        })
+    }
+
+    pub fn output_clause(&self, operation: Value, slot: i64) -> Result<i64, OptimizeError> {
+        self.output_binding(operation, slot)?.clause.ok_or_else(|| {
+            output_error(format!(
+                "missing collective output clause on {operation:?}, slot {slot}"
+            ))
+        })
+    }
+
+    pub fn output_field(&self, operation: Value, slot: i64) -> Result<i64, OptimizeError> {
+        self.output_binding(operation, slot)?.field.ok_or_else(|| {
+            output_error(format!(
+                "missing collective output field on {operation:?}, slot {slot}"
+            ))
+        })
+    }
+
+    pub fn accumulator_policies(&self, operation: Value) -> Vec<Option<Value>> {
+        self.structure.read().accumulator_policies.get(&operation).cloned().unwrap_or_default()
+    }
+
+    pub fn accumulator_group_count(&self, operation: Value) -> i64 {
+        self.structure
+            .read()
+            .accumulator_policies
+            .get(&operation)
+            .map_or(0, |policies| policies.len() as i64)
+    }
+
+    pub fn accumulator_policy(&self, operation: Value, group: i64) -> Result<Value, OptimizeError> {
+        let graph = self.structure.read();
+        let policy = usize::try_from(group)
+            .ok()
+            .and_then(|group| graph.accumulator_policies.get(&operation)?.get(group).copied().flatten());
+        policy.ok_or_else(|| {
+            output_error(format!(
+                "missing accumulator policy on {operation:?}, group {group}"
+            ))
+        })
     }
 
     pub fn collective_groups(&self, owner: Value) -> StableMap<(i64, CollectiveInput), Vec<Value>> {
@@ -720,6 +860,48 @@ impl State<'_, '_, '_> {
         }
     }
 
+    pub fn set_parallel_results(&mut self, operation: Value, results: ParallelResults) {
+        self.structure.write().parallels.insert(operation, results);
+    }
+
+    pub fn set_result_kind(&mut self, operation: Value, clause: i64, kind: Value) -> Result<(), Error> {
+        let mut graph = self.structure.write();
+        let Some(kind_slot) = usize::try_from(clause)
+            .ok()
+            .and_then(|clause| graph.parallels.get_mut(&operation)?.kinds.get_mut(clause))
+        else {
+            return Err(Error::BackendError(format!(
+                "missing collective clause {clause} on {operation:?}"
+            )));
+        };
+        *kind_slot = Some(kind);
+        Ok(())
+    }
+
+    pub fn set_output_role(&mut self, operation: Value, slot: i64, role: Value) -> Result<(), Error> {
+        let mut graph = self.structure.write();
+        let Some(binding) = usize::try_from(slot)
+            .ok()
+            .and_then(|slot| graph.parallels.get_mut(&operation)?.bindings.get_mut(slot))
+        else {
+            return Err(Error::BackendError(format!(
+                "missing collective output {slot} on {operation:?}"
+            )));
+        };
+        binding.role = Some(role);
+        Ok(())
+    }
+
+    pub fn set_accumulator_policies(&mut self, operation: Value, policies: Vec<Option<Value>>) {
+        self.structure.write().accumulator_policies.insert(operation, policies);
+    }
+
+    pub fn clear_collective_layouts(&mut self, operation: Value) {
+        let mut structure = self.structure.write();
+        structure.parallels.remove(&operation);
+        structure.accumulator_policies.remove(&operation);
+    }
+
     pub fn set_collective_inputs(
         &mut self,
         owner: Value,
@@ -802,6 +984,7 @@ impl State<'_, '_, '_> {
         self.operations.remove(&operation);
         self.clear_bodies(operation);
         self.clear_formulas(operation, false);
+        self.clear_collective_layouts(operation);
         let mut structure = self.structure.write();
         structure.targets.shift_remove(&operation);
         structure.inputs.replace(operation, Vec::new());

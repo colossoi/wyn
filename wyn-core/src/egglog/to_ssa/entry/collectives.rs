@@ -26,7 +26,7 @@ impl EntryEmission<'_, '_, '_> {
         let dispatch = *self.body.compiler.execution.dispatch(statement)?;
         let domain = query.required("OperationDomain", statement)?;
         let mut carry_inputs = LookupSet::default();
-        for clause in 0..crate::egglog::analysis::count(query, "ResultCount", statement)? {
+        for clause in 0..query.0.result_count(statement) {
             if let Some(reducer) = query.0.reducer_at(statement, clause) {
                 carry_inputs.extend(names_in(query, "RegionCapture", reducer)?);
                 for slot in 0..query.0.collective_input_count(statement, clause, CollectiveInput::Neutral) {
@@ -48,7 +48,7 @@ impl EntryEmission<'_, '_, '_> {
                 output_names.insert(name);
                 // The final carry dispatch can use arrays already published by the chunk dispatch.
                 if terminal && !plan.scan && after.contains(&name) {
-                    let role = query.required("OutputRole", (statement, slot as i64))?;
+                    let role = query.0.output_role(statement, slot as i64)?;
                     if query.enode("CollectedOutput", role)?.is_some() {
                         carry_inputs.insert(name);
                     }

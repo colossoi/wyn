@@ -1,11 +1,11 @@
 //! Apply an admitted domain composition to keyed cells and coordinate proofs.
-use crate::egglog::dataflow::edit::{self, OPERATION_CELLS};
+use crate::egglog::dataflow::edit;
 use crate::egglog::dataflow::ir::{self, Code, Name, OperationId, Parameter, RegionId};
 use crate::egglog::graph::Formula;
 use crate::egglog::graph::Graph;
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, OptimizeError};
-use egglog_engine::{RawValues, Value, Write};
+use egglog_engine::{Value, Write};
 
 pub(super) fn lift_row_length(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let Some(candidate) = Query(graph).first("LiftUniformRowLength")? else {
@@ -94,28 +94,9 @@ pub(super) fn apply(graph: &mut Graph, outer: Value, inner: Value) -> Result<(),
         .map(|operation| Ok((operation, query.0.operation_order(operation)?)))
         .collect::<Result<Vec<_>, OptimizeError>>()?;
     let base = query.0.operation_order(inner)? + 2;
-    let result_count = analysis::count(query, "ResultCount", inner)?;
+    let results = graph.parallel_results(inner)?;
     let reducers = graph.reducers(inner);
     let contributions = graph.collective_groups(inner);
-    let mut removed = Vec::new();
-    let mut copied = Vec::new();
-    for &table in OPERATION_CELLS {
-        if (table.starts_with("Result") && table != "ResultCount")
-            || ["OutputClause", "OutputField", "OutputRole"].contains(&table)
-        {
-            query.for_function(table, |keys, value| {
-                if keys[0] == outer {
-                    removed.push((table, keys.to_vec()));
-                }
-                if keys[0] == inner {
-                    let mut keys = keys.to_vec();
-                    keys[0] = outer;
-                    copied.push((table, keys, value));
-                }
-                Ok(())
-            })?;
-        }
-    }
     let mut certificates = Vec::new();
     query.for_each("OperationCertificate", |row| {
         if row[0] == inner {
@@ -126,14 +107,7 @@ pub(super) fn apply(graph: &mut Graph, outer: Value, inner: Value) -> Result<(),
     // Only identities and small immutable coordinate metadata cross this edit boundary.
     graph.update(|mut sink| {
         Ok((|| -> Result<(), OptimizeError> {
-            for (table, keys) in removed {
-                sink.remove(table, RawValues(keys))?;
-            }
-            for (table, keys, value) in copied {
-                sink.set(table, RawValues(keys), value)?;
-            }
-            sink.remove("ResultCount", outer)?;
-            sink.set("ResultCount", outer, result_count)?;
+            sink.set_parallel_results(outer, results);
             sink.set_reducers(outer, reducers);
             sink.clear_collective_inputs(outer);
             for ((clause, kind), values) in contributions {

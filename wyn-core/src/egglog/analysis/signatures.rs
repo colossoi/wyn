@@ -104,13 +104,13 @@ pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), Optimi
                 return Err(output_error("parallel coordinate is not its lane parameter"));
             }
         }
-        let clauses = count(query, "ResultCount", operation)?;
+        let clauses = query.0.result_count(operation);
         for slot in 0..query.0.output_count(operation) {
-            let clause = query.0.value_to_base::<i64>(query.required("OutputClause", (operation, slot))?);
+            let clause = query.0.output_clause(operation, slot)?;
             if clause < 0 || clause >= clauses {
                 return Err(output_error("parallel output refers to a missing result clause"));
             }
-            let field = query.0.value_to_base::<i64>(query.required("OutputField", (operation, slot))?);
+            let field = query.0.output_field(operation, slot)?;
             if field < 0
                 || field >= query.0.collective_input_count(operation, clause, CollectiveInput::Contribution)
             {
@@ -118,7 +118,7 @@ pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), Optimi
             }
         }
         for clause in 0..clauses {
-            let kind = query.required("ResultKindOf", (operation, clause))?;
+            let kind = query.0.result_kind(operation, clause)?;
             let predicate = query.0.collective_input_at(operation, clause, CollectiveInput::Predicate, 0);
             if query.enode("Compacted", kind)?.is_some() && predicate.is_none() {
                 return Err(output_error("compacted result has no predicate"));
@@ -160,7 +160,7 @@ pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), Optimi
     }
     if query.contains("AccumulatorOperation", operation)? {
         let body = query.0.control_region(operation, 0_i64)?;
-        let groups = count(query, "AccumulatorGroupCount", operation)?;
+        let groups = query.0.accumulator_group_count(operation);
         if query.0.parameter_count(body) < groups || query.0.yield_count(body) < groups {
             return Err(output_error("accumulator scope loses a capability"));
         }

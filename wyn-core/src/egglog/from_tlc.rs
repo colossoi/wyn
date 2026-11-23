@@ -8,6 +8,7 @@ use crate::builtins::{by_id, catalog, BuiltinId, Purity};
 use crate::egglog::graph::CollectiveInput;
 use crate::egglog::graph::Formula;
 use crate::egglog::graph::{ArgumentSite, Graph, State};
+use crate::egglog::graph::{OutputBinding, ParallelResults};
 use crate::op::BinaryOperator;
 use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
 use crate::tlc::stage::OwnershipApplied;
@@ -869,8 +870,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
         self.sink.set_control(operation.0, 0_i64, body.0);
         let execution = self.unit("Unscheduled")?;
         self.sink.set("OperationExecution", operation.0, execution)?;
-        self.sink.set("ResultCount", operation.0, clauses.len() as i64)?;
-        let mut output = 0_i64;
+        let mut results = ParallelResults::default();
         for (index, clause) in clauses.into_iter().enumerate() {
             let index = index as i64;
             let (kind, role, values) = match clause {
@@ -895,7 +895,6 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                     values,
                 } => {
                     self.sink.set_reducer(operation.0, index, combine.0);
-                    self.sink.set("ResultCommutative", (operation.0, index), false)?;
                     let neutral = neutral
                         .into_iter()
                         .map(|value| value.fact(&mut self.sink))
@@ -913,19 +912,17 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                     )
                 }
             };
-            self.sink.set("ResultKindOf", (operation.0, index), kind)?;
+            results.kinds.push(Some(kind));
             let values = values
                 .into_iter()
                 .map(|value| value.fact(&mut self.sink))
                 .collect::<Result<Vec<_>, _>>()?;
             for field in 0..values.len() {
-                self.sink.set("OutputClause", (operation.0, output), index)?;
-                self.sink.set("OutputField", (operation.0, output), field as i64)?;
-                self.sink.set("OutputRole", (operation.0, output), role)?;
-                output += 1;
+                results.bindings.push(OutputBinding::new(index, field as i64, role));
             }
             self.sink.set_collective_inputs(operation.0, index, CollectiveInput::Contribution, values)?;
         }
+        self.sink.set_parallel_results(operation.0, results);
         Ok(operation)
     }
 
@@ -1294,10 +1291,10 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
         let body = self.finish_region(body, &pattern, &returns)?;
         let operation = self.operation(Code::WithAcc, &[])?;
         self.sink.set_control(operation.0, 0_i64, body.0);
-        self.sink.set("AccumulatorGroupCount", operation.0, inputs.len() as i64)?;
+        let policies = inputs.iter().map(|input| Some(input.policy)).collect();
+        self.sink.set_accumulator_policies(operation.0, policies);
         for (group, input) in inputs.into_iter().enumerate() {
             let group = group as i64;
-            self.sink.set("AccumulatorPolicy", (operation.0, group), input.policy)?;
             self.sink.set_collective_inputs(
                 operation.0,
                 group,

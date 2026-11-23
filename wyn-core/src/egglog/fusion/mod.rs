@@ -61,8 +61,8 @@ struct MapLevel {
 
 fn collected_map(query: Query<'_>, operation: Value) -> Result<Option<MapLevel>, OptimizeError> {
     if !query.contains("ParallelOperation", operation)?
-        || analysis::count(query, "ResultCount", operation)? != 1
-        || query.enode("Collected", query.required("ResultKindOf", (operation, 0_i64))?)?.is_none()
+        || query.0.result_count(operation) != 1
+        || query.enode("Collected", query.0.result_kind(operation, 0_i64)?)?.is_none()
         || query.0.collective_input_count(operation, 0_i64, CollectiveInput::Contribution) != 1
     {
         return Ok(None);

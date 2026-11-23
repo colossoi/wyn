@@ -295,7 +295,7 @@ fn reducer_width_requires_agreement_and_a_length_preserving_combiner() -> Result
             (let neutral (ValueId 0)) (let item (ValueId 1))
             (let left (ValueId 2)) (let right (ValueId 3))
             (let result (ValueId 4)) (let length (ValueId 5)) (let measure (OperationId 1))
-            (set (ResultKindOf fold 0) (Folded (Total)))
+            (set (FixtureResultKindOf fold 0) (Folded (Total)))
             (set (FixtureResultNeutral fold 0 0) (ValueNameRef neutral))
             (set (FixtureResultValue fold 0 0) (ValueNameRef item))
             (set (FixtureResultReducer fold 0) reducer)

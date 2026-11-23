@@ -20,6 +20,13 @@ pub(super) enum Field {
     Output,
     OutputCount,
     Formula(Formula),
+    ResultKind,
+    ResultCount,
+    OutputClause,
+    OutputField,
+    OutputRole,
+    AccumulatorPolicy,
+    AccumulatorGroupCount,
     Collective(CollectiveInput),
     CollectiveCount(CollectiveInput),
     Yield,
@@ -55,6 +62,13 @@ impl Primitive for ExecutableField {
             Field::Output => "wyn-output",
             Field::OutputCount => "wyn-output-count",
             Field::Formula(kind) => kind.access(),
+            Field::ResultKind => "wyn-result-kind",
+            Field::ResultCount => "wyn-result-count",
+            Field::OutputClause => "wyn-output-clause",
+            Field::OutputField => "wyn-output-field",
+            Field::OutputRole => "wyn-output-role",
+            Field::AccumulatorPolicy => "wyn-accumulator-policy",
+            Field::AccumulatorGroupCount => "wyn-accumulator-group-count",
             Field::Collective(CollectiveInput::Contribution) => "wyn-contribution",
             Field::CollectiveCount(CollectiveInput::Contribution) => "wyn-contribution-count",
             Field::Collective(CollectiveInput::Neutral) => "wyn-fold-seed",
@@ -125,6 +139,31 @@ impl PurePrim for ExecutableField {
                 Some(state.base_to_value(count))
             }
             Field::Formula(kind) => graph.formulas.get(key, kind),
+            Field::ResultCount => Some(state.base_to_value(graph.parallels.get(&key)?.kinds.len() as i64)),
+            Field::AccumulatorGroupCount => {
+                Some(state.base_to_value(graph.accumulator_policies.get(&key)?.len() as i64))
+            }
+            Field::ResultKind
+            | Field::AccumulatorPolicy
+            | Field::OutputClause
+            | Field::OutputField
+            | Field::OutputRole => {
+                let slot = usize::try_from(state.value_to_base::<i64>(args[1])).ok()?;
+                match self.field {
+                    Field::ResultKind => graph.parallels.get(&key)?.kinds.get(slot).copied().flatten(),
+                    Field::AccumulatorPolicy => {
+                        graph.accumulator_policies.get(&key)?.get(slot).copied().flatten()
+                    }
+                    field => {
+                        let binding = graph.parallels.get(&key)?.bindings.get(slot)?;
+                        match field {
+                            Field::OutputClause => Some(state.base_to_value(binding.clause?)),
+                            Field::OutputField => Some(state.base_to_value(binding.field?)),
+                            _ => binding.role,
+                        }
+                    }
+                }
+            }
             Field::OutputCount => {
                 let count = graph.outputs.get(&key).map_or(0, |names| names.len() as i64);
                 Some(state.base_to_value(count))

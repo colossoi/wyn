@@ -310,14 +310,13 @@ fn compact_length_uses_a_count_without_a_collection() {
         let mut totals = 0;
         let mut packed = 0;
         let mut prefixes = 0;
-        query
-            .for_function("OutputRole", |_, role| {
-                totals += usize::from(query.enode("TotalOutput", role)?.is_some());
-                packed += usize::from(query.enode("CompactedOutput", role)?.is_some());
-                prefixes += usize::from(query.enode("PrefixOutput", role)?.is_some());
-                Ok(())
-            })
-            .unwrap();
+        for results in query.0.structure().read().parallels.values() {
+            for role in results.bindings.iter().filter_map(|binding| binding.role) {
+                totals += usize::from(query.enode("TotalOutput", role).unwrap().is_some());
+                packed += usize::from(query.enode("CompactedOutput", role).unwrap().is_some());
+                prefixes += usize::from(query.enode("PrefixOutput", role).unwrap().is_some());
+            }
+        }
         assert_eq!((totals, packed, prefixes), (1, 0, usize::from(has_prefix)));
         if has_prefix {
             let mut mixed = false;
@@ -350,11 +349,12 @@ fn count_compaction_batches_independent_lengths_and_preserves_observed_arrays() 
     assert_eq!(edit::revision(&graph)?, revision + 1);
     let query = Query(&graph);
     let mut roles = (0, 0);
-    query.for_function("OutputRole", |_, role| {
-        roles.0 += usize::from(query.enode("TotalOutput", role)?.is_some());
-        roles.1 += usize::from(query.enode("CompactedOutput", role)?.is_some());
-        Ok(())
-    })?;
+    for results in query.0.structure().read().parallels.values() {
+        for role in results.bindings.iter().filter_map(|binding| binding.role) {
+            roles.0 += usize::from(query.enode("TotalOutput", role)?.is_some());
+            roles.1 += usize::from(query.enode("CompactedOutput", role)?.is_some());
+        }
+    }
     assert_eq!(roles, (2, 1));
     memory::validate(&mut graph)
 }
@@ -426,14 +426,12 @@ fn compact_consumers_preserve_an_unrelated_scan_and_guard_partial_callbacks() {
             .filter(|&operation| query.contains("ParallelOperation", operation).unwrap()).collect();
         assert_eq!(parallels.len(), 1);
         let mut roles = (0, 0, 0);
-        query.for_function("OutputRole", |keys, role| {
-            if keys[0] == parallels[0] {
-                roles.0 += usize::from(query.enode("PrefixOutput", role)?.is_some());
-                roles.1 += usize::from(query.enode("CompactedOutput", role)?.is_some());
-                roles.2 += usize::from(query.enode("TotalOutput", role)?.is_some());
-            }
-            Ok(())
-        }).unwrap();
+        let results = query.0.parallel_results(parallels[0]).unwrap();
+        for role in results.bindings.iter().filter_map(|binding| binding.role) {
+            roles.0 += usize::from(query.enode("PrefixOutput", role).unwrap().is_some());
+            roles.1 += usize::from(query.enode("CompactedOutput", role).unwrap().is_some());
+            roles.2 += usize::from(query.enode("TotalOutput", role).unwrap().is_some());
+        }
         assert_eq!(roles, (1, usize::from(!reduction), usize::from(reduction)));
         if reduction {
             let mut guarded = 0;
@@ -466,8 +464,8 @@ fn scan_barriers_survive_intermediate_map_contraction() {
             if query.contains("ParallelOperation", row[0])? {
                 let mut scan = false;
                 let mut total = false;
-                for slot in 0..analysis::count(query, "ResultCount", row[0])? {
-                    let kind = query.required("ResultKindOf", (row[0], slot))?;
+                for slot in 0..query.0.result_count(row[0]) {
+                    let kind = query.0.result_kind(row[0], slot)?;
                     if let Some(fold) = query.enode("Folded", kind)? {
                         total |= query.enode("Total", fold[0])?.is_some();
                         scan |= query.enode("InclusiveScan", fold[0])?.is_some();
@@ -681,7 +679,7 @@ fn adjacent_accumulators_keep_distinct_capabilities_in_one_batch() -> Result<(),
         let mut found = Vec::new();
         for op in query.operations(root)? {
             if query.contains("AccumulatorOperation", op)? {
-                found.push(analysis::count(query, "AccumulatorGroupCount", op)?);
+                found.push(query.0.accumulator_group_count(op));
             }
         }
         Ok(found)

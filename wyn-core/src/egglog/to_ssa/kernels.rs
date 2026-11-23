@@ -134,16 +134,16 @@ impl Body<'_, '_, '_> {
         let mut contributes = false;
         let mut folds = Vec::new();
         let mut fold_data = Vec::new();
-        for clause in 0..crate::egglog::analysis::count(self.query(), "ResultCount", operation)? {
-            let kind = self.query().required("ResultKindOf", (operation, clause))?;
+        for clause in 0..self.query().0.result_count(operation) {
+            let kind = self.query().0.result_kind(operation, clause)?;
             let values = self.query().0.collective_inputs(operation, clause, CollectiveInput::Contribution);
             let output_names = |role: &str| -> Result<Vec<Value>, OptimizeError> {
                 let query = self.query();
                 let mut names = Vec::new();
                 for slot in 0..query.0.output_count(operation) {
-                    let selected = query.required("OutputClause", (operation, slot))?;
-                    if query.0.value_to_base::<i64>(selected) == clause
-                        && query.enode(role, query.required("OutputRole", (operation, slot))?)?.is_some()
+                    let selected = query.0.output_clause(operation, slot)?;
+                    if selected == clause
+                        && query.enode(role, query.0.output_role(operation, slot)?)?.is_some()
                     {
                         names.push(query.name(query.0.output(operation, slot)?)?);
                     }

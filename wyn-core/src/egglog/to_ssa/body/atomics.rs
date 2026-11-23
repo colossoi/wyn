@@ -61,8 +61,8 @@ impl Body<'_, '_, '_> {
         operation: Value,
     ) -> Result<bool, OptimizeError> {
         let query = self.query();
-        for clause in 0..crate::egglog::analysis::count(query, "ResultCount", operation)? {
-            let kind = query.required("ResultKindOf", (operation, clause))?;
+        for clause in 0..query.0.result_count(operation) {
+            let kind = query.0.result_kind(operation, clause)?;
             if query.enode("Contributed", kind)?.is_none() {
                 return Ok(false);
             }
@@ -76,7 +76,7 @@ impl Body<'_, '_, '_> {
                 let owner = capability[0];
                 let group = query.0.value_to_base::<i64>(capability[1]);
                 let arrays = query.0.collective_inputs(owner, group, CollectiveInput::Backing);
-                let policy = query.required("AccumulatorPolicy", (owner, group))?;
+                let policy = query.0.accumulator_policy(owner, group)?;
                 let combine = query.0.combiner_at(owner, group);
                 if self.atomic_policy(&arrays, policy, combine)?.is_none() {
                     return Ok(false);

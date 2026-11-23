@@ -10,7 +10,7 @@ use crate::egglog::{analysis, test_graph};
 use crate::{compile_thru_tlc, CodegenTarget, PipelineTopologyPolicy};
 use egglog_engine::sort::{S, Z};
 use egglog_engine::Value;
-use egglog_engine::{Core, Write};
+use egglog_engine::Write;
 
 #[test]
 fn whole_row_fusion_preserves_conflicting_callback_effects() {
@@ -700,20 +700,11 @@ fn accumulator_state_order_is_read_from_the_plan() {
         .into_iter()
         .find(|&operation| folds(query, operation).len() == 2)
         .expect("two independent accumulator clauses");
-    let mut rows = Vec::new();
-    for &table in super::super::dataflow::edit::OPERATION_CELLS {
-        if (table.starts_with("Result") && table != "ResultCount")
-            || ["OutputRole", "OutputClause", "OutputField"].contains(&table)
-        {
-            query
-                .for_function(table, |keys, value| {
-                    if keys[0] == operation {
-                        rows.push((table, keys.to_vec(), value));
-                    }
-                    Ok(())
-                })
-                .unwrap();
-        }
+    let mut results = query.0.parallel_results(operation).unwrap();
+    results.kinds.reverse();
+    results.bindings.reverse();
+    for binding in &mut results.bindings {
+        binding.clause = binding.clause.map(|clause| 1 - clause);
     }
     let mut outputs = query.0.outputs(operation);
     outputs.reverse();
@@ -729,17 +720,7 @@ fn accumulator_state_order_is_read_from_the_plan() {
             for ((clause, kind), values) in edges {
                 sink.set_collective_inputs(operation, 1 - clause, kind, values)?;
             }
-            for (table, keys, _) in &rows {
-                sink.remove(table, egglog_engine::RawValues(keys.clone()))?;
-            }
-            for (table, mut keys, mut value) in rows {
-                let slot = sink.value_to_base::<i64>(keys[1]);
-                keys[1] = sink.base_to_value(1_i64 - slot);
-                if table == "OutputClause" {
-                    value = sink.base_to_value(1_i64 - sink.value_to_base::<i64>(value));
-                }
-                sink.set(table, egglog_engine::RawValues(keys), value)?;
-            }
+            sink.set_parallel_results(operation, results);
             Ok(())
         })
         .unwrap();
@@ -823,8 +804,8 @@ fn flat_and_ranked_collectives_share_dimension_metadata() {
             if !matches!(code, Code::Parallel) {
                 continue;
             }
-            let matches = (0..analysis::count(query, "ResultCount", operation).unwrap()).any(|clause| {
-                let value = query.required("ResultKindOf", (operation, clause)).unwrap();
+            let matches = (0..query.0.result_count(operation)).any(|clause| {
+                let value = query.0.result_kind(operation, clause).unwrap();
                 query
                     .enode(
                         match kind {
@@ -1431,13 +1412,10 @@ fn infos(query: Query<'_>, operation: Value) -> Vec<Value> {
         .collect()
 }
 fn folds(query: Query<'_>, operation: Value) -> Vec<Value> {
-    (0..analysis::count(query, "ResultCount", operation).unwrap())
+    (0..query.0.result_count(operation))
         .filter_map(|slot| {
             query
-                .enode(
-                    "Folded",
-                    query.required("ResultKindOf", (operation, slot)).unwrap(),
-                )
+                .enode("Folded", query.0.result_kind(operation, slot).unwrap())
                 .unwrap()
                 .map(|fields| fields[0])
         })
@@ -1494,22 +1472,22 @@ fn collection_shape_proofs_distinguish_extents_from_capacity() {
         (set (DomainExtent (DomainId 0) 0) (IndexConstant 8))
         (set (DomainExtent (DomainId 0) 1) (IndexConstant 4))
         (set (FixtureOutput (OperationId 0) 0) (ValueNameRef (ValueId 0)))
-        (set (OutputRole (OperationId 0) 0) (CollectedOutput))
-        (set (OutputClause (OperationId 0) 0) 0)
-        (set (OutputField (OperationId 0) 0) 0)
-        (set (ResultKindOf (OperationId 0) 0) (Collected))
+        (set (FixtureOutputRole (OperationId 0) 0) (CollectedOutput))
+        (set (FixtureOutputClause (OperationId 0) 0) 0)
+        (set (FixtureOutputField (OperationId 0) 0) 0)
+        (set (FixtureResultKindOf (OperationId 0) 0) (Collected))
         (set (FixtureResultValue (OperationId 0) 0 0) (ValueNameRef (ValueId 10)))
         (set (FixtureOutput (OperationId 0) 1) (ValueNameRef (ValueId 1)))
-        (set (OutputRole (OperationId 0) 1) (CompactedOutput))
+        (set (FixtureOutputRole (OperationId 0) 1) (CompactedOutput))
         (set (FixtureOutput (OperationId 0) 2) (ValueNameRef (ValueId 2)))
-        (set (OutputRole (OperationId 0) 2) (TotalOutput))
-        (set (OutputClause (OperationId 0) 2) 2)
-        (set (OutputField (OperationId 0) 2) 0)
+        (set (FixtureOutputRole (OperationId 0) 2) (TotalOutput))
+        (set (FixtureOutputClause (OperationId 0) 2) 2)
+        (set (FixtureOutputField (OperationId 0) 2) 0)
         (set (FixtureResultReducer (OperationId 0) 2) (RegionId 2))
         (ReducerPreservesOuterLength (RegionId 2) 0)
         (set (FixtureResultNeutral (OperationId 0) 2 0) (ValueNameRef (ValueId 20)))
         (set (FixtureOutput (OperationId 0) 3) (ValueNameRef (ValueId 3)))
-        (set (OutputRole (OperationId 0) 3) (UpdatedOutput))
+        (set (FixtureOutputRole (OperationId 0) 3) (UpdatedOutput))
         (run-schedule (saturate graph-sizes))
         (check (= (CollectionRank (ValueId 0)) 2))
         (check (= (CollectionExtent (ValueId 0) 1) (IndexConstant 4)))
@@ -1550,7 +1528,7 @@ fn collected_shape_does_not_require_unrelated_result_constructors() {
         (set (DomainRank (DomainId 0)) 2)
         (set (DomainExtent (DomainId 0) 1) (IndexConstant 3))
         (set (FixtureOutput (OperationId 0) 0) (ValueNameRef (ValueId 0)))
-        (set (OutputRole (OperationId 0) 0) (CollectedOutput))
+        (set (FixtureOutputRole (OperationId 0) 0) (CollectedOutput))
         (run-schedule (saturate graph-sizes))
         (check (= (CollectionRank (ValueId 0)) 2))
         (check (= (CollectionExtent (ValueId 0) 1) (IndexConstant 3)))
@@ -1792,7 +1770,7 @@ fn kernel_policies_distinguish_compaction_atomics_and_native_scans() {
                 r#"
             (LiveOperation (OperationId 0))
             (set (OperationDomain (OperationId 0)) (DomainId 0)) (set (DomainRank (DomainId 0)) {rank})
-            (set (ResultCount (OperationId 0)) 1) (set (ResultKindOf (OperationId 0) 0) {kind})
+            (set (FixtureResultCount (OperationId 0)) 1) (set (FixtureResultKindOf (OperationId 0) 0) {kind})
             (set (FixtureResultValue (OperationId 0) 0 0) (AccNameRef (AccumulatorId 0)))
             (set (TokenCapability (AccumulatorId 0)) (TokenBindingAt (OperationId 1) 0))
             (set (FixtureResultReducer (OperationId 0) 0) (RegionId 1)) (LiveRegion (RegionId 1))

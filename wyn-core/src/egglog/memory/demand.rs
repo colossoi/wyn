@@ -1,7 +1,7 @@
 //! Follow the dependencies of observable operations and returned values.
 use super::super::dataflow::body::BodyGraph;
 use super::super::query::Query;
-use super::super::{analysis, output_error, OptimizeError};
+use super::super::{output_error, OptimizeError};
 use crate::egglog::graph::CollectiveInput;
 use crate::memory_ir::{Definition, Function, OperationId, ValueRef};
 use crate::LookupSet;
@@ -79,8 +79,8 @@ impl Needed {
                 names.extend(&body.ir.regions[edge.region].yields);
             }
             let key = body.operations[op];
-            if let Some(count) = query.lookup("ResultCount", key)? {
-                for clause in 0..query.0.value_to_base::<i64>(count) {
+            {
+                for clause in 0..query.0.result_count(key) {
                     let fields = query.0.collective_input_count(key, clause, CollectiveInput::Contribution);
                     for field in 0..fields {
                         names.push(value_ref(
@@ -122,25 +122,33 @@ pub(super) fn dead_clause(
     query: Query<'_>,
     needed: impl Fn(Value) -> bool,
 ) -> Result<Option<(Value, i64)>, OptimizeError> {
-    let mut dead = None;
-    query.for_function("ResultKindOf", |keys, kind| {
-        let operation = keys[0];
-        let clause = query.0.value_to_base(keys[1]);
-        if dead.is_some()
-            || !query.contains("LiveOperation", operation)?
-            || query.0.collective_input_count(operation, clause, CollectiveInput::Contribution) != 1
-            || (query.enode("Collected", kind)?.is_none() && query.enode("Compacted", kind)?.is_none())
-        {
-            return Ok(());
+    let structure = query.0.structure().read();
+    for (&operation, results) in &structure.parallels {
+        if !query.contains("LiveOperation", operation)? {
+            continue;
         }
-        for (slot, output) in query.0.outputs(operation).into_iter().enumerate() {
-            if needed(output) && analysis::count(query, "OutputClause", (operation, slot as i64))? == clause
+        for (clause, kind) in results.kinds.iter().enumerate() {
+            let Some(kind) = kind else { continue };
+            let clause = clause as i64;
+            if structure.collective.get(operation, clause, CollectiveInput::Contribution).len() != 1
+                || (query.enode("Collected", *kind)?.is_none()
+                    && query.enode("Compacted", *kind)?.is_none())
             {
-                return Ok(());
+                continue;
+            }
+            let mut live = false;
+            for (&output, binding) in
+                structure.outputs.get(&operation).into_iter().flatten().zip(&results.bindings)
+            {
+                if binding.clause == Some(clause) && needed(output) {
+                    live = true;
+                    break;
+                }
+            }
+            if !live {
+                return Ok(Some((operation, clause)));
             }
         }
-        dead = Some((operation, clause));
-        Ok(())
-    })?;
-    Ok(dead)
+    }
+    Ok(None)
 }

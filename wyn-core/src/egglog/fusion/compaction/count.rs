@@ -28,40 +28,43 @@ pub(in crate::egglog::fusion) fn run(graph: &mut Graph) -> Result<bool, Optimize
     let Some(compacted) = query.constructor("Compacted", RawValues(vec![]))? else {
         return Ok(false);
     };
-    let mut clauses = LookupSet::new();
-    query.for_function("ResultKindOf", |key, kind| {
-        if kind == compacted
-            && query.contains("LiveOperation", key[0])?
-            && query.0.collective_input_count(
-                key[0],
-                graph.value_to_base(key[1]),
-                CollectiveInput::Contribution,
-            ) == 1
-            && count(query, "DomainRank", query.required("OperationDomain", key[0])?)? == 1
-        {
-            clauses.insert((key[0], key[1]));
+    let mut candidates = StableMap::new();
+    {
+        let structure = graph.structure().read();
+        for (&op, results) in &structure.parallels {
+            if !query.contains("LiveOperation", op)?
+                || !results.kinds.contains(&Some(compacted))
+                || count(query, "DomainRank", query.required("OperationDomain", op)?)? != 1
+            {
+                continue;
+            }
+            for (slot, (&output, binding)) in
+                structure.outputs.get(&op).into_iter().flatten().zip(&results.bindings).enumerate()
+            {
+                let Some(clause) = binding.clause else { continue };
+                let kind = usize::try_from(clause)
+                    .ok()
+                    .and_then(|clause| results.kinds.get(clause).copied().flatten());
+                if kind == Some(compacted)
+                    && structure.collective.get(op, clause, CollectiveInput::Contribution).len() == 1
+                {
+                    candidates.insert(
+                        output,
+                        Candidate {
+                            operation: op,
+                            clause,
+                            slot: slot as i64,
+                            lengths: Vec::new(),
+                            observed: false,
+                        },
+                    );
+                }
+            }
         }
-        Ok(())
-    })?;
-    if clauses.is_empty() {
+    }
+    if candidates.is_empty() {
         return Ok(false);
     }
-    let mut candidates = StableMap::new();
-    query.for_function("OutputClause", |key, clause| {
-        if clauses.contains(&(key[0], clause)) {
-            candidates.insert(
-                query.0.output(key[0], query.0.value_to_base::<i64>(key[1]))?,
-                Candidate {
-                    operation: key[0],
-                    clause: graph.value_to_base(clause),
-                    slot: graph.value_to_base(key[1]),
-                    lengths: Vec::new(),
-                    observed: false,
-                },
-            );
-        }
-        Ok(())
-    })?;
     let mut length_uses = LookupSet::new();
     query.for_each("LengthOperation", |row| {
         if graph.value_to_base::<i64>(row[1]) == 0 {
@@ -179,12 +182,12 @@ fn packed_output(
     predicate: Value,
 ) -> Result<Option<Value>, OptimizeError> {
     for slot in 0..query.0.output_count(operation) {
-        let role = query.required("OutputRole", (operation, slot))?;
+        let role = query.0.output_role(operation, slot)?;
         if query.enode("CompactedOutput", role)?.is_none() {
             continue;
         }
-        let other = query.0.value_to_base::<i64>(query.required("OutputClause", (operation, slot))?);
-        if query.enode("Folded", query.required("ResultKindOf", (operation, other))?)?.is_some()
+        let other = query.0.output_clause(operation, slot)?;
+        if query.enode("Folded", query.0.result_kind(operation, other)?)?.is_some()
             && query.0.collective_input_at(operation, other, CollectiveInput::Predicate, 0)
                 == Some(predicate)
         {
@@ -261,19 +264,16 @@ fn make_count(
     sink.set_order(id, 0_i64);
     let kind = sink.add("Total", RawValues(Vec::new()))?;
     let kind = sink.add("Folded", kind)?;
-    sink.remove("ResultKindOf", (operation, clause))?;
-    sink.set("ResultKindOf", (operation, clause), kind)?;
+    sink.set_result_kind(operation, clause, kind)?;
     sink.set_collective_inputs(operation, clause, CollectiveInput::Predicate, Vec::new())?;
     let flag = Name::Value(flag).fact(sink)?;
     sink.set_collective_inputs(operation, clause, CollectiveInput::Contribution, vec![flag])?;
     sink.set_reducer(operation, clause, reducer);
     let neutral = Name::Value(zero.1).fact(sink)?;
     sink.set_collective_inputs(operation, clause, CollectiveInput::Neutral, vec![neutral])?;
-    sink.set("ResultCommutative", (operation, clause), true)?;
     sink.set_output(operation, output_slot, output)?;
     let role = sink.add("TotalOutput", RawValues(Vec::new()))?;
-    sink.remove("OutputRole", (operation, output_slot))?;
-    sink.set("OutputRole", (operation, output_slot), role)?;
+    sink.set_output_role(operation, output_slot, role)?;
     Ok(([zero.0, one.0], flag_operation.0))
 }
 

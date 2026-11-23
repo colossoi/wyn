@@ -1,10 +1,10 @@
 //! Apply selected edits to keyed graph cells without reconstructing a program.
 use super::ir::{self, Code};
 use crate::egglog::graph::{ArgumentSite, Graph};
-use crate::egglog::graph::{CollectiveInput, Formula};
+use crate::egglog::graph::{CollectiveInput, Formula, ParallelResults};
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, output_error, OptimizeError};
-use crate::{LookupMap, LookupSet, StableMap};
+use crate::{LookupSet, StableMap};
 use egglog_engine::{RawValues, Value, Write};
 use wyn_graph::ReplacementForest;
 
@@ -15,14 +15,6 @@ pub(in crate::egglog) const OPERATION_CELLS: &[&str] = &[
     "OperationDomain",
     "OperationWidth",
     "OperationExecution",
-    "ResultKindOf",
-    "ResultCount",
-    "ResultCommutative",
-    "OutputClause",
-    "OutputField",
-    "OutputRole",
-    "AccumulatorPolicy",
-    "AccumulatorGroupCount",
     "CallReturnType",
     "ScalarPayload",
 ];
@@ -427,6 +419,7 @@ pub(in crate::egglog) fn set_code(
     }
     graph.update(|mut sink| {
         sink.clear_collective_inputs(operation);
+        sink.clear_collective_layouts(operation);
         sink.clear_formulas(operation, matches!(code, Code::IndexValue));
         for (table, row) in rows {
             sink.remove(table, RawValues(row))?;
@@ -469,6 +462,8 @@ struct ClonedOperation {
     combiners: Vec<(i64, Value)>,
     collective: StableMap<(i64, CollectiveInput), Vec<Value>>,
     formulas: Vec<(Formula, Value)>,
+    results: Option<ParallelResults>,
+    policies: Vec<Option<Value>>,
 }
 
 /// Copy a selected region using fresh graph identities, substituting its entry edge.
@@ -672,6 +667,8 @@ pub(in crate::egglog) fn clone_region(
                 combiners: clone_callbacks(graph.combiners(row[1]))?,
                 collective,
                 formulas,
+                results: graph.parallel_results_at(row[1]),
+                policies: graph.accumulator_policies(row[1]),
             });
         }
         Ok(())
@@ -686,6 +683,12 @@ pub(in crate::egglog) fn clone_region(
         }
         for operation in operations {
             let key = operation.key;
+            if let Some(results) = operation.results {
+                sink.set_parallel_results(key, results);
+            }
+            if !operation.policies.is_empty() {
+                sink.set_accumulator_policies(key, operation.policies);
+            }
             for (kind, value) in operation.formulas {
                 sink.set_formula(key, kind, value)?;
             }
@@ -722,62 +725,28 @@ pub(in crate::egglog) fn remove_clause(
     operation: Value,
     clause: i64,
 ) -> Result<(), OptimizeError> {
-    let query = Query(graph);
-    let count = analysis::count(query, "ResultCount", operation)?;
-    let outputs = query.0.outputs(operation);
+    let mut results = graph.parallel_results(operation)?;
+    let Ok(index) = usize::try_from(clause) else {
+        return Err(output_error("negative collective clause"));
+    };
+    if index >= results.kinds.len() {
+        return Err(output_error("missing collective clause"));
+    }
+    results.kinds.remove(index);
+    let outputs = graph.outputs(operation);
     let mut names = Vec::with_capacity(outputs.len());
-    let mut slots = LookupMap::default();
-    let mut retained = 0_i64;
-    for (slot, name) in outputs.into_iter().enumerate() {
-        let slot = slot as i64;
-        let owner = query.0.value_to_base::<i64>(query.required("OutputClause", (operation, slot))?);
+    let mut bindings = Vec::with_capacity(outputs.len());
+    for (name, mut binding) in outputs.into_iter().zip(results.bindings) {
+        let Some(owner) = binding.clause else {
+            return Err(output_error("collective output has no clause"));
+        };
         if owner != clause {
+            binding.clause = Some(if owner > clause { owner - 1 } else { owner });
             names.push(name);
-            slots.insert(slot, retained);
-            retained += 1;
+            bindings.push(binding);
         }
     }
-    let mut old = Vec::new();
-    let mut next = Vec::new();
-    for &table in OPERATION_CELLS {
-        let results = table.starts_with("Result") && table != "ResultCount";
-        let output = table.starts_with("Output");
-        if !results && !output {
-            continue;
-        }
-        query.for_function(table, |keys, value| {
-            if keys[0] != operation {
-                return Ok(());
-            }
-            old.push((table, keys.to_vec()));
-            let slot = query.0.value_to_base::<i64>(keys[1]);
-            let destination = if results {
-                if slot == clause {
-                    return Ok(());
-                }
-                if slot > clause {
-                    slot - 1
-                } else {
-                    slot
-                }
-            } else {
-                let Some(&slot) = slots.get(&slot) else {
-                    return Ok(());
-                };
-                slot
-            };
-            let value = if table == "OutputClause" {
-                let owner = query.0.value_to_base::<i64>(value);
-                query.0.base_to_value(if owner > clause { owner - 1 } else { owner })
-            } else {
-                value
-            };
-            let mut keys = keys.to_vec();
-            keys[1] = query.0.base_to_value(destination);
-            next.push((table, keys, value));
-            Ok(())
-        })?;
-    }
+    results.bindings = bindings;
     let reducers = graph
         .reducers(operation)
         .into_iter()
@@ -795,14 +764,7 @@ pub(in crate::egglog) fn remove_clause(
             }
         }
         sink.set_reducers(operation, reducers);
-        for (table, keys) in old {
-            sink.remove(table, RawValues(keys))?;
-        }
-        for (table, keys, value) in next {
-            sink.set(table, RawValues(keys), value)?;
-        }
-        sink.remove("ResultCount", operation)?;
-        sink.set("ResultCount", operation, count - 1)?;
+        sink.set_parallel_results(operation, results);
         sink.set_outputs(operation, names)?;
         Ok(())
     })?;

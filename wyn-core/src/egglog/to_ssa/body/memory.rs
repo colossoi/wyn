@@ -599,9 +599,7 @@ impl Body<'_, '_, '_> {
                 }
                 self.statements(&self.query().operations(region)?)?;
                 let mut values = Vec::new();
-                for group in
-                    0..crate::egglog::analysis::count(self.query(), "AccumulatorGroupCount", statement)?
-                {
+                for group in 0..self.query().0.accumulator_group_count(statement) {
                     let count =
                         self.query().0.collective_input_count(statement, group, CollectiveInput::Backing);
                     for slot in 0..count {
@@ -1122,7 +1120,7 @@ impl Body<'_, '_, '_> {
         let owner = capability[0];
         let group = query.0.value_to_base::<i64>(capability[1]);
         let arrays = query.0.collective_inputs(owner, group, CollectiveInput::Backing);
-        let policy = query.required("AccumulatorPolicy", (owner, group))?;
+        let policy = query.0.accumulator_policy(owner, group)?;
         let combine = query.0.combiner_at(owner, group);
         let indices = query
             .vector(query.0.formula(operation, Formula::Extents)?)?

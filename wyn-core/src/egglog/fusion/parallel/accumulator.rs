@@ -2,7 +2,7 @@
 use super::placement::{child_on_path, demands, movable_group, pinned_operations, read_only};
 use super::{barriers, domains, effects_conflict, fuse_region, Body, Code, Effects, Query};
 use crate::egglog::graph::Graph;
-use crate::egglog::{analysis::count, timing, OptimizeError};
+use crate::egglog::{timing, OptimizeError};
 use crate::memory_ir::{OperationId, RegionId, ValueRef};
 use crate::{LookupSet, SortedSet};
 use egglog_engine::Value;
@@ -50,7 +50,7 @@ pub(in crate::egglog::fusion) fn run(graph: &mut Graph, sinking: bool) -> Result
     let mut groups = LookupSet::new();
     for op in accumulators {
         let region = query.0.control_region(op, 0_i64)?;
-        let count_groups = count(query, "AccumulatorGroupCount", op)?;
+        let count_groups = query.0.accumulator_group_count(op);
         if query.0.parameter_count(region) == count_groups && query.0.yield_count(region) == count_groups {
             groups.insert(op);
         }
@@ -92,7 +92,7 @@ pub(super) fn join(graph: &mut Graph, body: &mut Body) -> Result<bool, OptimizeE
     {
         let key = body.graph.operations[op];
         let lane = &body.graph.ir.regions[body.lane(op)?];
-        let count = count(query, "AccumulatorGroupCount", key)? as usize;
+        let count = query.0.accumulator_group_count(key) as usize;
         if lane.parameters.len() == count && lane.yields.len() == count {
             groups.insert(key);
         }

@@ -95,16 +95,8 @@
 (function OperationDomain (OperationKey) Domain :no-merge)
 (function OperationWidth (OperationKey) i64 :no-merge)
 (function OperationExecution (OperationKey) Execution :no-merge)
-(function ResultKindOf (OperationKey i64) ResultKind :no-merge)
-(function ResultCount (OperationKey) i64 :no-merge)
 ; Compacted values and packed scan prefixes share the lane predicate.
-(function ResultCommutative (OperationKey i64) bool :no-merge)
-(function OutputClause (OperationKey i64) i64 :no-merge)
-(function OutputField (OperationKey i64) i64 :no-merge)
-(function OutputRole (OperationKey i64) ResultRole :no-merge)
 
-(function AccumulatorPolicy (OperationKey i64) AccPolicy :no-merge)
-(function AccumulatorGroupCount (OperationKey) i64 :no-merge)
 (function AccumulatorParameter (OperationKey i64) AccName :no-merge)
 
 (function RetainAllFunctions () bool :merge (or old new))

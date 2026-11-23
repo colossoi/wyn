@@ -1,6 +1,5 @@
 //! Lower group-wide control and transfers with explicit shared storage.
 use super::{builder_error, error, Body, OptimizeError, Typed};
-use crate::egglog::analysis;
 use crate::egglog::graph::CollectiveInput;
 use crate::op::{BinaryOperator, OpTag};
 use crate::ssa::array_copy::matching_view_element;
@@ -214,7 +213,7 @@ impl Body<'_, '_, '_> {
     ) -> Result<Vec<Typed>, OptimizeError> {
         let checkpoint = self.values.checkpoint();
         let mut outputs = Vec::new();
-        for group in 0..analysis::count(self.query(), "AccumulatorGroupCount", statement)? {
+        for group in 0..self.query().0.accumulator_group_count(statement) {
             for slot in 0..self.query().0.collective_input_count(statement, group, CollectiveInput::Backing)
             {
                 let name =

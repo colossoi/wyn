@@ -1,8 +1,7 @@
 //! Structural state owned by a parallel fusion pass until it publishes its edits.
 use super::Domain;
-use crate::egglog::analysis::count;
 use crate::egglog::dataflow::{body::BodyGraph, cse, edit, ir::Code};
-use crate::egglog::graph::CollectiveInput;
+use crate::egglog::graph::{CollectiveInput, ParallelResults};
 use crate::egglog::graph::{Graph, State};
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, output_error, planning, timing, OptimizeError};
@@ -252,9 +251,9 @@ impl Body {
         for (op, _) in &body.domains {
             let key = body.graph.operations[op];
             let mut results = Results::default();
-            for slot in 0..count(query, "ResultCount", key)? {
+            for slot in 0..query.0.result_count(key) {
                 let id = (op, slot);
-                let kind = query.required("ResultKindOf", (key, slot))?;
+                let kind = query.0.result_kind(key, slot)?;
                 let values = query.0.collective_inputs(key, slot, CollectiveInput::Contribution);
                 for &name in &values {
                     body.uses.add(Site::Result(id), name);
@@ -292,9 +291,9 @@ impl Body {
                 results.clauses.push(id);
             }
             for slot in 0..query.0.output_count(key) {
-                let clause = count(query, "OutputClause", (key, slot))?;
-                let field = count(query, "OutputField", (key, slot))? as usize;
-                let role = query.required("OutputRole", (key, slot))?;
+                let clause = query.0.output_clause(key, slot)?;
+                let field = query.0.output_field(key, slot)? as usize;
+                let role = query.0.output_role(key, slot)?;
                 results.outputs.push(Output {
                     original: (op, slot),
                     clause: (op, clause),
@@ -852,22 +851,23 @@ impl Body {
         }
         self.publish_guards(graph)?;
         let query = Query(graph);
-        let mut clauses = LookupMap::new();
-        let mut outputs = LookupMap::new();
-        let mut counts = Vec::new();
+        let mut changed = Vec::new();
         let mut edges = Vec::new();
         for &op in &self.edited {
             if self.removed.contains(&op) {
                 continue;
             }
             let key = self.graph.operations[op];
-            let mut clause_count = 0_i64;
+            let mut results = ParallelResults::default();
+            let mut clauses = LookupMap::new();
             let mut reducers = Vec::new();
             for id in self.clauses_of(op) {
                 let original = self.graph.operations[id.0];
-                clauses.insert((original, id.1), (key, clause_count));
-                if let Some(region) = query.0.reducer_at(original, id.1) {
-                    reducers.push((clause_count, region));
+                let clause = results.kinds.len() as i64;
+                clauses.insert(id, clause);
+                results.kinds.push(Some(graph.result_kind(original, id.1)?));
+                if let Some(region) = graph.reducer_at(original, id.1) {
+                    reducers.push((clause, region));
                 }
                 for kind in [
                     CollectiveInput::Contribution,
@@ -876,55 +876,23 @@ impl Body {
                 ] {
                     let values = graph.collective_inputs(original, id.1, kind);
                     if !values.is_empty() {
-                        edges.push((key, clause_count, kind, values));
+                        edges.push((key, clause, kind, values));
                     }
                 }
-                clause_count += 1;
             }
             let mut names = Vec::new();
             for output in &self.results[op].outputs {
-                let Some(&(_, clause)) =
-                    clauses.get(&(self.graph.operations[output.clause.0], output.clause.1))
-                else {
+                let Some(&clause) = clauses.get(&output.clause) else {
                     continue;
                 };
-                let original = (self.graph.operations[output.original.0], output.original.1);
-                outputs.insert(original, (key, names.len() as i64, clause));
-                names.push(query.0.output(original.0, original.1)?);
+                let original = self.graph.operations[output.original.0];
+                let slot = output.original.1;
+                let mut binding = graph.output_binding(original, slot)?;
+                binding.clause = Some(clause);
+                results.bindings.push(binding);
+                names.push(graph.output(original, slot)?);
             }
-            counts.push((key, clause_count, names, reducers));
-        }
-        let edited: LookupSet<_> = counts.iter().map(|&(op, ..)| op).collect();
-        let mut rows = Vec::new();
-        let mut old = Vec::new();
-        for &table in edit::OPERATION_CELLS {
-            let result = table.starts_with("Result") && table != "ResultCount";
-            let output = table.starts_with("Output");
-            if !result && !output {
-                continue;
-            }
-            query.for_function(table, |keys, value| {
-                if edited.contains(&keys[0]) {
-                    old.push((table, keys.to_vec()));
-                }
-                let original = (keys[0], graph.value_to_base::<i64>(keys[1]));
-                let target = if result {
-                    clauses.get(&original).map(|&(op, slot)| (op, slot, value))
-                } else {
-                    outputs.get(&original).map(|&(op, slot, clause)| {
-                        let value =
-                            if table == "OutputClause" { graph.base_to_value(clause) } else { value };
-                        (op, slot, value)
-                    })
-                };
-                if let Some((op, slot, value)) = target {
-                    let mut keys = keys.to_vec();
-                    keys[0] = op;
-                    keys[1] = graph.base_to_value(slot);
-                    rows.push((table, keys, value));
-                }
-                Ok(())
-            })?;
+            changed.push((key, results, names, reducers));
         }
         let certificates = self
             .edited
@@ -933,17 +901,10 @@ impl Body {
             .map(|(op, name)| Ok((self.graph.operations[op], query.name(name)?)))
             .collect::<Result<Vec<_>, OptimizeError>>()?;
         graph.update(|mut sink| {
-            for (table, keys) in old {
-                sink.remove(table, RawValues(keys))?;
-            }
-            for (table, keys, value) in rows {
-                sink.set(table, RawValues(keys), value)?;
-            }
-            for (op, clauses, names, reducers) in counts {
+            for (op, results, names, reducers) in changed {
                 sink.clear_collective_inputs(op);
                 sink.set_reducers(op, reducers);
-                sink.remove("ResultCount", op)?;
-                sink.set("ResultCount", op, clauses)?;
+                sink.set_parallel_results(op, results);
                 sink.set_outputs(op, names)?;
             }
             for (op, group, kind, values) in edges {

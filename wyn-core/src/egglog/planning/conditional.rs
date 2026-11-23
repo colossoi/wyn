@@ -1,8 +1,8 @@
 //! Factor admitted map arms by reparenting their regions around one branch occurrence.
 use crate::egglog::dataflow::edit;
 use crate::egglog::dataflow::ir::{self, Code, Name, OperationId, Parameter, RegionId};
-use crate::egglog::graph::CollectiveInput;
 use crate::egglog::graph::Graph;
+use crate::egglog::graph::{CollectiveInput, OutputBinding, ParallelResults};
 use crate::egglog::query::Query;
 use crate::egglog::OptimizeError;
 use egglog_engine::{RawValues, Value, Write};
@@ -117,17 +117,19 @@ pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> 
             if let Some(width) = width {
                 sink.set("OperationWidth", parallel.0, width)?;
             }
-            sink.set("ResultCount", parallel.0, 1_i64)?;
             let kind = sink.add("Collected", RawValues(Vec::new()))?;
-            sink.set("ResultKindOf", (parallel.0, 0_i64), kind)?;
             let values =
                 bindings.into_iter().map(|value| value.fact(&mut sink)).collect::<Result<Vec<_>, _>>()?;
             let role = sink.add("CollectedOutput", RawValues(Vec::new()))?;
-            for slot in 0..values.len() {
-                sink.set("OutputClause", (parallel.0, slot as i64), 0_i64)?;
-                sink.set("OutputField", (parallel.0, slot as i64), slot as i64)?;
-                sink.set("OutputRole", (parallel.0, slot as i64), role)?;
-            }
+            sink.set_parallel_results(
+                parallel.0,
+                ParallelResults {
+                    kinds: vec![Some(kind)],
+                    bindings: (0..values.len())
+                        .map(|slot| OutputBinding::new(0, slot as i64, role))
+                        .collect(),
+                },
+            );
             sink.set_collective_inputs(parallel.0, 0, CollectiveInput::Contribution, values)?;
             for value in certificates {
                 sink.add("OperationCertificate", (parallel.0, value))?;

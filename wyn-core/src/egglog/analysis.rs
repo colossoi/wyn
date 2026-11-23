@@ -64,6 +64,10 @@ pub(super) fn invalidate(graph: &mut Graph) -> Result<(), OptimizeError> {
         "CollectiveLaneUse",
         "FoldSeedUse",
         "PackedClause",
+        "CollectedClause",
+        "CompactedClause",
+        "ContributedClause",
+        "FoldClause",
         "AccumulatorBackingUse",
         "SingleAccumulatorBacking",
         "ReducerWidthInputs",
@@ -329,9 +333,19 @@ pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeEr
 
 /// Publish the value sets needed by the scope, resource and execution proofs.
 pub(super) fn publish_collective_uses(graph: &mut Graph) -> Result<(), OptimizeError> {
+    let query = Query(graph);
+    let mut classes = Vec::new();
     let mut collective_uses = Vec::new();
     {
         let structure = graph.structure().read();
+        for (&operation, results) in &structure.parallels {
+            for (clause, &kind) in results.kinds.iter().enumerate() {
+                let Some(kind) = kind else { continue };
+                let (class, arguments) =
+                    query.application(kind, &["Collected", "Compacted", "Contributed", "Folded"])?;
+                classes.push((operation, clause as i64, class, arguments.first().copied()));
+            }
+        }
         for (&operation, groups) in &structure.collective.groups {
             let scope = structure.controls.get(&(operation, 0)).map(|edge| edge.region);
             for (&(group, kind), names) in groups {
@@ -340,6 +354,24 @@ pub(super) fn publish_collective_uses(graph: &mut Graph) -> Result<(), OptimizeE
         }
     }
     graph.update(|mut sink| {
+        for (operation, clause, class, fold) in classes {
+            match class {
+                "Collected" => {
+                    sink.add("CollectedClause", (operation, clause))?;
+                }
+                "Compacted" => {
+                    sink.add("CompactedClause", (operation, clause))?;
+                }
+                "Contributed" => {
+                    sink.add("ContributedClause", (operation, clause))?;
+                }
+                _ => {
+                    if let Some(fold) = fold {
+                        sink.add("FoldClause", (operation, clause, fold))?;
+                    }
+                }
+            }
+        }
         for (owner, scope, group, kind, names) in collective_uses {
             match kind {
                 CollectiveInput::Contribution => {

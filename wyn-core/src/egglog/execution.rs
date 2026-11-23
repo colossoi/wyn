@@ -200,10 +200,9 @@ pub(super) fn width(query: Query<'_>, operation: Value, selected: Value) -> Resu
     }
     let mut indexed_updates = false;
     let mut state_bytes = 0u64;
-    query.for_function("ResultKindOf", |keys, kind| {
-        indexed_updates |= keys[0] == operation && query.enode("Contributed", kind)?.is_some();
-        Ok(())
-    })?;
+    for kind in query.0.parallel_results(operation)?.kinds.into_iter().flatten() {
+        indexed_updates |= query.enode("Contributed", kind)?.is_some();
+    }
     query.for_each("ReducerState", |row| {
         if row[0] == operation {
             let Some((_, ty)) = representation::runtime_binding(query, row[5])? else {
@@ -739,8 +738,8 @@ impl Execution {
         if dispatch.grid.is_some() || dispatch.groups.is_some() {
             return Ok(false);
         }
-        for clause in 0..count(query, "ResultCount", operation)? {
-            if query.enode("Collected", query.required("ResultKindOf", (operation, clause))?)?.is_none() {
+        for clause in 0..query.0.result_count(operation) {
+            if query.enode("Collected", query.0.result_kind(operation, clause)?)?.is_none() {
                 return Ok(false);
             }
         }
