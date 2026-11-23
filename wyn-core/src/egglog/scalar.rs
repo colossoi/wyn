@@ -1,11 +1,12 @@
 //! Scalar rewriting uses the same statements, scopes, and effects as memory.
-use super::dataflow::{edit, ir::Code};
+use super::dataflow::{body::BodyGraph, edit, ir::Code};
 use super::query::Query;
 use super::{memory, output_error, OptimizeError, ScalarOptimization};
 use egglog_engine::sort::S;
 use egglog_engine::EGraph;
 use egglog_engine::Write;
 
+mod branch;
 mod fold;
 mod leaf;
 
@@ -52,21 +53,11 @@ pub(super) fn run(graph: &mut EGraph, policy: ScalarOptimization) -> Result<(), 
     memory::simplify(graph, true)
 }
 
-pub(super) fn apply(graph: &mut EGraph) -> Result<bool, OptimizeError> {
-    let query = Query(graph);
-    if let Some(candidate) = query.first("BranchCandidate")? {
-        let operation = candidate[0];
-        let region = candidate[1];
-        let outputs = query.sequence("Output", operation)?;
-        let yields = query.sequence("RegionYield", region)?;
-        if outputs.len() != yields.len() {
-            return Err(output_error("constant branch has inconsistent results"));
-        }
-        edit::replace(graph, &outputs.into_iter().zip(yields).collect::<Vec<_>>())?;
-        let operations = Query(graph).operations(region)?;
-        edit::splice(graph, operation, &operations)?;
+pub(super) fn apply(graph: &mut EGraph, body: Option<BodyGraph>) -> Result<bool, OptimizeError> {
+    if branch::apply(graph, body)? {
         return Ok(true);
     }
+    let query = Query(graph);
     let mut constants = Vec::new();
     query.for_each("FoldedConstant", |row| {
         let output = query.required("Output", (row[0], 0_i64))?;
@@ -100,6 +91,7 @@ pub(super) fn apply(graph: &mut EGraph) -> Result<bool, OptimizeError> {
     if structural.is_empty() {
         return Ok(false);
     }
+    let _timing = super::timing::span("egglog structural constant replacement");
     for (operation, code) in &structural {
         edit::set_code(graph, *operation, code.clone())?;
         edit::inputs(graph, *operation, &[])?;

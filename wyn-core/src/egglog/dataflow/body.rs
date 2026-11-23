@@ -245,6 +245,7 @@ pub(in crate::egglog) fn forward_copies(graph: &mut EGraph) -> Result<bool, Opti
     if !found {
         return Ok(false);
     }
+    let _timing = crate::egglog::timing::span("Rust copy forwarding");
     let mut body = BodyGraph::read(query)?;
     let redirected = body.ir.forward_copies().map_err(|err| output_error(err.to_string()))?;
     let mut removed = Vec::new();

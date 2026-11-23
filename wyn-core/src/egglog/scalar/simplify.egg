@@ -71,3 +71,8 @@
 (rule ((= revision (AnalysisRevision)) (LiveOperation operation) (BranchOperation operation)
        (= condition (Input operation 0)) (= (ConstantValue condition) 0) (= branch (ControlRegion operation 1)))
       ((BranchCandidate operation branch)) :ruleset scalar-analysis)
+; The selected arm determines each result, including conditions of later branches.
+(rule ((= revision (AnalysisRevision)) (BranchCandidate operation branch)
+       (= value (RegionYield branch slot)) (= bits (ConstantValue value))
+       (= result (Output operation slot)))
+      ((set (ConstantValue result) bits)) :ruleset scalar-analysis)

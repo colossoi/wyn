@@ -97,7 +97,7 @@ impl Reuse {
     }
 }
 
-pub(in crate::egglog) fn publish(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(in crate::egglog) fn publish(graph: &mut EGraph) -> Result<BodyGraph, OptimizeError> {
     let query = Query(graph);
     let body = BodyGraph::read(query)?;
     let mut reuse = Reuse::default();
@@ -112,5 +112,5 @@ pub(in crate::egglog) fn publish(graph: &mut EGraph) -> Result<(), OptimizeError
         }
         Ok(())
     })?;
-    Ok(())
+    Ok(body)
 }
