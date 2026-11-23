@@ -1,12 +1,12 @@
 //! Move siblings on the live graph without publishing each move.
 use super::body::{Body, Effects};
 use super::{effects_conflict, Query};
-use crate::egglog::dataflow::ir;
+use crate::egglog::graph::Graph;
 use crate::egglog::OptimizeError;
 use crate::memory_ir::{RegionId, ValueRef};
 use crate::LookupSet;
 use egglog_engine::sort::Z;
-use egglog_engine::{EGraph, Value};
+use egglog_engine::Value;
 
 #[derive(Default)]
 pub(super) struct Motion {
@@ -36,12 +36,11 @@ impl Motion {
                 })?;
             }
         }
-        query.for_function("OperationPayload", |keys, payload| {
-            if ir::code(query.0, payload).has_expression_identity() {
-                motion.preparation.insert(keys[0]);
+        for (operation, code) in query.0.codes() {
+            if code.has_expression_identity() {
+                motion.preparation.insert(operation);
             }
-            Ok(())
-        })?;
+        }
         motion.boundary.extend(&motion.parallel);
         motion.boundary.extend(&motion.branch);
         Ok(motion)
@@ -78,7 +77,7 @@ impl Motion {
 
     pub fn step(
         &self,
-        graph: &mut EGraph,
+        graph: &mut Graph,
         body: &mut Body,
         region: RegionId,
     ) -> Result<bool, OptimizeError> {

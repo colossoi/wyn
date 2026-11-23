@@ -1,6 +1,6 @@
 use super::{place, schedule, CostModel};
 use crate::egglog::dataflow::edit;
-use crate::egglog::dataflow::ir::{self, Code};
+use crate::egglog::dataflow::ir::Code;
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, test_graph};
 use crate::PipelineTopologyPolicy;
@@ -71,7 +71,7 @@ fn forward_dependencies_are_rejected_before_scheduling() {
     let mut multiply = None;
     query
         .for_each("LiveOperation", |row| {
-            match ir::code(&graph, query.required("OperationPayload", row[0])?) {
+            match query.0.code(row[0])? {
                 Code::Scalar(crate::egglog::payload::Payload::Binary(crate::op::BinaryOperator::Add)) => {
                     add = Some(row[0])
                 }

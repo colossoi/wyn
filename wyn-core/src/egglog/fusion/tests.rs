@@ -3,13 +3,14 @@ use crate::egglog::dataflow::{
     edit,
     ir::{self, Code, Name, OperationId},
 };
+use crate::egglog::graph::Graph;
 use crate::egglog::payload::Payload;
 use crate::egglog::{analysis, from_tlc, fuse, memory, query::Query, test_graph, OptimizeError};
 use crate::op::BinaryOperator;
-use egglog_engine::{EGraph, RawValues, Value, Write};
+use egglog_engine::{RawValues, Value, Write};
 
 fn change_lane_index(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     traversal: Value,
     delta: Option<Value>,
     commute: bool,
@@ -170,16 +171,14 @@ fn cross_region_motion_moves_a_capture_chain_in_one_edit() -> Result<(), Optimiz
     let query = Query(&graph);
     let mut multiply = None;
     query.for_each("LiveOperation", |row| {
-        if ir::code(query.0, query.required("OperationPayload", row[0])?)
-            == Code::Scalar(Payload::Binary(BinaryOperator::Multiply))
-        {
+        if query.0.code(row[0])? == Code::Scalar(Payload::Binary(BinaryOperator::Multiply)) {
             multiply = Some(row[0]);
         }
         Ok(())
     })?;
     let multiply = multiply.unwrap();
     assert_ne!(query.required("OperationRegion", multiply)?, root);
-    let demand_work = |graph: &mut EGraph| -> Result<(), OptimizeError> {
+    let demand_work = |graph: &mut Graph| -> Result<(), OptimizeError> {
         graph.update(|mut sink| sink.add("RegionWorkDemand", root))?;
         graph.parse_and_run_program(None, "(run-schedule (saturate graph-work))")?;
         Ok(())
@@ -192,11 +191,10 @@ fn cross_region_motion_moves_a_capture_chain_in_one_edit() -> Result<(), Optimiz
     assert_eq!(query.required("OperationRegion", multiply)?, root);
     assert!(query.operations(root)?.into_iter().any(|op| {
         query.lookup("Input", (op, 0_i64)).unwrap() == query.lookup("Output", (multiply, 0_i64)).unwrap()
-            && ir::code(query.0, query.required("OperationPayload", op).unwrap())
-                == Code::Scalar(Payload::Binary(BinaryOperator::Add))
+            && query.0.code(op).unwrap() == Code::Scalar(Payload::Binary(BinaryOperator::Add))
     }));
     // The repaired scope and work summaries must agree with a fresh solve.
-    let facts = |graph: &EGraph| -> Result<_, OptimizeError> {
+    let facts = |graph: &Graph| -> Result<_, OptimizeError> {
         let mut facts = crate::LookupSet::new();
         for table in ["DefinitionRegion", "RegionCapture", "OperationUse", "RegionWork"] {
             Query(graph).for_each(table, |row| {
@@ -437,7 +435,7 @@ fn compact_consumers_preserve_an_unrelated_scan_and_guard_partial_callbacks() {
         if reduction {
             let mut guarded = 0;
             query.for_each("LiveOperation", |row| {
-                if ir::code(&program.graph, query.required("OperationPayload", row[0])?)
+                if query.0.code(row[0])?
                     == Code::Scalar(Payload::Binary(BinaryOperator::Divide)) {
                     let region = query.required("OperationRegion", row[0])?;
                     let owner = query.row("RegionOwnedBy", |row| row[0] == region)?.unwrap()[1];
@@ -573,7 +571,7 @@ fn sibling_motion_moves_a_preparation_chain_in_one_edit() -> Result<(), Optimize
     let arithmetic_positions = |query: Query<'_>| -> Result<Vec<usize>, OptimizeError> {
         let mut positions = Vec::new();
         for (position, operation) in query.operations(root)?.into_iter().enumerate() {
-            let code = ir::code(query.0, query.required("OperationPayload", operation)?);
+            let code = query.0.code(operation)?;
             if matches!(
                 code,
                 Code::Scalar(Payload::Binary(BinaryOperator::Multiply | BinaryOperator::Add))
@@ -591,7 +589,7 @@ fn sibling_motion_moves_a_preparation_chain_in_one_edit() -> Result<(), Optimize
     assert!(after.iter().zip(before).all(|(after, before)| *after < before));
     let query = Query(&graph);
     let order = query.operations(root)?;
-    assert_eq!(query.vector(query.required("RegionOperations", root)?)?, order);
+    assert_eq!(query.0.region_order(root)?, order);
     for pair in order.windows(2) {
         assert!(query.contains("NextOperation", (pair[0], pair[1]))?);
     }

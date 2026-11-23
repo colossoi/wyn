@@ -1,4 +1,5 @@
 use super::{reference_paths, Dataflow, Value};
+use crate::egglog::graph::Graph;
 use crate::egglog::query::Query;
 use crate::tlc::{self, DefMeta};
 use crate::{ast_type_holes, compile_thru_frontend, SymbolId, SymbolTable};
@@ -11,7 +12,7 @@ fn import_returns_engine_errors_instead_of_panicking() {
     let program = tlc::lower_from_ast(program).unwrap();
     let entry = program.defs.iter().find(|def| matches!(def.meta, DefMeta::EntryPoint(_))).unwrap();
     let (body, _) = tlc::extract_lambda_params_ref(&entry.body);
-    let mut graph = egglog_engine::EGraph::default();
+    let mut graph = Graph::default();
     let mut flow = Dataflow::default();
     // Missing schema makes the engine reject the first imported fact.
     let result = graph.update(|mut sink| flow.import(body, &mut sink));

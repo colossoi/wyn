@@ -1,4 +1,5 @@
 //! Shared structural flow analysis; arithmetic remains in TLC.
+use crate::egglog::graph::Graph;
 pub(super) mod body;
 pub(super) mod cse;
 pub(super) mod edit;
@@ -11,21 +12,21 @@ use crate::tlc::{
 };
 use crate::{Interner, LookupMap, LookupSet, StableMap, SymbolId};
 pub(crate) use egglog_engine::Value;
-use egglog_engine::{EGraph, Error, FullState, RawValues, Write};
+use egglog_engine::{Error, FullState, RawValues, Write};
 use std::cell::RefCell;
 use std::hash::Hash;
 
 thread_local! {
-    static FLOW_TEMPLATE: RefCell<Option<EGraph>> = const { RefCell::new(None) };
+    static FLOW_TEMPLATE: RefCell<Option<Graph>> = const { RefCell::new(None) };
 }
 
-fn flow_graph() -> Result<EGraph, Error> {
+fn flow_graph() -> Result<Graph, Error> {
     FLOW_TEMPLATE.with(|template| {
         let mut template = template.borrow_mut();
         if let Some(graph) = template.as_ref() {
             return Ok(graph.clone());
         }
-        let mut graph = EGraph::default();
+        let mut graph = Graph::default();
         graph.parse_and_run_program(Some("dataflow".into()), include_str!("flow.egg"))?;
         *template = Some(graph.clone());
         Ok(graph)
@@ -79,7 +80,7 @@ pub(crate) struct Dependencies(LookupSet<Value>);
 
 #[derive(Default)]
 pub(crate) struct Dataflow {
-    graph: EGraph,
+    graph: Graph,
     next: i64,
     bindings: LookupMap<SymbolId, Expression>,
     terms: LookupMap<TermId, Expression>,

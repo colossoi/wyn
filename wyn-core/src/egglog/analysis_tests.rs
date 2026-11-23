@@ -118,12 +118,12 @@ fn region_order_refreshes_the_changed_body() -> Result<(), OptimizeError> {
     roots.sort_by_key(|&(order, _)| order);
     let main = roots[0].1;
     let other = roots[1].1;
-    let original = query.vector(query.required("RegionOperations", main)?)?;
-    let untouched = query.required("RegionOperations", other)?;
+    let original = query.0.region_order(main)?.to_vec();
+    let untouched = query.0.region_order(other)?.to_vec();
     edit::move_before(&mut graph, original[1], original[0])?;
     ensure(&mut graph)?;
     let query = Query(&graph);
-    assert_eq!(query.required("RegionOperations", other)?, untouched);
+    assert_eq!(query.0.region_order(other)?, untouched);
     assert!(query.contains("FirstOperation", (main, original[1]))?);
     assert!(query.contains("LastOperation", (main, *original.last().unwrap()))?);
     assert!(query.contains("NextOperation", (original[1], original[0]))?);

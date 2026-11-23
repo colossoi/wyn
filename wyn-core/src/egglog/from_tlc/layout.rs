@@ -4,7 +4,7 @@ use super::{
 };
 use egglog_engine::{Value, Write};
 
-impl<'source> Import<'_, '_, '_, 'source> {
+impl<'source> Import<'_, '_, '_, '_, 'source> {
     pub(super) fn array_layout(
         &mut self,
         source: Leaf,

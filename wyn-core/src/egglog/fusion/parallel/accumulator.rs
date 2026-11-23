@@ -1,12 +1,13 @@
 //! Join adjacent accumulator scopes and place producers where their results are used.
 use super::placement::{child_on_path, demands, movable_group, pinned_operations, read_only};
 use super::{barriers, domains, effects_conflict, fuse_region, Body, Code, Effects, Query};
+use crate::egglog::graph::Graph;
 use crate::egglog::{analysis::count, timing, OptimizeError};
 use crate::memory_ir::{OperationId, RegionId, ValueRef};
 use crate::{LookupSet, SortedSet};
-use egglog_engine::{EGraph, Value};
+use egglog_engine::Value;
 
-pub(in crate::egglog::fusion) fn run(graph: &mut EGraph, sinking: bool) -> Result<bool, OptimizeError> {
+pub(in crate::egglog::fusion) fn run(graph: &mut Graph, sinking: bool) -> Result<bool, OptimizeError> {
     let _timing =
         timing::span(if sinking { "Rust accumulator producer sinking" } else { "Rust accumulator fusion" });
     let query = Query(graph);
@@ -20,12 +21,11 @@ pub(in crate::egglog::fusion) fn run(graph: &mut EGraph, sinking: bool) -> Resul
     }
     let blocked = if sinking { pinned_operations(query)? } else { LookupSet::new() };
     let mut regions = Vec::new();
-    query.for_function("RegionOperations", |key, order| {
-        let operations = query.vector(order)?;
+    for (&region, operations) in &graph.region_orders {
         let relevant = if sinking {
             let mut producer = false;
             let mut relevant = false;
-            for operation in operations {
+            for &operation in operations {
                 if producer && accumulators.contains(&operation) {
                     relevant = true;
                     break;
@@ -41,10 +41,9 @@ pub(in crate::egglog::fusion) fn run(graph: &mut EGraph, sinking: bool) -> Resul
             operations.windows(2).any(|pair| pair.iter().all(|op| accumulators.contains(op)))
         };
         if relevant {
-            regions.push(key[0]);
+            regions.push(region);
         }
-        Ok(())
-    })?;
+    }
     if regions.is_empty() {
         return Ok(false);
     }
@@ -68,7 +67,7 @@ pub(in crate::egglog::fusion) fn run(graph: &mut EGraph, sinking: bool) -> Resul
     Ok(changed)
 }
 
-pub(super) fn join(graph: &mut EGraph, body: &mut Body) -> Result<bool, OptimizeError> {
+pub(super) fn join(graph: &mut Graph, body: &mut Body) -> Result<bool, OptimizeError> {
     let _timing = timing::span("Rust accumulator fusion");
     let is_scope = |op: OperationId| body.is_code(op, &Code::WithAcc);
     let pending: SortedSet<_> = body
@@ -104,7 +103,7 @@ pub(super) fn join(graph: &mut EGraph, body: &mut Body) -> Result<bool, Optimize
 }
 
 fn apply(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     body: &mut Body,
     mut pending: SortedSet<RegionId>,
     groups: &LookupSet<Value>,
@@ -133,7 +132,7 @@ fn apply(
 }
 
 fn join_one(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     body: &mut Body,
     region: RegionId,
     groups: &LookupSet<Value>,

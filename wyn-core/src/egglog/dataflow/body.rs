@@ -1,17 +1,14 @@
 //! Import the live body graph and publish changes to its direct operands.
-use super::{
-    edit,
-    ir::{self, Code},
-};
+use super::{edit, ir::Code};
 use crate::ast::Span;
+use crate::egglog::graph::Graph;
 use crate::egglog::{analysis, output_error, query::Query, timing, OptimizeError};
 use crate::memory_ir::{
     BodyRole, Definition, ForwardedValues, Function, MemoryIr, Operation, OperationId, Parameter, Region,
     RegionEdge, RegionId, UseSite, ValueRef,
 };
 use crate::{LookupMap, StableMap};
-use egglog_engine::sort::Boxed;
-use egglog_engine::{EGraph, RawValues, Value, Write};
+use egglog_engine::{RawValues, Value, Write};
 use slotmap::SecondaryMap;
 
 pub(in crate::egglog) struct BodyGraph {
@@ -75,17 +72,14 @@ impl BodyGraph {
                     diet: query.required("ParameterDiet", (region, index as i64))?,
                 });
             }
-            for op in query.vector(query.required("RegionOperations", region)?)? {
-                let code = ir::code(query.0, query.required("OperationPayload", op)?);
+            for &op in query.0.region_order(region)? {
+                let code = query.0.code(op)?;
                 let outputs = query.sequence("Output", op)?;
                 let definition = match code {
                     Code::Call => Definition::Call(functions[&query.required("CallTarget", op)?]),
                     code => Definition::Other(code),
                 };
-                let span = query
-                    .lookup("OperationSpan", op)?
-                    .map(|span| query.0.value_to_base::<Boxed<Span>>(span).0)
-                    .unwrap_or_else(Span::generated);
+                let span = query.0.span(op).unwrap_or_else(Span::generated);
                 let key = ir.append(
                     id,
                     Operation {
@@ -180,7 +174,7 @@ impl BodyGraph {
 
     pub fn publish_substitutions(
         &self,
-        graph: &mut EGraph,
+        graph: &mut Graph,
         values: &LookupMap<ValueRef, ValueRef>,
         uses: Vec<(UseSite, ValueRef)>,
     ) -> Result<(), OptimizeError> {
@@ -200,7 +194,7 @@ impl BodyGraph {
 
     pub fn publish_edges(
         &self,
-        graph: &mut EGraph,
+        graph: &mut Graph,
         edits: Vec<(UseSite, ValueRef)>,
     ) -> Result<(), OptimizeError> {
         let mut rows = Vec::with_capacity(edits.len());
@@ -239,7 +233,7 @@ impl BodyGraph {
 }
 
 pub(in crate::egglog) fn forward_equivalents(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     body: &mut Option<BodyGraph>,
 ) -> Result<bool, OptimizeError> {
     let query = Query(graph);
@@ -276,7 +270,7 @@ pub(in crate::egglog) fn forward_equivalents(
 }
 
 fn publish_forwarding(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     body: BodyGraph,
     redirected: ForwardedValues,
 ) -> Result<bool, OptimizeError> {

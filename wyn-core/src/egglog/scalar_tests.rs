@@ -3,12 +3,13 @@ use crate::egglog::dataflow::{
     edit,
     ir::{self, Code, Name},
 };
+use crate::egglog::graph::Graph;
 use crate::egglog::payload::Payload;
 use crate::op::BinaryOperator;
 use crate::types;
-use egglog_engine::{EGraph, Write};
+use egglog_engine::Write;
 
-fn optimized(source: &str) -> Result<EGraph, OptimizeError> {
+fn optimized(source: &str) -> Result<Graph, OptimizeError> {
     let source = crate::compile_thru_tlc(source).unwrap();
     let (mut graph, _) = from_tlc::import(&source)?;
     super::run(&mut graph, ScalarOptimization::Full)?;
@@ -22,10 +23,8 @@ fn dominating_total_expressions_share_one_evaluation() -> Result<(), OptimizeErr
     let query = Query(&graph);
     let mut additions = 0;
     query.for_each("LiveOperation", |row| {
-        additions += usize::from(
-            ir::code(&graph, query.required("OperationPayload", row[0])?)
-                == Code::Scalar(Payload::Binary(BinaryOperator::Add)),
-        );
+        additions +=
+            usize::from(query.0.code(row[0])? == Code::Scalar(Payload::Binary(BinaryOperator::Add)));
         Ok(())
     })?;
     assert_eq!(additions, 1);
@@ -44,9 +43,7 @@ fn partial_and_effectful_operands_keep_their_evaluation_guards() -> Result<(), O
     let mut additions = Vec::new();
     let query = Query(&graph);
     query.for_each("LiveOperation", |row| {
-        if ir::code(&graph, query.required("OperationPayload", row[0])?)
-            == Code::Scalar(Payload::Binary(BinaryOperator::Add))
-        {
+        if query.0.code(row[0])? == Code::Scalar(Payload::Binary(BinaryOperator::Add)) {
             additions.push(row[0]);
         }
         Ok(())
@@ -67,7 +64,7 @@ fn partial_and_effectful_operands_keep_their_evaluation_guards() -> Result<(), O
     let mut divisions = 0;
     let mut calls = 0;
     query.for_each("LiveOperation", |row| {
-        let code = ir::code(&graph, query.required("OperationPayload", row[0])?);
+        let code = query.0.code(row[0])?;
         let division = code == Code::Scalar(Payload::Binary(BinaryOperator::Divide));
         let call = matches!(code, Code::Call);
         if division || call {

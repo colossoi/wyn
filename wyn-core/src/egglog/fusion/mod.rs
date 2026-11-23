@@ -5,8 +5,9 @@ use super::dataflow::{
 };
 use super::query::Query;
 use super::{analysis, memory, OptimizeError};
+use crate::egglog::graph::Graph;
 use crate::LookupSet;
-use egglog_engine::{EGraph, Value, Write};
+use egglog_engine::{Value, Write};
 
 mod compaction;
 mod parallel;
@@ -14,18 +15,18 @@ mod parallel;
 #[cfg(test)]
 mod tests;
 
-pub(super) fn new_graph() -> Result<EGraph, OptimizeError> {
-    let mut graph = EGraph::default();
+pub(super) fn new_graph() -> Result<Graph, OptimizeError> {
+    let mut graph = Graph::default();
     memory::load(&mut graph)?;
     Ok(graph)
 }
 
-pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(super) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
     graph.parse_and_run_program(Some("graph fusion".into()), include_str!("parallel.egg"))?;
     Ok(())
 }
 
-pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(super) fn run(graph: &mut Graph) -> Result<(), OptimizeError> {
     let _timing = super::timing::span("egglog graph fusion");
     memory::simplify(graph, false)?;
     loop {
@@ -105,7 +106,7 @@ fn output_producer(query: Query<'_>, name: Value) -> Result<Option<Value>, Optim
     Ok(producer)
 }
 
-fn fuse_ranked_bucket(graph: &mut EGraph) -> Result<bool, OptimizeError> {
+fn fuse_ranked_bucket(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let query = Query(graph);
     let mut candidate = None;
     query.for_each("LiveOperation", |row| {
@@ -113,9 +114,7 @@ fn fuse_ranked_bucket(graph: &mut EGraph) -> Result<bool, OptimizeError> {
             return Ok(());
         }
         let bucket = row[0];
-        let Code::BucketScatter { coordinates, depth } =
-            ir::code(graph, query.required("OperationPayload", bucket)?)
-        else {
+        let Code::BucketScatter { coordinates, depth } = query.0.code(bucket)? else {
             return Ok(());
         };
         let expected = vec![(0..depth).map(|axis| axis as i64).collect::<Vec<_>>()];
@@ -248,7 +247,6 @@ fn fuse_ranked_bucket(graph: &mut EGraph) -> Result<bool, OptimizeError> {
             }
             sink.remove("RegionParameterCount", callback)?;
             ir::parameters(&mut sink, RegionId(callback), &parameters)?;
-            sink.remove("OperationPayload", bucket)?;
             ir::properties(
                 &mut sink,
                 bucket,
@@ -264,7 +262,7 @@ fn fuse_ranked_bucket(graph: &mut EGraph) -> Result<bool, OptimizeError> {
     Ok(true)
 }
 
-pub(super) fn hoist(graph: &mut EGraph) -> Result<bool, OptimizeError> {
+pub(super) fn hoist(graph: &mut Graph) -> Result<bool, OptimizeError> {
     if parallel::hoist(graph)? {
         return Ok(true);
     }

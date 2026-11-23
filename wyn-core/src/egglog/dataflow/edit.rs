@@ -1,13 +1,12 @@
 //! Apply selected edits to keyed graph cells without reconstructing a program.
 use super::ir::{self, Code};
+use crate::egglog::graph::Graph;
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, output_error, OptimizeError};
 use crate::{LookupMap, LookupSet};
-use egglog_engine::{EGraph, RawValues, Value, Write};
+use egglog_engine::{RawValues, Value, Write};
 
 pub(in crate::egglog) const OPERATION_CELLS: &[&str] = &[
-    "OperationPayload",
-    "OperationSpan",
     "InstructionWork",
     "LiteralBits",
     "OperationRegion",
@@ -87,11 +86,11 @@ pub(in crate::egglog) const OPERATION_RELATIONS: &[&str] = &[
     "ProvenTotalOperation",
 ];
 
-pub(in crate::egglog) fn revision(graph: &EGraph) -> Result<i64, OptimizeError> {
+pub(in crate::egglog) fn revision(graph: &Graph) -> Result<i64, OptimizeError> {
     analysis::count(Query(graph), "GraphEditRevision", RawValues(Vec::new()))
 }
 
-pub(in crate::egglog) fn changed(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(in crate::egglog) fn changed(graph: &mut Graph) -> Result<(), OptimizeError> {
     let Some(revision) = revision(graph)?.checked_add(1) else {
         return Err(output_error("graph edit revision exhausted"));
     };
@@ -103,7 +102,7 @@ pub(in crate::egglog) fn changed(graph: &mut EGraph) -> Result<(), OptimizeError
 }
 
 /// Advance the graph revision after an edit has repaired its affected facts.
-pub(in crate::egglog) fn preserve_revisions(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(in crate::egglog) fn preserve_revisions(graph: &mut Graph) -> Result<(), OptimizeError> {
     let query = Query(graph);
     let previous = graph.base_to_value(revision(graph)?);
     let key = || RawValues(Vec::new());
@@ -125,13 +124,13 @@ pub(in crate::egglog) fn preserve_revisions(graph: &mut EGraph) -> Result<(), Op
     Ok(())
 }
 
-pub(in crate::egglog) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(in crate::egglog) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
     graph.parse_and_run_program(Some("graph edits".into()), include_str!("edits.egg"))?;
     graph.parse_and_run_program(Some("graph cloning".into()), include_str!("clone.egg"))?;
     Ok(())
 }
 
-pub(in crate::egglog) fn clear(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(in crate::egglog) fn clear(graph: &mut Graph) -> Result<(), OptimizeError> {
     for table in [
         "ForwardCandidate",
         "ValueReplacement",
@@ -151,13 +150,13 @@ pub(in crate::egglog) fn clear(graph: &mut EGraph) -> Result<(), OptimizeError> 
     analysis::advance(graph)
 }
 
-pub(in crate::egglog) fn remove(graph: &mut EGraph, operations: &[Value]) -> Result<(), OptimizeError> {
+pub(in crate::egglog) fn remove(graph: &mut Graph, operations: &[Value]) -> Result<(), OptimizeError> {
     remove_without_revision(graph, operations)?;
     changed(graph)
 }
 
 pub(in crate::egglog) fn remove_without_revision(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     operations: &[Value],
 ) -> Result<(), OptimizeError> {
     let operations: LookupSet<_> = operations.iter().copied().collect();
@@ -183,13 +182,16 @@ pub(in crate::egglog) fn remove_without_revision(
         for (table, keys) in rows {
             sink.remove(table, RawValues(keys))?;
         }
+        for operation in operations {
+            sink.remove_operation(operation);
+        }
         Ok(())
     })?;
     Ok(())
 }
 
 pub(in crate::egglog) fn replace(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     replacements: &[(Value, Value)],
 ) -> Result<(), OptimizeError> {
     seed_replacements(graph, replacements)?;
@@ -198,14 +200,14 @@ pub(in crate::egglog) fn replace(
 }
 
 pub(in crate::egglog) fn replace_attributes(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     replacements: &[(Value, Value)],
 ) -> Result<(), OptimizeError> {
     seed_replacements(graph, replacements)?;
     replace_attributes_with_seeded_values(graph)
 }
 
-fn seed_replacements(graph: &mut EGraph, replacements: &[(Value, Value)]) -> Result<(), OptimizeError> {
+fn seed_replacements(graph: &mut Graph, replacements: &[(Value, Value)]) -> Result<(), OptimizeError> {
     clear(graph)?;
     graph.update(|mut sink| {
         for &(old, new) in replacements {
@@ -216,7 +218,7 @@ fn seed_replacements(graph: &mut EGraph, replacements: &[(Value, Value)]) -> Res
     Ok(())
 }
 
-fn replace_attributes_with_seeded_values(graph: &mut EGraph) -> Result<(), OptimizeError> {
+fn replace_attributes_with_seeded_values(graph: &mut Graph) -> Result<(), OptimizeError> {
     graph.parse_and_run_program(
         None,
         "(run-schedule (saturate graph-indices graph-substitution-index) (saturate graph-substitution) (saturate graph-apply))",
@@ -226,7 +228,7 @@ fn replace_attributes_with_seeded_values(graph: &mut EGraph) -> Result<(), Optim
 }
 
 pub(in crate::egglog) fn inputs(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     operation: Value,
     names: &[Value],
 ) -> Result<(), OptimizeError> {
@@ -249,7 +251,7 @@ pub(in crate::egglog) fn inputs(
 
 /// Insert operations at an execution point, retaining the relative order of both groups.
 pub(in crate::egglog) fn splice(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     at: Value,
     inserted: &[Value],
 ) -> Result<(), OptimizeError> {
@@ -287,7 +289,7 @@ pub(in crate::egglog) fn splice(
 }
 
 pub(in crate::egglog) fn move_before(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     operation: Value,
     before: Value,
 ) -> Result<(), OptimizeError> {
@@ -297,7 +299,7 @@ pub(in crate::egglog) fn move_before(
 
 /// Move into a region, appending when no anchor is supplied.
 pub(in crate::egglog) fn move_into(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     operation: Value,
     destination: Value,
     before: Option<Value>,
@@ -327,7 +329,7 @@ pub(in crate::egglog) fn move_into(
 }
 
 pub(in crate::egglog) fn set_code(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     operation: Value,
     code: Code,
 ) -> Result<(), OptimizeError> {
@@ -344,8 +346,6 @@ pub(in crate::egglog) fn set_code(
     let mut obsolete = Vec::new();
     for &table in OPERATION_CELLS {
         if [
-            "OperationPayload",
-            "OperationSpan",
             "InstructionWork",
             "LiteralBits",
             "ScalarPayload",
@@ -378,7 +378,7 @@ pub(in crate::egglog) fn set_code(
         sink.remove("ScalarPayload", operation)?;
         sink.remove("InstructionWork", operation)?;
         sink.remove("LiteralBits", operation)?;
-        sink.remove("OperationPayload", operation)?;
+
         Ok(())
     })?;
     graph.update(|mut sink| Ok(ir::properties(&mut sink, operation, code)))??;
@@ -388,7 +388,7 @@ pub(in crate::egglog) fn set_code(
 
 /// Copy a selected region using fresh graph identities, substituting its entry edge.
 pub(in crate::egglog) fn clone_region(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     context: Value,
     region: Value,
     arguments: &[Value],
@@ -438,6 +438,20 @@ pub(in crate::egglog) fn clone_region(
         None,
         "(run-schedule (saturate clone-index) (saturate clone-names) (saturate clone-edges))",
     )?;
+    let query = Query(graph);
+    let mut operations = Vec::new();
+    query.for_each("CloneOperation", |row| {
+        if row[0] == context {
+            let Some(copy) = query.constructor("ClonedOperation", (context, row[1]))? else {
+                return Err(output_error("cloned operation has no identity"));
+            };
+            operations.push((row[1], copy));
+        }
+        Ok(())
+    })?;
+    for (original, copy) in operations {
+        graph.copy_occurrence(original, copy)?;
+    }
     let Some(region) = Query(graph).constructor("ClonedRegion", (context, region))? else {
         return Err(output_error("selected region was not cloned"));
     };
@@ -446,7 +460,7 @@ pub(in crate::egglog) fn clone_region(
 
 /// Remove a result clause and compact only its keyed slot numbers.
 pub(in crate::egglog) fn remove_clause(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     operation: Value,
     clause: i64,
 ) -> Result<(), OptimizeError> {

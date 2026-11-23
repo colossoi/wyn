@@ -3,14 +3,15 @@ use super::body::{ClauseId, ClauseKind};
 use super::{
     barriers, domains, effects_conflict, fuse_region, pointwise_index, Body, Code, Effects, Query, Site,
 };
+use crate::egglog::graph::Graph;
 use crate::egglog::{output_error, timing, OptimizeError};
 use crate::memory_ir::{OperationId, RegionId, UseSite, ValueRef};
 use crate::{LookupMap, LookupSet};
 use egglog_engine::sort::Z;
-use egglog_engine::{EGraph, RawValues, Value};
+use egglog_engine::{RawValues, Value};
 use std::collections::VecDeque;
 
-pub(in crate::egglog::fusion) fn compact(graph: &mut EGraph) -> Result<bool, OptimizeError> {
+pub(in crate::egglog::fusion) fn compact(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let _timing = timing::span("Rust guarded compaction");
     let query = Query(graph);
     let Some(compacted) = query.constructor("Compacted", RawValues(vec![]))? else {
@@ -45,9 +46,9 @@ pub(in crate::egglog::fusion) fn compact(graph: &mut EGraph) -> Result<bool, Opt
     }
     let domains = domains(query)?;
     let mut regions = Vec::new();
-    query.for_function("RegionOperations", |key, order| {
+    for (&region, operations) in &graph.region_orders {
         let mut preceding = LookupSet::new();
-        for operation in query.vector(order)? {
+        for &operation in operations {
             let Some(domain) = domains.get(&operation) else {
                 continue;
             };
@@ -55,14 +56,13 @@ pub(in crate::egglog::fusion) fn compact(graph: &mut EGraph) -> Result<bool, Opt
                 if lengths.get(&extent).is_some_and(|sources| {
                     sources.iter().any(|name| producers.get(name).is_some_and(|op| preceding.contains(op)))
                 }) {
-                    regions.push(key[0]);
+                    regions.push(region);
                     break;
                 }
             }
             preceding.insert(operation);
         }
-        Ok(())
-    })?;
+    }
     if regions.is_empty() {
         return Ok(false);
     }
@@ -172,7 +172,7 @@ fn follows(
 }
 
 fn legal(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     body: &mut Body,
     first: OperationId,
     second: OperationId,

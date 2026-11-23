@@ -1,7 +1,7 @@
+use crate::egglog::graph::Graph;
 use crate::egglog::{dataflow::edit, query::Query, scalar, OptimizeError};
-use egglog_engine::EGraph;
 
-pub(super) fn fuse(graph: &mut EGraph) -> Result<bool, OptimizeError> {
+pub(super) fn fuse(graph: &mut Graph) -> Result<bool, OptimizeError> {
     if graph.get_size("OperationLayout") == 0 {
         return Ok(false);
     }

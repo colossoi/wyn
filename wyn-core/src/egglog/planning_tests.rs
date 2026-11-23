@@ -2,13 +2,14 @@ use super::super::query::Query;
 use super::super::{
     finish_for_test, from_tlc, fuse, optimize_for_test, place, schedule, schedule_with_subgroups,
 };
-use crate::egglog::dataflow::ir::{self, Bounds, Code};
+use crate::egglog::dataflow::ir::{Bounds, Code};
+use crate::egglog::graph::Graph;
 use crate::egglog::payload::read;
 use crate::egglog::{analysis, test_graph};
 use crate::{compile_thru_tlc, CodegenTarget, PipelineTopologyPolicy};
 use egglog_engine::sort::{S, Z};
+use egglog_engine::Value;
 use egglog_engine::{Core, Write};
-use egglog_engine::{EGraph, Value};
 
 #[test]
 fn whole_row_fusion_preserves_conflicting_callback_effects() {
@@ -163,7 +164,7 @@ fn selected(
     super::super::prepare_interfaces(scheduled).unwrap()
 }
 
-fn planned(source: &str, check: impl FnOnce(&EGraph)) {
+fn planned(source: &str, check: impl FnOnce(&Graph)) {
     let tlc = compile_thru_tlc(source).unwrap();
     let program = schedule(
         place(
@@ -189,7 +190,7 @@ fn cases_source(sources: &[impl AsRef<str>]) -> String {
 fn check_entries<Stage>(
     program: &super::super::Program<'_, Stage>,
     count: usize,
-    check: impl Fn(usize, &EGraph, Value),
+    check: impl Fn(usize, &Graph, Value),
 ) {
     let query = Query(&program.graph);
     let mut seen = vec![false; count];
@@ -208,7 +209,7 @@ fn check_entries<Stage>(
     assert!(seen.into_iter().all(|present| present));
 }
 
-fn planned_cases(sources: &[impl AsRef<str>], check: impl Fn(usize, &EGraph, Value)) {
+fn planned_cases(sources: &[impl AsRef<str>], check: impl Fn(usize, &Graph, Value)) {
     for (index, source) in sources.iter().enumerate() {
         let tlc = compile_thru_tlc(&cases_source(std::slice::from_ref(source))).unwrap();
         let program = schedule(
@@ -223,7 +224,7 @@ fn planned_cases(sources: &[impl AsRef<str>], check: impl Fn(usize, &EGraph, Val
     }
 }
 
-fn placed_cases(sources: &[impl AsRef<str>], check: impl Fn(usize, &EGraph, Value)) {
+fn placed_cases(sources: &[impl AsRef<str>], check: impl Fn(usize, &Graph, Value)) {
     for (index, source) in sources.iter().enumerate() {
         let tlc = compile_thru_tlc(&cases_source(std::slice::from_ref(source))).unwrap();
         let program = place(
@@ -235,7 +236,7 @@ fn placed_cases(sources: &[impl AsRef<str>], check: impl Fn(usize, &EGraph, Valu
     }
 }
 
-fn distributed_cases(sources: &[impl AsRef<str>], check: impl Fn(usize, &EGraph, Value)) {
+fn distributed_cases(sources: &[impl AsRef<str>], check: impl Fn(usize, &Graph, Value)) {
     for (index, source) in sources.iter().enumerate() {
         let tlc = compile_thru_tlc(&cases_source(std::slice::from_ref(source))).unwrap();
         let mut program = place(
@@ -248,13 +249,13 @@ fn distributed_cases(sources: &[impl AsRef<str>], check: impl Fn(usize, &EGraph,
     }
 }
 
-fn fused_cases(sources: &[impl AsRef<str>], check: impl Fn(usize, &EGraph, Value)) {
+fn fused_cases(sources: &[impl AsRef<str>], check: impl Fn(usize, &Graph, Value)) {
     let tlc = compile_thru_tlc(&cases_source(sources)).unwrap();
     let program = fuse(from_tlc(&tlc).unwrap()).unwrap();
     check_entries(&program, sources.len(), check);
 }
 
-fn top_level(graph: &EGraph, function: Value, constructor: &str) -> Vec<Value> {
+fn top_level(graph: &Graph, function: Value, constructor: &str) -> Vec<Value> {
     let query = Query(graph);
     let root = query.required("FunctionRoot", function).unwrap();
     query
@@ -265,7 +266,7 @@ fn top_level(graph: &EGraph, function: Value, constructor: &str) -> Vec<Value> {
         .collect()
 }
 
-fn dispatches(graph: &EGraph, function: Value) -> Vec<super::super::execution::Dispatch> {
+fn dispatches(graph: &Graph, function: Value) -> Vec<super::super::execution::Dispatch> {
     let mut graph = graph.clone();
     let execution = super::super::execution::Execution::select(&mut graph).unwrap();
     let query = Query(&graph);
@@ -507,9 +508,7 @@ fn updated_slice_preserves_its_descriptor() {
             let mut updates = 0;
             query
                 .for_each("LiveOperation", |row| {
-                    if let Code::Update { .. } =
-                        ir::code(graph, query.required("OperationPayload", row[0])?)
-                    {
+                    if let Code::Update { .. } = query.0.code(row[0])? {
                         let output = query.name(query.required("Output", (row[0], 0_i64))?)?;
                         let source = query.name(query.required("Input", (row[0], 0_i64))?)?;
                         assert_eq!(
@@ -565,7 +564,7 @@ fn loop_capacity_obligations_use_the_length_preservation_proof() {
     );
 }
 
-fn local_capacities(graph: &EGraph) -> Vec<i64> {
+fn local_capacities(graph: &Graph) -> Vec<i64> {
     let mut graph = graph.clone();
     super::analyze(&mut graph).unwrap();
     let query = Query(&graph);
@@ -777,7 +776,7 @@ fn flat_and_ranked_collectives_share_dimension_metadata() {
         let query = Query(graph);
         let mut matching = 0;
         for operation in within(graph, function) {
-            let code = ir::code(graph, query.required("OperationPayload", operation).unwrap());
+            let code = query.0.code(operation).unwrap();
             if kind == "bucket-scatter" {
                 if let Code::BucketScatter { coordinates, depth } = code {
                     assert_eq!(depth, expected_rank as usize);
@@ -889,9 +888,7 @@ fn ranked_inputs_keep_their_independent_coordinate_mappings() {
             let [operation] = top_level(graph, function, "BucketScatter")[..] else {
                 panic!("one bucket scatter");
             };
-            let Code::BucketScatter { coordinates, depth } =
-                ir::code(graph, query.required("OperationPayload", operation).unwrap())
-            else {
+            let Code::BucketScatter { coordinates, depth } = query.0.code(operation).unwrap() else {
                 panic!("bucket payload");
             };
             assert_eq!(coordinates, [vec![0], vec![1]]);
@@ -1279,10 +1276,7 @@ fn update_handles_and_reservation_results_cannot_escape_their_scope() {
         let mut operation = None;
         query
             .for_each("LiveOperation", |row| {
-                if matches!(
-                    ir::code(&graph, query.required("OperationPayload", row[0])?),
-                    Code::Accumulate { .. }
-                ) {
+                if matches!(query.0.code(row[0])?, Code::Accumulate { .. }) {
                     operation = Some(row[0]);
                 }
                 Ok(())
@@ -1386,7 +1380,7 @@ fn scan_epilogues_require_pointwise_reads_and_completed_captures() {
 }
 
 fn code_is(query: Query<'_>, operation: Value, kind: &str) -> bool {
-    let code = ir::code(query.0, query.required("OperationPayload", operation).unwrap());
+    let code = query.0.code(operation).unwrap();
     matches!(
         (kind, code),
         ("Parallel", Code::Parallel)
@@ -1440,7 +1434,7 @@ fn folds(query: Query<'_>, operation: Value) -> Vec<Value> {
         })
         .collect()
 }
-fn within(graph: &EGraph, function: Value) -> Vec<Value> {
+fn within(graph: &Graph, function: Value) -> Vec<Value> {
     let query = Query(graph);
     let root = query.required("FunctionRoot", function).unwrap();
     let mut operations = Vec::new();

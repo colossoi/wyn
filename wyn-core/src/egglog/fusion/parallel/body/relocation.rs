@@ -1,15 +1,16 @@
 use super::Body;
 use crate::egglog::dataflow::edit;
+use crate::egglog::graph::Graph;
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, planning, timing, OptimizeError};
 use crate::memory_ir::{OperationId, RegionId, ValueRef};
 use crate::{LookupMap, LookupSet};
-use egglog_engine::{EGraph, FullState, Value, Write};
+use egglog_engine::{FullState, Value, Write};
 
 impl Body {
     pub(in crate::egglog::fusion::parallel) fn publish_hoists(
         self,
-        graph: &mut EGraph,
+        graph: &mut Graph,
     ) -> Result<(), OptimizeError> {
         let _timing = timing::span("Rust hoist publication");
         let query = Query(graph);
@@ -33,7 +34,7 @@ impl Body {
 
     fn repair_scopes(
         &self,
-        graph: &mut EGraph,
+        graph: &mut Graph,
         old_regions: &LookupMap<OperationId, RegionId>,
     ) -> Result<(), OptimizeError> {
         let mut names = LookupSet::new();
@@ -127,7 +128,7 @@ impl Body {
 
     fn repair_reads(
         &self,
-        graph: &mut EGraph,
+        graph: &mut Graph,
         old_regions: &LookupMap<OperationId, RegionId>,
     ) -> Result<(), OptimizeError> {
         let mut regions = LookupSet::new();

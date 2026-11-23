@@ -3,10 +3,11 @@ use super::super::dataflow::ir::Code;
 use super::super::payload::Payload;
 use super::super::query::Query;
 use super::super::{analysis, timing, OptimizeError};
+use crate::egglog::graph::Graph;
 use crate::memory_ir::{OperationId, RegionId, UseSite, ValueRef};
 use crate::op::BinaryOperator;
 use crate::{LookupMap, LookupSet};
-use egglog_engine::{EGraph, RawValues, Value, Write};
+use egglog_engine::{RawValues, Value, Write};
 use std::collections::VecDeque;
 
 mod accumulator;
@@ -182,7 +183,7 @@ impl Vertical {
 }
 
 fn horizontal_pair(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     body: &mut Body,
     region: RegionId,
     examined: &mut usize,
@@ -208,7 +209,7 @@ fn horizontal_pair(
     Ok(None)
 }
 
-fn fuse_region(graph: &mut EGraph, body: &mut Body, region: RegionId) -> Result<bool, OptimizeError> {
+fn fuse_region(graph: &mut Graph, body: &mut Body, region: RegionId) -> Result<bool, OptimizeError> {
     let mut vertical = Vertical::default();
     let mut generated = vertical.seed(body, region)?;
     let mut vertical_checks = 0;
@@ -252,7 +253,7 @@ fn fuse_region(graph: &mut EGraph, body: &mut Body, region: RegionId) -> Result<
     Ok(changed)
 }
 
-pub(super) fn run(graph: &mut EGraph) -> Result<bool, OptimizeError> {
+pub(super) fn run(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let _timing = timing::span("Rust parallel fusion");
     let query = Query(graph);
     let domains = domains(query)?;
@@ -261,12 +262,12 @@ pub(super) fn run(graph: &mut EGraph) -> Result<bool, OptimizeError> {
     }
     let barriers = barriers(query)?;
     let mut regions = Vec::new();
-    query.for_function("RegionOperations", |key, order| {
+    for (&region, operations) in &graph.region_orders {
         let mut seen = LookupSet::new();
-        for op in query.vector(order)? {
+        for &op in operations {
             let group = domains.get(&op).map(|domain| domain.group);
             if group.is_some_and(|group| seen.contains(&group)) {
-                regions.push(key[0]);
+                regions.push(region);
                 break;
             }
             if barriers.contains(&op) {
@@ -274,8 +275,7 @@ pub(super) fn run(graph: &mut EGraph) -> Result<bool, OptimizeError> {
             }
             seen.extend(group);
         }
-        Ok(())
-    })?;
+    }
     if regions.is_empty() {
         return Ok(false);
     }
@@ -305,21 +305,19 @@ pub(super) fn run(graph: &mut EGraph) -> Result<bool, OptimizeError> {
     Ok(changed)
 }
 
-pub(super) fn move_siblings(graph: &mut EGraph) -> Result<bool, OptimizeError> {
+pub(super) fn move_siblings(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let _timing = timing::span("Rust sibling motion");
     let query = Query(graph);
     let motion = Motion::read(query)?;
     let mut regions = Vec::new();
-    query.for_function("RegionOperations", |keys, ops| {
-        let operations = query.vector(ops)?;
-        for (before, index) in motion.candidates(&operations, |op| op) {
+    for (&region, operations) in &graph.region_orders {
+        for (before, index) in motion.candidates(operations, |op| op) {
             if !analysis::uses_output_of(query, operations[index], operations[before])? {
-                regions.push(keys[0]);
+                regions.push(region);
                 break;
             }
         }
-        Ok(())
-    })?;
+    }
     if regions.is_empty() {
         return Ok(false);
     }
@@ -338,7 +336,7 @@ pub(super) fn move_siblings(graph: &mut EGraph) -> Result<bool, OptimizeError> {
 }
 
 fn legal(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     body: &mut Body,
     first: OperationId,
     second: OperationId,
@@ -403,7 +401,7 @@ fn legal(
 }
 
 fn effects_conflict(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     a: &Effects,
     b: &Effects,
     compare_traps: bool,

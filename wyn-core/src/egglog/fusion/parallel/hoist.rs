@@ -1,13 +1,14 @@
 //! Lift total invariant operations through their current region owners.
 use super::{domains, effects_conflict, Body, Code, Effects, Query, Site};
+use crate::egglog::graph::Graph;
 use crate::egglog::{timing, OptimizeError};
 use crate::memory_ir::{BodyRole, Definition, OperationId, UseSite, ValueRef};
 use crate::{LookupMap, LookupSet, SortedSet};
 use egglog_engine::sort::Z;
-use egglog_engine::{EGraph, Value, Write};
+use egglog_engine::{Value, Write};
 use std::collections::VecDeque;
 
-pub(in crate::egglog::fusion) fn hoist(graph: &mut EGraph) -> Result<bool, OptimizeError> {
+pub(in crate::egglog::fusion) fn hoist(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let _timing = timing::span("Rust cross-region hoisting");
     let query = Query(graph);
     let mut parents = LookupMap::new();
@@ -110,7 +111,7 @@ pub(in crate::egglog::fusion) fn hoist(graph: &mut EGraph) -> Result<bool, Optim
     Ok(changed)
 }
 
-pub(super) fn cheap(graph: &mut EGraph, operation: Value) -> Result<bool, OptimizeError> {
+pub(super) fn cheap(graph: &mut Graph, operation: Value) -> Result<bool, OptimizeError> {
     let query = Query(graph);
     if let Some(work) = query.lookup("InstructionWork", operation)? {
         return Ok(graph.value_to_base::<i64>(work) <= 4);

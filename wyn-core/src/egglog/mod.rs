@@ -9,10 +9,10 @@
 //! physical eligibility and kernel policies remain queryable in egglog.
 use self::dataflow::edit;
 use self::query::Query;
+use crate::egglog::graph::Graph;
 use crate::ssa::stage::Elaborated;
 use crate::tlc::stage::OwnershipApplied;
 use crate::{CodegenTarget, PipelineTopologyPolicy, SymbolId};
-use egglog_engine::EGraph;
 use egglog_engine::Error;
 use wyn_base::Interner;
 
@@ -23,6 +23,7 @@ pub(crate) mod dataflow;
 mod execution;
 mod from_tlc;
 mod fusion;
+mod graph;
 mod host;
 mod memory;
 mod payload;
@@ -199,7 +200,7 @@ pub fn to_ssa(program: HostPrepared<'_>, target: CodegenTarget) -> Result<Elabor
 /// program and logical execution choices. Host preparation freezes the physical plan.
 pub struct Program<'source, Stage> {
     source: &'source OwnershipApplied,
-    graph: EGraph,
+    graph: Graph,
     symbols: Interner<i64, SymbolId>,
     costs: cost::CostModel,
     _stage: Stage,

@@ -1,11 +1,12 @@
 //! Apply an admitted domain composition to keyed cells and coordinate proofs.
 use crate::egglog::dataflow::edit::{self, OPERATION_CELLS};
 use crate::egglog::dataflow::ir::{self, Code, Name, OperationId, Parameter, RegionId};
+use crate::egglog::graph::Graph;
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, OptimizeError};
-use egglog_engine::{Core, EGraph, RawValues, Value, Write};
+use egglog_engine::{Core, RawValues, Value, Write};
 
-pub(super) fn lift_row_length(graph: &mut EGraph) -> Result<bool, OptimizeError> {
+pub(super) fn lift_row_length(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let Some(candidate) = Query(graph).first("LiftUniformRowLength")? else {
         return Ok(false);
     };
@@ -16,7 +17,7 @@ pub(super) fn lift_row_length(graph: &mut EGraph) -> Result<bool, OptimizeError>
     Ok(true)
 }
 
-pub(super) fn canonicalize(graph: &mut EGraph) -> Result<bool, OptimizeError> {
+pub(super) fn canonicalize(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let query = Query(graph);
     let mut replacements = Vec::new();
     query.for_function("DomainExtent", |keys, index| {
@@ -42,7 +43,7 @@ pub(super) fn canonicalize(graph: &mut EGraph) -> Result<bool, OptimizeError> {
     Ok(true)
 }
 
-pub(super) fn apply(graph: &mut EGraph, outer: Value, inner: Value) -> Result<(), OptimizeError> {
+pub(super) fn apply(graph: &mut Graph, outer: Value, inner: Value) -> Result<(), OptimizeError> {
     let query = Query(graph);
     let domain = query.required("OperationDomain", outer)?;
     let inner_domain = query.required("OperationDomain", inner)?;

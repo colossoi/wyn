@@ -1,9 +1,10 @@
 //! Match repeatable expressions against the definitions visible at each occurrence.
 use super::{body::BodyGraph, ir::Code};
+use crate::egglog::graph::Graph;
 use crate::egglog::{query::Query, OptimizeError};
 use crate::memory_ir::{Definition, Function, OperationId, RegionId, ValueRef};
 use crate::LookupMap;
-use egglog_engine::{EGraph, Value, Write};
+use egglog_engine::{Value, Write};
 
 #[derive(Clone, Eq, Hash, PartialEq)]
 struct Expression {
@@ -97,7 +98,7 @@ impl Reuse {
     }
 }
 
-pub(in crate::egglog) fn publish(graph: &mut EGraph, body: &BodyGraph) -> Result<(), OptimizeError> {
+pub(in crate::egglog) fn publish(graph: &mut Graph, body: &BodyGraph) -> Result<(), OptimizeError> {
     let query = Query(graph);
     let mut reuse = Reuse::default();
     for function in body.ir.functions.values() {

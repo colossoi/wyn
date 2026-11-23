@@ -1,11 +1,12 @@
 //! Borrowed access to native tables. No facts are retained outside the egraph.
 use super::OptimizeError;
+use crate::egglog::graph::Graph;
 use egglog_engine::ast::FunctionSubtype;
 use egglog_engine::sort::VecContainer;
-use egglog_engine::{EGraph, IntoValues, RawValues, Read, Value};
+use egglog_engine::{IntoValues, RawValues, Read, Value};
 
 #[derive(Clone, Copy)]
-pub(super) struct Query<'a>(pub &'a EGraph);
+pub(super) struct Query<'a>(pub &'a Graph);
 
 impl Query<'_> {
     pub fn indexed(&self, table: &str, keys: &[Value], count: i64) -> Result<Vec<Value>, OptimizeError> {

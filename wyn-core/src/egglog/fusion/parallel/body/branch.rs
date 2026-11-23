@@ -3,6 +3,7 @@ use crate::ast::Span;
 use crate::egglog::dataflow::ir::{
     self, Code, Name, OperationId as WireOperationId, RegionId as WireRegionId,
 };
+use crate::egglog::graph::Graph;
 use crate::egglog::payload::Payload;
 use crate::egglog::{analysis::count, output_error, query::Query, OptimizeError};
 use crate::memory_ir::{
@@ -10,13 +11,13 @@ use crate::memory_ir::{
 };
 use crate::op::{BinaryOperator, UnaryOperator};
 use crate::LookupMap;
-use egglog_engine::{EGraph, RawValues, Value, Write};
+use egglog_engine::{RawValues, Value, Write};
 use std::mem::take;
 
 impl Body {
     pub(in crate::egglog::fusion::parallel) fn guard_shared_loop(
         &mut self,
-        graph: &mut EGraph,
+        graph: &mut Graph,
         producer: OperationId,
         before: OperationId,
         conditions: Vec<(ValueRef, bool)>,
@@ -232,7 +233,7 @@ impl Body {
         Ok(())
     }
 
-    pub(super) fn publish_joins(&self, graph: &mut EGraph) -> Result<(), OptimizeError> {
+    pub(super) fn publish_joins(&self, graph: &mut Graph) -> Result<(), OptimizeError> {
         if self.joined_yields.is_empty() {
             return Ok(());
         }

@@ -3,11 +3,12 @@ use crate::ast::Span;
 use crate::egglog::dataflow::ir::{
     self, Code, Name, OperationId as WireOperationId, RegionId as WireRegionId,
 };
+use crate::egglog::graph::Graph;
 use crate::egglog::{output_error, query::Query, OptimizeError};
 use crate::memory_ir::{
     BodyRole, Definition, Operation, OperationId, Region, RegionEdge, UseSite, ValueRef,
 };
-use egglog_engine::{EGraph, RawValues, Value, Write};
+use egglog_engine::{RawValues, Value, Write};
 use std::mem::take;
 
 pub(super) struct Guard {
@@ -59,7 +60,7 @@ impl Body {
 
     pub(in crate::egglog::fusion::parallel) fn guard(
         &mut self,
-        graph: &mut EGraph,
+        graph: &mut Graph,
         operation: OperationId,
         clause: ClauseId,
         predicate: Value,
@@ -210,7 +211,7 @@ impl Body {
         Ok(())
     }
 
-    pub(super) fn publish_guards(&self, graph: &mut EGraph) -> Result<(), OptimizeError> {
+    pub(super) fn publish_guards(&self, graph: &mut Graph) -> Result<(), OptimizeError> {
         if self.changed_clauses.is_empty() {
             return Ok(());
         }

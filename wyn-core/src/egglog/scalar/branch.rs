@@ -1,13 +1,14 @@
 //! Splice proven branch arms on the memory graph before publishing its changed edges.
 use crate::egglog::dataflow::{body::BodyGraph, edit};
+use crate::egglog::graph::Graph;
 use crate::egglog::{output_error, query::Query, timing, OptimizeError};
 use crate::memory_ir::{Function, ValueRef};
 use crate::LookupMap;
-use egglog_engine::{EGraph, Value, Write};
+use egglog_engine::{Value, Write};
 use std::mem::take;
 use wyn_graph::ReplacementForest;
 
-pub(super) fn apply(graph: &mut EGraph, body: &mut Option<BodyGraph>) -> Result<bool, OptimizeError> {
+pub(super) fn apply(graph: &mut Graph, body: &mut Option<BodyGraph>) -> Result<bool, OptimizeError> {
     let query = Query(graph);
     let mut selected = LookupMap::<Value, Value>::new();
     query.for_each("BranchCandidate", |row| {

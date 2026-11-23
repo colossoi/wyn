@@ -1,15 +1,16 @@
-use super::{code, operation, outputs, parameters, region, yields, Code, Name, Parameter};
+use super::{operation, outputs, parameters, region, yields, Code, Name, Parameter};
+use crate::egglog::graph::Graph;
 use crate::egglog::memory::load;
 use crate::egglog::payload::Payload;
 use crate::egglog::query::Query;
 use crate::egglog::test_graph;
 use crate::egglog::OptimizeError;
 use crate::op::BinaryOperator;
-use egglog_engine::{EGraph, RawValues, Write};
+use egglog_engine::{RawValues, Write};
 
 #[test]
 fn cloned_parameters_preserve_the_callers_value_type() {
-    let mut graph = EGraph::default();
+    let mut graph = Graph::default();
     load(&mut graph).unwrap();
     graph
         .parse_and_run_program(
@@ -33,7 +34,7 @@ fn cloned_parameters_preserve_the_callers_value_type() {
 
 #[test]
 fn operations_share_connectivity_without_sharing_occurrences_or_payloads() {
-    let mut graph = EGraph::default();
+    let mut graph = Graph::default();
     load(&mut graph).unwrap();
     let (add, sub) = graph
         .update(|mut sink| {
@@ -106,8 +107,8 @@ fn operations_share_connectivity_without_sharing_occurrences_or_payloads() {
             query.required("Input", (sub.0, slot)).unwrap()
         );
     }
-    let add_code = code(&graph, query.required("OperationPayload", add.0).unwrap());
-    let sub_code = code(&graph, query.required("OperationPayload", sub.0).unwrap());
+    let add_code = graph.code(add.0).unwrap();
+    let sub_code = graph.code(sub.0).unwrap();
     assert_eq!(add_code, Code::Scalar(Payload::Binary(BinaryOperator::Add)));
     assert_eq!(sub_code, Code::Scalar(Payload::Binary(BinaryOperator::Subtract)));
     crate::egglog::analysis::run(&mut graph).unwrap();

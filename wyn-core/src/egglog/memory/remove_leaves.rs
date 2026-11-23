@@ -1,13 +1,14 @@
 //! Delete unused scalar leaves without rebuilding proofs about surviving values.
 use super::{analysis, body::BodyGraph, demand::Needed, edit, scalar, timing, OptimizeError, Query};
 use crate::egglog::dataflow::ir::Code;
+use crate::egglog::graph::Graph;
 use crate::egglog::planning;
 use crate::memory_ir::{Definition, OperationId, ValueRef};
 use crate::LookupSet;
-use egglog_engine::{EGraph, Write};
+use egglog_engine::Write;
 
 pub(super) fn apply(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     body: &mut BodyGraph,
     needed: &Needed,
     dead: &[OperationId],

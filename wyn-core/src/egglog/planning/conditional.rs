@@ -1,11 +1,12 @@
 //! Factor admitted map arms by reparenting their regions around one branch occurrence.
 use crate::egglog::dataflow::edit;
 use crate::egglog::dataflow::ir::{self, Code, Name, OperationId, Parameter, RegionId};
+use crate::egglog::graph::Graph;
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, OptimizeError};
-use egglog_engine::{EGraph, RawValues, Value, Write};
+use egglog_engine::{RawValues, Value, Write};
 
-pub(super) fn apply(graph: &mut EGraph, branch: Value, yes: Value, no: Value) -> Result<(), OptimizeError> {
+pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> Result<(), OptimizeError> {
     let query = Query(graph);
     let a = query.required("ControlRegion", (yes, 0_i64))?;
     let b = query.required("ControlRegion", (no, 0_i64))?;

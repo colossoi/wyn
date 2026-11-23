@@ -73,8 +73,6 @@
 (relation ProvenTotalOperation (OperationKey))
 
 (relation NextOperation (OperationKey OperationKey))
-(sort OrderedOperations (Vec OperationKey))
-(function RegionOperations (RegionKey) OrderedOperations :no-merge)
 (relation FirstOperation (RegionKey OperationKey))
 (relation LastOperation (RegionKey OperationKey))
 (relation EmptyRegion (RegionKey))

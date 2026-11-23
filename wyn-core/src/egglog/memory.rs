@@ -1,24 +1,22 @@
 //! Pass orchestration over the authoritative graph.
-use super::dataflow::{
-    body, cse, edit,
-    ir::{self, Code},
-};
+use super::dataflow::{body, cse, edit, ir::Code};
 use super::query::Query;
 use super::{analysis, scalar, timing, OptimizeError};
+use crate::egglog::graph::Graph;
 use crate::LookupMap;
-use egglog_engine::{EGraph, Value};
+use egglog_engine::Value;
 use wyn_graph::dfs_postorder;
 
 mod demand;
 mod remove_leaves;
 
-pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(super) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
     super::dataflow::ir::load(graph)?;
     scalar::load(graph)?;
     super::planning::load(graph)
 }
 
-pub(super) fn inline(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(super) fn inline(graph: &mut Graph) -> Result<(), OptimizeError> {
     let _timing = timing::span("egglog helper inlining");
     let selection = timing::span("egglog inline selection");
     edit::clear(graph)?;
@@ -73,7 +71,7 @@ pub(super) fn inline(graph: &mut EGraph) -> Result<(), OptimizeError> {
     Ok(())
 }
 
-fn inline_call(graph: &mut EGraph, call: Value, callee: Value) -> Result<(), OptimizeError> {
+fn inline_call(graph: &mut Graph, call: Value, callee: Value) -> Result<(), OptimizeError> {
     let cloning = timing::span("egglog inline cloning");
     let arguments = Query(graph).sequence("Input", call)?;
     let outputs = Query(graph).sequence("Output", call)?;
@@ -91,7 +89,7 @@ fn inline_call(graph: &mut EGraph, call: Value, callee: Value) -> Result<(), Opt
     edit::splice(graph, call, &operations)
 }
 
-pub(super) fn simplify(graph: &mut EGraph, hoist: bool) -> Result<(), OptimizeError> {
+pub(super) fn simplify(graph: &mut Graph, hoist: bool) -> Result<(), OptimizeError> {
     let _timing = timing::span(if hoist {
         "egglog hoisting simplification"
     } else {
@@ -145,7 +143,7 @@ pub(super) fn simplify(graph: &mut EGraph, hoist: bool) -> Result<(), OptimizeEr
 }
 
 fn remove_dead_values(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     body: &mut Option<body::BodyGraph>,
 ) -> Result<bool, OptimizeError> {
     let _timing = timing::span("Rust dead operation selection");
@@ -172,7 +170,7 @@ fn remove_dead_values(
     Ok(false)
 }
 
-fn reduce_values(graph: &mut EGraph, body: &mut Option<body::BodyGraph>) -> Result<bool, OptimizeError> {
+fn reduce_values(graph: &mut Graph, body: &mut Option<body::BodyGraph>) -> Result<bool, OptimizeError> {
     let revision = edit::revision(graph)?;
     if scalar::apply(graph, body)? {
         *body = None;
@@ -184,14 +182,12 @@ fn reduce_values(graph: &mut EGraph, body: &mut Option<body::BodyGraph>) -> Resu
     body::forward_equivalents(graph, body)
 }
 
-fn scratch_shapes(graph: &mut EGraph) -> Result<(), OptimizeError> {
+fn scratch_shapes(graph: &mut Graph) -> Result<(), OptimizeError> {
     let query = Query(graph);
     let mut replacements = Vec::new();
     query.for_each("ScratchAllocation", |row| {
         let operation = row[0];
-        if !query.contains("LiveOperation", operation)?
-            || ir::code(graph, query.required("OperationPayload", operation)?) != Code::Scratch
-        {
+        if !query.contains("LiveOperation", operation)? || query.0.code(operation)? != Code::Scratch {
             return Ok(());
         }
         let source = query.name(query.required("Input", (operation, 0_i64))?)?;
@@ -212,7 +208,7 @@ fn scratch_shapes(graph: &mut EGraph) -> Result<(), OptimizeError> {
 }
 
 #[cfg(test)]
-pub(super) fn validate(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(super) fn validate(graph: &mut Graph) -> Result<(), OptimizeError> {
     analysis::run(graph)
 }
 

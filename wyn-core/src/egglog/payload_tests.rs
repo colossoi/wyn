@@ -1,28 +1,22 @@
 use super::{read, register, Payload};
-use crate::egglog::memory;
 use crate::egglog::query::Query;
+use crate::egglog::{graph::Graph, memory};
 use crate::op::BinaryOperator;
-use egglog_engine::{sort::Boxed, Core, EGraph, Write};
+use egglog_engine::{sort::Boxed, Core, Write};
 
 #[test]
 fn instruction_payloads_have_no_operands_and_preserve_operator_identity() {
-    let mut graph = EGraph::default();
+    let mut graph = Graph::default();
     register(&mut graph).unwrap();
     graph
         .parse_and_run_program(None, "(function TestPayload (i64) InstructionPayload :no-merge)")
         .unwrap();
     graph
         .update(|mut sink| {
-            sink.set(
-                "TestPayload",
-                0_i64,
-                sink.base_to_value(Boxed(Payload::Binary(BinaryOperator::Add))),
-            )?;
-            sink.set(
-                "TestPayload",
-                1_i64,
-                sink.base_to_value(Boxed(Payload::Binary(BinaryOperator::Subtract))),
-            )
+            let add = sink.base_to_value(Boxed(Payload::Binary(BinaryOperator::Add)));
+            let sub = sink.base_to_value(Boxed(Payload::Binary(BinaryOperator::Subtract)));
+            sink.set("TestPayload", 0_i64, add)?;
+            sink.set("TestPayload", 1_i64, sub)
         })
         .unwrap();
     let add = Query(&graph).required("TestPayload", (0_i64,)).unwrap();
@@ -44,7 +38,7 @@ fn instruction_payloads_have_no_operands_and_preserve_operator_identity() {
 
 #[test]
 fn arithmetic_payloads_share_generic_operand_structure() {
-    let mut graph = EGraph::default();
+    let mut graph = Graph::default();
     memory::load(&mut graph).unwrap();
     use crate::egglog::dataflow::ir::{operation, Code, Name};
     let (add, sub, again) = graph
@@ -85,12 +79,6 @@ fn arithmetic_payloads_share_generic_operand_structure() {
             query.required("Input", (sub.0, slot)).unwrap()
         );
     }
-    assert_ne!(
-        query.required("OperationPayload", add.0).unwrap(),
-        query.required("OperationPayload", sub.0).unwrap()
-    );
-    assert_eq!(
-        query.required("OperationPayload", add.0).unwrap(),
-        query.required("OperationPayload", again.0).unwrap()
-    );
+    assert_ne!(graph.code(add.0).unwrap(), graph.code(sub.0).unwrap());
+    assert_eq!(graph.code(add.0).unwrap(), graph.code(again.0).unwrap());
 }

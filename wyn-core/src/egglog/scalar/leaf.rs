@@ -3,13 +3,14 @@ use crate::egglog::dataflow::{
     edit,
     ir::{self, Code},
 };
+use crate::egglog::graph::Graph;
 use crate::egglog::{output_error, query::Query, timing, OptimizeError};
 use crate::{types, LookupSet};
 use egglog_engine::sort::VecContainer;
-use egglog_engine::{Core, EGraph, Value, Write};
+use egglog_engine::{Core, Value, Write};
 
 pub(in crate::egglog) fn forward_lengths(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     candidates_table: &str,
 ) -> Result<bool, OptimizeError> {
     let mut candidates = Vec::new();
@@ -24,7 +25,7 @@ pub(in crate::egglog) fn forward_lengths(
     let mut changed = false;
     for (operation, index) in candidates {
         let query = Query(graph);
-        let old = ir::code(graph, query.required("OperationPayload", operation)?);
+        let old = query.0.code(operation)?;
         if !matches!(old, Code::Length { .. }) {
             continue;
         }
@@ -51,13 +52,13 @@ pub(in crate::egglog) fn forward_lengths(
 }
 
 pub(super) fn fold(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     operation: Value,
     bits: Value,
     constant: Code,
 ) -> Result<bool, OptimizeError> {
     let query = Query(graph);
-    let old = ir::code(graph, query.required("OperationPayload", operation)?);
+    let old = query.0.code(operation)?;
     if !matches!(old, Code::Scalar(_) | Code::IndexValue)
         || !query.contains("DiscardableOperation", operation)?
         || query.contains("OrderedOperation", operation)?
@@ -71,7 +72,7 @@ pub(super) fn fold(
 }
 
 pub(in crate::egglog) fn materialize_scratch(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     candidates: Vec<(Value, Value)>,
 ) -> Result<(), OptimizeError> {
     let mut changed = false;
@@ -85,7 +86,7 @@ pub(in crate::egglog) fn materialize_scratch(
 }
 
 fn rewrite(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     operation: Value,
     old: Code,
     new: Code,
@@ -128,7 +129,6 @@ fn rewrite(
                     unreachable!("equivalent rewrites only change length, scalar, index and scratch leaves")
                 }
             }
-            sink.remove("OperationPayload", operation)?;
             for slot in 0..inputs.len() as i64 {
                 sink.remove("Input", (operation, slot))?;
                 sink.remove("InputDiet", (operation, slot))?;
@@ -254,7 +254,7 @@ impl UsePath {
     }
 }
 
-fn repair_use(graph: &mut EGraph, path: UsePath, name: Value, mut used: bool) -> Result<(), OptimizeError> {
+fn repair_use(graph: &mut Graph, path: UsePath, name: Value, mut used: bool) -> Result<(), OptimizeError> {
     let UsePath { scopes } = path;
     let mut scopes = scopes.into_iter().peekable();
     while let Some((region, operation)) = scopes.next() {
@@ -285,7 +285,7 @@ fn repair_use(graph: &mut EGraph, path: UsePath, name: Value, mut used: bool) ->
             || query.contains("EndDemand", (region, name))?
             || query.contains("RegionAttributeUse", (region, name))?;
         if !captured {
-            for op in query.vector(query.required("RegionOperations", region)?)? {
+            for &op in query.0.region_order(region)? {
                 captured |= query.contains("OperationUse", (op, name))?;
                 if captured {
                     break;
@@ -314,7 +314,7 @@ fn repair_use(graph: &mut EGraph, path: UsePath, name: Value, mut used: bool) ->
 }
 
 pub(in crate::egglog) fn remove_use(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     operation: Value,
     name: Value,
 ) -> Result<(), OptimizeError> {

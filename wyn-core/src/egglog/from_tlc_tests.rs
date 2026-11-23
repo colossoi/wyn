@@ -1,11 +1,12 @@
 use super::import;
 use crate::compile_thru_tlc;
-use crate::egglog::dataflow::ir::{self, Code};
+use crate::egglog::dataflow::ir::Code;
+use crate::egglog::graph::Graph;
 use crate::egglog::query::Query;
 use crate::tlc::{self, DefMeta, TermKind};
-use egglog_engine::{EGraph, Value};
+use egglog_engine::Value;
 
-fn function_body(graph: &EGraph) -> Vec<Value> {
+fn function_body(graph: &Graph) -> Vec<Value> {
     let query = Query(graph);
     let entry = query.first("EntryOrder").unwrap().unwrap()[0];
     query.operations(query.required("FunctionRoot", entry).unwrap()).unwrap()
@@ -41,10 +42,7 @@ fn evaluation_edges_stay_direct_and_borrowed_values_do_not_repeat_effects() {
         );
         let mut additions = 0;
         for statement in statements {
-            if let Code::Scalar(payload) = ir::code(
-                &graph,
-                Query(&graph).required("OperationPayload", statement).unwrap(),
-            ) {
+            if let Code::Scalar(payload) = graph.code(statement).unwrap() {
                 additions += usize::from(payload.spelling() == "+");
             }
         }

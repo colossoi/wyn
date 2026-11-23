@@ -1,8 +1,9 @@
 use super::{Body, Effects, Site};
+use crate::egglog::graph::Graph;
 use crate::egglog::{analysis::count, output_error, query::Query, OptimizeError};
 use crate::memory_ir::{BodyRole, OperationId, RegionId, ValueRef};
 use crate::LookupSet;
-use egglog_engine::{EGraph, RawValues, Write};
+use egglog_engine::{RawValues, Write};
 use std::mem::take;
 
 impl Body {
@@ -83,7 +84,7 @@ impl Body {
         self.effects.insert(scope, effects);
     }
 
-    pub(super) fn publish_accumulators(&self, graph: &mut EGraph) -> Result<(), OptimizeError> {
+    pub(super) fn publish_accumulators(&self, graph: &mut Graph) -> Result<(), OptimizeError> {
         if self.accumulator_origins.is_empty() {
             return Ok(());
         }

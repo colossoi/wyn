@@ -2,10 +2,11 @@
 use super::dataflow::ir::{self, Code};
 use super::query::Query;
 use super::{from_tlc, memory, OptimizeError};
-use egglog_engine::{EGraph, Value, Write};
+use crate::egglog::graph::Graph;
+use egglog_engine::{Value, Write};
 
-pub(super) fn fixture(codes: &[(i64, Code)], facts: &str) -> Result<EGraph, OptimizeError> {
-    let mut graph = EGraph::default();
+pub(super) fn fixture(codes: &[(i64, Code)], facts: &str) -> Result<Graph, OptimizeError> {
+    let mut graph = Graph::default();
     memory::load(&mut graph)?;
     graph.update(|mut sink| {
         Ok((|| -> Result<(), OptimizeError> {
@@ -21,15 +22,15 @@ pub(super) fn fixture(codes: &[(i64, Code)], facts: &str) -> Result<EGraph, Opti
     Ok(graph)
 }
 
-pub(super) fn import(source: &str) -> Result<EGraph, OptimizeError> {
+pub(super) fn import(source: &str) -> Result<Graph, OptimizeError> {
     let source = crate::compile_thru_tlc(source).unwrap();
     Ok(from_tlc::import(&source)?.0)
 }
 
-pub(super) fn entry(graph: &EGraph) -> Value {
+pub(super) fn entry(graph: &Graph) -> Value {
     Query(graph).first("EntryOrder").unwrap().unwrap()[0]
 }
 
-pub(super) fn root(graph: &EGraph) -> Value {
+pub(super) fn root(graph: &Graph) -> Value {
     Query(graph).required("FunctionRoot", entry(graph)).unwrap()
 }

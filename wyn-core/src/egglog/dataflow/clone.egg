@@ -139,7 +139,6 @@
       ((set (CloneSlicePrefix context slices (+ slot 1)) (vec-push prefix value))) :ruleset clone-edges)
 (rule ((= revision (AnalysisRevision)) (CloneSliceDemand context slices) (= replacement (CloneSlicePrefix context slices (vec-length slices))))
       ((set (CloneSlices context slices) replacement)) :ruleset clone-edges)
-(rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (= value (OperationPayload operation)) ) ((set (OperationPayload (ClonedOperation context operation)) value)) :ruleset clone-edges)
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (= value (OperationRegion operation)) ) ((set (OperationRegion (ClonedOperation context operation)) (ClonedRegion context value))) :ruleset clone-edges)
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (= value (OperationOrder operation)) ) ((set (OperationOrder (ClonedOperation context operation)) value)) :ruleset clone-edges)
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (= value (Input operation k0))) ((CloneNameDemand context value)) :ruleset clone-index)
@@ -281,6 +280,3 @@
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (RangeOperation operation)) ((RangeOperation (ClonedOperation context operation))) :ruleset clone-edges)
 
 (rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (PreservesInputShape operation v0 v1)) ((PreservesInputShape (ClonedOperation context operation) v0 v1)) :ruleset clone-edges)
-
-(rule ((= revision (AnalysisRevision)) (CloneOperation context operation) (= span (OperationSpan operation)))
-      ((set (OperationSpan (ClonedOperation context operation)) span)) :ruleset clone-edges)

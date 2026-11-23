@@ -4,13 +4,14 @@ use crate::egglog::dataflow::{
     edit,
     ir::{self, Code, Name, OperationId, Parameter, RegionId},
 };
+use crate::egglog::graph::{Graph, State};
 use crate::egglog::payload::Payload;
 use crate::egglog::query::Query;
 use crate::egglog::{timing, OptimizeError};
 use crate::op::BinaryOperator;
 use crate::types;
 use crate::{LookupMap, LookupSet, StableMap};
-use egglog_engine::{EGraph, FullState, RawValues, Value, Write};
+use egglog_engine::{RawValues, Value, Write};
 
 struct Candidate {
     operation: Value,
@@ -20,7 +21,7 @@ struct Candidate {
     observed: bool,
 }
 
-pub(in crate::egglog::fusion) fn run(graph: &mut EGraph) -> Result<bool, OptimizeError> {
+pub(in crate::egglog::fusion) fn run(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let _timing = timing::span("Rust compact length");
     let query = Query(graph);
     let Some(compacted) = query.constructor("Compacted", RawValues(vec![]))? else {
@@ -109,7 +110,7 @@ pub(in crate::egglog::fusion) fn run(graph: &mut EGraph) -> Result<bool, Optimiz
         let lane = query.required("ControlRegion", (operation, 0_i64))?;
         for region in [region, lane] {
             if !orders.contains_key(&region) {
-                orders.insert(region, query.vector(query.required("RegionOperations", region)?)?);
+                orders.insert(region, query.0.region_order(region)?.to_vec());
             }
         }
         reductions.push((
@@ -189,7 +190,7 @@ fn packed_output(
 }
 
 fn make_count(
-    sink: &mut FullState<'_, '_>,
+    sink: &mut State<'_, '_, '_>,
     operation: Value,
     clause: i64,
     output_slot: i64,
@@ -275,7 +276,7 @@ fn make_count(
 }
 
 fn constant(
-    sink: &mut FullState<'_, '_>,
+    sink: &mut State<'_, '_, '_>,
     owner: Value,
     slot: i64,
     bits: i64,

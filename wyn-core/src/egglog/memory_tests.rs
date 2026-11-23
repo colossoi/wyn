@@ -2,12 +2,13 @@ use crate::egglog::dataflow::{
     body, edit,
     ir::{self, Bounds, Code, Name},
 };
+use crate::egglog::graph::Graph;
 use crate::egglog::payload::Payload;
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, planning, test_graph, OptimizeError};
 use crate::op::BinaryOperator;
 use crate::types;
-use egglog_engine::{EGraph, RawValues, Write};
+use egglog_engine::{RawValues, Write};
 
 #[test]
 fn copy_forwarding_preserves_captures_loop_entries_and_backedges() -> Result<(), OptimizeError> {
@@ -20,10 +21,7 @@ fn copy_forwarding_preserves_captures_loop_entries_and_backedges() -> Result<(),
     let subtract = query
         .operations(inner)?
         .into_iter()
-        .find(|&op| {
-            ir::code(&graph, query.required("OperationPayload", op).unwrap())
-                == Code::Scalar(Payload::Binary(BinaryOperator::Subtract))
-        })
+        .find(|&op| query.0.code(op).unwrap() == Code::Scalar(Payload::Binary(BinaryOperator::Subtract)))
         .expect("loop body has a subtraction");
     let initial = query.required("EdgeArgument", (owner, 0_i64, 0_i64))?;
     let operands = query.sequence("Input", subtract)?;
@@ -338,10 +336,7 @@ fn keyed_positions_keep_multi_result_occurrences_distinct() -> Result<(), Optimi
     let a = query.constructor("OperationId", 0_i64)?.unwrap();
     let b = query.constructor("OperationId", 1_i64)?.unwrap();
     assert_ne!(a, b);
-    assert_eq!(
-        query.required("OperationPayload", a)?,
-        query.required("OperationPayload", b)?
-    );
+    assert_eq!(graph.code(a)?, graph.code(b)?);
     assert_eq!(query.sequence("Output", a)?.len(), 2);
     assert_eq!(query.sequence("Output", b)?.len(), 1);
     assert_ne!(
@@ -475,7 +470,7 @@ fn reduction_combiner_cannot_capture_a_lane_index() -> Result<(), OptimizeError>
     Ok(())
 }
 
-fn fusion_case(pointwise: bool) -> Result<EGraph, OptimizeError> {
+fn fusion_case(pointwise: bool) -> Result<Graph, OptimizeError> {
     let consumer = if pointwise { "map(|x|x+2,a)" } else { "map(|x|a[0],xs)" };
     let source =
         format!("entry main(xs:[4]i32) ([4]i32,[4]i32)=let a=map(|x|x+1,xs) in let b={consumer} in (a,b)");

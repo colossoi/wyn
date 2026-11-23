@@ -1,11 +1,11 @@
 use super::Execution;
 use crate::egglog::dataflow::ir::{self, Code};
+use crate::egglog::graph::Graph;
 use crate::egglog::memory;
 use crate::egglog::query::Query;
-use egglog_engine::EGraph;
 
-fn graph(grid: &str, rank: i64) -> EGraph {
-    let mut graph = EGraph::default();
+fn graph(grid: &str, rank: i64) -> Graph {
+    let mut graph = Graph::default();
     memory::load(&mut graph).unwrap();
     graph.update(|mut sink| Ok(ir::operation(&mut sink, 0, Code::Parallel, &[]))).unwrap().unwrap();
     graph

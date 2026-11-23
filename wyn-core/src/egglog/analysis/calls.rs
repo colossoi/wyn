@@ -1,9 +1,10 @@
 //! Resolve direct calls through attached control, reducer and combiner regions.
+use crate::egglog::graph::Graph;
 use crate::egglog::query::Query;
 use crate::egglog::OptimizeError;
 use crate::memory_ir::call_graph::{CallGraph, CallSite};
 use crate::{LookupMap, StableMap};
-use egglog_engine::{EGraph, RawValues, Value, Write};
+use egglog_engine::{RawValues, Value, Write};
 use wyn_graph::{for_each_reachable, WalkOrder};
 
 #[derive(Default)]
@@ -19,7 +20,7 @@ fn attached_region(query: Query<'_>, operation: Value) -> Result<Option<Value>, 
     Ok(None)
 }
 
-pub(super) fn publish(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(super) fn publish(graph: &mut Graph) -> Result<(), OptimizeError> {
     let query = Query(graph);
     let mut regions = LookupMap::<Value, RegionCalls>::new();
     for table in ["ControlRegion", "ResultReducer", "AccumulatorCombiner"] {

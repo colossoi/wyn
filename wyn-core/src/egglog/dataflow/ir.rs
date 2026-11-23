@@ -1,12 +1,10 @@
 //! Flat executable connectivity. Rust payloads contain attributes, never bodies or operands.
-use crate::ast::Span as SourceSpan;
+use crate::egglog::graph::{Graph, State};
 use crate::egglog::payload::{publish_properties, register, Payload};
-use crate::egglog::{output_error, OptimizeError};
+use crate::egglog::OptimizeError;
 use crate::types::Type;
-use egglog_engine::ast::{Literal, Span};
-use egglog_engine::prelude::{add_base_sort, BaseSort};
-use egglog_engine::sort::{BaseValues, Boxed};
-use egglog_engine::{Core, EGraph, FullState, TermDag, TermId, Value, Write};
+use egglog_engine::sort::Boxed;
+use egglog_engine::{Core, Value, Write};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::egglog) struct OperationId(pub Value);
@@ -21,7 +19,7 @@ pub(in crate::egglog) enum Name {
 }
 
 impl Name {
-    pub fn fact(self, sink: &mut FullState<'_, '_>) -> Result<Value, OptimizeError> {
+    pub fn fact(self, sink: &mut State<'_, '_, '_>) -> Result<Value, OptimizeError> {
         Ok(match self {
             Self::Value(value) => sink.add("ValueNameRef", value)?,
             Self::Accumulator(value) => sink.add("AccNameRef", value)?,
@@ -96,47 +94,8 @@ impl Code {
     }
 }
 
-#[derive(Debug)]
-struct CodeSort;
-
-#[derive(Debug)]
-struct SourceSpanSort;
-
-impl BaseSort for SourceSpanSort {
-    type Base = Boxed<SourceSpan>;
-
-    fn name(&self) -> &str {
-        "SourceSpan"
-    }
-
-    fn reconstruct_termdag(&self, values: &BaseValues, value: Value, dag: &mut TermDag) -> TermId {
-        dag.lit(Literal::String(format!(
-            "{:?}",
-            values.unwrap::<Boxed<SourceSpan>>(value).0
-        )))
-    }
-}
-
-impl BaseSort for CodeSort {
-    type Base = Boxed<Code>;
-
-    fn name(&self) -> &str {
-        "OperationCode"
-    }
-
-    fn reconstruct_termdag(&self, values: &BaseValues, value: Value, dag: &mut TermDag) -> TermId {
-        // Payload dumps describe Rust attributes; they are not executable program syntax.
-        dag.lit(Literal::String(format!(
-            "{:?}",
-            values.unwrap::<Boxed<Code>>(value).0
-        )))
-    }
-}
-
-pub(in crate::egglog) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(in crate::egglog) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
     register(graph)?;
-    add_base_sort(graph, SourceSpanSort, Span::Panic).map_err(|error| output_error(error.to_string()))?;
-    add_base_sort(graph, CodeSort, Span::Panic).map_err(|error| output_error(error.to_string()))?;
     graph.parse_and_run_program(Some("shared dataflow".into()), include_str!("../flow.egg"))?;
     graph.parse_and_run_program(Some("flat dataflow".into()), include_str!("../memory/schema.egg"))?;
     publish_properties(graph)?;
@@ -146,12 +105,8 @@ pub(in crate::egglog) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
     Ok(())
 }
 
-pub(in crate::egglog) fn code(graph: &EGraph, value: Value) -> Code {
-    graph.value_to_base::<Boxed<Code>>(value).0
-}
-
 pub(in crate::egglog) fn operation(
-    sink: &mut FullState<'_, '_>,
+    sink: &mut State<'_, '_, '_>,
     id: i64,
     code: Code,
     inputs: &[Name],
@@ -161,7 +116,7 @@ pub(in crate::egglog) fn operation(
 }
 
 pub(in crate::egglog) fn operation_at(
-    sink: &mut FullState<'_, '_>,
+    sink: &mut State<'_, '_, '_>,
     operation: OperationId,
     code: Code,
     inputs: &[Name],
@@ -181,7 +136,7 @@ pub(in crate::egglog) fn operation_at(
 }
 
 pub(in crate::egglog) fn properties(
-    sink: &mut FullState<'_, '_>,
+    sink: &mut State<'_, '_, '_>,
     operation: Value,
     code: Code,
 ) -> Result<(), OptimizeError> {
@@ -296,13 +251,12 @@ pub(in crate::egglog) fn properties(
             sink.add("AliasesInput", (operation, 0_i64, 0_i64))?;
         }
     }
-    let code = sink.base_to_value(Boxed(code));
-    sink.set("OperationPayload", operation, code)?;
+    sink.set_code(operation, code);
     Ok(())
 }
 
 pub(in crate::egglog) fn outputs(
-    sink: &mut FullState<'_, '_>,
+    sink: &mut State<'_, '_, '_>,
     operation: OperationId,
     outputs: &[Name],
 ) -> Result<(), OptimizeError> {
@@ -315,7 +269,7 @@ pub(in crate::egglog) fn outputs(
 }
 
 pub(in crate::egglog) fn region(
-    sink: &mut FullState<'_, '_>,
+    sink: &mut State<'_, '_, '_>,
     id: i64,
     operations: &[OperationId],
 ) -> Result<RegionId, OptimizeError> {
@@ -330,7 +284,7 @@ pub(in crate::egglog) fn region(
 }
 
 pub(in crate::egglog) fn parameters(
-    sink: &mut FullState<'_, '_>,
+    sink: &mut State<'_, '_, '_>,
     region: RegionId,
     parameters: &[Parameter],
 ) -> Result<(), OptimizeError> {
@@ -348,7 +302,7 @@ pub(in crate::egglog) fn parameters(
 }
 
 pub(in crate::egglog) fn yields(
-    sink: &mut FullState<'_, '_>,
+    sink: &mut State<'_, '_, '_>,
     region: RegionId,
     values: &[Name],
 ) -> Result<(), OptimizeError> {

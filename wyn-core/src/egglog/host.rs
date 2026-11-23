@@ -2,7 +2,7 @@
 use super::{output_error as error, representation, OptimizeError};
 use crate::builtins::catalog;
 use crate::egglog::bindings::Bindings;
-use crate::egglog::dataflow::ir::{self, Code};
+use crate::egglog::dataflow::ir::Code;
 use crate::egglog::query::Query;
 use crate::host::{Expr, ScalarExpr, ScalarSource, ScalarType};
 use crate::types::{Type, TypeName};
@@ -151,7 +151,7 @@ pub(super) fn remember(
     values: &mut Bindings<Value, ScalarExpr>,
     statement: Value,
 ) -> Result<(), OptimizeError> {
-    let code = ir::code(query.0, query.required("OperationPayload", statement)?);
+    let code = query.0.code(statement)?;
     let pattern = query.sequence("Output", statement)?;
     let operands = query.sequence("Input", statement)?;
     let atoms = operands.iter().map(|&name| query.name(name)).collect::<Result<Vec<_>, _>>()?;
@@ -548,7 +548,7 @@ fn scalar_body(
         outer.iter().map(|(&name, value)| (name, value.clone())).collect::<crate::StableMap<_, _>>().into();
     let mut bindings = Vec::new();
     for statement in query.operations(body)? {
-        let code = ir::code(query.0, query.required("OperationPayload", statement)?);
+        let code = query.0.code(statement)?;
         let pattern = query.sequence("Output", statement)?;
         let mut names = Vec::new();
         for binding in &pattern {

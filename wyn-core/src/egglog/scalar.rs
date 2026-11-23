@@ -2,15 +2,15 @@
 use super::dataflow::{body::BodyGraph, edit, ir::Code};
 use super::query::Query;
 use super::{memory, output_error, OptimizeError, ScalarOptimization};
+use crate::egglog::graph::Graph;
 use egglog_engine::sort::S;
-use egglog_engine::EGraph;
 use egglog_engine::Write;
 
 mod branch;
 mod fold;
 mod leaf;
 
-pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(super) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
     fold::register(graph);
     super::timing::evaluate(
         graph,
@@ -41,7 +41,7 @@ pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
     Ok(())
 }
 
-pub(super) fn run(graph: &mut EGraph, policy: ScalarOptimization) -> Result<(), OptimizeError> {
+pub(super) fn run(graph: &mut Graph, policy: ScalarOptimization) -> Result<(), OptimizeError> {
     let _timing = super::timing::span("egglog scalar optimization");
     if policy == ScalarOptimization::Full {
         graph.update(|mut sink| {
@@ -53,7 +53,7 @@ pub(super) fn run(graph: &mut EGraph, policy: ScalarOptimization) -> Result<(), 
     memory::simplify(graph, true)
 }
 
-pub(super) fn apply(graph: &mut EGraph, body: &mut Option<BodyGraph>) -> Result<bool, OptimizeError> {
+pub(super) fn apply(graph: &mut Graph, body: &mut Option<BodyGraph>) -> Result<bool, OptimizeError> {
     if branch::apply(graph, body)? {
         return Ok(true);
     }

@@ -1,8 +1,7 @@
 //! Emit statements in lexical order; descriptor arithmetic comes from bindings.
 use super::{builder_error, error, Body, Collection, CollectionShape, OptimizeError, Typed, Value};
-use crate::ast::Span;
 use crate::builtins::catalog;
-use crate::egglog::dataflow::ir::{self, Bounds, Code};
+use crate::egglog::dataflow::ir::{Bounds, Code};
 use crate::egglog::payload::Payload;
 use crate::egglog::query::Query;
 use crate::egglog::to_ssa::{host, runtime_binding, same_value_structure};
@@ -12,7 +11,6 @@ use crate::ssa::layout::{storage_elem_stride, storage_value_type};
 use crate::ssa::types::InstKind;
 use crate::types::{self, Type, TypeExt, TypeName};
 use crate::ResourceAccess;
-use egglog_engine::sort::Boxed;
 
 fn collection_type(declared: &Type, element: &Type, axes: usize) -> Result<Type, OptimizeError> {
     if axes == 0 {
@@ -210,10 +208,7 @@ impl Body<'_, '_, '_> {
     }
 
     pub(in crate::egglog::to_ssa) fn statement(&mut self, statement: Value) -> Result<(), OptimizeError> {
-        let span = self
-            .query()
-            .lookup("OperationSpan", statement)?
-            .map(|span| self.query().0.value_to_base::<Boxed<Span>>(span).0);
+        let span = self.query().0.span(statement);
         let previous = std::mem::replace(&mut self.span, span);
         let result = self.emit_statement(statement);
         self.span = previous;
@@ -231,7 +226,7 @@ impl Body<'_, '_, '_> {
         let pattern = query.sequence("Output", statement)?;
         let operands = query.sequence("Input", statement)?;
         let inputs = operands.iter().map(|&name| query.name(name)).collect::<Result<Vec<_>, _>>()?;
-        let code = ir::code(query.0, query.required("OperationPayload", statement)?);
+        let code = query.0.code(statement)?;
         if matches!(code, Code::Parallel)
             && query.enode("DeviceKernel", query.required("OperationExecution", statement)?)?.is_some()
             && self.active_dispatch != Some(statement)

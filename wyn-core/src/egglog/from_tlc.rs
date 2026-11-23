@@ -5,6 +5,7 @@ use super::payload::Payload;
 use super::{fusion, output_error, OptimizeError};
 use crate::ast::Span;
 use crate::builtins::{by_id, catalog, BuiltinId, Purity};
+use crate::egglog::graph::{Graph, State};
 use crate::op::BinaryOperator;
 use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
 use crate::tlc::stage::OwnershipApplied;
@@ -13,8 +14,8 @@ use crate::tlc::{
 };
 use crate::types::{self, extract_function_signature, strip_existentials, Diet, Type, TypeExt, TypeName};
 use crate::SymbolId;
-use egglog_engine::sort::{Boxed, VecContainer};
-use egglog_engine::{Core, EGraph, FullState, IntoValues, RawValues, Value, Write};
+use egglog_engine::sort::VecContainer;
+use egglog_engine::{Core, IntoValues, RawValues, Value, Write};
 use wyn_base::{IdSource, Interner};
 
 #[cfg(test)]
@@ -27,9 +28,7 @@ type SourceArray = ArrayExpr<ExplicitClosurePayload, ExplicitCapturesPayload>;
 type Operator = SoacOp<ExplicitClosurePayload, ExplicitCapturesPayload>;
 mod layout;
 
-pub(super) fn import(
-    source: &OwnershipApplied,
-) -> Result<(EGraph, Interner<i64, SymbolId>), OptimizeError> {
+pub(super) fn import(source: &OwnershipApplied) -> Result<(Graph, Interner<i64, SymbolId>), OptimizeError> {
     let mut graph = fusion::new_graph()?;
     let mut symbols = Interner::default();
     graph.update(|sink| {
@@ -94,8 +93,8 @@ struct AccumulatorInput {
     combine: Option<RegionId>,
 }
 
-struct Import<'graph, 'db, 'ids, 'source> {
-    sink: FullState<'graph, 'db>,
+struct Import<'graph, 'db, 'operations, 'ids, 'source> {
+    sink: State<'graph, 'db, 'operations>,
     symbols: &'ids mut Interner<i64, SymbolId>,
     source: &'source OwnershipApplied,
     names: IdSource<i64>,
@@ -106,7 +105,7 @@ struct Import<'graph, 'db, 'ids, 'source> {
     span: Span,
 }
 
-impl<'source> Import<'_, '_, '_, 'source> {
+impl<'source> Import<'_, '_, '_, '_, 'source> {
     fn node(&mut self, name: &str, values: impl IntoValues) -> Result<Value, OptimizeError> {
         Ok(self.sink.add(name, values)?)
     }
@@ -135,8 +134,7 @@ impl<'source> Import<'_, '_, '_, 'source> {
         let id = self.statements.next_id();
         let operation = ir::operation(&mut self.sink, id, code, inputs)?;
         if !self.span.is_generated() {
-            let span = self.sink.base_to_value(Boxed(self.span));
-            self.sink.set("OperationSpan", operation.0, span)?;
+            self.sink.set_span(operation.0, self.span)?;
         }
         Ok(operation)
     }

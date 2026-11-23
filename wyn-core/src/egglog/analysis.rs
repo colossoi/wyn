@@ -1,16 +1,16 @@
 //! Derived facts are disposable; executable edges remain in the flat graph.
-use super::dataflow::{edit, ir};
+use super::dataflow::edit;
 use super::query::Query;
 use super::{output_error, timing, OptimizeError};
-use crate::{LookupMap, StableMap};
-use egglog_engine::sort::VecContainer;
+use crate::egglog::graph::Graph;
+use crate::StableMap;
 use egglog_engine::sort::S;
-use egglog_engine::{Core, EGraph, IntoValues, RawValues, Value, Write};
+use egglog_engine::{IntoValues, RawValues, Value, Write};
 
 mod calls;
 mod signatures;
 
-pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(super) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
     graph.parse_and_run_program(
         Some("dataflow analysis".into()),
         concat!(
@@ -27,7 +27,7 @@ pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
 }
 
 /// Retire body-dependent proofs before solving a new graph revision.
-pub(super) fn invalidate(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(super) fn invalidate(graph: &mut Graph) -> Result<(), OptimizeError> {
     let _timing = timing::span("egglog full analysis invalidation");
     edit::clear(graph)?;
     for table in [
@@ -142,7 +142,7 @@ pub(super) fn invalidate(graph: &mut EGraph) -> Result<(), OptimizeError> {
 }
 
 /// Reseed rules after clearing derived tables while keeping valid graph facts.
-pub(super) fn advance(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(super) fn advance(graph: &mut Graph) -> Result<(), OptimizeError> {
     let revision = count(Query(graph), "AnalysisRevision", RawValues(Vec::new()))?;
     graph.update(|mut sink| {
         sink.remove("AnalysisRevision", RawValues(Vec::new()))?;
@@ -152,7 +152,7 @@ pub(super) fn advance(graph: &mut EGraph) -> Result<(), OptimizeError> {
 }
 
 /// Refresh lexical ownership, reachable calls, and recursion without solving dataflow.
-pub(super) fn structure(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(super) fn structure(graph: &mut Graph) -> Result<(), OptimizeError> {
     let _timing = timing::span("egglog graph structure");
     invalidate(graph)?;
     calls::publish(graph)?;
@@ -160,7 +160,7 @@ pub(super) fn structure(graph: &mut EGraph) -> Result<(), OptimizeError> {
     Ok(())
 }
 
-pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(super) fn run(graph: &mut Graph) -> Result<(), OptimizeError> {
     let _timing = timing::span("egglog graph analysis");
     structure(graph)?;
     graph.parse_and_run_program(
@@ -187,7 +187,7 @@ pub(super) fn run(graph: &mut EGraph) -> Result<(), OptimizeError> {
 }
 
 /// Reuse body-dependent proofs until the canonical graph is edited.
-pub(super) fn ensure(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(super) fn ensure(graph: &mut Graph) -> Result<(), OptimizeError> {
     let revision = edit::revision(graph)?;
     if Query(graph).lookup("DataflowRevision", RawValues(Vec::new()))?
         == Some(graph.base_to_value(revision))
@@ -197,7 +197,7 @@ pub(super) fn ensure(graph: &mut EGraph) -> Result<(), OptimizeError> {
     run(graph)
 }
 
-fn publish_order(graph: &mut EGraph) -> Result<(), OptimizeError> {
+fn publish_order(graph: &mut Graph) -> Result<(), OptimizeError> {
     let query = Query(graph);
     let mut operations = StableMap::<Value, Vec<(i64, Value)>>::default();
     query.for_each("LiveRegion", |row| {
@@ -212,17 +212,13 @@ fn publish_order(graph: &mut EGraph) -> Result<(), OptimizeError> {
         Ok(())
     })?;
     // Region order depends only on the occurrences in that region.
-    let mut previous = LookupMap::default();
-    query.for_function("RegionOperations", |keys, old| {
-        previous.insert(keys[0], query.vector(old)?);
-        Ok(())
-    })?;
+    let mut previous = graph.region_orders.clone();
     let mut removed = Vec::new();
     let mut updated = Vec::new();
     for (region, mut body) in operations {
         body.sort_by_key(|&(order, _)| order);
         let body = body.into_iter().map(|(_, operation)| operation).collect::<Vec<_>>();
-        let old = previous.remove(&region);
+        let old = previous.swap_remove(&region);
         if old.as_ref() == Some(&body) {
             continue;
         }
@@ -236,7 +232,7 @@ fn publish_order(graph: &mut EGraph) -> Result<(), OptimizeError> {
 }
 
 pub(super) fn replace_order(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     removed: Vec<(Value, Vec<Value>)>,
     updated: Vec<(Value, Vec<Value>)>,
 ) -> Result<(), OptimizeError> {
@@ -244,8 +240,8 @@ pub(super) fn replace_order(
         return Ok(());
     }
     graph.update(|mut sink| {
-        for (region, body) in removed {
-            sink.remove("RegionOperations", region)?;
+        for (region, body) in &removed {
+            let region = *region;
             sink.remove("RegionOperationCount", region)?;
             if let (Some(&first), Some(&last)) = (body.first(), body.last()) {
                 sink.remove("FirstOperation", (region, first))?;
@@ -260,7 +256,8 @@ pub(super) fn replace_order(
         Ok(())
     })?;
     graph.update(|mut sink| {
-        for (region, body) in updated {
+        for (region, body) in &updated {
+            let region = *region;
             sink.set("RegionOperationCount", region, body.len() as i64)?;
             if let (Some(&first), Some(&last)) = (body.first(), body.last()) {
                 sink.add("FirstOperation", (region, first))?;
@@ -271,14 +268,13 @@ pub(super) fn replace_order(
             for pair in body.windows(2) {
                 sink.add("NextOperation", (pair[0], pair[1]))?;
             }
-            let value = sink.container_to_value(VecContainer {
-                data: body,
-                do_rebuild: true,
-            });
-            sink.set("RegionOperations", region, value)?;
         }
         Ok(())
     })?;
+    for (region, _) in removed {
+        graph.region_orders.swap_remove(&region);
+    }
+    graph.region_orders.extend(updated);
     Ok(())
 }
 
@@ -330,7 +326,7 @@ pub(super) fn available_before(
 }
 
 /// Compute live-after values for the requested function roots.
-pub(super) fn liveness(graph: &mut EGraph, roots: &[Value]) -> Result<(), OptimizeError> {
+pub(super) fn liveness(graph: &mut Graph, roots: &[Value]) -> Result<(), OptimizeError> {
     ensure(graph)?;
     let query = Query(graph);
     let mut pending = Vec::new();
@@ -378,7 +374,7 @@ pub(super) fn liveness(graph: &mut EGraph, roots: &[Value]) -> Result<(), Optimi
 }
 
 /// Check the selected graph, including captures and simultaneous loop edges.
-pub(super) fn validate(graph: &EGraph) -> Result<(), OptimizeError> {
+pub(super) fn validate(graph: &Graph) -> Result<(), OptimizeError> {
     if !cfg!(debug_assertions) {
         return Ok(());
     }
@@ -389,7 +385,7 @@ pub(super) fn validate(graph: &EGraph) -> Result<(), OptimizeError> {
     query.for_each("LiveFunction", |row| signatures::function(query, row[0]))?;
     query.for_each("LiveOperation", |row| {
         let operation = row[0];
-        query.required("OperationPayload", operation)?;
+        graph.code(operation)?;
         query.required("OperationRegion", operation)?;
         query.required("OperationOrder", operation)?;
         for table in ["Input", "Output"] {
@@ -446,7 +442,7 @@ pub(super) fn validate(graph: &EGraph) -> Result<(), OptimizeError> {
                 "operand {:?} is unavailable at {:?} ({:?}) in {:?}",
                 row[1],
                 row[0],
-                ir::code(graph, query.required("OperationPayload", row[0])?),
+                query.0.code(row[0])?,
                 query.required("OperationRegion", row[0])?
             )));
         }

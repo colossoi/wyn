@@ -2,12 +2,12 @@
 use super::hoist::cheap;
 use super::placement::{child_on_path, demands, movable_group, pinned_operations, read_only};
 use super::{barriers, domains, fuse_region, Body, Code, Query};
+use crate::egglog::graph::Graph;
 use crate::egglog::{timing, OptimizeError};
 use crate::memory_ir::{Definition, OperationId, RegionId, ValueRef};
 use crate::{LookupSet, SortedSet, StableMap};
-use egglog_engine::EGraph;
 
-pub(in crate::egglog::fusion) fn run(graph: &mut EGraph) -> Result<bool, OptimizeError> {
+pub(in crate::egglog::fusion) fn run(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let _timing = timing::span("Rust branch fusion and sinking");
     let query = Query(graph);
     let mut branches = LookupSet::new();
@@ -20,14 +20,14 @@ pub(in crate::egglog::fusion) fn run(graph: &mut EGraph) -> Result<bool, Optimiz
     }
     let pinned = pinned_operations(query)?;
     let mut regions = Vec::new();
-    query.for_function("RegionOperations", |key, order| {
+    for (&region, operations) in &graph.region_orders {
         let mut producer = false;
         let mut previous_guard = None;
-        for op in query.vector(order)? {
+        for &op in operations {
             if branches.contains(&op) {
                 let guard = query.required("Input", (op, 0_i64))?;
                 if producer || previous_guard == Some(guard) {
-                    regions.push(key[0]);
+                    regions.push(region);
                     break;
                 }
                 previous_guard = Some(guard);
@@ -40,8 +40,7 @@ pub(in crate::egglog::fusion) fn run(graph: &mut EGraph) -> Result<bool, Optimiz
                 producer |= query.lookup("ControlRegion", (op, 0_i64))?.is_some();
             }
         }
-        Ok(())
-    })?;
+    }
     if regions.is_empty() {
         return Ok(false);
     }
@@ -96,7 +95,7 @@ fn adjacent(body: &Body, region: RegionId) -> Option<(OperationId, OperationId)>
 }
 
 fn sink_one(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     body: &mut Body,
     region: RegionId,
 ) -> Result<Option<RegionId>, OptimizeError> {
@@ -130,7 +129,7 @@ fn sink_one(
 }
 
 fn sink_shared_loop(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     body: &mut Body,
     region: RegionId,
 ) -> Result<Option<RegionId>, OptimizeError> {

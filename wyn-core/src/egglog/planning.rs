@@ -3,15 +3,16 @@ use super::cost::{self, CostModel};
 use super::dataflow::edit;
 use super::query::Query;
 use super::{analysis, memory, output_error, OptimizeError};
+use crate::egglog::graph::Graph;
 use crate::{LookupMap, LookupSet, PipelineTopologyPolicy};
 use egglog_engine::sort::{Boxed, Z};
-use egglog_engine::{EGraph, RawValues, Value, Write};
+use egglog_engine::{RawValues, Value, Write};
 
 mod conditional;
 mod distribution;
 mod layout;
 
-pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(super) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
     graph.parse_and_run_program(
         Some("graph planning".into()),
         concat!(
@@ -38,7 +39,7 @@ pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
 }
 
 /// Retain graph metadata across candidate resets, while solving newly added demands.
-pub(super) fn analyze(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(super) fn analyze(graph: &mut Graph) -> Result<(), OptimizeError> {
     analysis::ensure(graph)?;
     let _timing = super::timing::span("egglog graph metadata");
     let revision = edit::revision(graph)?;
@@ -111,7 +112,7 @@ pub(super) fn analyze(graph: &mut EGraph) -> Result<(), OptimizeError> {
 }
 
 /// Selection depends on phase policy as well as the executable graph.
-fn clear_candidates(graph: &mut EGraph) -> Result<(), OptimizeError> {
+fn clear_candidates(graph: &mut Graph) -> Result<(), OptimizeError> {
     for table in [
         "ConsumedScalarArray",
         "ReuseCandidate",
@@ -168,7 +169,7 @@ fn clear_candidates(graph: &mut EGraph) -> Result<(), OptimizeError> {
     analysis::advance(graph)
 }
 
-pub(super) fn clear_transform_candidates(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(super) fn clear_transform_candidates(graph: &mut Graph) -> Result<(), OptimizeError> {
     for table in [
         "DistributionPair",
         "DistributionReturnPrefix",
@@ -210,7 +211,7 @@ pub(super) fn clear_transform_candidates(graph: &mut EGraph) -> Result<(), Optim
     Ok(())
 }
 
-fn resolve_transform_availability(graph: &mut EGraph) -> Result<(), OptimizeError> {
+fn resolve_transform_availability(graph: &mut Graph) -> Result<(), OptimizeError> {
     let query = Query(graph);
     let mut transforms = Vec::new();
     query.for_each("TransformRequirement", |row| {
@@ -237,7 +238,7 @@ fn resolve_transform_availability(graph: &mut EGraph) -> Result<(), OptimizeErro
 }
 
 pub(super) fn repair_sibling_order(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     updated: &[(Value, Vec<Value>)],
 ) -> Result<(), OptimizeError> {
     let query = Query(graph);
@@ -270,7 +271,7 @@ pub(super) fn repair_sibling_order(
     reset_order_candidates(graph)
 }
 
-fn reset_order_candidates(graph: &mut EGraph) -> Result<(), OptimizeError> {
+fn reset_order_candidates(graph: &mut Graph) -> Result<(), OptimizeError> {
     // A reorder can change adjacency and speculative scope for pending transforms.
     if graph.get_size("DistributionPair") != 0 || graph.get_size("ConditionalPair") != 0 {
         clear_transform_candidates(graph)?;
@@ -285,7 +286,7 @@ pub(super) struct ChangedRegionWork {
 
 /// Retract affected work prefixes before the old occurrence order is replaced.
 pub(super) fn invalidate_region_work(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     previous: &[(Value, Vec<Value>)],
 ) -> Result<ChangedRegionWork, OptimizeError> {
     let query = Query(graph);
@@ -312,9 +313,7 @@ pub(super) fn invalidate_region_work(
         if !work.regions.insert(region) {
             continue;
         }
-        prefixes.extend(
-            query.vector(query.required("RegionOperations", region)?)?.into_iter().map(|op| (region, op)),
-        );
+        prefixes.extend(query.0.region_order(region)?.iter().map(|&op| (region, op)));
         for &op in consumers.get(&region).into_iter().flatten() {
             if work.operations.insert(op) {
                 let owner = query.required("OperationRegion", op)?;
@@ -341,10 +340,7 @@ pub(super) fn invalidate_region_work(
     Ok(work)
 }
 
-pub(super) fn restore_region_work(
-    graph: &mut EGraph,
-    work: ChangedRegionWork,
-) -> Result<(), OptimizeError> {
+pub(super) fn restore_region_work(graph: &mut Graph, work: ChangedRegionWork) -> Result<(), OptimizeError> {
     if !work.regions.is_empty() {
         graph.update(|mut sink| {
             for region in work.regions {
@@ -361,7 +357,7 @@ pub(super) fn restore_region_work(
 }
 
 pub(super) fn place(
-    graph: &mut EGraph,
+    graph: &mut Graph,
     topology: PipelineTopologyPolicy,
     costs: CostModel,
 ) -> Result<(), OptimizeError> {
@@ -425,7 +421,7 @@ pub(super) fn place(
     Ok(())
 }
 
-fn loop_layout(graph: &mut EGraph) -> Result<(), OptimizeError> {
+fn loop_layout(graph: &mut Graph) -> Result<(), OptimizeError> {
     for table in [
         "LoopStateBytes",
         "LoopFieldType",
@@ -438,7 +434,7 @@ fn loop_layout(graph: &mut EGraph) -> Result<(), OptimizeError> {
     Ok(())
 }
 
-pub(super) fn schedule(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(super) fn schedule(graph: &mut Graph) -> Result<(), OptimizeError> {
     // Host-region reachability is complete before false facts select local execution.
     graph.parse_and_run_program(None, "(run-schedule (saturate graph-placement-select))")?;
     let query = Query(graph);
@@ -460,7 +456,7 @@ pub(super) fn schedule(graph: &mut EGraph) -> Result<(), OptimizeError> {
     Ok(())
 }
 
-pub(super) fn load_execution(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(super) fn load_execution(graph: &mut Graph) -> Result<(), OptimizeError> {
     // Physical policies are loaded after the final structural analysis.
     graph.parse_and_run_program(
         Some("physical execution policies".into()),
@@ -473,7 +469,7 @@ pub(super) fn load_execution(graph: &mut EGraph) -> Result<(), OptimizeError> {
     Ok(())
 }
 
-pub(super) fn epilogues(graph: &mut EGraph) -> Result<(), OptimizeError> {
+pub(super) fn epilogues(graph: &mut Graph) -> Result<(), OptimizeError> {
     analyze(graph)?;
     clear_candidates(graph)?;
     loop_layout(graph)?;
@@ -500,7 +496,7 @@ mod tests;
 #[path = "planning/order_tests.rs"]
 mod order_tests;
 
-pub(super) fn factor_conditionals(graph: &mut EGraph) -> Result<bool, OptimizeError> {
+pub(super) fn factor_conditionals(graph: &mut Graph) -> Result<bool, OptimizeError> {
     graph.parse_and_run_program(None, "(run-schedule (saturate conditional-index))")?;
     resolve_transform_availability(graph)?;
     graph.parse_and_run_program(

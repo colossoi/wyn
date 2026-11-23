@@ -2,11 +2,12 @@
 use super::Domain;
 use crate::egglog::analysis::count;
 use crate::egglog::dataflow::{body::BodyGraph, cse, edit, ir::Code};
+use crate::egglog::graph::Graph;
 use crate::egglog::query::Query;
 use crate::egglog::{analysis, output_error, planning, timing, OptimizeError};
 use crate::memory_ir::{BodyRole, Definition, OperationId, RegionId, UseSite, ValueRef};
 use crate::{LookupMap, LookupSet, SortedSet};
-use egglog_engine::{EGraph, FullState, RawValues, Value, Write};
+use egglog_engine::{FullState, RawValues, Value, Write};
 use slotmap::SecondaryMap;
 use std::mem::take;
 use wyn_graph::ReplacementForest;
@@ -844,7 +845,7 @@ impl Body {
         Ok(())
     }
 
-    pub fn publish(self, graph: &mut EGraph) -> Result<(), OptimizeError> {
+    pub fn publish(self, graph: &mut Graph) -> Result<(), OptimizeError> {
         let _timing = timing::span("Rust parallel fusion publication");
         self.publish_joins(graph)?;
         self.publish_accumulators(graph)?;
@@ -960,7 +961,7 @@ impl Body {
     }
 
     /// Same-region motion preserves definitions, actual uses, ownership and effects.
-    pub fn publish_sibling_order(self, graph: &mut EGraph) -> Result<(), OptimizeError> {
+    pub fn publish_sibling_order(self, graph: &mut Graph) -> Result<(), OptimizeError> {
         let _timing = timing::span("Rust sibling order publication");
         if graph.get_size("LivenessRequest") != 0 {
             return self.publish(graph);
@@ -977,7 +978,7 @@ impl Body {
         let mut updated = Vec::new();
         for &region in &self.moved {
             let key = self.graph.regions[region];
-            let old = query.vector(query.required("RegionOperations", key)?)?;
+            let old = query.0.region_order(key)?.to_vec();
             let order = self.graph.ir.regions[region]
                 .operations
                 .iter()

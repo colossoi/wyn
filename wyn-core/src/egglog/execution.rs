@@ -2,17 +2,18 @@
 use super::analysis::count;
 use super::bindings::Bindings;
 use super::cost::{CollectiveWork, CostModel};
-use super::dataflow::ir::{self, Code};
+use super::dataflow::ir::Code;
 use super::host;
 use super::query::Query;
 use super::{output_error as error, representation, InterfacesPrepared, OptimizeError, Program};
+use crate::egglog::graph::Graph;
 use crate::host::ScalarExpr;
 use crate::ssa::layout::{storage_elem_stride, storage_value_type};
 use crate::tlc::DefMeta;
 use crate::types::{self, Type, TypeExt, TypeName};
 use crate::{LookupMap, LookupSet, StableMap};
 use egglog_engine::sort::Z;
-use egglog_engine::{EGraph, RawValues, Value, Write};
+use egglog_engine::{RawValues, Value, Write};
 use std::num::NonZeroU32;
 
 #[derive(Default)]
@@ -93,7 +94,7 @@ impl Execution {
         Ok(execution)
     }
 
-    pub fn select(graph: &mut EGraph) -> Result<Self, OptimizeError> {
+    pub fn select(graph: &mut Graph) -> Result<Self, OptimizeError> {
         graph.parse_and_run_program(None, "(run-schedule (saturate reducer-state))")?;
         let query = Query(graph);
         let mut execution = Self::default();
@@ -459,14 +460,14 @@ impl Execution {
         mut host_values: Bindings<Value, ScalarExpr>,
     ) -> Result<(), OptimizeError> {
         let query = planning.query;
-        let operations = query.vector(query.required("RegionOperations", region)?)?;
+        let operations = query.0.region_order(region)?.to_vec();
         let mut steps = Vec::new();
         let mut ordered = false;
         let mut host_ordered = Vec::new();
         let mut i = 0;
         while i < operations.len() {
             let operation = operations[i];
-            let code = ir::code(query.0, query.required("OperationPayload", operation)?);
+            let code = query.0.code(operation)?;
             let pattern = query.sequence("Output", operation)?;
             let mut boundary = query.contains("RequiresSnapshot", operation)?;
             let mut scalar_loop = None;
