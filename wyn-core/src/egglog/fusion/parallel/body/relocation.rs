@@ -6,8 +6,6 @@ use crate::memory_ir::{OperationId, RegionId, ValueRef};
 use crate::{LookupMap, LookupSet};
 use egglog_engine::{EGraph, FullState, Value, Write};
 
-type UseChanges = LookupMap<(Value, Value), bool>;
-
 impl Body {
     pub(in crate::egglog::fusion::parallel) fn publish_hoists(
         self,
@@ -26,18 +24,10 @@ impl Body {
             .collect::<Result<LookupMap<_, _>, OptimizeError>>()?;
         self.repair_scopes(graph, &old_regions)?;
         self.repair_reads(graph, &old_regions)?;
-        let work = planning::invalidate_hoist_work(graph, &previous)?;
+        let work = planning::invalidate_region_work(graph, &previous)?;
         graph.update(|mut sink| self.publish_order(&mut sink))?;
         analysis::replace_order(graph, previous, updated)?;
-        planning::restore_hoist_work(graph, work)?;
-        // Moving an observable read can remove the original control operation's last demand.
-        if self
-            .relocated
-            .iter()
-            .any(|&op| self.effects.get(op).is_some_and(|effect| !effect.reads.is_empty()))
-        {
-            edit::clear_demand(graph)?;
-        }
+        planning::restore_region_work(graph, work)?;
         edit::preserve_revisions(graph)
     }
 
@@ -46,7 +36,6 @@ impl Body {
         graph: &mut EGraph,
         old_regions: &LookupMap<OperationId, RegionId>,
     ) -> Result<(), OptimizeError> {
-        let query = Query(graph);
         let mut names = LookupSet::new();
         let mut definitions = Vec::new();
         let mut children = Vec::new();
@@ -78,9 +67,8 @@ impl Body {
             }
         }
 
-        let mut uses = UseChanges::new();
+        let mut uses = Vec::new();
         let mut captures = Vec::new();
-        let mut dependencies = LookupSet::new();
         let unchanged = LookupMap::new();
         for name in names {
             let mut before = Uses::default();
@@ -101,27 +89,12 @@ impl Body {
             for (set, other, used) in [(&before, &after, false), (&after, &before, true)] {
                 for &op in set.operations.difference(&other.operations) {
                     let key = self.graph.operations[op];
-                    uses.insert((key, name), used);
-                    if let ValueRef::Result(producer, _) = self.graph.refs[&name] {
-                        dependencies.insert((key, self.graph.operations[producer]));
-                    }
+                    uses.push(((key, name), used));
                 }
                 for &region in set.captures.difference(&other.captures) {
                     captures.push((self.graph.regions[region], name, used));
                 }
             }
-        }
-        let mut dependency_changes = Vec::new();
-        for (operation, producer) in dependencies {
-            let mut depends = false;
-            for output in query.sequence("Output", producer)? {
-                let key = (operation, output);
-                depends |= match uses.get(&key) {
-                    Some(&used) => used,
-                    None => query.contains("OperationUse", key)?,
-                };
-            }
-            dependency_changes.push((operation, producer, depends));
         }
         graph.update(|mut sink| {
             for (name, old, region) in definitions {
@@ -136,9 +109,8 @@ impl Body {
             for (ancestor, region) in lost_ancestors {
                 let key = (self.graph.regions[ancestor], self.graph.regions[region]);
                 sink.remove("FlowScopeAncestor", key)?;
-                sink.remove("FlowScopeContains", key)?;
             }
-            for (&key, &used) in &uses {
+            for (key, used) in uses {
                 for table in ["OperationUse", "AvailabilityDemand", "AvailableAt"] {
                     update(&mut sink, table, key, used)?;
                 }
@@ -147,9 +119,6 @@ impl Body {
                 for table in ["RegionCapture", "EntryDemand", "AvailableIn"] {
                     update(&mut sink, table, (region, name), used)?;
                 }
-            }
-            for (operation, producer, used) in dependency_changes {
-                update(&mut sink, "OperationDependency", (operation, producer), used)?;
             }
             Ok(())
         })?;

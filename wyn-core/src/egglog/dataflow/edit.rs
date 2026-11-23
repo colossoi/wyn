@@ -148,30 +148,18 @@ pub(in crate::egglog) fn clear(graph: &mut EGraph) -> Result<(), OptimizeError> 
     ] {
         graph.clear_function(table)?;
     }
-    clear_demand(graph)?;
     analysis::advance(graph)
 }
 
-pub(in crate::egglog) fn clear_demand(graph: &mut EGraph) -> Result<(), OptimizeError> {
-    for table in [
-        "ResultLive",
-        "DeadResultClause",
-        "NeededName",
-        "NeededOperation",
-        "ObservableOperation",
-    ] {
-        graph.clear_function(table)?;
-    }
-    let key = || RawValues(Vec::new());
-    let revision = analysis::count(Query(graph), "DemandRevision", key())?;
-    graph.update(|mut sink| {
-        sink.remove("DemandRevision", key())?;
-        sink.set("DemandRevision", key(), revision + 1)
-    })?;
-    Ok(())
+pub(in crate::egglog) fn remove(graph: &mut EGraph, operations: &[Value]) -> Result<(), OptimizeError> {
+    remove_without_revision(graph, operations)?;
+    changed(graph)
 }
 
-pub(in crate::egglog) fn remove(graph: &mut EGraph, operations: &[Value]) -> Result<(), OptimizeError> {
+pub(in crate::egglog) fn remove_without_revision(
+    graph: &mut EGraph,
+    operations: &[Value],
+) -> Result<(), OptimizeError> {
     let operations: LookupSet<_> = operations.iter().copied().collect();
     let query = Query(graph);
     let mut rows = Vec::new();
@@ -197,7 +185,6 @@ pub(in crate::egglog) fn remove(graph: &mut EGraph, operations: &[Value]) -> Res
         }
         Ok(())
     })?;
-    changed(graph)?;
     Ok(())
 }
 

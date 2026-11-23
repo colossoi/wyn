@@ -217,7 +217,6 @@ fn index_uses(query: Query<'_>, index: Value) -> Result<LookupSet<Value>, Optimi
 }
 
 struct UsePath {
-    producer: Option<Value>,
     scopes: Vec<(Value, Value)>,
 }
 
@@ -245,7 +244,7 @@ impl UsePath {
                         return Ok(None);
                     }
                 }
-                return Ok(Some(Self { producer, scopes }));
+                return Ok(Some(Self { scopes }));
             }
             let Some(parent) = query.lookup("RegionOwnedBy", region)? else {
                 return Ok(None);
@@ -256,7 +255,7 @@ impl UsePath {
 }
 
 fn repair_use(graph: &mut EGraph, path: UsePath, name: Value, mut used: bool) -> Result<(), OptimizeError> {
-    let UsePath { producer, scopes } = path;
+    let UsePath { scopes } = path;
     let mut scopes = scopes.into_iter().peekable();
     while let Some((region, operation)) = scopes.next() {
         let query = Query(graph);
@@ -264,15 +263,6 @@ fn repair_use(graph: &mut EGraph, path: UsePath, name: Value, mut used: bool) ->
             break;
         }
         let enclosing = scopes.peek().map(|&(_, op)| op);
-        let preserve_dependency = if let Some(producer) = producer {
-            let mut remaining = false;
-            for output in query.sequence("Output", producer)? {
-                remaining |= output != name && query.contains("OperationUse", (operation, output))?;
-            }
-            remaining
-        } else {
-            false
-        };
         graph.update(|mut sink| {
             if used {
                 sink.add("OperationUse", (operation, name))?;
@@ -282,13 +272,8 @@ fn repair_use(graph: &mut EGraph, path: UsePath, name: Value, mut used: bool) ->
                     sink.add("AvailableIn", (region, name))?;
                 }
             } else {
-                sink.remove("OperationUse", (operation, name))?;
-            }
-            if let Some(producer) = producer {
-                if used {
-                    sink.add("OperationDependency", (operation, producer))?;
-                } else if !preserve_dependency {
-                    sink.remove("OperationDependency", (operation, producer))?;
+                for table in ["OperationUse", "AvailabilityDemand", "AvailableAt"] {
+                    sink.remove(table, (operation, name))?;
                 }
             }
             Ok(())
@@ -311,10 +296,12 @@ fn repair_use(graph: &mut EGraph, path: UsePath, name: Value, mut used: bool) ->
             return Ok(());
         }
         graph.update(|mut sink| {
-            if captured {
-                sink.add("RegionCapture", (region, name))?;
-            } else {
-                sink.remove("RegionCapture", (region, name))?;
+            for table in ["RegionCapture", "EntryDemand", "AvailableIn"] {
+                if captured {
+                    sink.add(table, (region, name))?;
+                } else {
+                    sink.remove(table, (region, name))?;
+                }
             }
             Ok(())
         })?;
@@ -324,6 +311,17 @@ fn repair_use(graph: &mut EGraph, path: UsePath, name: Value, mut used: bool) ->
             || child_captures(query, parent, name)?;
     }
     Ok(())
+}
+
+pub(in crate::egglog) fn remove_use(
+    graph: &mut EGraph,
+    operation: Value,
+    name: Value,
+) -> Result<(), OptimizeError> {
+    let Some(path) = UsePath::read(Query(graph), operation, name)? else {
+        return Err(output_error("deleted leaf has an unavailable operand"));
+    };
+    repair_use(graph, path, name, false)
 }
 
 fn child_captures(query: Query<'_>, parent: Value, name: Value) -> Result<bool, OptimizeError> {

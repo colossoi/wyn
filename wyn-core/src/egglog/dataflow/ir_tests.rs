@@ -127,7 +127,7 @@ fn operations_share_connectivity_without_sharing_occurrences_or_payloads() {
         })
         .unwrap();
     crate::egglog::analysis::run(&mut graph).unwrap();
-    assert!(Query(&graph).contains("OperationDependency", (sub.0, add.0)).unwrap());
+    assert!(crate::egglog::analysis::uses_output_of(Query(&graph), sub.0, add.0).unwrap());
     graph
         .update(|mut sink| {
             sink.remove("Input", (sub.0, 0_i64))?;
@@ -135,7 +135,7 @@ fn operations_share_connectivity_without_sharing_occurrences_or_payloads() {
         })
         .unwrap();
     crate::egglog::analysis::run(&mut graph).unwrap();
-    assert!(!Query(&graph).contains("OperationDependency", (sub.0, add.0)).unwrap());
+    assert!(!crate::egglog::analysis::uses_output_of(Query(&graph), sub.0, add.0).unwrap());
     let functions = graph.get_function_names();
     for obsolete in ["Block", "Let", "MemoryProgram", "RenameProgram"] {
         assert!(

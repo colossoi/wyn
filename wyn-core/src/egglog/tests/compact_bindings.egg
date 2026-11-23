@@ -10,4 +10,6 @@
 (set (Output (OperationId 1) 0) (ValueNameRef (ValueId 4))) (set (OutputClause (OperationId 1) 0) 0)
 (set (Output (OperationId 2) 0) (ValueNameRef (ValueId 5))) (set (OutputClause (OperationId 2) 0) 0)
 (set (Output (OperationId 2) 1) (ValueNameRef (ValueId 6))) (set (OutputClause (OperationId 2) 1) 0)
-(NeededName (ValueNameRef (ValueId 2))) (NeededName (ValueNameRef (ValueId 4)))
+(set (OutputCount (OperationId 0)) 2)
+(set (OutputCount (OperationId 1)) 1)
+(set (OutputCount (OperationId 2)) 2)

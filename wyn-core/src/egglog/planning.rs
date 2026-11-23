@@ -278,18 +278,18 @@ fn reset_order_candidates(graph: &mut EGraph) -> Result<(), OptimizeError> {
     Ok(())
 }
 
-pub(super) struct HoistWork {
+pub(super) struct ChangedRegionWork {
     regions: LookupSet<Value>,
     operations: LookupSet<Value>,
 }
 
 /// Retract affected work prefixes before the old occurrence order is replaced.
-pub(super) fn invalidate_hoist_work(
+pub(super) fn invalidate_region_work(
     graph: &mut EGraph,
     previous: &[(Value, Vec<Value>)],
-) -> Result<HoistWork, OptimizeError> {
+) -> Result<ChangedRegionWork, OptimizeError> {
     let query = Query(graph);
-    let mut work = HoistWork {
+    let mut work = ChangedRegionWork {
         regions: LookupSet::new(),
         operations: LookupSet::new(),
     };
@@ -341,7 +341,10 @@ pub(super) fn invalidate_hoist_work(
     Ok(work)
 }
 
-pub(super) fn restore_hoist_work(graph: &mut EGraph, work: HoistWork) -> Result<(), OptimizeError> {
+pub(super) fn restore_region_work(
+    graph: &mut EGraph,
+    work: ChangedRegionWork,
+) -> Result<(), OptimizeError> {
     if !work.regions.is_empty() {
         graph.update(|mut sink| {
             for region in work.regions {

@@ -76,7 +76,7 @@ fn copy_forwarding_preserves_captures_loop_entries_and_backedges() -> Result<(),
     })??;
     analysis::run(&mut graph)?;
     graph.parse_and_run_program(None, "(run-schedule (saturate scalar-analysis))")?;
-    assert!(body::forward_equivalents(&mut graph, None)?);
+    assert!(body::forward_equivalents(&mut graph, &mut None)?);
     analysis::ensure(&mut graph)?;
     let query = Query(&graph);
     assert_eq!(query.required("EdgeArgument", (owner, 0_i64, 0_i64))?, initial);
@@ -449,10 +449,7 @@ fn applied_rewrites_do_not_replay_when_another_pass_revisits_the_same_body() -> 
     edit::replace(&mut graph, &[(y, z)])?;
     analysis::run(&mut graph)?;
     let revision = edit::revision(&graph)?;
-    graph.parse_and_run_program(
-        None,
-        "(run-schedule (saturate graph-candidates graph-needed graph-apply))",
-    )?;
+    graph.parse_and_run_program(None, "(run-schedule (saturate graph-candidates graph-apply))")?;
     assert_eq!(edit::revision(&graph)?, revision);
     let operation = Query(&graph).first("Operation")?.unwrap()[0];
     assert!(!Query(&graph).contains("DirectOperationUse", (operation, x))?);
@@ -911,8 +908,18 @@ fn borrowed_vector_indexing_preserves_bounds_and_sort_overloads() -> Result<(), 
 
 #[test]
 fn compact_bindings_preserve_clause_offsets_and_liveness() -> Result<(), OptimizeError> {
-    let mut graph = test_graph::fixture(&[], include_str!("tests/compact_bindings.egg"))?;
-    graph.parse_and_run_program(None,"(run-schedule (saturate graph-needed) (saturate graph-result-select)) (check (DeadResultClause (OperationId 0) 1)) (fail (check (DeadResultClause (OperationId 1) 0))) (fail (check (DeadResultClause (OperationId 2) 0)))")?;
+    let graph = test_graph::fixture(&[], include_str!("tests/compact_bindings.egg"))?;
+    let query = Query(&graph);
+    let first = query.constructor("OperationId", 0_i64)?.unwrap();
+    let second = query.constructor("OperationId", 1_i64)?.unwrap();
+    let kept = [
+        query.required("Output", (first, 0_i64))?,
+        query.required("Output", (second, 0_i64))?,
+    ];
+    assert_eq!(
+        super::demand::dead_clause(query, |name| kept.contains(&name))?,
+        Some((first, 1))
+    );
     Ok(())
 }
 

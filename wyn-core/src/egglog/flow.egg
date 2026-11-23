@@ -85,11 +85,9 @@
 (relation FlowScope (RegionKey))
 (relation FlowScopeParent (RegionKey RegionKey))
 (relation FlowScopeAncestor (RegionKey RegionKey))
-(function FlowScopeContains (RegionKey RegionKey) bool :merge (or old new))
 (rule ((FlowScope scope)) ((FlowScopeAncestor scope scope)) :ruleset flow-scopes)
 (rule ((FlowScopeParent child parent) (FlowScopeAncestor ancestor parent))
       ((FlowScopeAncestor ancestor child)) :ruleset flow-scopes)
-(rule ((FlowScopeAncestor ancestor scope)) ((set (FlowScopeContains ancestor scope) true)) :ruleset flow-scopes)
 ; Placement adds reference edges without changing the source dependency proofs.
 (relation FlowReferenceEdge (SourceValue SourceValue))
 (relation FlowChoice (SourceValue SourceValue SourceValue))

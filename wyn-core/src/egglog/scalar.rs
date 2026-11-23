@@ -99,7 +99,7 @@ pub(super) fn apply(graph: &mut EGraph, body: &mut Option<BodyGraph>) -> Result<
     Ok(true)
 }
 
-pub(super) use leaf::{forward_lengths, materialize_scratch};
+pub(super) use leaf::{forward_lengths, materialize_scratch, remove_use};
 
 #[cfg(test)]
 #[path = "scalar_tests.rs"]

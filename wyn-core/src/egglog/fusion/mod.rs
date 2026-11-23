@@ -163,7 +163,7 @@ fn fuse_ranked_bucket(graph: &mut EGraph) -> Result<bool, OptimizeError> {
         for pair in levels.windows(2) {
             if let Some(source) = output_producer(query, pair[1].source)? {
                 for operation in query.operations(pair[0].region)? {
-                    if operation == source || query.contains("OperationDependency", (source, operation))? {
+                    if operation == source || analysis::uses_output_of(query, source, operation)? {
                         moved.retain(|&item| item != operation);
                         exclusive &= query
                             .lookup("MovableOperation", operation)?

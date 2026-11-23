@@ -97,13 +97,12 @@ impl Reuse {
     }
 }
 
-pub(in crate::egglog) fn publish(graph: &mut EGraph) -> Result<BodyGraph, OptimizeError> {
+pub(in crate::egglog) fn publish(graph: &mut EGraph, body: &BodyGraph) -> Result<(), OptimizeError> {
     let query = Query(graph);
-    let body = BodyGraph::read(query)?;
     let mut reuse = Reuse::default();
     for function in body.ir.functions.values() {
         if let Function::Defined(region) = *function {
-            reuse.scope(query, &body, region, &[])?;
+            reuse.scope(query, body, region, &[])?;
         }
     }
     graph.update(|mut sink| {
@@ -112,5 +111,5 @@ pub(in crate::egglog) fn publish(graph: &mut EGraph) -> Result<BodyGraph, Optimi
         }
         Ok(())
     })?;
-    Ok(body)
+    Ok(())
 }

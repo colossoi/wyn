@@ -24,6 +24,16 @@ pub(in crate::egglog) struct BodyGraph {
 }
 
 impl BodyGraph {
+    pub fn get_or_read<'a>(
+        slot: &'a mut Option<Self>,
+        query: Query<'_>,
+    ) -> Result<&'a mut Self, OptimizeError> {
+        match slot {
+            Some(body) => Ok(body),
+            slot @ None => Ok(slot.insert(Self::read(query)?)),
+        }
+    }
+
     pub fn read(query: Query<'_>) -> Result<Self, OptimizeError> {
         let mut ir = MemoryIr::default();
         let mut regions = SecondaryMap::new();
@@ -230,7 +240,7 @@ impl BodyGraph {
 
 pub(in crate::egglog) fn forward_equivalents(
     graph: &mut EGraph,
-    body: Option<BodyGraph>,
+    body: &mut Option<BodyGraph>,
 ) -> Result<bool, OptimizeError> {
     let query = Query(graph);
     let mut replacements = LookupMap::new();
@@ -242,7 +252,7 @@ pub(in crate::egglog) fn forward_equivalents(
         return Ok(false);
     }
     let _timing = timing::span("Rust value forwarding");
-    let mut body = match body {
+    let mut body = match body.take() {
         Some(body) => body,
         None => BodyGraph::read(query)?,
     };

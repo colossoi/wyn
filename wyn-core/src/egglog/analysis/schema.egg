@@ -40,7 +40,6 @@
 (relation DirectOperationUse (OperationKey Name))
 (relation OperationAttributeUse (OperationKey Name))
 (relation OperationUse (OperationKey Name))
-(relation OperationDependency (OperationKey OperationKey))
 (relation InvalidDataflow (String))
 
 (relation IndexUse (IndexExp ValueName))

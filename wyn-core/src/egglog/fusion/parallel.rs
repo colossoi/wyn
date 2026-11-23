@@ -2,7 +2,7 @@
 use super::super::dataflow::ir::Code;
 use super::super::payload::Payload;
 use super::super::query::Query;
-use super::super::{timing, OptimizeError};
+use super::super::{analysis, timing, OptimizeError};
 use crate::memory_ir::{OperationId, RegionId, UseSite, ValueRef};
 use crate::op::BinaryOperator;
 use crate::{LookupMap, LookupSet};
@@ -313,7 +313,7 @@ pub(super) fn move_siblings(graph: &mut EGraph) -> Result<bool, OptimizeError> {
     query.for_function("RegionOperations", |keys, ops| {
         let operations = query.vector(ops)?;
         for (before, index) in motion.candidates(&operations, |op| op) {
-            if !query.contains("OperationDependency", (operations[index], operations[before]))? {
+            if !analysis::uses_output_of(query, operations[index], operations[before])? {
                 regions.push(keys[0]);
                 break;
             }

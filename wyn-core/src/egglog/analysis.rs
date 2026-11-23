@@ -71,7 +71,6 @@ pub(super) fn invalidate(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "DirectOperationUse",
         "OperationAttributeUse",
         "OperationUse",
-        "OperationDependency",
         "InvalidDataflow",
         "RegularLength",
         "RowDependent",
@@ -120,7 +119,6 @@ pub(super) fn invalidate(graph: &mut EGraph) -> Result<(), OptimizeError> {
         "AccumulatorParameter",
         "FlowScopeParent",
         "FlowScopeAncestor",
-        "FlowScopeContains",
         "SourceAlias",
         "SourceField",
         "SourceSelect",
@@ -282,6 +280,21 @@ pub(super) fn replace_order(
         Ok(())
     })?;
     Ok(())
+}
+
+/// Test whether an operation uses any of the producer's results.
+pub(super) fn uses_output_of(
+    query: Query<'_>,
+    operation: Value,
+    producer: Value,
+) -> Result<bool, OptimizeError> {
+    for slot in 0..count(query, "OutputCount", producer)? {
+        let output = query.required("Output", (producer, slot))?;
+        if query.contains("OperationUse", (operation, output))? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Test a prospective use against the current lexical order.

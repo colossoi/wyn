@@ -9,6 +9,9 @@ use crate::LookupMap;
 use egglog_engine::{EGraph, Value};
 use wyn_graph::dfs_postorder;
 
+mod demand;
+mod remove_leaves;
+
 pub(super) fn load(graph: &mut EGraph) -> Result<(), OptimizeError> {
     super::dataflow::ir::load(graph)?;
     scalar::load(graph)?;
@@ -95,12 +98,14 @@ pub(super) fn simplify(graph: &mut EGraph, hoist: bool) -> Result<(), OptimizeEr
         "egglog reducing simplification"
     });
     edit::clear(graph)?;
+    let mut body = None;
     loop {
         analysis::ensure(graph)?;
-        let body = {
+        {
             let _timing = timing::span("Rust expression reuse");
-            cse::publish(graph)?
-        };
+            let current = body::BodyGraph::get_or_read(&mut body, Query(graph))?;
+            cse::publish(graph, current)?;
+        }
         {
             let _timing = timing::span("egglog scalar candidates");
             graph.parse_and_run_program(
@@ -108,11 +113,11 @@ pub(super) fn simplify(graph: &mut EGraph, hoist: bool) -> Result<(), OptimizeEr
                 "(run-schedule (saturate graph-candidates scalar-analysis))",
             )?;
         }
-        if reduce_values(graph, Some(body))? {
+        if reduce_values(graph, &mut body)? {
             continue;
         }
 
-        if remove_dead_values(graph)? {
+        if remove_dead_values(graph, &mut body)? {
             continue;
         }
 
@@ -120,58 +125,61 @@ pub(super) fn simplify(graph: &mut EGraph, hoist: bool) -> Result<(), OptimizeEr
         let before_planning = edit::revision(graph)?;
         super::planning::analyze(graph)?;
         if scalar::forward_lengths(graph, "ForwardLength")? {
+            body = None;
             graph.parse_and_run_program(None, "(run-schedule (saturate scalar-analysis))")?;
         }
-        if reduce_values(graph, None)? {
+        if reduce_values(graph, &mut body)? {
             continue;
         }
         scratch_shapes(graph)?;
         if edit::revision(graph)? != before_planning {
-            edit::clear_demand(graph)?;
+            body = None;
             continue;
         }
         if hoist && (super::planning::factor_conditionals(graph)? || super::fusion::hoist(graph)?) {
+            body = None;
             continue;
         }
         return Ok(());
     }
 }
 
-fn remove_dead_values(graph: &mut EGraph) -> Result<bool, OptimizeError> {
-    let _timing = timing::span("egglog dead operation selection");
-    graph.parse_and_run_program(
-        None,
-        "(run-schedule (saturate graph-needed) (saturate graph-result-select))",
-    )?;
+fn remove_dead_values(
+    graph: &mut EGraph,
+    body: &mut Option<body::BodyGraph>,
+) -> Result<bool, OptimizeError> {
+    let _timing = timing::span("Rust dead operation selection");
     let query = Query(graph);
-    let mut dead = Vec::new();
-    query.for_each("LiveOperation", |row| {
-        if !query.contains("NeededOperation", row[0])? {
-            dead.push(row[0]);
-        }
-        Ok(())
-    })?;
+    let current = body::BodyGraph::get_or_read(body, query)?;
+    let needed = demand::Needed::read(query, current)?;
+    let dead =
+        current.ir.operations.keys().filter(|op| !needed.operations.contains(op)).collect::<Vec<_>>();
     if !dead.is_empty() {
-        let _timing = timing::span("egglog dead operation removal");
-        edit::remove(graph, &dead)?;
+        let _timing = timing::span("Rust dead operation removal");
+        if !remove_leaves::apply(graph, current, &needed, &dead)? {
+            let keys = dead.iter().map(|&op| current.operations[op]).collect::<Vec<_>>();
+            edit::remove(graph, &keys)?;
+            *body = None;
+        }
         return Ok(true);
     }
-    if let Some(candidate) = query.first("DeadResultClause")? {
+    if let Some((operation, clause)) = demand::dead_clause(query, |name| needed.uses(current, name))? {
         let _timing = timing::span("egglog dead result removal");
-        let clause = graph.value_to_base::<i64>(candidate[1]);
-        edit::remove_clause(graph, candidate[0], clause)?;
+        edit::remove_clause(graph, operation, clause)?;
+        *body = None;
         return Ok(true);
     }
     Ok(false)
 }
 
-fn reduce_values(graph: &mut EGraph, mut body: Option<body::BodyGraph>) -> Result<bool, OptimizeError> {
+fn reduce_values(graph: &mut EGraph, body: &mut Option<body::BodyGraph>) -> Result<bool, OptimizeError> {
     let revision = edit::revision(graph)?;
-    if scalar::apply(graph, &mut body)? {
+    if scalar::apply(graph, body)? {
+        *body = None;
         return Ok(true);
     }
     if edit::revision(graph)? != revision {
-        body = None;
+        *body = None;
     }
     body::forward_equivalents(graph, body)
 }

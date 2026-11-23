@@ -130,8 +130,6 @@
 (rule ((= revision (AnalysisRevision)) (= child (ControlRegion operation 0)) (= value (ResultPredicate operation clause))
        (DefinitionRegion (ValueNameRef value) owner) (!= child owner))
       ((RegionCapture child (ValueNameRef value))) :ruleset dataflow-dependencies)
-(rule ((= revision (AnalysisRevision)) (OperationUse operation name) (= (Defines name) (OperationSite producer slot)))
-      ((OperationDependency operation producer)) :ruleset dataflow-dependencies)
 
 ; Forwarding publishes the same value language used by the earlier TLC passes.
 (rule ((= revision (AnalysisRevision)) (ProductOperation operation) (= (Input operation slot) (ValueNameRef input))

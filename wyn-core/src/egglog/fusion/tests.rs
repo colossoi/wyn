@@ -198,13 +198,7 @@ fn cross_region_motion_moves_a_capture_chain_in_one_edit() -> Result<(), Optimiz
     // The repaired scope and work summaries must agree with a fresh solve.
     let facts = |graph: &EGraph| -> Result<_, OptimizeError> {
         let mut facts = crate::LookupSet::new();
-        for table in [
-            "DefinitionRegion",
-            "RegionCapture",
-            "OperationUse",
-            "OperationDependency",
-            "RegionWork",
-        ] {
+        for table in ["DefinitionRegion", "RegionCapture", "OperationUse", "RegionWork"] {
             Query(graph).for_each(table, |row| {
                 facts.insert((table, row.to_vec()));
                 Ok(())
