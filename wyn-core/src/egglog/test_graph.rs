@@ -44,6 +44,10 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
         "FixtureControlRegion",
         "FixtureInput",
         "FixtureYield",
+        "FixtureOutput",
+        "FixtureParameter",
+        "FixtureResultReducer",
+        "FixtureAccumulatorCombiner",
     ];
     if !fields.iter().any(|field| facts.contains(field)) {
         graph.parse_and_run_program(None, facts)?;
@@ -60,6 +64,10 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
             (function FixtureControlRegion (OperationKey i64) RegionKey :no-merge)
             (function FixtureInput (OperationKey i64) Name :no-merge)
             (function FixtureYield (RegionKey i64) Name :no-merge)
+            (function FixtureOutput (OperationKey i64) Name :no-merge)
+            (function FixtureParameter (RegionKey i64) Name :no-merge)
+            (function FixtureResultReducer (OperationKey i64) RegionKey :no-merge)
+            (function FixtureAccumulatorCombiner (OperationKey i64) RegionKey :no-merge)
         ",
         )?;
     }
@@ -101,10 +109,64 @@ pub(super) fn facts_with_positions(graph: &mut Graph, facts: &str) -> Result<(),
         yields.entry(keys[0]).or_default().push((graph.value_to_base::<i64>(keys[1]), value));
         Ok(())
     })?;
+    let mut outputs = crate::LookupMap::<Value, Vec<(i64, Value)>>::new();
+    query.for_function("FixtureOutput", |keys, value| {
+        outputs.entry(keys[0]).or_default().push((graph.value_to_base::<i64>(keys[1]), value));
+        Ok(())
+    })?;
+    let mut parameters = crate::LookupMap::<Value, Vec<(i64, Value)>>::new();
+    query.for_function("FixtureParameter", |keys, value| {
+        parameters.entry(keys[0]).or_default().push((graph.value_to_base::<i64>(keys[1]), value));
+        Ok(())
+    })?;
+    let mut reducers = Vec::new();
+    let mut combiners = Vec::new();
+    for (table, output) in [
+        ("FixtureResultReducer", &mut reducers),
+        ("FixtureAccumulatorCombiner", &mut combiners),
+    ] {
+        query.for_function(table, |keys, region| {
+            output.push((keys[0], graph.value_to_base::<i64>(keys[1]), region));
+            Ok(())
+        })?;
+    }
     graph.update(|mut sink| {
+        for (op, slot, region) in reducers {
+            sink.set_reducer(op, slot, region);
+            sink.set("RegionOwnedBy", region, op)?;
+            sink.add("ReducerBody", (op, slot, region))?;
+        }
+        for (op, slot, region) in combiners {
+            sink.set_combiner(op, slot, region);
+            sink.set("RegionOwnedBy", region, op)?;
+        }
+        for (region, mut names) in parameters {
+            sink.add("Region", region)?;
+            names.sort_unstable_by_key(|&(slot, _)| slot);
+            assert!(names.iter().enumerate().all(|(i, &(slot, _))| i as i64 == slot));
+            for &(slot, name) in &names {
+                let site = sink.add("ParameterSite", (region, slot))?;
+                sink.set("Defines", name, site)?;
+                sink.add("FormalOrigin", (name, region, slot))?;
+            }
+            sink.set_parameters(region, names.into_iter().map(|(_, name)| name).collect())?;
+        }
+        for (operation, mut values) in outputs {
+            values.sort_unstable_by_key(|&(slot, _)| slot);
+            assert!(values.iter().enumerate().all(|(i, &(slot, _))| i as i64 == slot));
+            for &(slot, value) in &values {
+                let site = sink.add("OperationSite", (operation, slot))?;
+                sink.set("Defines", value, site)?;
+                sink.add("ResultOrigin", (value, operation, slot))?;
+            }
+            sink.set_outputs(operation, values.into_iter().map(|(_, value)| value).collect())?;
+        }
         for (region, mut values) in yields {
             values.sort_unstable_by_key(|&(slot, _)| slot);
             assert!(values.iter().enumerate().all(|(i, &(slot, _))| i as i64 == slot));
+            for &(_, value) in &values {
+                sink.add("EndDemand", (region, value))?;
+            }
             sink.set_yields(region, values.into_iter().map(|(_, value)| value).collect())?;
         }
         for (operation, mut values) in inputs {

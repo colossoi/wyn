@@ -1,5 +1,5 @@
 //! Read executable fields from the Rust graph in planning rules.
-use super::graph::SharedStructure;
+use super::graph::{callback_at, SharedStructure};
 use egglog_engine::ast::Span;
 use egglog_engine::constraint::{SimpleTypeConstraint, TypeConstraint};
 use egglog_engine::{ArcSort, Core, Primitive, PurePrim, PureState, Value};
@@ -12,11 +12,17 @@ pub(super) enum Field {
     FunctionRoot,
     CallTarget,
     ControlRegion,
+    Reducer,
+    Combiner,
     EdgeArgument,
     Input,
     InputCount,
+    Output,
+    OutputCount,
     Yield,
     YieldCount,
+    Parameter,
+    ParameterCount,
     ControlYield,
     Yielded,
     RegionYields,
@@ -38,11 +44,17 @@ impl Primitive for ExecutableField {
             Field::FunctionRoot => "wyn-function-root",
             Field::CallTarget => "wyn-call-target",
             Field::ControlRegion => "wyn-control-region",
+            Field::Reducer => "wyn-reducer",
+            Field::Combiner => "wyn-combiner",
             Field::EdgeArgument => "wyn-edge-argument",
             Field::Input => "wyn-input",
             Field::InputCount => "wyn-input-count",
+            Field::Output => "wyn-output",
+            Field::OutputCount => "wyn-output-count",
             Field::Yield => "wyn-yield",
             Field::YieldCount => "wyn-yield-count",
+            Field::Parameter => "wyn-parameter",
+            Field::ParameterCount => "wyn-parameter-count",
             Field::ControlYield => "wyn-control-yield",
             Field::Yielded => "wyn-is-yielded",
             Field::RegionYields => "wyn-region-yields",
@@ -68,6 +80,8 @@ impl PurePrim for ExecutableField {
             Field::Order => graph.operations.get(&key)?.order.map(|order| state.base_to_value(order)),
             Field::FunctionRoot => graph.roots.get(&key).copied(),
             Field::CallTarget => graph.targets.get(&key).copied(),
+            Field::Reducer => callback_at(&graph.reducers, key, state.value_to_base(args[1])),
+            Field::Combiner => callback_at(&graph.combiners, key, state.value_to_base(args[1])),
             Field::ControlRegion => {
                 let slot: i64 = state.value_to_base(args[1]);
                 graph.controls.get(&(key, slot)).map(|edge| edge.region)
@@ -78,6 +92,22 @@ impl PurePrim for ExecutableField {
             }
             Field::InputCount => {
                 let count = graph.inputs.values.get(&key).map_or(0, |values| values.len() as i64);
+                Some(state.base_to_value(count))
+            }
+            Field::Output => {
+                let slot = usize::try_from(state.value_to_base::<i64>(args[1])).ok()?;
+                graph.outputs.get(&key)?.get(slot).copied()
+            }
+            Field::OutputCount => {
+                let count = graph.outputs.get(&key).map_or(0, |names| names.len() as i64);
+                Some(state.base_to_value(count))
+            }
+            Field::Parameter => {
+                let slot = usize::try_from(state.value_to_base::<i64>(args[1])).ok()?;
+                graph.parameters.get(&key)?.get(slot).copied()
+            }
+            Field::ParameterCount => {
+                let count = graph.parameters.get(&key).map_or(0, |names| names.len() as i64);
                 Some(state.base_to_value(count))
             }
             Field::Yield => {

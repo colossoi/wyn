@@ -24,7 +24,7 @@ fn planning_metadata_survives_candidate_resets_and_tracks_edits() -> Result<(), 
     )?;
     planning::analyze(&mut graph)?;
     let query = Query(&graph);
-    let output = query.required("Output", (operation, 0_i64))?;
+    let output = query.0.output(operation, 0_i64)?;
     let candidate = query.first("ForwardCandidate")?.unwrap();
     let revision = query.required("PlanningRevision", RawValues(Vec::new()))?;
     let constant = query.required("ConstantValue", output)?;
@@ -256,8 +256,8 @@ fn logical_values_and_storage_reads_have_distinct_effects() {
         (let value (ValueId 0)) (let storage (ValueId 1))
         (set (ValueType value) (LogicalValue (ArrayType (ValueArray) (vec-of (FixedExtent 4)) (ElementValue (ScalarElement (I32))))))
         (set (ValueType storage) (LogicalValue (ArrayType (StorageArray) (vec-of (FixedExtent 4)) (ElementValue (ScalarElement (I32))))))
-        (set (RegionParameter (RegionId 0) 0) (ValueNameRef value))
-        (set (RegionParameter (RegionId 0) 1) (ValueNameRef storage))
+        (set (FixtureParameter (RegionId 0) 0) (ValueNameRef value))
+        (set (FixtureParameter (RegionId 0) 1) (ValueNameRef storage))
         (set (FixtureInput (OperationId 0) 0) (ValueNameRef value)) (ReadsInput (OperationId 0) 0)
         (set (FixtureInput (OperationId 1) 0) (ValueNameRef storage)) (ReadsInput (OperationId 1) 0)
         (OrderedOperation (OperationId 2)) (OrderedOperation (OperationId 3))
@@ -291,14 +291,14 @@ fn reducer_width_requires_agreement_and_a_length_preserving_combiner() -> Result
             (set (ResultNeutralCount fold 0) 1) (set (ResultValueCount fold 0) 1)
             (set (ResultNeutral fold 0 0) (ValueNameRef neutral))
             (set (ResultValue fold 0 0) (ValueNameRef item))
-            (set (ResultReducer fold 0) reducer)
-            (set (RegionParameterCount reducer) 2)
-            (set (RegionParameter reducer 0) (ValueNameRef left))
-            (set (RegionParameter reducer 1) (ValueNameRef right))
+            (set (FixtureResultReducer fold 0) reducer)
+
+            (set (FixtureParameter reducer 0) (ValueNameRef left))
+            (set (FixtureParameter reducer 1) (ValueNameRef right))
             (set (FixtureYield reducer 0) (ValueNameRef result))
             (LengthOperation measure 0)
             (set (FixtureInput measure 0) (ValueNameRef left))
-            (set (Output measure 0) (ValueNameRef length))
+            (set (FixtureOutput measure 0) (ValueNameRef length))
             (ArrayOuterBound neutral (IndexConstant 4))
             (ArrayOuterBound item (IndexConstant {item_width}))
             (ArrayOuterBound result {result_bound})

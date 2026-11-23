@@ -3,7 +3,7 @@ use super::dataflow::edit;
 use super::query::Query;
 use super::{output_error, timing, OptimizeError};
 use crate::egglog::graph::Graph;
-use crate::StableMap;
+use crate::{LookupMap, StableMap};
 use egglog_engine::sort::S;
 use egglog_engine::{IntoValues, RawValues, Value, Write};
 
@@ -54,6 +54,10 @@ pub(super) fn invalidate(graph: &mut Graph) -> Result<(), OptimizeError> {
         "FlowParameter",
         "FlowArgument",
         "Defines",
+        "ResultOrigin",
+        "FormalOrigin",
+        "ReducerBody",
+        "ReducerWidthInputs",
         "DefinitionRegion",
         "RootFunction",
         "RegionOwnedBy",
@@ -169,6 +173,33 @@ pub(super) fn structure(graph: &mut Graph, for_inlining: bool) -> Result<(), Opt
 // Correlate the operands of each proof before the solver joins their types and ranges.
 pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeError> {
     let query = Query(graph);
+    let mut definitions = Vec::new();
+    {
+        let structure = graph.structure().read();
+        query.for_each("LiveRegion", |row| {
+            let region = row[0];
+            for (slot, &name) in structure.parameters.get(&region).into_iter().flatten().enumerate() {
+                definitions.push(("ParameterSite", region, slot as i64, name, region));
+            }
+            Ok(())
+        })?;
+        query.for_each("LiveOperation", |row| {
+            let operation = row[0];
+            let Some(region) = structure.operations.get(&operation).and_then(|position| position.region)
+            else {
+                return Ok(());
+            };
+            for (slot, &name) in structure.outputs.get(&operation).into_iter().flatten().enumerate() {
+                definitions.push(("OperationSite", operation, slot as i64, name, region));
+            }
+            Ok(())
+        })?;
+    }
+    let mut reducers = Vec::new();
+    query.for_each("LiveOperation", |row| {
+        reducers.extend(graph.reducers(row[0]).into_iter().map(|(slot, body)| (row[0], slot, body)));
+        Ok(())
+    })?;
     let mut branches = Vec::new();
     query.for_each("BranchOperation", |row| {
         let op = row[0];
@@ -178,21 +209,26 @@ pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeEr
         let Some(no) = graph.control_at(op, 1) else {
             return Ok(());
         };
-        let Some(count) = query.lookup("OutputCount", op)? else {
-            return Ok(());
-        };
-        let results = query.indexed("Output", &[op], graph.value_to_base::<i64>(count))?;
+        let results = graph.outputs(op);
         let arms = graph.yield_values(yes).into_iter().zip(graph.yield_values(no));
         for (slot, (result, (yes, no))) in results.into_iter().zip(arms).enumerate() {
             branches.push((op, slot as i64, result, yes, no));
         }
         Ok(())
     })?;
+    let mut direct_uses = Vec::new();
+    let mut end_demands = Vec::new();
     let mut binary = Vec::new();
     let mut indices = Vec::new();
     let mut lengths = Vec::new();
     {
         let structure = graph.structure().read();
+        for (&operation, inputs) in &structure.inputs.values {
+            direct_uses.extend(inputs.iter().map(|&input| (operation, input)));
+        }
+        for (&region, yields) in &structure.yields.values {
+            end_demands.extend(yields.iter().map(|&value| (region, value)));
+        }
         query.for_function("ScalarPayload", |keys, _| {
             if let Some([left, right]) = structure.inputs.values.get(&keys[0]).map(Vec::as_slice) {
                 binary.push((keys[0], *left, *right));
@@ -211,7 +247,7 @@ pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeEr
             let Some(array) = structure.inputs.values.get(&row[0]).and_then(|inputs| inputs.first()) else {
                 return Ok(());
             };
-            let Some(length) = query.lookup("Output", (row[0], 0_i64))? else {
+            let Some(length) = query.0.output_at(row[0], 0_i64) else {
                 return Ok(());
             };
             if let (Some(array), Some(length)) = (query.value_name(*array)?, query.value_name(length)?) {
@@ -221,6 +257,29 @@ pub(super) fn publish_proof_operands(graph: &mut Graph) -> Result<(), OptimizeEr
         })?;
     }
     graph.update(|mut sink| {
+        let mut sites = LookupMap::new();
+        for (kind, key, slot, name, region) in definitions {
+            let site = sink.add(kind, (key, slot))?;
+            if sites.insert(name, site).is_some_and(|previous| site != previous) {
+                sink.add("InvalidDataflow", "value has more than one definition")?;
+            }
+            sink.set("Defines", name, site)?;
+            let origin = if kind == "ParameterSite" { "FormalOrigin" } else { "ResultOrigin" };
+            sink.add(origin, (name, key, slot))?;
+            sink.add("DefinitionRegion", (name, region))?;
+            if kind == "ParameterSite" {
+                sink.add("AvailableIn", (region, name))?;
+            }
+        }
+        for site in direct_uses {
+            sink.add("DirectOperationUse", site)?;
+        }
+        for site in end_demands {
+            sink.add("EndDemand", site)?;
+        }
+        for reducer in reducers {
+            sink.add("ReducerBody", reducer)?;
+        }
         for branch in branches {
             sink.add("BranchResult", branch)?;
         }
@@ -362,8 +421,8 @@ pub(super) fn uses_output_of(
     operation: Value,
     producer: Value,
 ) -> Result<bool, OptimizeError> {
-    for slot in 0..count(query, "OutputCount", producer)? {
-        let output = query.required("Output", (producer, slot))?;
+    for slot in 0..query.0.output_count(producer) {
+        let output = query.0.output(producer, slot)?;
         if query.contains("OperationUse", (operation, output))? {
             return Ok(true);
         }
@@ -463,7 +522,7 @@ pub(super) fn validate(graph: &Graph) -> Result<(), OptimizeError> {
         graph.code(operation)?;
         query.0.operation_region(operation)?;
         query.0.operation_order(operation)?;
-        for value in graph.inputs(operation).into_iter().chain(query.sequence("Output", operation)?) {
+        for value in graph.inputs(operation).into_iter().chain(query.0.outputs(operation)) {
             typed(query, value)?;
         }
         if query.contains("CallOperation", operation)? {
@@ -471,7 +530,7 @@ pub(super) fn validate(graph: &Graph) -> Result<(), OptimizeError> {
             let expected = if query.contains("External", target)? {
                 count(query, "ExternalParameterCount", target)?
             } else {
-                count(query, "RegionParameterCount", query.0.function_root(target)?)?
+                query.0.parameter_count(query.0.function_root(target)?)
             };
             if query.0.input_count(operation) != expected {
                 return Err(output_error("call argument count differs from its signature"));
@@ -482,18 +541,17 @@ pub(super) fn validate(graph: &Graph) -> Result<(), OptimizeError> {
             || query.contains("WhileLoopOperation", operation)?
         {
             let body = query.0.control_region(operation, 0_i64)?;
-            let results = count(query, "OutputCount", operation)?;
+            let results = query.0.output_count(operation);
             let induction = i64::from(query.contains("CountedLoopOperation", operation)?);
-            if count(query, "RegionParameterCount", body)? != results + induction
-                || query.0.yield_count(body) != results
+            if query.0.parameter_count(body) != results + induction || query.0.yield_count(body) != results
             {
                 return Err(output_error("loop carry signature is inconsistent"));
             }
             for slot in 0..results {
                 let initial = query.0.argument(operation, 0_i64, slot)?;
-                let parameter = query.required("RegionParameter", (body, slot))?;
+                let parameter = query.0.parameter(body, slot)?;
                 let backedge = query.0.yield_value(body, slot)?;
-                let result = query.required("Output", (operation, slot))?;
+                let result = query.0.output(operation, slot)?;
                 let ty = typed(query, parameter)?;
                 for name in [initial, backedge, result] {
                     if !signatures::compatible(query, typed(query, name)?, ty)? {
@@ -519,8 +577,8 @@ pub(super) fn validate(graph: &Graph) -> Result<(), OptimizeError> {
     query.for_each("LiveRegion", |row| {
         let region = row[0];
         signatures::region(query, region)?;
-        for slot in 0..count(query, "RegionParameterCount", region)? {
-            typed(query, query.required("RegionParameter", (region, slot))?)?;
+        for slot in 0..query.0.parameter_count(region) {
+            typed(query, query.0.parameter(region, slot)?)?;
             query.required("ParameterDiet", (region, slot))?;
         }
         for slot in 0..query.0.yield_count(region) {

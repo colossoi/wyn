@@ -11,8 +11,6 @@ pub(in crate::egglog) const OPERATION_CELLS: &[&str] = &[
     "InstructionWork",
     "LiteralBits",
     "InputDiet",
-    "Output",
-    "OutputCount",
     "LoopIndex",
     "LoopStart",
     "LoopCount",
@@ -30,7 +28,6 @@ pub(in crate::egglog) const OPERATION_CELLS: &[&str] = &[
     "ResultValueCount",
     "ResultValue",
     "ResultPredicate",
-    "ResultReducer",
     "ResultNeutral",
     "ResultNeutralCount",
     "ResultCommutative",
@@ -41,7 +38,6 @@ pub(in crate::egglog) const OPERATION_CELLS: &[&str] = &[
     "AccumulatorGroupCount",
     "AccumulatorArrayCount",
     "AccumulatorArray",
-    "AccumulatorCombiner",
     "CallReturnType",
     "ScalarPayload",
 ];
@@ -362,14 +358,7 @@ pub(in crate::egglog) fn set_code(
     }
     let mut obsolete = Vec::new();
     for &table in OPERATION_CELLS {
-        if [
-            "InstructionWork",
-            "LiteralBits",
-            "ScalarPayload",
-            "Output",
-            "OutputCount",
-        ]
-        .contains(&table)
+        if ["InstructionWork", "LiteralBits", "ScalarPayload"].contains(&table)
             || (table == "OperationIndex" && matches!(code, Code::IndexValue))
         {
             continue;
@@ -388,7 +377,7 @@ pub(in crate::egglog) fn set_code(
         for (table, keys) in obsolete {
             sink.remove(table, RawValues(keys))?;
         }
-        sink.clear_control(operation);
+        sink.clear_bodies(operation);
         sink.remove_call_target(operation);
         sink.remove("ScalarPayload", operation)?;
         sink.remove("InstructionWork", operation)?;
@@ -437,7 +426,7 @@ pub(in crate::egglog) fn clone_region(
     ] {
         graph.clear_function(table)?;
     }
-    let parameters = Query(graph).sequence("RegionParameter", region)?;
+    let parameters = Query(graph).0.parameters(region);
     if parameters.len() != arguments.len() {
         return Err(output_error("region entry edge has the wrong argument count"));
     }
@@ -446,12 +435,15 @@ pub(in crate::egglog) fn clone_region(
     let mut members = LookupSet::new();
     let mut operations = Vec::new();
     let mut argument_names = LookupSet::new();
+    let mut result_names = LookupSet::new();
     while let Some(region) = pending.pop() {
         if members.insert(region) {
+            result_names.extend(graph.parameters(region));
             argument_names.extend(graph.yield_values(region));
             for operation in query.operations(region)? {
-                pending.extend(query.attached_regions(operation)?);
+                pending.extend(graph.attached_regions(operation));
                 argument_names.extend(graph.inputs(operation));
+                result_names.extend(graph.outputs(operation));
                 for (slot, _) in graph.controls(operation) {
                     argument_names.extend(graph.arguments(operation, slot));
                 }
@@ -474,6 +466,10 @@ pub(in crate::egglog) fn clone_region(
         for argument in argument_names {
             sink.add("CloneNameDemand", (context, argument))?;
         }
+        for result in result_names {
+            sink.add("CloneNameDemand", (context, result))?;
+            sink.add("CloneLocal", (context, result))?;
+        }
         Ok(())
     })?;
     graph.parse_and_run_program(
@@ -491,7 +487,12 @@ pub(in crate::egglog) fn clone_region(
             .into_iter()
             .map(|name| query.required("CloneName", (context, name)))
             .collect::<Result<Vec<_>, _>>()?;
-        cloned_yields.push((new_region, values));
+        let parameters = graph
+            .parameters(region)
+            .into_iter()
+            .map(|name| query.required("CloneName", (context, name)))
+            .collect::<Result<Vec<_>, _>>()?;
+        cloned_yields.push((new_region, parameters, values));
     }
     let mut operations = Vec::new();
     query.for_each("CloneOperation", |row| {
@@ -522,6 +523,17 @@ pub(in crate::egglog) fn clone_region(
                     Ok((slot, clone, arguments))
                 })
                 .collect::<Result<Vec<_>, OptimizeError>>()?;
+            let clone_callbacks = |callbacks: Vec<(i64, Value)>| -> Result<Vec<_>, OptimizeError> {
+                callbacks
+                    .into_iter()
+                    .map(|(slot, child)| {
+                        let Some(region) = query.constructor("ClonedRegion", (context, child))? else {
+                            return Err(output_error("cloned callback has no region"));
+                        };
+                        Ok((slot, region))
+                    })
+                    .collect()
+            };
             operations.push((
                 row[1],
                 copy,
@@ -534,19 +546,32 @@ pub(in crate::egglog) fn clone_region(
                     .into_iter()
                     .map(|name| query.required("CloneName", (context, name)))
                     .collect::<Result<Vec<_>, _>>()?,
+                graph
+                    .outputs(row[1])
+                    .into_iter()
+                    .map(|name| query.required("CloneName", (context, name)))
+                    .collect::<Result<Vec<_>, _>>()?,
+                clone_callbacks(graph.reducers(row[1]))?,
+                clone_callbacks(graph.combiners(row[1]))?,
             ));
         }
         Ok(())
     })?;
-    for &(original, copy, _, _, _, _, _) in &operations {
+    for &(original, copy, ..) in &operations {
         graph.copy_occurrence(original, copy)?;
     }
     graph.update(|mut sink| {
-        for (region, values) in cloned_yields {
+        for (region, parameters, values) in cloned_yields {
+            sink.set_parameters(region, parameters)?;
             sink.set_yields(region, values)?;
         }
-        for (_, operation, region, order, target, controls, inputs) in operations {
+        for (_, operation, region, order, target, controls, inputs, outputs, reducers, combiners) in
+            operations
+        {
+            sink.set_reducers(operation, reducers);
+            sink.set_combiners(operation, combiners);
             sink.set_inputs(operation, inputs)?;
+            sink.set_outputs(operation, outputs)?;
             for (slot, child, arguments) in controls {
                 sink.set_control(operation, slot, child);
                 for (index, name) in arguments.into_iter().enumerate() {
@@ -575,12 +600,15 @@ pub(in crate::egglog) fn remove_clause(
 ) -> Result<(), OptimizeError> {
     let query = Query(graph);
     let count = analysis::count(query, "ResultCount", operation)?;
-    let outputs = analysis::count(query, "OutputCount", operation)?;
+    let outputs = query.0.outputs(operation);
+    let mut names = Vec::with_capacity(outputs.len());
     let mut slots = LookupMap::default();
     let mut retained = 0_i64;
-    for slot in 0..outputs {
+    for (slot, name) in outputs.into_iter().enumerate() {
+        let slot = slot as i64;
         let owner = query.0.value_to_base::<i64>(query.required("OutputClause", (operation, slot))?);
         if owner != clause {
+            names.push(name);
             slots.insert(slot, retained);
             retained += 1;
         }
@@ -589,7 +617,7 @@ pub(in crate::egglog) fn remove_clause(
     let mut next = Vec::new();
     for &table in OPERATION_CELLS {
         let results = table.starts_with("Result") && table != "ResultCount";
-        let output = table.starts_with("Output") && table != "OutputCount";
+        let output = table.starts_with("Output");
         if !results && !output {
             continue;
         }
@@ -626,7 +654,15 @@ pub(in crate::egglog) fn remove_clause(
             Ok(())
         })?;
     }
+    let reducers = graph
+        .reducers(operation)
+        .into_iter()
+        .filter_map(|(slot, region)| {
+            (slot != clause).then_some((if slot > clause { slot - 1 } else { slot }, region))
+        })
+        .collect();
     graph.update(|mut sink| {
+        sink.set_reducers(operation, reducers);
         for (table, keys) in old {
             sink.remove(table, RawValues(keys))?;
         }
@@ -635,8 +671,7 @@ pub(in crate::egglog) fn remove_clause(
         }
         sink.remove("ResultCount", operation)?;
         sink.set("ResultCount", operation, count - 1)?;
-        sink.remove("OutputCount", operation)?;
-        sink.set("OutputCount", operation, retained)?;
+        sink.set_outputs(operation, names)?;
         Ok(())
     })?;
     changed(graph)?;

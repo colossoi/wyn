@@ -76,7 +76,7 @@ impl Body<'_, '_, '_> {
                 let count = crate::egglog::analysis::count(query, "AccumulatorArrayCount", (owner, group))?;
                 let arrays = query.indexed("AccumulatorArray", &[owner, capability[1]], count)?;
                 let policy = query.required("AccumulatorPolicy", (owner, group))?;
-                let combine = query.lookup("AccumulatorCombiner", (owner, group))?;
+                let combine = query.0.combiner_at(owner, group);
                 if self.atomic_policy(&arrays, policy, combine)?.is_none() {
                     return Ok(false);
                 }

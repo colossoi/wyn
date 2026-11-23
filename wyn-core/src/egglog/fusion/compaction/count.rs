@@ -45,7 +45,7 @@ pub(in crate::egglog::fusion) fn run(graph: &mut Graph) -> Result<bool, Optimize
     query.for_function("OutputClause", |key, clause| {
         if clauses.contains(&(key[0], clause)) {
             candidates.insert(
-                query.required("Output", (key[0], key[1]))?,
+                query.0.output(key[0], query.0.value_to_base::<i64>(key[1]))?,
                 Candidate {
                     operation: key[0],
                     clause: graph.value_to_base(clause),
@@ -62,7 +62,7 @@ pub(in crate::egglog::fusion) fn run(graph: &mut Graph) -> Result<bool, Optimize
         if graph.value_to_base::<i64>(row[1]) == 0 {
             let input = query.0.input(row[0], 0_i64)?;
             if let Some(candidate) = candidates.get_mut(&input) {
-                let output = query.required("Output", (row[0], 0_i64))?;
+                let output = query.0.output(row[0], 0_i64)?;
                 candidate.lengths.push((row[0], output));
                 length_uses.insert((row[0], input));
             }
@@ -172,7 +172,7 @@ fn packed_output(
     operation: Value,
     predicate: Value,
 ) -> Result<Option<Value>, OptimizeError> {
-    for slot in 0..count(query, "OutputCount", operation)? {
+    for slot in 0..query.0.output_count(operation) {
         let role = query.required("OutputRole", (operation, slot))?;
         if query.enode("CompactedOutput", role)?.is_none() {
             continue;
@@ -181,7 +181,7 @@ fn packed_output(
         if query.enode("Folded", query.required("ResultKindOf", (operation, other))?)?.is_some()
             && query.lookup("ResultPredicate", (operation, other))? == Some(predicate)
         {
-            return Ok(Some(query.required("Output", (operation, slot))?));
+            return Ok(Some(query.0.output(operation, slot)?));
         }
     }
     Ok(None)
@@ -260,13 +260,12 @@ fn make_count(
     sink.remove("ResultValue", (operation, clause, 0_i64))?;
     let flag = Name::Value(flag).fact(sink)?;
     sink.set("ResultValue", (operation, clause, 0_i64), flag)?;
-    sink.set("ResultReducer", (operation, clause), reducer)?;
+    sink.set_reducer(operation, clause, reducer);
     sink.set("ResultNeutralCount", (operation, clause), 1_i64)?;
     let neutral = Name::Value(zero.1).fact(sink)?;
     sink.set("ResultNeutral", (operation, clause, 0_i64), neutral)?;
     sink.set("ResultCommutative", (operation, clause), true)?;
-    sink.remove("Output", (operation, output_slot))?;
-    sink.set("Output", (operation, output_slot), output)?;
+    sink.set_output(operation, output_slot, output)?;
     let role = sink.add("TotalOutput", RawValues(Vec::new()))?;
     sink.remove("OutputRole", (operation, output_slot))?;
     sink.set("OutputRole", (operation, output_slot), role)?;

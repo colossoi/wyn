@@ -152,7 +152,7 @@ pub(super) fn remember(
     statement: Value,
 ) -> Result<(), OptimizeError> {
     let code = query.0.code(statement)?;
-    let pattern = query.sequence("Output", statement)?;
+    let pattern = query.0.outputs(statement);
     let operands = query.0.inputs(statement);
     let atoms = operands.iter().map(|&name| query.name(name)).collect::<Result<Vec<_>, _>>()?;
     if matches!(code, Code::Branch) {
@@ -535,7 +535,7 @@ fn scalar_body(
     let mut bindings = Vec::new();
     for statement in query.operations(body)? {
         let code = query.0.code(statement)?;
-        let pattern = query.sequence("Output", statement)?;
+        let pattern = query.0.outputs(statement);
         let mut names = Vec::new();
         for binding in &pattern {
             let Some(name) = query.value_name(*binding)? else {
@@ -632,9 +632,9 @@ fn scalar_loop(
     let mut values: Bindings<_, _> =
         outer.iter().map(|(&name, value)| (name, value.clone())).collect::<crate::StableMap<_, _>>().into();
     let mut initial = if counted { vec![ScalarExpr::I32(0)] } else { vec![] };
-    let count = crate::egglog::analysis::count(query, "OutputCount", loop_)? as usize;
+    let count = query.0.output_count(loop_) as usize;
     for i in 0..count {
-        let parameter = query.required("RegionParameter", (region, i as i64))?;
+        let parameter = query.0.parameter(region, i as i64)?;
         let Some(binding) = query.value_name(parameter)? else {
             return Ok(None);
         };
@@ -715,7 +715,7 @@ fn scalar_call(
     if calls.contains(&callee) {
         return Ok(None);
     }
-    let params = query.sequence("RegionParameter", root)?;
+    let params = query.0.parameters(root);
     let arguments = query.0.inputs(call);
     if params.len() != arguments.len() {
         return Err(error("scalar call arity mismatch"));

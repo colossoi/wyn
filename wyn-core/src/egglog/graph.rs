@@ -38,9 +38,13 @@ pub(super) struct ExecutableStructure {
     pub roots: StableMap<Value, Value>,
     pub targets: StableMap<Value, Value>,
     pub controls: LookupMap<(Value, i64), ControlEdge>,
+    pub reducers: LookupMap<Value, Vec<(i64, Value)>>,
+    pub combiners: LookupMap<Value, Vec<(i64, Value)>>,
     pub argument_uses: LookupMap<Value, LookupSet<ArgumentSite>>,
     pub inputs: ValueLists,
+    pub outputs: LookupMap<Value, Vec<Value>>,
     pub yields: ValueLists,
+    pub parameters: LookupMap<Value, Vec<Value>>,
     arities: LookupSet<usize>,
 }
 
@@ -99,6 +103,16 @@ impl Graph {
             (Field::Region, vec![operation.clone()], region.clone()),
             (Field::Order, vec![operation.clone()], I64Sort.to_arcsort()),
             (Field::FunctionRoot, vec![function.clone()], region.clone()),
+            (
+                Field::Reducer,
+                vec![operation.clone(), index.clone()],
+                region.clone(),
+            ),
+            (
+                Field::Combiner,
+                vec![operation.clone(), index.clone()],
+                region.clone(),
+            ),
             (Field::CallTarget, vec![operation.clone()], function),
             (
                 Field::ControlRegion,
@@ -112,8 +126,20 @@ impl Graph {
             ),
             (Field::Input, vec![operation.clone(), index.clone()], name.clone()),
             (Field::InputCount, vec![operation.clone()], index.clone()),
+            (
+                Field::Output,
+                vec![operation.clone(), index.clone()],
+                name.clone(),
+            ),
+            (Field::OutputCount, vec![operation.clone()], index.clone()),
             (Field::Yield, vec![region.clone(), index.clone()], name.clone()),
             (Field::YieldCount, vec![region.clone()], index.clone()),
+            (
+                Field::Parameter,
+                vec![region.clone(), index.clone()],
+                name.clone(),
+            ),
+            (Field::ParameterCount, vec![region.clone()], index.clone()),
             (
                 Field::ControlYield,
                 vec![operation, index.clone(), index],
@@ -207,6 +233,25 @@ impl Graph {
             .unwrap_or_default()
     }
 
+    pub fn outputs(&self, operation: Value) -> Vec<Value> {
+        self.structure.read().outputs.get(&operation).cloned().unwrap_or_default()
+    }
+
+    pub fn output_count(&self, operation: Value) -> i64 {
+        self.structure.read().outputs.get(&operation).map_or(0, |outputs| outputs.len() as i64)
+    }
+
+    pub fn output_at(&self, operation: Value, slot: i64) -> Option<Value> {
+        self.structure.read().outputs.get(&operation)?.get(usize::try_from(slot).ok()?).copied()
+    }
+
+    pub fn output(&self, operation: Value, slot: i64) -> Result<Value, OptimizeError> {
+        let Some(name) = self.output_at(operation, slot) else {
+            return Err(output_error(format!("missing output {slot} on {operation:?}")));
+        };
+        Ok(name)
+    }
+
     pub fn inputs(&self, operation: Value) -> Vec<Value> {
         self.structure.read().inputs.values.get(&operation).cloned().unwrap_or_default()
     }
@@ -222,6 +267,25 @@ impl Graph {
     pub fn input(&self, operation: Value, slot: i64) -> Result<Value, OptimizeError> {
         self.input_at(operation, slot)
             .ok_or_else(|| output_error(format!("operation {operation:?} has no input {slot}")))
+    }
+
+    pub fn parameters(&self, region: Value) -> Vec<Value> {
+        self.structure.read().parameters.get(&region).cloned().unwrap_or_default()
+    }
+
+    pub fn parameter_count(&self, region: Value) -> i64 {
+        self.structure.read().parameters.get(&region).map_or(0, |parameters| parameters.len() as i64)
+    }
+
+    pub fn parameter_at(&self, region: Value, slot: i64) -> Option<Value> {
+        self.structure.read().parameters.get(&region)?.get(usize::try_from(slot).ok()?).copied()
+    }
+
+    pub fn parameter(&self, region: Value, slot: i64) -> Result<Value, OptimizeError> {
+        let Some(name) = self.parameter_at(region, slot) else {
+            return Err(output_error(format!("missing parameter {slot} in {region:?}")));
+        };
+        Ok(name)
     }
 
     pub fn yield_values(&self, region: Value) -> Vec<Value> {
@@ -241,6 +305,41 @@ impl Graph {
             return Err(output_error(format!("region {region:?} has no yield {slot}")));
         };
         Ok(value)
+    }
+
+    pub fn reducers(&self, operation: Value) -> Vec<(i64, Value)> {
+        self.structure.read().reducers.get(&operation).cloned().unwrap_or_default()
+    }
+
+    pub fn combiners(&self, operation: Value) -> Vec<(i64, Value)> {
+        self.structure.read().combiners.get(&operation).cloned().unwrap_or_default()
+    }
+
+    pub fn reducer_at(&self, operation: Value, slot: i64) -> Option<Value> {
+        callback_at(&self.structure.read().reducers, operation, slot)
+    }
+
+    pub fn combiner_at(&self, operation: Value, slot: i64) -> Option<Value> {
+        callback_at(&self.structure.read().combiners, operation, slot)
+    }
+
+    pub fn reducer(&self, operation: Value, slot: i64) -> Result<Value, OptimizeError> {
+        let Some(region) = self.reducer_at(operation, slot) else {
+            return Err(output_error(format!("missing reducer {slot} on {operation:?}")));
+        };
+        Ok(region)
+    }
+
+    pub fn attached_regions(&self, operation: Value) -> Vec<Value> {
+        let structure = self.structure.read();
+        let mut regions: Vec<_> = [0, 1]
+            .into_iter()
+            .filter_map(|slot| structure.controls.get(&(operation, slot)).map(|edge| edge.region))
+            .collect();
+        for callbacks in [&structure.reducers, &structure.combiners] {
+            regions.extend(callbacks.get(&operation).into_iter().flatten().map(|&(_, child)| child));
+        }
+        regions
     }
 
     pub fn region_of(&self, operation: Value) -> Option<Value> {
@@ -344,6 +443,33 @@ impl State<'_, '_, '_> {
         self.structure.write().targets.shift_remove(&operation);
     }
 
+    pub fn set_outputs(&mut self, operation: Value, names: Vec<Value>) -> Result<(), Error> {
+        register_arity(&mut self.facts, self.structure, names.len())?;
+        let mut graph = self.structure.write();
+        if names.is_empty() {
+            graph.outputs.remove(&operation);
+        } else {
+            graph.outputs.insert(operation, names);
+        }
+        Ok(())
+    }
+
+    pub fn set_output(&mut self, operation: Value, slot: i64, name: Value) -> Result<(), Error> {
+        let Ok(index) = usize::try_from(slot) else {
+            return Err(Error::BackendError(format!(
+                "negative result {slot} on {operation:?}"
+            )));
+        };
+        let mut graph = self.structure.write();
+        let Some(target) = graph.outputs.get_mut(&operation).and_then(|names| names.get_mut(index)) else {
+            return Err(Error::BackendError(format!(
+                "missing result {slot} on {operation:?}"
+            )));
+        };
+        *target = name;
+        Ok(())
+    }
+
     pub fn set_inputs(&mut self, operation: Value, inputs: Vec<Value>) -> Result<(), Error> {
         register_arity(&mut self.facts, self.structure, inputs.len())?;
         self.structure.write().inputs.replace(operation, inputs);
@@ -354,6 +480,17 @@ impl State<'_, '_, '_> {
         self.structure.write().inputs.redirect(operation, slot, input)
     }
 
+    pub fn set_parameters(&mut self, region: Value, names: Vec<Value>) -> Result<(), Error> {
+        register_arity(&mut self.facts, self.structure, names.len())?;
+        let mut graph = self.structure.write();
+        if names.is_empty() {
+            graph.parameters.remove(&region);
+        } else {
+            graph.parameters.insert(region, names);
+        }
+        Ok(())
+    }
+
     pub fn set_yields(&mut self, region: Value, values: Vec<Value>) -> Result<(), Error> {
         register_arity(&mut self.facts, self.structure, values.len())?;
         self.structure.write().yields.replace(region, values);
@@ -362,6 +499,32 @@ impl State<'_, '_, '_> {
 
     pub fn set_yield(&mut self, region: Value, slot: i64, value: Value) -> Result<(), Error> {
         self.structure.write().yields.redirect(region, slot, value)
+    }
+
+    pub fn set_reducer(&mut self, operation: Value, slot: i64, region: Value) {
+        set_callback(&mut self.structure.write().reducers, operation, slot, region);
+    }
+
+    pub fn set_combiner(&mut self, operation: Value, slot: i64, region: Value) {
+        set_callback(&mut self.structure.write().combiners, operation, slot, region);
+    }
+
+    pub fn set_reducers(&mut self, operation: Value, reducers: Vec<(i64, Value)>) {
+        let mut structure = self.structure.write();
+        if reducers.is_empty() {
+            structure.reducers.remove(&operation);
+        } else {
+            structure.reducers.insert(operation, reducers);
+        }
+    }
+
+    pub fn set_combiners(&mut self, operation: Value, combiners: Vec<(i64, Value)>) {
+        let mut structure = self.structure.write();
+        if combiners.is_empty() {
+            structure.combiners.remove(&operation);
+        } else {
+            structure.combiners.insert(operation, combiners);
+        }
     }
 
     pub fn set_control(&mut self, operation: Value, slot: i64, child: Value) {
@@ -410,8 +573,10 @@ impl State<'_, '_, '_> {
         Ok(())
     }
 
-    pub fn clear_control(&mut self, operation: Value) {
+    pub fn clear_bodies(&mut self, operation: Value) {
         let mut structure = self.structure.write();
+        structure.reducers.remove(&operation);
+        structure.combiners.remove(&operation);
         for slot in 0..2 {
             if let Some(edge) = structure.controls.remove(&(operation, slot)) {
                 for (index, value) in edge.arguments.into_iter().enumerate() {
@@ -463,10 +628,11 @@ impl State<'_, '_, '_> {
 
     pub fn remove_operation(&mut self, operation: Value) {
         self.operations.remove(&operation);
-        self.clear_control(operation);
+        self.clear_bodies(operation);
         let mut structure = self.structure.write();
         structure.targets.shift_remove(&operation);
         structure.inputs.replace(operation, Vec::new());
+        structure.outputs.remove(&operation);
         if let Some(region) = structure.operations.remove(&operation).and_then(|position| position.region) {
             if let Some(operations) = structure.by_region.get_mut(&region) {
                 operations.remove(&operation);
@@ -513,6 +679,28 @@ impl ValueLists {
             self.uses.entry(value).or_default().insert((owner, slot));
         }
         Ok(())
+    }
+}
+
+pub(super) fn callback_at(
+    callbacks: &LookupMap<Value, Vec<(i64, Value)>>,
+    operation: Value,
+    slot: i64,
+) -> Option<Value> {
+    callbacks.get(&operation)?.iter().find_map(|&(index, region)| (index == slot).then_some(region))
+}
+
+fn set_callback(
+    callbacks: &mut LookupMap<Value, Vec<(i64, Value)>>,
+    operation: Value,
+    slot: i64,
+    region: Value,
+) {
+    let attached = callbacks.entry(operation).or_default();
+    if let Some((_, previous)) = attached.iter_mut().find(|(index, _)| *index == slot) {
+        *previous = region;
+    } else {
+        attached.push((slot, region));
     }
 }
 

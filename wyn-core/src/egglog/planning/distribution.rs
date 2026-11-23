@@ -70,7 +70,7 @@ pub(super) fn apply(graph: &mut Graph, outer: Value, inner: Value) -> Result<(),
     let mut parameters = Vec::new();
     for (region, rank) in [(body, rank), (inner_body, inner_rank)] {
         for slot in 1..=rank {
-            let name = query.required("RegionParameter", (region, slot))?;
+            let name = query.0.parameter(region, slot)?;
             let value = query.fields("ValueNameRef", name)?[0];
             parameters.push(Parameter {
                 name: Name::Value(value),
@@ -94,6 +94,7 @@ pub(super) fn apply(graph: &mut Graph, outer: Value, inner: Value) -> Result<(),
         .collect::<Result<Vec<_>, OptimizeError>>()?;
     let base = query.0.operation_order(inner)? + 2;
     let result_count = analysis::count(query, "ResultCount", inner)?;
+    let reducers = graph.reducers(inner);
     let mut removed = Vec::new();
     let mut copied = Vec::new();
     for &table in OPERATION_CELLS {
@@ -131,6 +132,7 @@ pub(super) fn apply(graph: &mut Graph, outer: Value, inner: Value) -> Result<(),
             }
             sink.remove("ResultCount", outer)?;
             sink.set("ResultCount", outer, result_count)?;
+            sink.set_reducers(outer, reducers);
             let ordinal = sink.add("DerivedValue", (inner, 40_i64, 0_i64))?;
             sink.set("ValueType", ordinal, info)?;
             sink.remove("DomainOrdinal", domain)?;
@@ -142,10 +144,9 @@ pub(super) fn apply(graph: &mut Graph, outer: Value, inner: Value) -> Result<(),
                 sink.set("DomainExtent", (domain, rank + slot as i64), extent)?;
             }
             for slot in 0..=rank {
-                sink.remove("RegionParameter", (body, slot))?;
                 sink.remove("ParameterDiet", (body, slot))?;
             }
-            sink.remove("RegionParameterCount", body)?;
+            sink.set_parameters(body, Vec::new())?;
             parameters.insert(
                 0,
                 Parameter {

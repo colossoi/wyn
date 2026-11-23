@@ -22,11 +22,6 @@ impl Query<'_> {
             .collect()
     }
 
-    pub fn sequence(&self, table: &str, owner: Value) -> Result<Vec<Value>, OptimizeError> {
-        let count = self.required(&format!("{table}Count"), owner)?;
-        self.indexed(table, &[owner], self.0.value_to_base::<i64>(count))
-    }
-
     pub fn operations(&self, region: Value) -> Result<Vec<Value>, OptimizeError> {
         let mut operations = Vec::new();
         let positions = self.0.structure().read();
@@ -40,22 +35,6 @@ impl Query<'_> {
         }
         operations.sort_by_key(|&(order, _)| order);
         Ok(operations.into_iter().map(|(_, operation)| operation).collect())
-    }
-
-    pub fn attached_regions(&self, operation: Value) -> Result<Vec<Value>, OptimizeError> {
-        let mut regions: Vec<_> = self.0.controls(operation).map(|(_, child)| child).collect();
-        for (table, count) in [
-            ("ResultReducer", "ResultCount"),
-            ("AccumulatorCombiner", "AccumulatorGroupCount"),
-        ] {
-            let Some(count) = self.lookup(count, operation)? else {
-                continue;
-            };
-            for slot in 0..self.0.value_to_base::<i64>(count) {
-                regions.extend(self.lookup(table, (operation, slot))?);
-            }
-        }
-        Ok(regions)
     }
 
     pub fn name(&self, name: Value) -> Result<Value, OptimizeError> {

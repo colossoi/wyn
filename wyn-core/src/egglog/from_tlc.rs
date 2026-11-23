@@ -887,7 +887,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                     combine,
                     values,
                 } => {
-                    self.sink.set("ResultReducer", (operation.0, index), combine.0)?;
+                    self.sink.set_reducer(operation.0, index, combine.0);
                     self.sink.set("ResultCommutative", (operation.0, index), false)?;
                     self.sink.set("ResultNeutralCount", (operation.0, index), neutral.len() as i64)?;
                     for (field, value) in neutral.into_iter().enumerate() {
@@ -1287,7 +1287,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
             self.sink.set("AccumulatorArrayCount", (operation.0, group), 1_i64)?;
             self.sink.set("AccumulatorArray", (operation.0, group, 0_i64), input.array)?;
             if let Some(combine) = input.combine {
-                self.sink.set("AccumulatorCombiner", (operation.0, group), combine.0)?;
+                self.sink.set_combiner(operation.0, group, combine.0);
             }
         }
         self.emit(operation, ty, scope)

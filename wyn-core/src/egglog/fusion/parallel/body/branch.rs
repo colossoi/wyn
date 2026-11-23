@@ -77,8 +77,7 @@ impl Body {
                 sink.set("ValueType", inside, ty)?;
                 let inner = Name::Value(inside);
                 let inner_name = inner.fact(&mut sink)?;
-                sink.remove("Output", (key, 0_i64))?;
-                sink.set("Output", (key, 0_i64), inner_name)?;
+                sink.set_output(key, 0_i64, inner_name)?;
                 let branch =
                     ir::operation_at(&mut sink, WireOperationId(guard), Code::Branch, &[predicate])?;
                 ir::outputs(&mut sink, branch, &[Name::Value(name)])?;
@@ -258,17 +257,14 @@ impl Body {
             ));
         }
         let mut certificates = Vec::new();
+        let mut outputs = Vec::new();
         for op in self.joined_branches.iter().copied().chain(self.accumulator_origins.keys()) {
             let key = self.graph.operations[op];
             let size = self.graph.ir.operations[op].result_types.len();
-            for slot in 0..size {
-                rows.push((
-                    "Output",
-                    vec![key, index(slot)],
-                    self.graph.names[&ValueRef::Result(op, slot)],
-                ));
-            }
-            rows.push(("OutputCount", vec![key], index(size)));
+            outputs.push((
+                key,
+                (0..size).map(|slot| self.graph.names[&ValueRef::Result(op, slot)]).collect(),
+            ));
             for (_, name) in self.uses.at(Site::Certificate(op)) {
                 certificates.push((key, query.name(name)?));
             }
@@ -282,6 +278,9 @@ impl Body {
             Ok(())
         })?;
         graph.update(|mut sink| {
+            for (op, names) in outputs {
+                sink.set_outputs(op, names)?;
+            }
             for (region, values) in region_yields {
                 sink.set_yields(region, values)?;
             }

@@ -60,7 +60,7 @@ pub(super) fn apply(graph: &mut Graph, body: &mut Option<BodyGraph>) -> Result<b
     let query = Query(graph);
     let mut constants = Vec::new();
     query.for_each("FoldedConstant", |row| {
-        let output = query.required("Output", (row[0], 0_i64))?;
+        let output = query.0.output(row[0], 0_i64)?;
         let primitive = query.required("ValuePrimitive", output)?;
         let ty = query.0.value_to_base::<S>(query.required("ScalarTypeName", primitive)?);
         let Some(ty) = fold::scalar_type(ty.as_str()) else {

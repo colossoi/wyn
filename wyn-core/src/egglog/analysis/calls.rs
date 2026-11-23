@@ -38,7 +38,7 @@ pub(super) fn publish(graph: &mut Graph, for_inlining: bool) -> Result<(), Optim
         }
         for (slot, &initial) in edge.arguments.iter().enumerate() {
             let slot = slot as i64;
-            let Some(parameter) = query.lookup("RegionParameter", (edge.region, slot))? else {
+            let Some(parameter) = query.0.parameter_at(edge.region, slot) else {
                 continue;
             };
             let Some(next) = query.0.yield_at(edge.region, slot) else {
@@ -53,11 +53,12 @@ pub(super) fn publish(graph: &mut Graph, for_inlining: bool) -> Result<(), Optim
             }
         }
     }
-    for table in ["ResultReducer", "AccumulatorCombiner"] {
-        query.for_function(table, |keys, child| {
-            record(keys[0], child);
-            Ok(())
-        })?;
+    for callbacks in [&positions.reducers, &positions.combiners] {
+        for (&operation, bodies) in callbacks {
+            for &(_, child) in bodies {
+                record(operation, child);
+            }
+        }
     }
     for (&operation, &callee) in &positions.targets {
         if let Some(region) = positions.operations.get(&operation).and_then(|position| position.region) {
@@ -81,7 +82,23 @@ pub(super) fn publish(graph: &mut Graph, for_inlining: bool) -> Result<(), Optim
         );
     }
     let mut parallel_functions = Vec::new();
+    let mut memory_signatures = Vec::new();
     for (&function, &root) in &positions.roots {
+        if for_inlining {
+            for &parameter in positions.parameters.get(&root).into_iter().flatten() {
+                let requires_inline = match query.value_name(parameter)? {
+                    Some(name) => match query.lookup("ValueType", name)? {
+                        Some(info) => query.enode("LogicalValue", info)?.is_some(),
+                        None => false,
+                    },
+                    None => query.enode("AccNameRef", parameter)?.is_some(),
+                };
+                if requires_inline {
+                    memory_signatures.push(function);
+                    break;
+                }
+            }
+        }
         let bodies = reached.entry(function).or_default();
         let sites = calls.entry(function).or_insert_with(Vec::new);
         for_each_reachable(
@@ -127,6 +144,9 @@ pub(super) fn publish(graph: &mut Graph, for_inlining: bool) -> Result<(), Optim
         }
         for function in parallel_functions {
             sink.add("InlineParallel", function)?;
+        }
+        for function in memory_signatures {
+            sink.set("InlineRequired", function, true)?;
         }
         for function in functions {
             sink.set("RecursiveFunction", function, recursive.contains(&function))?;

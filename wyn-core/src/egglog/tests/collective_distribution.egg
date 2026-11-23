@@ -3,42 +3,42 @@
 (let array (ArrayType (ValueArray) (vec-of (FixedExtent 4)) (ElementValue (ScalarElement (I32)))))
 (set (FixtureRegion (OperationId 90)) (RegionId 0))
 (set (FixtureOrder (OperationId 90)) 0)
-(set (OutputCount (OperationId 90)) 1)
-(set (Output (OperationId 90) 0) (ValueNameRef (ValueId 1000)))
+
+(set (FixtureOutput (OperationId 90) 0) (ValueNameRef (ValueId 1000)))
 (set (ValueType (ValueId 1000)) scalar)
 (set (FixtureRegion (OperationId 0)) (RegionId 0))
 (set (FixtureOrder (OperationId 0)) 1)
-(set (OutputCount (OperationId 0)) 2)
-(set (Output (OperationId 0) 0) (ValueNameRef (ValueId 3)))
-(set (Output (OperationId 0) 1) (ValueNameRef (ValueId 4)))
+
+(set (FixtureOutput (OperationId 0) 0) (ValueNameRef (ValueId 3)))
+(set (FixtureOutput (OperationId 0) 1) (ValueNameRef (ValueId 4)))
 (set (FixtureRegion (OperationId 1)) (RegionId 1))
 (set (FixtureOrder (OperationId 1)) 0)
-(set (OutputCount (OperationId 1)) 2)
-(set (Output (OperationId 1) 0) (ValueNameRef (ValueId 1)))
-(set (Output (OperationId 1) 1) (ValueNameRef (ValueId 2)))
+
+(set (FixtureOutput (OperationId 1) 0) (ValueNameRef (ValueId 1)))
+(set (FixtureOutput (OperationId 1) 1) (ValueNameRef (ValueId 2)))
 (Region (RegionId 0)) (FlowScope (RegionId 0))
-(set (RegionParameterCount (RegionId 0)) 0)
+
 
 (set (FixtureYield (RegionId 0) 0) (ValueNameRef (ValueId 3)))
 (set (RegionReturnType (RegionId 0) 0) (LogicalReturn array))
 (set (FixtureYield (RegionId 0) 1) (ValueNameRef (ValueId 4)))
 (set (RegionReturnType (RegionId 0) 1) (LogicalReturn array))
 (Region (RegionId 1)) (FlowScope (RegionId 1))
-(set (RegionParameterCount (RegionId 1)) 2)
 
-(set (RegionParameter (RegionId 1) 0) (ValueNameRef (ValueId 110)))
+
+(set (FixtureParameter (RegionId 1) 0) (ValueNameRef (ValueId 110)))
 (set (ValueType (ValueId 110)) scalar)
 (set (ParameterDiet (RegionId 1) 0) (Observe))
-(set (RegionParameter (RegionId 1) 1) (ValueNameRef (ValueId 10)))
+(set (FixtureParameter (RegionId 1) 1) (ValueNameRef (ValueId 10)))
 (set (ValueType (ValueId 10)) scalar)
 (set (ParameterDiet (RegionId 1) 1) (Observe))
 (Region (RegionId 2)) (FlowScope (RegionId 2))
-(set (RegionParameterCount (RegionId 2)) 2)
 
-(set (RegionParameter (RegionId 2) 0) (ValueNameRef (ValueId 111)))
+
+(set (FixtureParameter (RegionId 2) 0) (ValueNameRef (ValueId 111)))
 (set (ValueType (ValueId 111)) scalar)
 (set (ParameterDiet (RegionId 2) 0) (Observe))
-(set (RegionParameter (RegionId 2) 1) (ValueNameRef (ValueId 11)))
+(set (FixtureParameter (RegionId 2) 1) (ValueNameRef (ValueId 11)))
 (set (ValueType (ValueId 11)) scalar)
 (set (ParameterDiet (RegionId 2) 1) (Observe))
 (set (ValueType (ValueId 1)) scalar)
@@ -46,12 +46,12 @@
 (set (ValueType (ValueId 3)) (LogicalValue array))
 (set (ValueType (ValueId 4)) (LogicalValue array))
 (Region (RegionId 20)) (FlowScope (RegionId 20))
-(set (RegionParameterCount (RegionId 20)) 2)
 
-(set (RegionParameter (RegionId 20) 0) (ValueNameRef (ValueId 20)))
+
+(set (FixtureParameter (RegionId 20) 0) (ValueNameRef (ValueId 20)))
 (set (ValueType (ValueId 20)) scalar)
 (set (ParameterDiet (RegionId 20) 0) (Observe))
-(set (RegionParameter (RegionId 20) 1) (ValueNameRef (ValueId 21)))
+(set (FixtureParameter (RegionId 20) 1) (ValueNameRef (ValueId 21)))
 (set (ValueType (ValueId 21)) scalar)
 (set (ParameterDiet (RegionId 20) 1) (Observe))
 
@@ -61,18 +61,18 @@
 (set (FixtureOrder (OperationId 20)) 0)
 (set (FixtureInput (OperationId 20) 0) (ValueNameRef (ValueId 20)))
 (set (FixtureInput (OperationId 20) 1) (ValueNameRef (ValueId 21)))
-(set (OutputCount (OperationId 20)) 1)
-(set (Output (OperationId 20) 0) (ValueNameRef (ValueId 22)))
+
+(set (FixtureOutput (OperationId 20) 0) (ValueNameRef (ValueId 22)))
 (set (ValueType (ValueId 22)) scalar)
 (DiscardableOperation (OperationId 20)) (RepeatableOperation (OperationId 20))
 FIRST_CAPTURE
 (Region (RegionId 30)) (FlowScope (RegionId 30))
-(set (RegionParameterCount (RegionId 30)) 2)
 
-(set (RegionParameter (RegionId 30) 0) (ValueNameRef (ValueId 30)))
+
+(set (FixtureParameter (RegionId 30) 0) (ValueNameRef (ValueId 30)))
 (set (ValueType (ValueId 30)) scalar)
 (set (ParameterDiet (RegionId 30) 0) (Observe))
-(set (RegionParameter (RegionId 30) 1) (ValueNameRef (ValueId 31)))
+(set (FixtureParameter (RegionId 30) 1) (ValueNameRef (ValueId 31)))
 (set (ValueType (ValueId 31)) scalar)
 (set (ParameterDiet (RegionId 30) 1) (Observe))
 
@@ -82,8 +82,8 @@ FIRST_CAPTURE
 (set (FixtureOrder (OperationId 30)) 0)
 (set (FixtureInput (OperationId 30) 0) (ValueNameRef (ValueId 30)))
 (set (FixtureInput (OperationId 30) 1) (ValueNameRef (ValueId 31)))
-(set (OutputCount (OperationId 30)) 1)
-(set (Output (OperationId 30) 0) (ValueNameRef (ValueId 32)))
+
+(set (FixtureOutput (OperationId 30) 0) (ValueNameRef (ValueId 32)))
 (set (ValueType (ValueId 32)) scalar)
 (DiscardableOperation (OperationId 30)) (RepeatableOperation (OperationId 30))
 SECOND_CAPTURE
@@ -119,7 +119,7 @@ SECOND_CAPTURE
 (set (OutputClause (OperationId 1) 0) 0)
 (set (OutputField (OperationId 1) 0) 0)
 (set (OutputRole (OperationId 1) 0) (TotalOutput))
-(set (ResultReducer (OperationId 1) 0) (RegionId 20))
+(set (FixtureResultReducer (OperationId 1) 0) (RegionId 20))
 (set (ResultNeutralCount (OperationId 1) 0) 1)
 (set (ResultNeutral (OperationId 1) 0 0) (ValueNameRef (ValueId 1000)))
 (set (ResultCommutative (OperationId 1) 0) true)
@@ -129,7 +129,7 @@ SECOND_CAPTURE
 (set (OutputClause (OperationId 1) 1) 1)
 (set (OutputField (OperationId 1) 1) 0)
 (set (OutputRole (OperationId 1) 1) (TotalOutput))
-(set (ResultReducer (OperationId 1) 1) (RegionId 30))
+(set (FixtureResultReducer (OperationId 1) 1) (RegionId 30))
 (set (ResultNeutralCount (OperationId 1) 1) 1)
 (set (ResultNeutral (OperationId 1) 1 0) (ValueNameRef (ValueId 1000)))
 (set (ResultCommutative (OperationId 1) 1) true)

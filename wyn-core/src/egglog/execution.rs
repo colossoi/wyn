@@ -304,12 +304,9 @@ fn collective(
         scan: query.flag("ChunkScan", operation)?,
         ..Default::default()
     };
-    query.for_function("ResultReducer", |keys, reducer| {
-        if keys[0] == operation {
-            work.combine_ops = work.combine_ops.saturating_add(region_work(query, reducer)?);
-        }
-        Ok(())
-    })?;
+    for (_, reducer) in query.0.reducers(operation) {
+        work.combine_ops = work.combine_ops.saturating_add(region_work(query, reducer)?);
+    }
     let mut states = states.iter().filter(|((owner, _, _), _)| *owner == operation).collect::<Vec<_>>();
     states.sort_by_key(|((_, clause, slot), _)| (*clause, *slot));
     let mut types = Vec::new();
@@ -425,7 +422,7 @@ impl Execution {
                 return Err(error("entry source metadata missing"));
             };
             let mut host_values = Bindings::default();
-            for (i, parameter) in query.sequence("RegionParameter", root)?.into_iter().enumerate() {
+            for (i, parameter) in query.0.parameters(root).into_iter().enumerate() {
                 if let Some((name, ty)) = representation::runtime_binding(query, parameter)? {
                     if !declarations.get(i).is_some_and(|param| param.device_produced) {
                         host_values.insert(name, ScalarExpr::Local(format!("parameter_{i}")));
@@ -468,7 +465,7 @@ impl Execution {
         while i < operations.len() {
             let operation = operations[i];
             let code = query.0.code(operation)?;
-            let pattern = query.sequence("Output", operation)?;
+            let pattern = query.0.outputs(operation);
             let mut boundary = query.contains("RequiresSnapshot", operation)?;
             let mut scalar_loop = None;
             let kind = if self.dispatches.contains_key(&operation) {
@@ -539,7 +536,7 @@ impl Execution {
                 let interface = if matches!(code, Code::Branch) {
                     pattern.clone()
                 } else {
-                    query.sequence("RegionParameter", query.0.control_region(operation, 0_i64)?)?
+                    query.0.parameters(query.0.control_region(operation, 0_i64)?)
                 };
                 let buffer_result = generated
                     && interface.iter().try_fold(false, |any, &binding| {
@@ -554,10 +551,7 @@ impl Execution {
                 let fixed_state = buffer_result
                     && !matches!(code, Code::Branch)
                     && query
-                        .lookup(
-                            "LoopStateBytes",
-                            (operation, count(query, "OutputCount", operation)?),
-                        )?
+                        .lookup("LoopStateBytes", (operation, query.0.output_count(operation)))?
                         .is_some();
                 if !matches!(code, Code::Branch)
                     && generated
@@ -634,7 +628,7 @@ impl Execution {
                     if matches!(code, Code::Length { axis: 0 }) {
                         let source = query.name(query.0.input(operation, 0_i64)?)?;
                         if self.host_shapes.contains(&source) {
-                            let name = query.name(query.required("Output", (operation, 0_i64))?)?;
+                            let name = query.name(query.0.output(operation, 0_i64)?)?;
                             let length = query
                                 .lookup("LogicalOuterCount", source)?
                                 .map(|count| host::scalar_index(query, &host_values, count))

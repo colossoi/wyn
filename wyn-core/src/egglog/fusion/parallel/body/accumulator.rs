@@ -91,22 +91,24 @@ impl Body {
         let query = Query(graph);
         let index = |slot: usize| graph.base_to_value(slot as i64);
         let mut rows = Vec::new();
+        let mut parameters = Vec::new();
+        let mut callbacks = Vec::new();
         for (op, origins) in &self.accumulator_origins {
             let key = self.graph.operations[op];
             let region = self.lane(op)?;
             let wire_region = self.graph.regions[region];
             let body = &self.graph.ir.regions[region];
             let mut base = 0;
+            let mut combiners = Vec::new();
             for &origin in origins {
                 let origin = self.graph.operations[origin];
                 let size = count(query, "AccumulatorGroupCount", origin)?;
                 for slot in 0..size {
                     let group = index(base + slot as usize);
-                    for table in [
-                        "AccumulatorPolicy",
-                        "AccumulatorArrayCount",
-                        "AccumulatorCombiner",
-                    ] {
+                    if let Some(combine) = query.0.combiner_at(origin, slot) {
+                        combiners.push((base as i64 + slot, combine));
+                    }
+                    for table in ["AccumulatorPolicy", "AccumulatorArrayCount"] {
                         if let Some(value) = query.lookup(table, (origin, slot))? {
                             rows.push((table, vec![key, group], value));
                         }
@@ -125,25 +127,22 @@ impl Body {
                 }
                 base += size as usize;
             }
+            let mut names = Vec::with_capacity(body.parameters.len());
             for (slot, parameter) in body.parameters.iter().enumerate() {
-                let args = vec![wire_region, index(slot)];
-                rows.push(("ParameterDiet", args.clone(), parameter.diet));
-                rows.push((
-                    "RegionParameter",
-                    args,
-                    self.graph.names[&ValueRef::Parameter(region, slot)],
-                ));
+                rows.push(("ParameterDiet", vec![wire_region, index(slot)], parameter.diet));
+                names.push(self.graph.names[&ValueRef::Parameter(region, slot)]);
             }
-            rows.extend([
-                ("AccumulatorGroupCount", vec![key], index(base)),
-                (
-                    "RegionParameterCount",
-                    vec![wire_region],
-                    index(body.parameters.len()),
-                ),
-            ]);
+            parameters.push((wire_region, names));
+            callbacks.push((key, combiners));
+            rows.push(("AccumulatorGroupCount", vec![key], index(base)));
         }
         graph.update(|mut sink| {
+            for (op, combiners) in callbacks {
+                sink.set_combiners(op, combiners);
+            }
+            for (region, names) in parameters {
+                sink.set_parameters(region, names)?;
+            }
             for (table, keys, value) in rows {
                 sink.remove(table, RawValues(keys.clone()))?;
                 sink.set(table, RawValues(keys), value)?;

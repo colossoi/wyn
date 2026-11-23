@@ -79,7 +79,7 @@ impl Compiler<'_, '_> {
         let name_fields = query.fields("FunctionId", name)?;
         let text = self.program.graph.value_to_base::<S>(name_fields[1]).to_string();
         let params = if let Some(root) = root {
-            query.sequence("RegionParameter", root)?.into_iter().try_fold(Vec::new(), |mut out, name| {
+            query.0.parameters(root).into_iter().try_fold(Vec::new(), |mut out, name| {
                 let Some(binding) = runtime_binding(query, name)? else {
                     return Err(error(
                         "memory-bearing shader helper must be inlined before emission",

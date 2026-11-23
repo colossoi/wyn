@@ -91,6 +91,7 @@ pub(super) fn apply(
             ] {
                 sink.remove(table, output)?;
             }
+            sink.remove("ResultOrigin", (output, operation, 0_i64))?;
             sink.remove("DefinitionRegion", (output, region))
         })?;
     }

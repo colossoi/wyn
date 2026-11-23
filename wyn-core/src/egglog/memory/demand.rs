@@ -130,7 +130,7 @@ pub(super) fn dead_clause(
         {
             return Ok(());
         }
-        for (slot, output) in query.sequence("Output", operation)?.into_iter().enumerate() {
+        for (slot, output) in query.0.outputs(operation).into_iter().enumerate() {
             if needed(output) && analysis::count(query, "OutputClause", (operation, slot as i64))? == clause
             {
                 return Ok(());

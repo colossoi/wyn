@@ -145,7 +145,14 @@ fn motion_preserves_array_storage_inside_repeated_regions() -> Result<(), Optimi
         let owner = query.0.operation_region(allocation)?;
         assert_ne!(owner, root);
         if allocation_kind == "ScratchAllocation" {
-            assert!(query.row("ResultReducer", |row| row[2] == owner)?.is_some());
+            assert!(query
+                .0
+                .structure()
+                .read()
+                .reducers
+                .values()
+                .flatten()
+                .any(|&(_, region)| region == owner));
         }
         super::parallel::hoist(&mut graph)?;
         assert_eq!(
@@ -188,7 +195,7 @@ fn cross_region_motion_moves_a_capture_chain_in_one_edit() -> Result<(), Optimiz
     let query = Query(&graph);
     assert_eq!(query.0.operation_region(multiply)?, root);
     assert!(query.operations(root)?.into_iter().any(|op| {
-        query.0.input_at(op, 0_i64) == query.lookup("Output", (multiply, 0_i64)).unwrap()
+        query.0.input_at(op, 0_i64) == query.0.output_at(multiply, 0_i64)
             && query.0.code(op).unwrap() == Code::Scalar(Payload::Binary(BinaryOperator::Add))
     }));
     // The repaired scope and work summaries must agree with a fresh solve.
@@ -277,7 +284,7 @@ fn merging_matching_branches_preserves_certificates_and_path_order() -> Result<(
     assert!(super::parallel::branches(&mut graph)?);
     assert_eq!(edit::revision(&graph)?, revision + 1);
     let query = Query(&graph);
-    assert_eq!(analysis::count(query, "OutputCount", first)?, 2);
+    assert_eq!(query.0.output_count(first), 2);
     assert!(query.contains("OperationCertificate", (first, condition))?);
     assert!(!query.contains("Operation", second)?);
     assert!(query.contains("Operation", dependent)?);
@@ -316,9 +323,7 @@ fn compact_length_uses_a_count_without_a_collection() {
             let mut mixed = false;
             query
                 .for_each("LiveOperation", |row| {
-                    if query.contains("ParallelOperation", row[0])?
-                        && analysis::count(query, "OutputCount", row[0])? == 2
-                    {
+                    if query.contains("ParallelOperation", row[0])? && query.0.output_count(row[0]) == 2 {
                         mixed = true;
                     }
                     Ok(())
@@ -391,7 +396,7 @@ fn guarded_compaction_streams_a_map_into_a_reduce_in_one_batch() -> Result<(), O
         let query = Query(&graph);
         let traversals = parallels(query, root)?;
         assert_eq!(traversals.len(), 3);
-        let delta = if index < 2 { Some(query.required("RegionParameter", (root, 2_i64))?) } else { None };
+        let delta = if index < 2 { Some(query.0.parameter(root, 2_i64)?) } else { None };
         change_lane_index(&mut graph, traversals[1], delta, index == 0)?;
     }
     memory::simplify(&mut graph, false)?;
@@ -528,7 +533,7 @@ fn one_fusion_publication_contracts_independent_bodies_and_pointwise_chains() ->
             .filter(|&op| query.contains("ParallelOperation", op).unwrap())
             .nth(1)
             .unwrap();
-        let delta = query.lookup("RegionParameter", (root, 1_i64))?;
+        let delta = query.0.parameter_at(root, 1_i64);
         let commute = root == roots[0].1;
         change_lane_index(&mut graph, consumer, delta, commute)?;
     }
@@ -540,7 +545,7 @@ fn one_fusion_publication_contracts_independent_bodies_and_pointwise_chains() ->
         let mut outputs = Vec::new();
         for op in query.operations(region)? {
             if query.contains("ParallelOperation", op)? {
-                outputs.push(analysis::count(query, "OutputCount", op)?);
+                outputs.push(query.0.output_count(op));
             }
         }
         outputs.sort_unstable();
@@ -607,7 +612,7 @@ fn free_names_preserve_large_shared_fanout() {
     let query = Query(&program.graph);
     let entry = query.first("EntryOrder").unwrap().unwrap()[0];
     let root = query.0.function_root(entry).unwrap();
-    let input = query.required("RegionParameter", (root, 0_i64)).unwrap();
+    let input = query.0.parameter(root, 0_i64).unwrap();
     let mut uses = 0;
     query
         .for_each("DirectOperationUse", |row| {

@@ -170,7 +170,7 @@ impl Body<'_, '_, '_> {
 
     pub fn lambda(&mut self, region: Value, arguments: Vec<Typed>) -> Result<Vec<Typed>, OptimizeError> {
         let checkpoint = self.values.checkpoint();
-        self.bind(&self.query().sequence("RegionParameter", region)?, arguments)?;
+        self.bind(&self.query().0.parameters(region), arguments)?;
         let result = self.block(region);
         self.values.restore(checkpoint);
         result
@@ -223,7 +223,7 @@ impl Body<'_, '_, '_> {
             statement,
         )?;
         let query = self.query();
-        let pattern = query.sequence("Output", statement)?;
+        let pattern = query.0.outputs(statement);
         let operands = query.0.inputs(statement);
         let inputs = operands.iter().map(|&name| query.name(name)).collect::<Result<Vec<_>, _>>()?;
         let code = query.0.code(statement)?;
@@ -508,8 +508,8 @@ impl Body<'_, '_, '_> {
                 let region = self.query().0.control_region(statement, 0_i64)?;
                 let mut params = Vec::new();
                 let mut initial = Vec::new();
-                for slot in 0..crate::egglog::analysis::count(self.query(), "OutputCount", statement)? {
-                    let parameter = self.query().required("RegionParameter", (region, slot))?;
+                for slot in 0..self.query().0.output_count(statement) {
+                    let parameter = self.query().0.parameter(region, slot)?;
                     if let Some((name, ty)) = runtime_binding(self.query(), parameter)? {
                         let argument = self.query().0.argument(statement, 0_i64, slot)?;
                         let Some(value) = self.operand(argument)? else {
@@ -1123,7 +1123,7 @@ impl Body<'_, '_, '_> {
         let count = crate::egglog::analysis::count(query, "AccumulatorArrayCount", (owner, group))?;
         let arrays = query.indexed("AccumulatorArray", &[owner, capability[1]], count)?;
         let policy = query.required("AccumulatorPolicy", (owner, group))?;
-        let combine = query.lookup("AccumulatorCombiner", (owner, group))?;
+        let combine = query.0.combiner_at(owner, group);
         let indices = query
             .vector(query.required("OperationShape", operation)?)?
             .into_iter()

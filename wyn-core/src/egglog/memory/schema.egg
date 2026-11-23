@@ -83,14 +83,10 @@
 (relation OperationWorkDemand (OperationKey))
 (function OperationWork (OperationKey) BigInt :no-merge)
 (function InputDiet (OperationKey i64) Diet :no-merge)
-(function Output (OperationKey i64) Name :no-merge)
-(function OutputCount (OperationKey) i64 :no-merge)
 (function ValueType (ValueName) ValueInfo :no-merge)
 (function AccumulatorType (AccName) AccInfo :no-merge)
 (relation OperationCertificate (OperationKey ValueName))
 
-(function RegionParameter (RegionKey i64) Name :no-merge)
-(function RegionParameterCount (RegionKey) i64 :no-merge)
 (function ParameterDiet (RegionKey i64) Diet :no-merge)
 (function RegionReturnType (RegionKey i64) ReturnInfo :no-merge)
 (relation YieldCertificate (RegionKey i64 ValueName))
@@ -114,7 +110,6 @@
 (function ResultValue (OperationKey i64 i64) Name :no-merge)
 ; Compacted values and packed scan prefixes share the lane predicate.
 (function ResultPredicate (OperationKey i64) ValueName :no-merge)
-(function ResultReducer (OperationKey i64) RegionKey :no-merge)
 (function ResultNeutral (OperationKey i64 i64) Name :no-merge)
 (function ResultNeutralCount (OperationKey i64) i64 :no-merge)
 (function ResultCommutative (OperationKey i64) bool :no-merge)
@@ -127,7 +122,6 @@
 (function AccumulatorArrayCount (OperationKey i64) i64 :no-merge)
 (function AccumulatorArray (OperationKey i64 i64) ValueName :no-merge)
 (function AccumulatorParameter (OperationKey i64) AccName :no-merge)
-(function AccumulatorCombiner (OperationKey i64) RegionKey :no-merge)
 
 (function RetainAllFunctions () bool :merge (or old new))
 (set (RetainAllFunctions) false)

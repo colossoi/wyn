@@ -30,7 +30,10 @@ pub(in crate::egglog::fusion) fn compact(graph: &mut Graph) -> Result<bool, Opti
     let mut producers = LookupMap::new();
     query.for_function("OutputClause", |key, clause| {
         if packed.contains(&(key[0], clause)) {
-            producers.insert(query.required("Output", (key[0], key[1]))?, key[0]);
+            producers.insert(
+                query.0.output(key[0], query.0.value_to_base::<i64>(key[1]))?,
+                key[0],
+            );
         }
         Ok(())
     })?;

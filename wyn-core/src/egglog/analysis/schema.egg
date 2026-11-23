@@ -23,6 +23,9 @@
 
 (datatype DefinitionSite (ParameterSite RegionKey i64) (OperationSite OperationKey i64))
 (function Defines (Name) DefinitionSite :merge old)
+(relation ResultOrigin (Name OperationKey i64))
+(relation FormalOrigin (Name RegionKey i64))
+(relation ReducerBody (OperationKey i64 RegionKey))
 (relation DefinitionRegion (Name RegionKey))
 (relation RootFunction (RegionKey FunctionName))
 (function RegionOwnedBy (RegionKey) OperationKey :merge old)

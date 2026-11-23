@@ -74,7 +74,7 @@ pub(super) fn inline(graph: &mut Graph) -> Result<(), OptimizeError> {
 fn inline_call(graph: &mut Graph, call: Value, callee: Value) -> Result<(), OptimizeError> {
     let cloning = timing::span("egglog inline cloning");
     let arguments = Query(graph).0.inputs(call);
-    let outputs = Query(graph).sequence("Output", call)?;
+    let outputs = Query(graph).0.outputs(call);
     let region = edit::clone_region(graph, call, callee, &arguments)?;
     drop(cloning);
     let substitution = timing::span("egglog inline substitution");

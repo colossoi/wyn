@@ -258,11 +258,8 @@ pub(in crate::egglog) fn outputs(
     operation: OperationId,
     outputs: &[Name],
 ) -> Result<(), OptimizeError> {
-    sink.set("OutputCount", operation.0, outputs.len() as i64)?;
-    for (index, output) in outputs.iter().enumerate() {
-        let output = output.fact(sink)?;
-        sink.set("Output", (operation.0, index as i64), output)?;
-    }
+    let names = outputs.iter().map(|name| name.fact(sink)).collect::<Result<Vec<_>, _>>()?;
+    sink.set_outputs(operation.0, names)?;
     Ok(())
 }
 
@@ -286,16 +283,17 @@ pub(in crate::egglog) fn parameters(
     region: RegionId,
     parameters: &[Parameter],
 ) -> Result<(), OptimizeError> {
-    sink.set("RegionParameterCount", region.0, parameters.len() as i64)?;
+    let mut names = Vec::with_capacity(parameters.len());
     for (index, parameter) in parameters.iter().enumerate() {
         match parameter.name {
             Name::Value(value) => sink.set("ValueType", value, parameter.info)?,
             Name::Accumulator(value) => sink.set("AccumulatorType", value, parameter.info)?,
         }
         let name = parameter.name.fact(sink)?;
-        sink.set("RegionParameter", (region.0, index as i64), name)?;
+        names.push(name);
         sink.set("ParameterDiet", (region.0, index as i64), parameter.diet)?;
     }
+    sink.set_parameters(region.0, names)?;
     Ok(())
 }
 

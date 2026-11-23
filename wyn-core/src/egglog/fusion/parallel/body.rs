@@ -301,7 +301,7 @@ impl Body {
                 );
                 results.clauses.push(id);
             }
-            for slot in 0..count(query, "OutputCount", key)? {
+            for slot in 0..query.0.output_count(key) {
                 let clause = count(query, "OutputClause", (key, slot))?;
                 let field = count(query, "OutputField", (key, slot))? as usize;
                 let role = query.required("OutputRole", (key, slot))?;
@@ -871,31 +871,34 @@ impl Body {
             }
             let key = self.graph.operations[op];
             let mut clause_count = 0_i64;
+            let mut reducers = Vec::new();
             for id in self.clauses_of(op) {
-                clauses.insert((self.graph.operations[id.0], id.1), (key, clause_count));
+                let original = self.graph.operations[id.0];
+                clauses.insert((original, id.1), (key, clause_count));
+                if let Some(region) = query.0.reducer_at(original, id.1) {
+                    reducers.push((clause_count, region));
+                }
                 clause_count += 1;
             }
-            let mut output_count = 0_i64;
+            let mut names = Vec::new();
             for output in &self.results[op].outputs {
                 let Some(&(_, clause)) =
                     clauses.get(&(self.graph.operations[output.clause.0], output.clause.1))
                 else {
                     continue;
                 };
-                outputs.insert(
-                    (self.graph.operations[output.original.0], output.original.1),
-                    (key, output_count, clause),
-                );
-                output_count += 1;
+                let original = (self.graph.operations[output.original.0], output.original.1);
+                outputs.insert(original, (key, names.len() as i64, clause));
+                names.push(query.0.output(original.0, original.1)?);
             }
-            counts.push((key, clause_count, output_count));
+            counts.push((key, clause_count, names, reducers));
         }
-        let edited: LookupSet<_> = counts.iter().map(|&(op, _, _)| op).collect();
+        let edited: LookupSet<_> = counts.iter().map(|&(op, ..)| op).collect();
         let mut rows = Vec::new();
         let mut old = Vec::new();
         for &table in edit::OPERATION_CELLS {
             let result = table.starts_with("Result") && table != "ResultCount";
-            let output = table.starts_with("Output") && table != "OutputCount";
+            let output = table.starts_with("Output");
             if !result && !output {
                 continue;
             }
@@ -935,11 +938,11 @@ impl Body {
             for (table, keys, value) in rows {
                 sink.set(table, RawValues(keys), value)?;
             }
-            for (op, clauses, outputs) in counts {
-                for (table, count) in [("ResultCount", clauses), ("OutputCount", outputs)] {
-                    sink.remove(table, op)?;
-                    sink.set(table, op, count)?;
-                }
+            for (op, clauses, names, reducers) in counts {
+                sink.set_reducers(op, reducers);
+                sink.remove("ResultCount", op)?;
+                sink.set("ResultCount", op, clauses)?;
+                sink.set_outputs(op, names)?;
             }
             self.publish_order(&mut sink)?;
             for certificate in certificates {

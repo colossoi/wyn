@@ -144,7 +144,7 @@ fn inlining_exposes_parallel_work_through_scalar_helpers_before_copying_them() -
         (delete (InlineAll)) (set (InlineAll) false)
         (set (FixtureRegion (OperationId 6)) (RegionId 2))
         (set (FixtureOrder (OperationId 6)) 0)
-        (set (OutputCount (OperationId 6)) 0)
+
         "#,
     )?;
     super::inline(&mut graph)?;
@@ -177,10 +177,10 @@ fn nested_calls_mark_only_the_reachable_cycle_recursive() -> Result<(), Optimize
     test_graph::facts_with_positions(
         &mut graph,
         r#"
-        (set (ResultReducer (OperationId 5) 0) (RegionId 10))
+        (set (FixtureResultReducer (OperationId 5) 0) (RegionId 10))
         (set (FixtureRegion (OperationId 6)) (RegionId 10))
         (set (FixtureCallTarget (OperationId 6)) (FunctionId 2 "identity"))
-        (set (AccumulatorCombiner (OperationId 6) 0) (RegionId 11))
+        (set (FixtureAccumulatorCombiner (OperationId 6) 0) (RegionId 11))
         (delete (FixtureRegion (OperationId 2)))
         (set (FixtureRegion (OperationId 2)) (RegionId 11))
         (delete (FixtureRegion (OperationId 1)))
@@ -247,7 +247,7 @@ fn structural_cloning_renames_storage_shapes_without_analysis() -> Result<(), Op
     let root = query.constructor("RegionId", 0_i64)?.unwrap();
     let context = query.constructor("OperationId", 1_i64)?.unwrap();
     let storage = query.constructor("OperationId", 5_i64)?.unwrap();
-    let arguments = query.sequence("RegionParameter", root)?;
+    let arguments = query.0.parameters(root);
     edit::clone_region(&mut graph, context, root, &arguments)?;
     let query = Query(&graph);
     let cloned = query.constructor("ClonedOperation", (context, storage))?.unwrap();
@@ -276,7 +276,7 @@ fn structural_cloning_follows_nested_regions_without_analysis() -> Result<(), Op
     let view = query.first("ViewOperation")?.unwrap()[0];
     let slices = query.required("OperationSlices", view)?;
     let returns = query.0.yield_values(root);
-    let mut arguments = query.sequence("RegionParameter", root)?;
+    let mut arguments = query.0.parameters(root);
     arguments[1] = arguments[2];
     let cloned_root = edit::clone_region(&mut graph, branch, root, &arguments)?;
     let query = Query(&graph);
@@ -319,11 +319,11 @@ fn keyed_positions_keep_multi_result_occurrences_distinct() -> Result<(), Optimi
             ),
         ],
         r#"
-        (set (OutputCount (OperationId 0)) 2)
-        (set (Output (OperationId 0) 0) (ValueNameRef (ValueId 9000)))
-        (set (Output (OperationId 0) 1) (ValueNameRef (ValueId 9001)))
-        (set (OutputCount (OperationId 1)) 1)
-        (set (Output (OperationId 1) 0) (ValueNameRef (ValueId 9002)))
+
+        (set (FixtureOutput (OperationId 0) 0) (ValueNameRef (ValueId 9000)))
+        (set (FixtureOutput (OperationId 0) 1) (ValueNameRef (ValueId 9001)))
+
+        (set (FixtureOutput (OperationId 1) 0) (ValueNameRef (ValueId 9002)))
     "#,
     )?;
     let query = Query(&graph);
@@ -331,14 +331,11 @@ fn keyed_positions_keep_multi_result_occurrences_distinct() -> Result<(), Optimi
     let b = query.constructor("OperationId", 1_i64)?.unwrap();
     assert_ne!(a, b);
     assert_eq!(graph.code(a)?, graph.code(b)?);
-    assert_eq!(query.sequence("Output", a)?.len(), 2);
-    assert_eq!(query.sequence("Output", b)?.len(), 1);
-    assert_ne!(
-        query.required("Output", (a, 0_i64))?,
-        query.required("Output", (a, 1_i64))?
-    );
-    assert!(query.lookup("Output", (a, -1_i64))?.is_none());
-    assert!(query.lookup("Output", (a, 2_i64))?.is_none());
+    assert_eq!(query.0.outputs(a).len(), 2);
+    assert_eq!(query.0.outputs(b).len(), 1);
+    assert_ne!(query.0.output(a, 0_i64)?, query.0.output(a, 1_i64)?);
+    assert!(query.0.output_at(a, -1_i64).is_none());
+    assert!(query.0.output_at(a, 2_i64).is_none());
     Ok(())
 }
 
@@ -408,10 +405,10 @@ fn substitution_preserves_static_types_and_renames_nested_indices() -> Result<()
     analysis::run(&mut graph)?;
     let root = test_graph::root(&graph);
     let query = Query(&graph);
-    let start = query.required("RegionParameter", (root, 1_i64))?;
-    let other = query.required("RegionParameter", (root, 2_i64))?;
+    let start = query.0.parameter(root, 1_i64)?;
+    let other = query.0.parameter(root, 2_i64)?;
     let view = query.first("ViewOperation")?.unwrap()[0];
-    let output = query.name(query.required("Output", (view, 0_i64))?)?;
+    let output = query.name(query.0.output(view, 0_i64)?)?;
     let info = query.required("ValueType", output)?;
     edit::replace(&mut graph, &[(start, other)])?;
     analysis::run(&mut graph)?;
@@ -428,9 +425,9 @@ fn applied_rewrites_do_not_replay_when_another_pass_revisits_the_same_body() -> 
     analysis::run(&mut graph)?;
     let root = test_graph::root(&graph);
     let query = Query(&graph);
-    let x = query.required("RegionParameter", (root, 0_i64))?;
-    let y = query.required("RegionParameter", (root, 1_i64))?;
-    let z = query.required("RegionParameter", (root, 2_i64))?;
+    let x = query.0.parameter(root, 0_i64)?;
+    let y = query.0.parameter(root, 1_i64)?;
+    let z = query.0.parameter(root, 2_i64)?;
     edit::replace(&mut graph, &[(x, y)])?;
     analysis::run(&mut graph)?;
     edit::replace(&mut graph, &[(y, z)])?;
@@ -452,7 +449,7 @@ fn reduction_combiner_cannot_capture_a_lane_index() -> Result<(), OptimizeError>
     let parallel = query.first("ParallelOperation")?.unwrap()[0];
     let domain = query.required("OperationDomain", parallel)?;
     let index = query.required("DomainAxis", (domain, 0_i64))?;
-    let reducer = query.required("ResultReducer", (parallel, 0_i64))?;
+    let reducer = query.0.reducer(parallel, 0_i64)?;
     graph.update(|mut sink| {
         let value = sink.add("ValueNameRef", index)?;
         sink.set_yield(reducer, 0_i64, value)
@@ -480,7 +477,7 @@ fn fusion_forwards_pointwise_reads_and_retains_both_results() -> Result<(), Opti
     query.for_each("LiveOperation", |row| {
         if query.contains("ParallelOperation", row[0])? {
             parallels += 1;
-            results += analysis::count(query, "OutputCount", row[0])?;
+            results += query.0.output_count(row[0]);
         }
         Ok(())
     })?;
@@ -490,8 +487,8 @@ fn fusion_forwards_pointwise_reads_and_retains_both_results() -> Result<(), Opti
     query.for_each("LiveOperation", |row| {
         if query.contains("IndexOperation", row[0])? {
             let source = query.0.input(row[0], 0_i64)?;
-            query.for_function("Output", |keys, output| {
-                reads += usize::from(output == source && query.contains("ParallelOperation", keys[0])?);
+            query.for_each("ParallelOperation", |row| {
+                reads += usize::from(query.0.outputs(row[0]).contains(&source));
                 Ok(())
             })?;
         }
@@ -566,14 +563,14 @@ fn fusion_keeps_the_reducer_with_its_result() -> Result<(), OptimizeError> {
     let [producer, consumer] = parallels.as_slice() else {
         panic!("expected a separate producer and reduction before fusion");
     };
-    let reducer = initial.required("ResultReducer", (*consumer, 0_i64))?;
+    let reducer = initial.0.reducer(*consumer, 0_i64)?;
     crate::egglog::fusion::run(&mut graph)?;
     super::validate(&mut graph)?;
     let query = Query(&graph);
     assert!(query.contains("LiveOperation", *producer)?);
     assert!(!query.contains("LiveOperation", *consumer)?);
-    assert_eq!(query.required("ResultReducer", (*producer, 1_i64))?, reducer);
-    assert_eq!(analysis::count(query, "OutputCount", *producer)?, 2);
+    assert_eq!(query.0.reducer(*producer, 1_i64)?, reducer);
+    assert_eq!(query.0.output_count(*producer), 2);
     Ok(())
 }
 
@@ -659,8 +656,8 @@ fn different_parameter_names_do_not_prove_disjoint_memory() -> Result<(), Optimi
         r#"
         (let array (LogicalValue (ArrayType (StorageArray) (vec-of (FixedExtent 4)) (ElementValue (ScalarElement (I32))))))
         (set (ValueType (ValueId 0)) array) (set (ValueType (ValueId 1)) array)
-        (set (RegionParameter (RegionId 0) 0) (ValueNameRef (ValueId 0)))
-        (set (RegionParameter (RegionId 0) 1) (ValueNameRef (ValueId 1)))
+        (set (FixtureParameter (RegionId 0) 0) (ValueNameRef (ValueId 0)))
+        (set (FixtureParameter (RegionId 0) 1) (ValueNameRef (ValueId 1)))
         (set (FixtureInput (OperationId 0) 0) (ValueNameRef (ValueId 0))) (WritesInput (OperationId 0) 0)
         (set (FixtureInput (OperationId 1) 0) (ValueNameRef (ValueId 1))) (ReadsInput (OperationId 1) 0)
         (EffectCompare (OperationId 0) (OperationId 1))
@@ -779,12 +776,12 @@ fn consumed_tokens_cannot_be_reused() -> Result<(), OptimizeError> {
         (let info (AccumulatorInfo (vec-of (IndexConstant 4)) (vec-of (ScalarElement (I32)))))
         (set (AccumulatorType (AccumulatorId 0)) info) (set (AccumulatorType (AccumulatorId 1)) info) (set (AccumulatorType (AccumulatorId 2)) info)
         (Region (RegionId 0)) (FlowScope (RegionId 0))
-        (set (RegionParameterCount (RegionId 0)) 1) (set (RegionParameter (RegionId 0) 0) (AccNameRef (AccumulatorId 0)))
+        (set (FixtureParameter (RegionId 0) 0) (AccNameRef (AccumulatorId 0)))
         (set (ParameterDiet (RegionId 0) 0) (Consume))
         (set (FixtureInput (OperationId 0) 0) (AccNameRef (AccumulatorId 0)))
-        (set (OutputCount (OperationId 0)) 1) (set (Output (OperationId 0) 0) (AccNameRef (AccumulatorId 1)))
+        (set (FixtureOutput (OperationId 0) 0) (AccNameRef (AccumulatorId 1)))
         (set (FixtureInput (OperationId 1) 0) (AccNameRef (AccumulatorId 0)))
-        (set (OutputCount (OperationId 1)) 1) (set (Output (OperationId 1) 0) (AccNameRef (AccumulatorId 2)))
+        (set (FixtureOutput (OperationId 1) 0) (AccNameRef (AccumulatorId 2)))
         (set (FixtureRegion (OperationId 0)) (RegionId 0)) (set (FixtureOrder (OperationId 0)) 0)
         (set (FixtureRegion (OperationId 1)) (RegionId 0)) (set (FixtureOrder (OperationId 1)) 1)
         (Function (FunctionId 0 "invalid")) (set (FixtureFunctionRoot (FunctionId 0 "invalid")) (RegionId 0))
@@ -812,11 +809,9 @@ fn validation_checks_live_functions_and_ignores_retired_programs() -> Result<(),
         Ok(())
     })?;
     super::validate(&mut graph)?;
-    let original = Query(&graph).required("RegionParameter", (root, 0_i64))?;
+    let original = Query(&graph).0.parameter(root, 0_i64)?;
     graph.update(|mut sink| {
-        sink.remove("RegionParameterCount", root)?;
-        sink.set("RegionParameterCount", root, 2_i64)?;
-        sink.set("RegionParameter", (root, 1_i64), original)?;
+        sink.set_parameters(root, vec![original, original])?;
         let observe = sink.add("Observe", RawValues(Vec::new()))?;
         sink.set("ParameterDiet", (root, 1_i64), observe)?;
         Ok(())
@@ -824,10 +819,8 @@ fn validation_checks_live_functions_and_ignores_retired_programs() -> Result<(),
     let error = super::validate(&mut graph).expect_err("duplicate binders");
     assert!(error.to_string().contains("more than one definition"), "{error}");
     graph.update(|mut sink| {
-        sink.remove("RegionParameter", (root, 1_i64))?;
         sink.remove("ParameterDiet", (root, 1_i64))?;
-        sink.remove("RegionParameterCount", root)?;
-        sink.set("RegionParameterCount", root, 1_i64)?;
+        sink.set_parameters(root, vec![original])?;
         sink.remove("EntryOrder", function)?;
         Ok(())
     })?;
@@ -894,10 +887,7 @@ fn compact_bindings_preserve_clause_offsets_and_liveness() -> Result<(), Optimiz
     let query = Query(&graph);
     let first = query.constructor("OperationId", 0_i64)?.unwrap();
     let second = query.constructor("OperationId", 1_i64)?.unwrap();
-    let kept = [
-        query.required("Output", (first, 0_i64))?,
-        query.required("Output", (second, 0_i64))?,
-    ];
+    let kept = [query.0.output(first, 0_i64)?, query.0.output(second, 0_i64)?];
     assert_eq!(
         super::demand::dead_clause(query, |name| kept.contains(&name))?,
         Some((first, 1))

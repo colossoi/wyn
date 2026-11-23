@@ -145,12 +145,12 @@ impl Body<'_, '_, '_> {
             let output_names = |role: &str| -> Result<Vec<Value>, OptimizeError> {
                 let query = self.query();
                 let mut names = Vec::new();
-                for slot in 0..crate::egglog::analysis::count(query, "OutputCount", operation)? {
+                for slot in 0..query.0.output_count(operation) {
                     let selected = query.required("OutputClause", (operation, slot))?;
                     if query.0.value_to_base::<i64>(selected) == clause
                         && query.enode(role, query.required("OutputRole", (operation, slot))?)?.is_some()
                     {
-                        names.push(query.name(query.required("Output", (operation, slot))?)?);
+                        names.push(query.name(query.0.output(operation, slot)?)?);
                     }
                 }
                 Ok(names)
@@ -181,7 +181,7 @@ impl Body<'_, '_, '_> {
                         exclusive: kind.starts_with("Exclusive"),
                     }
                 };
-                let reducer = self.query().required("ResultReducer", (operation, clause))?;
+                let reducer = self.query().0.reducer(operation, clause)?;
                 let count = crate::egglog::analysis::count(
                     self.query(),
                     "ResultNeutralCount",
@@ -221,7 +221,7 @@ impl Body<'_, '_, '_> {
             }
         }
         for (compact, mode, reducer, atoms, values, prefixes, totals) in fold_data {
-            let parameters = self.query().sequence("RegionParameter", reducer)?;
+            let parameters = self.query().0.parameters(reducer);
             let mut neutral = Vec::new();
             for (i, atom) in atoms.into_iter().enumerate() {
                 let Some(parameter) = parameters.get(i) else {
@@ -784,7 +784,7 @@ impl Body<'_, '_, '_> {
                         let query = body.query();
                         if let Some(slot) = query.lookup("ColumnScanLoad", (operation, step))? {
                             let slot = query.0.value_to_base::<i64>(slot) as usize;
-                            let name = query.name(query.required("Output", (step, 0_i64))?)?;
+                            let name = query.name(query.0.output(step, 0_i64)?)?;
                             body.values.insert(name, inputs[slot].clone());
                         } else {
                             body.statement(step)?;

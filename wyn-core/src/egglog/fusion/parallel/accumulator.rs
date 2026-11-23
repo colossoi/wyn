@@ -51,9 +51,7 @@ pub(in crate::egglog::fusion) fn run(graph: &mut Graph, sinking: bool) -> Result
     for op in accumulators {
         let region = query.0.control_region(op, 0_i64)?;
         let count_groups = count(query, "AccumulatorGroupCount", op)?;
-        if count(query, "RegionParameterCount", region)? == count_groups
-            && query.0.yield_count(region) == count_groups
-        {
+        if query.0.parameter_count(region) == count_groups && query.0.yield_count(region) == count_groups {
             groups.insert(op);
         }
     }

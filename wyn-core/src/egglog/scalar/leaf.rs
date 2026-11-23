@@ -320,26 +320,9 @@ pub(in crate::egglog) fn remove_use(
 }
 
 fn child_captures(query: Query<'_>, parent: Value, name: Value) -> Result<bool, OptimizeError> {
-    let mut slot = 0_i64;
-    while let Some(region) = query.0.control_at(parent, slot) {
-        if query.contains("RegionCapture", (region, name))? {
+    for child in query.0.attached_regions(parent) {
+        if query.contains("RegionCapture", (child, name))? {
             return Ok(true);
-        }
-        slot += 1;
-    }
-    for (table, count) in [
-        ("ResultReducer", "ResultCount"),
-        ("AccumulatorCombiner", "AccumulatorGroupCount"),
-    ] {
-        let Some(count) = query.lookup(count, parent)? else {
-            continue;
-        };
-        for slot in 0..query.0.value_to_base::<i64>(count) {
-            if let Some(region) = query.lookup(table, (parent, slot))? {
-                if query.contains("RegionCapture", (region, name))? {
-                    return Ok(true);
-                }
-            }
         }
     }
     Ok(false)

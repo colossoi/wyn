@@ -63,7 +63,7 @@ impl BodyGraph {
             Ok(())
         })?;
         for (&region, &id) in &region_ids {
-            for (index, name) in query.sequence("RegionParameter", region)?.into_iter().enumerate() {
+            for (index, name) in query.0.parameters(region).into_iter().enumerate() {
                 let value = ValueRef::Parameter(id, index);
                 refs.insert(name, value);
                 names.insert(value, name);
@@ -74,7 +74,7 @@ impl BodyGraph {
             }
             for &op in query.0.region_order(region)? {
                 let code = query.0.code(op)?;
-                let outputs = query.sequence("Output", op)?;
+                let outputs = query.0.outputs(op);
                 let definition = match code {
                     Code::Call => Definition::Call(functions[&query.0.call_target(op)?]),
                     code => Definition::Other(code),
@@ -129,23 +129,21 @@ impl BodyGraph {
                 });
             }
         }
-        for (table, role) in [
-            ("ResultReducer", BodyRole::Reducer as fn(usize) -> BodyRole),
-            ("AccumulatorCombiner", BodyRole::Combiner),
-        ] {
-            query.for_function(table, |keys, child| {
-                let Some(&op) = operation_ids.get(&keys[0]) else {
-                    return Ok(());
-                };
-                let index = usize::try_from(query.0.value_to_base::<i64>(keys[1]))
-                    .map_err(|_| output_error("negative region index"))?;
-                ir.operations[op].bodies.push(RegionEdge {
-                    role: role(index),
-                    region: region_ids[&child],
-                    arguments: Vec::new(),
-                });
-                Ok(())
-            })?;
+        for (op, &key) in &operations {
+            for (bodies, role) in [
+                (query.0.reducers(key), BodyRole::Reducer as fn(usize) -> BodyRole),
+                (query.0.combiners(key), BodyRole::Combiner),
+            ] {
+                for (slot, child) in bodies {
+                    let index =
+                        usize::try_from(slot).map_err(|_| output_error("negative callback index"))?;
+                    ir.operations[op].bodies.push(RegionEdge {
+                        role: role(index),
+                        region: region_ids[&child],
+                        arguments: Vec::new(),
+                    });
+                }
+            }
         }
         Ok(Self {
             ir,

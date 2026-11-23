@@ -26,7 +26,7 @@ impl EntryEmission<'_, '_, '_> {
         let domain = query.required("OperationDomain", statement)?;
         let mut carry_inputs = LookupSet::default();
         for clause in 0..crate::egglog::analysis::count(query, "ResultCount", statement)? {
-            if let Some(reducer) = query.lookup("ResultReducer", (statement, clause))? {
+            if let Some(reducer) = query.0.reducer_at(statement, clause) {
                 carry_inputs.extend(names_in(query, "RegionCapture", reducer)?);
                 for slot in
                     0..crate::egglog::analysis::count(query, "ResultNeutralCount", (statement, clause))?
@@ -39,7 +39,7 @@ impl EntryEmission<'_, '_, '_> {
                 }
             }
         }
-        let pattern = query.sequence("Output", statement)?;
+        let pattern = query.0.outputs(statement);
         let mut output_names = LookupSet::default();
         for (slot, &binding) in pattern.iter().enumerate() {
             if let Some((name, _)) = runtime_binding(query, binding)? {
@@ -185,7 +185,7 @@ impl EntryEmission<'_, '_, '_> {
         cooperative: bool,
         capacity: Value,
     ) -> Result<(), OptimizeError> {
-        let pattern = self.body.query().sequence("Output", statement)?;
+        let pattern = self.body.query().0.outputs(statement);
         let values = self.body.parallel_phase(
             statement,
             &pattern,

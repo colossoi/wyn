@@ -78,7 +78,7 @@ pub(super) fn lower(
         let Some(&region) = compiler.definitions.get(&function) else {
             return Err(error("entry graph function missing"));
         };
-        let params = query.sequence("RegionParameter", region)?;
+        let params = query.0.parameters(region);
         let mut pc_offset = 0u32;
         let mut parameter_inputs = Vec::new();
         let mut templates = Vec::new();
@@ -1566,7 +1566,7 @@ impl EntryEmission<'_, '_, '_> {
             let statement = step.operation;
             let mut live = step.live.clone();
             live.extend(after.iter().copied());
-            let pattern = self.body.query().sequence("Output", statement)?;
+            let pattern = self.body.query().0.outputs(statement);
             if step.boundary {
                 let mut before = statement_names(self.body.query(), &[statement])?;
                 before.extend(live.iter().copied());
@@ -1661,7 +1661,7 @@ impl EntryEmission<'_, '_, '_> {
     }
 
     fn cpu_loop(&mut self, loop_: Value) -> Result<(), OptimizeError> {
-        let pattern = self.body.query().sequence("Output", loop_)?;
+        let pattern = self.body.query().0.outputs(loop_);
         let mut outputs = Vec::new();
         for &binding in &pattern {
             let Some((name, ty)) = super::runtime_binding(self.body.query(), binding)? else {
@@ -1754,9 +1754,9 @@ impl EntryEmission<'_, '_, '_> {
     }
 
     fn loop_body(&mut self, expression: Value, after: &LookupSet<Value>) -> Result<(), OptimizeError> {
-        let pattern = self.body.query().sequence("Output", expression)?;
+        let pattern = self.body.query().0.outputs(expression);
         let region = self.body.query().0.control_region(expression, 0_i64)?;
-        let merges = self.body.query().sequence("RegionParameter", region)?;
+        let merges = self.body.query().0.parameters(region);
         let counted = self.body.query().contains("CountedLoopOperation", expression)?;
         let mut before = names_in(self.body.query(), "OperationUse", expression)?;
         before.extend(after.iter().copied());
@@ -2026,7 +2026,7 @@ impl EntryEmission<'_, '_, '_> {
     }
 
     fn branch(&mut self, operation: Value, after: &LookupSet<Value>) -> Result<(), OptimizeError> {
-        let pattern = self.body.query().sequence("Output", operation)?;
+        let pattern = self.body.query().0.outputs(operation);
         let yes = self.body.query().0.control_region(operation, 0_i64)?;
         let no = self.body.query().0.control_region(operation, 1_i64)?;
         let condition_name = self.body.query().name(self.body.query().0.input(operation, 0_i64)?)?;

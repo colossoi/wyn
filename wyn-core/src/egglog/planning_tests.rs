@@ -58,7 +58,7 @@ fn every_collective_callback_must_be_available_before_distribution() {
         let mut facts = include_str!("tests/collective_distribution.egg").to_owned();
         for (prefix, base) in [("FIRST", 20), ("SECOND", 30)] {
             let capture = if blocked == Some(base) {
-                format!("(set (FixtureInput (OperationId {}) 0) (ValueNameRef (ValueId {}))) (set (FixtureInput (OperationId {}) 1) (ValueNameRef (ValueId 10))) (set (OutputCount (OperationId {})) 1) (set (Output (OperationId {}) 0) (ValueNameRef (ValueId {}))) (set (ValueType (ValueId {})) scalar) (set (FixtureRegion (OperationId {})) (RegionId {})) (set (FixtureOrder (OperationId {})) 1) (DiscardableOperation (OperationId {})) (RepeatableOperation (OperationId {}))",base+1,base+2,base+1,base+1,base+1,base+3,base+3,base+1,base,base+1,base+1,base+1)
+                format!("(set (FixtureInput (OperationId {}) 0) (ValueNameRef (ValueId {}))) (set (FixtureInput (OperationId {}) 1) (ValueNameRef (ValueId 10))) (set (FixtureOutput (OperationId {}) 0) (ValueNameRef (ValueId {}))) (set (ValueType (ValueId {})) scalar) (set (FixtureRegion (OperationId {})) (RegionId {})) (set (FixtureOrder (OperationId {})) 1) (DiscardableOperation (OperationId {})) (RepeatableOperation (OperationId {}))",base+1,base+2,base+1,base+1,base+3,base+3,base+1,base,base+1,base+1,base+1)
             } else {
                 String::new()
             };
@@ -96,7 +96,7 @@ fn every_collective_callback_must_be_available_before_distribution() {
         assert_eq!(outer.len(), 1);
         assert_eq!(rank(query, outer[0]), if blocked.is_some() { 1 } else { 2 });
         assert_eq!(
-            analysis::count(query, "OutputCount", outer[0]).unwrap(),
+            query.0.output_count(outer[0]),
             2,
             "both source results must survive the legality decision"
         );
@@ -135,7 +135,7 @@ fn sliced_local_collections_retain_their_source_capacity() {
             if query.contains("ParallelOperation", row[0])?
                 && query.enode("InvocationLocal", query.required("OperationExecution", row[0])?)?.is_some()
             {
-                for name in query.sequence("Output", row[0])? {
+                for name in query.0.outputs(row[0]) {
                     let name = query.name(name)?;
                     let info = query.required("ValueType", name)?;
                     if array_extents(query, info).is_some() {
@@ -404,7 +404,7 @@ fn dependent_or_partial_regions_stay_inside_parallel_callbacks() {
             let result = query.0.yield_value(root, 0_i64).unwrap();
             let mut checked = false;
             for outer in top_level(graph, function, "Parallel") {
-                if !query.sequence("Output", outer).unwrap().contains(&result) {
+                if !query.0.outputs(outer).contains(&result) {
                     assert!(
                         !query.contains("OperationTrap", outer).unwrap(),
                         "case {index}: only total independent producers may leave the callback"
@@ -510,7 +510,7 @@ fn updated_slice_preserves_its_descriptor() {
             query
                 .for_each("LiveOperation", |row| {
                     if let Code::Update { .. } = query.0.code(row[0])? {
-                        let output = query.name(query.required("Output", (row[0], 0_i64))?)?;
+                        let output = query.name(query.0.output(row[0], 0_i64)?)?;
                         let source = query.name(query.0.input(row[0], 0_i64)?)?;
                         assert_eq!(
                             query.required("ValueType", output)?,
@@ -538,7 +538,7 @@ fn shrinking_loop_does_not_inherit_its_initial_extent() {
             let operation = loops[0];
             assert!(!query.contains("LoopPreservesOuterLength", (operation, 0_i64)).unwrap());
             let initial = query.name(query.0.argument(operation, 0_i64, 0_i64).unwrap()).unwrap();
-            let output = query.name(query.required("Output", (operation, 0_i64)).unwrap()).unwrap();
+            let output = query.name(query.0.output(operation, 0_i64).unwrap()).unwrap();
             assert!(array_extents(query, query.required("ValueType", output).unwrap()).is_some());
             assert!(!query.contains("OuterShapeSource", (output, initial)).unwrap());
         },
@@ -574,7 +574,7 @@ fn local_capacities(graph: &Graph) -> Vec<i64> {
             if query.contains("ParallelOperation", row[0])?
                 && query.enode("InvocationLocal", query.required("OperationExecution", row[0])?)?.is_some()
             {
-                for name in query.sequence("Output", row[0])? {
+                for name in query.0.outputs(row[0]) {
                     let name = query.name(name)?;
                     if let Some(capacity) = query.lookup("OuterCapacity", name)? {
                         capacities.push(graph.value_to_base::<i64>(capacity));
@@ -702,7 +702,7 @@ fn accumulator_state_order_is_read_from_the_plan() {
     let mut rows = Vec::new();
     for &table in super::super::dataflow::edit::OPERATION_CELLS {
         if (table.starts_with("Result") && table != "ResultCount")
-            || ["Output", "OutputRole", "OutputClause", "OutputField"].contains(&table)
+            || ["OutputRole", "OutputClause", "OutputField"].contains(&table)
         {
             query
                 .for_function(table, |keys, value| {
@@ -714,9 +714,15 @@ fn accumulator_state_order_is_read_from_the_plan() {
                 .unwrap();
         }
     }
+    let mut outputs = query.0.outputs(operation);
+    outputs.reverse();
+    let reducers =
+        query.0.reducers(operation).into_iter().map(|(slot, region)| (1 - slot, region)).collect();
     program
         .graph
         .update(|mut sink| {
+            sink.set_outputs(operation, outputs)?;
+            sink.set_reducers(operation, reducers);
             for (table, keys, _) in &rows {
                 sink.remove(table, egglog_engine::RawValues(keys.clone()))?;
             }
@@ -731,6 +737,7 @@ fn accumulator_state_order_is_read_from_the_plan() {
             Ok(())
         })
         .unwrap();
+    super::super::dataflow::edit::changed(&mut program.graph).unwrap();
     let ssa = finish_for_test(
         super::super::prepare_interfaces(schedule(program).unwrap()).unwrap(),
         CodegenTarget::Wgsl,
@@ -962,7 +969,7 @@ fn rectangular_candidates_retain_expensive_but_legal_recomputation() {
     ];
     for i in 1_i64..=80 {
         codes.push((i, Code::Scalar(Payload::Binary(BinaryOperator::Multiply))));
-        prefix.push_str(&format!("(set (FixtureInput (OperationId {i}) 0) (ValueNameRef (ValueId {}))) (set (FixtureInput (OperationId {i}) 1) (ValueNameRef (ValueId 1000))) (set (OutputCount (OperationId {i})) 1) (set (Output (OperationId {i}) 0) (ValueNameRef (ValueId {i}))) (set (ValueType (ValueId {i})) scalar) (set (FixtureRegion (OperationId {i})) (RegionId 1)) (set (FixtureOrder (OperationId {i})) {}) (RepeatableOperation (OperationId {i})) (DiscardableOperation (OperationId {i}))",i-1,i-1));
+        prefix.push_str(&format!("(set (FixtureInput (OperationId {i}) 0) (ValueNameRef (ValueId {}))) (set (FixtureInput (OperationId {i}) 1) (ValueNameRef (ValueId 1000))) (set (FixtureOutput (OperationId {i}) 0) (ValueNameRef (ValueId {i}))) (set (ValueType (ValueId {i})) scalar) (set (FixtureRegion (OperationId {i})) (RegionId 1)) (set (FixtureOrder (OperationId {i})) {}) (RepeatableOperation (OperationId {i})) (DiscardableOperation (OperationId {i}))",i-1,i-1));
     }
     let mut graph = test_graph::fixture(
         &codes,
@@ -1094,7 +1101,7 @@ fn rectangular_runtime_dimensions_must_be_uniform_across_outer_coordinates() {
         let output = query.0.yield_value(root, 0_i64).unwrap();
         let ranks = top_level(graph, function, "Parallel")
             .into_iter()
-            .filter(|&operation| query.sequence("Output", operation).unwrap().contains(&output))
+            .filter(|&operation| query.0.outputs(operation).contains(&output))
             .map(|operation| rank(query, operation))
             .collect::<Vec<_>>();
         assert_eq!(
@@ -1158,23 +1165,21 @@ fn indexed_reducers_share_native_recognition_and_keep_cas_fallback() {
         planned(&source, |graph| {
             let query = Query(graph);
             let mut checked = 0;
-            query
-                .for_function("AccumulatorCombiner", |_, combine| {
-                    let native = query
-                        .lookup("NativeBinaryReducer", combine)?
-                        .map(|value| read(graph, value).spelling().into_owned());
-                    let opcode = match expected {
-                        "AtomicAdd" => Some("+"),
-                        "AtomicAnd" => Some("&"),
-                        "AtomicOr" => Some("|"),
-                        "AtomicXor" => Some("^"),
-                        _ => None,
-                    };
-                    assert_eq!(native.as_deref(), opcode, "{reducer}");
-                    checked += 1;
-                    Ok(())
-                })
-                .unwrap();
+            for &(_, combine) in graph.structure().read().combiners.values().flatten() {
+                let native = query
+                    .lookup("NativeBinaryReducer", combine)
+                    .unwrap()
+                    .map(|value| read(graph, value).spelling().into_owned());
+                let opcode = match expected {
+                    "AtomicAdd" => Some("+"),
+                    "AtomicAnd" => Some("&"),
+                    "AtomicOr" => Some("|"),
+                    "AtomicXor" => Some("^"),
+                    _ => None,
+                };
+                assert_eq!(native.as_deref(), opcode, "{reducer}");
+                checked += 1;
+            }
             assert_eq!(checked, 1, "one logical indexed combiner: {reducer}");
         });
     }
@@ -1413,8 +1418,8 @@ fn sizes(query: Query<'_>, operation: Value) -> Vec<i64> {
 }
 fn infos(query: Query<'_>, operation: Value) -> Vec<Value> {
     query
-        .sequence("Output", operation)
-        .unwrap()
+        .0
+        .outputs(operation)
         .into_iter()
         .map(|name| query.required("ValueType", query.name(name).unwrap()).unwrap())
         .collect()
@@ -1458,7 +1463,7 @@ fn indexed_literal_bounds_require_every_element() {
         let mut indexed = 0;
         query
             .for_each("IndexOperation", |row| {
-                let value = query.required("Output", (row[0], 0_i64))?;
+                let value = query.0.output(row[0], 0_i64)?;
                 let low = query.lookup("IntegerLower", value)?.map(|v| query.0.value_to_base::<i64>(v));
                 let high = query.lookup("IntegerUpper", value)?.map(|v| query.0.value_to_base::<i64>(v));
                 assert_eq!(low.zip(high), expected);
@@ -1476,28 +1481,28 @@ fn collection_shape_proofs_distinguish_extents_from_capacity() {
         &[(0, Code::Parallel), (1, Code::Uninitialized)],
         r#"
         (set (OperationShape (OperationId 1)) (vec-of (IndexConstant 2)))
-        (set (Output (OperationId 1) 0) (ValueNameRef (ValueId 30)))
+        (set (FixtureOutput (OperationId 1) 0) (ValueNameRef (ValueId 30)))
         (LiveOperation (OperationId 0))
         (set (OperationDomain (OperationId 0)) (DomainId 0))
         (set (DomainRank (DomainId 0)) 2)
         (set (DomainExtent (DomainId 0) 0) (IndexConstant 8))
         (set (DomainExtent (DomainId 0) 1) (IndexConstant 4))
-        (set (Output (OperationId 0) 0) (ValueNameRef (ValueId 0)))
+        (set (FixtureOutput (OperationId 0) 0) (ValueNameRef (ValueId 0)))
         (set (OutputRole (OperationId 0) 0) (CollectedOutput))
         (set (OutputClause (OperationId 0) 0) 0)
         (set (OutputField (OperationId 0) 0) 0)
         (set (ResultKindOf (OperationId 0) 0) (Collected))
         (set (ResultValue (OperationId 0) 0 0) (ValueNameRef (ValueId 10)))
-        (set (Output (OperationId 0) 1) (ValueNameRef (ValueId 1)))
+        (set (FixtureOutput (OperationId 0) 1) (ValueNameRef (ValueId 1)))
         (set (OutputRole (OperationId 0) 1) (CompactedOutput))
-        (set (Output (OperationId 0) 2) (ValueNameRef (ValueId 2)))
+        (set (FixtureOutput (OperationId 0) 2) (ValueNameRef (ValueId 2)))
         (set (OutputRole (OperationId 0) 2) (TotalOutput))
         (set (OutputClause (OperationId 0) 2) 2)
         (set (OutputField (OperationId 0) 2) 0)
-        (set (ResultReducer (OperationId 0) 2) (RegionId 2))
+        (set (FixtureResultReducer (OperationId 0) 2) (RegionId 2))
         (ReducerPreservesOuterLength (RegionId 2) 0)
         (set (ResultNeutral (OperationId 0) 2 0) (ValueNameRef (ValueId 20)))
-        (set (Output (OperationId 0) 3) (ValueNameRef (ValueId 3)))
+        (set (FixtureOutput (OperationId 0) 3) (ValueNameRef (ValueId 3)))
         (set (OutputRole (OperationId 0) 3) (UpdatedOutput))
         (run-schedule (saturate graph-sizes))
         (check (= (CollectionRank (ValueId 0)) 2))
@@ -1538,7 +1543,7 @@ fn collected_shape_does_not_require_unrelated_result_constructors() {
         (set (OperationDomain (OperationId 0)) (DomainId 0))
         (set (DomainRank (DomainId 0)) 2)
         (set (DomainExtent (DomainId 0) 1) (IndexConstant 3))
-        (set (Output (OperationId 0) 0) (ValueNameRef (ValueId 0)))
+        (set (FixtureOutput (OperationId 0) 0) (ValueNameRef (ValueId 0)))
         (set (OutputRole (OperationId 0) 0) (CollectedOutput))
         (run-schedule (saturate graph-sizes))
         (check (= (CollectionRank (ValueId 0)) 2))
@@ -1564,7 +1569,7 @@ fn element_update_snapshots_require_no_escaping_copy() {
         let facts = format!(
             r#"
             (LiveOperation (OperationId 0)) (LiveOperation (OperationId 1)) (LiveOperation (OperationId 2))
-            (set (Output (OperationId 0) 0) (ValueNameRef (ValueId 1)))
+            (set (FixtureOutput (OperationId 0) 0) (ValueNameRef (ValueId 1)))
             (set (FixtureInput (OperationId 1) 0) (ValueNameRef (ValueId 1)))
             (set (OperationSlices (OperationId 1)) (vec-of (At (IndexConstant 0))))
             (OperationUse (OperationId 1) (ValueNameRef (ValueId 1)))
@@ -1598,7 +1603,7 @@ fn element_update_snapshots_require_no_escaping_copy() {
 fn slice_lengths_do_not_require_a_source_capacity_bound() {
     let graph = test_graph::fixture(&[(0, Code::View)], r#"
         (set (FixtureInput (OperationId 0) 0) (ValueNameRef (ValueId 0)))
-        (set (Output (OperationId 0) 0) (ValueNameRef (ValueId 1)))
+        (set (FixtureOutput (OperationId 0) 0) (ValueNameRef (ValueId 1)))
         (set (OperationSlices (OperationId 0)) (vec-of (Slice (IndexConstant 2) (IndexConstant 5) (IndexConstant 1))))
         (run-schedule (saturate graph-sizes))
         (check (= (LogicalOuterCount (ValueId 1)) (IndexConstant 5)))
@@ -1624,8 +1629,8 @@ fn speculation_requires_native_outputs_purity_and_bounded_work() {
                 r#"
             (LiveOperation (OperationId 0))
             (set (PureOperation (OperationId 0)) {pure})
-            (set (OutputCount (OperationId 0)) 1)
-            (set (Output (OperationId 0) 0) (ValueNameRef (ValueId 0)))
+
+            (set (FixtureOutput (OperationId 0) 0) (ValueNameRef (ValueId 0)))
             (set (ValueType (ValueId 0)) (ScalarInfo {element}))
             (set (FixtureControlRegion (OperationId 0) 0) (RegionId 0))
             (set (FixtureControlRegion (OperationId 0) 1) (RegionId 1))
@@ -1783,7 +1788,7 @@ fn kernel_policies_distinguish_compaction_atomics_and_native_scans() {
             (set (ResultValueCount (OperationId 0) 0) 1)
             (set (ResultValue (OperationId 0) 0 0) (AccNameRef (AccumulatorId 0)))
             (set (TokenCapability (AccumulatorId 0)) (TokenBindingAt (OperationId 1) 0))
-            (set (ResultReducer (OperationId 0) 0) (RegionId 1)) (LiveRegion (RegionId 1))
+            (set (FixtureResultReducer (OperationId 0) 0) (RegionId 1)) (LiveRegion (RegionId 1))
             (set (ResultNeutralCount (OperationId 0) 0) 1)
             (set (ResultNeutral (OperationId 0) 0 0) (ValueNameRef (ValueId 10)))
             (set (ConstantValue (ValueNameRef (ValueId 10))) 0) (NativeAddition (RegionId 1))

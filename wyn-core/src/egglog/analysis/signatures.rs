@@ -37,7 +37,7 @@ pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), Optimi
         for slot in 0..query.0.input_count(operation) {
             let argument = query.0.input(operation, slot)?;
             let expected = if let Some(root) = root {
-                typed(query, query.required("RegionParameter", (root, slot))?)?
+                typed(query, query.0.parameter(root, slot)?)?
             } else {
                 query.required("ExternalParameterType", (target, slot))?
             };
@@ -54,12 +54,12 @@ pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), Optimi
             }
         }
         let results = count(query, "FunctionResultCount", target)?;
-        if count(query, "OutputCount", operation)? != results {
+        if query.0.output_count(operation) != results {
             return Err(output_error("call result count differs from its signature"));
         }
         for slot in 0..results {
             let expected = query.required("FunctionResultType", (target, slot))?;
-            let output = query.required("Output", (operation, slot))?;
+            let output = query.0.output(operation, slot)?;
             if query.required("CallReturnType", (operation, slot))? != expected {
                 return Err(output_error("call result type differs from its signature"));
             }
@@ -70,11 +70,11 @@ pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), Optimi
         boolean(query, query.0.input(operation, 0_i64)?)?;
         for edge in 0_i64..2 {
             let child = query.0.control_region(operation, edge)?;
-            if query.0.yield_count(child) != count(query, "OutputCount", operation)? {
+            if query.0.yield_count(child) != query.0.output_count(operation) {
                 return Err(output_error("branch result count differs from its signature"));
             }
-            for slot in 0..count(query, "OutputCount", operation)? {
-                let result = query.required("Output", (operation, slot))?;
+            for slot in 0..query.0.output_count(operation) {
+                let result = query.0.output(operation, slot)?;
                 returns(query, result, query.required("RegionReturnType", (child, slot))?)?;
             }
         }
@@ -90,21 +90,21 @@ pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), Optimi
         let domain = query.required("OperationDomain", operation)?;
         let rank = count(query, "DomainRank", domain)?;
         let lane = query.0.control_region(operation, 0_i64)?;
-        if count(query, "RegionParameterCount", lane)? != rank + 1 {
+        if query.0.parameter_count(lane) != rank + 1 {
             return Err(output_error("parallel parameters differ from its domain"));
         }
-        let ordinal = query.name(query.required("RegionParameter", (lane, 0_i64))?)?;
+        let ordinal = query.name(query.0.parameter(lane, 0_i64)?)?;
         if query.required("DomainOrdinal", domain)? != ordinal {
             return Err(output_error("parallel ordinal is not its lane parameter"));
         }
         for slot in 0..rank {
-            let axis = query.name(query.required("RegionParameter", (lane, slot + 1))?)?;
+            let axis = query.name(query.0.parameter(lane, slot + 1)?)?;
             if query.required("DomainAxis", (domain, slot))? != axis {
                 return Err(output_error("parallel coordinate is not its lane parameter"));
             }
         }
         let clauses = count(query, "ResultCount", operation)?;
-        for slot in 0..count(query, "OutputCount", operation)? {
+        for slot in 0..query.0.output_count(operation) {
             let clause = query.0.value_to_base::<i64>(query.required("OutputClause", (operation, slot))?);
             if clause < 0 || clause >= clauses {
                 return Err(output_error("parallel output refers to a missing result clause"));
@@ -127,10 +127,10 @@ pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), Optimi
                 boolean(query, predicate)?;
             }
             if query.enode("Folded", kind)?.is_some() {
-                let reducer = query.required("ResultReducer", (operation, clause))?;
+                let reducer = query.0.reducer(operation, clause)?;
                 let neutral = count(query, "ResultNeutralCount", (operation, clause))?;
                 if rank == 0
-                    || count(query, "RegionParameterCount", reducer)? != 2 * neutral
+                    || query.0.parameter_count(reducer) != 2 * neutral
                     || query.0.yield_count(reducer) != neutral
                     || count(query, "ResultValueCount", (operation, clause))? != neutral
                 {
@@ -140,8 +140,8 @@ pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), Optimi
                 }
                 for slot in 0..neutral {
                     let initial = query.required("ResultNeutral", (operation, clause, slot))?;
-                    let parameter = query.required("RegionParameter", (reducer, slot))?;
-                    let other = query.required("RegionParameter", (reducer, slot + neutral))?;
+                    let parameter = query.0.parameter(reducer, slot)?;
+                    let other = query.0.parameter(reducer, slot + neutral)?;
                     if !compatible(query, typed(query, initial)?, typed(query, parameter)?)?
                         || !compatible(query, typed(query, parameter)?, typed(query, other)?)?
                     {
@@ -156,7 +156,7 @@ pub(super) fn operation(query: Query<'_>, operation: Value) -> Result<(), Optimi
     if query.contains("AccumulatorOperation", operation)? {
         let body = query.0.control_region(operation, 0_i64)?;
         let groups = count(query, "AccumulatorGroupCount", operation)?;
-        if count(query, "RegionParameterCount", body)? < groups || query.0.yield_count(body) < groups {
+        if query.0.parameter_count(body) < groups || query.0.yield_count(body) < groups {
             return Err(output_error("accumulator scope loses a capability"));
         }
         for group in 0..groups {
@@ -184,7 +184,7 @@ pub(super) fn region(query: Query<'_>, region: Value) -> Result<(), OptimizeErro
             return Err(output_error("two operation occurrences share an execution order"));
         }
     }
-    for parameter in query.sequence("RegionParameter", region)? {
+    for parameter in query.0.parameters(region) {
         if let Some(token) = query.enode("AccNameRef", parameter)? {
             if let Some(info) =
                 query.enode("AccumulatorInfo", query.required("AccumulatorType", token[0])?)?

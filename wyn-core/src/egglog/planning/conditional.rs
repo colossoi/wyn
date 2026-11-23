@@ -3,20 +3,20 @@ use crate::egglog::dataflow::edit;
 use crate::egglog::dataflow::ir::{self, Code, Name, OperationId, Parameter, RegionId};
 use crate::egglog::graph::Graph;
 use crate::egglog::query::Query;
-use crate::egglog::{analysis, OptimizeError};
+use crate::egglog::OptimizeError;
 use egglog_engine::{RawValues, Value, Write};
 
 pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> Result<(), OptimizeError> {
     let query = Query(graph);
     let a = query.0.control_region(yes, 0_i64)?;
     let b = query.0.control_region(no, 0_i64)?;
-    let yes_params = query.sequence("RegionParameter", a)?;
-    let no_params = query.sequence("RegionParameter", b)?;
+    let yes_params = query.0.parameters(a);
+    let no_params = query.0.parameters(b);
     edit::replace(graph, &no_params.into_iter().zip(yes_params).collect::<Vec<_>>())?;
     let query = Query(graph);
     let mut parameters = Vec::new();
-    for slot in 0..analysis::count(query, "RegionParameterCount", a)? {
-        let name = query.name(query.required("RegionParameter", (a, slot))?)?;
+    for slot in 0..query.0.parameter_count(a) {
+        let name = query.name(query.0.parameter(a, slot)?)?;
         parameters.push(Parameter {
             name: Name::Value(name),
             info: query.required("ValueType", name)?,
@@ -24,7 +24,7 @@ pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> 
         });
     }
     let parameter_count = parameters.len();
-    let outputs = query.sequence("Output", branch)?;
+    let outputs = query.0.outputs(branch);
     let count = outputs.len();
     let mut yes_values = Vec::new();
     let mut no_values = Vec::new();
@@ -83,11 +83,9 @@ pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> 
             }
             for arm in [a, b] {
                 for slot in 0..parameter_count as i64 {
-                    sink.remove("RegionParameter", (arm, slot))?;
                     sink.remove("ParameterDiet", (arm, slot))?;
                 }
-                sink.remove("RegionParameterCount", arm)?;
-                sink.set("RegionParameterCount", arm, 0_i64)?;
+                sink.set_parameters(arm, Vec::new())?;
             }
             ir::yields(&mut sink, RegionId(a), &yes_values)?;
             ir::yields(&mut sink, RegionId(b), &no_values)?;
@@ -101,7 +99,6 @@ pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> 
                     sink.remove("RegionReturnType", (arm, slot as i64))?;
                     sink.set("RegionReturnType", (arm, slot as i64), info)?;
                 }
-                sink.remove("Output", (branch, slot as i64))?;
             }
             ir::outputs(&mut sink, OperationId(branch), &bindings)?;
             sink.set_control(branch, 0_i64, a);

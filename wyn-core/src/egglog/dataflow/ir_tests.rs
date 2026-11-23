@@ -120,7 +120,7 @@ fn operations_share_connectivity_without_sharing_occurrences_or_payloads() {
     assert!(query.contains("AvailableAt", (add.0, input)).unwrap());
     assert!(query.contains("NameLiveAfter", (add.0, input)).unwrap());
     assert!(!query.contains("NameLiveAfter", (sub.0, input)).unwrap());
-    let output = query.required("Output", (add.0, 0_i64)).unwrap();
+    let output = query.0.output(add.0, 0_i64).unwrap();
     graph.update(|mut sink| sink.set_input(sub.0, 0_i64, output)).unwrap();
     crate::egglog::analysis::run(&mut graph).unwrap();
     assert!(crate::egglog::analysis::uses_output_of(Query(&graph), sub.0, add.0).unwrap());

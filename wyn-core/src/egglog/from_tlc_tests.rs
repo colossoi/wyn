@@ -107,7 +107,7 @@ fn repeated_free_references_keep_dependencies_in_sibling_and_nested_regions() {
             .iter()
             .find(|&&operation| query.contains("ParallelOperation", operation).unwrap())
             .expect("outer producer");
-        let names = query.sequence("Output", producer).unwrap();
+        let names = query.0.outputs(producer);
         assert!(!names.is_empty(), "{kind} producer has explicit result bindings");
         let mut captures = 0;
         query

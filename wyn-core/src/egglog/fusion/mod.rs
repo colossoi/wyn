@@ -96,14 +96,10 @@ fn collected_map(query: Query<'_>, operation: Value) -> Result<Option<MapLevel>,
 }
 
 fn output_producer(query: Query<'_>, name: Value) -> Result<Option<Value>, OptimizeError> {
-    let mut producer = None;
-    query.for_function("Output", |keys, value| {
-        if value == name {
-            producer = Some(keys[0]);
-        }
-        Ok(())
-    })?;
-    Ok(producer)
+    let Some(site) = query.lookup("Defines", name)? else {
+        return Ok(None);
+    };
+    Ok(query.enode("OperationSite", site)?.map(|fields| fields[0]))
 }
 
 fn fuse_ranked_bucket(graph: &mut Graph) -> Result<bool, OptimizeError> {
@@ -192,7 +188,7 @@ fn fuse_ranked_bucket(graph: &mut Graph) -> Result<bool, OptimizeError> {
             if !available {
                 return Ok(());
             }
-            hoisted_outputs.extend(query.sequence("Output", operation)?);
+            hoisted_outputs.extend(query.0.outputs(operation));
         }
         for level in &levels {
             if !hoisted_outputs.contains(&level.source)
@@ -211,7 +207,7 @@ fn fuse_ranked_bucket(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let inner = &levels[levels.len() - 1];
     let query = Query(graph);
     let callback = query.0.control_region(bucket, 0_i64)?;
-    let old_parameter = query.required("RegionParameter", (callback, 0_i64))?;
+    let old_parameter = query.0.parameter(callback, 0_i64)?;
     edit::replace(graph, &[(old_parameter, inner.result)])?;
     for operation in hoisted {
         edit::move_before(graph, operation, outer.operation)?;
@@ -229,7 +225,7 @@ fn fuse_ranked_bucket(graph: &mut Graph) -> Result<bool, OptimizeError> {
     let parameters = levels
         .iter()
         .map(|level| -> Result<Parameter, OptimizeError> {
-            let name = query.required("Output", (level.index, 0_i64))?;
+            let name = query.0.output(level.index, 0_i64)?;
             let value = query.name(name)?;
             Ok(Parameter {
                 name: Name::Value(value),
@@ -238,14 +234,13 @@ fn fuse_ranked_bucket(graph: &mut Graph) -> Result<bool, OptimizeError> {
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let old_count = analysis::count(query, "RegionParameterCount", callback)?;
+    let old_count = query.0.parameter_count(callback);
     graph.update(|mut sink| {
         Ok((|| -> Result<(), OptimizeError> {
             for slot in 0..old_count {
-                sink.remove("RegionParameter", (callback, slot))?;
                 sink.remove("ParameterDiet", (callback, slot))?;
             }
-            sink.remove("RegionParameterCount", callback)?;
+            sink.set_parameters(callback, Vec::new())?;
             ir::parameters(&mut sink, RegionId(callback), &parameters)?;
             ir::properties(
                 &mut sink,
