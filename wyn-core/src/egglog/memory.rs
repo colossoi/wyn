@@ -1,5 +1,5 @@
 //! Pass orchestration over the authoritative graph.
-use super::dataflow::{cse, edit};
+use super::dataflow::edit;
 use super::query::Query;
 use super::{analysis, scalar, timing, OptimizeError};
 use crate::egglog::graph::Graph;
@@ -8,6 +8,8 @@ use egglog_engine::Value;
 mod demand;
 mod forward;
 mod remove_leaves;
+
+pub(super) use forward::replace_local_scalars;
 
 pub(super) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
     super::dataflow::ir::load(graph)?;
@@ -57,18 +59,14 @@ pub(super) fn simplify(graph: &mut Graph, hoist: bool) -> Result<(), OptimizeErr
         "egglog reducing simplification"
     });
     loop {
-        let current = analysis::current(graph)?;
-        if !current {
+        edit::intern_scalars(graph)?;
+        if !analysis::current(graph)? {
             let reach = analysis::calls::Reachability::read(graph)?;
             let roots = reach.roots(graph);
             scalar::splice_static_branches(graph, &roots)?;
             forward::before_analysis(graph, roots)?;
         }
         analysis::ensure(graph)?;
-        if current {
-            let _timing = timing::span("Rust expression reuse");
-            cse::publish(graph)?;
-        }
         {
             let _timing = timing::span("egglog scalar candidates");
             graph.parse_and_run_program(

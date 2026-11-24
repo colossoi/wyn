@@ -1,18 +1,21 @@
 //! Match repeatable expressions against the definitions visible at each occurrence.
+//! The scalar interner shares definitions in a single region. Reuse also sees
+//! dominating definitions in enclosing regions and pending fusion edits.
 use super::{body::BodyGraph, ir::Code};
-use crate::egglog::graph::Formula;
-use crate::egglog::graph::Graph;
-use crate::egglog::{query::Query, OptimizeError};
+use crate::egglog::analysis::typed;
+use crate::egglog::graph::{Formula, Graph};
+use crate::egglog::{query::Query, timing, OptimizeError};
 use crate::memory_ir::{Definition, OperationId, RegionId, ValueRef};
 use crate::{LookupMap, LookupSet};
-use egglog_engine::{Value, Write};
+use egglog_engine::Value;
+use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::hash::Hash;
 
 #[derive(Clone, Eq, Hash, PartialEq)]
 struct Expression<K> {
     code: Code,
-    operands: Vec<K>,
+    operands: SmallVec<[K; 2]>,
     index: Option<Value>,
     ty: Value,
 }
@@ -78,7 +81,7 @@ impl Reuse<ValueRef> {
         Ok(self.observe(
             Expression {
                 code: code.clone(),
-                operands: op.inputs.clone(),
+                operands: SmallVec::from_slice(&op.inputs),
                 index: query.0.formula_at(key, Formula::Index),
                 ty: *ty,
             },
@@ -129,7 +132,7 @@ impl Reuse<Value> {
         &mut self,
         query: Query<'_>,
         region: Value,
-        products: &mut LookupMap<Value, Vec<Value>>,
+        products: &mut LookupMap<Value, SmallVec<[Value; 2]>>,
     ) -> Result<(), OptimizeError> {
         let mut definitions = Vec::new();
         let graph = query.0;
@@ -141,25 +144,28 @@ impl Reuse<Value> {
             for child in query.0.attached_regions(operation) {
                 self.execution_region(query, child, products)?;
             }
-            let code = query.0.code(operation)?;
-            if !code.has_expression_identity()
-                || !query.contains("RepeatableOperation", operation)?
-                || query.0.output_count(operation) != 1
-            {
+            let code = graph.code(operation)?;
+            if !code.has_expression_identity() {
                 continue;
             }
-            let output = query.0.output(operation, 0)?;
-            if query.value_name(output)?.is_none() {
-                continue;
-            }
-            let operands = graph.inputs(operation);
-            let ty = crate::egglog::analysis::typed(query, output)?;
+            let (output, ty) = if let Some(ty) = graph.interned_scalar_type(operation) {
+                (graph.output(operation, 0)?, ty)
+            } else {
+                if !query.contains("RepeatableOperation", operation)? || graph.output_count(operation) != 1
+                {
+                    continue;
+                }
+                let output = graph.output(operation, 0)?;
+                if query.value_name(output)?.is_none() {
+                    continue;
+                }
+                (output, typed(query, output)?)
+            };
+            let operands = graph.expression_inputs(operation);
             if let (Code::Project { index }, [input]) = (&code, operands.as_slice()) {
                 let product = self.replacements.get(input).copied().unwrap_or(*input);
                 if let Some(field) = products.get(&product).and_then(|fields| fields.get(*index)) {
-                    if query.value_name(*field)?.is_some()
-                        && crate::egglog::analysis::typed(query, *field)? == ty
-                    {
+                    if query.value_name(*field)?.is_some() && typed(query, *field)? == ty {
                         self.replacements.insert(output, *field);
                         continue;
                     }
@@ -216,6 +222,7 @@ pub(in crate::egglog) fn find(
     graph: &mut Graph,
     roots: Vec<Value>,
 ) -> Result<LookupMap<Value, Value>, OptimizeError> {
+    let _timing = timing::span("Rust expression reuse");
     invalidate(graph);
     let mut reuse = Reuse::<Value>::default();
     let mut products = LookupMap::new();
@@ -230,16 +237,4 @@ pub(in crate::egglog) fn find(
         }
     }
     Ok(reuse.replacements)
-}
-
-pub(in crate::egglog) fn publish(graph: &mut Graph) -> Result<(), OptimizeError> {
-    let roots = Query(graph).live_roots()?;
-    let replacements = find(graph, roots)?;
-    graph.update(|mut sink| {
-        for (old, new) in replacements {
-            sink.add("ForwardCandidate", (old, new))?;
-        }
-        Ok(())
-    })?;
-    Ok(())
 }

@@ -40,6 +40,7 @@ pub(super) fn load(graph: &mut Graph) -> Result<(), OptimizeError> {
 /// Refresh lexical ownership, reachable calls, and recursion without solving dataflow.
 pub(super) fn structure(graph: &mut Graph) -> Result<Vec<Value>, OptimizeError> {
     let _timing = timing::span("egglog graph structure");
+    edit::intern_scalars(graph)?;
     let reach = calls::Reachability::read(graph)?;
     let refresh = scopes::prepare(graph, &reach)?;
     calls::publish(graph, &reach, &refresh.solve)?;
@@ -382,6 +383,7 @@ pub(super) fn current(graph: &Graph) -> Result<bool, OptimizeError> {
 
 /// Reuse body-dependent proofs until the executable graph is edited.
 pub(super) fn ensure(graph: &mut Graph) -> Result<(), OptimizeError> {
+    edit::intern_scalars(graph)?;
     if current(graph)? {
         return Ok(());
     }

@@ -7,7 +7,7 @@ use crate::ast::Span;
 use crate::builtins::{by_id, catalog, BuiltinId, Purity};
 use crate::egglog::graph::CollectiveInput;
 use crate::egglog::graph::Formula;
-use crate::egglog::graph::{ArgumentSite, Graph, ScalarCode, ScalarExpressionId, State};
+use crate::egglog::graph::{ArgumentSite, Graph, ScalarExpressionId, State};
 use crate::egglog::graph::{Dimension, IterationDomain};
 use crate::egglog::graph::{OutputBinding, ParallelResults};
 use crate::op::BinaryOperator;
@@ -17,7 +17,7 @@ use crate::tlc::{
     self, extract_lambda_params_ref, ArrayExpr, DefMeta, LoopKind, SoacBody, SoacOp, TermKind, VarRef,
 };
 use crate::types::{self, extract_function_signature, strip_existentials, Diet, Type, TypeExt, TypeName};
-use crate::{LookupMap, SymbolId};
+use crate::SymbolId;
 use egglog_engine::sort::VecContainer;
 use egglog_engine::{Core, IntoValues, RawValues, Value, Write};
 use smallvec::SmallVec;
@@ -50,6 +50,7 @@ pub(super) fn import(source: &OwnershipApplied) -> Result<(Graph, Interner<i64, 
         };
         Ok(import.program())
     })??;
+    super::dataflow::edit::intern_scalars(&mut graph)?;
     Ok((graph, symbols))
 }
 #[derive(Clone)]
@@ -65,11 +66,10 @@ enum Imported<'source> {
     Callable(&'source Term, Vec<Imported<'source>>),
 }
 
-#[derive(Default)]
 struct Scope {
+    region: RegionId,
     statements: Vec<OperationId>,
     parameters: Vec<Parameter>,
-    scalar_results: LookupMap<ScalarExpressionId, Leaf>,
 }
 
 struct Domain {
@@ -112,6 +112,15 @@ struct Import<'graph, 'db, 'operations, 'ids, 'source> {
 }
 
 impl<'source> Import<'_, '_, '_, '_, 'source> {
+    fn scope(&mut self) -> Result<Scope, OptimizeError> {
+        let id = self.regions.next_id();
+        Ok(Scope {
+            region: RegionId(self.node("RegionId", id)?),
+            statements: Vec::new(),
+            parameters: Vec::new(),
+        })
+    }
+
     fn node(&mut self, name: &str, values: impl IntoValues) -> Result<Value, OptimizeError> {
         Ok(self.sink.add(name, values)?)
     }
@@ -271,12 +280,14 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
     ) -> Result<Imported<'source>, OptimizeError> {
         let code = Code::Constant { ty: ty.clone(), bits };
         let info = self.value_info(ty)?;
-        let expression = self.sink.intern_scalar(ScalarCode::Literal(bits), &[], info);
-        if let Some(result) = scope.scalar_results.get(&expression) {
-            return Ok(Imported::Leaf(result.clone()));
+        let (expression, fresh) = self.sink.intern_scalar(scope.region.0, code.clone(), &[], info);
+        let value = self.scalar_leaf(expression, ty, info, fresh)?;
+        if fresh {
+            let operation = self.operation(code, &[])?;
+            self.statement(vec![Name::Value(value.name)], operation, scope)?;
+            self.sink.bind_scalar(operation.0, expression)?;
         }
-        let operation = self.operation(code, &[])?;
-        self.emit_scalar(operation, ty, info, Some(expression), scope)
+        Ok(Imported::Leaf(value))
     }
 
     fn primitive(
@@ -307,18 +318,34 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
         let code = Code::Scalar(payload);
         let info = self.value_info(ty)?;
         let inputs: Vec<_> = atoms.into_iter().map(Name::Value).collect();
-        let shared = if pure && repeatable {
+        let lane_dependent = if let Payload::Intrinsic { id, .. } = payload {
+            let known = catalog().known();
+            [
+                known.thread_id,
+                known.thread_id_y,
+                known.thread_id_z,
+                known.local_id,
+                known.workgroup_id,
+                known.num_workgroups,
+            ]
+            .contains(&id)
+        } else {
+            false
+        };
+        let (value, expression) = if pure && repeatable && !lane_dependent {
             let values = inputs
                 .iter()
                 .map(|input| input.fact(&mut self.sink))
                 .collect::<Result<SmallVec<[Value; 2]>, _>>()?;
-            Some(self.sink.intern_scalar(ScalarCode::Operation(payload), &values, info))
+            let (expression, fresh) = self.sink.intern_scalar(scope.region.0, code.clone(), &values, info);
+            let value = self.scalar_leaf(expression, ty, info, fresh)?;
+            if !fresh {
+                return Ok(Imported::Leaf(value));
+            }
+            (value, Some(expression))
         } else {
-            None
+            (self.typed_leaf(ty, info)?, None)
         };
-        if let Some(result) = shared.and_then(|key| scope.scalar_results.get(&key)) {
-            return Ok(Imported::Leaf(result.clone()));
-        }
         let operation = self.operation(code, &inputs)?;
         if pure {
             self.sink.add("DiscardableOperation", operation.0)?;
@@ -328,38 +355,32 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
         if repeatable {
             self.sink.add("RepeatableOperation", operation.0)?;
         }
-        if let Payload::Intrinsic { id, .. } = payload {
-            let known = catalog().known();
-            if [
-                known.thread_id,
-                known.thread_id_y,
-                known.thread_id_z,
-                known.local_id,
-                known.workgroup_id,
-                known.num_workgroups,
-            ]
-            .contains(&id)
-            {
-                self.sink.add("LaneDependentOperation", operation.0)?;
-            }
+        if lane_dependent {
+            self.sink.add("LaneDependentOperation", operation.0)?;
         }
-        self.emit_scalar(operation, ty, info, shared, scope)
-    }
-
-    fn emit_scalar(
-        &mut self,
-        operation: OperationId,
-        ty: &Type,
-        info: Value,
-        expression: Option<ScalarExpressionId>,
-        scope: &mut Scope,
-    ) -> Result<Imported<'source>, OptimizeError> {
-        let value = self.typed_leaf(ty, info)?;
         self.statement(vec![Name::Value(value.name)], operation, scope)?;
         if let Some(expression) = expression {
-            scope.scalar_results.insert(expression, value.clone());
+            self.sink.bind_scalar(operation.0, expression)?;
         }
         Ok(Imported::Leaf(value))
+    }
+
+    fn scalar_leaf(
+        &mut self,
+        expression: ScalarExpressionId,
+        ty: &Type,
+        info: Value,
+        fresh: bool,
+    ) -> Result<Leaf, OptimizeError> {
+        let name = self.node("ScalarValue", expression.index())?;
+        if fresh {
+            self.sink.set_value_type(name, info)?;
+        }
+        Ok(Leaf {
+            name,
+            info,
+            ty: strip_existentials(ty).clone(),
+        })
     }
 
     fn index(&mut self, term: &'source Term, scope: &mut Scope) -> Result<Value, OptimizeError> {
@@ -571,8 +592,8 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
         results: &[Name],
         returns: &[Value],
     ) -> Result<RegionId, OptimizeError> {
-        let id = self.regions.next_id();
-        let region = ir::region(&mut self.sink, id, &scope.statements)?;
+        let region = scope.region;
+        ir::place_region(&mut self.sink, region, &scope.statements)?;
         ir::parameters(&mut self.sink, region, &scope.parameters)?;
         ir::yields(&mut self.sink, region, results)?;
         for (index, &info) in returns.iter().enumerate() {
@@ -643,7 +664,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
             } else {
                 let mut scope = Scope {
                     parameters: params,
-                    ..Scope::default()
+                    ..self.scope()?
                 };
                 let value = self.visit(body, &mut scope)?;
                 let body = self.finish(scope, &value)?;
@@ -796,8 +817,8 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                 else_branch,
             } => {
                 let condition = self.atom(cond, scope)?;
-                let mut left = Scope::default();
-                let mut right = Scope::default();
+                let mut left = self.scope()?;
+                let mut right = self.scope()?;
                 let yes = self.visit(then_branch, &mut left)?;
                 let no = self.visit(else_branch, &mut right)?;
                 let yes = self.finish(left, &yes)?;
@@ -1027,7 +1048,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                     return Err(output_error("zip has no inputs"));
                 };
                 let (domain, index) = self.iteration(first, scope)?;
-                let mut inner = Scope::default();
+                let mut inner = self.scope()?;
                 let mut fields = Vec::new();
                 let mut types = Vec::new();
                 for source in values {
@@ -1207,7 +1228,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                     return Err(output_error("map has no inputs"));
                 };
                 let (domain, index) = self.iteration(first, scope)?;
-                let mut inner = Scope::default();
+                let mut inner = self.scope()?;
                 let mut arguments = Vec::new();
                 for input in inputs {
                     let expression = self.traversal_input(input.name, index.name)?;
@@ -1223,7 +1244,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                 let neutral = self.atom(ne, scope)?;
                 let combine = self.callback(op, scope)?;
                 let (domain, index) = self.iteration(&input, scope)?;
-                let mut inner = Scope::default();
+                let mut inner = self.scope()?;
                 let expression = self.traversal_input(input.name, index.name)?;
                 let value = self.emit(expression, &Self::row_type(&input.ty)?, &mut inner)?;
                 let result = self.result(&value)?;
@@ -1244,7 +1265,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
             SoacOp::Filter { pred, input } => {
                 let input = Self::leaf(self.array(input, scope)?)?;
                 let (domain, index) = self.iteration(&input, scope)?;
-                let mut inner = Scope::default();
+                let mut inner = self.scope()?;
                 let expression = self.traversal_input(input.name, index.name)?;
                 let value = self.emit(expression, &Self::row_type(&input.ty)?, &mut inner)?;
                 let condition = Self::leaf(self.apply_callback(pred, vec![value.clone()], &mut inner)?)?;
@@ -1341,7 +1362,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
         }
         let mut body = Scope {
             parameters,
-            ..Scope::default()
+            ..self.scope()?
         };
         self.statement(pattern.clone(), parallel, &mut body)?;
         let body = self.finish_region(body, &pattern, &returns)?;
@@ -1476,7 +1497,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
             return Err(output_error("scatter has no input"));
         };
         let (domain, index) = self.iteration(first, scope)?;
-        let mut lane = Scope::default();
+        let mut lane = self.scope()?;
         let mut arguments = Vec::new();
         for source in sources {
             let expression = self.traversal_input(source.name, index.name)?;
@@ -1528,7 +1549,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
             self.accumulator(&destination, policy, Some(combine), &mut inputs, &mut parameters)?;
         let (domain, index) = self.iteration(&indices, scope)?;
         let position = index.name;
-        let mut lane = Scope::default();
+        let mut lane = self.scope()?;
         let expression = self.traversal_input(indices.name, position)?;
         let index = Self::leaf(self.emit(expression, &Self::row_type(&indices.ty)?, &mut lane)?)?;
         let expression = self.traversal_input(values.name, position)?;
@@ -1566,7 +1587,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
         }
         let mut inner = Scope {
             parameters,
-            ..Scope::default()
+            ..self.scope()?
         };
         let body = &callback.lam.body;
         let result = if matches!(body.kind, TermKind::Var(VarRef::Symbol(_))) {
@@ -1603,7 +1624,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
         let initial = Self::leaf(self.visit(init, scope)?)?;
         let carried = self.scalar(loop_var_ty)?;
         let checkpoint = self.bindings.checkpoint();
-        let mut inner = Scope::default();
+        let mut inner = self.scope()?;
         let mut initial_values = vec![initial.clone()];
         let mut carried_values = vec![carried.clone()];
         let mut induction = None;

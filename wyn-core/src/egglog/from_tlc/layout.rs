@@ -32,7 +32,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
             self.layout_extent(&source, 1, scope)?
         };
         let height = self.layout_extent(&source, 0, scope)?;
-        let mut inner = Scope::default();
+        let mut inner = self.scope()?;
         let (domain, coordinates, layout) = if transpose {
             let (domain, axes) = self.domain(&[width, height])?;
             (domain, [axes[1].name, axes[0].name], "TransposeAxes")

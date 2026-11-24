@@ -49,6 +49,12 @@ pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> 
     let parent = query.0.operation_region(branch)?;
     let order = query.0.operation_order(branch)?;
     let domain = query.0.operation_domain(yes)?;
+    let mut static_extents = Vec::new();
+    for (axis, extent) in query.0.domain_extents(domain)?.into_iter().enumerate() {
+        if let Some(count) = query.lookup("StaticIndex", extent)? {
+            static_extents.push((axis, count));
+        }
+    }
     let execution = query.required("OperationExecution", yes)?;
     let width = query.lookup("OperationWidth", yes)?;
     let mut arm_operations = Vec::new();
@@ -106,6 +112,11 @@ pub(super) fn apply(graph: &mut Graph, branch: Value, yes: Value, no: Value) -> 
             sink.set_region(parallel.0, parent);
             sink.set_order(parallel.0, order);
             sink.set_control(parallel.0, 0_i64, lane);
+            // A constant extent remains available when the map moves outside its arm.
+            for (axis, count) in static_extents {
+                let extent = sink.add("IndexConstant", count)?;
+                sink.set_domain_extent(domain, axis, extent)?;
+            }
             sink.set_operation_domain(parallel.0, domain);
             sink.set("OperationExecution", parallel.0, execution)?;
             if let Some(width) = width {

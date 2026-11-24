@@ -265,19 +265,28 @@ pub(in crate::egglog) fn outputs(
     Ok(())
 }
 
+pub(in crate::egglog) fn place_region(
+    sink: &mut State<'_, '_, '_>,
+    region: RegionId,
+    operations: &[OperationId],
+) -> Result<(), OptimizeError> {
+    sink.add("FlowScope", region.0)?;
+    for (position, operation) in operations.iter().enumerate() {
+        sink.set_region(operation.0, region.0);
+        sink.set_order(operation.0, position as i64);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 pub(in crate::egglog) fn region(
     sink: &mut State<'_, '_, '_>,
     id: i64,
     operations: &[OperationId],
 ) -> Result<RegionId, OptimizeError> {
-    let region = sink.add("RegionId", id)?;
-
-    sink.add("FlowScope", region)?;
-    for (position, operation) in operations.iter().enumerate() {
-        sink.set_region(operation.0, region);
-        sink.set_order(operation.0, position as i64);
-    }
-    Ok(RegionId(region))
+    let region = RegionId(sink.add("RegionId", id)?);
+    place_region(sink, region, operations)?;
+    Ok(region)
 }
 
 pub(in crate::egglog) fn parameters(

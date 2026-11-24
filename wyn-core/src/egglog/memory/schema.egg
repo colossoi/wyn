@@ -1,7 +1,7 @@
 ; Type and index proofs accompany a flat graph of operation occurrences.
 ; Executable bodies and operand lists are not egglog syntax trees.
 (datatype FunctionName (FunctionId i64 String))
-(datatype ValueName (ValueId i64) (ClonedValue OperationKey ValueName))
+(datatype ValueName (ValueId i64) (ScalarValue i64) (ClonedValue OperationKey ValueName))
 (datatype AccName (AccumulatorId i64) (ClonedAccumulator OperationKey AccName))
 (datatype Name (ValueNameRef ValueName) (AccNameRef AccName))
 (constructor DerivedRegion (OperationKey i64 i64) RegionKey)

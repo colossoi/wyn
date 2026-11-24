@@ -26,8 +26,9 @@ pub(super) fn before_analysis(graph: &mut Graph, roots: Vec<Value>) -> Result<()
 }
 
 pub(super) fn run(graph: &mut Graph) -> Result<bool, OptimizeError> {
+    let roots = Query(graph).live_roots()?;
+    let mut candidates = cse::find(graph, roots)?;
     let query = Query(graph);
-    let mut candidates = LookupMap::new();
     let mut pending = Vec::new();
     query.for_each("ForwardCandidate", |row| {
         if row[0] != row[1] {
@@ -56,27 +57,15 @@ pub(super) fn run(graph: &mut Graph) -> Result<bool, OptimizeError> {
             }
         }
     }
-    let local_inputs = if removed.len() == replacements.len() {
-        scalar_inputs(query, &replacements, &removed)?
-    } else {
-        None
-    };
-    graph.update(|mut sink| {
-        for edge in pending {
-            sink.remove("ForwardCandidate", edge)?;
-        }
-        Ok(())
-    })?;
-    if let Some(inputs) = local_inputs {
-        let _timing = timing::span("Rust local scalar forwarding");
-        for input in inputs {
-            input.apply(graph)?;
-        }
-        if !remove_leaves::apply(graph, &removed, scalar_uses)? {
-            return Err(output_error(
-                "scalar forwarding changed whether its definitions could be removed",
-            ));
-        }
+    if !pending.is_empty() {
+        graph.update(|mut sink| {
+            for edge in pending {
+                sink.remove("ForwardCandidate", edge)?;
+            }
+            Ok(())
+        })?;
+    }
+    if replace_local_scalars(graph, &replacements, &removed, false)? {
         return Ok(true);
     }
     edit::replace(graph, &replacements)?;
@@ -88,10 +77,37 @@ pub(super) fn run(graph: &mut Graph) -> Result<bool, OptimizeError> {
     Ok(false)
 }
 
+/// Exact scalar duplicates can feed effectful users because they supply the same
+/// typed value. Other forwards use the ordinary pure-scalar operand path.
+pub(in crate::egglog) fn replace_local_scalars(
+    graph: &mut Graph,
+    replacements: &[(Value, Value)],
+    removed: &[Value],
+    exact: bool,
+) -> Result<bool, OptimizeError> {
+    if removed.len() != replacements.len() {
+        return Ok(false);
+    }
+    let Some(inputs) = scalar_inputs(Query(graph), replacements, removed, exact)? else {
+        return Ok(false);
+    };
+    let _timing = timing::span("Rust local scalar forwarding");
+    for input in inputs {
+        input.apply(graph)?;
+    }
+    if !remove_leaves::apply(graph, removed, scalar_uses)? {
+        return Err(output_error(
+            "scalar forwarding changed whether its definitions could be removed",
+        ));
+    }
+    Ok(true)
+}
+
 fn scalar_inputs(
     query: Query<'_>,
     replacements: &[(Value, Value)],
     removed: &[Value],
+    exact: bool,
 ) -> Result<Option<Vec<ScalarInputs>>, OptimizeError> {
     let graph = query.0;
     let mut updates = LookupMap::<Value, Vec<(usize, Value)>>::new();
@@ -100,13 +116,21 @@ fn scalar_inputs(
         let Some(name) = query.value_name(old)? else {
             return Ok(None);
         };
-        let Some(primitive) = query.lookup("ValuePrimitive", old)? else {
-            return Ok(None);
+        let scalar = match query.lookup("ValuePrimitive", old)? {
+            Some(primitive) => query.lookup("ValuePrimitive", new)? == Some(primitive),
+            None if exact => {
+                if let Some(info) = query.lookup("ValueType", name)? {
+                    query.enode("ScalarInfo", info)?.is_some()
+                } else {
+                    false
+                }
+            }
+            None => false,
         };
         if !matches!(graph.code(producer)?, Code::Scalar(_) | Code::Constant { .. })
             || !query.flag("PureOperation", producer)?
             || query.contains("LaneDependentOperation", producer)?
-            || query.lookup("ValuePrimitive", new)? != Some(primitive)
+            || !scalar
             || structure.argument_uses.contains_key(&old)
             || structure.yields.uses.contains_key(&old)
             || structure.collective.uses.contains_key(&old)
@@ -122,10 +146,12 @@ fn scalar_inputs(
             }
         }
         for &(user, slot) in structure.inputs.uses.get(&old).into_iter().flatten() {
-            if !matches!(graph.code(user)?, Code::Scalar(_))
-                || !query.contains("LiveOperation", user)?
-                || !query.flag("PureOperation", user)?
-            {
+            let supported = match graph.code(user)? {
+                Code::Scalar(_) => exact || query.flag("PureOperation", user)?,
+                Code::Branch | Code::Call => exact,
+                _ => false,
+            };
+            if !supported || !query.contains("LiveOperation", user)? {
                 return Ok(None);
             }
             let Ok(slot) = usize::try_from(slot) else {

@@ -5,7 +5,7 @@ use super::properties;
 use crate::egglog::analysis::scopes::Changes;
 use crate::egglog::graph::{Formula, Graph};
 use crate::egglog::query::Query;
-use crate::egglog::{analysis, output_error, OptimizeError};
+use crate::egglog::{analysis, memory, output_error, OptimizeError};
 use crate::LookupSet;
 use egglog_engine::{RawValues, Value, Write};
 use wyn_graph::ReplacementForest;
@@ -105,6 +105,24 @@ fn clear_substitution(graph: &mut Graph) -> Result<(), OptimizeError> {
         graph.clear_function(table)?;
     }
     Ok(())
+}
+
+/// Re-intern the scalar definitions touched by committed graph edits.
+pub(in crate::egglog) fn intern_scalars(graph: &mut Graph) -> Result<(), OptimizeError> {
+    loop {
+        let duplicates = graph.changed_scalar_duplicates()?;
+        if duplicates.is_empty() {
+            return Ok(());
+        }
+        let replacements = duplicates.iter().map(|&(_, old, keep)| (old, keep)).collect::<Vec<_>>();
+        let removed = duplicates.iter().map(|&(operation, _, _)| operation).collect::<Vec<_>>();
+        if analysis::current(graph)? && memory::replace_local_scalars(graph, &replacements, &removed, true)?
+        {
+            continue;
+        }
+        replace(graph, &replacements)?;
+        remove(graph, &removed)?;
+    }
 }
 
 pub(in crate::egglog) fn remove(graph: &mut Graph, operations: &[Value]) -> Result<(), OptimizeError> {

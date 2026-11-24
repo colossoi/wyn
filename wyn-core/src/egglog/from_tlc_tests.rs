@@ -1,6 +1,6 @@
 use super::import;
 use crate::compile_thru_tlc;
-use crate::egglog::dataflow::ir::Code;
+use crate::egglog::dataflow::{edit, ir::Code};
 use crate::egglog::graph::Graph;
 use crate::egglog::query::Query;
 use crate::tlc::{self, DefMeta, TermKind};
@@ -53,8 +53,10 @@ fn evaluation_edges_stay_direct_and_borrowed_values_do_not_repeat_effects() {
 #[test]
 fn scalar_expressions_share_identity_at_import_and_after_an_operand_edit() {
     let program = compile_thru_tlc(
-        "entry main(x:i32,y:i32,z:i32,b:bool) (i32,i32,i32,i32,i32,i32) =
-         (x+y,x+y,let y=z in x+y,if b then x+y else z,7,7)",
+        "entry main(x:i32,y:i32,z:i32,b:bool) (i32,i32,i32,i32,i32,i32,i32,i32) =
+         let left=x+y
+         let right=let y=z in x+y
+         in (left,x+y,right,if b then x+y else z,7,7,left*7,right*7)",
     )
     .unwrap();
     let (mut graph, _) = import(&program).unwrap();
@@ -83,12 +85,47 @@ fn scalar_expressions_share_identity_at_import_and_after_an_operand_edit() {
         .0;
     assert_ne!(graph.output(first, 0).unwrap(), graph.output(nested, 0).unwrap());
     let identity = graph.scalar_expression(first).unwrap();
-    assert_eq!(graph.scalar_expression(nested), Some(identity));
+    assert_ne!(graph.scalar_expression(nested), Some(identity));
     assert_ne!(graph.scalar_expression(second), Some(identity));
 
-    let y = graph.inputs(first)[1];
+    let parents: Vec<_> = body
+        .iter()
+        .copied()
+        .filter(|&op| matches!(graph.code(op).unwrap(), Code::Scalar(payload) if payload.spelling() == "*"))
+        .collect();
+    let [left, right] = parents[..] else {
+        panic!("two distinct multiplications before the edit");
+    };
+    let before = graph.scalar_expression(right).unwrap();
+    let child_before = graph.scalar_expression(second).unwrap();
+    let left_before = graph.scalar_expression(left).unwrap();
+    let sibling_before = graph.scalar_expression(nested).unwrap();
+    let [x, y] = graph.inputs(first)[..] else {
+        panic!("binary addition");
+    };
+    let z = graph.inputs(second)[1];
+    graph.update(|mut sink| sink.set_input(second, 1, x)).unwrap();
+    let revision = edit::revision(&graph).unwrap();
+    edit::intern_scalars(&mut graph).unwrap();
+    assert_eq!(edit::revision(&graph).unwrap(), revision);
+    assert_eq!(graph.inputs(right)[0], fields[2]);
+    assert_ne!(graph.scalar_expression(second).unwrap(), child_before);
+    assert_ne!(graph.scalar_expression(right).unwrap(), before);
+    assert_eq!(graph.scalar_expression(left), Some(left_before));
+    assert_eq!(graph.scalar_expression(nested), Some(sibling_before));
+
+    graph.update(|mut sink| sink.set_input(second, 1, z)).unwrap();
+    edit::intern_scalars(&mut graph).unwrap();
+    assert_eq!(graph.scalar_expression(second), Some(child_before));
+    assert_eq!(graph.scalar_expression(right), Some(before));
+
     graph.update(|mut sink| sink.set_input(second, 1, y)).unwrap();
-    assert_eq!(graph.scalar_expression(second), Some(identity));
+    crate::egglog::analysis::ensure(&mut graph).unwrap();
+    assert!(!graph.has_operation(second));
+    assert_eq!(graph.inputs(product)[2], fields[0]);
+    assert!(graph.has_operation(nested));
+    assert!(!graph.has_operation(right));
+    assert_eq!(graph.inputs(product)[6], graph.inputs(product)[7]);
 }
 
 #[test]
