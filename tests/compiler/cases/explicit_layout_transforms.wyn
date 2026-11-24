@@ -9,11 +9,28 @@
 --! path = "output.{target}"
 --! targets = ["wgsl"]
 --! contains = ["fn generated_compute(", "fn literal_flatten_compute(", "fn literal_transpose_compute("]
---! excludes = ["fn generated_compute_1("]
+--! excludes = ["fn generated_compute_1(", "fn packed_generated_compute_1(", "fn packed_rows_compute_1(", "fn packed_runtime_compute_1(", "fn packed_with_metadata_compute_2("]
 --! [[host]]
 --! entry = "runtime_array_elements"
 --! inputs = {xs = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]}
 --! result_bytes = 48
+--! [[host]]
+--! entry = "packed_generated"
+--! dispatches = 1
+--! result_bytes = 64
+--! [[host]]
+--! entry = "packed_rows"
+--! dispatches = 1
+--! result_bytes = 64
+--! [[host]]
+--! entry = "packed_runtime"
+--! dispatches = 1
+--! inputs = {xs = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]}
+--! result_bytes = 64
+
+--! [[host]]
+--! entry = "packed_with_metadata"
+--! dispatches = 2
 
 entry transposed(xs: [][3]i32) [3][]i32 = transpose(xs)
 
@@ -36,3 +53,35 @@ entry runtime_shape(rows: i32, cols: i32) []i32 =
 entry array_elements(xs: [2][3][2]i32) [6][2]i32 = flatten(transpose(xs))
 
 entry runtime_array_elements(xs: [][3][2]i32) [3][][2]i32 = transpose(xs)
+
+entry packed_runtime(xs: [][4][2]i32) []i32 =
+    flatten(flatten(map(|tile| transpose(tile), xs)))
+
+entry packed_generated() [16]i32 =
+    let xs: [2][4][2]i32 =
+        map(|tile| map(|lane| map(|item| 100*tile + 10*lane + item, iota(2)), iota(4)), iota(2)) in
+    flatten(flatten(map(|tile| transpose(tile), xs)))
+
+entry packed_tail() [16]i32 =
+    let xs: [2][4][2]i32 = map(|tile| map(|lane|
+        let i = tile*4 + lane in
+        map(|item| if i < 7 then i + item else -1, iota(2)), iota(4)), iota(2)) in
+    flatten(flatten(map(|tile| transpose(tile), xs)))
+
+entry packed_empty_lanes(xs: [2][0][3]i32) [0]i32 =
+    flatten(flatten(map(|tile| transpose(tile), xs)))
+
+entry packed_rows() [16]i32 =
+    let xs: [2][4][2]i32 =
+        map(|tile| map(|lane| [100*tile + 10*lane, 100*tile + 10*lane+1], iota(4)), iota(2)) in
+    flatten(flatten(map(|tile| transpose(tile), xs)))
+
+entry packed_with_metadata() ([16]i32,[8]i32,[8]bool) =
+    let parts: ([2][4][2]i32,[2]([4]i32,[4]bool)) = unzip(map(|tile|
+        let split: ([4][2]i32,[4](i32,bool)) = unzip(map(|lane|
+            let i = 4*tile+lane in
+            if i < 7 then ([i,i+1],(i+2,i==6)) else ([-1,-1],(0,false)), iota(4))) in
+        let (rows,metadata) = split in (rows,unzip(metadata)), iota(2))) in
+    let (rows,metadata) = parts in
+    let (counts,overflow) = unzip(metadata) in
+    (flatten(flatten(map(|tile| transpose(tile), rows))), flatten(counts), flatten(overflow))

@@ -9,11 +9,11 @@ def neighbor_address(i: i32, ordinal: i32) i32 =
   (i/32)*96*32 + ordinal*32 + i%32
 
 -- Sort, retain/refine the cornerstone tree, build broad and narrow phases.
--- leaf_slots includes the sentinel slot; neighbor_slots includes padded tiles.
+-- leaf_slots includes the sentinel slot; neighbor_tiles includes padded tiles.
 def prepare<[n],[m],[k]>(positions: [n]vec4f32, velocities: [n]vec4f32,
       ids: [n]i32, previous_tree: [m]u32, leaf_slots: [m]i32,
-      neighbor_slots: [k]i32, world_size: f32, radius: f32, ncrit: i32)
-    ([n]vec4f32,[n]vec4f32,[m]u32,[k]i32,[n]i32,bool) =
+      neighbor_tiles: [k]i32, world_size: f32, radius: f32, ncrit: i32)
+    ([n]vec4f32,[n]vec4f32,[m]u32,[k*96*32]i32,[n]i32,bool) =
   let pairs = map(|i| @[Hilbert.encode(positions[i].xyz,world_size),u32(i)],ids) in
   let sorted = Sort.FourBit.radix_sort(32,|i,p| u32.get_bit(i,p.x),pairs) in
   let keys = map(|p| p.x,sorted) in
@@ -24,13 +24,21 @@ def prepare<[n],[m],[k]>(positions: [n]vec4f32, velocities: [n]vec4f32,
   let node_slots = iota(((length(leaf_slots)-2)/7)*8+1) in
   let (children,boxes,ranges,node_count) = Linked.build(tree,offsets,node_slots,world_size) in
   let leaves = map(|i| Neighbors.linked_leaf_neighbors(i,p,offsets,children,boxes,ranges,node_count,radius),iota(Octree.lower_bound(tree,Octree.sentinel))) in
-  let neighbors = map(|i|
-    let leaf = Octree.lower_bound(tree,keys[i]+1u32)-1 in
-    Neighbors.linked_particle_neighbors(i,p,ranges,leaves[leaf],radius),ids) in
-  let tiled = map(|address|
-    let i = (address/(96*32))*32 + address%32 in
-    let ordinal = (address%(96*32))/32 in
-    if i < length(p) then neighbors[i][ordinal] else -1i32,neighbor_slots) in
-  let counts = map(|row| row[96],neighbors) in
-  let overflow = tree_overflow || reduce(|a,b| a || b,false,map(|row| row[97] != 0,neighbors)) in
+  let parts: ([k][32][96]i32,[k]([32]i32,[32]bool)) =
+    unzip(map(|tile|
+      let split: ([32][96]i32,[32](i32,bool)) = unzip(map(|lane|
+        let slot = 32*tile+lane in
+        if slot < length(ids) then
+          let i = ids[slot] in
+          let leaf = Octree.lower_bound(tree,keys[i]+1u32)-1 in
+          let (row,count,overflow) = Neighbors.linked_particle_neighbor_row(i,p,ranges,leaves[leaf],radius) in
+          (row,(count,overflow))
+        else (replicate(96,-1i32),(0i32,false)),iota(32))) in
+      let (rows,metadata) = split in (rows,unzip(metadata)),neighbor_tiles)) in
+  let (rows,metadata) = parts in
+  let (tile_counts,tile_overflow) = unzip(metadata) in
+  let tiled = flatten(flatten(map(|tile| transpose(tile),rows))) in
+  let padded_counts = flatten(tile_counts) in
+  let counts: [n]i32 = padded_counts[0..length(ids)] in
+  let overflow = tree_overflow || reduce(|a,b| a || b,false,flatten(tile_overflow)) in
   (p,v,tree,tiled,counts,overflow)

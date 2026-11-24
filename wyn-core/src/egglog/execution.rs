@@ -58,8 +58,16 @@ pub(super) enum StorageReuse {
     Candidates(Vec<Value>),
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct FlatCollection {
+    pub lanes: u32,
+    pub items: u32,
+    pub size: u32,
+}
+
 #[derive(Default)]
 pub(super) struct StorageShapes {
+    pub flat: LookupMap<Value, FlatCollection>,
     pub outer_capacity: LookupMap<Value, i64>,
     pub static_count: LookupMap<Value, i64>,
     pub ranked: LookupSet<Value>,
@@ -73,6 +81,20 @@ pub(super) struct StorageShapes {
 impl StorageShapes {
     fn read(query: Query<'_>) -> Result<Self, OptimizeError> {
         let mut shapes = Self::default();
+        query.for_each("FlatCollection", |row| {
+            shapes.flat.insert(
+                row[0],
+                FlatCollection {
+                    lanes: u32::try_from(query.0.value_to_base::<i64>(row[1]))
+                        .map_err(|_| error("invalid flat collection lanes"))?,
+                    items: u32::try_from(query.0.value_to_base::<i64>(row[2]))
+                        .map_err(|_| error("invalid flat collection items"))?,
+                    size: u32::try_from(query.0.value_to_base::<i64>(row[3]))
+                        .map_err(|_| error("invalid flat collection size"))?,
+                },
+            );
+            Ok(())
+        })?;
         query.for_function("OuterCapacity", |keys, value| {
             shapes.outer_capacity.insert(keys[0], query.0.value_to_base::<i64>(value));
             Ok(())

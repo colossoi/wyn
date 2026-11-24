@@ -779,11 +779,12 @@ impl Body<'_, '_, '_> {
         axes: usize,
         element: &Type,
     ) -> Result<Typed, OptimizeError> {
+        let layout = self.compiler.execution.storage.flat.get(&name);
         if matches!(self.collections.get(&name), Some(Collection::Pending { .. })) {
             let Some(Collection::Pending { ty, shape, block }) = self.collections.remove(&name) else {
                 return Err(error("pending collection missing"));
             };
-            let ty = collection_type(&ty, element, axes)?;
+            let ty = if layout.is_some() { ty } else { collection_type(&ty, element, axes)? };
             let storage = if let Some(storage) = self.reuse_storage(name, &ty)? {
                 storage
             } else {
@@ -811,7 +812,45 @@ impl Body<'_, '_, '_> {
         value: Typed,
     ) -> Result<(), OptimizeError> {
         let array = self.array_destination(name, indices.len(), &value.ty)?;
-        self.write_array_value(array, indices, value)
+        let Some(layout) = self.compiler.execution.storage.flat.get(&name).copied() else {
+            return self.write_array_value(array, indices, value);
+        };
+        let [block, lane, rest @ ..] = indices else {
+            return Err(error("flat output needs an outer and lane index"));
+        };
+        let lanes = Self::number(layout.lanes);
+        let base = self.binary(BinaryOperator::Multiply, block.clone(), lanes.clone())?;
+        if layout.items == 0 {
+            let slot = self.binary(BinaryOperator::Add, base, lane.clone())?;
+            let mut coordinates = vec![slot];
+            coordinates.extend_from_slice(rest);
+            return self.write_array_value(array, &coordinates, value);
+        }
+        let base = self.binary(BinaryOperator::Multiply, base, Self::number(layout.items))?;
+        let base = self.binary(BinaryOperator::Add, base, lane.clone())?;
+        let write_item = |body: &mut Self, item: Typed, cell: Typed| {
+            let delta = body.binary(BinaryOperator::Multiply, item, lanes.clone())?;
+            let slot = body.binary(BinaryOperator::Add, base.clone(), delta)?;
+            body.write_array_value(array.clone(), &[slot], cell)
+        };
+        if let [item] = rest {
+            return write_item(self, item.clone(), value);
+        }
+        if !rest.is_empty() {
+            return Err(error("flat output has too many indices"));
+        }
+        self.counted(
+            Self::number(0),
+            Self::number(layout.items),
+            Self::number(1),
+            vec![],
+            |body, item, _| {
+                let cell = body.index(value, item.clone())?;
+                write_item(body, item, cell)?;
+                Ok(vec![])
+            },
+        )?;
+        Ok(())
     }
 
     fn scratch(

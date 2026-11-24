@@ -361,3 +361,10 @@
 (rule ((= bytes (LoopStateBytes loop slot)) (= next (LoopFieldBytes loop slot (RootPath)))
        (<= (+ bytes next) (bigint 16384)))
       ((set (LoopStateBytes loop (+ slot 1)) (+ bytes next))) :ruleset graph-loop-layout)
+
+(relation FlatCollection (ValueName i64 i64 i64))
+(rule ((ResultOrigin (ValueNameRef value) op slot)
+       (= (wyn-output-role op slot) (FlatOutput lanes items size)))
+      ((FlatCollection value lanes items size) (FreshArray value)
+       (set (LogicalOuterCount value) (IndexConstant size))
+       (set (OuterCapacity value) size)) :ruleset graph-sizes)

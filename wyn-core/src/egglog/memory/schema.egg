@@ -62,7 +62,7 @@
   (Total) (InclusiveScan) (ExclusiveScan)
   (InclusiveScanAndTotal) (ExclusiveScanAndTotal))
 (datatype ResultKind (Collected) (Compacted) (Contributed) (Folded FoldKind))
-(datatype ResultRole (CollectedOutput) (CompactedOutput) (PrefixOutput) (TotalOutput) (UpdatedOutput))
+(datatype ResultRole (CollectedOutput) (FlatOutput i64 i64 i64) (CompactedOutput) (PrefixOutput) (TotalOutput) (UpdatedOutput))
 (datatype AccPolicy (DisjointWrites) (IdenticalWrites) (CombineWrites) (FetchAddWrites))
 
 ; Operand and region-edge cells supply the current planning rules.
@@ -82,7 +82,8 @@
 (function ParameterDiet (RegionKey i64) Diet :no-merge)
 (function RegionReturnType (RegionKey i64) ReturnInfo :no-merge)
 
-(datatype ArrayLayout (TransposeAxes) (FlattenAxes))
+(sort LayoutOrder (Vec i64))
+(datatype ArrayLayout (AxisLayout i64 LayoutOrder))
 (function OperationWidth (OperationKey) i64 :no-merge)
 (function OperationExecution (OperationKey) Execution :no-merge)
 ; Compacted values and packed scan prefixes share the lane predicate.
