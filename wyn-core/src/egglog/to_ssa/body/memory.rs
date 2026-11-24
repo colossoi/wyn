@@ -764,11 +764,12 @@ impl Body<'_, '_, '_> {
         indices: &[Typed],
         value: Typed,
     ) -> Result<(), OptimizeError> {
+        let layout = self.compiler.execution.storage.flat.get(&name).copied();
         if matches!(self.collections.get(&name), Some(Collection::Pending { .. })) {
             let Some(Collection::Pending { ty, shape, block }) = self.collections.remove(&name) else {
                 return Err(error("pending collection missing"));
             };
-            let ty = collection_type(&ty, &value.ty, indices.len())?;
+            let ty = if layout.is_some() { ty } else { collection_type(&ty, &value.ty, indices.len())? };
             let storage = if let Some(storage) = self.reuse_storage(name, &ty)? {
                 storage
             } else {
@@ -790,6 +791,41 @@ impl Body<'_, '_, '_> {
             })
             .cloned()
         {
+            if let Some(layout) = layout {
+                let [block, lane] = indices else {
+                    return Err(error("flat output needs an outer and lane index"));
+                };
+                if layout.items == 0 {
+                    let base = self.binary(
+                        BinaryOperator::Multiply,
+                        block.clone(),
+                        Self::number(layout.lanes),
+                    )?;
+                    let slot = self.binary(BinaryOperator::Add, base, lane.clone())?;
+                    return self.write_array_value(array, &[slot], value);
+                }
+                let offset = self.binary(
+                    BinaryOperator::Multiply,
+                    block.clone(),
+                    Self::number(layout.items),
+                )?;
+                self.counted(
+                    Self::number(0),
+                    Self::number(layout.items),
+                    Self::number(1),
+                    vec![],
+                    |body, item, _| {
+                        let cell = body.index(value.clone(), item.clone())?;
+                        let slot = body.binary(BinaryOperator::Add, offset.clone(), item)?;
+                        let slot =
+                            body.binary(BinaryOperator::Multiply, slot, Self::number(layout.lanes))?;
+                        let slot = body.binary(BinaryOperator::Add, slot, lane.clone())?;
+                        body.write_array_value(array.clone(), &[slot], cell)?;
+                        Ok(vec![])
+                    },
+                )?;
+                return Ok(());
+            }
             return self.write_array_value(array, indices, value);
         }
         Err(error("array destination has no SSA representation"))

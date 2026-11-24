@@ -53,9 +53,9 @@ def linked_leaf_neighbors<[n],[m],[k]>(leaf: i32, positions: [n]vec4f32, offsets
   (result with [256] = count) with [257] = if overflow then 1 else 0
 
 -- Candidate node ranges are already linked to the spatially sorted particles.
-def linked_particle_neighbors<[n],[k]>(i: i32, positions: [n]vec4f32, ranges: [k]vec2i32,
-                                     candidates: [258]i32, radius: f32) [98]i32 =
-  let (result,count) = loop (result,count) = (replicate(98,-1i32),0i32) for li<candidates[256] do
+def collect_linked_particle_neighbors<[n],[k],[r]>(i: i32, positions: [n]vec4f32, ranges: [k]vec2i32,
+                                     candidates: [258]i32, radius: f32, scratch: [r]i32) ([r]i32,i32) =
+  let (result,count) = loop (result,count) = (scratch,0i32) for li<candidates[256] do
     let range = ranges[candidates[li]] in
     let (result,count) = loop (result,count) = (result,count) for batch<range.y/4 do
       let first = range.x+batch*4 in
@@ -78,7 +78,17 @@ def linked_particle_neighbors<[n],[k]>(i: i32, positions: [n]vec4f32, ranges: [k
       let r = positions[i].xyz-positions[index].xyz in
       let hit = dot(r,r) < radius*radius && count < 96 in
       (if hit then result with [count] = index else result,if hit then count+1 else count) in
-  (result with [96] = count) with [97] = candidates[257]
+  (result,count)
+
+def linked_particle_neighbor_row<[n],[k]>(i: i32, positions: [n]vec4f32, ranges: [k]vec2i32,
+                                        candidates: [258]i32, radius: f32) ([96]i32,i32,bool) =
+  let (row,count) = collect_linked_particle_neighbors(i,positions,ranges,candidates,radius,replicate(96,-1i32)) in
+  (row,count,candidates[257] != 0)
+
+def linked_particle_neighbors<[n],[k]>(i: i32, positions: [n]vec4f32, ranges: [k]vec2i32,
+                                     candidates: [258]i32, radius: f32) [98]i32 =
+  let (row,count) = collect_linked_particle_neighbors(i,positions,ranges,candidates,radius,replicate(98,-1i32)) in
+  (row with [96] = count) with [97] = candidates[257]
 
 -- One BFS per occupied leaf. Queue stores parent Hilbert intervals, equivalent
 -- to upstream's first-child-node queue; children are visited in Hilbert order.

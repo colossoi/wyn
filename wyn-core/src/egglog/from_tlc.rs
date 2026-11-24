@@ -17,7 +17,7 @@ use crate::tlc::{
     self, extract_lambda_params_ref, ArrayExpr, DefMeta, LoopKind, SoacBody, SoacOp, TermKind, VarRef,
 };
 use crate::types::{self, extract_function_signature, strip_existentials, Diet, Type, TypeExt, TypeName};
-use crate::SymbolId;
+use crate::{LookupMap, LookupSet, SymbolId};
 use egglog_engine::sort::VecContainer;
 use egglog_engine::{Core, IntoValues, RawValues, Value, Write};
 use smallvec::SmallVec;
@@ -32,6 +32,7 @@ type Callback = SoacBody<ExplicitClosurePayload, ExplicitCapturesPayload>;
 type SourceArray = ArrayExpr<ExplicitClosurePayload, ExplicitCapturesPayload>;
 type Operator = SoacOp<ExplicitClosurePayload, ExplicitCapturesPayload>;
 mod layout;
+use layout::Layout;
 
 pub(super) fn import(source: &OwnershipApplied) -> Result<(Graph, Interner<i64, SymbolId>), OptimizeError> {
     let mut graph = fusion::new_graph()?;
@@ -46,6 +47,8 @@ pub(super) fn import(source: &OwnershipApplied) -> Result<(Graph, Interner<i64, 
             regions: IdSource::new(),
             domains: IdSource::new(),
             bindings: Bindings::default(),
+            layouts: LookupMap::new(),
+            transpose_functions: layout::transpose_functions(source),
             span: Span::generated(),
         };
         Ok(import.program())
@@ -108,6 +111,8 @@ struct Import<'graph, 'db, 'operations, 'ids, 'source> {
     regions: IdSource<i64>,
     domains: IdSource<i64>,
     bindings: Bindings<SymbolId, Imported<'source>>,
+    layouts: LookupMap<Value, Layout>,
+    transpose_functions: LookupSet<SymbolId>,
     span: Span,
 }
 
@@ -1099,7 +1104,12 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                 return Err(output_error("array layout transform expects one array"));
             };
             return self
-                .array_layout(Self::leaf(source.clone())?, ty, id == known.transpose, scope)
+                .array_layout(
+                    Self::leaf(source.clone())?,
+                    ty,
+                    (id == known.transpose).then_some(0),
+                    scope,
+                )
                 .map(Some);
         }
         if ![
@@ -1227,6 +1237,9 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                 let Some(first) = inputs.first() else {
                     return Err(output_error("map has no inputs"));
                 };
+                if inputs.len() == 1 && layout::transposes_input(lam, &self.transpose_functions) {
+                    return self.array_layout(first.clone(), ty, Some(1), scope);
+                }
                 let (domain, index) = self.iteration(first, scope)?;
                 let mut inner = self.scope()?;
                 let mut arguments = Vec::new();

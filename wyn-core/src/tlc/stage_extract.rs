@@ -1941,7 +1941,10 @@ fn flatten_compute_output_many(
     term_ids: &mut TermIdSource,
 ) -> Option<Term> {
     let span = body.span;
-    let source_ty = body.ty.clone();
+    let mut source_ty = body.ty.clone();
+    if !types::size::fold_type(&mut source_ty) {
+        return None;
+    }
     let source = symbols.alloc("_w_compute_output_value".to_string());
     let mut leaves = outputs
         .iter()
