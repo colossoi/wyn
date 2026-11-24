@@ -16,6 +16,7 @@ use wyn_graph::ReplacementForest;
 mod accumulator;
 mod branch;
 mod guard;
+mod join_repair;
 mod relocation;
 use guard::Guard;
 

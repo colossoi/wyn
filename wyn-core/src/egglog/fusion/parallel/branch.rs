@@ -48,12 +48,15 @@ pub(in crate::egglog::fusion) fn run(graph: &mut Graph) -> Result<bool, Optimize
     body.pinned.extend(pinned.iter().filter_map(|key| body.graph.operation_ids.get(key).copied()));
     let mut pending: SortedSet<_> = regions.into_iter().map(|region| body.regions[&region]).collect();
     let mut changed = false;
+    let mut only_joins = true;
     while let Some(region) = pending.pop_first() {
         let affected = if let Some((first, second)) = adjacent(&body, region) {
             body.join_branches(first, second)?.to_vec()
         } else if let Some(destination) = sink_one(graph, &mut body, region)? {
+            only_joins = false;
             vec![destination]
         } else if let Some(destination) = sink_shared_loop(graph, &mut body, region)? {
+            only_joins = false;
             vec![destination]
         } else {
             continue;
@@ -61,11 +64,11 @@ pub(in crate::egglog::fusion) fn run(graph: &mut Graph) -> Result<bool, Optimize
         changed = true;
         // A joined or prepended arm can expose an ordinary fusion without changing its domain.
         for affected in affected.into_iter().chain([region]) {
-            fuse_region(graph, &mut body, affected)?;
+            only_joins &= !fuse_region(graph, &mut body, affected)?;
         }
         pending.extend(body.take_dirty());
     }
-    if changed {
+    if changed && !(only_joins && body.repair_empty_joins(graph)?) {
         body.publish(graph)?;
     }
     Ok(changed)

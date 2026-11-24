@@ -71,6 +71,19 @@ pub(super) struct Refresh {
 }
 
 impl Scopes {
+    pub(in crate::egglog) fn forget_empty_arms(&mut self, regions: &[Value], operations: &[Value]) {
+        let functions: LookupSet<_> =
+            regions.iter().filter_map(|region| self.owners.remove(region)).collect();
+        let regions: LookupSet<_> = regions.iter().copied().collect();
+        let operations: LookupSet<_> = operations.iter().copied().collect();
+        for function in functions {
+            if let Some(scope) = self.members.get_mut(&function) {
+                scope.regions.retain(|region| !regions.contains(region));
+                scope.operations.retain(|operation| !operations.contains(operation));
+            }
+        }
+    }
+
     pub(super) fn refresh(
         &mut self,
         graph: &Graph,
