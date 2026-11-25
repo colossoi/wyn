@@ -147,20 +147,22 @@ def pressure_velocity_neighbors<[n],[k]>(i: i32, positions: [n]vec4f32, velociti
     correction+(coefficients[i]+coefficients[index])*gradient(positions[i].xyz-positions[index].xyz) in
   @[ (velocities[i].xyz - dt*correction)..., 0.0 ]
 
-def project_neighbors<[n],[k]>(positions: [n]vec4f32, velocities: [n]vec4f32,
-            factors: [n]vec2f32, density_solve: bool, ids: [n]i32, neighbors: [k]i32, counts: [n]i32) [n]vec4f32 =
+def project_neighbors<[n],[k],T>(positions: [n]vec4f32, velocities: [n]vec4f32,
+            factors: [n]vec2f32, density_solve: bool, ids: [n]i32, neighbors: [k]i32, counts: [n]i32,
+            finish: vec4f32 -> vec4f32 -> T) [n]T =
   let coefficients = map(|i| coefficient_neighbors(i,positions,velocities,factors,density_solve,neighbors,counts),
                          ids) in
-  map(|i| pressure_velocity_neighbors(i,positions,velocities,coefficients,neighbors,counts),ids)
+  map2(|p,i| finish(p,pressure_velocity_neighbors(i,positions,velocities,coefficients,neighbors,counts)),
+       positions,ids)
 
 -- Upstream default: one divergence iteration, external forces, one density
 -- iteration, then integrate. All pressure updates read a frozen velocity pass.
-def step_neighbors<[n],[k]>(positions: [n]vec4f32, velocities: [n]vec4f32, bounds: vec3f32, ids: [n]i32, neighbors: [k]i32, counts: [n]i32)
+def step_neighbors<[n],[k]>(positions: [n]vec4f32, velocities: [n]vec4f32, bounds: vec3f32, neighbors: [k]i32, counts: [n]i32)
     ([n]vec4f32,[n]vec4f32) =
+  let ids = iota(length(positions)) in
   let factors = map(|i| density_factor_neighbors(i,positions,neighbors,counts),ids) in
-  let divergence_free = project_neighbors(positions,velocities,factors,false,ids,neighbors,counts) in
-  let accelerated = map(|i| external(positions[i],divergence_free[i],bounds),
-                        ids) in
-  let corrected = project_neighbors(positions,accelerated,factors,true,ids,neighbors,counts) in
-  let integrated = map(|i| integrate(positions[i],corrected[i],bounds),ids) in
+  let accelerated = project_neighbors(positions,velocities,factors,false,ids,neighbors,counts,
+                                      |p,v| external(p,v,bounds)) in
+  let integrated = project_neighbors(positions,accelerated,factors,true,ids,neighbors,counts,
+                                     |p,v| integrate(p,v,bounds)) in
   (map(|(p,_v)| p,integrated),map(|(_p,v)| v,integrated))

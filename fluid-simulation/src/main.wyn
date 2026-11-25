@@ -27,7 +27,7 @@ entry fluid(previous_positions: []vec4f32, previous_velocities: []vec4f32,
   let (sorted_p,sorted_v,tree,neighbors,counts,overflow) = Spatial.prepare(
     current_p,current_v,0i32..<count,starting_tree,tree_slots,
     0i32..<((count+31)/32),max(bounds.x,max(bounds.y,bounds.z)),Fluid.h,leaf_threshold) in
-  let (stepped_p,stepped_v) = Fluid.step_neighbors(sorted_p,sorted_v,bounds,0i32..<count,neighbors,counts) in
+  let (stepped_p,stepped_v) = Fluid.step_neighbors(sorted_p,sorted_v,bounds,neighbors,counts) in
   let positions = map(|i| if active && !reset && !overflow then stepped_p[i] else current_p[i],0i32..<count) in
   let velocities = map(|i| if active && !reset && !overflow then stepped_v[i] else current_v[i],0i32..<count) in
   let image = Renderer.render(positions,velocities,0i32..<count,resolution,mouse,bounds,overflow,screen) in
