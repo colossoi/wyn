@@ -13,37 +13,46 @@ def lower_bound<[n]>(keys: [n]u32, value: u32) i32 =
 -- Upstream rebalance markers: 8 splits, 1 retains, 0 removes a merged sibling.
 def rebalance<[n],[m]>(keys: [n]u32, corners: [m]u32, slots: [m]i32,
     ncrit: i32, maintenance: bool) ([m]u32,bool,bool) =
-  let leaves = lower_bound(corners,sentinel) in
-  let active = iota(leaves) in
-  let offsets = map(|key| lower_bound(keys,key),corners[0..leaves+1]) in
-  let ops = map(|i|
-    if i >= leaves then 0i32 else
-    let span = corners[i+1]-corners[i] in
-    let count = offsets[i+1]-offsets[i] in
+  let capacity = length(slots) in
+  let leaf_count = lower_bound(corners,sentinel) in
+  let last_boundary = capacity-1 in
+  let sentinel_offset = lower_bound(keys,sentinel) in
+  let offsets = map(|key| if key < sentinel then lower_bound(keys,key) else sentinel_offset,corners) in
+  let intervals = zip(corners[0..last_boundary],corners[1..capacity]) in
+  let particle_ranges = zip(offsets[0..last_boundary],offsets[1..capacity]) in
+  let count_children = |i,leaf: ((u32,u32),(i32,i32))|
+    let ((lower,upper),(first_particle,last_particle)) = leaf in
+    if lower >= sentinel then 0i32 else
+    let span = upper-lower in
+    let count = last_particle-first_particle in
     if count > ncrit && span >= 8u32 then 8i32 else
     if !maintenance || span == sentinel then 1i32 else
     let parent_span = span << 3u32 in
-    let octant = i32((corners[i] % parent_span)/span) in
-    let first = i-octant in
-    if maintenance && octant != 0 && first >= 0 && first+8 <= leaves then
-      if corners[first]+parent_span == corners[first+8]
-         && offsets[first+8]-offsets[first] <= ncrit then 0i32 else 1i32
-    else 1i32,active) in
-  let ends = scan((+),0i32,ops) in
-  let total = ends[length(ends)-1] in
-  let overflow = total >= length(corners) in
-  let changed = reduce(|a,b| a || b,false,map(|op| op != 1,ops)) in
-  let writes = iota(leaves*8) in
-  let destinations = map(|j|
-    let i=j/8 in let child=j%8 in
-    if i < leaves && child < ops[i] && !overflow then ends[i]-ops[i]+child else -1i32,writes) in
-  let values = map(|j|
-    let i=j/8 in let child=j%8 in
-    if i < leaves && child < ops[i] then
-      corners[i]+u32(child)*((corners[i+1]-corners[i])/u32(ops[i])) else sentinel,writes) in
-  let next = scatter(map(|_| sentinel,slots),destinations,values) in
-  let selected = map2(|old,new| if overflow then old else new,corners,next) in
-  (selected,overflow,changed)
+    let octant = i32((lower % parent_span)/span) in
+    let first_sibling = i-octant in
+    let after_siblings = first_sibling+8 in
+    if octant != 0 && first_sibling >= 0 && after_siblings <= leaf_count then
+      if corners[first_sibling]+parent_span == corners[after_siblings]
+         && offsets[after_siblings]-offsets[first_sibling] <= ncrit then 0i32 else 1i32
+    else 1i32 in
+  let child_counts = map2(count_children,iota(last_boundary),zip(intervals,particle_ranges)) in
+  let child_ends = scan((+),0i32,child_counts) in
+  let total = child_ends[length(child_ends)-1] in
+  let overflow = total >= capacity in
+  let changed = reduce(|a,b| a || b,false,
+    map2(|i,count| i < leaf_count && count != 1,iota(last_boundary),child_counts)) in
+  -- A prefix end selects the parent of each live output slot. This keeps the
+  -- launch capacity fixed while avoiding eight candidate writes per leaf.
+  let next = map2(|i,old|
+    if overflow then old else if i >= total then sentinel else
+    let (parent,_) = loop (lo,hi) = (0i32,leaf_count) while lo < hi do
+      let mid = lo+(hi-lo)/2 in
+      if child_ends[mid] <= i then (mid+1,hi) else (lo,mid) in
+    let count = child_counts[parent] in
+    let child = i-(child_ends[parent]-count) in
+    let (lower,upper) = intervals[parent] in
+    lower+u32(child)*((upper-lower)/u32(count)),iota(capacity),corners) in
+  (next,overflow,changed)
 
 def split<[n],[m]>(keys: [n]u32, corners: [m]u32, slots: [m]i32, ncrit: i32)
     ([m]u32,bool) =
