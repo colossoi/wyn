@@ -1072,7 +1072,14 @@ impl Body<'_, '_, '_> {
         )?;
         let fits = self.binary(BinaryOperator::LessEqual, count.clone(), capacity_value)?;
         self.require_condition(fits)?;
-        let storage = self.local_array(types::sized_array(capacity, element.clone()))?;
+        let exact_size = self
+            .integer_literal(&count)
+            .and_then(|size| usize::try_from(size).ok())
+            .filter(|&size| size > 0 && size <= capacity);
+        let storage = self.local_array(types::sized_array(
+            exact_size.unwrap_or(capacity),
+            element.clone(),
+        ))?;
         self.counted(
             Self::number(0),
             count.clone(),
@@ -1087,6 +1094,9 @@ impl Body<'_, '_, '_> {
             },
         )?;
         let storage = self.snapshot(storage)?;
+        if exact_size.is_some() {
+            return Ok(storage);
+        }
         let count = self.cast(count, &types::i32())?;
         let ty = types::make_array1(
             element,
