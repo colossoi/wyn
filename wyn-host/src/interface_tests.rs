@@ -87,6 +87,7 @@ fn nested_dispatch_loops_keep_inner_and_outer_dependencies() {
         body: vec![2],
         completion: 3,
         control: DispatchLoopControl::While {
+            initial_condition: None,
             condition: ScalarExpr::Bool(true),
         },
         carried: vec![],

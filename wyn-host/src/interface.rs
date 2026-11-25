@@ -139,6 +139,8 @@ pub enum DispatchLoopControl {
         index: ScalarSource,
     },
     While {
+        /// Compile-time value of the predicate before the first iteration.
+        initial_condition: Option<bool>,
         condition: ScalarExpr,
     },
 }
@@ -147,13 +149,13 @@ impl DispatchLoopControl {
     pub fn expression(&self) -> &ScalarExpr {
         match self {
             Self::Counted { count, .. } => count,
-            Self::While { condition } => condition,
+            Self::While { condition, .. } => condition,
         }
     }
     pub fn expression_mut(&mut self) -> &mut ScalarExpr {
         match self {
             Self::Counted { count, .. } => count,
-            Self::While { condition } => condition,
+            Self::While { condition, .. } => condition,
         }
     }
 }

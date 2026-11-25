@@ -539,10 +539,18 @@ impl Program {
                             writeln!(out, "    (dotimes (iteration {})", self.whl_scalar(*pipeline, count)?)?;
                             writeln!(out, "      (gpu-write-scalar {index} 0 'i32 (i32 iteration))")?;
                         }
-                        crate::DispatchLoopControl::While { condition } => {
-                            writeln!(out, "    (do () ((not (progn")?;
+                        crate::DispatchLoopControl::While { initial_condition, condition } => {
+                            let condition = self.whl_scalar(*pipeline, condition)?;
+                            let (bindings, condition) = if let Some(initial) = initial_condition {
+                                let initial = if *initial { "t" } else { "nil" };
+                                ("(first-dispatch-iteration t nil)",
+                                 format!("(if first-dispatch-iteration {initial} {condition})"))
+                            } else {
+                                ("", condition)
+                            };
+                            writeln!(out, "    (do ({bindings}) ((not (progn")?;
                             self.write_operations(out, entry, test)?;
-                            writeln!(out, "      {})) nil)", self.whl_scalar(*pipeline, condition)?)?;
+                            writeln!(out, "      {condition})) nil)")?;
                         }
                     }
                     self.write_operations(out, entry, body)?;

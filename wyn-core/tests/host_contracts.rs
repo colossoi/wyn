@@ -109,7 +109,7 @@ fn dispatch_loops_share_product_carries_and_control_across_backends() {
             program.interface.source_results.iter().find(|result| result.entry == "uniform_rows").unwrap();
         assert!(matches!(&rows.shape, ResultShape::Rectangular(dimensions) if dimensions.len() == 2));
         for loop_ in loops {
-            if let DispatchLoopControl::While { condition } = &loop_.control {
+            if let DispatchLoopControl::While { condition, .. } = &loop_.control {
                 if loop_.test.is_empty() {
                     let ScalarExpr::Read { source, .. } = condition else {
                         panic!("while predicate must come from its test dispatch or a carried binding");

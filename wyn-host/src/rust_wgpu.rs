@@ -649,10 +649,23 @@ impl Program {
                                 }
                             })
                         }
-                        crate::DispatchLoopControl::While { condition } => {
+                        crate::DispatchLoopControl::While { initial_condition, condition } => {
                             let condition = self.rust_scalar(*pipeline, condition)?;
+                            let (setup, condition) = if let Some(value) = initial_condition {
+                                (
+                                    quote!(let mut first_dispatch_iteration = true;),
+                                    quote!(if ::std::mem::take(&mut first_dispatch_iteration) {
+                                        #value
+                                    } else {
+                                        #condition
+                                    }),
+                                )
+                            } else {
+                                (quote!(), condition)
+                            };
                             quote!({
                                 #initial
+                                #setup
                                 loop {
                                     #test
                                     if !(#condition) { break; }

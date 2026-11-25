@@ -38,7 +38,7 @@ use crate::ssa::layout::{
     block_layout, std430_type_layout, storage_elem_stride, storage_value_type, type_byte_size,
 };
 use crate::ssa::stage::Elaborated;
-use crate::ssa::types::{InstKind, Terminator, ValueRef};
+use crate::ssa::types::{ConstantValue, InstKind, Terminator, ValueRef};
 use crate::tlc::{extract_lambda_params_ref, DefMeta};
 use crate::types::{
     self, buffer_tag, canonical_storage_buffer_ty, strip_existentials, Type, TypeExt, TypeName,
@@ -1748,6 +1748,8 @@ impl EntryEmission<'_, '_, '_> {
             .iter()
             .map(|(&name, expression)| (name, expression.clone()))
             .collect::<StableMap<_, _>>();
+        let loop_parameter = self.body.query().loop_parameter(expression)?;
+        let mut initial_condition = None;
         let mut carried_values = Vec::new();
         for (index, (merge, output)) in merges.into_iter().zip(&pattern).enumerate() {
             let parameter = merge;
@@ -1771,6 +1773,12 @@ impl EntryEmission<'_, '_, '_> {
                 } else {
                     None
                 };
+                if !counted && name == loop_parameter {
+                    initial_condition = match value.value {
+                        ValueRef::Const(ConstantValue::Bool(value)) => Some(value),
+                        _ => self.body.literal_bits(&value).map(|bits| bits != 0),
+                    };
+                }
                 let initial = self.capture(value)?;
                 let slots = saved_slots(&initial)?;
                 let mut replacements = LookupMap::default();
@@ -1792,7 +1800,6 @@ impl EntryEmission<'_, '_, '_> {
                 carried_values.push((name, output, initial, current, slots));
             }
         }
-        let loop_parameter = self.body.query().loop_parameter(expression)?;
         let control = if counted {
             let Some(count) = host::scalar_index(
                 self.body.query(),
@@ -1818,6 +1825,7 @@ impl EntryEmission<'_, '_, '_> {
                 return Err(error("loop predicate is not a scalar carry"));
             };
             DispatchLoopControl::While {
+                initial_condition,
                 condition: ScalarExpr::Read {
                     source: scalar_source(*slot),
                     offset: 0,
