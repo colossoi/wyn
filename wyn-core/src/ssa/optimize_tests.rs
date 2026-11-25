@@ -56,7 +56,7 @@ fn scalar_projection_forwarding_preserves_snapshots_across_writes() {
             .unwrap();
         builder.terminate(Terminator::Return(Some(result.into()))).unwrap();
         let mut body = builder.finish().unwrap();
-        forward_aggregate_reads(&mut body);
+        forward_aggregate_reads(&mut body, &LookupSet::new());
         let instruction = body.inner.inst_of_value(result).unwrap();
         assert_eq!(
             matches!(body.inner.insts[instruction].data, InstKind::Load { .. }),
@@ -102,7 +102,7 @@ fn representation_lowering_makes_view_updates_explicit_without_selecting_local_r
             .unwrap();
         builder.terminate(Terminator::Return(Some(result.into()))).unwrap();
         let mut body = builder.finish().unwrap();
-        prepare_values(&mut body);
+        prepare_values(&mut body, &LookupSet::new());
         let ValueDef::Inst { inst } = body.inner.values[result].def else {
             panic!("instruction result")
         };
@@ -222,7 +222,7 @@ fn dynamic_array_materialization_is_shared_outside_the_loop() {
         target: loop_body,
         args: vec![sum.into()],
     };
-    prepare_values(&mut body);
+    prepare_values(&mut body, &LookupSet::new());
     crate::ssa::ir::schedule_floating(&mut body.inner).unwrap();
     let materialized: Vec<_> = body
         .inner
