@@ -10,6 +10,7 @@ def neighbor_address(i: i32, ordinal: i32) i32 =
 
 -- Sort, retain/refine the cornerstone tree, build broad and narrow phases.
 -- leaf_slots includes the sentinel slot; neighbor_tiles includes padded tiles.
+-- Only the first counts[i] entries in each particle's column are initialized.
 def prepare<[n],[m],[k]>(positions: [n]vec4f32, velocities: [n]vec4f32,
       ids: [n]i32, previous_tree: [m]u32, leaf_slots: [m]i32,
       neighbor_tiles: [k]i32, world_size: f32, radius: f32, ncrit: i32)
@@ -29,12 +30,15 @@ def prepare<[n],[m],[k]>(positions: [n]vec4f32, velocities: [n]vec4f32,
     unzip(map(|tile|
       let split: ([32][96]i32,[32](i32,bool)) = unzip(map(|lane|
         let slot = 32*tile+lane in
-        if slot < length(ids) then
+        let (row,count,overflow) = if slot < length(ids) then
           let i = ids[slot] in
           let leaf = Octree.lower_bound(tree,keys[i]+1u32)-1 in
-          let (row,count,overflow) = Neighbors.linked_particle_neighbor_row(i,p,ranges,leaves[leaf],radius) in
-          (row,(count,overflow))
-        else (replicate(96,-1i32),(0i32,false)),iota(32))) in
+          Neighbors.linked_particle_neighbor_row(i,p,ranges,leaves[leaf],radius)
+        else ((#[scratch] replicate(96,-1i32)),0i32,false) in
+        let ordinals = iota(count) in
+        let values = map(|j| row[j],ordinals) in
+        let destination: [96]i32 = scratch(96) in
+        (scatter(destination,ordinals,values),(count,overflow)),iota(32))) in
       let (rows,metadata) = split in (rows,unzip(metadata)),neighbor_tiles)) in
   let (rows,metadata) = parts in
   let (tile_counts,tile_overflow) = unzip(metadata) in

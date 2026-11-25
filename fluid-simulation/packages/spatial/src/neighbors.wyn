@@ -81,7 +81,7 @@ def collect_linked_particle_neighbors<[n],[k],[r]>(i: i32, positions: [n]vec4f32
 
 def linked_particle_neighbor_row<[n],[k]>(i: i32, positions: [n]vec4f32, ranges: [k]vec2i32,
                                         candidates: [258]i32, radius: f32) ([96]i32,i32,bool) =
-  let (row,count) = collect_linked_particle_neighbors(i,positions,ranges,candidates,radius,replicate(96,-1i32)) in
+  let (row,count) = collect_linked_particle_neighbors(i,positions,ranges,candidates,radius,(#[scratch] replicate(96,-1i32))) in
   (row,count,candidates[257] != 0)
 
 def linked_particle_neighbors<[n],[k]>(i: i32, positions: [n]vec4f32, ranges: [k]vec2i32,

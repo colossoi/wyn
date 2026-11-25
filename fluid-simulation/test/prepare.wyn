@@ -12,4 +12,10 @@ entry prepare() ([]vec4f32,[]i32,[]u32,[]i32,[]i32) =
   let slots = 0i32..<80 in
   let old = map(|i| if i == 0 then 0u32 else 1073741824u32,slots) in
   let (p,v,tree,neighbors,counts,overflow) = S.prepare(positions,velocities,ids,old,slots,0i32..<1,16.0,1.7,2) in
+  let neighbors = map(|slot|
+    let particle = slot%32 in
+    let ordinal = slot/32 in
+    if particle < length(counts) then
+      if ordinal < counts[particle] then neighbors[slot] else -1i32
+    else -1i32,iota(length(neighbors))) in
   (v,counts,tree,neighbors,[if overflow then 1 else 0])
