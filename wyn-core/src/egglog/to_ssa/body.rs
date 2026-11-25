@@ -20,6 +20,8 @@ mod subgroups;
 mod values;
 mod workgroup;
 
+use memory::CollectedScatter;
+
 pub(super) enum CollectionShape {
     Local(Typed),
     Device(Vec<(Typed, Expr)>),
@@ -68,6 +70,7 @@ pub(super) struct Body<'a, 'p, 'source> {
     pub host_values: Bindings<Value, ScalarExpr>,
     pub collections: LookupMap<Value, Collection>,
     pub collection_outputs: LookupMap<Value, Type>,
+    collected_scatter: Option<CollectedScatter>,
     pub reused_buffers: LookupSet<BindingRef>,
     pub guard: Option<ScalarExpr>,
     pub generated: Option<GeneratedBuffers>,
@@ -107,6 +110,7 @@ impl<'a, 'p, 'source> Body<'a, 'p, 'source> {
             host_values: Bindings::default(),
             collections: LookupMap::default(),
             collection_outputs: LookupMap::default(),
+            collected_scatter: None,
             reused_buffers: LookupSet::default(),
             guard: None,
             generated: None,

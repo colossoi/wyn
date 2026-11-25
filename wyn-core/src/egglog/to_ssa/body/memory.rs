@@ -4,7 +4,7 @@ use crate::builtins::catalog;
 use crate::egglog::dataflow::ir::{Bounds, Code};
 use crate::egglog::execution::StorageReuse;
 use crate::egglog::graph::CollectiveInput;
-use crate::egglog::graph::Formula;
+use crate::egglog::graph::{Formula, Origin};
 use crate::egglog::payload::Payload;
 use crate::egglog::query::Query;
 use crate::egglog::to_ssa::{host, runtime_binding, same_value_structure};
@@ -14,6 +14,21 @@ use crate::ssa::layout::{storage_elem_stride, storage_value_type};
 use crate::ssa::types::InstKind;
 use crate::types::{self, Type, TypeExt, TypeName};
 use crate::ResourceAccess;
+
+pub(in crate::egglog::to_ssa) struct ScratchScatter {
+    scope: Value,
+    pub output: Value,
+    backing: Value,
+    shape: Value,
+    pub copy: Option<Value>,
+}
+
+pub(super) struct CollectedScatter {
+    scope: Value,
+    output: Value,
+    shape: Typed,
+    coordinates: Vec<Typed>,
+}
 
 fn collection_type(declared: &Type, element: &Type, axes: usize) -> Result<Type, OptimizeError> {
     if axes == 0 {
@@ -758,17 +773,17 @@ impl Body<'_, '_, '_> {
         Err(error("array value has no SSA representation"))
     }
 
-    pub fn write_array(
+    fn array_destination(
         &mut self,
         name: Value,
-        indices: &[Typed],
-        value: Typed,
-    ) -> Result<(), OptimizeError> {
+        axes: usize,
+        element: &Type,
+    ) -> Result<Typed, OptimizeError> {
         if matches!(self.collections.get(&name), Some(Collection::Pending { .. })) {
             let Some(Collection::Pending { ty, shape, block }) = self.collections.remove(&name) else {
                 return Err(error("pending collection missing"));
             };
-            let ty = collection_type(&ty, &value.ty, indices.len())?;
+            let ty = collection_type(&ty, element, axes)?;
             let storage = if let Some(storage) = self.reuse_storage(name, &ty)? {
                 storage
             } else {
@@ -777,22 +792,26 @@ impl Body<'_, '_, '_> {
             };
             self.collections.insert(name, Collection::Allocated(storage));
         }
-        if let Some(array) = self
-            .values
-            .get(&name)
-            .or_else(|| self.collections.get(&name).and_then(Collection::value))
-            .filter(|value| {
-                value.ty.is_array()
-                    || matches!(
-                        value.ty,
-                        Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), _)
-                    )
-            })
-            .cloned()
+        let array = self.named(name)?;
+        if array.ty.is_array()
+            || matches!(
+                array.ty,
+                Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), _)
+            )
         {
-            return self.write_array_value(array, indices, value);
+            return Ok(array);
         }
         Err(error("array destination has no SSA representation"))
+    }
+
+    pub fn write_array(
+        &mut self,
+        name: Value,
+        indices: &[Typed],
+        value: Typed,
+    ) -> Result<(), OptimizeError> {
+        let array = self.array_destination(name, indices.len(), &value.ty)?;
+        self.write_array_value(array, indices, value)
     }
 
     fn scratch(
@@ -1137,6 +1156,108 @@ impl Body<'_, '_, '_> {
         Ok(coordinates)
     }
 
+    pub(in crate::egglog::to_ssa) fn collected_scatter(
+        &self,
+        operations: &[Value],
+        collects: &[(Value, Value)],
+    ) -> Result<Option<ScratchScatter>, OptimizeError> {
+        let Some(&scope) = operations.last() else {
+            return Ok(None);
+        };
+        let execution = self.compiler.execution;
+        let query = self.query();
+        if !matches!(query.0.code(scope)?, Code::WithAcc)
+            || execution.workgroup(scope).accumulator
+            || query.0.accumulator_group_count(scope) != 1
+            || query.0.combiner_at(scope, 0).is_some()
+            || query.enode("IdenticalWrites", query.0.accumulator_policy(scope, 0)?)?.is_none()
+        {
+            return Ok(None);
+        }
+        let [result] = query.0.outputs(scope)[..] else {
+            return Ok(None);
+        };
+        let mut outputs = collects.iter().filter(|(_, value)| *value == result);
+        let Some(&(output, _)) = outputs.next() else {
+            return Ok(None);
+        };
+        if outputs.next().is_some()
+            || !matches!(
+                self.collections.get(&output),
+                Some(Collection::Pending {
+                    shape: CollectionShape::Device(_),
+                    ..
+                })
+            )
+            || !matches!(execution.storage_reuse(output), None | Some(StorageReuse::Fresh))
+        {
+            return Ok(None);
+        }
+        let [backing] = query.0.collective_inputs(scope, 0, CollectiveInput::Backing)[..] else {
+            return Ok(None);
+        };
+        let Some(reference) = query.constructor("ValueNameRef", backing)? else {
+            return Ok(None);
+        };
+        let Some(Origin::Result(operation, 0)) = query.0.origin(reference) else {
+            return Ok(None);
+        };
+        let (shape, copy) = match query.0.code(operation)? {
+            Code::Scratch => (backing, None),
+            Code::Copy => {
+                let source = query.0.input(operation, 0)?;
+                let Some(Origin::Result(producer, 0)) = query.0.origin(source) else {
+                    return Ok(None);
+                };
+                if !matches!(query.0.code(producer)?, Code::Scratch) {
+                    return Ok(None);
+                }
+                let structure = query.0.structure().read();
+                if structure.inputs.uses.contains_key(&reference)
+                    || structure.yields.uses.contains_key(&reference)
+                    || structure.argument_uses.contains_key(&reference)
+                    || structure.certificates.uses.contains_key(&reference)
+                    || structure.collective.uses.get(&backing).is_none_or(|uses| uses.len() != 1)
+                {
+                    return Ok(None);
+                }
+                (query.name(source)?, Some(operation))
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(ScratchScatter {
+            scope,
+            output,
+            backing,
+            shape,
+            copy,
+        }))
+    }
+
+    pub(in crate::egglog::to_ssa) fn emit_collected_scatter(
+        &mut self,
+        scatter: &ScratchScatter,
+        coordinates: &[Typed],
+    ) -> Result<(), OptimizeError> {
+        let shape = self.named(scatter.shape)?;
+        self.array_destination(scatter.output, coordinates.len(), &shape.ty)?;
+        let region = self.query().0.control_region(scatter.scope, 0)?;
+        let operations = self.query().operations(region)?;
+        let checkpoint = self.values.checkpoint();
+        // The scoped contribution still uses the backing's shape for bounds and scheduling.
+        self.values.insert(scatter.backing, shape.clone());
+        let previous = self.collected_scatter.replace(CollectedScatter {
+            scope: scatter.scope,
+            output: scatter.output,
+            shape,
+            coordinates: coordinates.to_vec(),
+        });
+        let result = self.statements(&operations);
+        self.collected_scatter = previous;
+        self.values.restore(checkpoint);
+        result
+    }
+
     fn accumulate(&mut self, operation: Value) -> Result<Vec<Typed>, OptimizeError> {
         let query = self.query();
         let operands = query.0.inputs(operation);
@@ -1150,6 +1271,19 @@ impl Body<'_, '_, '_> {
             .into_iter()
             .map(|index| self.index_expression(index))
             .collect::<Result<Vec<_>, _>>()?;
+        if let Some(scatter) = self.collected_scatter.as_ref().filter(|scatter| scatter.scope == owner) {
+            let output = scatter.output;
+            let shape = scatter.shape.clone();
+            let mut coordinates = scatter.coordinates.clone();
+            let valid = self.valid_indices(shape, &indices)?;
+            let mut values = self.yield_values(&operands[1..])?;
+            let Some(value) = values.pop().filter(|_| values.is_empty()) else {
+                return Err(error("collected scatter must receive one value"));
+            };
+            coordinates.extend(indices);
+            self.when(valid, |body| body.write_array(output, &coordinates, value))?;
+            return Ok(vec![]);
+        }
         let Some(&first) = arrays.first() else {
             return Err(error("empty accumulator destination"));
         };

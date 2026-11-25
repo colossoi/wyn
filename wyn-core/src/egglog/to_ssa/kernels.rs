@@ -1040,7 +1040,16 @@ impl Body<'_, '_, '_> {
         leader: Option<Typed>,
     ) -> Result<Vec<Typed>, OptimizeError> {
         let coordinates = self.domain_coordinates(domain)?;
-        let operations = self.query().operations(statements)?;
+        let mut operations = self.query().operations(statements)?;
+        let scatter = if leader.is_none() && folds.is_empty() {
+            self.collected_scatter(&operations, collects)?
+        } else {
+            None
+        };
+        if let Some(scatter) = &scatter {
+            operations.pop();
+            operations.retain(|&op| Some(op) != scatter.copy);
+        }
         let (suffix, group_loop) = if let (Some(_), Some(active)) = (&leader, self.active_dispatch) {
             let workgroup = self.compiler.execution.workgroup(active);
             (workgroup.map_suffix, workgroup.map_loop)
@@ -1059,7 +1068,13 @@ impl Body<'_, '_, '_> {
         self.statements(prefix)?;
         let publish = |body: &mut Self| {
             body.statements(tail)?;
+            if let Some(scatter) = &scatter {
+                body.emit_collected_scatter(scatter, &coordinates)?;
+            }
             for &(output, result) in collects {
+                if scatter.as_ref().is_some_and(|scatter| scatter.output == output) {
+                    continue;
+                }
                 let Some(value) = body.operand(result)? else {
                     return Err(error("collected result is a capability"));
                 };
