@@ -710,6 +710,9 @@ impl Body<'_, '_, '_> {
     ) -> Result<(), OptimizeError> {
         let ty = self.builder.place_elem_ty(place).clone();
         let value = self.cast(value, &ty)?;
+        // A whole-array store copies the contents of local storage at the point of the store.
+        let value =
+            if self.local_arrays.contains_key(&value.value) { self.snapshot(value)? } else { value };
         self.builder
             .push_void_inst(InstKind::Store {
                 place,

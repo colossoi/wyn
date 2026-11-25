@@ -36,6 +36,11 @@ def main():
             results = {"result_0": values, "result_1": other}
             tiled[entry] = results
             tiled[f"{entry}_kept"] = results | {"result_2": rows}
+    scratch_entry = "scratch_scatter_after_update"
+    tiled[scratch_entry] = {
+        "result_0": [2, 4, 3, 1, 12, 14, 13, 11],
+        "result_1": [7, 27],
+    }
     fixtures = [
         ("library/handwritten_gathers.wyn", [], {name: {name: values} for name, values in gathers.items()}),
         ("cases/tuple_array_operations_projected_tuple_7.wyn",
@@ -46,6 +51,8 @@ def main():
         directory = Path(temporary)
         data = directory / "input.bin"
         data.write_bytes(struct.pack(f"<{len(inputs)}i", *inputs))
+        rows = directory / "rows.bin"
+        rows.write_bytes(struct.pack("<8i", 1, 2, 3, 4, 11, 12, 13, 14))
         for target, suffix in (("spirv", "spv"), ("wgsl", "wgsl")):
             for fixture, flags, cases in fixtures:
                 shader = directory / f"array-values.{suffix}"
@@ -65,6 +72,8 @@ def main():
                         command += ["--output", f"{name}:{output}"]
                     if entry == tuple_entry:
                         command += ["--input", f"projected_tuple_7_xs:{data}"]
+                    if entry == scratch_entry:
+                        command += ["--input", f"xs:{rows}"]
                     if options.no_validate:
                         command.append("--no-validate")
                     run = subprocess.run(command, capture_output=True, text=True, timeout=60)

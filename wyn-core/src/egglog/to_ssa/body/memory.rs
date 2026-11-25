@@ -943,14 +943,7 @@ impl Body<'_, '_, '_> {
             place = next;
             ty = element;
         }
-        let value = self.cast(value, &ty)?;
-        self.builder
-            .push_void_inst(InstKind::Store {
-                place,
-                value: value.value,
-            })
-            .map(|_| ())
-            .map_err(builder_error)
+        self.store_place(place, value)
     }
 
     fn update_slices(

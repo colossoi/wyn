@@ -37,3 +37,9 @@ entry tiled_reduced_7() ([16]i32, i32) =
 entry tiled_reduced_7_kept() ([16]i32, i32, [7][3]i32) =
   let rows = map(row, iota(7)) in
   (tiled(rows), reduce((+), 0, metadata(rows)), rows)
+
+entry scratch_scatter_after_update(xs: [2][4]i32) ([8]i32, [2]i32) =
+  let (rows, tags) = unzip(map(|row|
+    let result = scatter(duplicate_scratch(row), [3,0,2,1], row) in
+    (result, result[1] + row[2]), xs)) in
+  (flatten(rows), tags)
