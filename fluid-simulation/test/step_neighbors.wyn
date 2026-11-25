@@ -15,4 +15,4 @@ entry step() ([]vec4f32,[]vec4f32) =
   let neighbors = map(|address|
     let i = address%32 in let j = (address/32)%96 in
     if i < 2 && j < 2 then j else if i < 4 && j == 0 then i else -1i32,0i32..<3072) in
-  Fluid.step_neighbors(positions,velocities,@[16.0,12.0,10.0],0i32..<4,neighbors,[2i32,2i32,1i32,1i32])
+  Fluid.step_neighbors(positions,velocities,@[16.0,12.0,10.0],neighbors,[2i32,2i32,1i32,1i32])

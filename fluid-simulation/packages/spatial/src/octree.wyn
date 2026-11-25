@@ -39,7 +39,8 @@ def rebalance<[n],[m]>(keys: [n]u32, corners: [m]u32, slots: [m]i32,
     if i < leaves && child < ops[i] then
       corners[i]+u32(child)*((corners[i+1]-corners[i])/u32(ops[i])) else sentinel,writes) in
   let next = scatter(map(|_| sentinel,slots),destinations,values) in
-  (if overflow then corners else next,overflow,changed)
+  let selected = map2(|old,new| if overflow then old else new,corners,next) in
+  (selected,overflow,changed)
 
 def split<[n],[m]>(keys: [n]u32, corners: [m]u32, slots: [m]i32, ncrit: i32)
     ([m]u32,bool) =
