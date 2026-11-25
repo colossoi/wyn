@@ -11,9 +11,7 @@ def cube(key: u32, span: u32, world_size: f32) (vec3f32,vec3f32) =
 def intersects(a: vec3f32,b: vec3f32,c: vec3f32,d: vec3f32) bool =
   a.x <= d.x && a.y <= d.y && a.z <= d.z && b.x >= c.x && b.y >= c.y && b.z >= c.z
 
--- Upstream's 32-lane BFS: four queued first-child pointers expand to 32
--- sibling tests per batch. Scans express ballot counts and exclusive ranks;
--- the compiler supplies shared storage and workgroup synchronization.
+-- One scratch array holds the 128 queue entries followed by the candidate row.
 def linked_leaf_neighbors<[n],[m],[k]>(leaf: i32, positions: [n]vec4f32, offsets: [m]i32,
     children: [k]i32, boxes: [k]vec4f32, ranges: [k]vec2i32, node_count: i32, radius: f32) [258]i32 =
   let empty = replicate(258,-1i32) in
@@ -21,36 +19,37 @@ def linked_leaf_neighbors<[n],[m],[k]>(leaf: i32, positions: [n]vec4f32, offsets
   if offsets[leaf] == offsets[leaf+1] then
     (empty with [256] = 0) with [257] = 0 else
   let first = offsets[leaf] in let last = offsets[leaf+1] in
-  let points = map(|p| p.xyz,positions[first..last]) in
-  let lo = reduce(|a,b| min(a,b),@[f32.highest,f32.highest,f32.highest],points)-radius in
-  let hi = reduce(|a,b| max(a,b),@[f32.lowest,f32.lowest,f32.lowest],points)+radius in
-  let initial = replicate(128,0i32) with [0] = (if children[0] != 0 then children[0] else 0i32) in
-  let (_queue,_old,_nodes,_offset,_new,result,count,overflow) =
-    loop (queue,old,nodes,offset,new,result,count,overflow) = (initial,0i32,1i32,0i32,0i32,empty,0i32,false)
+  let (lo,hi,_) = loop (lo,hi,j) = (positions[first].xyz,positions[first].xyz,first+1)
+    while j < last do (min(lo,positions[j].xyz),max(hi,positions[j].xyz),j+1) in
+  let lo = lo-radius in
+  let hi = hi+radius in
+  let initial = replicate(386,-1i32) with [0] = children[0] in
+  let (scratch,_,_,_,_,_,count,overflow) =
+    loop (scratch,old,nodes,offset,lane,new,count,overflow) =
+      (initial,0i32,1i32,0i32,0i32,0i32,0i32,false)
     while nodes > 0 && !overflow do
-      let raw_indices = map(|lane| queue[(old+offset+lane/8)%128]+lane%8,iota(32)) in
-      let indices = map(|lane| if raw_indices[lane] < node_count then raw_indices[lane] else 0i32,iota(32)) in
-      let accepted = map(|lane|
-        if offset+lane/8 >= nodes || raw_indices[lane] >= node_count then false else
-        let box = boxes[indices[lane]] in intersects(box.xyz,box.xyz+box.w,lo,hi),iota(32)) in
-      let splits = map(|lane| if accepted[lane] && children[indices[lane]] != 0 then 1i32 else 0i32,iota(32)) in
-      let leaves = map(|lane| if accepted[lane] && children[indices[lane]] == 0 && ranges[indices[lane]].y > 0
-                              then 1i32 else 0i32,iota(32)) in
-      let split_ends = scan((+),0i32,splits) in
-      let leaf_ends = scan((+),0i32,leaves) in
-      let destinations = map(|lane| if leaves[lane] != 0 && count+leaf_ends[lane] <= 256
-                                  then count+leaf_ends[lane]-1 else -1i32,iota(32)) in
-      let output = scatter(result,destinations,indices) in
-      let queue_destinations = map(|lane| if splits[lane] != 0 && nodes+new+split_ends[lane] <= 128
-          then (old+nodes+new+split_ends[lane]-1)%128 else -1i32,iota(32)) in
-      let child_indices = map(|lane| if splits[lane] != 0 then children[indices[lane]] else 0i32,iota(32)) in
-      let next_queue = scatter(queue,queue_destinations,child_indices) in
-      let next_new = new+split_ends[31] in
-      let next_count = count+leaf_ends[31] in
-      let next_overflow = nodes+next_new > 128 || next_count > 256 in
-      if offset+4 >= nodes then (next_queue,old+nodes,next_new,0i32,0i32,output,min(next_count,256),next_overflow)
-      else (next_queue,old,nodes,offset+4,next_new,output,min(next_count,256),next_overflow) in
-  (result with [256] = count) with [257] = if overflow then 1 else 0
+      let index = scratch[(old+offset+lane/8)%128]+lane%8 in
+      let (child,leaf) =
+        if index >= node_count then (0i32,false) else
+        let box = boxes[index] in
+        if !intersects(box.xyz,box.xyz+box.w,lo,hi) then (0i32,false) else
+        let child = children[index] in
+        (child,child == 0 && ranges[index].y > 0) in
+      let destination = if child != 0 && nodes+new < 128 then (old+nodes+new)%128
+                        else if leaf && count < 256 then 128+count else -1i32 in
+      let scratch = if destination >= 0 then
+        scratch with [destination] = (if child != 0 then child else index) else scratch in
+      let next_new = new + (if child != 0 then 1 else 0) in
+      let next_count = count + (if leaf then 1 else 0) in
+      if lane+1 < min(32,(nodes-offset)*8) then
+        (scratch,old,nodes,offset,lane+1,next_new,next_count,false)
+      else
+        let overflow = nodes+next_new > 128 || next_count > 256 in
+        if offset+4 >= nodes then
+          (scratch,old+nodes,next_new,0i32,0i32,0i32,min(next_count,256),overflow)
+        else
+          (scratch,old,nodes,offset+4,0i32,next_new,min(next_count,256),overflow) in
+  ((scratch with [384] = count) with [385] = if overflow then 1 else 0)[128..386]
 
 -- Candidate node ranges are already linked to the spatially sorted particles.
 def collect_linked_particle_neighbors<[n],[k],[r]>(i: i32, positions: [n]vec4f32, ranges: [k]vec2i32,
