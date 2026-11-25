@@ -15,7 +15,7 @@ def prepare<[n],[m],[k]>(positions: [n]vec4f32, velocities: [n]vec4f32,
       neighbor_tiles: [k]i32, world_size: f32, radius: f32, ncrit: i32)
     ([n]vec4f32,[n]vec4f32,[m]u32,[k*96*32]i32,[n]i32,bool) =
   let keys_by_id = map(|p| Hilbert.encode(p.xyz,world_size),positions) in
-  let order = Sort.FourBit.radix_sort(32,|bit,i| u32.get_bit(bit,keys_by_id[i]),ids) in
+  let order = Sort.radix_sort(30,|bit,i| u32.get_bit(bit,keys_by_id[i]),ids) in
   let keys = map(|i| keys_by_id[i],order) in
   let p = map(|i| positions[i],order) in
   let v = map(|i| velocities[i],order) in

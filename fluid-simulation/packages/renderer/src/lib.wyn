@@ -1,4 +1,4 @@
--- Upstream sphere impostors: cull, compact, rasterize quads, shade sphere depth.
+-- Upstream sphere impostors: cull particles, rasterize quads, shade sphere depth.
 -- Indexed instancing supplies the same quads as upstream's task/mesh shaders.
 import "pkg:gfx"
 
@@ -9,7 +9,7 @@ def color(speed: f32) vec3f32 =
   let low = @[0.0,0.0,1.0]*(1.0-a)+@[1.0,0.5,1.0]*a in
   low*(1.0-b)+@[1.0,1.0,0.0]*b
 
-def render<[n]>(positions: [n]vec4f32, velocities: [n]vec4f32, ids: [n]i32,
+def render<[n]>(positions: [n]vec4f32, velocities: [n]vec4f32,
     resolution: vec3f32, mouse: vec4f32, bounds: vec3f32, overflow: bool,
     screen: *render_target<vec4f32>) render_target<vec4f32> =
   let camera = {target = bounds*0.5,
@@ -18,25 +18,22 @@ def render<[n]>(positions: [n]vec4f32, velocities: [n]vec4f32, ids: [n]i32,
     distance = bounds.x*1.65} in
   let view = gfx.camera.look_at(gfx.camera.orbit.eye(camera),camera.target,@[0.0,1.0,0.0]) in
   let projection = gfx.camera.perspective(45.0,resolution.x/resolution.y,0.1,1000.0) in
-  let visible = map(|p|
-    let clip = gfx.camera.world_to_clip(p.xyz,view,projection) in
-    let r = p.w*clip.w in
-    if clip.w > 0.0 && abs(clip.x) < clip.w+r && abs(clip.y) < clip.w+r
-       && clip.z > 0.0 && clip.z < clip.w+r then 1i32 else 0i32,positions) in
-  let offsets = scan((+),0i32,visible) in
-  let destinations = map(|i| if visible[i] != 0 then offsets[i]-1 else -1i32,ids) in
-  let compacted = scatter(map(|_| -1i32,ids),destinations,ids) in
-  let count = if length(ids) == 0 then 0u32 else u32(offsets[length(ids)-1]) in
+  let count = u32(length(positions)) in
   let indices = [0u32,1u32,2u32,2u32,1u32,3u32] in
   let command = {index_count=6u32,instance_count=count,first_index=0u32,
                  vertex_offset=0i32,first_instance=0u32} in
   let triangles = rasterize_triangles(indexed_indirect_draw(indices,command),|vi,ii,_|
-    let id = compacted[i32(ii)] in
+    let id = i32(ii) in
     let p = positions[id] in
     let center = view*@[p.xyz...,1.0] in
+    let clip = projection*center in
+    let r = p.w*clip.w in
+    let visible = clip.w > 0.0 && abs(clip.x) < clip.w+r && abs(clip.y) < clip.w+r
+                  && clip.z > 0.0 && clip.z < clip.w+r in
     let uv = [@[-0.5,-0.5],@[0.5,-0.5],@[-0.5,0.5],@[0.5,0.5]][i32(vi)] in
     let vertex = @[center.x+uv.x*p.w*2.0,center.y+uv.y*p.w*2.0,center.z] in
-    vertex_output(projection*@[vertex...,1.0],
+    -- Send all four vertices of a culled particle outside the clip volume.
+    vertex_output(if visible then projection*@[vertex...,1.0] else @[2.0,2.0,0.0,1.0],
       {uv=uv,view_position=vertex,radius=p.w,base_color=color(magnitude(velocities[id].xyz))})) in
   shade_with({depth_test=#less_equal,depth_write=true,blend=#replace,color_write=true},
     screen,triangles,|v,_,_,_,_|

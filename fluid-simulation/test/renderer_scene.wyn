@@ -5,4 +5,4 @@ module Renderer = import "pkg:renderer"
 entry scene(resolution: vec3f32, mouse: vec4f32, screen: render_target<vec4f32>) render_target<vec4f32> =
   let positions = [@[25.0,17.0,15.0,2.0],@[30.0,17.0,15.0,2.0]] in
   let velocities = [@[0.0,0.0,0.0,0.0],@[10.0,0.0,0.0,0.0]] in
-  Renderer.render(positions,velocities,0i32..<2,resolution,mouse,@[56.0,35.0,30.0],false,screen)
+  Renderer.render(positions,velocities,resolution,mouse,@[56.0,35.0,30.0],false,screen)
