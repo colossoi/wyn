@@ -2,10 +2,13 @@
 -- Trailing entries are the 2^30 sentinel. The last active boundary is sentinel.
 def sentinel: u32 = 1073741824u32
 
-def lower_bound<[n]>(keys: [n]u32, value: u32) i32 =
-  let (lo,hi) = loop (lo,hi) = (0i32,length(keys)) while lo < hi do
+def lower_bound_between<[n]>(keys: [n]u32, value: u32, first: i32, last: i32) i32 =
+  let (lo,hi) = loop (lo,hi) = (first,last) while lo < hi do
     let mid = lo+(hi-lo)/2 in
     if keys[mid] < value then (mid+1,hi) else (lo,mid) in lo
+
+def lower_bound<[n]>(keys: [n]u32, value: u32) i32 =
+  lower_bound_between(keys,value,0i32,length(keys))
 
 -- Upstream rebalance markers: 8 splits, 1 retains, 0 removes a merged sibling.
 def rebalance<[n],[m]>(keys: [n]u32, corners: [m]u32, slots: [m]i32,
