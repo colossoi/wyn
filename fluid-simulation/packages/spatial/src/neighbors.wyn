@@ -52,10 +52,10 @@ def linked_leaf_neighbors<[n],[m],[k]>(leaf: i32, positions: [n]vec4f32, offsets
   ((scratch with [384] = count) with [385] = if overflow then 1 else 0)[128..386]
 
 -- Candidate node ranges are already linked to the spatially sorted particles.
-def collect_linked_particle_neighbors<[n],[k],[r]>(i: i32, positions: [n]vec4f32, ranges: [k]vec2i32,
-                                     candidates: [258]i32, radius: f32, scratch: [r]i32) ([r]i32,i32) =
-  let (result,count) = loop (result,count) = (scratch,0i32) for li<candidates[256] do
-    let range = ranges[candidates[li]] in
+def collect_linked_particle_neighbors<[n],[r]>(i: i32, positions: [n]vec4f32,
+    candidate_count: i32, range_at: i32 -> vec2i32, radius: f32, scratch: [r]i32) ([r]i32,i32) =
+  let (result,count) = loop (result,count) = (scratch,0i32) for li<candidate_count do
+    let range = range_at(li) in
     let (result,count) = loop (result,count) = (result,count) for batch<range.y/4 do
       let first = range.x+batch*4 in
       -- Fetch all four independent positions before testing or appending.
@@ -79,14 +79,18 @@ def collect_linked_particle_neighbors<[n],[k],[r]>(i: i32, positions: [n]vec4f32
       (if hit then result with [count] = index else result,if hit then count+1 else count) in
   (result,count)
 
-def linked_particle_neighbor_row<[n],[k]>(i: i32, positions: [n]vec4f32, ranges: [k]vec2i32,
-                                        candidates: [258]i32, radius: f32) ([96]i32,i32,bool) =
-  let (row,count) = collect_linked_particle_neighbors(i,positions,ranges,candidates,radius,(#[scratch] replicate(96,-1i32))) in
-  (row,count,candidates[257] != 0)
+def linked_particle_neighbor_row<[n]>(i: i32, positions: [n]vec4f32,
+    packed: Segmented.storage<vec2i32>, descriptor: (Segmented.row,bool), radius: f32)
+    ([96]i32,i32,bool) =
+  let (segment,overflow) = descriptor in
+  let (row,count) = collect_linked_particle_neighbors(i,positions,Segmented.size(segment),
+    |ordinal| Segmented.get(packed,segment,ordinal),radius,(#[scratch] replicate(96,-1i32))) in
+  (row,count,overflow)
 
 def linked_particle_neighbors<[n],[k]>(i: i32, positions: [n]vec4f32, ranges: [k]vec2i32,
                                      candidates: [258]i32, radius: f32) [98]i32 =
-  let (row,count) = collect_linked_particle_neighbors(i,positions,ranges,candidates,radius,replicate(98,-1i32)) in
+  let (row,count) = collect_linked_particle_neighbors(i,positions,candidates[256],
+    |ordinal| ranges[candidates[ordinal]],radius,replicate(98,-1i32)) in
   (row with [96] = count) with [97] = candidates[257]
 
 -- One BFS per occupied leaf. Queue stores parent Hilbert intervals, equivalent

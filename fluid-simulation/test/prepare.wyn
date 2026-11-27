@@ -1,6 +1,7 @@
 -- Combined spatial test for the tiled neighbor output and its metadata.
 --   wyn build fluid-simulation/test/prepare.wyn -o /tmp/prepare.spv
 --   extra/viz/target/release/viz validate /tmp/prepare.spv
+--   extra/viz/target/release/viz pipeline /tmp/prepare.wynhost
 -- Expected: particle IDs in velocity.x reorder to [3,1,2,0], neighbor counts
 -- are [3,3,3,1], and overflow is [0]. Do not execute a shader failing validation.
 
@@ -11,7 +12,7 @@ entry prepare() ([]vec4f32,[]i32,[]u32,[]i32,[]i32) =
   let velocities = map(|i| @[f32(i),0.0,0.0,0.0],ids) in
   let slots = 0i32..<80 in
   let old = map(|i| if i == 0 then 0u32 else 1073741824u32,slots) in
-  let (p,v,tree,neighbors,counts,overflow) = S.prepare(positions,velocities,ids,old,slots,0i32..<1,16.0,1.7,2) in
+  let (_,v,tree,neighbors,counts,overflow) = S.prepare(positions,velocities,ids,old,slots,0i32..<1,16.0,1.7,2) in
   let neighbors = map(|slot|
     let particle = slot%32 in
     let ordinal = slot/32 in

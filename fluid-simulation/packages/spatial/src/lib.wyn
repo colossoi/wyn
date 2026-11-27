@@ -25,15 +25,27 @@ def prepare<[n],[m],[k]>(positions: [n]vec4f32, velocities: [n]vec4f32,
   let offsets = map(|key| Octree.lower_bound(keys,key),tree) in
   let node_slots = iota(((length(leaf_slots)-2)/7)*8+1) in
   let (children,boxes,ranges,node_count) = Linked.build(tree,offsets,node_slots,world_size) in
-  let leaves = map(|i| Neighbors.linked_leaf_neighbors(i,p,offsets,children,boxes,ranges,node_count,radius),iota(Octree.lower_bound(tree,Octree.sentinel))) in
+  let pack_leaf = |i: i32|
+    let first = offsets[i] in
+    let after = offsets[i+1] in
+    let candidates = Neighbors.linked_leaf_neighbors(i,p,offsets,children,boxes,ranges,node_count,radius) in
+    let row = map(|node| ranges[node],candidates[0..candidates[256]]) in
+    (row,(first,after,candidates[257] != 0)) in
+  -- Only this phase reads the ranges, and each leaf contributes at most 256.
+  let candidate_arena: []vec2i32 = scratch(length(leaf_slots)*256) in
+  let (packed, leaves) = Segmented.flatmap(candidate_arena,pack_leaf,
+    leaf_slots[0..length(leaf_slots)-1]) in
+  let descriptors: [n](Segmented.row,bool) = scratch(length(ids)) in
+  let neighborhoods = scatter_ranges(descriptors,
+    |(row,(first,after,overflow))| (after-first,(first,row,overflow || !Segmented.fits(row))),
+    |(first,row,overflow),j| (first+j,(row,overflow)),leaves) in
   let parts: ([k][32][96]i32,[k]([32]i32,[32]bool)) =
     unzip(map(|tile|
       let split: ([32][96]i32,[32](i32,bool)) = unzip(map(|lane|
         let slot = 32*tile+lane in
         let (row,count,overflow) = if slot < length(ids) then
           let i = ids[slot] in
-          let leaf = Octree.lower_bound(tree,keys[i]+1u32)-1 in
-          Neighbors.linked_particle_neighbor_row(i,p,ranges,leaves[leaf],radius)
+          Neighbors.linked_particle_neighbor_row(i,p,packed,neighborhoods[i],radius)
         else ((#[scratch] replicate(96,-1i32)),0i32,false) in
         let ordinals = iota(count) in
         let values = map(|j| row[j],ordinals) in
