@@ -287,6 +287,15 @@ impl Body<'_, '_, '_> {
                         }
                     }
                 }
+                // A fresh scratch allocation has no initialized elements to copy.
+                if let Some(Origin::Result(producer, 0)) = self.query().0.origin(operands[0]) {
+                    if matches!(self.query().0.code(producer)?, Code::Scratch)
+                        && self.query().0.formula_at(producer, Formula::Extents).is_some()
+                    {
+                        let fresh = self.scratch(producer, &[], &pattern)?;
+                        return self.bind(&pattern, vec![fresh]);
+                    }
+                }
                 let Some(element) = source.ty.elem_type().cloned() else {
                     return Err(error("copy source has no element"));
                 };
