@@ -52,7 +52,7 @@ impl Body<'_, '_, '_> {
         Ok(Some(AtomicUpdate::Native(op)))
     }
 
-    pub(in crate::egglog::to_ssa) fn atomic_contributions(
+    pub(in crate::egglog::to_ssa) fn independent_contributions(
         &self,
         operation: Value,
     ) -> Result<bool, OptimizeError> {
@@ -71,7 +71,9 @@ impl Body<'_, '_, '_> {
                 let arrays = query.0.collective_inputs(owner, group, CollectiveInput::Backing);
                 let policy = query.0.accumulator_policy(owner, group)?;
                 let combine = query.0.combiner_at(owner, group);
-                if self.atomic_policy(&arrays, policy, combine)?.is_none() {
+                if query.enode("DisjointWrites", policy)?.is_none()
+                    && self.atomic_policy(&arrays, policy, combine)?.is_none()
+                {
                     return Ok(false);
                 }
             }
@@ -79,7 +81,7 @@ impl Body<'_, '_, '_> {
         Ok(true)
     }
 
-    fn atomic(
+    pub(super) fn atomic(
         &mut self,
         place: PlaceId,
         op: AtomicOp,

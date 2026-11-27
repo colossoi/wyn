@@ -296,62 +296,7 @@ impl Body<'_, '_, '_> {
                         return self.bind(&pattern, vec![fresh]);
                     }
                 }
-                let Some(element) = source.ty.elem_type().cloned() else {
-                    return Err(error("copy source has no element"));
-                };
-                let known_count = self.compiler.execution.storage.static_count.get(&inputs[0]);
-                let count = if let Some(&count) = known_count {
-                    self.literal(count, &types::i32())?
-                } else {
-                    self.array_length(source.clone())?
-                };
-                let inline = source.ty.array_variant().is_some_and(types::is_array_variant_composite)
-                    && matches!(
-                        source.ty.array_size(),
-                        Some(Type::Constructed(TypeName::Size(_), _))
-                    );
-                let destination = if self.active_dispatch.is_none() && !inline {
-                    let length = self.host_array_length(&source)?;
-                    let Some(stride) = storage_elem_stride(&storage_value_type(&element)) else {
-                        return Err(error("copy element has no stride"));
-                    };
-                    let bytes =
-                        Expr::Multiply(Box::new(length.clone()), Box::new(Expr::Integer(stride.into())));
-                    let (_, destination) = self.device_buffer(&element, bytes, count.clone())?;
-                    self.set_shape(&destination, vec![length])?;
-                    destination
-                } else {
-                    let capacity = self
-                        .integer_literal(&count)
-                        .and_then(|n| usize::try_from(n).ok())
-                        .or_else(|| match source.ty.array_size() {
-                            Some(Type::Constructed(TypeName::Size(size), _)) => Some(*size),
-                            _ => None,
-                        });
-                    let capacity = capacity.or(self
-                        .compiler
-                        .execution
-                        .storage
-                        .outer_capacity
-                        .get(&inputs[0])
-                        .and_then(|&value| usize::try_from(value).ok()));
-                    let Some(capacity) = capacity else {
-                        return Err(error("local copy needs a capacity bound"));
-                    };
-                    self.local_array_with_length(types::sized_array(capacity, element), count.clone())?
-                };
-                self.counted(
-                    Self::number(0),
-                    count,
-                    Self::number(1),
-                    vec![],
-                    |body, index, _| {
-                        let value = body.index(source, index.clone())?;
-                        body.store(destination.clone(), index, value)?;
-                        Ok(vec![])
-                    },
-                )?;
-                vec![destination]
+                vec![self.copy_storage(source, inputs[0])?]
             }
             Code::Scratch => vec![self.scratch(statement, &inputs, &pattern)?],
             Code::Length { axis } => {
@@ -602,6 +547,12 @@ impl Body<'_, '_, '_> {
             Code::BucketScatter { coordinates, depth } => {
                 vec![self.bucket_scatter(statement, &coordinates, depth)?]
             }
+            Code::ReservationCursor => vec![self.reservation_cursor()?],
+            Code::WithReservedSpan => {
+                let region = self.query().0.control_region(statement, 0)?;
+                let start = self.reserve_span(&inputs[1..])?;
+                self.lambda(region, vec![start])?
+            }
             Code::View => {
                 let mut array = self.named(inputs[0])?;
                 for slice in self.query().vector(self.query().0.formula(statement, Formula::Slices)?)? {
@@ -761,6 +712,73 @@ impl Body<'_, '_, '_> {
 }
 
 impl Body<'_, '_, '_> {
+    fn copy_storage(&mut self, source: Typed, input: Value) -> Result<Typed, OptimizeError> {
+        if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = &source.ty {
+            let mut copies = Vec::with_capacity(fields.len());
+            for slot in 0..fields.len() {
+                let field = self.field(source.clone(), slot)?;
+                copies.push(self.copy_storage(field, input)?);
+            }
+            return self.tuple(copies);
+        }
+        let Some(element) = source.ty.elem_type().cloned() else {
+            return Err(error("copy source has no element"));
+        };
+        let known_count = self.compiler.execution.storage.static_count.get(&input);
+        let count = if let Some(&count) = known_count {
+            self.literal(count, &types::i32())?
+        } else {
+            self.array_length(source.clone())?
+        };
+        let inline = source.ty.array_variant().is_some_and(types::is_array_variant_composite)
+            && matches!(
+                source.ty.array_size(),
+                Some(Type::Constructed(TypeName::Size(_), _))
+            );
+        let destination = if self.active_dispatch.is_none() && !inline {
+            let length = self.host_array_length(&source)?;
+            let Some(stride) = storage_elem_stride(&storage_value_type(&element)) else {
+                return Err(error("copy element has no stride"));
+            };
+            let bytes = Expr::Multiply(Box::new(length.clone()), Box::new(Expr::Integer(stride.into())));
+            let (_, destination) = self.device_buffer(&element, bytes, count.clone())?;
+            self.set_shape(&destination, vec![length])?;
+            destination
+        } else {
+            let capacity =
+                self.integer_literal(&count).and_then(|n| usize::try_from(n).ok()).or_else(|| match source
+                    .ty
+                    .array_size()
+                {
+                    Some(Type::Constructed(TypeName::Size(size), _)) => Some(*size),
+                    _ => None,
+                });
+            let capacity = capacity.or(self
+                .compiler
+                .execution
+                .storage
+                .outer_capacity
+                .get(&input)
+                .and_then(|&value| usize::try_from(value).ok()));
+            let Some(capacity) = capacity else {
+                return Err(error("local copy needs a capacity bound"));
+            };
+            self.local_array_with_length(types::sized_array(capacity, element), count.clone())?
+        };
+        self.counted(
+            Self::number(0),
+            count,
+            Self::number(1),
+            vec![],
+            |body, index, _| {
+                let value = body.index(source, index.clone())?;
+                body.store(destination.clone(), index, value)?;
+                Ok(vec![])
+            },
+        )?;
+        Ok(destination)
+    }
+
     pub fn read_array(&mut self, name: Value, indices: &[Typed]) -> Result<Typed, OptimizeError> {
         if let Some(mut array) = self
             .values
@@ -788,11 +806,12 @@ impl Body<'_, '_, '_> {
         axes: usize,
         element: &Type,
     ) -> Result<Typed, OptimizeError> {
+        let layout = self.compiler.execution.storage.flat.get(&name);
         if matches!(self.collections.get(&name), Some(Collection::Pending { .. })) {
             let Some(Collection::Pending { ty, shape, block }) = self.collections.remove(&name) else {
                 return Err(error("pending collection missing"));
             };
-            let ty = collection_type(&ty, element, axes)?;
+            let ty = if layout.is_some() { ty } else { collection_type(&ty, element, axes)? };
             let storage = if let Some(storage) = self.reuse_storage(name, &ty)? {
                 storage
             } else {
@@ -820,7 +839,45 @@ impl Body<'_, '_, '_> {
         value: Typed,
     ) -> Result<(), OptimizeError> {
         let array = self.array_destination(name, indices.len(), &value.ty)?;
-        self.write_array_value(array, indices, value)
+        let Some(layout) = self.compiler.execution.storage.flat.get(&name).copied() else {
+            return self.write_array_value(array, indices, value);
+        };
+        let [block, lane, rest @ ..] = indices else {
+            return Err(error("flat output needs an outer and lane index"));
+        };
+        let lanes = Self::number(layout.lanes);
+        let base = self.binary(BinaryOperator::Multiply, block.clone(), lanes.clone())?;
+        if layout.items == 0 {
+            let slot = self.binary(BinaryOperator::Add, base, lane.clone())?;
+            let mut coordinates = vec![slot];
+            coordinates.extend_from_slice(rest);
+            return self.write_array_value(array, &coordinates, value);
+        }
+        let base = self.binary(BinaryOperator::Multiply, base, Self::number(layout.items))?;
+        let base = self.binary(BinaryOperator::Add, base, lane.clone())?;
+        let write_item = |body: &mut Self, item: Typed, cell: Typed| {
+            let delta = body.binary(BinaryOperator::Multiply, item, lanes.clone())?;
+            let slot = body.binary(BinaryOperator::Add, base.clone(), delta)?;
+            body.write_array_value(array.clone(), &[slot], cell)
+        };
+        if let [item] = rest {
+            return write_item(self, item.clone(), value);
+        }
+        if !rest.is_empty() {
+            return Err(error("flat output has too many indices"));
+        }
+        self.counted(
+            Self::number(0),
+            Self::number(layout.items),
+            Self::number(1),
+            vec![],
+            |body, item, _| {
+                let cell = body.index(value, item.clone())?;
+                write_item(body, item, cell)?;
+                Ok(vec![])
+            },
+        )?;
+        Ok(())
     }
 
     fn scratch(
@@ -1289,40 +1346,37 @@ impl Body<'_, '_, '_> {
         let Some(&first) = arrays.first() else {
             return Err(error("empty accumulator destination"));
         };
-        if self.values.get(&first).is_some_and(|value| value.ty.is_array()) {
-            let array = self.named(first)?;
-            let valid = self.valid_indices(array, &indices)?;
-            let values = self.yield_values(&operands[1..])?;
-            if let Some(update) = self.atomic_policy(&arrays, policy, combine)? {
-                let [value] = values.as_slice() else {
-                    return Err(error("atomic accumulator must receive one scalar"));
-                };
-                self.when(valid, |body| {
-                    body.atomic_accumulate(first, &indices, value.clone(), update)
-                })?;
-                return Ok(vec![]);
-            }
+        let array = self.named(first)?;
+        let valid = self.valid_indices(array, &indices)?;
+        let values = self.yield_values(&operands[1..])?;
+        if let Some(update) = self.atomic_policy(&arrays, policy, combine)? {
+            let [value] = values.as_slice() else {
+                return Err(error("atomic accumulator must receive one scalar"));
+            };
             self.when(valid, |body| {
-                let values = if let Some(combine) = combine {
-                    let mut operands = arrays
-                        .iter()
-                        .map(|&array| body.read_array(array, &indices))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    operands.extend(values);
-                    body.lambda(combine, operands)?
-                } else {
-                    values
-                };
-                if values.len() != arrays.len() {
-                    return Err(error("accumulator value count differs from destinations"));
-                }
-                for (&array, value) in arrays.iter().zip(values) {
-                    body.write_array(array, &indices, value)?;
-                }
-                Ok(())
+                body.atomic_accumulate(first, &indices, value.clone(), update)
             })?;
             return Ok(vec![]);
         }
-        Err(error("accumulator destination has no SSA array representation"))
+        self.when(valid, |body| {
+            let values = if let Some(combine) = combine {
+                let mut operands = arrays
+                    .iter()
+                    .map(|&array| body.read_array(array, &indices))
+                    .collect::<Result<Vec<_>, _>>()?;
+                operands.extend(values);
+                body.lambda(combine, operands)?
+            } else {
+                values
+            };
+            if values.len() != arrays.len() {
+                return Err(error("accumulator value count differs from destinations"));
+            }
+            for (&array, value) in arrays.iter().zip(values) {
+                body.write_array(array, &indices, value)?;
+            }
+            Ok(())
+        })?;
+        Ok(vec![])
     }
 }

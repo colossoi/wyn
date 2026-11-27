@@ -1261,9 +1261,18 @@ impl<'a> TypeChecker<'a> {
                         self.format_type(&condition_ty)
                     )
                 })?;
-                self.check_expression(&if_expr.then_branch, expected_type)?;
-                self.check_expression(&if_expr.else_branch, expected_type)?;
-                let result = expected_type.apply(&self.context);
+                let expected = expected_type.apply(&self.context);
+                let left_contract = self.branch_contract(&expected);
+                let right_contract = self.branch_contract(&expected);
+                let left = self.check_expression(&if_expr.then_branch, &left_contract)?;
+                let right = self.check_expression(&if_expr.else_branch, &right_contract)?;
+                let result = self.branch_result(&left, &right, expr.h.span)?;
+                self.unify_or_err_weakening(
+                    &result,
+                    expected_type,
+                    expr.h.span,
+                    "If result type mismatch",
+                )?;
                 if as_arrow(&result).is_some() {
                     bail_type_at!(expr.h.span, "Functions cannot be returned from if expressions");
                 }
@@ -1776,6 +1785,47 @@ impl<'a> TypeChecker<'a> {
             let body = Self::arrow_chain(&[dest_array, items], result);
             self.define_builtin(&format!("bucket_scatter_{rank}d"), Self::generalize_closed(body));
         }
+
+        let a = Self::var(self.fresh_var());
+        let item = Self::var(self.fresh_var());
+        let state = Self::var(self.fresh_var());
+        let mut array = |element| {
+            let storage = self.fresh_var();
+            let size = self.fresh_var();
+            self.array_ty(element, storage, size)
+        };
+        let destinations = array(a.clone());
+        let inputs = array(item.clone());
+        let prepare = Type::arrow(item, types::tuple(vec![i32(), state.clone()]));
+        let writes = types::tuple(vec![i32(), a]);
+        let emit = Self::arrow_chain(&[state, i32()], writes);
+        let signature = Self::arrow_chain(&[destinations.clone(), prepare, emit, inputs], destinations);
+        self.define_builtin("scatter_ranges", Self::generalize_closed(signature));
+
+        let item = Self::var(self.fresh_var());
+        let element = Self::var(self.fresh_var());
+        let side = Self::var(self.fresh_var());
+        let n = self.fresh_var();
+        let (input_variant, arena_variant, row_variant) =
+            (self.fresh_var(), self.fresh_var(), self.fresh_var());
+        let (capacity, width) = (self.fresh_var(), self.fresh_var());
+        let input = self.array_ty(item.clone(), input_variant, n);
+        let arena = self.array_ty(element.clone(), arena_variant, capacity);
+        let row = self.array_ty(element, row_variant, width);
+        let handle = types::tuple(vec![i32(), i32()]);
+        let records = Type::Constructed(
+            TypeName::Array,
+            vec![
+                types::tuple(vec![handle, side.clone()]),
+                Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+                Self::var(n),
+                no_buffer(),
+            ],
+        );
+        let result = types::tuple(vec![arena.clone(), records]);
+        let f = Type::arrow(item, types::tuple(vec![row, side]));
+        let sig = Self::arrow_chain(&[arena, f, input], result);
+        self.define_builtin("_w_segmented_flatmap", Self::generalize_closed(sig));
 
         // reduce_by_index: ∀a n m s1 s2 s3. Array[a, s1, n] -> (a -> a -> a) -> a -> Array[i32, s2, m] -> Array[a, s3, m] -> Array[a, s1, n]
         let (a, n, m) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
@@ -3202,13 +3252,7 @@ impl<'a> TypeChecker<'a> {
                 let then_ty = self.infer_expression(&if_expr.then_branch)?;
                 let else_ty = self.infer_expression(&if_expr.else_branch)?;
 
-                self.unify_or_err(
-                    &then_ty,
-                    &else_ty,
-                    if_expr.else_branch.h.span,
-                    "If branches have incompatible types",
-                )?;
-                let result_ty = then_ty.apply(&self.context);
+                let result_ty = self.branch_result(&then_ty, &else_ty, if_expr.else_branch.h.span)?;
 
                 // Futhark restriction: functions cannot be returned from if expressions
                 let resolved_result = result_ty.apply(&self.context);
@@ -3869,6 +3913,55 @@ impl<'a> TypeChecker<'a> {
             }
         }
         Ok(())
+    }
+
+    fn branch_contract(&mut self, expected: &Type) -> Type {
+        match expected {
+            Type::Variable(_) => self.context.new_variable(),
+            Type::Constructed(name @ (TypeName::Tuple(_) | TypeName::Record(_)), fields) => {
+                Type::Constructed(
+                    name.clone(),
+                    fields.iter().map(|ty| self.branch_contract(ty)).collect(),
+                )
+            }
+            Type::Constructed(TypeName::Array, fields) => {
+                let mut fields = fields.clone();
+                fields[0] = self.branch_contract(&fields[0]);
+                if matches!(fields[2], Type::Variable(_)) {
+                    fields[2] = self.context.new_variable();
+                }
+                Type::Constructed(TypeName::Array, fields)
+            }
+            _ => expected.clone(),
+        }
+    }
+
+    /// A runtime array extent in one arm cannot be inferred from the other arm.
+    fn branch_result(&mut self, left: &Type, right: &Type, span: Span) -> Result<Type> {
+        let left = left.apply(&self.context);
+        let right = right.apply(&self.context);
+        if let (Type::Constructed(name, xs), Type::Constructed(other, ys)) = (&left, &right) {
+            if name == other
+                && xs.len() == ys.len()
+                && matches!(name, TypeName::Array | TypeName::Tuple(_) | TypeName::Record(_))
+            {
+                let mut fields = Vec::with_capacity(xs.len());
+                for (i, (x, y)) in xs.iter().zip(ys).enumerate() {
+                    if *name == TypeName::Array
+                        && i == 2
+                        && x != y
+                        && (matches!(x, Type::Variable(_)) || matches!(y, Type::Variable(_)))
+                    {
+                        fields.push(self.context.new_variable());
+                    } else {
+                        fields.push(self.branch_result(x, y, span)?);
+                    }
+                }
+                return Ok(Type::Constructed(name.clone(), fields));
+            }
+        }
+        self.unify_or_err(&left, &right, span, "If branches have incompatible types")?;
+        Ok(left.apply(&self.context))
     }
 
     /// Unify two types or produce a "<context>, got A and B" type error.

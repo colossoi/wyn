@@ -85,8 +85,13 @@ fn verify_no_nested_lambdas(
             }
         };
         match soac {
-            SoacOp::Map { lam, .. } | SoacOp::Scatter { lam, .. } | SoacOp::BucketScatter { lam, .. } => {
-                check(lam)?
+            SoacOp::Map { lam, .. }
+            | SoacOp::FlatMap { lam, .. }
+            | SoacOp::Scatter { lam, .. }
+            | SoacOp::BucketScatter { lam, .. } => check(lam)?,
+            SoacOp::ScatterRanges { lam, emit, .. } => {
+                check(lam)?;
+                check(emit)?;
             }
             SoacOp::Reduce { op, .. } | SoacOp::Scan { op, .. } | SoacOp::ReduceByIndex { op, .. } => {
                 check(op)?
@@ -505,7 +510,23 @@ impl ClosureConverter {
                 pred: self.lift_soac_lambda(pred.lam, span),
                 input: self.convert_array_expr(input),
             },
+            SoacOp::FlatMap { dest, lam, inputs } => SoacOp::FlatMap {
+                dest: Box::new(self.convert_term(*dest)),
+                lam: self.lift_soac_lambda(lam.lam, span),
+                inputs: inputs.into_iter().map(|input| self.convert_array_expr(input)).collect(),
+            },
             SoacOp::Scatter { dest, lam, inputs } => SoacOp::Scatter {
+                dest: Box::new(self.convert_term(*dest)),
+                lam: self.lift_soac_lambda(lam.lam, span),
+                inputs: inputs.into_iter().map(|input| self.convert_array_expr(input)).collect(),
+            },
+            SoacOp::ScatterRanges {
+                dest,
+                lam,
+                emit,
+                inputs,
+            } => SoacOp::ScatterRanges {
+                emit: self.lift_soac_lambda(emit.lam, span),
                 dest: Box::new(self.convert_term(*dest)),
                 lam: self.lift_soac_lambda(lam.lam, span),
                 inputs: inputs.into_iter().map(|input| self.convert_array_expr(input)).collect(),

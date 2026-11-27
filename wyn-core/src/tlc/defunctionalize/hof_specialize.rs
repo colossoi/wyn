@@ -256,12 +256,26 @@ fn substitute_in_soac(
             body(pred, old_symbol, replacement, term_ids);
             substitute_in_array(input, old_symbol, replacement, term_ids);
         }
-        SoacOp::Scatter { dest, lam, inputs }
+        SoacOp::FlatMap { dest, lam, inputs }
+        | SoacOp::Scatter { dest, lam, inputs }
         | SoacOp::BucketScatter {
             dest, lam, inputs, ..
         } => {
             substitute_in_place(dest, old_symbol, replacement, term_ids);
             body(lam, old_symbol, replacement, term_ids);
+            for input in inputs {
+                substitute_in_array(input, old_symbol, replacement, term_ids);
+            }
+        }
+        SoacOp::ScatterRanges {
+            dest,
+            lam,
+            emit,
+            inputs,
+        } => {
+            substitute_in_place(dest, old_symbol, replacement, term_ids);
+            body(lam, old_symbol, replacement, term_ids);
+            body(emit, old_symbol, replacement, term_ids);
             for input in inputs {
                 substitute_in_array(input, old_symbol, replacement, term_ids);
             }
@@ -594,8 +608,12 @@ impl HofSpecializer<'_> {
         soac: &mut SoacOp<ExplicitClosurePayload, ExplicitCapturesPayload>,
     ) -> bool {
         match soac {
-            SoacOp::Map { lam, .. } | SoacOp::Scatter { lam, .. } | SoacOp::BucketScatter { lam, .. } => {
-                self.cascade_specialize_soac_body(lam)
+            SoacOp::Map { lam, .. }
+            | SoacOp::FlatMap { lam, .. }
+            | SoacOp::Scatter { lam, .. }
+            | SoacOp::BucketScatter { lam, .. } => self.cascade_specialize_soac_body(lam),
+            SoacOp::ScatterRanges { lam, emit, .. } => {
+                self.cascade_specialize_soac_body(lam) | self.cascade_specialize_soac_body(emit)
             }
             SoacOp::Reduce { op, .. } | SoacOp::Scan { op, .. } | SoacOp::ReduceByIndex { op, .. } => {
                 self.cascade_specialize_soac_body(op)

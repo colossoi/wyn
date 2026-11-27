@@ -149,7 +149,23 @@ impl Body<'_, '_, '_> {
                 Ok(names)
             };
             if self.query().enode("Collected", kind)?.is_some() {
-                collects.extend(output_names("CollectedOutput")?.into_iter().zip(values));
+                let query = self.query();
+                for slot in 0..query.0.output_count(operation) {
+                    if query.0.output_clause(operation, slot)? != clause {
+                        continue;
+                    }
+                    let role = query.0.output_role(operation, slot)?;
+                    if query.enode("CollectedOutput", role)?.is_none()
+                        && query.enode("FlatOutput", role)?.is_none()
+                    {
+                        continue;
+                    }
+                    let field = query.0.output_field(operation, slot)?;
+                    let Some(&result) = values.get(field as usize) else {
+                        return Err(error("collected output is missing its contribution"));
+                    };
+                    collects.push((query.name(query.0.output(operation, slot)?)?, result));
+                }
             } else if self.query().enode("Compacted", kind)?.is_some() {
                 let predicate =
                     self.query().0.collective_input(operation, clause, CollectiveInput::Predicate, 0)?;
@@ -309,6 +325,17 @@ impl Body<'_, '_, '_> {
                 if !collected.contains(&name) {
                     continue;
                 }
+                if let Some(tile) = self.compiler.execution.storage.flat.get(&name) {
+                    let count = Self::number(tile.size);
+                    let shape = if dispatch.is_some() {
+                        CollectionShape::outer(count, Some(Expr::Integer(i64::from(tile.size))))
+                    } else {
+                        CollectionShape::Local(count)
+                    };
+                    let block = self.current()?;
+                    self.collections.insert(name, Collection::Pending { ty, shape, block });
+                    continue;
+                }
                 let rank = if folds.iter().any(|fold| fold.totals.contains(&name)) {
                     axes.len() - 1
                 } else {
@@ -377,7 +404,7 @@ impl Body<'_, '_, '_> {
         let atomic_updates = contributes
             && compacts.is_empty()
             && folds.is_empty()
-            && self.atomic_contributions(operation)?;
+            && self.independent_contributions(operation)?;
         if contributes && !atomic_updates && matches!(phase, Some(CollectivePhase::Epilogue { .. })) {
             return Err(error("scan overwrite epilogue requires atomic storage"));
         }

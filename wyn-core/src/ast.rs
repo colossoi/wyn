@@ -240,6 +240,8 @@ pub enum SoacKind {
     ReduceByIndex,
     Scatter,
     BucketScatter(u8),
+    ScatterRanges,
+    FlatMap,
 }
 
 /// The source-level `???` expression.

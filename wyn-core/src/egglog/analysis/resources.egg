@@ -71,6 +71,8 @@
 (rule ((TotalIndex operation))
       ((set (DiscardableRead operation) true)) :ruleset dataflow-total)
 (rule ((LiveOperation operation) (ProvenTotalOperation operation)) ((set (OperationTotal operation) true)) :ruleset dataflow-total)
+(rule ((LiveOperation operation) (ProvenTotalOperation operation) (IndexOperation operation))
+      ((set (DiscardableRead operation) true)) :ruleset dataflow-total)
 ; A positive i32 divisor excludes both zero and the signed overflow case.
 (rule ((= payload (ScalarPayload operation)) (DivisionPayload payload)
        (DirectOperationUse operation (ValueNameRef divisor)) (= (wyn-input operation 1) (ValueNameRef divisor)) (= (ValueType divisor) (ScalarInfo (ScalarElement (I32))))

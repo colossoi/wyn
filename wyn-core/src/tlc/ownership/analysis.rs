@@ -346,8 +346,11 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
     /// semantics in addition to source-level `*` contracts.
     fn callee_return_diet(&self, func: &Term<C, S>, n_args: usize) -> Diet {
         let known = catalog().known();
-        if var_term_builtin_id(func, self.symbols) == Some(known.array_with) {
-            // A functional `array_with` returns a fresh (alias-free) array.
+        let builtin = var_term_builtin_id(func, self.symbols);
+        if builtin.is_some_and(|id| {
+            [known.array_with, known.scratch_alloc, known.scratch_annotation].contains(&id)
+        }) {
+            // A functional update and either form of scratch allocate a fresh array.
             return Diet::Leaf(true);
         }
         if var_term_builtin_id(func, self.symbols) == Some(known.image_with) {
@@ -856,7 +859,11 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
                     self.visit_array_expr(input);
                 }
             }
-            SoacOp::BucketScatter {
+            SoacOp::FlatMap { dest, lam, inputs }
+            | SoacOp::ScatterRanges {
+                dest, lam, inputs, ..
+            }
+            | SoacOp::BucketScatter {
                 dest, lam, inputs, ..
             } => {
                 self.visit_term(dest);
@@ -872,6 +879,9 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
                     }
                 }
                 self.visit_soac_body(lam);
+                if let SoacOp::ScatterRanges { emit, .. } = op {
+                    self.visit_soac_body(emit);
+                }
             }
             SoacOp::ReduceByIndex {
                 dest,
@@ -1292,7 +1302,14 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
         match op {
             SoacOp::Map { .. } | SoacOp::Filter { .. } | SoacOp::Scan { .. } => LookupSet::new(),
             SoacOp::Scatter { inputs, .. } => self.aliases_of_array_exprs(inputs),
-            SoacOp::BucketScatter { inputs, .. } => self.aliases_of_array_exprs(inputs),
+            SoacOp::FlatMap { dest, inputs, .. } => {
+                let mut aliases = self.aliases_of_array_exprs(inputs);
+                aliases.extend(self.alias_targets(dest));
+                aliases
+            }
+            SoacOp::ScatterRanges { inputs, .. } | SoacOp::BucketScatter { inputs, .. } => {
+                self.aliases_of_array_exprs(inputs)
+            }
             SoacOp::Reduce { ne, input, .. } => {
                 let mut aliases = self.alias_targets(ne);
                 aliases.extend(self.array_expr_aliases(input));

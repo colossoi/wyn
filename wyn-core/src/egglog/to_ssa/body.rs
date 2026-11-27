@@ -16,6 +16,7 @@ mod atomics;
 mod bucket;
 mod control;
 mod memory;
+mod reservation;
 mod subgroups;
 mod values;
 mod workgroup;

@@ -516,7 +516,8 @@ fn check_linear_image_results_in_soac(
         SoacOp::Filter { pred, input, .. } => {
             check_linear_image_results_in_array_expr(input, program, model).or_else(|| check_body(pred))
         }
-        SoacOp::Scatter { dest, lam, inputs }
+        SoacOp::FlatMap { dest, lam, inputs }
+        | SoacOp::Scatter { dest, lam, inputs }
         | SoacOp::BucketScatter {
             dest, lam, inputs, ..
         } => check_linear_image_results_in_term(dest, program, model, LinearImageUseContext::Used)
@@ -526,6 +527,19 @@ fn check_linear_image_results_in_soac(
                     .find_map(|input| check_linear_image_results_in_array_expr(input, program, model))
             })
             .or_else(|| check_body(lam)),
+        SoacOp::ScatterRanges {
+            dest,
+            lam,
+            emit,
+            inputs,
+        } => check_linear_image_results_in_term(dest, program, model, LinearImageUseContext::Used)
+            .or_else(|| {
+                inputs
+                    .iter()
+                    .find_map(|input| check_linear_image_results_in_array_expr(input, program, model))
+            })
+            .or_else(|| check_body(lam))
+            .or_else(|| check_body(emit)),
         SoacOp::ReduceByIndex {
             dest,
             op,

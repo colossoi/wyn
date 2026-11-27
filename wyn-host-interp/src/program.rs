@@ -338,7 +338,7 @@ impl Program {
             let name = literal(&parts[1])?.text()?.to_owned();
             let values = parts[2..].iter().map(literal).collect::<Result<Vec<_>>>()?;
             let allowed: &[&str] = match kind {
-                "define-gpu-module" => &[":format", ":path"],
+                "define-gpu-module" => &[":format", ":path", ":source"],
                 "define-gpu-kernel" => &[":module", ":entry", ":workgroup-size", ":parameters", ":abi"],
                 "define-gpu-graphics" => &[
                     ":vertex",
@@ -363,8 +363,15 @@ impl Program {
             };
             let options = Options::parse(&values, allowed)?;
             for key in allowed {
-                if *key != ":source-name" {
+                if !matches!(*key, ":source-name" | ":path" | ":source") {
                     options.get(key)?;
+                }
+            }
+            if kind == "define-gpu-module" {
+                match (options.optional(":path"), options.optional(":source")) {
+                    (Some(Value::String(_)), None) => {}
+                    (None, Some(Value::String(_))) if options.text(":format")? == ":wgsl" => {}
+                    _ => return Err(Error::Invalid("GPU module requires a path or inline WGSL".into())),
                 }
             }
             if kind == "define-host-entry" {

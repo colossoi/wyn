@@ -293,6 +293,8 @@ pub enum SoacKind {
     ReduceByIndex,
     Scatter,
     BucketScatter(u8),
+    ScatterRanges,
+    FlatMap,
 }
 
 impl SoacKind {
@@ -307,6 +309,8 @@ impl SoacKind {
             "zip" | "zip2" | "zip3" | "zip4" | "zip5" => SoacKind::Zip,
             "reduce_by_index" => SoacKind::ReduceByIndex,
             "scatter" => SoacKind::Scatter,
+            "_w_segmented_flatmap" => SoacKind::FlatMap,
+            "scatter_ranges" => SoacKind::ScatterRanges,
             "bucket_scatter_1d" => SoacKind::BucketScatter(1),
             "bucket_scatter_2d" => SoacKind::BucketScatter(2),
             "bucket_scatter_3d" => SoacKind::BucketScatter(3),

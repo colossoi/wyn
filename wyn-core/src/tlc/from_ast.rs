@@ -894,6 +894,26 @@ impl<'a> Transformer<'a> {
             ast::SoacKind::Zip => self.transform_soac_zip(args, ty, span),
             ast::SoacKind::ReduceByIndex => self.transform_soac_reduce_by_index(args, ty, span),
             ast::SoacKind::Scatter => self.transform_soac_scatter(args, ty, span),
+            ast::SoacKind::FlatMap => {
+                let dest = self.transform_expr(&args[0]);
+                let func = self.transform_expr(&args[1]);
+                let input = self.transform_expr(&args[2]);
+                let mut binds = Bindings::new();
+                let dest = binds.name(dest, "_w_destination", self.symbols, self.term_ids);
+                let lam = self.term_to_lambda(func);
+                let input = self.soac_input(input, &mut binds);
+                let term = self.mk_term(
+                    ty,
+                    span,
+                    TermKind::Soac(SoacOp::FlatMap {
+                        dest: Box::new(dest),
+                        lam,
+                        inputs: vec![input],
+                    }),
+                );
+                binds.finish(term, self.term_ids)
+            }
+            ast::SoacKind::ScatterRanges => self.transform_soac_scatter_ranges(args, ty, span),
             ast::SoacKind::BucketScatter(rank) => self.transform_soac_bucket_scatter(args, ty, span, rank),
         }
     }
@@ -1198,6 +1218,34 @@ impl<'a> Transformer<'a> {
             }),
         );
         binds.finish(soac, self.term_ids)
+    }
+
+    fn transform_soac_scatter_ranges(
+        &mut self,
+        args: &[ast::Expression<ast::HolesResolvedTree>],
+        ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
+        let dest = self.transform_expr(&args[0]);
+        let func = self.transform_expr(&args[1]);
+        let writer = self.transform_expr(&args[2]);
+        let emit = self.term_to_lambda(writer);
+        let input = self.transform_expr(&args[3]);
+        let lam = self.term_to_lambda(func);
+        let mut binds = Bindings::new();
+        let dest = binds.name(dest, "_w_pack_destination", self.symbols, self.term_ids);
+        let input = self.soac_input(input, &mut binds);
+        let term = self.mk_term(
+            ty,
+            span,
+            TermKind::Soac(SoacOp::ScatterRanges {
+                dest: Box::new(dest),
+                lam,
+                emit,
+                inputs: vec![input],
+            }),
+        );
+        binds.finish(term, self.term_ids)
     }
 
     /// Transform `bucket_scatter_Nd(dest, items)`, where every ranked item

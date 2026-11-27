@@ -826,7 +826,7 @@ fn borrowed_vector_indexing_preserves_bounds_and_sort_overloads() -> Result<(), 
     let mut graph = test_graph::fixture(
         &[],
         r#"
-        (sort FixtureNumbers (Vec i64)) (sort FixtureNames (Vec ValueName))
+        (sort FixtureNames (Vec ValueName))
         (let numbers (vec-of 7 19)) (let names (vec-of (ValueId 3) (ValueId 8)))
         (check (= (vec-get numbers 0) 7)) (check (= (vec-get numbers 1) 19))
         (check (= (vec-get names 1) (ValueId 8)))

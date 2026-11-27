@@ -962,6 +962,17 @@ pub enum SoacOp<C: Payload = data::Empty, S: Payload = data::Empty> {
         input_dimensions: Vec<Vec<u8>>,
         domain_rank: u8,
     },
+    FlatMap {
+        dest: Box<Term<C, S>>,
+        lam: SoacBody<C, S>,
+        inputs: Vec<ArrayExpr<C, S>>,
+    },
+    ScatterRanges {
+        dest: Box<Term<C, S>>,
+        lam: SoacBody<C, S>,
+        emit: SoacBody<C, S>,
+        inputs: Vec<ArrayExpr<C, S>>,
+    },
     /// General histogram update. egglog retains the reducer and neutral value;
     /// physical expansion currently emits a serial read-combine-write loop.
     ReduceByIndex {

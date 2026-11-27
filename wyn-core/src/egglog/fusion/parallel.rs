@@ -2,7 +2,7 @@
 use super::super::dataflow::ir::Code;
 use super::super::query::Query;
 use super::super::{analysis, timing, OptimizeError};
-use crate::egglog::graph::Graph;
+use crate::egglog::graph::{Formula, Graph, Origin};
 use crate::memory_ir::{OperationId, RegionId, UseSite, ValueRef};
 use crate::{LookupMap, LookupSet};
 use egglog_engine::{RawValues, Value, Write};
@@ -48,10 +48,12 @@ fn domains(query: Query<'_>) -> Result<LookupMap<Value, Domain>, OptimizeError> 
                 .into_iter()
                 .map(|extent| (extent, bounds.get(&extent).copied()))
                 .collect::<Vec<_>>();
-            let key = extents
-                .iter()
-                .map(|&(extent, bound)| (bound.is_some(), bound.unwrap_or(extent)))
-                .collect::<Vec<_>>();
+            let mut key = Vec::with_capacity(extents.len());
+            for &(extent, bound) in &extents {
+                let formula = extent_formula(query, extent)?;
+                let bound = bound.or_else(|| bounds.get(&formula).copied());
+                key.push((bound.is_some(), bound.unwrap_or(formula)));
+            }
             let next_group = groups.len();
             let group = *groups.entry((execution, key)).or_insert(next_group);
             let mut axes = Vec::new();
@@ -73,6 +75,20 @@ fn domains(query: Query<'_>) -> Result<LookupMap<Value, Domain>, OptimizeError> 
         Ok(())
     })?;
     Ok(domains)
+}
+
+fn extent_formula(query: Query<'_>, mut extent: Value) -> Result<Value, OptimizeError> {
+    while let Some(value) = query.enode("IndexValue", extent)? {
+        let reference = query.constructor("ValueNameRef", value[0])?;
+        let Some(Origin::Result(op, _)) = reference.and_then(|name| query.0.origin(name)) else {
+            break;
+        };
+        if query.0.code(op)? != Code::IndexValue {
+            break;
+        }
+        extent = query.0.formula(op, Formula::Index)?;
+    }
+    Ok(extent)
 }
 
 fn barriers(query: Query<'_>) -> Result<LookupSet<Value>, OptimizeError> {
@@ -308,20 +324,32 @@ fn legal(
     first: OperationId,
     second: OperationId,
 ) -> Result<Option<Vec<(OperationId, Value)>>, OptimizeError> {
+    let (region, position) = body.positions[first];
+    legal_at(graph, body, first, second, region, position)
+}
+
+fn legal_at(
+    graph: &mut Graph,
+    body: &mut Body,
+    first: OperationId,
+    second: OperationId,
+    region: RegionId,
+    position: usize,
+) -> Result<Option<Vec<(OperationId, Value)>>, OptimizeError> {
     let first_lane = body.lane(first)?;
     let second_lane = body.lane(second)?;
-    let region = body.positions[first].0;
     let second_regions = body.subregions(second);
+
     let mut loads = Vec::new();
     for (site, name) in body.tree_uses(second) {
         let ValueRef::Result(producer, slot) = body.graph.refs[&name] else {
             continue;
         };
-        if body.positions[producer].0 != region || body.positions[producer].1 < body.positions[first].1 {
-            continue;
-        }
         if producer != first {
-            return Ok(None);
+            if body.positions[producer].0 == region && body.positions[producer].1 >= position {
+                return Ok(None);
+            }
+            continue;
         }
         let Site::Operand(UseSite::Input(load, 0)) = site else {
             return Ok(None);
@@ -350,6 +378,7 @@ fn legal(
     let no_effects = Effects::default();
     let a = body.effects.get(first).unwrap_or(&no_effects);
     let b = body.effects.get(second).unwrap_or(&no_effects);
+
     if body.unknown_aliases && (!a.writes.is_empty() || !b.writes.is_empty()) {
         return Ok(None);
     }

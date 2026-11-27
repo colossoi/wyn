@@ -1,5 +1,7 @@
 use std::fmt::Write;
 
+mod device_loop;
+
 use crate::{
     Access, Allocation, Binding, BlendMode, BufferLen, BufferSource, CullMode, DepthTest, DrawCall,
     DrawCount, Entry, Expr, FillMode, FrameResourceKind, FrontFace, HostError, IndexFormat, Operation,
@@ -234,6 +236,7 @@ impl Program {
             }
         }
         for entry in &self.entries {
+            self.write_device_loop_kernels(&mut out, &entry.operations)?;
             self.write_entry(&mut out, entry)?;
         }
         Ok(out)
@@ -531,6 +534,9 @@ impl Program {
                     self.write_buffer_bindings(out, entry, *pipeline, std::iter::once((&ScalarSource::Resource(*target), source)))?;
                 }
                 Operation::Loop { pipeline, region, test, body } => {
+                    if self.write_device_loop(out, entry, *pipeline, *region, test, body)? {
+                        continue;
+                    }
                     let repeated = &self.interface.dispatch_loops[*region];
                     self.write_buffer_bindings(out, entry, *pipeline, repeated.carried.iter().map(|carry| (&carry.binding, &carry.initial)))?;
                     match &repeated.control {
@@ -539,10 +545,18 @@ impl Program {
                             writeln!(out, "    (dotimes (iteration {})", self.whl_scalar(*pipeline, count)?)?;
                             writeln!(out, "      (gpu-write-scalar {index} 0 'i32 (i32 iteration))")?;
                         }
-                        crate::DispatchLoopControl::While { condition } => {
-                            writeln!(out, "    (do () ((not (progn")?;
+                        crate::DispatchLoopControl::While { initial_condition, condition, .. } => {
+                            let condition = self.whl_scalar(*pipeline, condition)?;
+                            let (bindings, condition) = if let Some(initial) = initial_condition {
+                                let initial = if *initial { "t" } else { "nil" };
+                                ("(first-dispatch-iteration t nil)",
+                                 format!("(if first-dispatch-iteration {initial} {condition})"))
+                            } else {
+                                ("", condition)
+                            };
+                            writeln!(out, "    (do ({bindings}) ((not (progn")?;
                             self.write_operations(out, entry, test)?;
-                            writeln!(out, "      {})) nil)", self.whl_scalar(*pipeline, condition)?)?;
+                            writeln!(out, "      {condition})) nil)")?;
                         }
                     }
                     self.write_operations(out, entry, body)?;
