@@ -16,7 +16,13 @@ pub(in crate::egglog::fusion) fn run(graph: &mut Graph, sinking: bool) -> Result
         accumulators.insert(row[0]);
         Ok(())
     })?;
-    if accumulators.is_empty() {
+    let mut destinations = accumulators.clone();
+    if sinking {
+        destinations.extend(
+            query.0.codes().filter_map(|(op, code)| (*code == Code::WithReservedSpan).then_some(op)),
+        );
+    }
+    if destinations.is_empty() {
         return Ok(false);
     }
     let blocked = if sinking { pinned_operations(query)? } else { LookupSet::new() };
@@ -26,13 +32,13 @@ pub(in crate::egglog::fusion) fn run(graph: &mut Graph, sinking: bool) -> Result
             let mut producer = false;
             let mut relevant = false;
             for &operation in operations {
-                if producer && accumulators.contains(&operation) {
+                if producer && destinations.contains(&operation) {
                     relevant = true;
                     break;
                 }
                 if blocked.contains(&operation) {
-                    producer = false;
-                } else if !accumulators.contains(&operation) {
+                    producer = matches!(query.0.code(operation)?, Code::Parallel);
+                } else if !destinations.contains(&operation) {
                     producer |= query.0.control_at(operation, 0_i64).is_some();
                 }
             }
@@ -113,7 +119,7 @@ fn apply(
         let edited = if let Some(destination) = joined {
             Some(destination)
         } else if sinking {
-            sink_one(Query(graph), body, region)?
+            sink_one(graph, body, region)?
         } else {
             None
         };
@@ -161,28 +167,52 @@ fn join_one(
 }
 
 fn sink_one(
-    query: Query<'_>,
+    graph: &mut Graph,
     body: &mut Body,
     region: RegionId,
 ) -> Result<Option<RegionId>, OptimizeError> {
     let mut selected = None;
-    for &producer in &body.graph.ir.regions[region].operations {
+    for producer in body.graph.ir.regions[region].operations.clone() {
         if body.graph.ir.operations[producer].bodies.is_empty()
             || body.is_code(producer, &Code::WithAcc)
-            || !read_only(body, producer)
+            || (!read_only(body, producer) && !body.is_code(producer, &Code::Parallel))
         {
             continue;
         }
-        let (members, demands) = demands(query, body, producer)?;
+        let (members, demands) = demands(Query(graph), body, producer)?;
         let mut targets = demands.iter().filter_map(|&demand| child_on_path(body, demand, region));
         let Some((scope, destination)) = targets.next() else {
             continue;
         };
-        if !body.is_code(scope, &Code::WithAcc)
+        let span = body.is_code(scope, &Code::WithReservedSpan);
+        // Reservation only mutates a compiler-private cursor. Reads in the producer
+        // cannot observe it, and the writer executes once even for a failed claim.
+        if !(body.is_code(scope, &Code::WithAcc) || span && members.iter().all(|&op| read_only(body, op)))
             || body.lane(scope)? != destination
             || demands.iter().any(|&demand| !body.inside(demand, destination))
         {
             continue;
+        }
+        if span {
+            let Some(&consumer) = body.graph.ir.regions[destination].operations.first() else {
+                continue;
+            };
+            let (Some(a), Some(b)) = (body.domains.get(producer), body.domains.get(consumer)) else {
+                continue;
+            };
+            if members.len() != 1
+                || a.group != b.group
+                || !super::legal_at(graph, body, producer, consumer, destination, 0)?
+                    .is_some_and(|loads| !loads.is_empty())
+            {
+                continue;
+            }
+        }
+        // The accumulator body runs exactly once. Moving the immediately preceding
+        // traversal to its beginning preserves execution order, including effects.
+        if members.len() == 1 && body.positions[producer].1 + 1 == body.positions[scope].1 {
+            selected = Some((scope, destination, vec![producer]));
+            break;
         }
         let Some(moved) = movable_group(body, producer, scope, &members) else {
             continue;

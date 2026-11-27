@@ -142,6 +142,8 @@ pub enum DispatchLoopControl {
         /// Compile-time value of the predicate before the first iteration.
         initial_condition: Option<bool>,
         condition: ScalarExpr,
+        /// Proven maximum trip count of the original while loop.
+        maximum: Option<u32>,
     },
 }
 

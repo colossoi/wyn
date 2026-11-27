@@ -31,6 +31,8 @@ pub(super) type Term = tlc::Term<ExplicitClosurePayload, ExplicitCapturesPayload
 type Callback = SoacBody<ExplicitClosurePayload, ExplicitCapturesPayload>;
 type SourceArray = ArrayExpr<ExplicitClosurePayload, ExplicitCapturesPayload>;
 type Operator = SoacOp<ExplicitClosurePayload, ExplicitCapturesPayload>;
+mod bounded_loop;
+mod flatmap;
 mod layout;
 use layout::Layout;
 
@@ -230,7 +232,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
             _ => {
                 return Err(output_error(format!(
                     "memory scalar type is not primitive: {ty:?}"
-                )))
+                )));
             }
         };
         self.unit(name)
@@ -1298,6 +1300,13 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                 indices,
                 values,
             } => self.indexed_fold(dest, op, ne, indices, values, ty, scope),
+            SoacOp::FlatMap { dest, lam, inputs } => self.segmented_flatmap(dest, lam, inputs, ty, scope),
+            SoacOp::ScatterRanges {
+                dest,
+                lam,
+                emit,
+                inputs,
+            } => self.scatter_ranges(dest, lam, emit, inputs, ty, scope),
             SoacOp::BucketScatter {
                 dest,
                 lam,
@@ -1487,6 +1496,98 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
         Ok(())
     }
 
+    fn scatter_destination(&mut self, destination: Leaf, scope: &mut Scope) -> Result<Leaf, OptimizeError> {
+        if destination.ty.array_variant().is_some_and(types::is_array_variant_view) {
+            return Ok(destination);
+        }
+        let copy = self.operation(Code::Copy, &[Name::Value(destination.name)])?;
+        Self::leaf(self.emit(copy, &destination.ty, scope)?)
+    }
+
+    fn scatter_ranges(
+        &mut self,
+        dest: &'source Term,
+        prepare: &'source Callback,
+        emit: &'source Callback,
+        sources: &'source [SourceArray],
+        ty: &Type,
+        scope: &mut Scope,
+    ) -> Result<Imported<'source>, OptimizeError> {
+        let [source] = sources else {
+            return Err(output_error("range scatter needs one input"));
+        };
+        let source = Self::leaf(self.array(source, scope)?)?;
+        let destination = Self::leaf(self.visit(dest, scope)?)?;
+        let destination = self.scatter_destination(destination, scope)?;
+        let (domain, axis) = self.iteration(&source, scope)?;
+        let mut lane = self.scope()?;
+        let input = self.traversal_input(source.name, axis.name)?;
+        let item = self.emit(input, &Self::row_type(&source.ty)?, &mut lane)?;
+        let prepared = Self::leaf(self.apply_callback(prepare, vec![item], &mut lane)?)?;
+        let Type::Constructed(TypeName::Tuple(2), fields) = strip_existentials(&prepared.ty) else {
+            return Err(output_error("range scatter callback must return (count, state)"));
+        };
+        let count = self.project(&prepared, 0, &types::i32(), &mut lane)?;
+        let state = self.project(&prepared, 1, &fields[1], &mut lane)?;
+        let policy = self.unit("DisjointWrites")?;
+        let mut inputs = Vec::new();
+        let mut parameters = Vec::new();
+        let (initial, info) = self.accumulator(&destination, policy, None, &mut inputs, &mut parameters)?;
+        let updated = self.write_range(initial, info, count.name, &mut lane, |this, inner, j| {
+            let pair = Self::leaf(this.apply_callback(
+                emit,
+                vec![Imported::Leaf(state), Imported::Leaf(j)],
+                inner,
+            )?)?;
+            let index = this.project(&pair, 0, &types::i32(), inner)?;
+            let value = this.project(&pair, 1, &Self::row_type(ty)?, inner)?;
+            Ok((index.name, value.name))
+        })?;
+        self.contribute(vec![(updated, info)], domain, lane, inputs, parameters, ty, scope)
+    }
+
+    fn write_range(
+        &mut self,
+        initial: Value,
+        info: Value,
+        count: Value,
+        lane: &mut Scope,
+        element: impl FnOnce(&mut Self, &mut Scope, Leaf) -> Result<(Value, Value), OptimizeError>,
+    ) -> Result<Value, OptimizeError> {
+        let mut inner = self.scope()?;
+        let carry = self.fresh("AccumulatorId")?;
+        self.sink.set("AccumulatorType", carry, info)?;
+        let consume = self.unit("Consume")?;
+        inner.parameters.push(Parameter {
+            name: Name::Accumulator(carry),
+            info,
+            diet: consume,
+        });
+        let j = self.scalar(&types::i32())?;
+        let observe = self.unit("Observe")?;
+        inner.parameters.push(Parameter {
+            name: self.binding(&j),
+            info: j.info,
+            diet: observe,
+        });
+        let (index, value) = element(self, &mut inner, j)?;
+        let (next, _) = self.accumulate(carry, info, index, value, &mut inner)?;
+        let returns = self.node("ReturnAccumulator", info)?;
+        let inner = self.finish_region(inner, &[Name::Accumulator(next)], &[returns])?;
+        let repeated = self.operation(Code::CountedLoop, &[])?;
+        self.sink.set_control(repeated.0, 0_i64, inner.0);
+        let argument = Name::Accumulator(initial).fact(&mut self.sink)?;
+        self.sink.set_argument(ArgumentSite(repeated.0, 0, 0), argument)?;
+        let extent = self.node("IndexValue", count)?;
+        let zero = self.node("IndexConstant", 0_i64)?;
+        let extent = self.node("IndexMax", (zero, extent))?;
+        self.sink.set_formula(repeated.0, Formula::LoopCount, extent)?;
+        let updated = self.fresh("AccumulatorId")?;
+        self.sink.set("AccumulatorType", updated, info)?;
+        self.statement(vec![Name::Accumulator(updated)], repeated, lane)?;
+        Ok(updated)
+    }
+
     fn scatter(
         &mut self,
         dest: &'source Term,
@@ -1496,12 +1597,7 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
         scope: &mut Scope,
     ) -> Result<Imported<'source>, OptimizeError> {
         let destination = Self::leaf(self.visit(dest, scope)?)?;
-        let destination = if destination.ty.array_variant().is_some_and(types::is_array_variant_view) {
-            destination
-        } else {
-            let copy = self.operation(Code::Copy, &[Name::Value(destination.name)])?;
-            Self::leaf(self.emit(copy, &destination.ty, scope)?)?
-        };
+        let destination = self.scatter_destination(destination, scope)?;
         let sources = sources
             .iter()
             .map(|input| Self::leaf(self.array(input, scope)?))
@@ -1715,15 +1811,20 @@ impl<'source> Import<'_, '_, '_, '_, 'source> {
                 diet: observe,
             });
         }
-        let body = self.finish_region(inner, &results, &returns)?;
+        let loop_region = self.finish_region(inner, &results, &returns)?;
         let operation = self.operation(form, &[])?;
-        self.sink.set_control(operation.0, 0_i64, body.0);
+        self.sink.set_control(operation.0, 0_i64, loop_region.0);
         for (index, initial) in initial_values.iter().enumerate() {
             let name = self.binding(initial).fact(&mut self.sink)?;
             self.sink.set_argument(ArgumentSite(operation.0, 0, index), name)?;
         }
         if let Some((_, count)) = induction {
             self.sink.set_formula(operation.0, Formula::LoopCount, count)?;
+        } else if let LoopKind::While { cond } = kind {
+            if let Some(bound) = bounded_loop::maximum(*loop_var, init_bindings, init, cond, body) {
+                let count = self.node("IndexConstant", bound)?;
+                self.sink.set_formula(operation.0, Formula::LoopCount, count)?;
+            }
         }
         self.statement(pattern, operation, scope)?;
         Ok(Imported::Leaf(output))

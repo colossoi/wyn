@@ -1,7 +1,7 @@
 use super::bindings::{comparison, dimension};
 use super::{gpu_error, options, texture_format, Resource, WgpuBackend};
 use crate::{Number, NumberType, Program, Result, Value};
-use wgpu::{AddressMode, FilterMode, SamplerDescriptor};
+use wgpu::{AddressMode, BufferUsages, FilterMode, SamplerDescriptor};
 use wgpu::{
     ComputePassDescriptor, ComputePipelineDescriptor, Extent3d, PipelineLayoutDescriptor, ShaderStages,
     TextureDescriptor, TextureDimension, TextureUsages, TextureViewDescriptor,
@@ -467,27 +467,59 @@ impl WgpuBackend {
     }
 
     fn dispatch(&mut self, program: &Program, args: &[Value]) -> Result<Value> {
-        let o = options(args, 1, &[":groups", ":args"])?;
+        enum Grid<'a> {
+            Direct([u32; 3]),
+            Indirect {
+                arguments: &'a Value,
+                offset: u64,
+            },
+        }
+
+        let o = options(args, 1, &[":groups", ":indirect", ":args"])?;
         let name = args[0].text()?;
         let Some(kernel) = program.kernels.get(name) else {
             return Err(gpu_error(format!("unknown kernel {name}")));
         };
-        let mut groups = three(o.get(":groups")?)?;
         let entry = kernel.options.text(":entry")?;
-        if let Some(threads) = self.dispatch_overrides.get(entry) {
-            let workgroup = three(kernel.options.get(":workgroup-size")?)?;
-            groups = [
-                threads[0].div_ceil(workgroup[0]),
-                threads[1].div_ceil(workgroup[1]),
-                threads[2].div_ceil(workgroup[2]),
-            ];
-        }
-        if groups.iter().any(|n| *n > self.device.limits().max_compute_workgroups_per_dimension) {
-            return Err(gpu_error("dispatch exceeds device limits"));
-        }
-        if groups.contains(&0) {
-            return Ok(Value::Nil);
-        }
+        let override_threads = self.dispatch_overrides.get(entry);
+        let grid = match (o.optional(":groups"), o.optional(":indirect")) {
+            (Some(groups), None) => {
+                let mut groups = three(groups)?;
+                if let Some(threads) = override_threads {
+                    let workgroup = three(kernel.options.get(":workgroup-size")?)?;
+                    groups = [
+                        threads[0].div_ceil(workgroup[0]),
+                        threads[1].div_ceil(workgroup[1]),
+                        threads[2].div_ceil(workgroup[2]),
+                    ];
+                }
+                if groups.iter().any(|n| *n > self.device.limits().max_compute_workgroups_per_dimension) {
+                    return Err(gpu_error("dispatch exceeds device limits"));
+                }
+                if groups.contains(&0) {
+                    return Ok(Value::Nil);
+                }
+                Grid::Direct(groups)
+            }
+            (None, Some(indirect)) => {
+                let [arguments, offset] = indirect.list()? else {
+                    return Err(gpu_error("indirect dispatch expects a buffer and a byte offset"));
+                };
+                if override_threads.is_some() {
+                    return Err(gpu_error("indirect dispatch cannot use a thread override"));
+                }
+                let offset = offset.u64()?;
+                let bytes = self.buffer_size(arguments)?;
+                if !offset.is_multiple_of(4) || offset.checked_add(12).is_none_or(|end| end > bytes) {
+                    return Err(gpu_error("invalid indirect dispatch argument range"));
+                }
+                if !self.buffer(arguments)?.usage().contains(BufferUsages::INDIRECT) {
+                    return Err(gpu_error("dispatch argument buffer lacks indirect usage"));
+                }
+                Grid::Indirect { arguments, offset }
+            }
+            _ => return Err(gpu_error("expected exactly one of :groups and :indirect")),
+        };
         if !self.computes.contains_key(name) {
             let _trace = super::profile::Span::new("compute-pipeline", entry);
             let (layouts, pushes) = self.layouts(kernel, ShaderStages::COMPUTE)?;
@@ -530,7 +562,12 @@ impl WgpuBackend {
             for (offset, bytes) in pushes {
                 pass.set_push_constants(offset, &bytes);
             }
-            pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
+            match grid {
+                Grid::Direct([x, y, z]) => pass.dispatch_workgroups(x, y, z),
+                Grid::Indirect { arguments, offset } => {
+                    pass.dispatch_workgroups_indirect(self.buffer(arguments)?, offset);
+                }
+            }
         }
         self.record(encoder);
         Ok(Value::Nil)

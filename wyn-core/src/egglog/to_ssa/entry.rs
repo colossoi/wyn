@@ -1350,7 +1350,7 @@ impl EntryEmission<'_, '_, '_> {
                 DispatchSize::Computed { elements, groups }
             } else {
                 let query = self.body.query();
-                let atomic = self.body.atomic_contributions(statement)?;
+                let atomic = self.body.independent_contributions(statement)?;
                 let launch = self.body.compiler.execution.launch(statement)?;
                 let mut elements = Expr::Integer(1);
                 for &extent in &launch.extents {
@@ -1824,6 +1824,15 @@ impl EntryEmission<'_, '_, '_> {
             else {
                 return Err(error("loop predicate is not a scalar carry"));
             };
+            let maximum =
+                if let Some(bound) = self.body.query().0.formula_at(expression, Formula::LoopCount) {
+                    match host::scalar_index(self.body.query(), &self.body.host_values, bound)? {
+                        Some(ScalarExpr::I32(value)) => u32::try_from(value).ok(),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
             DispatchLoopControl::While {
                 initial_condition,
                 condition: ScalarExpr::Read {
@@ -1831,6 +1840,7 @@ impl EntryEmission<'_, '_, '_> {
                     offset: 0,
                     ty: ScalarType::Bool,
                 },
+                maximum,
             }
         };
         self.flush(&before, vec![], true)?;
@@ -2680,7 +2690,7 @@ fn saved_slots(saved: &Location) -> Result<Vec<(BindingRef, Type)>, OptimizeErro
                     match extent.value {
                         ExtentValue::Stored(binding, _) => add(slots, binding, Body::number(0).ty),
                         ExtentValue::Local(_) => {
-                            return Err(error("carried extent has not been materialized"))
+                            return Err(error("carried extent has not been materialized"));
                         }
                         ExtentValue::Constant(_) => {}
                     }

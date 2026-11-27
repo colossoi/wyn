@@ -65,6 +65,9 @@ pub(in crate::egglog) enum Code {
     WhileLoop,
     Parallel,
     WithAcc,
+    ReservationCursor,
+    /// The writer receives the start of its disjoint span and runs once per reservation.
+    WithReservedSpan,
     BucketScatter {
         coordinates: Vec<Vec<i64>>,
         depth: usize,
@@ -227,6 +230,13 @@ pub(in crate::egglog) fn properties(
         }
         Code::WithAcc => {
             sink.add("AccumulatorOperation", operation)?;
+        }
+        Code::ReservationCursor => {
+            sink.add("FreshOutput", (operation, 0_i64))?;
+        }
+        Code::WithReservedSpan => {
+            sink.add("WritesInput", (operation, 1_i64))?;
+            sink.add("AliasesInput", (operation, 0_i64, 0_i64))?;
         }
         Code::BucketScatter { .. } => {
             sink.add("OrderedOperation", operation)?;

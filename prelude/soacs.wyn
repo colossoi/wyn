@@ -137,6 +137,11 @@ def spread<[n], [m], A>(
 -- Generated nested maps fuse into the insertion pass; they do not require
 -- materialising the complete ranked item array.
 
+-- scatter_ranges(dest, prepare, emit, inputs) writes variable-length runs.
+-- prepare(item) returns (steps, state). For 0 <= j < steps, emit(state, j)
+-- returns (index, value). In-bounds destinations must be disjoint across
+-- input items. Out-of-bounds writes are ignored.
+
 -- | Generalised histogram / scatter-with-combiner. For each `k`,
 -- combine `values[k]` into `dest[indices[k]]` using `op`. `op` must
 -- be associative and commutative for the same reason `reduce` does.
@@ -152,3 +157,30 @@ def hist<[n], [m], A>(
     values: [m]A         -- ^ Inputs to combine into buckets.
   ) [n]A =
   reduce_by_index(dest, op, ne, indices, values)
+
+-- | Segmented results of a bounded flatmap. Input i owns row i and its side
+-- result. The callback returns a variable-length row and its side result.
+-- Element order within a row is preserved. Handles index their own storage.
+module type SEGMENTED = {
+  type storage<T>
+  type row
+  sig flatmap<[n], [cap], A, B, C>(arena: *[cap]B, f: A -> ([]B,C), xs: [n]A) (storage<B>,[n](row,C))
+  sig size(r: row) i32
+  sig fits(r: row) bool
+  -- Read element i of this row, with 0 <= i < size(r).
+  sig get<T>(data: storage<T>, r: row, i: i32) T
+}
+module Segmented : SEGMENTED = {
+  type storage<T> = []T
+  type row = (i32,i32)
+
+  def size(r: row) i32 = r.1
+  def fits(r: row) bool = r.0 >= 0
+  def get<T>(data: storage<T>, r: row, i: i32) T = data[r.0+i]
+
+  -- All rows fit when their lengths sum to at most the arena capacity.
+  -- If space runs out, a failed row is empty and fits returns false.
+  def flatmap<[n], [cap], A, B, C>(arena: *[cap]B,
+      f: A -> ([]B,C), xs: [n]A) =
+    _w_segmented_flatmap(arena, f, xs)
+}

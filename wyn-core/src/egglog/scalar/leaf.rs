@@ -11,14 +11,40 @@ use crate::{types, LookupSet};
 use egglog_engine::sort::VecContainer;
 use egglog_engine::{Core, Value, Write};
 
+// iota clamps signed counts at zero. A count obtained from an array length is
+// already nonnegative, even when its forwarded formula has no static bounds.
+fn unclamp_length(query: Query<'_>, index: Value) -> Result<Value, OptimizeError> {
+    let Some(args) = query.enode("IndexMax", index)? else {
+        return Ok(index);
+    };
+    let (Some(zero), Some(value)) = (
+        query.enode("IndexConstant", args[0])?,
+        query.enode("IndexValue", args[1])?,
+    ) else {
+        return Ok(index);
+    };
+    let Some(reference) = query.constructor("ValueNameRef", value[0])? else {
+        return Ok(index);
+    };
+    let Some(Origin::Result(op, _)) = query.0.origin(reference) else {
+        return Ok(index);
+    };
+    if query.0.value_to_base::<i64>(zero[0]) == 0 && matches!(query.0.code(op)?, Code::Length { .. }) {
+        Ok(args[1])
+    } else {
+        Ok(index)
+    }
+}
+
 pub(in crate::egglog) fn forward_lengths(
     graph: &mut Graph,
     candidates_table: &str,
 ) -> Result<bool, OptimizeError> {
     let mut candidates = Vec::new();
-    Query(graph).for_each(candidates_table, |row| {
-        if Query(graph).contains("LiveOperation", row[0])? {
-            candidates.push((row[0], row[1]));
+    let query = Query(graph);
+    query.for_each(candidates_table, |row| {
+        if query.contains("LiveOperation", row[0])? {
+            candidates.push((row[0], row[1], unclamp_length(query, row[1])?));
         }
         Ok(())
     })?;
@@ -27,7 +53,7 @@ pub(in crate::egglog) fn forward_lengths(
     }
     let _timing = timing::span("Rust length forwarding");
     let mut changed = false;
-    for (operation, index) in candidates {
+    for (operation, proof, index) in candidates {
         let query = Query(graph);
         let old = query.0.code(operation)?;
         if !matches!(old, Code::Length { .. }) {
@@ -45,7 +71,7 @@ pub(in crate::egglog) fn forward_lengths(
             (Code::IndexValue, Some(index))
         };
         if rewrite(graph, operation, old, new, extent)? {
-            graph.update(|mut sink| sink.remove(candidates_table, (operation, index)))?;
+            graph.update(|mut sink| sink.remove(candidates_table, (operation, proof)))?;
             changed = true;
         }
     }

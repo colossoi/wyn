@@ -375,6 +375,8 @@ fn materialize_expression(
                     name_resolution::SoacKind::Zip => ast::SoacKind::Zip,
                     name_resolution::SoacKind::ReduceByIndex => ast::SoacKind::ReduceByIndex,
                     name_resolution::SoacKind::Scatter => ast::SoacKind::Scatter,
+                    name_resolution::SoacKind::FlatMap => ast::SoacKind::FlatMap,
+                    name_resolution::SoacKind::ScatterRanges => ast::SoacKind::ScatterRanges,
                     name_resolution::SoacKind::BucketScatter(rank) => ast::SoacKind::BucketScatter(rank),
                 }),
             };

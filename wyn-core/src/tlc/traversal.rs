@@ -405,9 +405,19 @@ where
 {
     match soac {
         SoacOp::Map { lam, inputs }
+        | SoacOp::FlatMap { lam, inputs, .. }
         | SoacOp::Scatter { lam, inputs, .. }
         | SoacOp::BucketScatter { lam, inputs, .. } => {
             rewrite_soac_body_types(lam, map);
+            for input in inputs {
+                rewrite_array_expr_types(input, map);
+            }
+        }
+        SoacOp::ScatterRanges {
+            lam, emit, inputs, ..
+        } => {
+            rewrite_soac_body_types(lam, map);
+            rewrite_soac_body_types(emit, map);
             for input in inputs {
                 rewrite_array_expr_types(input, map);
             }
@@ -493,12 +503,26 @@ where
             visit_soac_body_children(pred, f);
             visit_array_expr_children(input, f);
         }
-        SoacOp::Scatter { dest, lam, inputs }
+        SoacOp::FlatMap { dest, lam, inputs }
+        | SoacOp::Scatter { dest, lam, inputs }
         | SoacOp::BucketScatter {
             dest, lam, inputs, ..
         } => {
             f(dest);
             visit_soac_body_children(lam, f);
+            for input in inputs {
+                visit_array_expr_children(input, f);
+            }
+        }
+        SoacOp::ScatterRanges {
+            dest,
+            lam,
+            emit,
+            inputs,
+        } => {
+            f(dest);
+            visit_soac_body_children(lam, f);
+            visit_soac_body_children(emit, f);
             for input in inputs {
                 visit_array_expr_children(input, f);
             }
@@ -609,12 +633,26 @@ where
             visit_soac_body_children_mut(pred, f);
             visit_array_expr_children_mut(input, f);
         }
-        SoacOp::Scatter { dest, lam, inputs }
+        SoacOp::FlatMap { dest, lam, inputs }
+        | SoacOp::Scatter { dest, lam, inputs }
         | SoacOp::BucketScatter {
             dest, lam, inputs, ..
         } => {
             f(dest);
             visit_soac_body_children_mut(lam, f);
+            for input in inputs {
+                visit_array_expr_children_mut(input, f);
+            }
+        }
+        SoacOp::ScatterRanges {
+            dest,
+            lam,
+            emit,
+            inputs,
+        } => {
+            f(dest);
+            visit_soac_body_children_mut(lam, f);
+            visit_soac_body_children_mut(emit, f);
             for input in inputs {
                 visit_array_expr_children_mut(input, f);
             }
@@ -733,7 +771,23 @@ where
             pred: map_soac_body_children(pred, f),
             input: map_array_expr_children(input, f),
         },
+        SoacOp::FlatMap { dest, lam, inputs } => SoacOp::FlatMap {
+            dest: Box::new(f(*dest)),
+            lam: map_soac_body_children(lam, f),
+            inputs: inputs.into_iter().map(|ae| map_array_expr_children(ae, f)).collect(),
+        },
         SoacOp::Scatter { dest, lam, inputs } => SoacOp::Scatter {
+            dest: Box::new(f(*dest)),
+            lam: map_soac_body_children(lam, f),
+            inputs: inputs.into_iter().map(|ae| map_array_expr_children(ae, f)).collect(),
+        },
+        SoacOp::ScatterRanges {
+            dest,
+            lam,
+            emit,
+            inputs,
+        } => SoacOp::ScatterRanges {
+            emit: map_soac_body_children(emit, f),
             dest: Box::new(f(*dest)),
             lam: map_soac_body_children(lam, f),
             inputs: inputs.into_iter().map(|ae| map_array_expr_children(ae, f)).collect(),

@@ -77,8 +77,9 @@ impl Body {
         }
         let mut effects = self.effects.remove(scope).unwrap_or_default();
         for &member in members {
-            if let Some(Effects { reads, traps, .. }) = self.effects.get(member) {
+            if let Some(Effects { reads, writes, traps }) = self.effects.get(member) {
                 effects.reads.extend(reads);
+                effects.writes.extend(writes);
                 effects.traps |= traps;
             }
         }

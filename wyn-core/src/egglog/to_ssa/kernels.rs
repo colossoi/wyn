@@ -404,7 +404,7 @@ impl Body<'_, '_, '_> {
         let atomic_updates = contributes
             && compacts.is_empty()
             && folds.is_empty()
-            && self.atomic_contributions(operation)?;
+            && self.independent_contributions(operation)?;
         if contributes && !atomic_updates && matches!(phase, Some(CollectivePhase::Epilogue { .. })) {
             return Err(error("scan overwrite epilogue requires atomic storage"));
         }

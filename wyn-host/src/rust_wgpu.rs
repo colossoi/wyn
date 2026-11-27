@@ -649,7 +649,7 @@ impl Program {
                                 }
                             })
                         }
-                        crate::DispatchLoopControl::While { initial_condition, condition } => {
+                        crate::DispatchLoopControl::While { initial_condition, condition, .. } => {
                             let condition = self.rust_scalar(*pipeline, condition)?;
                             let (setup, condition) = if let Some(value) = initial_condition {
                                 (

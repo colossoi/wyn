@@ -9,15 +9,17 @@ pub(super) fn load(program: &Program, path: &Path) -> Result<Option<BTreeMap<Str
     if extension.eq_ignore_ascii_case("wynhost") {
         return Ok(None);
     }
-    if program.modules.len() > 1 {
+    let mut external =
+        program.modules.iter().filter(|(_, module)| module.options.optional(":path").is_some());
+    let Some((name, module)) = external.next() else {
+        return Err(anyhow!("host program has no external GPU module"));
+    };
+    if external.next().is_some() {
         return Err(anyhow!(
             "a shader path requires a host program with one GPU module; \
              pass the .wynhost path to run a program with multiple modules"
         ));
     }
-    let Some((name, module)) = program.modules.first_key_value() else {
-        return Err(anyhow!("host program has no GPU module"));
-    };
     let format = if extension.eq_ignore_ascii_case("wgsl") { ":wgsl" } else { ":spirv" };
     let declared = module.options.text(":format")?;
     if format != declared {

@@ -323,6 +323,7 @@ impl Dataflow {
         let first_reference = self.reference_occurrences.len();
         let mut children = Vec::new();
         let mut body = None;
+        let mut writer = None;
         let mut captures = 0;
         match &term.kind {
             TermKind::Let { name, .. } => {
@@ -349,8 +350,15 @@ impl Dataflow {
             TermKind::Soac(soac) => {
                 let callback = match soac {
                     SoacOp::Map { lam, .. }
+                    | SoacOp::FlatMap { lam, .. }
                     | SoacOp::Scatter { lam, .. }
                     | SoacOp::BucketScatter { lam, .. } => lam,
+                    SoacOp::ScatterRanges { lam, emit, .. } => {
+                        self.locals.extend(emit.lam.params.iter().map(|(name, _)| *name));
+                        writer = Some(emit.lam.body.as_ref());
+                        S::for_each(&emit.data, &mut |_| captures += 1);
+                        lam
+                    }
                     SoacOp::Reduce { op, .. }
                     | SoacOp::Scan { op, .. }
                     | SoacOp::ReduceByIndex { op, .. } => op,
@@ -466,7 +474,7 @@ impl Dataflow {
                         return;
                     }
                     result = (|| {
-                        let edge = if body.is_some_and(|body| std::ptr::eq(child, body)) {
+                        let edge = if [body, writer].into_iter().flatten().any(|b| std::ptr::eq(child, b)) {
                             if matches!(term.kind, TermKind::Lambda(_)) {
                                 "FlowReference"
                             } else {
@@ -553,6 +561,25 @@ impl Dataflow {
                     sink.add("FlowNext", (arm.control.1, exit))?;
                 }
                 (children[0].control.0, exit)
+            }
+            TermKind::Soac(SoacOp::ScatterRanges { lam, .. }) => {
+                // Visit order is destination, prepare (+ captures), emit (+ captures), inputs.
+                let mut emit_index = 2;
+                S::for_each(&lam.data, &mut |_| emit_index += 1);
+                let prepare = children[1].control;
+                let emit = children[emit_index].control;
+                let item = self.fresh(sink)?;
+                let write = self.fresh(sink)?;
+                self.actions.insert(item, Action::Define(term.id));
+                sink.add("FlowNext", (item, prepare.0))?;
+                sink.add("FlowNext", (item, exit))?;
+                sink.add("FlowNext", (prepare.1, write))?;
+                sink.add("FlowNext", (write, emit.0))?;
+                sink.add("FlowNext", (emit.1, write))?;
+                sink.add("FlowNext", (write, item))?;
+                let enter = self.sequence(&children[emit_index + 1..], item, sink)?;
+                let enter = self.sequence(&children[2..emit_index], enter, sink)?;
+                (self.sequence(&children[..1], enter, sink)?, exit)
             }
             TermKind::Lambda(_) | TermKind::Soac(_) => {
                 let repeat = self.fresh(sink)?;

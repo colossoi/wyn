@@ -99,7 +99,9 @@ impl WgpuBackend {
     pub fn new(device: Device, queue: Queue, program: &Program, base: &Path) -> Result<Self> {
         let mut sources = BTreeMap::new();
         for (name, module) in &program.modules {
-            sources.insert(name.clone(), fs::read(base.join(module.options.text(":path")?))?);
+            if let Some(path) = module.options.optional(":path") {
+                sources.insert(name.clone(), fs::read(base.join(path.text()?))?);
+            }
         }
         Self::with_sources(device, queue, program, &sources)
     }
@@ -114,8 +116,13 @@ impl WgpuBackend {
         let mut empty_storage_bytes = 4;
         for (name, declaration) in &program.modules {
             let _trace = profile::Span::new("shader", name);
-            let Some(bytes) = sources.get(name) else {
-                return Err(gpu_error(format!("missing shader module {name}")));
+            let bytes = if let Some(source) = declaration.options.optional(":source") {
+                source.text()?.as_bytes()
+            } else {
+                let Some(bytes) = sources.get(name) else {
+                    return Err(gpu_error(format!("missing shader module {name}")));
+                };
+                bytes.as_slice()
             };
             let ir = match declaration.options.text(":format")? {
                 ":wgsl" => {
